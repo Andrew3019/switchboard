@@ -512,6 +512,12 @@ def main(argv: Optional[list[str]] = None) -> int:
               "    code plugins are `sb plugin list`.", file=sys.stderr)
         return 2
 
+    # Writable, deliberately, even for `sb status` and `sb log`. This is the short-lived
+    # process running current code that `store._connect_readonly` says the migration
+    # belongs to — make this readonly and nothing reconciles the schema at all. It is also
+    # not read-only in fact: `flush_pending` below writes, `whoami` revives, and `collect`
+    # reaps. Making the read verbs genuinely read-only is a bigger change than a flag —
+    # see `.switchboard/design/status-truth.md` §6(c).
     try:
         db = store.connect()
     except Exception as e:                       # not in a repo, or an unreadable store

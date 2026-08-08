@@ -412,6 +412,56 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(store.get_agent(d, "ghost"))
         d.close()
 
+    def test_a_herdr_we_could_not_reach_refuses_the_wipe(self):
+        """The distinction the whole guard turns on: an ANSWER of "nobody" is evidence,
+        and no answer at all is not. Failing toward the empty set meant a herdr installed
+        somewhere else — or slow, or exiting non-zero — was enough to drop `agents`,
+        `messages` and `events` under a live fleet, unrecoverably and unlogged."""
+        from unittest import mock
+        d = store.connect(path=Path(self.tmp.name) / "unknown.db")
+        store.create_agent(d, name="real", role="worker")
+        with mock.patch.object(store, "_herdr_alive", lambda: None):
+            with self.assertRaises(store.LiveAgentsError) as cm:
+                store._reset(d)
+        self.assertIn("herdr could not be reached", str(cm.exception))
+        self.assertIsNotNone(store.get_agent(d, "real"))
+        d.close()
+
+    def test_every_way_of_not_getting_an_answer_reads_as_unknown(self):
+        """Not-installed, non-zero, hung, and unparseable are all `None`, never `set()`."""
+        import subprocess as sp
+        from unittest import mock
+
+        def ran(rc=0, out=""):
+            return lambda *a, **k: sp.CompletedProcess(a[0], rc, out, "")
+
+        cases = {
+            "not installed": mock.Mock(side_effect=FileNotFoundError()),
+            "non-zero exit": ran(1, ""),
+            "hung": mock.Mock(side_effect=sp.TimeoutExpired("herdr", 5)),
+            "not json": ran(0, "herdr: no daemon"),
+            "json of another shape": ran(0, '{"error": "nope"}'),
+        }
+        for label, runner in cases.items():
+            with self.subTest(label):
+                with mock.patch.object(store.subprocess, "run", runner):
+                    self.assertIsNone(store._herdr_alive())
+        with mock.patch.object(store.subprocess, "run",
+                               ran(0, '{"result": {"agents": [{"name": "a"}, {}]}}')):
+            self.assertEqual(store._herdr_alive(), {"a"})       # an answer is still an answer
+
+    def test_the_herdr_binary_is_the_one_on_PATH(self):
+        """A hardcoded ~/.local/bin/herdr made "installed elsewhere" mean "nobody is
+        alive". Resolved like the adapter does it (`herdr.Herdr.__init__`)."""
+        from unittest import mock
+        seen = []
+        with mock.patch.object(store.shutil, "which", lambda n: "/opt/homebrew/bin/herdr"), \
+             mock.patch.object(store.subprocess, "run",
+                               lambda argv, **k: seen.append(argv) or
+                               __import__("subprocess").CompletedProcess(argv, 1, "", "")):
+            store._herdr_alive()
+        self.assertEqual(seen[0][0], "/opt/homebrew/bin/herdr")
+
     def test_force_escapes_the_guard(self):
         from unittest import mock
         d = store.connect(path=Path(self.tmp.name) / "force.db")

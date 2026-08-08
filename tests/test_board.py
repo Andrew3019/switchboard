@@ -176,8 +176,9 @@ class SnapshotIsReadOnlyTest(unittest.TestCase):
         class NoAgents:
             def list_agents(self): return []
 
-        connect = store.connect                       # before the patch shadows it
-        with mock.patch.object(store, "connect", lambda: connect(path=self.path)), \
+        # `db_path`, not `connect`: shadowing `connect` would fake the very call whose
+        # arguments are now half the guarantee (see tests/test_readonly.py).
+        with mock.patch.object(store, "db_path", lambda *a, **k: self.path), \
              mock.patch.object(herdr_mod, "Herdr", NoAgents):
             s, note = board.snapshot()
 

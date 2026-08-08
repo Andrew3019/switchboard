@@ -10,11 +10,15 @@ board appears nowhere in defaults/protocol.md, which is where an agent actually
 learns what `sb` can do. Everything here is read-only against the store, with
 exactly one side effect — `herdr agent focus`, a human jumping to a pane.
 
-That claim was false until `snapshot()` started passing `reap=False`: the
-refresh went through `status.collect`, which marks an agent `failed` when herdr
-no longer lists it, so every board was a reaper on a two-second tick running
-whatever `status.py` it imported at startup. Read `snapshot()` before removing
-that argument.
+That claim was false twice, and both repairs are one line in `snapshot()`.
+`reap=False`: the refresh goes through `status.collect`, which marks an agent
+`failed` when herdr no longer lists it, so every board was a reaper on a
+two-second tick running whatever `status.py` it imported at startup.
+`readonly=True`: `store.connect()` is itself a writer — it re-stamps `meta`, it
+ALTERs tables and backfills every agent row, and it can DROP `agents`,
+`messages` and `events` — so a board was also a schema migrator on that same
+tick, and the worst of those three is not recoverable. Read `snapshot()` before
+removing either argument.
 
 Proved out by `scripts/05-mouse.py` and `scripts/06-board.py`: herdr forwards
 SGR mouse events to a pane, and a decoded row maps back to an agent. Those two
@@ -294,18 +298,26 @@ def snapshot():
     A board that tracebacks into a raw terminal is worse than a board that says
     it cannot see anything, so every failure below becomes a line on screen.
 
-    `reap=False` is load-bearing, not a tidy-up. This process outlives the code
-    it was started with — hours of two-second ticks against the `status.py` that
-    existed when the human opened it — and drift written from here is written by
-    a version of the heuristic nobody can read any more. The flags still appear
-    on screen; ending an agent's turn is left to a short-lived `sb` process.
+    `readonly=True` and `reap=False` are load-bearing, not tidy-ups, and they
+    close the same hole from two ends. This process outlives the code it was
+    started with — hours of two-second ticks against the `status.py` and the
+    `store.SCHEMA` that existed when the human opened it — so anything it writes
+    is written by a version nobody can read any more. `reap=False` stops
+    `collect` ending an agent's turn; `readonly=True` stops `connect` migrating
+    the schema, which is the larger of the two (it can drop the store) and the
+    one a flag on `collect` could not reach. Ending turns and reconciling
+    schemas are both jobs for a short-lived `sb` running current code.
+
+    A store too old or too new for this board therefore reads as "could not read
+    the tree: no such column: agents.branch" on screen, which is what a viewer
+    should say — rather than being quietly migrated to suit a stale reader.
     """
     from . import store
     from .herdr import Herdr
 
     try:
-        db = store.connect()
-    except Exception as e:                       # not a repo, unreadable db, ...
+        db = store.connect(readonly=True)
+    except Exception as e:                       # not a repo, no store yet, unreadable, ...
         return _empty(), f"store unavailable: {e}"
     try:
         snap = status_mod.collect(db, Herdr(), reap=False)
