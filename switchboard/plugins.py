@@ -297,7 +297,8 @@ def bound(repo: Optional[Path] = None) -> dict[str, list[str]]:
 
     Reads the *preset* bindings, because there is one bindings file and one notation for
     prompt text — the `@` sigil is what says a name is a plugin's fragment rather than a
-    preset file. Injecting it is phase 3's; this is only what `sb plugin list` reports.
+    preset file. This is what `sb plugin list` reports; `presets.resolve` is what acts
+    on it.
     """
     every, per_role = config.preset_bindings(repo)
     out: dict[str, list[str]] = {}
@@ -312,6 +313,11 @@ def bound(repo: Optional[Path] = None) -> dict[str, list[str]]:
 
 
 # -- the fragment (level 2) ----------------------------------------------------
+
+# What one plugin may spend on every spawn it is bound to. See `[limits] plugin_fragment`
+# in defaults/settings.toml for why the number is what it is; it is read rather than
+# repeated so there is one place to change it.
+FRAGMENT_BUDGET = config.setting("limits.plugin_fragment")
 
 
 def fragment(repo: Optional[Path], name: str) -> Optional[str]:
@@ -330,6 +336,25 @@ def fragment(repo: Optional[Path], name: str) -> Optional[str]:
         return None
     text = config.read_text(d / "agent.md")
     return (config.flatten(text) or None) if text is not None else None
+
+
+def clip(line: str, limit: int = FRAGMENT_BUDGET) -> str:
+    """A fragment cut to the budget at a word boundary, or unchanged if it fits.
+
+    Truncation rather than rejection is the whole point: a plugin that grew chatty must
+    cost context, not spawns. The cut lands on a word boundary because the reader is a
+    language model and a severed word is noise, and the ellipsis is kept so a fragment
+    that stops early is distinguishable from one that simply ended.
+
+    Not folded into `fragment()`, which stays the plain read of what is on disk: the
+    injector needs both lengths to know whether anything was dropped, and dropping
+    something is an event somebody should be able to find in `sb log`.
+    """
+    if len(line) <= limit:
+        return line
+    head = line[:max(limit - 1, 0)]
+    cut = head.rsplit(" ", 1)[0].rstrip(" ;,-") if " " in head else head
+    return (cut or head) + "…"
 
 
 # -- loading (level 3) ---------------------------------------------------------

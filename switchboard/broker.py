@@ -29,6 +29,7 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
+import sys
 import time
 import re
 from pathlib import Path
@@ -1112,10 +1113,36 @@ class Broker:
         file is flattened to one line on the way out, but a repo's presets.toml can also
         name a preset that no longer flattens cleanly, and that failure should name the
         preset rather than arrive as invalid_agent_argument.
+
+        `extra` is `explicit`: it is exactly the names a caller handed in by hand, which is
+        the property the explicit-vs-bound asymmetry is about (§6). A fragment named there
+        that will not load is fatal; the same fragment arriving from a binding is skipped
+        with a warning, because a repo's `presets.toml` must not be able to stop every
+        spawn. Threaded from `extra` rather than from the CLI's `--with` flag, so the rule
+        keeps holding for any other caller that reaches delegation with names of its own.
         """
         names = presets_mod.for_role(self.repo, role, extra)
         return [validate.line(p, "preset text", max_len=validate.MAX_PROMPT)
-                for p in presets_mod.resolve(names, self.repo)]
+                for p in presets_mod.resolve(names, self.repo,
+                                             explicit=frozenset(extra),
+                                             on_event=self._fragment_note())]
+
+    def _fragment_note(self) -> Callable[..., None]:
+        """What `presets.resolve` does with a fragment it dropped or cut.
+
+        Everything is logged; only the skip is printed. A skipped fragment means an agent
+        was spawned without an instruction somebody's `presets.toml` says it should have
+        had, and the one line naming the plugin is the only signal that happened — the
+        spawn itself succeeds, which is the whole point of skipping. A truncation is a
+        note for whoever edits `agent.md` next, and printing it on every spawn would train
+        the reader to ignore both.
+        """
+        def note(*, kind: str, plugin: str, **payload) -> None:
+            store.log_event(self.db, kind=kind, plugin=plugin, **payload)
+            if kind == "fragment_skipped":
+                print(f"sb: {payload['reason']} — skipped, so this agent is spawning "
+                      f"without it", file=sys.stderr)
+        return note
 
     def _fork_for(self, name: str, *, parent: str) -> Optional[dict]:
         """Give this child a worktree of its own. The branch is the agent's NAME.

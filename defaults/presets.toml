@@ -14,6 +14,21 @@
 #
 #     all = ["!reset", "own-files"]
 #
+# A name here is a preset file. A name with an `@` in front of it is a PLUGIN's fragment —
+# the `agent.md` shipped by the plugin of that name, which has to be enabled in
+# plugins.toml:
+#
+#     all = ["own-files", "@todo"]
+#
+# The sigil is what lets a preset and a plugin share a name, and it makes the provenance of
+# every injected line visible here. It is also required: a bare `todo` naming an enabled
+# plugin is an error rather than a literal, because otherwise it would ship the one-word
+# string "todo" into an agent's system prompt and look like it had worked.
+#
+# An `@name` that does not resolve is SKIPPED with a warning when it comes from this file,
+# and an error when someone typed `--with @name`. A half-installed plugin must not stop the
+# fleet spawning; a fragment you asked for by hand must not vanish silently.
+#
 # Kept out of roles.toml deliberately: a role is what an agent IS (its tier, its
 # disposition, its own prompt), a preset is behaviour injected into it. Mixing the two made
 # "add a preset" look like "redefine the role".

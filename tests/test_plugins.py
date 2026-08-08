@@ -34,7 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from switchboard import cli  # noqa: E402
 from switchboard import config  # noqa: E402
 from switchboard import plugins  # noqa: E402
+from switchboard import presets  # noqa: E402
 from switchboard import store  # noqa: E402
+from switchboard import validate  # noqa: E402
 
 from test_workspace import FakeHerdr  # noqa: E402
 
@@ -170,6 +172,11 @@ class Sandbox(unittest.TestCase):
     def bind(self, *names: str) -> None:
         (self.sw / "presets.toml").write_text(
             "all = [" + ", ".join(f'"{n}"' for n in names) + "]\n")
+
+    def preset(self, name: str, text: str) -> None:
+        d = self.sw / "presets"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(text)
 
     def loaded(self, name: str) -> plugins.Loaded:
         return plugins.load(self.repo, name)
@@ -781,6 +788,285 @@ class CliTest(Sandbox):
         self.assertFalse(payload["ok"])
 
 
+class SigilTest(Sandbox):
+    """§3.3's three resolution rules, at the level they are decided.
+
+    `presets.resolve` is where a name becomes prompt text, so it is where the sigil is
+    read. These call it directly; `FragmentInjectionTest` below is the same rules seen
+    from a spawn.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ship("todo", FIXTURE, agent_md="# todo\n- run `sb plugin todo list` first\n")
+
+    # -- rule 1: `@name` is reserved -------------------------------------
+
+    def test_an_enabled_plugin_with_an_agent_md_resolves_to_its_fragment(self):
+        self.enable("todo")
+        self.assertEqual(presets.resolve(["@todo"], self.repo),
+                         ["run `sb plugin todo list` first"])
+
+    def test_an_unknown_at_name_is_never_passed_through_verbatim(self):
+        """The failure the sigil exists to make impossible: `@nope` reaching a system
+        prompt as the two-character string `@nope`."""
+        with self.assertRaises(validate.Invalid) as cm:
+            presets.resolve(["@nope"], self.repo, explicit={"@nope"})
+        self.assertIn("'@nope' names no plugin", str(cm.exception))
+
+    def test_an_available_but_unenabled_plugin_says_how_to_enable_it(self):
+        """Enabled, not merely available: injecting instructions for verbs that will not
+        dispatch tells an agent to run commands it cannot."""
+        with self.assertRaises(validate.Invalid) as cm:
+            presets.resolve(["@todo"], self.repo, explicit={"@todo"})
+        self.assertIn("not enabled", str(cm.exception))
+        self.assertIn("plugins.toml", str(cm.exception))
+
+    def test_an_enabled_plugin_with_no_agent_md_is_an_error_of_its_own(self):
+        self.ship("bare", FIXTURE)
+        self.enable("bare")
+        with self.assertRaises(validate.Invalid) as cm:
+            presets.resolve(["@bare"], self.repo, explicit={"@bare"})
+        self.assertIn("no agent.md", str(cm.exception))
+
+    def test_a_preset_file_of_the_same_name_is_not_what_at_means(self):
+        """The sigil's other job: a preset and a plugin may share a name without either
+        shadowing the other."""
+        self.enable("todo")
+        self.preset("todo", "# todo\nthe preset, not the plugin")
+        self.assertEqual(presets.resolve(["@todo"], self.repo),
+                         ["run `sb plugin todo list` first"])
+        self.assertEqual(presets.resolve(["todo"], self.repo),
+                         ["the preset, not the plugin"])
+
+    # -- rule 2: a bare plugin name is an error --------------------------
+
+    def test_a_bare_plugin_name_names_the_sigil(self):
+        """`--with todo` shipping the one-word string "todo" into a system prompt looks
+        like success and is not. Neither original proposal closed this."""
+        self.enable("todo")
+        with self.assertRaises(validate.Invalid) as cm:
+            presets.resolve(["todo"], self.repo)
+        self.assertIn("'todo' is a plugin fragment — write '@todo'", str(cm.exception))
+
+    def test_the_bare_name_rule_does_not_depend_on_provenance(self):
+        """Unlike an unresolvable `@name`, which is a fact about this machine and is
+        survivable, a bare plugin name is wrong in the file wherever it is read."""
+        self.enable("todo")
+        with self.assertRaises(validate.Invalid):
+            presets.resolve(["todo"], self.repo, explicit=frozenset())
+
+    def test_a_preset_file_still_wins_over_the_bare_name_rule(self):
+        """Rule 2 is 'matching no preset file'. A repo that had a `todo` preset before the
+        plugin existed keeps getting it."""
+        self.enable("todo")
+        self.preset("todo", "# todo\nthe preset")
+        self.assertEqual(presets.resolve(["todo"], self.repo), ["the preset"])
+
+    def test_a_bare_name_for_a_plugin_that_is_not_enabled_is_still_literal(self):
+        """Enabled is the trigger. An available-but-off plugin has not claimed the word,
+        so a repo using it as an instruction keeps working."""
+        self.assertEqual(presets.resolve(["todo"], self.repo), ["todo"])
+
+    # -- rule 3: everything else is untouched ----------------------------
+
+    def test_an_unrecognised_name_is_still_passed_through_verbatim(self):
+        self.enable("todo")
+        self.assertEqual(presets.resolve(["be terse"], self.repo), ["be terse"])
+
+    def test_order_is_resolution_order_whatever_the_kinds_are(self):
+        self.enable("todo")
+        self.preset("p", "# p\nPPP")
+        self.assertEqual(presets.resolve(["p", "@todo", "raw"], self.repo),
+                         ["PPP", "run `sb plugin todo list` first", "raw"])
+
+    # -- the asymmetry ---------------------------------------------------
+
+    def test_an_explicit_fragment_that_fails_raises(self):
+        """You asked for it by hand; dropping it silently spawns an agent missing an
+        instruction you believed it had."""
+        with self.assertRaises(validate.Invalid):
+            presets.resolve(["@todo"], self.repo, explicit={"@todo"})
+
+    def test_a_bound_fragment_that_fails_is_skipped_and_reported(self):
+        """Delegation must not fail because somebody's plugin is half-installed."""
+        seen = []
+        out = presets.resolve(["@todo"], self.repo, on_event=lambda **kw: seen.append(kw))
+        self.assertEqual(out, [])
+        self.assertEqual(seen[0]["kind"], "fragment_skipped")
+        self.assertEqual(seen[0]["plugin"], "todo")
+
+    def test_the_default_is_binding_because_a_name_nobody_typed_is_one(self):
+        """The empty default is the correct one on the merits, not merely the compatible
+        one — which is why it is asserted rather than left to the call site."""
+        self.assertEqual(presets.resolve(["@todo"], self.repo), [])
+
+    def test_a_name_in_both_a_binding_and_the_command_line_is_explicit(self):
+        """`for_role` de-duplicates, so it resolves once. A failure you can see beats a
+        warning you cannot."""
+        names = presets.for_role(self.repo, "worker", ["@todo"])
+        self.assertEqual(names, ["@todo"])
+        with self.assertRaises(validate.Invalid):
+            presets.resolve(names, self.repo, explicit=frozenset(["@todo"]))
+
+    def test_one_failing_fragment_does_not_stop_the_rest_of_a_binding(self):
+        self.preset("p", "# p\nPPP")
+        self.assertEqual(presets.resolve(["@todo", "p"], self.repo), ["PPP"])
+
+    # -- the budget ------------------------------------------------------
+
+    def test_a_fragment_within_budget_is_untouched(self):
+        self.enable("todo")
+        (line,) = presets.resolve(["@todo"], self.repo)
+        self.assertNotIn("…", line)
+
+    def test_an_over_budget_fragment_is_truncated_not_rejected(self):
+        """A chatty plugin must not break spawning."""
+        self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * 200))
+        self.enable("fat")
+        seen = []
+        (line,) = presets.resolve(["@fat"], self.repo, explicit={"@fat"},
+                                  on_event=lambda **kw: seen.append(kw))
+        self.assertLessEqual(len(line), plugins.FRAGMENT_BUDGET)
+        self.assertTrue(line.endswith("…"))
+        self.assertEqual(seen[0]["kind"], "fragment_truncated")
+        self.assertEqual(seen[0]["limit"], plugins.FRAGMENT_BUDGET)
+
+    def test_truncation_lands_on_a_word_boundary(self):
+        """The reader is a language model, and a severed word is noise."""
+        self.assertEqual(plugins.clip("alpha beta gamma", 12), "alpha beta…")
+
+    def test_a_fragment_that_exactly_fits_is_not_clipped(self):
+        self.assertEqual(plugins.clip("abcde", 5), "abcde")
+
+    def test_a_single_word_longer_than_the_budget_is_still_cut(self):
+        """No word boundary to land on. Cutting mid-word beats shipping nothing, and beats
+        shipping 8000 characters of it."""
+        self.assertEqual(plugins.clip("x" * 20, 5), "xxxx…")
+
+    def test_the_budget_is_read_from_settings_and_not_repeated_in_python(self):
+        self.assertEqual(plugins.FRAGMENT_BUDGET,
+                         config.setting("limits.plugin_fragment"))
+
+
+class FragmentInjectionTest(Sandbox):
+    """The same rules, seen from a spawn — which is the only place they matter.
+
+    A fragment rides the existing `with_` list in resolution order and gets no new slot:
+    `--as` replaces the ROLE PROMPT and never touches `with_`, so fragments are already
+    undisplaceable and a slot of their own would only move them away from where the caller
+    typed them.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ship("todo", FIXTURE, agent_md="# todo\n- run `sb plugin todo list` first\n")
+        self.enable("todo")
+        cwd = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, cwd)
+        self.h = FakeHerdr(self.repo / "worktrees")
+
+    def run_sb(self, *argv) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli, "Herdr", lambda **kw: self.h), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def prompts(self) -> list[str]:
+        return self.h.started[-1]["prompts"]
+
+    FRAGMENT = "run `sb plugin todo list` first"
+
+    def test_a_bound_fragment_reaches_the_system_prompt(self):
+        self.bind("@todo")
+        code, _, err = self.run_sb("delegate", "do a thing")
+        self.assertEqual(code, 0, err)
+        self.assertIn(self.FRAGMENT, self.prompts())
+
+    def test_an_explicit_fragment_reaches_the_system_prompt(self):
+        code, _, err = self.run_sb("delegate", "do a thing", "--with", "@todo")
+        self.assertEqual(code, 0, err)
+        self.assertIn(self.FRAGMENT, self.prompts())
+
+    def test_injecting_a_fragment_imports_no_plugin_code(self):
+        """The single most important property in the design, asserted on the path that
+        would lose it: the fragment went out and the plugin never ran."""
+        self.bind("@todo")
+        self.run_sb("delegate", "do a thing")
+        self.assertIn(self.FRAGMENT, self.prompts())
+        self.assertEqual([k for k in sys.modules if k.startswith("sb_plugin_")], [])
+
+    def test_a_fragment_rides_the_with_list_and_gets_no_new_slot(self):
+        self.preset("p", "# p\nPPP")
+        self.bind("p", "@todo")
+        self.run_sb("delegate", "do a thing", "--with", "extra")
+        tail = self.prompts()[-3:]
+        self.assertEqual(tail, ["PPP", self.FRAGMENT, "extra"])
+
+    def test_as_does_not_displace_a_fragment(self):
+        """`--as` replaces the role prompt at position 4 and never touches `with_`."""
+        self.bind("@todo")
+        self.run_sb("delegate", "do a thing", "--as", "you are a duck")
+        self.assertIn("you are a duck", self.prompts())
+        self.assertEqual(self.prompts()[-1], self.FRAGMENT)
+
+    def test_no_prompt_line_contains_a_newline(self):
+        """herdr refuses any agent argument containing one. The fragment is flattened by
+        the same `config.flatten` presets already use, so this holds without a new rule."""
+        self.ship("multi", FIXTURE, agent_md="# multi\nfirst line\n\n- a\n- b\n")
+        self.enable("todo", "multi")
+        self.bind("@todo", "@multi")
+        self.run_sb("delegate", "do a thing")
+        self.assertIn("a ; b", self.prompts()[-1])
+        for p in self.prompts():
+            self.assertNotIn("\n", p)
+
+    # -- the asymmetry, at the spawn -------------------------------------
+
+    def test_an_explicit_fragment_that_fails_stops_the_spawn(self):
+        code, _, err = self.run_sb("delegate", "do a thing", "--with", "@nope")
+        self.assertNotEqual(code, 0)
+        self.assertIn("@nope", err)
+        self.assertEqual(self.h.started, [])
+
+    def test_a_bound_fragment_that_fails_spawns_anyway_and_warns(self):
+        self.bind("@nope")
+        code, _, err = self.run_sb("delegate", "do a thing")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.h.started), 1)
+        self.assertIn("@nope", err)
+        self.assertIn("skipped", err)
+
+    def test_a_skipped_fragment_is_logged(self):
+        self.bind("@nope")
+        self.run_sb("delegate", "do a thing")
+        _, out, _ = self.run_sb("log", "--json")
+        kinds = [e["kind"] for e in json.loads(out)["events"]]
+        self.assertIn("fragment_skipped", kinds)
+
+    def test_a_bare_plugin_name_in_a_binding_stops_the_spawn(self):
+        """Not survivable, unlike an unresolvable `@name`: nothing about the machine makes
+        a bare plugin name right, so skipping it would only hide a typo forever."""
+        self.bind("todo")
+        code, _, err = self.run_sb("delegate", "do a thing")
+        self.assertNotEqual(code, 0)
+        self.assertIn("write '@todo'", err)
+        self.assertEqual(self.h.started, [])
+
+    def test_an_over_budget_fragment_still_spawns(self):
+        self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * 200))
+        self.enable("todo", "fat")
+        self.bind("@fat")
+        code, _, err = self.run_sb("delegate", "do a thing")
+        self.assertEqual(code, 0, err)
+        self.assertLessEqual(len(self.prompts()[-1]), plugins.FRAGMENT_BUDGET)
+        _, out, _ = self.run_sb("log", "--json")
+        self.assertIn("fragment_truncated",
+                      [e["kind"] for e in json.loads(out)["events"]])
+
+
 class IsolationTest(Sandbox):
     """§4.6, stated as tests and made real. These are the acceptance criteria.
 
@@ -792,9 +1078,10 @@ class IsolationTest(Sandbox):
         super().setUp()
         self.ship("broken", BROKEN, agent_md="# broken\nsomething an agent is told")
         self.enable("broken")
-        # Bound as well as enabled. The `@` sigil's resolution into a spawn is phase 3's;
-        # what phase 2 owes is that a binding naming a broken plugin cannot stop a spawn,
-        # and that is true whichever of the two ways `@broken` is read.
+        # Bound as well as enabled, and now that the sigil resolves for real this is not a
+        # formality: `@broken` names a plugin that cannot be imported, and it still has to
+        # reach the prompt. That is the topology, stated as a spawn — the fragment is a
+        # file read, so whether the code behind it runs is a question delegate never asks.
         self.bind("@broken")
         cwd = Path.cwd()
         os.chdir(self.repo)
@@ -848,6 +1135,15 @@ class IsolationTest(Sandbox):
         code, out, err = self.run_sb("delegate", "do a thing")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.h.started), 1)
+        self.assertNeverImported()
+
+    def test_2_a_broken_plugins_fragment_is_still_injected(self):
+        """Not "the spawn survived a broken plugin" but "the broken plugin still spoke".
+        Skipping it would pass the test above and lose the property: sb was never going to
+        run the code, so a `SystemExit` at module scope has no bearing on a markdown file
+        sitting next to it. §11 item 4 records the same thing for an incompatible API."""
+        self.run_sb("delegate", "do a thing")
+        self.assertIn("something an agent is told", self.h.started[0]["prompts"])
         self.assertNeverImported()
 
     def test_2_start_spawns_normally(self):

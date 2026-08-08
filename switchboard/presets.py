@@ -29,14 +29,62 @@ the protocol out of CLAUDE.md and into the system prompt.
 
 An unrecognised `--with` value is passed through verbatim, so a one-off instruction still
 works without creating a file for it.
+
+One notation, two kinds of thing
+--------------------------------
+
+A preset and a plugin may share a name, so the `@` sigil says which is meant:
+
+    all = ["own-files", "@todo"]
+
+`own-files` is a preset file; `@todo` is the fragment shipped by the plugin `todo`. Three
+rules, in this order (§3.3):
+
+- `@<name>` that does not resolve to an enabled plugin with an `agent.md` FAILS. The `@`
+  prefix is reserved and there is no literal passthrough for it.
+- A **bare** name matching no preset file but matching an enabled plugin is an ERROR
+  naming the sigil. Without this, `--with todo` ships the one-word string `"todo"` into a
+  system prompt: it looks like success and is not.
+- Every other bare name behaves exactly as before — preset file if one matches, otherwise
+  literal passthrough.
+
+Resolving `@<name>` reads one markdown file and stops. Nothing here imports a plugin, and
+that is the property the whole load model of `plugins.py` rests on: `delegate` is the verb
+the entire system runs on, and it has never heard of plugin code.
+
+How a fragment fails depends on how it was asked for
+----------------------------------------------------
+
+`explicit` is the set of names the caller named by hand — `delegate`'s `extra`, which is
+`--with`. A fragment in it that will not resolve raises; one that arrived from a binding in
+`presets.toml` is skipped with a note, because delegation must not fail over somebody's
+half-installed todo plugin. The default is the empty set, and that is the correct default
+rather than merely a compatible one: a name nobody typed is a binding.
+
+The bare-name rule is NOT asymmetric, and the difference is the point. `@todo` failing is
+a statement about this machine — the plugin is not installed here yet — which is a
+condition a spawn should survive. A bare `todo` is a statement about the file: there is no
+reading under which shipping the literal word was intended, and it is wrong everywhere the
+file is read.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Callable, Collection, Iterable, Optional
 
 from . import config
+from . import plugins as plugins_mod
+from . import validate
+
+# What tells a plugin's fragment from a preset file wherever prompt text is named.
+SIGIL = "@"
+
+# Named in the error you get for a plugin that is available but off, because that error's
+# whole job is to say where the fix goes. Assembled from `[paths]` so it cannot become a
+# lie the day someone moves the file.
+_ENABLEMENT_HINT = "{}/{}".format(config.setting("paths.repo_dir"),
+                                  config.setting("paths.plugins_file"))
 
 # Both of these are `[paths]` entries in settings.toml — see config.py. The functions stay
 # because "where do presets live" is a question the rest of the code should ask rather than
@@ -101,20 +149,88 @@ def for_role(repo: Path, role: str, extra: Iterable[str] = ()) -> list[str]:
     return out
 
 
-def resolve(names: Iterable[str], repo: Optional[Path] = None) -> list[str]:
-    """Turn `--with` values into prompt lines.
+def resolve(
+    names: Iterable[str],
+    repo: Optional[Path] = None,
+    *,
+    explicit: Collection[str] = frozenset(),
+    on_event: Optional[Callable[..., None]] = None,
+) -> list[str]:
+    """Turn `--with` values and bindings into prompt lines.
 
-    A name that matches a file becomes that file's contents. Anything else is treated as
-    a literal instruction, so throwaway customization needs no file at all.
+    `@<name>` becomes that plugin's `agent.md`, clipped to its budget. A name that matches
+    a preset file becomes that file's contents. Anything else is a literal instruction, so
+    throwaway customization needs no file at all.
+
+    `explicit` is the names the caller named by hand; see the module docstring for why a
+    fragment in it raises where one from a binding is skipped. `on_event` is how the two
+    non-fatal outcomes — a skipped fragment and a truncated one — reach the store and,
+    for the ones a person should see, stderr. It takes `store.log_event`'s keywords, so a
+    caller holding a database handle passes one line. No callback means no reporting,
+    which is what a test or a `--json` reader wants.
     """
     repo = Path(repo or Path.cwd())
     found = available(repo)
     out = []
     for n in names:
-        if n in found:
+        if n.startswith(SIGIL):
+            line = _fragment(repo, n[len(SIGIL):],
+                             explicit=n in explicit, on_event=on_event)
+        elif n in found:
             line = flatten(found[n].read_text())
-            if line:
-                out.append(line)
+        elif n in plugins_mod.enabled(repo):
+            # The one-word-string failure, made loud. Not conditioned on `explicit`: a
+            # bare plugin name is wrong however it arrived.
+            raise validate.Invalid(
+                f"'{n}' is a plugin fragment — write '{SIGIL}{n}'")
         else:
-            out.append(n)
+            line = n
+        if line:
+            out.append(line)
     return out
+
+
+def _fragment(repo: Path, name: str, *, explicit: bool,
+              on_event: Optional[Callable[..., None]]) -> Optional[str]:
+    """One `@<name>`, resolved — or the failure, rendered per its provenance.
+
+    An enabled plugin is required, not merely an available one: enabled is the state that
+    says this repo runs the thing, and injecting instructions for verbs that will not
+    dispatch tells an agent to run commands it cannot.
+    """
+    line = plugins_mod.fragment(repo, name) if name in plugins_mod.enabled(repo) else None
+    if not line:
+        why = _unresolved(repo, name)
+        if explicit:
+            raise validate.Invalid(why)
+        _report(on_event, kind="fragment_skipped", plugin=name, reason=why)
+        return None
+    clipped = plugins_mod.clip(line)
+    if clipped != line:
+        # Logged rather than printed: the fragment still went out, the spawn was fine, and
+        # the person who needs to know is whoever edits agent.md next — not whoever is
+        # delegating right now.
+        _report(on_event, kind="fragment_truncated", plugin=name,
+                chars=len(line), limit=plugins_mod.FRAGMENT_BUDGET)
+    return clipped
+
+
+def _unresolved(repo: Path, name: str) -> str:
+    """Why `@<name>` did not resolve, phrased for whoever has to fix it.
+
+    Three distinct conditions with three distinct fixes, so they get three distinct
+    sentences: one message covering all of them would send you to the wrong file twice
+    before the right one.
+    """
+    at = f"{SIGIL}{name}"
+    if name not in plugins_mod.available(repo):
+        return f"'{at}' names no plugin — see `sb plugin list`"
+    if name not in plugins_mod.enabled(repo):
+        return (f"'{at}' is not enabled — add it to {_ENABLEMENT_HINT}: "
+                f'enabled = ["{name}"]')
+    return (f"'{at}' has no agent.md, so the plugin '{name}' contributes no prompt text")
+
+
+def _report(on_event: Optional[Callable[..., None]], **payload: Any) -> None:
+    if on_event is not None:
+        on_event(**payload)

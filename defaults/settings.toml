@@ -158,6 +158,15 @@ text = 4000
 # traffic, so it gets more room — a preset is allowed to be a substantial briefing.
 prompt = 8000
 
+# One plugin's `agent.md` fragment, after flattening. Far below `prompt` on purpose: a
+# preset is bound because somebody decided this role needs it, while a fragment is bound
+# because a plugin is installed, and protocol.md's own header says what that costs —
+# everything in a system prompt is "paid for on every single spawn, by every agent,
+# forever". Enough to name a plugin's verbs and the rule for using them; not enough to
+# explain them. Over-budget text is truncated at a word boundary with an event logged,
+# never rejected: a chatty plugin must not break spawning.
+plugin_fragment = 400
+
 # A workspace name is used verbatim as a git branch name. Refs have no real length limit,
 # but a path built from one does, and nothing legitimate comes close.
 ref = 200

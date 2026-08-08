@@ -325,6 +325,22 @@ mechanism (`presets.available`/`bindings`/`for_role`/`resolve`) is wired into
 `sb delegate --with` and `sb presets`. An unrecognized `--with` name is treated as a
 literal inline instruction, not an error.
 
+One notation covers both kinds of prompt text, in `presets.toml` and in `--with` alike,
+and the `@` sigil says which is meant (`presets.resolve`). Three rules, in order:
+
+| the name | what happens |
+|---|---|
+| `@<name>` | that plugin's `agent.md`, or a failure — the `@` prefix is reserved, and never passes through as a literal |
+| a bare name matching no preset file but matching an enabled plugin | an error naming the sigil: `'todo' is a plugin fragment — write '@todo'` |
+| any other bare name | unchanged — preset file if one matches, otherwise a literal instruction |
+
+**Failure is asymmetric for `@<name>` and only for it.** A fragment named explicitly (it is
+in `delegate`'s `extra`, i.e. `--with`) that will not resolve is an error; one that arrived
+from a binding is skipped with a line on stderr and a `fragment_skipped` event, because
+delegation must not fail over a half-installed plugin. A name in both counts as explicit.
+The bare-name error is not asymmetric: an unresolvable `@name` is a fact about this
+machine, while a bare plugin name is wrong in the file wherever it is read.
+
 ## Plugins
 A plugin is a Python package sb imports — `defaults/plugins/<name>/` or a repo's
 `.switchboard/plugins/<name>/`, holding an `__init__.py` that defines `register(reg)`. It
@@ -333,8 +349,12 @@ owns a CLI verb and a directory of durable state. Machinery only as of this rele
 
 Three states, separately settable: **available** (present in either root), **enabled**
 (listed in `plugins.toml` — its commands dispatch and it gets a state directory), **bound**
-(`@<name>` listed in `presets.toml` — its `agent.md` is injected into spawns; the injection
-itself is not wired yet).
+(`@<name>` listed in `presets.toml` — its `agent.md` is flattened and appended to the spawn,
+riding the existing `with_` list in resolution order with no slot of its own).
+
+A fragment is capped at `[limits] plugin_fragment = 400` characters, against `prompt = 8000`
+for presets and role prompts. Over-budget text is truncated at a word boundary with a
+`fragment_truncated` event, never rejected: a chatty plugin must not break spawning.
 
 The load model is the load-bearing part. Four levels, and the assignment of verbs to them
 is fixed and tested (`tests/test_plugins.py::IsolationTest`):
