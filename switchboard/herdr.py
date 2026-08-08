@@ -437,12 +437,16 @@ class Herdr:
         self._call("agent", "prompt", name, text)
 
     def prompt_pane(self, pane_id: str, text: str) -> None:
-        """Deliver to a pane directly, bypassing agent-name resolution.
+        """Run a command in a pane. For FIXED commands only — `text` reaches a shell.
 
-        herdr can lose an agent's name binding permanently — once it has seen the agent
-        leave the foreground (which `sb` running in that pane causes), `agent prompt` and
+        Named `prompt_pane` because it was once used as a delivery path of last resort:
+        herdr can lose an agent's name binding permanently (once it has seen the agent
+        leave the foreground, which `sb` running in that pane causes, `agent prompt` and
         even a pane-targeted `agent prompt` answer agent_not_found / agent_not_ready, and
-        no later report re-registers it. Pane input does not go through that registry.
+        no later report re-registers it), and pane input does not go through that registry.
+        That use is gone: `pane run` types into whatever shell is sitting in the pane, so a
+        backtick or a `$(` in agent-authored text executed there. `Broker._ring` fails
+        instead. The one remaining caller passes a literal `exec` line (`board.open_beside`).
 
         `pane run` types but does not reliably submit into a TUI prompt box, so the
         explicit `enter` is required.

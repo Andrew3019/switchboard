@@ -151,6 +151,33 @@ class BranchTaken(ValueError):
         )
 
 
+class Undeliverable(HerdrError):
+    """A ring that had to land in the target's current turn could not be delivered.
+
+    A HerdrError so `sb` already reports it as a failed herdr call rather than a
+    traceback, and so nothing that catches herdr failures around a ring stops catching
+    this one.
+
+    It exists because the alternative used to be typing the text into the pane's shell
+    (`pane run`), where a backtick or a `$(` in an agent-authored interrupt executes as a
+    command. That fallback is gone; what replaces it for `sb interrupt` is this — the
+    caller is a human reacting to something urgent, and they are owed the news that their
+    instruction did not arrive, immediately, rather than a message in the store that looks
+    exactly like one the agent already read.
+    """
+
+    def __init__(self, who: str, cause: HerdrError):
+        self.who, self.cause = who, cause
+        super().__init__(
+            "undeliverable",
+            f"{who}: nothing can be injected into its current turn — herdr answered "
+            f"[{cause.code}] {cause.message}, which is what a lost name binding looks "
+            f"like, and no later report re-registers it. The message is queued, so it "
+            f"will reach {who} on its next `sb inbox`; if it has to land now, that needs "
+            f"a human in that pane.",
+        )
+
+
 def _slug(name: str) -> str:
     """A branch name reduced to something herdr will accept as an agent name.
 
@@ -1670,9 +1697,13 @@ class Broker:
         the turn with `esc` and puts the instruction itself on the wire, because a queued
         interrupt is not an interrupt — the work you are trying to stop would finish first.
 
-        The message still goes in the store, delivered and read, so the instruction is
-        durable and shows up in `sb inspect` alongside everything else the agent was told.
-        It travelled inline, so there is nothing left to announce.
+        The message still goes in the store, and once delivery is confirmed it is marked
+        read: the instruction is durable and shows up in `sb inspect` alongside everything
+        else the agent was told, and having travelled inline there is nothing left to
+        announce. Marked only THEN, though — marking it up front made a failed interrupt
+        indistinguishable from one the agent had already read, which is the worst possible
+        record of "this never arrived". If it does not arrive it stays queued, and
+        `Undeliverable` tells the caller so.
         """
         me = me or self.whoami()
         # Always lands now — deferring an interrupt would defeat it entirely.
@@ -1682,10 +1713,12 @@ class Broker:
                 time.sleep(INTERRUPT_SETTLE)   # let the cancel land before the new one
             except HerdrError as e:
                 store.log_event(self.db, kind="interrupt_stop_failed", agent=name, error=str(e))
-        mid = store.put_message(self.db, from_agent=me, to_agent=name, kind="tell",
-                                body=self._say("notify.interrupt", text=text))
+        body = self._say("notify.interrupt", text=text)
+        mid = store.put_message(self.db, from_agent=me, to_agent=name, kind="tell", body=body)
+        # Raises Undeliverable if it cannot land — deliberately not caught here. The store
+        # row survives it, undelivered, which is exactly the state a queued `tell` is in.
+        self._ring(name, body, force=True)
         store.mark_collected(self.db, mid)
-        self._ring(name, self._say("notify.interrupt", text=text), force=True)
         store.log_event(self.db, kind="interrupt", agent=name, stopped=stop, text=text[:EVENT_CLIP])
 
     # -- internals -------------------------------------------------------
@@ -1755,6 +1788,19 @@ class Broker:
         the current turn rather than queueing after it, so ringing a working agent
         interrupts whatever it was doing. `force` is for interrupt, whose whole purpose is
         to land now.
+
+        There is no fallback when `agent prompt` fails. There used to be one — type the
+        text into the agent's pane with `pane run` — and it was a shell: any backtick or
+        `$(` in an agent-authored interrupt ran as a command in that pane (confirmed live).
+        It was never a recovery path either, only a lookalike: herdr loses a name binding
+        when it sees the agent leave the foreground, and an agent whose TUI is not there to
+        read a prompt is not there to read typed-in text either.
+
+        So a failed ring is a failed ring. For the doorbell that costs nothing — the
+        message is already durable with `delivered_at` NULL, and `flush_pending` re-rings
+        it from `undelivered()` on the next `sb` command anyone runs. A `force` ring has no
+        such retry worth waiting for, because "later" is precisely what it was refusing, so
+        that one raises instead of quietly returning False.
         """
         if who == HUMAN:
             return False
@@ -1764,23 +1810,13 @@ class Broker:
         self._unblock_if_needed(who)
         try:
             self.h.prompt(who, text)
-            store.mark_delivered(self.db, who)
-            return True
         except HerdrError as e:
-            first = e
-        # herdr can permanently lose an agent's name binding; pane input still lands.
-        a = store.get_agent(self.db, who)
-        if a and a["pane_id"]:
-            try:
-                self.h.prompt_pane(a["pane_id"], text)
-                store.mark_delivered(self.db, who)
-                store.log_event(self.db, kind="ring_via_pane", agent=who,
-                                after=str(first)[:NOTIFY_CLIP])
-                return True
-            except HerdrError as e2:
-                first = e2
-        store.log_event(self.db, kind="ring_failed", agent=who, error=str(first))
-        return False
+            store.log_event(self.db, kind="ring_failed", agent=who, error=str(e))
+            if force:
+                raise Undeliverable(who, e) from e
+            return False
+        store.mark_delivered(self.db, who)
+        return True
 
     def _unblock_if_needed(self, who: str) -> None:
         """A blocked agent is un-targetable in herdr, by herdr's design.
