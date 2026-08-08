@@ -160,28 +160,41 @@ class ShippedDefaultsTest(_Layered):
         # Shipped bindings are no longer empty (§7.4), and what is in them is not this
         # test's business — what is, is that a repo with no config of its own gets exactly
         # what `defaults/presets.toml` says and nothing invented on the way.
-        self.assertEqual(every, tuple(config.read_toml(SHIPPED / "presets.toml")["all"]))
-        self.assertEqual(per_role, {})
+        shipped = config.read_toml(SHIPPED / "presets.toml")
+        self.assertEqual(every, tuple(shipped["all"]))
+        self.assertEqual(per_role,
+                         {k: tuple(v) for k, v in shipped.get("roles", {}).items()})
 
     def test_roles_come_from_markdown_files_not_a_python_dict(self):
         names = {f.stem for f in (SHIPPED / "roles").glob("*.md")}
         self.assertEqual(set(config.roles(None)), names)
 
-    def test_every_shipped_role_has_a_tier_a_disposition_and_a_prompt(self):
+    def test_every_shipped_role_has_a_tier_and_a_prompt(self):
+        """No `cleanup` here on purpose. A disposition is a run-time decision — set per
+        spawn by `sb delegate --keep` / `--ephemeral`, and swept by the orchestrator — not
+        a property of a kind of agent, so no role file carries one any more."""
         for name, r in config.roles(None).items():
             with self.subTest(role=name):
                 self.assertTrue(r.get("model"), f"{name} names no tier")
-                self.assertTrue(r.get("cleanup"), f"{name} has no disposition")
                 self.assertTrue(r.get("prompt"), f"{name} has no prompt")
+                self.assertNotIn("cleanup", r, f"{name} hardcodes a disposition")
 
     def test_the_roles_named_in_settings_all_exist(self):
-        """`sb delegate` with no --role, an undefined role, `sb start` and
-        `sb workspace new` each name a role in settings.toml. A typo in one of those is a
-        role that silently resolves to nothing."""
+        """`sb start` and `sb workspace new` each name a role that must have a prompt: a
+        typo there is an orchestrator that silently resolves to nothing.
+
+        `default_role` and `fallback_role` are deliberately NOT checked. Both name
+        `worker`, which ships no file — an agent delegated with no `--role` gets the
+        protocol, its identity, its presets and its task, and that is the whole point of
+        consolidating the roles. What they must not do is name something half-defined, so
+        the assertion is that they resolve, not that a file backs them."""
         roles = config.roles(None)
-        for key in ("default_role", "fallback_role", "main_role", "workspace_role"):
+        for key in ("main_role", "workspace_role"):
             with self.subTest(key=key):
                 self.assertIn(config.setting(f"vocabulary.{key}"), roles)
+        for key in ("default_role", "fallback_role"):
+            with self.subTest(key=key):
+                self.assertTrue(config.setting(f"vocabulary.{key}"))
 
     def test_the_protocol_is_a_single_line_and_names_the_verbs(self):
         line = config.protocol(None)
@@ -227,7 +240,6 @@ class RoleLayeringTest(_Layered):
         got = config.roles(self.repo)["researcher"]
         self.assertEqual(got["model"], "strong")
         self.assertEqual(got["prompt"], shipped["prompt"])
-        self.assertEqual(got["cleanup"], shipped["cleanup"])
 
     def test_a_repo_can_add_a_role_of_its_own(self):
         self.write("roles.toml", '[archivist]\ncleanup = "keep"\n')
@@ -464,7 +476,7 @@ class DefaultsRelocationTest(unittest.TestCase):
                 self.assertEqual(sorted(config.roles(None)), ["hermit"])
 
     def test_the_env_var_is_not_consulted_once_it_is_gone(self):
-        self.assertIn("worker", config.roles(None))
+        self.assertIn("orchestrator", config.roles(None))
 
 
 if __name__ == "__main__":

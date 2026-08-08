@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import roles  # noqa: E402
+from switchboard import config, roles  # noqa: E402
 
 
 class RolesTest(unittest.TestCase):
@@ -42,19 +42,32 @@ class RolesTest(unittest.TestCase):
     def test_roles_carry_no_preset_config(self):
         """A role is what an agent IS; which presets it gets lives in presets.toml."""
         r = roles.load(self.repo)
-        self.assertFalse(hasattr(r["worker"], "with_"))
+        self.assertFalse(hasattr(r["researcher"], "with_"))
 
     def test_repo_config_overrides_builtin_role_fields(self):
         self.write('[researcher]\nmodel = "strong"\n')
         r = roles.load(self.repo)
         self.assertEqual(r["researcher"].model, "strong")   # builtin default is "cheap"
 
-    def test_unknown_role_inherits_worker(self):
-        """Vocabulary is data: an undefined role works rather than erroring."""
-        r = roles.load(self.repo)
-        got = roles.get(r, "wizard")
+    def test_an_unknown_role_works_rather_than_erroring(self):
+        """Vocabulary is data: `--role wizard` runs with nobody having defined a wizard.
+
+        It keeps its own NAME and takes the FALLBACK ROLE's fields, prompt included — so a
+        wizard behaves like a worker while still being called a wizard. Asserted against
+        the fallback by name rather than against "worker", because which role is the
+        fallback is `[vocabulary] fallback_role` and a repo may say otherwise.
+
+        The prompt travelling with it is the point, and was briefly lost: while `worker`
+        shipped no file, an undefined role inherited an empty prompt and finished by
+        writing its answer into its own pane instead of calling `sb done`."""
+        fallback = roles.get(roles.load(self.repo),
+                             config.setting("vocabulary.fallback_role"))
+        got = roles.get(roles.load(self.repo), "wizard")
         self.assertEqual(got.name, "wizard")
-        self.assertEqual(got.cleanup, r["worker"].cleanup)
+        self.assertEqual(got.cleanup, fallback.cleanup)
+        self.assertEqual(got.model, fallback.model)
+        self.assertEqual(got.prompt, fallback.prompt)
+        self.assertTrue(got.prompt, "the fallback must carry a prompt, not an empty string")
 
     # -- model tiers -----------------------------------------------------
 

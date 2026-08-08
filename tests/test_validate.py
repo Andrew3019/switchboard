@@ -102,7 +102,9 @@ class LineTest(unittest.TestCase):
                          validate.MAX_TEXT)
 
     def test_prompts_get_a_larger_cap_than_traffic(self):
-        big = "x" * 6_000
+        """Sized off the caps rather than a literal: both were raised once already, and a
+        hardcoded length turns that into a puzzling failure in an unrelated file."""
+        big = "x" * (validate.MAX_TEXT + 1)
         with self.assertRaises(validate.Invalid):
             validate.line(big, "task")
         self.assertEqual(validate.line(big, "--as", max_len=validate.MAX_PROMPT), big)

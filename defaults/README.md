@@ -1,8 +1,9 @@
 # defaults/ — the shipped configuration
 
 Everything switchboard knows out of the box, in files rather than in Python. Roles, model
-tiers, preset bindings, the agent protocol, the spawn prompts, and every number worth
-tuning live here. `switchboard/config.py` is the only thing that reads them.
+tiers, presets and their bindings, the plugins that ship, the agent protocol, the spawn
+prompts, and every number worth tuning live here. `switchboard/config.py` is the only
+thing that reads them.
 
 Not dot-prefixed on purpose. This is the reference copy: you are meant to open it, read it,
 and copy pieces of it into your own repo. A hidden directory says "internal", and these
@@ -23,16 +24,20 @@ For any repo, two layers, most general first:
 | `defaults/roles/<name>.md`  | `.switchboard/roles/<name>.md`, `.switchboard/roles.toml` |
 | `defaults/models.toml`      | `~/.config/switchboard/models.toml`, then `.switchboard/models.toml` |
 | `defaults/presets.toml`     | `.switchboard/presets.toml`            |
+| `defaults/presets/<name>.md`| `.switchboard/presets/<name>.md`       |
 | `defaults/plugins.toml`     | `.switchboard/plugins.toml`            |
 | `defaults/plugins/<name>/`  | `.switchboard/plugins/<name>/`         |
 | `defaults/protocol.md`      | `.switchboard/protocol.md`             |
 | `defaults/prompts.toml`     | `.switchboard/prompts.toml`            |
 | `defaults/settings.toml`    | `.switchboard/settings.toml`           |
 
-Preset *files* (`.switchboard/presets/<name>.md`) are deliberately NOT layered: the
-protocol is what every agent needs, a preset is what some agents need, and what
-switchboard's own agents need has no bearing on another repo's. Only the *bindings* —
-which preset applies to which role — are shipped and layered.
+Preset *files* are layered by name, and a repo's `<name>.md` replaces the shipped one of
+that name. They have to be: the shipped `presets.toml` binds `evidence` and `verify` by
+name, and if the bodies did not ship too, a fresh clone would have bindings pointing at
+nothing. Three ship — `evidence`, `verify`, and `adversarial`, which is bound to nothing
+and read on demand with `sb presets adversarial`. What is *shipped* is still small on
+purpose: the protocol is what every agent needs, a preset is what some agents need, and
+what switchboard's own agents need has little bearing on another repo's.
 
 Both were called "plugins" until the word was needed for code that runs. A preset is
 markdown and cannot run; a plugin is Python and can. A repo still holding the pre-rename
@@ -55,11 +60,13 @@ recursively and identically to every file above:
 2. **Scalars replace.** A string, number or boolean in the override wins outright.
 3. **Arrays join.** The base's items come first, then the override's, with duplicates
    dropped and order preserved. Adding a preset binding therefore cannot wipe a shipped
-   one — which is the whole reason joining is the default.
+   one — which is the whole reason joining is the default, and it matters now that the
+   shipped bindings are not empty: `all = ["@report-bug"]`, plus `evidence` and `verify`
+   on the roles whose whole output is a claim about something they read or ran.
 
 To *replace* an array instead of joining it, make `"!reset"` its first element:
 
-    all = ["!reset", "own-files"]     # exactly own-files, whatever was shipped
+    all = ["!reset"]                  # nothing at all, whatever was shipped
 
 Everything about this is tested in `tests/test_config.py`.
 
@@ -72,9 +79,10 @@ suite; also the escape hatch for shipping a different baseline to a team.
 
 | file                | what it holds                                                      |
 | ------------------- | ------------------------------------------------------------------ |
-| `roles/*.md`        | one role each: TOML front matter for the fields, markdown for the prompt |
+| `roles/*.md`        | one role each — `orchestrator`, `researcher`, `reviewer`, `qa`: TOML front matter for the fields, markdown for the prompt |
 | `models.toml`       | what `cheap`, `default`, `strong` mean — the only place model names appear |
-| `presets.toml`      | which presets apply to which role                                   |
+| `presets.toml`      | which presets apply to which role, and which every agent gets       |
+| `presets/*.md`      | one preset each: prompt text bound to a role, or a procedure read by name with `sb presets <name>` |
 | `plugins.toml`      | which plugins are enabled — `sb plugin list` shows the rest          |
 | `plugins/<name>/`   | one plugin each: `__init__.py` defines `register()`, `agent.md` is its prompt fragment |
 | `protocol.md`       | the agent protocol, injected as a system prompt at every spawn      |

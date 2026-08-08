@@ -251,6 +251,20 @@ def flatten(text: str) -> str:
     return re.sub(r"^;\s*", "", body)
 
 
+def prose(text: str) -> str:
+    """The same file, for something that is going to READ it rather than be spawned with it.
+
+    `flatten` drops the HTML comments on the way to one line. This drops them and stops:
+    the comments are notes to whoever edits the file and are never part of what the prompt
+    says, but the wrapping, the headings and the lists are how the prose is meant to be
+    read. An agent told to go and read a procedure wants it in that form, not as an
+    unbroken line — the one-line rule exists because herdr rejects newlines in a spawn
+    ARGUMENT, and nothing about reading a file is subject to it.
+    """
+    body = _COMMENT.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", body).strip() + "\n"
+
+
 def front_matter(text: str) -> tuple[dict, str]:
     """Split `+++ TOML +++ prose` into its two halves.
 

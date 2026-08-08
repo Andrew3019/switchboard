@@ -145,27 +145,41 @@ wait = ["done", "failed", "blocked", "working", "idle"]
 
 [limits]
 # Caps, in characters. None of these is a buffer limit; they are smell detectors.
+#
+# RAISED DELIBERATELY, and the reasoning is worth keeping because the old numbers were not
+# wrong so much as premature. They were set as style advice with an exception behind it: a
+# summary of 4001 characters is not a bug, it is a long summary, and refusing it turns a
+# matter of taste into an agent that cannot report at all. Nobody had hit them; they were
+# guesses about behaviour nobody had observed yet.
+#
+# So the caps that remain exist to stop a RUNAWAY — an agent pasting a transcript into a
+# mailbox, a loop appending forever — not to enforce brevity. Brevity is the protocol's job
+# and the roles', where it is said in words and can be judged. Lower any of these the day
+# something actually goes wrong, and write what went wrong next to the new number.
 
-# herdr's rule, not ours: an agent name must match [a-z][a-z0-9_-]{0,31}.
+# NOT ours and NOT tunable in practice: herdr requires [a-z][a-z0-9_-]{0,31}. Raising this
+# does not raise herdr's rule; it only makes sb accept a name herdr will then reject, which
+# is strictly worse than refusing it here where the error can say so. Leave it.
 agent_name = 32
 
-# A task, a message, a question, a summary. The protocol says pass file paths and never
-# file contents, so anything longer than about a page and a half is a payload that should
-# have been a file. It also stops a runaway agent pasting a transcript into a mailbox.
-text = 4000
+# A task, a message, a question, a summary. The protocol still says pass file paths and
+# never file contents, and that remains the right instruction — but it is an instruction,
+# and this number is now only the runaway guard behind it.
+text = 40000
 
 # Authored prompt text (`--as`, and preset files after flattening). Config rather than
-# traffic, so it gets more room — a preset is allowed to be a substantial briefing.
-prompt = 8000
+# traffic: a preset is allowed to be a substantial briefing, and the orchestrator role is
+# already ~4.7k on its own. Kept strictly ABOVE `text` — authored config should never be
+# the thing that hits a cap before a runaway message does.
+prompt = 80000
 
-# One plugin's `agent.md` fragment, after flattening. Far below `prompt` on purpose: a
-# preset is bound because somebody decided this role needs it, while a fragment is bound
-# because a plugin is installed, and protocol.md's own header says what that costs —
-# everything in a system prompt is "paid for on every single spawn, by every agent,
-# forever". Enough to name a plugin's verbs and the rule for using them; not enough to
-# explain them. Over-budget text is truncated at a word boundary with an event logged,
-# never rejected: a chatty plugin must not break spawning.
-plugin_fragment = 400
+# One plugin's `agent.md` fragment, after flattening. Still the smallest of the three, and
+# still for the reason protocol.md's header gives — everything in a system prompt is "paid
+# for on every single spawn, by every agent, forever" — but 400 was tight enough that both
+# shipped fragments were written to fit the cap rather than to say the right thing, which
+# is the cap editing the prose. Over-budget text is truncated at a word boundary with an
+# event logged, never rejected: a chatty plugin must not break spawning.
+plugin_fragment = 4000
 
 # A workspace name is used verbatim as a git branch name. Refs have no real length limit,
 # but a path built from one does, and nothing legitimate comes close.

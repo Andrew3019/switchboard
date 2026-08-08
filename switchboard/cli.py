@@ -168,7 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only agents that are blocked, at a prompt, or holding unread mail")
     ss.add_argument("--mine", action="store_true",
                     help="only your own subtree (for a human: every agent)")
-    cmd("presets", help="list available presets and their bindings")
+    # Naming one prints it. A preset is not always a disposition stapled onto a spawn —
+    # some are procedures an agent is TOLD to go and follow, and without a way to read one
+    # on demand the only way to reach a procedure was to be spawned with it already
+    # attached, paying its length on every such spawn forever. Read-only, load level 1, no
+    # plugin import: safe for an agent to run mid-turn.
+    pr = cmd("presets", help="list available presets, or print one")
+    pr.add_argument("name", nargs="?", help="print this preset instead of listing")
     # REMAINDER, so the top-level parser stays static and unbreakable by anything on
     # disk. Registering plugin commands here would mean importing plugin code to print
     # `sb --help` — and `_tier_help` above already has to wrap a config read in a bare
@@ -204,14 +210,18 @@ def build_parser() -> argparse.ArgumentParser:
         "cleanup", help="close finished agents",
         description="With no name, closes every finished agent in your subtree (for a "
                     "human: all of them). Naming agents closes those instead, and a name "
-                    "also means you want it closed whatever its role's disposition says.")
+                    "also means you want it closed whatever disposition it was spawned "
+                    "with.")
     c.add_argument("name", nargs="*", help="specific agents to close")
     # `--all-idle` is the older spelling and stays forever: it is in scripts and in muscle
     # memory. One dest, so the two can never disagree. The newer name is the honest one —
     # this has never closed agents by idleness, only agents that FINISHED, and the old
     # name promised a sweep by idleness that would close an agent mid-turn.
     c.add_argument("--include-kept", "--all-idle", dest="include_kept", action="store_true",
-                   help="also close finished agents whose role says keep")
+                   # No role carries a disposition any more — it is set per spawn by
+                   # `sb delegate --keep` / `--ephemeral` and stored on the agent. The help
+                   # said "whose role says keep" long after roles stopped saying anything.
+                   help="also close finished agents that were spawned to be kept")
     c.add_argument("--force", action="store_true",
                    help="close a NAMED agent whatever state it is in, unread mail and all "
                         "(the escape hatch for one that is genuinely stuck)")
@@ -739,6 +749,19 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "presets":
+        if args.name:
+            try:
+                path, body = presets_mod.text(b.repo, args.name)
+            except KeyError:
+                # Name the alternatives rather than just refusing: the caller is an agent
+                # that was told to follow a procedure and got the name slightly wrong, and
+                # the whole list is four items long.
+                known = ", ".join(sorted(presets_mod.available(b.repo))) or "none"
+                print(f"sb: no preset '{args.name}' (have: {known})", file=sys.stderr)
+                return 1
+            _emit(args, body.rstrip("\n"),
+                  {"preset": args.name, "path": str(path), "text": body})
+            return 0
         found = presets_mod.available(b.repo)
         every, per_role = presets_mod.bindings(b.repo)
         lines = []

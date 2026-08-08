@@ -33,9 +33,12 @@
 # disposition, its own prompt), a preset is behaviour injected into it. Mixing the two made
 # "add a preset" look like "redefine the role".
 #
-# Preset FILES are not layered — only these bindings are. The protocol is what every agent
-# needs; a preset is what some agents need, and what switchboard's own agents need has no
-# bearing on yours.
+# Preset FILES layer the same way everything else here does: a repo's
+# `.switchboard/presets/<name>.md` REPLACES the shipped one of that name. (This comment
+# used to say the opposite. It was wrong — see `presets.available()`, and the shipped
+# bindings below, which name files that therefore have to ship.) The protocol is what every
+# agent needs; a preset is what some agents need, and a repo that disagrees with a shipped
+# one overrides the file rather than arguing with it.
 #
 # This file was `plugins.toml` until "plugin" was needed for the other thing — a preset is
 # prompt text and cannot run, a plugin is Python and can. A repo still holding
@@ -44,18 +47,32 @@
 # Applied to every agent, whatever its role. Paid on every single spawn, so the bar is
 # "genuinely universal" and nothing that is merely useful belongs here.
 #
-# Two entries clear it, both plugin fragments (`@` — see above). `@todo` because a shared
-# list nobody is told about is a list nobody reads, and `@report-bug` because an agent that
-# works around an sb bug silently costs everyone after it more than the bug did. Both are
-# capped at [limits] plugin_fragment and both are written to fit under the cap rather than
-# be cut by it.
+# One entry clears it: `@report-bug`, because an agent that works around an sb bug silently
+# costs everyone after it more than the bug did, and no other mechanism catches that.
+#
+# `@todo` used to be here too, on the reasoning that a shared list nobody is told about is a
+# list nobody reads. True, and not sufficient — the fragment is paid on every spawn forever,
+# and the list only repays that if somebody is actually working from it. The plugin is now
+# disabled in plugins.toml as well; re-binding it here without re-enabling it there would
+# ship a fragment naming commands that do not dispatch.
+#
+# Capped at [limits] plugin_fragment. Note the cap was 400 when this fragment was written
+# and is now 4000, so it is currently shaped by a constraint that no longer applies.
 #
 # A repo that does not want the tax says `all = ["!reset"]` in its own presets.toml. That
 # keeps `sb plugin todo` working for the human and stops it being told to every spawn —
 # which is the one thing collapsing "enabled" and "bound" into one state would have made
 # impossible to say.
-all = ["@todo", "@report-bug"]
+all = ["@report-bug"]
 
-# Per-role additions, appended to `all`. Also shipped empty: which behaviours a role needs
-# is a property of the work a repo does, not of switchboard.
+# Per-role additions, appended to `all`.
+#
+# These three came up out of `.switchboard/presets.toml`, where they had been sitting as
+# repo-local config that was really just the right answer. `verify` on qa is definitional —
+# a qa agent that does not run anything is not doing qa. `evidence` on the three roles whose
+# entire output is a claim about something they read is the same kind of statement. What
+# stayed behind is genuinely local: nothing.
 [roles]
+researcher = ["evidence"]
+reviewer   = ["evidence"]
+qa         = ["verify", "evidence"]

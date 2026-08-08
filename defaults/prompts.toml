@@ -16,17 +16,32 @@
 
 [spawn]
 
-# Who this agent is. Every agent gets this one.
+# Who this agent is, and who it answers to. Every agent gets this one.
+#
+# "You report to" rather than "your parent is": naming the relationship is what makes the
+# protocol's `sb done` contract land on a specific reader. An agent that knows only that a
+# parent exists still writes for an imagined human; an agent told that '{parent}' is the
+# one who reads it writes for '{parent}'. The phrasing holds whether the parent is another
+# agent or the human who ran `sb start`.
 #   {name}   the agent's own name        {role}   its role
 #   {parent} the agent that spawned it, or the human
-identity = "You are agent '{name}', role '{role}'. Your parent is '{parent}'."
+identity = "You are agent '{name}', role '{role}'. You report to '{parent}': they spawned you, and your `sb done` summary is what they see of your work."
 
 # Added only when the agent is being placed in a named workspace.
+#
+# The last sentence came from the deleted `own-files` preset, which every agent used to pay
+# for. Almost all of that preset was about SCOPE — edit only what you were assigned, do not
+# fix a neighbouring file — and that now lives in the protocol, said once for everyone. The
+# re-read rule is different in kind: it is about CONCURRENCY, and it only applies to agents
+# sharing a checkout, which is exactly and only the agents who get this fragment. So it
+# moved here, where the people who need it are the people who pay for it.
 #   {workspace} the workspace name       {path} the checkout it sits over
 workspace = """
 You are working in workspace '{workspace}' at {path}. Everything you and your children do
 belongs there. Other agents and the human may be in this same workspace at the same time —
-it is shared, so coordinate through `sb`, and never assume you are alone in it.
+it is shared, so coordinate through `sb`, and never assume you are alone in it. If a file
+has changed under you since you read it, re-read it before you edit: your copy is stale and
+overwriting somebody's work is not recoverable from a summary.
 """
 
 # The first instruction a top-level orchestrator gets when `sb start` was given no task.
@@ -43,14 +58,31 @@ workspace_task = "Await instructions for this workspace."
 # agent to go and read it is what keeps a message off the wire and out of the pane.
 mail = "You have mail. Run: sb inbox"
 
-# A pending `ask` is worth distinguishing: somebody is BLOCKED on the answer.
-mail_question = "You have mail (a question). Run: sb inbox"
+# A pending `ask` is worth distinguishing: somebody is BLOCKED on the answer — `sb ask` is
+# the one verb that waits, so the asker is spending real time in a pane doing nothing. The
+# old text said "(a question)" and left the reader to infer the urgency; saying it outright
+# costs a clause and is the only thing separating this doorbell from the one above.
+mail_question = "You have mail (a question) — someone is waiting on your answer and cannot continue without it. Run: sb inbox"
 
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
-child_done = "A child finished. Run: sb inbox"
+#
+# It fires once per child, and a parent that fans out five of them is woken five times. Read
+# as a bare summons, each wake looked like a cue to speak, so parents dripped one message per
+# arrival instead of waiting for the cohort. The second sentence removes the implied
+# obligation without adding payload — the message itself still lives in the store, which is
+# the whole point of a doorbell. How to handle a cohort is the orchestrator role's business,
+# not the doorbell's; this only stops the doorbell from arguing with it.
+child_done = "A child finished. Run: sb inbox. Waking is not a reason to report — if other children are still running, wait for them."
 
 # `sb interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
 # running, so it has to say plainly that the previous instruction is void.
+#
+# "Stop what you are doing" said the wrong half. An agent reads it, stops, does the new
+# thing — and then goes back to what it was doing before, because nothing told it not to.
+# The instruction is CANCELLED, not paused, and that has to be stated: an agent resuming a
+# superseded task after the human has already redirected it is the failure this exists to
+# prevent. It ends by naming the recovery, so an agent that genuinely was mid-something
+# irreversible has somewhere to go other than guessing.
 #   {text} what the human typed
-interrupt = "[INTERRUPT — stop what you are doing] {text}"
+interrupt = "[INTERRUPT — stop now] The instruction you were following is cancelled; do not resume it. Do this instead: {text} — if stopping has left something half-done, say so with `sb block` before you go on."

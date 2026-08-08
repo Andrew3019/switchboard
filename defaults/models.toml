@@ -36,9 +36,21 @@ provider = "claude"
 # opus ran it. An agent that stops for a human on ordinary shell commands is not cheap,
 # it is unusable unattended. Cheapness comes from effort, not from a smaller model.
 [tiers.cheap]
+# `medium`, not `low`. The tier had one consumer, `researcher`, and the researcher's job
+# changed underneath it: an orchestrator's FIRST move is now to spend one agent
+# understanding a task before splitting it, and that agent is usually a researcher. So the
+# tier that was chosen for "one of five parallel readers, none of them load-bearing" became
+# the tier every subsequent split depends on. Low effort was the wrong place to save money
+# once one report decides how the whole job gets divided.
+#
+# Still the cheap tier and still cheap the same WAY — sonnet, with effort as the dial (see
+# the note above about haiku). One notch, in the one place a bad answer is expensive.
+#
+# Read this before using `--model cheap` expecting the old behaviour: it is now sonnet at
+# medium effort everywhere, not just for researchers.
 provider = "claude"
 model    = "sonnet"
-effort   = "low"
+effort   = "medium"
 
 [tiers.default]
 # No model and no effort: whatever the provider CLI itself defaults to. Deliberately not a

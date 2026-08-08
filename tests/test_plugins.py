@@ -941,7 +941,7 @@ class SigilTest(Sandbox):
 
     def test_an_over_budget_fragment_is_truncated_not_rejected(self):
         """A chatty plugin must not break spawning."""
-        self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * 200))
+        self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * plugins.FRAGMENT_BUDGET))
         self.enable("fat")
         seen = []
         (line,) = presets.resolve(["@fat"], self.repo, explicit={"@fat"},
@@ -1075,7 +1075,7 @@ class FragmentInjectionTest(Sandbox):
         self.assertEqual(self.h.started, [])
 
     def test_an_over_budget_fragment_still_spawns(self):
-        self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * 200))
+        self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * plugins.FRAGMENT_BUDGET))
         self.enable("todo", "fat")
         self.bind("@fat")
         code, _, err = self.run_sb("delegate", "do a thing")

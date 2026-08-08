@@ -3,7 +3,12 @@
 A preset is one markdown file in `<repo>/.switchboard/presets/<name>.md`. Adding a
 behaviour means adding a file; nothing registers it, nothing imports it.
 
-    sb delegate "review PR 42" --role reviewer --with adversarial --with report-bug
+    sb delegate "review PR 42" --role reviewer --with evidence --with @report-bug
+    sb presets adversarial                       read one instead of being spawned with it
+
+The second line is the other half. Not every preset is a disposition stapled onto a spawn
+— some are procedures an agent is told to go and follow, bound to nothing and read by name
+when the job comes up. `text()` below is that path, and `adversarial` is why it exists.
 
 This was called a "plugin" until the word was needed for something else. A preset is
 prompt text and cannot run; a plugin is Python and can. `.md` versus `.py` is the whole
@@ -17,11 +22,15 @@ Why files rather than lines in the protocol:
 - Presets are per-repo, so what switchboard's agents need has no bearing on lore's.
 - They are editable without touching code, which is the point of "customizable".
 
-That last one is also why preset FILES are not layered out of `defaults/`, while almost
-everything else here is: a shipped preset would arrive in every repo whether or not it
-suited the work, and would then have to be argued back out. Only the BINDINGS — which
-preset applies to which role — are shipped, in `defaults/presets.toml`, and a repo's
-`.switchboard/presets.toml` joins them rather than replacing them.
+Preset files ARE layered, and this docstring claimed for a while that they were not. See
+`available()`: the shipped directory is read first and a repo's `<name>.md` replaces the
+shipped one of that name. It has to work that way — the shipped `presets.toml` binds
+`verify` and `evidence` by name, so if the bodies did not ship too, a fresh clone would
+have bindings pointing at nothing.
+
+What is true, and is what the old claim was reaching for, is that a shipped preset is not
+imposed: it ships as a FILE, and a repo decides whether anything is bound to it. Bindings
+join across layers rather than replacing, so adding one cannot silently drop another.
 
 Files are written multi-line for humans and flattened to a single line on the way out,
 because herdr rejects newlines in agent arguments — the constraint that already forced
@@ -125,6 +134,25 @@ def flatten(text: str) -> str:
     """Markdown on disk, one line on the wire. See `config.flatten` — the same rule applies
     to the protocol, to role prompts, and to these, so it lives in one place."""
     return config.flatten(text)
+
+
+def text(repo: Path, name: str) -> tuple[Path, str]:
+    """One preset's prose, and the file it came from. Raises `KeyError` if there is none.
+
+    For READING a preset rather than being spawned with one. Some presets are procedures
+    an agent is told to go and follow — `adversarial` is the shipped example — and until
+    this existed the only way to reach one was to be spawned with it already stapled on,
+    which meant every such agent paid its length forever whether it ran the procedure or
+    not. Discovering that a procedure exists and reading it on demand is the cheaper shape,
+    and it is the one an orchestrator told "run an adversarial review" actually needs.
+
+    `config.prose` rather than `flatten`: the caller is going to read this.
+    """
+    found = available(repo)
+    if name not in found:
+        raise KeyError(name)
+    path = found[name]
+    return path, config.prose(path.read_text())
 
 
 def bindings(repo: Path) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:

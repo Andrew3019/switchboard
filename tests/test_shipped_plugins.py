@@ -94,12 +94,21 @@ class ShippedDefaultsTest(ShippedSandbox):
     def test_both_plugins_are_available_out_of_the_box(self):
         self.assertEqual(sorted(plugins.available(self.repo)), ["report-bug", "todo"])
 
-    def test_both_plugins_ship_enabled(self):
-        self.assertEqual(sorted(plugins.enabled(self.repo)), ["report-bug", "todo"])
+    def test_only_report_bug_ships_enabled(self):
+        """`todo` is available but off. The three states are the point: it stays on disk and
+        `sb plugin list` still describes it, so turning it on is one line rather than an
+        install."""
+        self.assertEqual(sorted(plugins.enabled(self.repo)), ["report-bug"])
 
-    def test_both_plugins_ship_bound_to_every_agent(self):
-        self.assertEqual(plugins.bound(self.repo),
-                         {"todo": ["every agent"], "report-bug": ["every agent"]})
+    def test_only_report_bug_ships_bound_to_every_agent(self):
+        self.assertEqual(plugins.bound(self.repo), {"report-bug": ["every agent"]})
+
+    def test_a_disabled_plugin_is_still_available(self):
+        """Available, enabled and bound are separately settable, and `todo` is now the
+        shipped proof: present on disk, dispatching nothing, taxing no spawn."""
+        self.assertIn("todo", plugins.available(self.repo))
+        self.assertNotIn("todo", plugins.enabled(self.repo))
+        self.assertNotIn("todo", plugins.bound(self.repo))
 
     def test_every_shipped_binding_actually_resolves(self):
         """A bound name that resolves to nothing is a fragment silently missing from every
@@ -135,8 +144,9 @@ class ShippedDefaultsTest(ShippedSandbox):
     def test_unbinding_keeps_the_commands(self):
         """`all = ["!reset"]` — stop taxing every spawn, keep `sb plugin todo`. This is the
         option that collapsing the three states into two would have made unsayable."""
+        (self.sw / "plugins.toml").write_text('enabled = ["todo"]\n')
         (self.sw / "presets.toml").write_text('all = ["!reset"]\n')
-        self.assertEqual(presets.for_role(self.repo, "builder"), [])
+        self.assertEqual(presets.for_role(self.repo, "qa"), ["verify", "evidence"])
         self.assertEqual(sorted(plugins.enabled(self.repo)), ["report-bug", "todo"])
         self.assertIn("t-1", self.ok("plugin", "todo", "add", "still works"))
 
@@ -155,14 +165,25 @@ class ShippedDefaultsTest(ShippedSandbox):
         """Unbinding does not disable and disabling does not unbind — the whole reason
         §7.2 keeps three states rather than two."""
         (self.sw / "plugins.toml").write_text('enabled = ["!reset"]\n')
-        self.assertEqual(plugins.bound(self.repo),
-                         {"todo": ["every agent"], "report-bug": ["every agent"]})
+        self.assertEqual(plugins.bound(self.repo), {"report-bug": ["every agent"]})
 
 
 # -- todo (§9) -----------------------------------------------------------------
 
 
 class TodoTest(ShippedSandbox):
+    """`todo` ships DISABLED, so every test here turns it on first.
+
+    That is the point rather than an inconvenience: the plugin is complete and works, it is
+    simply not something every spawn should pay for until a workflow actually uses it.
+    Enabling it in one line here is the same one line a repo writes to adopt it, so these
+    tests exercise the real adoption path instead of a default that happens to be on.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.sw / "plugins.toml").write_text('enabled = ["todo"]\n')
+
     def test_add_files_a_todo_and_names_its_id(self):
         out = self.ok("plugin", "todo", "add", "write the brief")
         self.assertIn("t-1", out)
@@ -357,6 +378,114 @@ class TodoTest(ShippedSandbox):
 
 
 # -- report-bug (§10) ----------------------------------------------------------
+
+
+class SessionTailTest(ShippedSandbox):
+    """The `## session` block — a bounded tail of the filing agent's pane.
+
+    Its whole risk profile is the failure path: the most likely reason anyone is filing a
+    bug is that sb is misbehaving, so the tail is fetched by shelling out to the very tool
+    being reported on. Every one of those failures has to end in a report that still exists.
+
+    The tail logic is tested against `_session_tail` directly, with an agent name passed in.
+    The sandbox has no calling agent, so an end-to-end file would short-circuit on the
+    no-agent guard and assert nothing — which is exactly what the first version of these
+    tests did.
+    """
+
+    def _dir(self) -> Path:
+        return self.user_state / "plugins" / "report-bug"
+
+    def _plugin_module(self):
+        """The imported plugin module, reached the way sb reaches it.
+
+        sb imports it under a mangled name (`sb_plugin_report-bug`) so nothing can reach a
+        plugin by importing it normally. Loading it by path here would produce a DIFFERENT
+        module object and patching that would patch nothing — so this loads it sb's way and
+        then fetches the object sb put in `sys.modules`, which is the one the handler runs
+        against.
+        """
+        plugins.load(self.repo, "report-bug")
+        return sys.modules["sb_plugin_report-bug"]
+
+    @contextlib.contextmanager
+    def _inspect(self, mod, *, stdout=None, exc=None):
+        """Intercept only the `sb inspect` subprocess, and let every other one through.
+
+        `subprocess` is one shared module object, so patching `run` outright also patches
+        the `git describe` and `herdr --version` probes. The first version of this did
+        exactly that and failed for a reason that had nothing to do with the tail.
+        """
+        real = mod.subprocess.run
+
+        def fake(cmd, *a, **kw):
+            if list(cmd[:2]) != ["sb", "inspect"]:
+                return real(cmd, *a, **kw)
+            if exc is not None:
+                raise exc
+            return mock.Mock(returncode=0, stdout=stdout)
+
+        with mock.patch.object(mod.subprocess, "run", side_effect=fake):
+            yield
+
+    def test_a_human_filing_gets_no_session_block(self):
+        """No agent, no session — and no subprocess either. This is the end-to-end path
+        for a person at a terminal, which is how most reports here get filed."""
+        self.ok("plugin", "report-bug", "file", "sb delegate hangs")
+        (f,) = self._dir().glob("*.md")
+        self.assertNotIn("## session", f.read_text())
+
+    def test_no_agent_means_no_lookup_at_all(self):
+        mod = self._plugin_module()
+        with mock.patch.object(mod.subprocess, "run",
+                               side_effect=AssertionError("must not shell out")):
+            self.assertEqual(mod._session_tail(None), "")
+
+    def test_the_tail_is_clipped_to_the_cap_however_much_comes_back(self):
+        """`-n` is a request to `sb inspect`; the cap here is the guarantee. A future
+        inspect that over-delivers must not turn a bounded tail into a transcript."""
+        mod = self._plugin_module()
+        flood = "\n".join(f"line {i}" for i in range(500))
+        with self._inspect(mod, stdout=json.dumps({"output": {"text": flood}})):
+            tail = mod._session_tail("qa-3")
+        lines = tail.splitlines()
+        self.assertEqual(len(lines), mod.TAIL_LINES)
+        self.assertEqual(lines[-1], "line 499")     # the END of the pane, not the start
+        self.assertEqual(lines[0], f"line {500 - mod.TAIL_LINES}")
+
+    def test_a_broken_inspect_costs_the_section_not_the_report(self):
+        """The failure that matters: sb misbehaving is the expected condition here."""
+        mod = self._plugin_module()
+        for exc in (OSError("sb is not on PATH"),
+                    mod.subprocess.TimeoutExpired(cmd="sb", timeout=5)):
+            with self.subTest(exc=type(exc).__name__):
+                with self._inspect(mod, exc=exc):
+                    self.assertEqual(mod._session_tail("qa-3"), "")
+
+    def test_a_non_zero_exit_or_malformed_json_is_not_a_crash(self):
+        mod = self._plugin_module()
+        with self._inspect(mod, stdout="not json at all"):
+            self.assertEqual(mod._session_tail("qa-3"), "")
+        with self._inspect(mod, stdout=json.dumps({"output": None})):
+            self.assertEqual(mod._session_tail("qa-3"), "")
+        with self._inspect(mod, stdout=json.dumps({})):
+            self.assertEqual(mod._session_tail("qa-3"), "")
+
+    def test_the_tail_is_fenced_and_comes_last(self):
+        """Terminal output is full of characters markdown would eat, and it is the one
+        open-ended part of the file — so it is fenced, and it sits after the facts."""
+        import time as _time
+        mod = self._plugin_module()
+        pane = "$ sb cleanup\n0 agents cleaned up\n# not a heading"
+        with self._inspect(mod, stdout=json.dumps({"output": {"text": pane}})):
+            body = mod._render(
+                mock.Mock(agent="qa-3", repo="/r", worktree="/w"),
+                mock.Mock(command="sb cleanup", expected="closed", actual="nothing"),
+                "cleanup does nothing", _time.localtime())
+        self.assertIn(f"## session (last {mod.TAIL_LINES} lines)", body)
+        self.assertIn("```\n$ sb cleanup", body)
+        self.assertIn("# not a heading", body)      # survives, because it is fenced
+        self.assertGreater(body.index("## session"), body.index("## context"))
 
 
 class ReportBugTest(ShippedSandbox):
@@ -587,6 +716,7 @@ class DoctorTest(ShippedSandbox):
     def test_a_disabled_plugins_state_is_not_an_orphan(self):
         """Disabling does not touch state and re-enabling finds it intact, so a disabled
         plugin's directory is not orphaned and reporting it would teach the wrong `rm`."""
+        (self.sw / "plugins.toml").write_text('enabled = ["todo"]\n')
         self.ok("plugin", "todo", "add", "a")
         (self.sw / "plugins.toml").write_text('enabled = ["!reset"]\n')
         _, out, _ = self.sb("doctor")

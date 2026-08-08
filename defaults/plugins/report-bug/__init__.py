@@ -25,13 +25,28 @@ uncommitted work), herdr's version, python, platform, the repo and worktree the 
 in, and the calling agent. Everything narrative comes from the caller, because only the
 caller knows it.
 
-NOT captured: the agent's transcript. A Claude Code transcript contains everything the
-agent read. Hoovering that into a bug report by default is a data-exfiltration shape even
-with no publishing step, and it is not needed to make the simple thing work.
+Also captured, and this reverses an earlier decision: the last few lines of the filing
+agent's session. The old rule was that NOTHING of the transcript went in, on the grounds
+that a Claude Code transcript contains everything the agent read and hoovering it into a
+report is a data-exfiltration shape even with no publishing step. That reasoning is still
+right about the WHOLE transcript and wrong about a tail. A report that says "sb cleanup did
+nothing" is an assertion; the same report with the last twenty lines of the pane attached
+is evidence, and the difference is most of what makes a report worth filing.
+
+So: a bounded tail, `TAIL_LINES` long, and never more. Not the whole transcript, not
+configurable upward from an agent's own argument, and skipped entirely when a human filed
+the report (there is no session to tail) or when the tail cannot be read. Everything the
+old reasoning protects against needs the word "everything" to be true, and here it is not.
+
+It is fetched by running `sb inspect --json` as a subprocess, for the same reason the
+version strings are: a plugin gets no store handle and no broker, so the CLI is the only
+door it has. Failure is silent and the section is simply absent — a bug report must never
+fail because the thing it is reporting on is broken, which is exactly the likely case.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -65,6 +80,11 @@ MAX_SUMMARY = 200
 # How long to wait on a subprocess asked for a version string. Anything slower than this is
 # broken, and a bug report is the worst possible moment to hang.
 TIMEOUT = 5
+
+# Lines of the filing agent's session kept with the report. Deliberately small: enough to
+# see what happened immediately before the bug, nowhere near enough to be a transcript. The
+# agent cannot raise it — the cap is the whole safeguard, so it is not an argument.
+TAIL_LINES = 20
 
 
 def register(reg):
@@ -223,7 +243,43 @@ def _render(ctx, args, what: str, now) -> str:
               f"- repo: {ctx.repo}",
               f"- worktree: {ctx.worktree}",
               ""]
+    # Last, and fenced. Last because it is the only unbounded-looking part of the file and
+    # a reader should reach the facts first; fenced because it is terminal output and
+    # markdown would otherwise eat its formatting.
+    tail = _session_tail(ctx.agent)
+    if tail:
+        lines += [f"## session (last {TAIL_LINES} lines)", "", "```", tail, "```", ""]
     return "\n".join(lines)
+
+
+def _session_tail(agent: Optional[str]) -> str:
+    """The last `TAIL_LINES` lines of this agent's pane, or "" if that cannot be had.
+
+    `sb inspect --json` rather than any import: `switchboard.plugins` is the one sb module
+    a plugin may reach for, and it deliberately hands over no store handle and no broker.
+    Shelling out to the CLI is the same door `_sb_version` uses.
+
+    Every failure is "": no agent (a human filed it), sb not on PATH, a non-zero exit, JSON
+    that does not parse, a shape that has moved. The most likely single reason to be filing
+    a bug is that sb is misbehaving, so this must never be the thing that breaks filing.
+    """
+    if not agent:
+        return ""
+    try:
+        r = subprocess.run(["sb", "inspect", agent, "-n", str(TAIL_LINES), "--json"],
+                           capture_output=True, text=True, timeout=TIMEOUT)
+        if r.returncode != 0 or not r.stdout.strip():
+            return ""
+        # `inspect --json` puts the pane or transcript under `output`, as
+        # {source, detail, path, text}. Only `text` is wanted, and the tail is re-clipped
+        # here rather than trusted to `-n`: `-n` is a request, this is the guarantee.
+        out = json.loads(r.stdout).get("output") or {}
+        text = out.get("text") if isinstance(out, dict) else None
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return ""
+    if not text:
+        return ""
+    return "\n".join(str(text).splitlines()[-TAIL_LINES:]).rstrip()
 
 
 def _sb_version() -> str:

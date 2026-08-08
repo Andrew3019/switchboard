@@ -167,7 +167,7 @@ class BrokerTest(unittest.TestCase):
         """
         self.b.delegate("t", role="researcher", me="orch")     # researcher = cheap
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "sonnet", "--effort", "low"])
+                         ["--model", "sonnet", "--effort", "medium"])
 
     def test_an_explicit_model_is_a_tier_name_too(self):
         """`--model strong` must be resolved, not handed to the CLI as a model id."""
@@ -750,7 +750,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo), pane_id="w1:p1")
         self.b.restore("kid")
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "sonnet", "--effort", "low"])
+                         ["--model", "sonnet", "--effort", "medium"])
 
     def test_restore_without_a_session_is_an_error(self):
         store.create_agent(self.db, name="kid", role="worker")

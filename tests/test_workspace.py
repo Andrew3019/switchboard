@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import store  # noqa: E402
+from switchboard import config, store  # noqa: E402
 from switchboard.broker import HUMAN, Broker  # noqa: E402
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
@@ -1361,7 +1361,8 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
     def test_a_plugin_that_cannot_flatten_names_the_plugin(self):
         """The CLI's error quality has to survive the move: this is what becomes an agent
         argument, so a plugin that flattens to something herdr rejects must say so."""
-        (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * 9000)
+        over = config.setting("limits.prompt") + 1
+        (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * over)
         with self.assertRaises(ValueError) as cm:
             self.b.delegate("t", role="worker", me=HUMAN)
         self.assertIn("preset text", str(cm.exception))

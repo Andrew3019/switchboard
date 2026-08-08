@@ -52,7 +52,7 @@ class PresetTest(unittest.TestCase):
         a fresh clone would have bindings pointing at nothing."""
         got = presets.available(Path(self.tmp.name) / "nope")
         self.assertIn("adversarial", got)
-        self.assertIn("own-files", got)
+        self.assertIn("evidence", got)
 
     def test_missing_dir_is_not_an_error(self):
         presets.available(Path(self.tmp.name) / "nope")   # no raise
@@ -118,8 +118,11 @@ class BindingTest(unittest.TestCase):
                          [*shipped_all(), "own-files"])
 
     def test_role_bindings_append_to_all(self):
-        self.write('all = ["own-files"]\n\n[roles]\nreviewer = ["adversarial"]\n')
-        self.assertEqual(presets.for_role(self.repo, "reviewer"),
+        """`wizard` deliberately: a role the shipped layer says nothing about, so what is
+        asserted is this file's binding on top of `all` and nothing else. Using a role that
+        also ships a binding would test two layers at once and fail whenever either moved."""
+        self.write('all = ["own-files"]\n\n[roles]\nwizard = ["adversarial"]\n')
+        self.assertEqual(presets.for_role(self.repo, "wizard"),
                          [*shipped_all(), "own-files", "adversarial"])
         self.assertEqual(presets.for_role(self.repo, "worker"),
                          [*shipped_all(), "own-files"])
@@ -221,6 +224,67 @@ class RetiredVerbTest(unittest.TestCase):
                                side_effect=AssertionError("must not connect")):
             with redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(["plugins"]), 2)
+
+
+class ReadingAPresetTest(unittest.TestCase):
+    """`presets.text` — reading a preset instead of being spawned with one.
+
+    The case that forced it: `adversarial` is a procedure an orchestrator is TOLD to run,
+    so it is bound to nothing and has to be reachable by name. Before this, an unbound
+    preset was unreachable except by stapling it to every spawn that might want it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.dir = self.repo / ".switchboard" / "presets"
+        self.dir.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_it_keeps_the_layout_and_drops_the_editor_notes(self):
+        """The whole difference from `flatten`. A reader gets prose; a spawn gets one line."""
+        (self.dir / "proc.md").write_text(
+            "<!-- why this exists, for whoever edits it -->\n"
+            "# proc\n\nFirst step.\n\n- a bullet\n- another\n")
+        path, body = presets.text(self.repo, "proc")
+        self.assertEqual(path, self.dir / "proc.md")
+        self.assertNotIn("whoever edits", body)
+        self.assertIn("# proc", body)          # heading kept — flatten drops it
+        self.assertIn("\n", body)              # layout kept — flatten would not
+        self.assertIn("- a bullet", body)      # still a list, not `; ` separators
+
+    def test_an_unbound_preset_is_still_readable(self):
+        """Being bound to nothing must not make a preset unreachable — that is the point."""
+        (self.dir / "unbound.md").write_text("# unbound\nRun the rounds.")
+        every, per_role = presets.bindings(self.repo)
+        self.assertNotIn("unbound", every)
+        self.assertFalse(any("unbound" in ps for ps in per_role.values()))
+        self.assertIn("Run the rounds.", presets.text(self.repo, "unbound")[1])
+
+    def test_an_unknown_name_raises_rather_than_returning_empty(self):
+        with self.assertRaises(KeyError):
+            presets.text(self.repo, "no-such-preset")
+
+    def test_the_shipped_adversarial_procedure_is_readable_and_bound_to_nobody(self):
+        """Pins the arrangement itself, not the prose: a repo with no preset directory can
+        still read it, and nothing pays for it on spawn."""
+        bare = Path(self.tmp.name) / "empty-repo"
+        bare.mkdir()
+        every, per_role = presets.bindings(bare)
+        self.assertNotIn("adversarial", every)
+        self.assertFalse(any("adversarial" in ps for ps in per_role.values()))
+        self.assertIn("adversarial", presets.text(bare, "adversarial")[1])
+
+    def test_the_verb_takes_an_optional_name(self):
+        """`sb presets` still lists; `sb presets <name>` reaches the reading path. Pinned
+        because the two share one verb and an argparse slip would break listing silently."""
+        from switchboard import cli
+
+        parser = cli.build_parser()
+        self.assertIsNone(parser.parse_args(["presets"]).name)
+        self.assertEqual(parser.parse_args(["presets", "adversarial"]).name, "adversarial")
 
 
 if __name__ == "__main__":

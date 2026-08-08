@@ -71,7 +71,7 @@ class ModelsTest(unittest.TestCase):
     def test_cli_args_carry_model_and_effort(self):
         """--model and --effort are both real claude flags; see models.py for the citation."""
         self.assertEqual(
-            self.load().resolve("cheap").cli_args(), ["--model", "sonnet", "--effort", "low"])
+            self.load().resolve("cheap").cli_args(), ["--model", "sonnet", "--effort", "medium"])
         self.assertEqual(
             self.load().resolve("strong").cli_args(), ["--model", "opus", "--effort", "high"])
 
@@ -283,7 +283,7 @@ class CliSurfaceTest(unittest.TestCase):
     def test_models_verb_reports_resolved_flags(self):
         d = self._models_json()
         self.assertEqual(d["tiers"]["cheap"]["cli_args"],
-                         ["--model", "sonnet", "--effort", "low"])
+                         ["--model", "sonnet", "--effort", "medium"])
         # `default` defers to the provider CLI, so it resolves to no flags at all.
         self.assertEqual(d["tiers"]["default"]["cli_args"], [])
 

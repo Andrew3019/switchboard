@@ -353,8 +353,23 @@ class Herdr:
         agent_args += list(model_args)
         if resume:
             agent_args += ["--resume", resume]
-        for p in prompts:
-            agent_args += ["--append-system-prompt", p]
+        # ONE flag, joined — never one flag per fragment. `claude` honours only the LAST
+        # `--append-system-prompt` it is given and silently discards the rest: verified as
+        # `claude -p ... --append-system-prompt "…ALPHA." --append-system-prompt "…BRAVO."
+        # --append-system-prompt "…CHARLIE."`, which answers "CHARLIE" and nothing else.
+        #
+        # This is the bug that made every prompt in `defaults/` a fiction. Fragments are
+        # appended here in the order protocol, identity, workspace, role, presets — so what
+        # every agent actually received was its LAST preset fragment, with no protocol and
+        # no role prompt at all. Agents therefore never called `sb done`, never committed
+        # first, reached for their own question tool instead of `sb block`, and orchestrated
+        # nothing, because not one of those rules was ever delivered. The prompts were never
+        # the problem; the delivery was.
+        #
+        # Joined with a space, not a newline: herdr rejects any agent argument containing
+        # one, which is the same constraint that flattens each fragment in the first place.
+        if prompts:
+            agent_args += ["--append-system-prompt", " ".join(prompts)]
 
         last: Optional[HerdrError] = None
         for attempt in range(attempts):

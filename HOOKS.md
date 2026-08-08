@@ -162,14 +162,18 @@ Exit 2 on a blocking hook (Stop, PreToolUse, etc.) is **"prevent this action"**.
 | **Recommendation** | ⏸️ Build after Stop hook is stable. Optional; current piggyback is acceptable. |
 
 ### PreToolUse
-**Purpose:** Enforce file ownership mechanically instead of via `own-files` prompt plugin.
+**Purpose:** Enforce file ownership mechanically instead of by instruction. There is no
+longer a preset for it: the `own-files` preset was deleted and the scope half of it —
+edit only what you were assigned, report anything else rather than fixing it — moved into
+`defaults/protocol.md`, so every agent is told once. That makes the instruction universal;
+it does not make it enforced, which is what this hook would be for.
 
 | Aspect | Detail |
 |--------|--------|
 | **Blocking?** | Yes; can block tool execution |
 | **Cost** | ~10-50ms **per tool call** (high-frequency) |
 | **Frequency** | 10-100+ per agent per turn |
-| **Value** | Prevents tool calls to files not owned by the agent. Currently relies on prompt instruction, which is forgotten under compaction or task depth. |
+| **Value** | Prevents tool calls to files not owned by the agent. Currently relies on a protocol sentence, which is forgotten under compaction or task depth. |
 | **Trade-off** | **High per-operation cost** (1-5 seconds added per turn if there are 100+ tool calls). Worth it *only if* file-ownership violations are common and serious. |
 | **Loop risk** | If agent keeps trying to call disallowed tools, it pays the hook cost on each retry. Acceptable; the friction discourages the mistake. |
 | **Recommendation** | ❌ Defer; measure first. Only add if file-ownership bugs are frequent. C6 says "enforce mechanically," but the cost has to justify the bug rate. Revisit after 10-20 real runs. |

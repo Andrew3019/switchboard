@@ -104,6 +104,35 @@ class SpawnTest(unittest.TestCase):
         self.assertIn("-- --permission-mode auto", argv)   # default is manual: agents stall
         self.assertIn("--append-system-prompt you are w1", argv)
 
+    def test_every_prompt_is_delivered_in_ONE_flag(self):
+        """The regression that made every prompt in `defaults/` a fiction.
+
+        `claude` honours only the LAST `--append-system-prompt` it is given and silently
+        discards every earlier one. Verified against the real CLI: three flags carrying
+        ALPHA, BRAVO and CHARLIE answer "CHARLIE"; one flag carrying all three answers all
+        three. switchboard appends protocol, identity, workspace, role and presets in that
+        order — so one flag per fragment meant every agent ever spawned received its last
+        preset fragment and NOTHING else: no protocol, no role prompt.
+
+        Asserted two ways on purpose. Counting the flags is what actually pins the bug —
+        an assertion that each fragment merely APPEARS in argv passes happily while the
+        CLI throws all but the last away.
+        """
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        Herdr("herdr", runner=fake).start_agent(
+            "w1", "w1:p9", prompts=["PROTOCOL here", "you are w1", "role text", "a preset"])
+        argv = fake.argv()
+        self.assertEqual(argv.count("--append-system-prompt"), 1,
+                         "one flag per fragment: the CLI keeps only the last one")
+        self.assertIn("--append-system-prompt PROTOCOL here you are w1 role text a preset",
+                      argv)
+
+    def test_no_prompts_means_no_flag_at_all(self):
+        """An empty join would hand the CLI an empty system prompt rather than none."""
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        Herdr("herdr", runner=fake).start_agent("w1", "w1:p9", prompts=[])
+        self.assertNotIn("--append-system-prompt", fake.argv())
+
     def test_resume_and_model_args_ride_the_passthrough(self):
         """Model flags arrive pre-resolved and are spliced in verbatim.
 

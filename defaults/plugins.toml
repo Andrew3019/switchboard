@@ -23,7 +23,13 @@
 #
 #     enabled = ["!reset"]
 #
-# Both shipped plugins ship ON, and both are bound in presets.toml as well.
+# `report-bug` ships ON and bound. `todo` ships OFF — present on disk, so `sb plugin list`
+# still describes it and one line here turns it back on, but its commands do not dispatch,
+# it gets no state directory, and no spawn carries its fragment. It was on by default and
+# came off because nobody could say what it was doing for them: an agent told to consult a
+# shared list before starting is being taxed on every spawn for a coordination mechanism
+# that only pays off if somebody is actually reading and writing that list. Turn it back on
+# when there is a workflow that wants it, not because it is available.
 #
 # This is the single-user assumption cashed in directly. An off-by-default plugin that its
 # only user turns on in every repo he touches is a line of ceremony, not a guarantee — the
@@ -38,4 +44,4 @@
 # fragments. `enabled = ["!reset"]` here turns the commands off; `all = ["!reset"]` in a
 # repo's presets.toml keeps the commands and stops the per-spawn tax. They are different
 # levers because they are different costs.
-enabled = ["todo", "report-bug"]
+enabled = ["report-bug"]

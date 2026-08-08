@@ -3,9 +3,12 @@
      it: a fragment that truncates on every spawn is a fragment whose last sentence nobody
      ever reads.
 
-     The `report-bug` PRESET carries the same guidance, for spawns bound to it rather than
-     to this plugin. The two are kept in step deliberately until the preset can be retired
-     without an existing `--with report-bug` degrading into a one-word literal. -->
+     There was a `report-bug` PRESET saying the same thing, kept in step with this file for
+     spawns bound to it rather than to the plugin. It is deleted: this fragment is bound to
+     every agent through `defaults/presets.toml`, so the preset was pure duplication. Note
+     the consequence — `--with report-bug` now fails rather than silently shipping the
+     one-word string "report-bug", which is the sigil rule doing its job. It is
+     `@report-bug` or nothing. -->
 # report-bug
 
 - Hit a bug in switchboard itself (`sb`, or anything under `switchboard/`)? File it: `sb plugin report-bug file "<what broke>" --command "..." --expected "..." --actual "<the exact error>"`.
