@@ -462,15 +462,26 @@ class Broker:
         """
         a = store.get_agent(self.db, name)
         if a is not None:
-            if not self._alive(name):
-                if a["session_id"]:
-                    self.restore(name)
-                else:
-                    # A row with no pane and no session is a husk; replace it rather than
-                    # orphan it. Same rule as `_spawn_lead`'s.
-                    store.drop_agent(self.db, name)
-                    return self._top(name, task, focus, board)
+            if not a["pane_id"] and not a["session_id"]:
+                # A row with no pane AND no session is a husk; replace it rather than
+                # orphan it. Same rule as `_spawn_lead`'s (`session id → restore; pane,
+                # no session → join; neither → husk`) — this used to claim that rule and
+                # test only the session id, which made "pane, no session" a husk too.
+                #
+                # That shape is not exotic, it is every agent's first turn. herdr's
+                # `agent list` carries no session id at all (`herdr.py:104`), so the only
+                # writer of the column is `_claim_session`, which needs the agent itself
+                # to have run an `sb` command. Until it does, an ordinary `sb start`
+                # DELETED its row: the session id went with it, so `restore` had nothing
+                # to restore, and `whoami` resolved the still-running agent to HUMAN.
+                store.drop_agent(self.db, name)
+                return self._top(name, task, focus, board)
+            if a["session_id"] and not self._alive_or_unknown(name):
+                self.restore(name)
             elif task:
+                # Alive, or a pane we cannot see an agent in yet — a claim somebody made
+                # moments ago and is still spawning into. Either way the name is somebody
+                # else's; hand it the work, as `_joined_lead` does.
                 self.tell([name], task, me=HUMAN)
             store.log_event(self.db, kind="start", agent=name, created=False)
             if board:
@@ -988,6 +999,31 @@ class Broker:
             return any(x.name == name for x in self.h.list_agents())
         except HerdrError:
             return False
+
+    def _alive_or_unknown(self, name: str) -> bool:
+        """`_alive`, except an unreachable herdr answers "still going".
+
+        One call stack, one posture. `_running_tops` fails OPEN and hands the name it
+        chose straight to `_top` (`:405`), which then asks the same question again — and
+        `_alive` fails CLOSED, throwing away the posture picked one line earlier. What
+        `_top` does with a "dead" answer is `restore`, which spawns: precisely the second
+        orchestrator on top of a live one that `_running_tops` fails open to avoid.
+
+        So take the reversible branch, which is what `design-c.md` asks of an unknown.
+        Guessing alive costs an `sb start` that only re-focuses, and the human types it
+        again. Guessing dead resumes a live agent's session in a second pane, and no
+        command undoes that.
+
+        No pane is not an unknown — that is our own row, not herdr's answer.
+
+        `_alive` itself is deliberately untouched: `restore` and `workspace` pay a
+        different price for doubt, and flipping it is its own landing.
+        """
+        a = store.get_agent(self.db, name)
+        if not a or not a["pane_id"]:
+            return False
+        known = self._agent_states()      # None is "cannot tell", not "nobody is running"
+        return known is None or name in known
 
     def _recorded_path(self, name: str) -> Optional[str]:
         """Where this workspace's CHECKOUT is, according to our own rows.

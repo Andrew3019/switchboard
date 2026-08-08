@@ -1059,6 +1059,78 @@ class BrokerTest(unittest.TestCase):
             self._dead_top(name)
         self.assertEqual(self.b.start(new=True), "main-3")
 
+    # -- start: a spawning agent is not a husk ------------------------------
+
+    def _sessionless_top(self, name=MAIN_NAME, pane="w1:p1"):
+        """A live orchestrator that has not run an `sb` command of its own yet.
+
+        The normal shape, not an exotic one: herdr's `agent list` carries no session id,
+        so `_claim_session` is the only writer of the column and it needs the agent
+        itself to call `sb`. Backdated well past SPAWN_GRACE, because this is the steady
+        state until that happens and not a spawn-window race.
+        """
+        store.create_agent(self.db, name=name, role=MAIN, pane_id=pane)
+        self.db.execute("UPDATE agents SET created_at=? WHERE name=?",
+                        (store.now() - int(status.SPAWN_GRACE) - 100, name))
+        self.db.commit()
+        return store.get_agent(self.db, name)
+
+    def test_start_does_not_delete_an_agent_herdr_has_not_listed_yet(self):
+        """The harm is the DELETE, so assert the row, not the return value.
+
+        No herdr error is needed to get here: herdr answers normally and simply does not
+        list the name for the whole of `start_agent`'s 282 s retry window. `sb start`
+        read a pane with no session as a husk and dropped the row — session id, pane and
+        parentage with it, so `restore` had nothing left and `whoami` called the still
+        running agent HUMAN.
+        """
+        self.h.focus = lambda n: None
+        before = self._sessionless_top()
+        self.h.list_agents = lambda: []          # herdr is up; this name just is not in it
+        self.restart_sb().start()
+
+        after = store.get_agent(self.db, MAIN_NAME)
+        self.assertIsNotNone(after)
+        self.assertEqual(after["pane_id"], before["pane_id"])
+        self.assertEqual(after["created_at"], before["created_at"])   # the row, not a new one
+        self.assertEqual(self.h.started, [])     # and nothing was spawned over the top of it
+
+    def test_start_hands_its_task_to_the_agent_it_cannot_see(self):
+        """Same name means the same agent: join it and give it the work.
+
+        `_spawn_lead` already treats this shape as "a claim somebody made moments ago and
+        is still spawning into"; `_top` cited that rule and did the opposite.
+        """
+        self.h.focus = lambda n: None
+        self._sessionless_top()
+        self.h.list_agents = lambda: []
+        self.assertEqual(self.restart_sb().start(task="merge PR 41"), MAIN_NAME)
+        self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
+        self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
+
+    def test_an_unreachable_herdr_does_not_resume_a_live_orchestrator(self):
+        """One call stack, one posture.
+
+        `_running_tops` fails OPEN and hands this very name to `_top`, which asked the
+        same question again with the opposite posture and resumed the agent it had just
+        refused to give up on — a second pane on a live session, which nothing undoes.
+        """
+        self.h.focus = lambda n: None
+        store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1",
+                           session_id="sess-main")
+        self.h.list_error = HerdrError("no_server", "connection refused")
+        self.assertEqual(self.restart_sb().start(), MAIN_NAME)
+        self.assertEqual(self.h.started, [])
+        self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
+
+    def test_start_still_replaces_a_row_that_never_reached_a_pane(self):
+        """The husk branch survives the narrowing: no pane AND no session is still one."""
+        self.h.focus = lambda n: None
+        store.create_agent(self.db, name=MAIN_NAME, role=MAIN)
+        self.h.list_agents = lambda: []
+        self.assertEqual(self.restart_sb().start(), MAIN_NAME)
+        self.assertEqual(self.h.started[-1]["name"], MAIN_NAME)
+
     # -- worktree config links -------------------------------------------
 
     def _repo_with_worktree(self):
