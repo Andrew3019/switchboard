@@ -525,10 +525,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "delegate":
         cleanup = "keep" if args.keep else ("close" if args.ephemeral else None)
-        # `--with` goes down as NAMES. Resolution and layering live in `Broker._plugins`,
-        # because this branch is not the only way a spawn happens: `sb workspace new` and
-        # `sb start` reach `delegate` directly, and while the layering lived here their
-        # leads got no plugins at all.
+        # `--with` goes down as NAMES. Resolution and layering live in the broker's
+        # `_resolve_bindings`, because this branch is not the only way a spawn happens:
+        # `sb workspace new` and `sb start` reach `delegate` directly, and while the
+        # layering lived here their leads got nothing bound at all.
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           name=args.name or _derived_name(db, args.role),
                           model=args.model, with_=args.with_,

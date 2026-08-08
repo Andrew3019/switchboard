@@ -902,8 +902,12 @@ class Broker:
 
     # -- spawning --------------------------------------------------------
 
-    def _plugins(self, role: str, extra: Sequence[str] = ()) -> list[str]:
-        """The prompt lines this spawn's plugins contribute.
+    def _resolve_bindings(self, role: str, extra: Sequence[str] = ()) -> list[str]:
+        """The prompt lines this spawn's bindings contribute.
+
+        Named for what it does rather than for what the bound things are currently called:
+        the vocabulary above it is being reworked, and a spawn resolving its bindings is
+        the part that stays true either way.
 
         Layered, most general first: repo defaults -> the role's own -> the caller's
         `--with`. Each layer appends (see `plugins.for_role`).
@@ -930,7 +934,7 @@ class Broker:
         as_prompt: Optional[str] = None,
         name: Optional[str] = None,
         model: Optional[str] = None,
-        with_: Sequence[str] = (),      # plugin NAMES (or literal lines) — see `_plugins`
+        with_: Sequence[str] = (),      # NAMES to bind (or literal lines) — see below
         cleanup: Optional[str] = None,
         me: Optional[str] = None,
         workspace: Optional[str] = None,
@@ -962,7 +966,7 @@ class Broker:
             prompts.append(as_prompt)
         elif r.prompt:
             prompts.append(r.prompt)
-        prompts.extend(self._plugins(role, with_))
+        prompts.extend(self._resolve_bindings(role, with_))
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
         wsid = workspace_id or self._parent_workspace_id(me, ws)
