@@ -63,7 +63,10 @@ mailbox.
 ### `sb done <summary>`
 Reports the calling agent finished. The summary is delivered to the parent's mailbox
 (`[done] ` prefix) if it has one, otherwise only logged (root agents have no parent).
-Also pushes `idle` to herdr and rings the parent's doorbell.
+Also pushes `idle` to herdr and rings the parent's doorbell. Reporting done with children
+still working is legal — a parent that delegated must have a legal way to end its turn —
+but it is named back to the caller and logged as `done_with_live_children`; `sb cleanup`
+will not close the pane while they run.
 - Entry point: `cli.py:727-730` → `Broker.done` (`broker.py:1486-1509`)
 - Depends on: same doorbell mechanism as `tell`
 - Config: `settings.toml [vocabulary] done_prefix`
@@ -132,14 +135,18 @@ directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or
   §4.6 asserts this check; it is deliberately not built, and §4.6 says why.
 - Config: `settings.toml [herdr] min_version`
 
-### `sb cleanup [name...] [--include-kept] [--force] [--dry-run]`
+### `sb cleanup [name...] [--include-kept] [--force] [--leave-children] [--dry-run]`
 Closes finished agents' panes — never their history; `sb restore` brings a closed agent
-back. With no names, sweeps the caller's own subtree (or everything, for a human). Four
+back. With no names, sweeps the caller's own subtree (or everything, for a human). Five
 layered safety gates: must be finished with no unread mail; an end that no agent reported
 (`failed`, written by `status._record_gone`) is re-checked against `agent list` and left
 alone if herdr still has the agent **or cannot be asked**; the agent's own recorded
-disposition (`--include-kept` lifts it); `--force` lifts every gate but only alongside an
-explicit name.
+disposition (`--include-kept` lifts it); `--force` lifts those three but only alongside an
+explicit name; and **no agent is closed while a descendant is still `working` or
+`blocked`** — the invariant that an agent with no pane has no live children under it.
+`--force` does NOT lift the last one, because it is a fact about agents the caller did not
+name; `--leave-children` does, and says what it costs. The other way out is to close the
+subtree from the leaves up.
 - Entry point: `cli.py:801-806` → `Broker.cleanup` (`broker.py:1554-1626`)
 - Depends on: the store's per-agent `cleanup` column, written at spawn
 - Status: working. The disposition is a **run-time** decision, not a role's property: no

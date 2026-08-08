@@ -1547,7 +1547,7 @@ class Broker:
 
     # -- status ----------------------------------------------------------
 
-    def done(self, summary: str, *, me: Optional[str] = None) -> None:
+    def done(self, summary: str, *, me: Optional[str] = None) -> list[str]:
         """Report finished. The summary goes to the parent, if there is one.
 
         A ROOT agent has no parent and the human has no mailbox, so its summary is not
@@ -1555,6 +1555,17 @@ class Broker:
         show: `sb status` puts it on the done row, `sb inspect` prints it in full, `sb
         log` has it. Nothing is lost by not addressing anybody; a row in a mailbox nobody
         reads was only ever a second copy of this.
+
+        **Reporting done with children still working stays legal**, and the returned list
+        of their names is the whole change here. Refusing it would be a protocol change —
+        a parent that delegated and then hit its own end would have no legal move, and
+        the one it would reach for is closing its children, which ends work nobody asked
+        to end. It is also not where the harm is: `cleanup` is what closes the pane, and
+        `cleanup` now refuses (see `live_descendants`), so a done parent with live
+        children stays reachable and still collects their summaries.
+
+        So it is surfaced, not blocked: the names come back for the CLI to print, and
+        `done_with_live_children` goes in the log.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -1567,10 +1578,15 @@ class Broker:
         store.set_state(self.db, me, "done")
         self._push_state(a, IDLE, summary)   # herdr has no `done`; it derives it from idle
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP])
+        still_working = self.live_descendants(me)
+        if still_working:
+            store.log_event(self.db, kind="done_with_live_children", agent=me,
+                            children=",".join(still_working))
         if parent:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
             self._ring(parent, self._say("notify.child_done"))
+        return still_working
 
     def block(self, why: str, *, me: Optional[str] = None) -> None:
         """Stop and surface to the human — never to the parent.
@@ -1617,13 +1633,14 @@ class Broker:
 
     def cleanup(self, names: Sequence[str] = (), *, include_kept: bool = False,
                 force: bool = False, dry_run: bool = False,
+                leave_children: bool = False,
                 me: Optional[str] = None) -> list[str]:
         """Close agents. With no names, every finished one in the caller's scope.
 
         Safe to be aggressive: closing costs only the pane. Session, summary, messages
         and the on-disk transcript all survive, and `sb restore` brings the agent back.
 
-        Four gates, and which of them a caller may lift is the whole design:
+        Five gates, and which of them a caller may lift is the whole design:
 
         - **finished, and no unread mail.** A sweep never lifts these. Closing an agent
           mid-turn would strand whatever it was doing, and discarding unread mail loses a
@@ -1638,6 +1655,20 @@ class Broker:
           outright — it is the escape hatch for an agent that is genuinely stuck (its
           state never advanced, its name was lost by herdr, it holds mail it can never
           read) and that no sweep can therefore ever reach. Naming it IS the confirmation.
+
+        - **live descendants**, and `force` does NOT lift this one. See
+          `live_descendants` for the invariant. Every other gate is a fact about the
+          agent you named — its state, its mail, its role — and `--force` is you saying
+          you know that fact and mean it anyway. Live children are facts about agents you
+          did NOT name, and no flag about this agent gets to decide their fate. So the
+          gate takes its own flag, `leave_children`, which says the thing it does: close
+          the parent's pane, leave the children running. The other way out is to close
+          the subtree from the leaves up, which never breaks the invariant at all.
+
+          Named agents get a refusal before anything is closed, rather than a skip: you
+          asked for this agent by name, so silence would be a lie. A sweep skips it the
+          way it skips every other gate, and logs `cleanup_held` so the log can answer
+          "why is that one still here".
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -1659,12 +1690,31 @@ class Broker:
                                  "it lifts every safety gate, so it is never a sweep")
             candidates = scope
 
+        # Computed for every candidate up front, so a named agent is refused before
+        # anything at all has been closed: half a `sb cleanup a b` is worse than none.
+        held = {} if leave_children else {
+            a["name"]: kids for a in candidates
+            if a["name"] != me and (kids := self.live_descendants(a["name"]))
+        }
+        if held and names:
+            raise ValueError(
+                "still working underneath: "
+                + "; ".join(f"{p} → {', '.join(kids)}" for p, kids in held.items())
+                + ". Close them first (the subtree closes from the leaves up), or "
+                  "--leave-children to close the parent and leave them running."
+            )
+
         closed = []
         for a in candidates:
             if a["name"] == me:
                 continue                      # never close the caller
             if a["ended_at"] and not a["pane_id"]:
                 continue                      # already gone
+            if a["name"] in held:
+                if not dry_run:               # a dry run reads; it never writes
+                    store.log_event(self.db, kind="cleanup_held", agent=a["name"],
+                                    live_children=",".join(held[a["name"]]))
+                continue                      # the invariant; see the docstring
             if not force:
                 if a["state"] not in FINISHED:
                     continue                  # only finished agents; --all-idle too
@@ -1694,6 +1744,46 @@ class Broker:
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             closed.append(a["name"])
         return closed
+
+    def live_descendants(self, name: str) -> list[str]:
+        """Descendants of `name` whose work is still going. The invariant's one predicate.
+
+        > **INVARIANT: an agent whose pane is closed has no descendant whose pane is
+        > still working.**
+
+        Before this it was true by luck: `children_of` existed in exactly one place, to
+        scope a sweep to the caller's subtree, and nothing anywhere asked "does this
+        agent have live children?" before ending it. Everything that closes a pane on
+        purpose asks here now, so the invariant holds by construction rather than by
+        nobody having tried yet.
+
+        Why it matters is not tidiness: a child of a closed parent reports with `sb
+        done`, which writes the summary to the parent and rings it. The parent has no
+        pane, so the ring fails (`ring_failed`) and the summary sits unread in the store
+        forever, which is precisely the "the board looks fine and something is silently
+        not happening" class.
+
+        **The STORE only, deliberately not herdr** — the same call `_will_never_answer`
+        makes, for the same reason. An agent missing from `agent list` looks identical
+        whether it died or herdr hiccupped, and a hiccup that read as "no live children"
+        would wave through exactly the close this exists to stop. A row that says
+        `working` when the pane is long dead costs a refusal, which the human undoes by
+        closing that row; the other way round costs live work.
+
+        A row is born `working`, so a child mid-spawn counts as live. That is the safe
+        direction: it is also the child that would be hardest to notice missing.
+
+        **What this cannot cover, and nothing can: a parent's pane that simply dies** — a
+        crash, a closed tab, a herdr restart (route A1). There is no caller there to
+        refuse, so the invariant is a property of what switchboard *does*, not of what
+        the world does to it. What the model says about that shape is: it is not a state
+        anything here creates, it is already recorded when it bites (`ring_failed` on the
+        child's `done`), and it is nameable — this method, asked of the dead parent,
+        answers it. The board draws it as an ordinary archived row with its live children
+        under it, which is the honest picture and not a special case.
+        """
+        return [a["name"] for a in self._descendants(name)
+                if a["state"] in store.LIVE_STATES and not a["ended_at"]]
 
     def _descendants(self, name: str) -> list:
         out, frontier = [], [name]

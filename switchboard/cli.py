@@ -227,6 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--force", action="store_true",
                    help="close a NAMED agent whatever state it is in, unread mail and all "
                         "(the escape hatch for one that is genuinely stuck)")
+    # Its own flag rather than a corner of --force: --force is you overriding facts about
+    # the agent you named, and this overrides a fact about agents you did not name.
+    c.add_argument("--leave-children", action="store_true",
+                   help="close an agent whose children are still working, leaving them "
+                        "running with no pane above them (--force does not do this)")
     c.add_argument("--dry-run", action="store_true")
 
     w = cmd("workspace", help="workspaces (worktree + herdr workspace + lead)")
@@ -741,8 +746,14 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "done":
-        b.done(args.summary, me=me)
-        _emit(args, "done", {"agent": me})
+        still = b.done(args.summary, me=me)
+        # Legal, and worth saying out loud: the agent is finishing a turn its children
+        # have not finished, and their summaries will arrive here after it.
+        note = "done" if not still else (
+            "done — still working underneath you: " + ", ".join(still)
+            + ". Their summaries will reach you here, and nothing will close your pane "
+              "while they run.")
+        _emit(args, note, {"agent": me, "live_children": still})
         return 0
 
     if cmd == "block":
@@ -816,7 +827,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "cleanup":
         names = b.cleanup(args.name, include_kept=args.include_kept, force=args.force,
-                          dry_run=args.dry_run, me=me)
+                          dry_run=args.dry_run, leave_children=args.leave_children, me=me)
         verb = "would close" if args.dry_run else "closed"
         _emit(args, f"{verb}: {', '.join(names) or '(nothing)'}", {"closed": names})
         return 0

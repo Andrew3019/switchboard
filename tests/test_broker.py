@@ -686,6 +686,159 @@ class BrokerTest(unittest.TestCase):
         store.set_state(self.db, "leaf", "done")
         self.assertIn("leaf", self.b.cleanup(me="top", include_kept=True))
 
+    # -- cleanup: the invariant ------------------------------------------
+    #
+    # INVARIANT: an agent whose pane is closed has no descendant whose pane is still
+    # working. Every test here asserts the HARM — the parent's pane being closed, or the
+    # summary that then cannot be delivered — and not what `cleanup` returned.
+
+    def _family(self, *, child_state: str = "working"):
+        """orch → lead (done, pane w1:p1) → worker (still going, pane w1:p2)."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="lead", role="orchestrator", parent="orch",
+                           pane_id="w1:p1", cleanup="close")
+        store.create_agent(self.db, name="worker", role="worker", parent="lead",
+                           pane_id="w1:p2", cleanup="close")
+        store.set_state(self.db, "lead", "done")
+        if child_state != "working":
+            store.set_state(self.db, "worker", child_state)
+
+    def test_a_sweep_leaves_a_done_parent_whose_child_is_still_working(self):
+        """The four old gates all pass for `lead`: finished, its own report, no mail, role
+        says close. Nothing asked whether anything was still running underneath it."""
+        self._family()
+        self.b.cleanup(me="orch")
+        self.assertNotIn("w1:p1", self.h.closed)
+        self.assertEqual(store.get_agent(self.db, "lead")["pane_id"], "w1:p1")
+        # and the log can answer "why is that one still here"
+        held = [e for e in store.recent_events(self.db, agent="lead")
+                if e["kind"] == "cleanup_held"]
+        self.assertEqual(len(held), 1)
+
+    def test_a_blocked_child_holds_its_parent_open_too(self):
+        """A blocked child is the sharp case: it is waiting on a person, and closing the
+        pane above it is how the answer stops being able to reach anyone."""
+        self._family(child_state="blocked")
+        self.b.cleanup(me="orch")
+        self.assertNotIn("w1:p1", self.h.closed)
+
+    def test_naming_a_parent_with_a_live_child_closes_nothing(self):
+        self._family()
+        with self.assertRaises(ValueError) as e:
+            self.b.cleanup(["lead"], me="orch")
+        self.assertIn("worker", str(e.exception))       # says which agent is holding it
+        self.assertEqual(self.h.closed, [])
+        self.assertEqual(store.get_agent(self.db, "lead")["pane_id"], "w1:p1")
+
+    def test_force_does_not_close_a_parent_over_its_live_child(self):
+        """The decision: `--force` overrides facts about the agent you NAMED — its state,
+        its mail, its role. A live child is a fact about an agent you did not name, and no
+        flag about the parent gets to end its work."""
+        self._family()
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["lead"], me="orch", force=True)
+        self.assertEqual(self.h.closed, [])
+
+    def test_one_held_parent_stops_the_whole_named_cleanup(self):
+        """Refused before anything is closed. Half of `sb cleanup a b` is worse than none:
+        the caller reads one error and cannot tell what already happened."""
+        self._family()
+        store.create_agent(self.db, name="sib", role="worker", parent="orch",
+                           pane_id="w1:p3", cleanup="close")
+        store.set_state(self.db, "sib", "done")
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["sib", "lead"], me="orch")
+        self.assertEqual(self.h.closed, [])
+
+    def test_a_dry_run_does_not_offer_a_parent_with_a_live_child(self):
+        """`--dry-run` is what a human reads before sweeping, and it writes nothing."""
+        self._family()
+        self.assertEqual(self.b.cleanup(me="orch", dry_run=True), [])
+        self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="lead")
+                          if e["kind"] == "cleanup_held"], [])
+
+    def test_closing_the_subtree_from_the_leaves_up_always_works(self):
+        """The way out that keeps the invariant rather than breaking it — and the reason
+        the gate needs no lifting to stay usable."""
+        self._family()
+        self.b.cleanup(["worker"], me="orch", force=True)
+        self.b.cleanup(["lead"], me="orch")
+        self.assertIn("w1:p1", self.h.closed)
+
+    def test_leave_children_is_the_one_way_to_close_over_a_live_child(self):
+        """The other way out, for a human who means it: the parent's pane goes, the
+        child's work does not. It has its own flag because it does its own harm."""
+        self._family()
+        self.b.cleanup(["lead"], me="orch", leave_children=True)
+        self.assertIn("w1:p1", self.h.closed)
+        self.assertNotIn("w1:p2", self.h.closed)        # the child keeps working
+
+    def test_a_fully_finished_subtree_still_sweeps(self):
+        """The gate must not cost the normal sweep. A finished child is not live work."""
+        self._family(child_state="done")
+        self.b.cleanup(me="orch")
+        self.assertIn("w1:p1", self.h.closed)
+        self.assertIn("w1:p2", self.h.closed)
+
+    def test_a_child_of_a_closed_parent_cannot_deliver_its_summary(self):
+        """WHY the gate exists, spelled out end to end.
+
+        The child reports `sb done`; the summary is written to the parent and the doorbell
+        rung. The parent has no pane and herdr has lost the binding that went with it, so
+        the ring fails and the summary sits in the store with nobody able to read it — the
+        failure class where the board looks fine and something is silently not happening.
+
+        Reached here only through `--leave-children`, which is the point: this is the harm
+        the flag names, and the only route to it that switchboard still has.
+        """
+        self._family()
+        self.b.cleanup(["lead"], me="orch", leave_children=True)
+        self.h.unreachable.add("lead")                  # the binding went with the pane
+
+        self.b.done("my part is finished", me="worker")
+        stranded = store.undelivered(self.db)
+        self.assertEqual([(m["to_agent"], m["kind"]) for m in stranded], [("lead", "done")])
+        self.assertIn("ring_failed",
+                      [e["kind"] for e in store.recent_events(self.db, agent="lead")])
+
+    def test_a_refused_close_keeps_the_childs_summary_deliverable(self):
+        """The same story with the gate doing its job: the pane is still there, so the
+        summary lands and the doorbell rings."""
+        self._family()
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["lead"], me="orch")
+
+        self.b.done("my part is finished", me="worker")
+        self.assertEqual(store.undelivered(self.db), [])
+        self.assertIn("lead", [p[0] for p in self.h.prompts])
+
+    def test_done_with_children_still_working_stays_legal_and_is_recorded(self):
+        """Deliberately NOT a protocol change: a parent that delegated and then reached
+        its own end must have a legal move, and the one it would reach for otherwise is
+        closing its children. The harm was never `done` — it was the close that follows,
+        and that is what is gated. So this reports, records, and stays closeable-proof.
+        """
+        self._family(child_state="working")
+        store.set_state(self.db, "lead", "working")      # about to report done itself
+        self.b.done("handing off", me="lead")
+
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "done")
+        self.assertIn("done_with_live_children",
+                      [e["kind"] for e in store.recent_events(self.db, agent="lead")])
+        # and the summary still reached its own parent, unchanged
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] handing off"])
+        # the pane survives the sweep that follows
+        self.b.cleanup(me="orch")
+        self.assertNotIn("w1:p1", self.h.closed)
+
+    def test_done_says_nothing_when_the_children_have_all_finished(self):
+        self._family(child_state="done")
+        store.set_state(self.db, "lead", "working")
+        self.b.done("all in", me="lead")
+        self.assertNotIn("done_with_live_children",
+                         [e["kind"] for e in store.recent_events(self.db, agent="lead")])
+
     def test_ask_fails_fast_on_an_unknown_target(self):
         """Otherwise the caller blocks the entire timeout waiting on nobody."""
         with self.assertRaises(KeyError):
