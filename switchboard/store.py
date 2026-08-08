@@ -252,8 +252,14 @@ def _migrate_additive(db: sqlite3.Connection) -> bool:
                 "SELECT name FROM sqlite_master WHERE type='table'")}:
             return False                       # a whole new table: rebuild
         have = _columns(db, table)
-        if have - set(cols):
-            return False                       # a column was REMOVED: not additive
+        # Columns in the store that this code does not know about are LEFT ALONE. They are
+        # not evidence of a removal — far more often they are a newer `sb`, run from another
+        # checkout against the same store, that added one. Two checkouts share one store, so
+        # migrations have to survive being met by older code; treating an unknown column as
+        # destructive is what wedged the whole machine once already (see `connect`). Nothing
+        # here reads by position — every INSERT names its columns and rows are read by name
+        # — so an extra column costs us nothing. A genuine removal is the newer code's to
+        # handle, on the side that knows the column is gone.
         for name, decl in cols.items():
             if name in have:
                 continue

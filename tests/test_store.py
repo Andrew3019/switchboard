@@ -188,11 +188,17 @@ class StoreTest(unittest.TestCase):
             store.SCHEMA = original
             store._SCHEMA_HASH = __import__("hashlib").sha256(original.encode()).hexdigest()[:16]
 
-    def test_a_removed_column_is_not_additive(self):
+    def test_an_unknown_column_does_not_force_a_reset(self):
+        """A newer `sb`, run from another checkout against the same store, adds a column
+        this code has never heard of. Older code must keep working: two checkouts share
+        one store, and reading the extra column as destructive wedged every agent on the
+        machine once already."""
         p = Path(self.tmp.name) / "destructive.db"
         d = store.connect(path=p)
-        d.execute("ALTER TABLE agents ADD COLUMN gone_tomorrow TEXT")
-        self.assertFalse(store._migrate_additive(d))          # falls through to reset
+        store.create_agent(d, name="w", role="worker")
+        d.execute("ALTER TABLE agents ADD COLUMN added_by_newer_sb TEXT")
+        self.assertTrue(store._migrate_additive(d))           # no reset
+        self.assertIsNotNone(store.get_agent(d, "w"))         # and the fleet survives
         d.close()
 
     def test_liveness_is_judged_by_herdr_not_the_store(self):
