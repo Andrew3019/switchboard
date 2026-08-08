@@ -330,7 +330,45 @@ arguments. An error message naming a command that does not exist is worse than a
 message naming none, because it costs the reader the time to try it. Both flags added,
 plus `store.reset` as the public face of `_reset`.
 
-The remaining hard stop is unchanged and still worth revisiting.
+### STATUS: the remaining hard stop is gone too (2026-08-07)
+
+The "still open" half above is closed. It was still a deadlock in the one shape that
+matters — a `NOT NULL` column with no literal default, which is exactly what splitting the
+conflated `workspace` column produced, and it wedged a live fleet a second time.
+
+Three changes, all of them in `store.connect`'s path:
+
+- **Compatibility is structural, not equality.** `_deficit` asks whether the store
+  *contains* what this code needs, and returns `(addable, blocking)`. The hash is demoted
+  to a cache key, so a comment edit — or a column another checkout added — costs one
+  PRAGMA sweep and nothing else.
+- **A rebuild is deferred, never forced.** `_reconcile` resets only when nothing is live.
+  Under a live fleet it keeps the old store open and leaves the hash *unstamped*, so the
+  next `sb` retries — which means the fleet's own draining clears this with nobody having
+  to remember it. `LiveAgentsError` no longer escapes into `connect()`; the only caller
+  that can still surface it is the one that asked for a reset by name.
+- **The refusal is per-verb, not total.** `store.schema_deficit` is public, and `cli` gates
+  the four verbs that *create an agent* (`start`, `delegate`, `workspace`, `restore`) —
+  the ones that write the missing columns. A deny-list, so a verb added later defaults to
+  working. `sb done`, `block`, `tell`, `ask`, `inbox` are unreachable by the gate, which is
+  what makes draining possible. `store.log_event` swallows a missing `events` table for the
+  same reason: an audit trail that can take down the `sb done` it is recording is worth
+  less than none.
+
+Exit codes: the refusal was already non-zero (`cli.main` returned 2 from the catch-all
+around `connect`, which the report's "exit code is 0" does not reproduce against this
+code). It is now 1 — the store is in a state, the input was fine, and 2 is this CLI's code
+for "nothing wrong but what you typed". `sb doctor` reports a pending rebuild and exits 1
+so its exit code and its `ok` field cannot disagree.
+
+`tests/test_schema_guard.py` pins the CLI half; the store half is in `tests/test_store.py`.
+All five degraded-store tests fail if the refusal is put back into `connect()`.
+
+**Known gap:** `status.py` reads `events` unguarded in `_last_activity`, `_block_reasons`
+and `_last_summaries`, so when the deficit is a whole missing *table*, `sb status` exits 1
+with the explanation rather than showing a partial tree. Not a brick, and not the shape the
+fleet hit — but `status.py` belongs to another agent, so it is written down rather than
+fixed here.
 
 ## `sb wait` returns success while the agent is still working
 

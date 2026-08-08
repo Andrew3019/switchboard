@@ -5,6 +5,8 @@ Run: python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -163,6 +165,25 @@ class StoreTest(unittest.TestCase):
 
     # -- schema evolution ------------------------------------------------
 
+    @contextlib.contextmanager
+    def _schema(self, old: str, new: str):
+        """Run the body as if this code shipped a different SCHEMA.
+
+        Which is the only honest way to test any of this: the interesting case is always
+        *two* versions of `sb` meeting over one store, and a test that edits the store
+        instead of the code is testing the mirror image of the thing that breaks.
+        """
+        original, original_hash = store.SCHEMA, store._SCHEMA_HASH
+        store.SCHEMA = original.replace(old, new)
+        self.assertNotEqual(store.SCHEMA, original, "the SCHEMA anchor no longer matches")
+        store._SCHEMA_HASH = hashlib.sha256(store.SCHEMA.encode()).hexdigest()[:16]
+        try:
+            yield
+        finally:
+            store.SCHEMA, store._SCHEMA_HASH = original, original_hash
+
+    _ENDED = "    ended_at      INTEGER\n"
+
     def test_an_added_column_migrates_instead_of_resetting(self):
         """A schema change must never wedge running agents.
 
@@ -175,18 +196,12 @@ class StoreTest(unittest.TestCase):
         store.create_agent(d1, name="w", role="worker")
         d1.close()
 
-        original = store.SCHEMA
-        try:
-            store.SCHEMA = original.replace(
-                "    ended_at      INTEGER\n", "    ended_at      INTEGER,\n    newcol        TEXT\n")
-            store._SCHEMA_HASH = "changed"
+        with self._schema(self._ENDED, self._ENDED.rstrip("\n") + ",\n    newcol   TEXT\n"):
             d2 = store.connect(path=p)
             self.assertIsNotNone(store.get_agent(d2, "w"))     # data survived
             self.assertIn("newcol", {r[1] for r in d2.execute("PRAGMA table_info(agents)")})
+            self.assertEqual(store.schema_deficit(d2), [])     # and is fully caught up
             d2.close()
-        finally:
-            store.SCHEMA = original
-            store._SCHEMA_HASH = __import__("hashlib").sha256(original.encode()).hexdigest()[:16]
 
     def test_an_unknown_column_does_not_force_a_reset(self):
         """A newer `sb`, run from another checkout against the same store, adds a column
@@ -197,8 +212,71 @@ class StoreTest(unittest.TestCase):
         d = store.connect(path=p)
         store.create_agent(d, name="w", role="worker")
         d.execute("ALTER TABLE agents ADD COLUMN added_by_newer_sb TEXT")
-        self.assertTrue(store._migrate_additive(d))           # no reset
+        self.assertEqual(store._deficit(d), ([], []))         # nothing missing: no reset
         self.assertIsNotNone(store.get_agent(d, "w"))         # and the fleet survives
+        d.close()
+
+    def test_a_cosmetic_schema_edit_costs_nothing(self):
+        """The hash covers the SCHEMA string verbatim, so editing a COMMENT in it changed
+        it. That must not so much as touch the store."""
+        p = Path(self.tmp.name) / "comment.db"
+        d1 = store.connect(path=p)
+        store.create_agent(d1, name="w", role="worker")
+        d1.close()
+        with self._schema("-- JSON", "-- JSON, one day maybe msgpack"):
+            d2 = store.connect(path=p)
+            self.assertIsNotNone(store.get_agent(d2, "w"))
+            self.assertEqual(store.schema_deficit(d2), [])
+            d2.close()
+
+    # -- the deadlock ----------------------------------------------------
+    #
+    # A change that ALTER TABLE cannot apply — here a NOT NULL column with no literal
+    # default, which is the shape that split `workspace` in two and bricked the fleet.
+
+    _SPLIT = "    ended_at      INTEGER,\n    branch        TEXT NOT NULL\n"
+
+    def test_a_non_additive_change_under_a_live_fleet_degrades_not_deadlocks(self):
+        from unittest import mock
+        p = Path(self.tmp.name) / "deadlock.db"
+        d1 = store.connect(path=p)
+        store.create_agent(d1, name="w", role="worker")
+        d1.close()
+
+        with self._schema(self._ENDED, self._SPLIT):
+            with mock.patch.object(store, "_herdr_alive", lambda: {"w"}):
+                d2 = store.connect(path=p)                     # NO exception: this is the fix
+            self.assertIsNotNone(store.get_agent(d2, "w"))     # the fleet's state is intact
+            self.assertTrue(store.schema_deficit(d2))          # and it says why, by name
+            store.set_state(d2, "w", "done")                   # `sb done` still reaches it
+            self.assertEqual(store.get_agent(d2, "w")["state"], "done")
+            d2.close()
+
+    def test_the_store_rebuilds_itself_once_the_fleet_drains(self):
+        """The degraded store is not stamped, so the next process retries — which is how
+        this clears without anyone having to remember it happened."""
+        from unittest import mock
+        p = Path(self.tmp.name) / "drains.db"
+        d1 = store.connect(path=p)
+        store.create_agent(d1, name="w", role="worker")
+        d1.close()
+
+        with self._schema(self._ENDED, self._SPLIT):
+            with mock.patch.object(store, "_herdr_alive", lambda: {"w"}):
+                store.connect(path=p).close()                  # degraded, deferred
+            with mock.patch.object(store, "_herdr_alive", lambda: set()):
+                d3 = store.connect(path=p)                     # last agent gone: rebuild
+            self.assertEqual(store.schema_deficit(d3), [])
+            self.assertIn("branch", {r[1] for r in d3.execute("PRAGMA table_info(agents)")})
+            d3.close()
+
+    def test_a_missing_table_is_blocking_not_addable(self):
+        p = Path(self.tmp.name) / "notable.db"
+        d = store.connect(path=p)
+        d.execute("DROP TABLE events")
+        addable, blocking = store._deficit(d)
+        self.assertEqual(addable, [])
+        self.assertTrue(any("events" in b for b in blocking))
         d.close()
 
     def test_liveness_is_judged_by_herdr_not_the_store(self):

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from typing import Any, Optional
 
@@ -358,6 +359,31 @@ def _derived_name(db, role: str) -> Optional[str]:
     return f"{stem}-{n}"
 
 
+# The only verbs refused while the store is degraded — see `store.schema_deficit`. All
+# four create an agent, which is what writes the columns a degraded store does not have;
+# everything else runs, because a live fleet has to be able to drain itself and a human has
+# to be able to watch it do so. A deny-list, not an allow-list, on purpose: a verb added
+# later defaults to *working*, and after a deadlock that cost seventeen agents, that is the
+# direction to be wrong in.
+_NEEDS_FRESH_SCHEMA = {"start", "delegate", "workspace", "restore"}
+
+
+def _degraded(deficit: list[str], cmd: str) -> str:
+    """Why this one command cannot run while the rest of `sb` still can.
+
+    Names what is missing, what an agent can still do, and that it clears itself. The old
+    message said only "let them finish", which was advice an agent could not take: to
+    finish it had to run `sb done`, and `sb done` was the command being refused.
+    """
+    return (f"sb: `sb {cmd}` cannot run against this store yet —\n"
+            + "".join(f"      {d}\n" for d in deficit)
+            + "    A fleet is still running on the older store, so it has not been\n"
+              "    rebuilt yet. Reporting is unaffected: sb done, sb block, sb tell and\n"
+              "    sb inbox all still work, and the store rebuilds itself as soon as the\n"
+              "    last agent finishes. To rebuild NOW and lose their state:\n"
+              "      sb doctor --reset-store --force")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -371,9 +397,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         db = store.connect()
-    except Exception as e:                       # not in a repo, or a live-agents refusal
+    except Exception as e:                       # not in a repo, or an unreadable store
         print(f"sb: {e}", file=sys.stderr)
         return 2
+
+    deficit = store.schema_deficit(db)
+    if deficit and args.cmd in _NEEDS_FRESH_SCHEMA:
+        print(_degraded(deficit, args.cmd), file=sys.stderr)
+        return 1
 
     h = Herdr(on_event=lambda **kw: store.log_event(db, **kw))
     # THIS worktree, not the main checkout. repo_root() is the shared .git,
@@ -395,6 +426,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _dispatch(args, b, db, h)
     except HerdrError as e:
         print(f"sb: herdr [{e.code}] {e.message}", file=sys.stderr)
+        return 1
+    except sqlite3.OperationalError as e:
+        # On a degraded store this is a command that turned out to need the new schema
+        # after all — `_NEEDS_FRESH_SCHEMA` is a judgement, and this is what a wrong
+        # judgement looks like from the caller's side. Say which, rather than leaking
+        # "no such column: agents.branch" to an agent that cannot act on it.
+        print(_degraded(deficit, args.cmd) if deficit else f"sb: store: {e}",
+              file=sys.stderr)
         return 1
     except (ValueError, KeyError) as e:
         print(f"sb: {_reason(e)}", file=sys.stderr)
@@ -424,13 +463,25 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 return 1
             _emit(args, f"store reset: {store.db_path()}", {"reset": True})
             return 0
+        # The store's condition is reported here whatever herdr says. A degraded store is
+        # invisible by design — every verb an agent uses keeps working — so `doctor` is
+        # the one place it has to be legible, or nobody learns the rebuild is pending.
+        deficit = store.schema_deficit(db)
+        schema = "".join(f"\n       PENDING REBUILD — {d}" for d in deficit)
+        if schema:
+            schema += ("\n       (a fleet is live; it rebuilds when the last one finishes)")
         try:
             h.check()
-            _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}", {"ok": True})
+            _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}",
+                  {"ok": not deficit, "schema_deficit": deficit})
         except HerdrError as e:
-            _emit(args, f"PROBLEM [{e.code}]\n  {e.message}", {"ok": False, "code": e.code})
+            _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}",
+                  {"ok": False, "code": e.code, "schema_deficit": deficit})
             return 1
-        return 0
+        # Non-zero for a pending rebuild, so the exit code and the `ok` field cannot
+        # disagree. Nothing is broken — but `doctor` is the verb whose whole job is to
+        # say so out loud, and a script checking it should see the difference.
+        return 1 if deficit else 0
 
     if cmd == "init":
         p = b.init()

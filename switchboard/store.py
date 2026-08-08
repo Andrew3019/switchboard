@@ -173,13 +173,24 @@ CREATE TABLE events (
 CREATE INDEX idx_events_agent ON events(agent, id);
 """
 
+# A cache key, NOT a version. It covers the SCHEMA string verbatim, so editing a comment
+# in it changes the hash — which is fine, and was not always: while this gated the store,
+# a comment edit was enough to trigger a wipe-or-refuse. It now means only "the store was
+# last stamped by different source text, go and look at its actual shape" (`_reconcile`).
+# Compatibility is decided by `_deficit`, which asks whether the store CONTAINS what this
+# code needs. That is the question that survives two checkouts sharing one store.
 _SCHEMA_HASH = hashlib.sha256(SCHEMA.encode()).hexdigest()[:16]
 
 LIVE_STATES = tuple(config.setting("states.live"))
 
 
 class LiveAgentsError(RuntimeError):
-    """Schema changed while agents are still running."""
+    """A rebuild was asked for while agents are still running, and refused.
+
+    Only ever surfaces to a caller who asked for a rebuild by name (`sb doctor
+    --reset-store`). `_reconcile` catches it and keeps serving the old store instead,
+    because a refusal that reaches `connect()` reaches every command there is.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +199,14 @@ class LiveAgentsError(RuntimeError):
 
 
 def connect(cwd: Optional[Path] = None, *, path: Optional[Path] = None) -> sqlite3.Connection:
-    """Open the store, creating or resetting the schema as needed.
+    """Open the store, reconciling the schema as needed. NEVER raises over a schema change.
 
-    There are no migrations. Everything in here is operational state, so on a schema
-    change we simply drop and recreate — unless agents are live, in which case we refuse
-    rather than pull the floor out from under a running workflow.
+    Compatibility is judged structurally, not by version equality: a store is usable if it
+    *contains* what this code needs. Extra columns are fine, missing ones are added where
+    SQLite allows it, and a genuinely destructive difference defers a rebuild rather than
+    forcing one — see `_reconcile`. `connect()` is what every `sb` command calls, including
+    the `sb done` an agent needs to stop being live, so nothing decided here may be able to
+    stop a fleet from draining itself.
     """
     p = path or db_path(cwd)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -208,14 +222,59 @@ def connect(cwd: Optional[Path] = None, *, path: Optional[Path] = None) -> sqlit
     if row is None:
         _create(db)
     elif row["value"] != _SCHEMA_HASH:
-        # Additive changes migrate in place. Only a destructive change falls through to a
-        # reset — and a reset while agents are running is a deadlock, because `connect()`
-        # is what every `sb` command calls, including the `sb done` an agent would need to
-        # stop being 'live'. Observed exactly that: one agent added a column and wedged
-        # every other agent on the machine.
-        if not _migrate_additive(db):
-            _reset(db)
+        # The hash is a cache key, not a gate: an unequal one only means "look properly",
+        # and `_reconcile` decides on the actual shape of the store. A comment edit, or a
+        # column another checkout added, therefore costs one PRAGMA sweep and nothing else.
+        _reconcile(db)
     return db
+
+
+def _reconcile(db: sqlite3.Connection) -> None:
+    """Bring the store up to what this code needs — or defer, never deadlock.
+
+    Three outcomes, in order of how much they cost:
+
+    - nothing missing (only cosmetic drift, or columns a newer `sb` added): stamp and go;
+    - everything missing can be ALTERed in: add the columns, stamp, and go;
+    - something missing cannot be added to existing rows: the store has to be rebuilt, and
+      a rebuild under a live fleet is exactly the deadlock this module exists to avoid. So
+      it happens only when nothing is live, and otherwise the OLD store is left open and
+      unstamped — degraded, still serving every command that fits inside it, and rebuilt
+      by whichever `sb` runs first after the last agent finishes.
+
+    Deliberately not stamped in the degraded case: the unstamped hash is what makes the
+    next process retry, which is how the fleet's own draining clears this without anyone
+    noticing it happened.
+    """
+    addable, blocking = _deficit(db)
+    if not blocking:
+        for table, name, decl in addable:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', ?)",
+                   (_SCHEMA_HASH,))
+        db.commit()
+        return
+    try:
+        _reset(db)
+    except LiveAgentsError:
+        pass                                   # degraded; see `schema_deficit`
+
+
+def schema_deficit(db: sqlite3.Connection) -> list[str]:
+    """What this code needs and this store cannot give it. Empty when all is well.
+
+    Non-empty means `connect()` chose to keep a live fleet alive on an older store rather
+    than rebuild underneath it. Callers use this to refuse the few commands that would
+    write into what is missing — NOT to refuse everything, which is the whole bug.
+
+    Every `sb` invocation asks this, so the stamp is the fast path: it is written only
+    where the store has just been brought up to date, and the degraded case deliberately
+    leaves it alone — so a matching stamp already means there is nothing to report.
+    """
+    row = db.execute("SELECT value FROM meta WHERE key='schema_hash'").fetchone()
+    if row is not None and row["value"] == _SCHEMA_HASH:
+        return []
+    return _deficit(db)[1]
 
 
 def _columns(db: sqlite3.Connection, table: str) -> set:
@@ -239,18 +298,26 @@ def _wanted() -> dict:
     return out
 
 
-def _migrate_additive(db: sqlite3.Connection) -> bool:
-    """Add missing columns. Returns False if anything non-additive differs.
+def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
+    """What this code needs that the store lacks: `(addable, blocking)`.
 
-    SQLite cannot ADD COLUMN with a non-constant default, so a NOT NULL column without a
-    literal default is treated as non-additive and falls through to a reset.
+    `addable` is a plan of `(table, column, decl)` triples that ALTER TABLE can apply in
+    place. `blocking` is a list of human-readable gaps that it cannot — a table that does
+    not exist at all, or a NOT NULL column with no literal default, which SQLite refuses to
+    add to existing rows. Only a non-empty `blocking` can ever cost anyone their store.
+
+    Nothing here compares the store to the schema for *equality*. It asks the narrower and
+    much safer question — is everything this code reads and writes present? — because the
+    store is shared by every worktree of the repo, so it is routinely met by code both
+    older and newer than whatever last wrote it.
     """
     wanted = _wanted()
-    plan = []
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    plan, blocking = [], []
     for table, cols in wanted.items():
-        if table not in {r[0] for r in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}:
-            return False                       # a whole new table: rebuild
+        if table not in tables:
+            blocking.append(f"table {table} is missing")
+            continue                           # its columns are the table's problem
         have = _columns(db, table)
         # Columns in the store that this code does not know about are LEFT ALONE. They are
         # not evidence of a removal — far more often they are a newer `sb`, run from another
@@ -264,14 +331,10 @@ def _migrate_additive(db: sqlite3.Connection) -> bool:
             if name in have:
                 continue
             if "NOT NULL" in decl.upper() and "DEFAULT" not in decl.upper():
-                return False                   # cannot be added to existing rows
-            plan.append((table, name, decl))
-    for table, name, decl in plan:
-        db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', ?)",
-               (_SCHEMA_HASH,))
-    db.commit()
-    return True
+                blocking.append(f"{table}.{name} cannot be added to existing rows")
+            else:
+                plan.append((table, name, decl))
+    return plan, blocking
 
 
 def _create(db: sqlite3.Connection) -> None:
@@ -285,9 +348,9 @@ def _create(db: sqlite3.Connection) -> None:
 def reset(db: sqlite3.Connection, *, force: bool = False) -> None:
     """Drop and recreate the schema, on purpose. `sb doctor --reset-store`.
 
-    The public face of `_reset`, which `connect()` also reaches for when a schema change
-    is not additive. Named in the LiveAgentsError that refusal raises, because a way out
-    that nothing offers is not a way out.
+    The public face of `_reset`, which `_reconcile` also reaches for. Named in the
+    LiveAgentsError that refusal raises, because a way out that nothing offers is not a
+    way out.
     """
     _reset(db, force=force)
 
@@ -296,25 +359,33 @@ def _reset(db: sqlite3.Connection, *, force: bool = False) -> None:
     """Recreate the schema.
 
     The live-agent guard exists so a schema change cannot pull the floor out from under a
-    running workflow. But it must never become a deadlock: `connect()` is what every `sb`
-    command calls, so refusing here brakes *every* agent — including the ones that would
-    have to run `sb done` to stop being 'live'. Observed exactly that.
+    running workflow. Refusing is safe HERE and nowhere else: `_reconcile` catches the
+    refusal and keeps serving the old store, so the only caller that ever surfaces it to a
+    human is the one that asked for a reset by name. It used to escape into `connect()`,
+    which every `sb` command calls — including the `sb done` an agent needs in order to
+    stop being 'live' — and wedged a whole fleet.
 
-    Two things keep the guard honest:
+    Three things keep the guard honest:
       - liveness is checked against **herdr**, not the store, because store state drifts
         (an agent that finished without reporting still reads as 'working' forever);
+      - a store with no `agents` table has nothing to protect, so it never blocks;
       - `force` exists, and the error says so.
     """
-    live = [r["name"] for r in db.execute(
-        f"SELECT name FROM agents WHERE state IN {LIVE_STATES} AND ended_at IS NULL"
-    ).fetchall()]
+    try:
+        live = [r["name"] for r in db.execute(
+            f"SELECT name FROM agents WHERE state IN {LIVE_STATES} AND ended_at IS NULL"
+        ).fetchall()]
+    except sqlite3.OperationalError:
+        live = []                              # no agents table: nothing is running
     if live and not force:
         live = [n for n in live if n in _herdr_alive()]
     if live and not force:
         raise LiveAgentsError(
-            "the schema changed but these agents are still running: "
+            "the store's schema changed under a running fleet: "
             + ", ".join(live)
-            + "\nLet them finish, or: sb doctor --reset-store --force"
+            + "\nThey keep working on the old store, which is rebuilt automatically once"
+              "\nthe last one finishes. To rebuild NOW and lose their state:"
+              "\n  sb doctor --reset-store --force"
         )
     for t in ("agents", "messages", "events"):
         db.execute(f"DROP TABLE IF EXISTS {t}")
@@ -647,13 +718,19 @@ def log_event(
     """Append-only. Every `sb` invocation lands here, including failures.
 
     Never swallow an adapter error — a discarded stderr is why we still cannot say what
-    caused one spawn failure during validation.
+    caused one spawn failure during validation. What IS swallowed is the log's own failure
+    to write: on a degraded store (see `schema_deficit`) this table may not exist yet, and
+    an audit trail that can take down the `sb done` it was trying to record is worth less
+    than no audit trail at all. Every herdr call routes through here.
     """
-    db.execute(
-        "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
-        (agent, kind, json.dumps(payload, default=str) if payload else None, now()),
-    )
-    db.commit()
+    try:
+        db.execute(
+            "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+            (agent, kind, json.dumps(payload, default=str) if payload else None, now()),
+        )
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def recent_events(
