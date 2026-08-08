@@ -133,7 +133,16 @@ CREATE TABLE agents (
     state         TEXT NOT NULL,      -- working | blocked | done | failed
     session_id    TEXT,               -- the agent's OWN session id; how `sb` knows who is calling
     cwd           TEXT,               -- needed to resolve the on-disk transcript
-    workspace     TEXT,
+    workspace     TEXT,               -- the workspace NAME. A label, nothing more: it is
+                                      -- not evidence of a checkout, and must never be
+                                      -- read as one (see `branch`).
+    branch        TEXT,               -- the git branch of the worktree this workspace
+                                      -- sits on. NULL means BARE: a place to work with no
+                                      -- checkout of its own. This is the fact "does this
+                                      -- agent have a worktree?" — asked of the store, not
+                                      -- inferred from the name, which is a branch for a
+                                      -- worktree space and an agent-ish label for a bare
+                                      -- one, with nothing to tell the two apart.
     workspace_id  TEXT,               -- herdr's id for that workspace. Authoritative:
                                       -- resolving a name to an id is one-to-many, so a
                                       -- child spawned from a re-derived id lands in the
@@ -225,11 +234,12 @@ def connect(cwd: Optional[Path] = None, *, path: Optional[Path] = None) -> sqlit
         # The hash is a cache key, not a gate: an unequal one only means "look properly",
         # and `_reconcile` decides on the actual shape of the store. A comment edit, or a
         # column another checkout added, therefore costs one PRAGMA sweep and nothing else.
-        _reconcile(db)
+        # `cwd` goes along for the backfills, which need to know which checkout is asking.
+        _reconcile(db, cwd)
     return db
 
 
-def _reconcile(db: sqlite3.Connection) -> None:
+def _reconcile(db: sqlite3.Connection, cwd: Optional[Path] = None) -> None:
     """Bring the store up to what this code needs — or defer, never deadlock.
 
     Three outcomes, in order of how much they cost:
@@ -245,11 +255,18 @@ def _reconcile(db: sqlite3.Connection) -> None:
     Deliberately not stamped in the degraded case: the unstamped hash is what makes the
     next process retry, which is how the fleet's own draining clears this without anyone
     noticing it happened.
+
+    A column that means something for the rows that predate it gets its `_BACKFILLS` entry
+    run right after its own ALTER — inside the same "nothing is blocking" branch, so a
+    deferred rebuild never half-fills anything.
     """
     addable, blocking = _deficit(db)
     if not blocking:
         for table, name, decl in addable:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            fill = _BACKFILLS.get((table, name))
+            if fill:
+                fill(db, cwd)
         db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', ?)",
                    (_SCHEMA_HASH,))
         db.commit()
@@ -296,6 +313,46 @@ def _wanted() -> dict:
                 cols[parts[0]] = " ".join(parts[1:])
         out[m.group(1)] = cols
     return out
+
+
+def _backfill_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
+    """Give the rows that predate `agents.branch` the branch they have always been on.
+
+    A row recorded a workspace name and the cwd it ran in, and that pair is enough: a
+    worktree space runs in its OWN checkout, while the one bare space in the model — the
+    root orchestrator's, over the main checkout — runs in the primary one. So every row in
+    a named workspace outside the primary checkout was in a worktree, and its workspace
+    name is its branch (the name is used verbatim as the branch when one is forked).
+
+    Wrong in one direction only, and deliberately: an old `sb workspace new main`, which
+    attaches to the primary checkout rather than forking, reads back as bare. A child of
+    it then forks its own worktree instead of writing into the main checkout — the safe
+    way to be wrong, and what the model wants anyway.
+
+    Best effort. If we cannot say where the primary checkout is, leave every branch NULL:
+    "no worktree" costs a fork, "a worktree that isn't there" costs somebody's main
+    checkout.
+    """
+    try:
+        primary = main_checkout(cwd).resolve()
+    except Exception:                              # noqa: BLE001 — not a repo, no answer
+        return
+    rows = db.execute(
+        "SELECT name, cwd, workspace FROM agents "
+        "WHERE workspace IS NOT NULL AND cwd IS NOT NULL"
+    ).fetchall()
+    # Resolved, not string-compared: a recorded cwd and the main checkout routinely differ
+    # by a symlink (`/var` vs `/private/var` on macOS) while naming one directory, and
+    # that difference would read as "a worktree of its own".
+    for r in rows:
+        if Path(r["cwd"]).resolve() != primary:
+            db.execute("UPDATE agents SET branch=? WHERE name=?",
+                       (r["workspace"], r["name"]))
+
+
+# Columns that mean something for rows written before they existed. Keyed by
+# (table, column), run once, right after the ALTER that added them — see `_reconcile`.
+_BACKFILLS = {("agents", "branch"): _backfill_branch}
 
 
 def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
@@ -416,16 +473,16 @@ def now() -> int:
 
 
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
-       (name, parent, role, task, state, session_id, cwd, workspace, workspace_id,
-        terminal_id, pane_id, cleanup, created_at)
-       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?)"""
+       (name, parent, role, task, state, session_id, cwd, workspace, branch,
+        workspace_id, terminal_id, pane_id, cleanup, created_at)
+       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
-    name: str, role: str, parent, task, session_id, cwd, workspace, workspace_id,
+    name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
     terminal_id, pane_id, cleanup,
 ) -> tuple:
-    return (name, parent, role, task, session_id, cwd, workspace, workspace_id,
+    return (name, parent, role, task, session_id, cwd, workspace, branch, workspace_id,
             terminal_id, pane_id, cleanup, now())
 
 
@@ -439,6 +496,7 @@ def create_agent(
     session_id: Optional[str] = None,
     cwd: Optional[str] = None,
     workspace: Optional[str] = None,
+    branch: Optional[str] = None,
     workspace_id: Optional[str] = None,
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
@@ -451,8 +509,8 @@ def create_agent(
     """
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
-        _agent_values(name, role, parent, task, session_id, cwd, workspace, workspace_id,
-                      terminal_id, pane_id, cleanup),
+        _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
+                      workspace_id, terminal_id, pane_id, cleanup),
     )
     db.commit()
     return get_agent(db, name)
@@ -468,6 +526,7 @@ def claim_agent(
     session_id: Optional[str] = None,
     cwd: Optional[str] = None,
     workspace: Optional[str] = None,
+    branch: Optional[str] = None,
     workspace_id: Optional[str] = None,
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
@@ -486,8 +545,8 @@ def claim_agent(
     """
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
-        _agent_values(name, role, parent, task, session_id, cwd, workspace, workspace_id,
-                      terminal_id, pane_id, cleanup),
+        _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
+                      workspace_id, terminal_id, pane_id, cleanup),
     )
     db.commit()
     return cur.rowcount == 1
@@ -520,6 +579,43 @@ def agent_by_session(db: sqlite3.Connection, session_id: str) -> Optional[sqlite
         "SELECT * FROM agents WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
         (session_id,),
     ).fetchone()
+
+
+def agent_branch(db: sqlite3.Connection, name: str) -> Optional[str]:
+    """The branch of the worktree this agent works in. None = it has no worktree.
+
+    THE question the fork rule asks ("does my parent have a worktree?"), answered as a
+    fact rather than by reading the workspace name — which says branch for one kind of
+    space and says nothing at all for the other.
+    """
+    row = get_agent(db, name)
+    return row["branch"] if row is not None else None
+
+
+def workspace_branch(db: sqlite3.Connection, workspace: str) -> Optional[str]:
+    """The branch of the worktree a NAMED workspace sits on. None = bare, or unknown.
+
+    A property of the workspace, not of any one agent in it: every agent in a worktree
+    space shares its checkout, so the first row that recorded a branch answers for all of
+    them. That is also how a child picks up the branch it inherits.
+    """
+    row = db.execute(
+        "SELECT branch FROM agents WHERE workspace=? AND branch IS NOT NULL "
+        "ORDER BY created_at LIMIT 1", (workspace,)
+    ).fetchone()
+    return row["branch"] if row else None
+
+
+def known_workspace(db: sqlite3.Connection, workspace: str) -> bool:
+    """Have we ever recorded an agent in this workspace?
+
+    What tells "bare" apart from "never heard of it": `workspace_branch` returns None for
+    both, and they deserve different answers — one is a place with no checkout, the other
+    is a name we know nothing about.
+    """
+    return db.execute(
+        "SELECT 1 FROM agents WHERE workspace=? LIMIT 1", (workspace,)
+    ).fetchone() is not None
 
 
 def children_of(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
@@ -562,7 +658,7 @@ def set_state(db: sqlite3.Connection, name: str, state: str) -> None:
 
 
 def update_agent(db: sqlite3.Connection, name: str, **fields: Any) -> None:
-    allowed = {"session_id", "cwd", "workspace", "workspace_id", "terminal_id",
+    allowed = {"session_id", "cwd", "workspace", "branch", "workspace_id", "terminal_id",
                "pane_id", "cleanup", "task"}
     bad = set(fields) - allowed
     if bad:
@@ -571,6 +667,28 @@ def update_agent(db: sqlite3.Connection, name: str, **fields: Any) -> None:
         return
     sets = ", ".join(f"{k}=?" for k in fields)
     db.execute(f"UPDATE agents SET {sets} WHERE name=?", (*fields.values(), name))
+    db.commit()
+
+
+def mark_spawned(db: sqlite3.Connection, name: str) -> None:
+    """The claim became a real agent: it is `working`, and it has not ended.
+
+    Separate from `update_agent` because `state` and `ended_at` are deliberately NOT in
+    that allowlist — nothing should be able to rewrite an end as a side effect of
+    recording a pane id. This is the one narrow exception, and it exists because the row
+    can be closed UNDER a spawn that is still in flight: `delegate` claims the row before
+    herdr is called, `agent start` retries a flaky first attempt for seconds, and any
+    `status.collect` in that window sees a running row herdr does not know yet and reaps
+    it (`status._record_gone`). The reaper now holds off for the spawn window too, so this
+    is the second of two guards rather than the only one — but it is the one that repairs
+    a row already wrongly closed, which no reaper grace can do after the fact.
+
+    Only ever called on the success path of a spawn, where `working` is the truth by
+    construction: herdr has just returned an agent.
+    """
+    db.execute(
+        "UPDATE agents SET state='working', ended_at=NULL WHERE name=?", (name,)
+    )
     db.commit()
 
 

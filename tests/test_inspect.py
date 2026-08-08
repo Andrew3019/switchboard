@@ -103,8 +103,8 @@ class InspectTest(Base):
         self.assertEqual(d.agent.herdr_state, "idle")
 
     def test_an_agent_herdr_has_never_heard_of_is_gone_not_an_error(self):
-        self.agent()
-        d = self.inspect(h=FakeHerdr([]))
+        self.agent(session_id="s1")     # past its spawn; a session-less row this young
+        d = self.inspect(h=FakeHerdr([]))   # would be a claim, and claims are not reaped
         self.assertTrue(d.agent.gone)
 
     def test_unknown_agent_is_loud(self):

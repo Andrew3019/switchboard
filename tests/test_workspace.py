@@ -47,6 +47,7 @@ class FakeHerdr:
         self.closed: list[str] = []
         self.calls: list[str] = []
         self.splits: list[tuple[str, str, float]] = []   # (from_pane, direction, ratio)
+        self.split_cwds: list[str] = []                  # where each split pane landed
         self.pane_prompts: list[tuple[str, str]] = []    # what was typed into a raw pane
         self.panes: set[str] = set()                     # every pane believed to exist
         self._n = 0
@@ -64,9 +65,24 @@ class FakeHerdr:
 
     @staticmethod
     def _facts(wt: dict) -> dict:
+        """The real dual shape, verified against `herdr worktree open`.
+
+        Two worktree objects, two different key names: `workspace.worktree` is a
+        `WorkspaceWorktreeInfo` and says `checkout_path`; the top-level one is a
+        `WorktreeInfo` and says `path`, with no `checkout_path` anywhere in it. Faking
+        `checkout_path` on the top-level object is what let broker.py read the path off the
+        wrong object for 602 green tests.
+        """
         return {"workspace": {"workspace_id": wt["id"], "label": wt["branch"],
-                              "worktree": {"checkout_path": wt["path"]}},
-                "worktree": {"checkout_path": wt["path"]},
+                              "worktree": {"checkout_path": wt["path"],
+                                           "repo_key": "/repo/.git",
+                                           "repo_name": "repo",
+                                           "repo_root": "/repo",
+                                           "is_linked_worktree": True}},
+                "worktree": {"path": wt["path"], "branch": wt["branch"],
+                             "label": "repo", "is_bare": False, "is_detached": False,
+                             "is_prunable": False, "is_linked_worktree": True,
+                             "open_workspace_id": wt["id"]},
                 "root_pane": {"pane_id": wt["root_pane"]},
                 "tab": {"tab_id": wt["id"] + ":t1"}}
 
@@ -140,6 +156,7 @@ class FakeHerdr:
             self._n += 1
             new = f"{pane}s{self._n}"
         self.splits.append((pane, direction, ratio))
+        self.split_cwds.append(cwd or "")
         self.panes.add(new)
         return new
 
@@ -211,8 +228,59 @@ class WorkspaceTest(unittest.TestCase):
     def test_the_lead_runs_inside_the_worktree_not_the_main_checkout(self):
         r = self.b.workspace_new("api", me=HUMAN)
         a = store.get_agent(self.db, "api-lead")
+        self.assertTrue(r["path"])          # "" degrades to the main checkout downstream
         self.assertEqual(a["cwd"], r["path"])
         self.assertNotEqual(a["cwd"], str(self.repo))
+
+    # -- reading the path off herdr's response ---------------------------
+    #
+    # herdr hands back two worktree objects with different key names. Reading the wrong one
+    # yields "" — and "" never errors, it just quietly means "the main checkout" in
+    # link_config, in the lead's system prompt, and in the recorded cwd the next open
+    # trusts. These pin the read itself, below workspace_new.
+
+    def test_the_path_is_read_off_the_workspace_scoped_worktree(self):
+        """Both objects present — the real shape. The workspace-scoped one is the truth."""
+        r = {"workspace": {"workspace_id": "w1",
+                           "worktree": {"checkout_path": "/wt/api",
+                                        "repo_root": "/repo",
+                                        "is_linked_worktree": True}},
+             "worktree": {"path": "/wt/api", "branch": "api", "is_bare": False},
+             "root_pane": {"pane_id": "w1:p1"}}
+        facts = self.b._workspace_facts("api", r, fresh=True)
+        self.assertEqual(facts["path"], "/wt/api")
+        self.assertEqual(facts["workspace_id"], "w1")
+        self.assertEqual(facts["pane_id"], "w1:p1")
+
+    def test_the_top_level_worktrees_path_key_is_accepted(self):
+        """The top-level object says `path`, never `checkout_path` — take it when it is
+        all we have, rather than reporting no worktree at all."""
+        r = {"workspace": {"workspace_id": "w1"},
+             "worktree": {"path": "/wt/api", "branch": "api"},
+             "root_pane": {"pane_id": "w1:p1"}}
+        self.assertEqual(self.b._workspace_facts("api", r, fresh=True)["path"], "/wt/api")
+
+    def test_a_response_with_no_path_anywhere_raises(self):
+        """Empty must never reach delegate: it is indistinguishable from the main
+        checkout, and gets recorded as this workspace's path for every later open."""
+        r = {"workspace": {"workspace_id": "w1"}, "worktree": {},
+             "root_pane": {"pane_id": "w1:p1"}}
+        with self.assertRaises(HerdrError) as e:
+            self.b._workspace_facts("api", r, fresh=True)
+        self.assertIn("workspace_no_path", str(e.exception))
+
+    def test_a_worktree_carrying_no_path_is_not_opened_silently(self):
+        """End to end: a herdr that answers with the wrong keys fails the open loudly
+        instead of handing the lead the main checkout."""
+        facts = FakeHerdr._facts
+        self.h._facts = lambda wt: {**facts(wt),                      # type: ignore[method-assign]
+                                    "workspace": {"workspace_id": wt["id"]},
+                                    "worktree": {"branch": wt["branch"]}}
+        with self.assertRaises(HerdrError) as e:
+            self.b.workspace_new("api", me=HUMAN)
+        self.assertIn("workspace_unavailable", str(e.exception))
+        self.assertIn("workspace_no_path", str(e.exception))
+        self.assertIsNone(store.get_agent(self.db, "api-lead"))
 
     def test_the_lead_takes_the_new_workspaces_root_pane(self):
         """A freshly created workspace already has an idle shell; do not waste a tab."""
@@ -474,14 +542,22 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(len(self.h.started), 1)             # nothing spawned twice
         self.assertEqual(store.unread_for(self.db, "main")[-1]["body"], "merge PR 41")
 
-    def test_the_orchestrators_children_land_in_the_same_workspace(self):
+    def test_the_orchestrators_children_never_land_in_the_main_checkout(self):
+        """The fork rule, at the depth that matters most.
+
+        This test used to assert the opposite — that a root's child shared its bare space
+        over the main checkout — which is exactly the behaviour the decided model exists
+        to end: everything below the root writes, and the root's space is the human's own
+        checkout.
+        """
         main = self._git_repo()
         b = Broker(self.db, self.h, repo=main)
         b.start(focus=False)
         kid = b.delegate("do a thing", role="worker", me="main")
         row = store.get_agent(self.db, kid)
-        self.assertEqual(row["workspace"], "main")
-        self.assertEqual(Path(row["cwd"]).resolve(), main.resolve())
+        self.assertEqual(row["workspace"], kid)              # a tree of its own
+        self.assertEqual(row["branch"], kid)
+        self.assertNotEqual(Path(row["cwd"]).resolve(), main.resolve())
 
     # -- the store is disposable; herdr's agents are not -------------------
 
@@ -552,26 +628,80 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(store.get_agent(self.db, kid)["pane_id"], "w9:p9")
         self.assertTrue(r["workspace_id"])
 
-    def test_delegating_outside_a_workspace_falls_back_to_the_callers_own(self):
+    def test_delegating_with_no_recorded_workspace_id_falls_back_to_the_callers_own(self):
         """An empty workspace id means "wherever herdr is FOCUSED", so a child would land
         in a stranger's workspace purely because something called focus recently. herdr
-        injects the caller's own workspace into every pane; use that."""
+        injects the caller's own workspace into every pane; use that.
+
+        The parent here has a worktree, so nothing forks and placement is the only thing
+        under test — a parent WITHOUT one now forks, which is its own answer to "where
+        does this child go".
+        """
         import os
         from unittest import mock
+        store.create_agent(self.db, name="lead", role="orchestrator", workspace="api",
+                           branch="api", cwd=str(self.repo))      # no workspace_id
         with mock.patch.dict(os.environ, {"HERDR_WORKSPACE_ID": "w1"}, clear=False):
-            kid = self.b.delegate("t", role="worker", me=HUMAN)
+            kid = self.b.delegate("t", role="worker", me="lead")
         row = store.get_agent(self.db, kid)
-        self.assertIsNone(row["workspace"])                  # no NAMED workspace
+        self.assertEqual(row["workspace"], "api")            # inherited, not forked
         self.assertEqual(row["cwd"], str(self.repo))
         self.assertEqual(self.h.tabs[-1][0], "w1")           # but placed where I am
 
-    def test_with_no_workspace_anywhere_it_still_delegates(self):
+    def test_with_nothing_to_fork_into_and_no_workspace_anywhere_it_still_delegates(self):
+        """A fork that cannot happen must not take the spawn down with it.
+
+        The parent has no worktree, so the rule says fork — and this herdr cannot make
+        one. The child lands where its parent is, which is the pre-fork-rule behaviour and
+        the right thing to degrade to; the refusal that IS worth failing a spawn is a
+        branch collision, and only that.
+        """
         import os
         from unittest import mock
+        self.h.create_worktree = None                        # an adapter that cannot fork
+        self.h.open_worktree = None
         with mock.patch.dict(os.environ, {}, clear=True):
             kid = self.b.delegate("t", role="worker", me=HUMAN)
         self.assertEqual(self.h.tabs[-1][0], "")
         self.assertIsNotNone(store.get_agent(self.db, kid))
+        self.assertIsNone(store.get_agent(self.db, kid)["branch"])
+        self.assertTrue(any(e["kind"] == "fork_failed"
+                            for e in store.recent_events(self.db)))
+
+    # -- the board -------------------------------------------------------
+    #
+    # `sb start` opened one and `sb workspace new` did not, for no reason anybody chose.
+    # The gate is the decided model: a board is the human's window onto agents somebody is
+    # running, so it belongs to an orchestrator lead and to nobody else.
+
+    def test_a_new_workspace_opens_a_board_beside_its_lead(self):
+        self.b.workspace_new("api", me=HUMAN)
+        lead = store.get_agent(self.db, "api-lead")
+        self.assertEqual(len(self.h.splits), 1)
+        from_pane, direction, _ratio = self.h.splits[0]
+        self.assertEqual(from_pane, lead["pane_id"])        # split the lead's own pane
+        self.assertEqual(direction, "right")
+        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+
+    def test_the_board_reads_the_workspace_checkout_not_the_main_one(self):
+        """A board pointed at the main checkout looks right and reports the wrong tree."""
+        r = self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(self.h.split_cwds, [r["path"]])
+        self.assertNotEqual(r["path"], str(self.repo))
+
+    def test_a_worker_lead_gets_no_board(self):
+        """A plain worker forked into its own worktree runs nobody; a panel there is half
+        a screen of empty view."""
+        self.b.workspace_new("api", role="worker", me=HUMAN)
+        self.assertIn("api-lead", self.h.live)              # the lead still spawned
+        self.assertEqual(self.h.splits, [])
+        self.assertEqual(self.h.pane_prompts, [])
+
+    def test_no_board_declines_the_split(self):
+        self.b.workspace_new("api", board=False, me=HUMAN)
+        self.assertIn("api-lead", self.h.live)
+        self.assertEqual(self.h.splits, [])
+        self.assertEqual(self.h.pane_prompts, [])
 
 
 class StartWorkspaceTest(WorkspaceTest):
@@ -659,6 +789,581 @@ class StartWorkspaceTest(WorkspaceTest):
         self.h.split_pane = missing
         name = self.b.start(focus=False)
         self.assertIsNotNone(store.get_agent(self.db, name))
+
+
+class WorktreeIsAFactTest(WorkspaceTest):
+    """"Does this agent have a worktree?" is read from the store, never from the name.
+
+    The `workspace` column says a branch for a worktree space and an agent-ish label for a
+    bare one, and nothing distinguishes the two. `branch` does: NULL means bare. The fork
+    rule asks `Broker.has_worktree`, and the landmine below is what the conflation cost —
+    looking up a bare space's herdr id used to fork it a git branch and a checkout.
+    """
+
+    def test_a_workspace_lead_records_the_branch_it_works_on(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(r["branch"], "api")
+        self.assertEqual(store.get_agent(self.db, "api-lead")["branch"], "api")
+        self.assertTrue(self.b.has_worktree("api-lead"))
+        self.assertEqual(self.b.worktree_branch("api-lead"), "api")
+
+    def test_children_inherit_the_branch_with_the_workspace(self):
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        grandkid = self.b.delegate("t", role="worker", me=kid)
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], "api")
+        self.assertTrue(self.b.has_worktree(grandkid))
+
+    def test_the_top_level_orchestrators_space_is_bare(self):
+        """`sb start` lays a workspace over the main checkout and never forks. The row has
+        to say so, or its children inherit a checkout that is the human's."""
+        b = Broker(self.db, self.h, repo=self._git_repo())
+        name = b.start(focus=False)
+        self.assertIsNone(store.get_agent(self.db, name)["branch"])
+        self.assertFalse(b.has_worktree(name))
+
+    def test_nobody_and_the_human_have_no_worktree(self):
+        self.assertFalse(self.b.has_worktree(HUMAN))
+        self.assertFalse(self.b.has_worktree("never-existed"))
+
+    def test_a_bare_space_is_not_mistaken_for_a_named_checkout(self):
+        """The recorded cwd of a bare space is the main checkout — real, and not this
+        workspace's. Reading it as one is what made a label look like a worktree."""
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo))
+        self.assertIsNone(self.b._recorded_path("scratch"))
+
+    # -- the landmine ----------------------------------------------------
+
+    def test_looking_up_a_bare_spaces_id_creates_no_branch_and_no_worktree(self):
+        """`_workspace_id` fell through to `_attach_workspace`, whose create step runs
+        `worktree create --branch <name>`. Merely resolving an id therefore forked a git
+        branch and a checkout for a space that never had one."""
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo))
+        self.assertEqual(self.b._workspace_id("scratch"), "")
+        self.assertEqual(self.h.calls, [])                   # herdr was not even asked
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_childs_placement_never_forks_its_parents_bare_space(self):
+        """End to end, through the path that actually reached it: the last-resort tab
+        placement for a child whose parent's workspace id we never recorded."""
+        import os
+        from unittest import mock
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            kid = self.b.delegate("t", role="worker", me="root")
+        # The child forks — its parent is bare — but it forks its OWN name. What must
+        # never happen is a checkout appearing under the parent's bare label.
+        self.assertEqual(self.h.calls_of("create_worktree"), [kid])
+        self.assertEqual(store.get_agent(self.db, kid)["workspace"], kid)
+
+    def test_an_unknown_name_is_looked_up_never_created(self):
+        """No row at all is not permission to fork one. The open is tried — a herdr
+        restart loses workspaces our store never knew — and failing it is harmless."""
+        self.assertEqual(self.b._workspace_id("mystery"), "")
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_bare_space_never_shadows_a_worktree_of_the_same_name(self):
+        """Two spaces may share a name — that is what the split is for. A branch belongs
+        to the workspace it was recorded in, and is not inherited by name."""
+        self.b.workspace_new("api", me=HUMAN)                # worktree space 'api'
+        store.create_agent(self.db, name="root", role="main", workspace="api",
+                           cwd=str(self.repo))              # a bare row, same name
+        self.assertIsNone(store.get_agent(self.db, "root")["branch"])
+        kid = self.b.delegate("t", role="worker", me="root")
+        # Its parent is bare, so it forks — and what it must not do is pick up the 'api'
+        # worktree that merely shares its parent's label.
+        self.assertNotEqual(store.get_agent(self.db, kid)["branch"], "api")
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
+
+    def test_workspace_new_still_creates_the_worktree_it_is_asked_for(self):
+        """The lookup stopped creating; the verb that means "make me one" must not."""
+        self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
+
+
+class ForkRuleTest(WorkspaceTest):
+    """The fork rule: you get a worktree when your parent has not got one.
+
+    Otherwise you inherit your parent's and share it as a tab. Role-agnostic — there is no
+    read-only exception, because "it will only read" is a claim about the future and the
+    one bare space in the model is the human's own checkout.
+
+    The consequence that needs no separate rule, and is what these pin down: the root
+    orchestrator's children each fork, and everything below them inherits.
+    """
+
+    def _bare_root(self, name: str = "root") -> str:
+        """A root orchestrator's space: a herdr workspace over the main checkout, no
+        branch of its own. What `sb start` produces."""
+        store.create_agent(self.db, name=name, role="main", workspace="scratch",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        return name
+
+    def test_a_child_of_a_bare_parent_is_forked_its_own_worktree(self):
+        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        row = store.get_agent(self.db, kid)
+        self.assertEqual(row["branch"], kid)                 # the branch IS the name
+        self.assertEqual(row["workspace"], kid)
+        self.assertEqual(self.h.calls_of("create_worktree"), [kid])
+        self.assertNotEqual(row["cwd"], str(self.repo))      # not the human's checkout
+        self.assertTrue(self.b.has_worktree(kid))
+
+    def test_a_grandchild_inherits_its_parents_worktree_rather_than_forking(self):
+        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        grandkid = self.b.delegate("t", role="worker", me=kid)
+        rows = [store.get_agent(self.db, n) for n in (kid, grandkid)]
+        self.assertEqual(rows[1]["branch"], rows[0]["branch"])
+        self.assertEqual(rows[1]["workspace"], rows[0]["workspace"])
+        self.assertEqual(rows[1]["cwd"], rows[0]["cwd"])
+        self.assertEqual(self.h.calls_of("create_worktree"), [kid])   # exactly one fork
+
+    def test_it_stays_inherited_all_the_way_down(self):
+        """Depth is not a factor: one fork at the top of a subtree, tabs below it."""
+        line = [self._bare_root()]
+        for _ in range(4):
+            line.append(self.b.delegate("t", role="worker", me=line[-1]))
+        branches = [store.get_agent(self.db, n)["branch"] for n in line[1:]]
+        self.assertEqual(branches, [line[1]] * 4)
+        self.assertEqual(self.h.calls_of("create_worktree"), [line[1]])
+
+    def test_a_second_child_of_the_bare_root_forks_its_own(self):
+        """Siblings do not share: each child of the root is a separate line of work."""
+        root = self._bare_root()
+        a = self.b.delegate("t", role="worker", me=root)
+        b = self.b.delegate("t", role="worker", me=root)
+        self.assertEqual(self.h.calls_of("create_worktree"), [a, b])
+        self.assertNotEqual(store.get_agent(self.db, a)["cwd"],
+                            store.get_agent(self.db, b)["cwd"])
+
+    def test_the_rule_is_role_agnostic(self):
+        """A researcher that swears it only reads gets a tree of its own like everyone
+        else. The exception is what put agents in the human's checkout."""
+        root = self._bare_root()
+        for role in ("researcher", "worker", "orchestrator"):
+            with self.subTest(role=role):
+                kid = self.b.delegate("t", role=role, me=root)
+                self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
+
+    def test_the_human_has_no_worktree_to_lend_so_their_child_forks(self):
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
+
+    def test_the_question_is_asked_of_the_store_not_of_the_name(self):
+        """A bare space whose label happens to name a real branch must still fork. The
+        name cannot answer this — only `agents.branch` can."""
+        self.b.workspace_new("api", me=HUMAN)                # a real worktree named 'api'
+        store.create_agent(self.db, name="root", role="main", workspace="api",
+                           cwd=str(self.repo), pane_id="w1:p1")   # a BARE space, same name
+        kid = self.b.delegate("t", role="worker", me="root")
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
+        self.assertNotEqual(store.get_agent(self.db, kid)["cwd"],
+                            store.get_agent(self.db, "api-lead")["cwd"])
+
+    def test_a_lead_in_a_worktree_forks_nothing_for_its_children(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        self.assertEqual(store.get_agent(self.db, kid)["cwd"], r["path"])
+        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
+
+    def test_a_caller_that_names_the_workspace_is_not_overridden(self):
+        """`sb start` and a workspace lead both place a child explicitly. A fork on top of
+        that would ignore the instruction."""
+        r = self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me=self._bare_root(),
+                              workspace="api", branch="api", cwd=r["path"])
+        self.assertEqual(store.get_agent(self.db, kid)["workspace"], "api")
+        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
+
+    def test_the_child_takes_the_forked_workspaces_root_pane(self):
+        """A fresh workspace already has an idle shell; a tab on top of it is a pane
+        nobody ever closes."""
+        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        self.assertEqual(self.h.tabs, [])
+        self.assertEqual(store.get_agent(self.db, kid)["pane_id"],
+                         self.h.checkouts[store.get_agent(self.db, kid)["cwd"]]["root_pane"])
+
+    def test_the_child_is_placed_in_its_own_new_workspace(self):
+        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        row = store.get_agent(self.db, kid)
+        self.assertEqual(row["workspace_id"],
+                         self.h.checkouts[row["cwd"]]["id"])
+
+    def test_the_fork_is_in_the_event_log(self):
+        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        forks = [e for e in store.recent_events(self.db) if e["kind"] == "fork"]
+        self.assertEqual([e["agent"] for e in forks], [kid])
+
+    # -- the collision refusal -------------------------------------------
+
+    def test_a_branch_that_already_exists_refuses_the_fork(self):
+        """Never silently reused: that branch is somebody else's work, with somebody
+        else's commits on it."""
+        import subprocess
+        main = self._git_repo()
+        subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
+        b = Broker(self.db, self.h, repo=main)
+        store.create_agent(self.db, name="root", role="main", cwd=str(main))
+        with self.assertRaises(ValueError) as cm:
+            b.delegate("t", role="worker", name="spike", me="root")
+        self.assertIn("spike", str(cm.exception))
+        self.assertIn("already exists", str(cm.exception))
+
+    def test_the_refusal_names_both_ways_forward(self):
+        import subprocess
+        main = self._git_repo()
+        subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
+        b = Broker(self.db, self.h, repo=main)
+        store.create_agent(self.db, name="root", role="main", cwd=str(main))
+        with self.assertRaises(ValueError) as cm:
+            b.delegate("t", role="worker", name="spike", me="root")
+        self.assertIn("--name", str(cm.exception))           # spawn under another name
+        self.assertIn("--workspace spike", str(cm.exception))   # or join what is there
+
+    def test_a_refused_fork_spawns_nothing_and_holds_no_name(self):
+        """Refused BEFORE anything is claimed, so the name is free for the retry the
+        message asks for."""
+        import subprocess
+        main = self._git_repo()
+        subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
+        b = Broker(self.db, self.h, repo=main)
+        store.create_agent(self.db, name="root", role="main", cwd=str(main))
+        with self.assertRaises(ValueError):
+            b.delegate("t", role="worker", name="spike", me="root")
+        self.assertIsNone(store.get_agent(self.db, "spike"))
+        self.assertEqual(self.h.started, [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_the_branch_the_agent_is_named_after_is_the_one_checked_for(self):
+        """An unrelated branch is not a collision — only this agent's own name is."""
+        import subprocess
+        main = self._git_repo()
+        subprocess.run(["git", "branch", "somebody-else"], cwd=main, capture_output=True)
+        b = Broker(self.db, self.h, repo=main)
+        store.create_agent(self.db, name="root", role="main", cwd=str(main))
+        kid = b.delegate("t", role="worker", name="spike", me="root")
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], "spike")
+
+    def test_an_inheriting_child_is_never_refused_over_a_branch(self):
+        """The refusal belongs to forking. A child that inherits its parent's worktree
+        touches no branch, so a branch of its name is none of its business."""
+        import subprocess
+        main = self._git_repo()
+        subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
+        b = Broker(self.db, self.h, repo=main)
+        r = b.workspace_new("api", me=HUMAN)
+        kid = b.delegate("t", role="worker", name="spike", me="api-lead")
+        self.assertEqual(store.get_agent(self.db, kid)["cwd"], r["path"])
+
+
+class ForkBaseTest(WorkspaceTest):
+    """Where a fork starts from: `origin/main`, fetched on the spot.
+
+    A local `main` is however stale the last pull left it, so the base is the
+    remote-tracking ref and it is refreshed at the moment of the fork. None of that may
+    cost a spawn: a laptop with no network still forks, just from what it already has.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bases: list[str] = []
+        real = self.h.create_worktree
+        def recording(branch, *, base="main", **kw):         # noqa: E306
+            self.bases.append(base)
+            return real(branch, base=base, **kw)
+        self.h.create_worktree = recording
+
+    @staticmethod
+    def _git(where: Path, *args: str):
+        import subprocess
+        return subprocess.run(["git", *args], cwd=where, capture_output=True, text=True)
+
+    def _repo_with_origin(self) -> Path:
+        """A main checkout with a real remote — a bare repo next door, so a fetch is a
+        real fetch with no network in it."""
+        main = self._git_repo()
+        origin = self.repo / "origin.git"
+        self._git(self.repo, "init", "-q", "--bare", "-b", "main", str(origin))
+        self._git(main, "remote", "add", "origin", str(origin))
+        self._git(main, "push", "-q", "origin", "main")
+        return main
+
+    def _tracking(self, main: Path) -> bool:
+        return self._git(main, "rev-parse", "--verify", "--quiet",
+                         "refs/remotes/origin/main").returncode == 0
+
+    def test_the_base_is_fetched_on_the_spot_and_forked_from(self):
+        main = self._repo_with_origin()
+        self._git(main, "update-ref", "-d", "refs/remotes/origin/main")   # never fetched
+        self.assertFalse(self._tracking(main))
+        r = Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
+        self.assertTrue(self._tracking(main), "the fork fetched the base first")
+        self.assertEqual(self.bases, ["origin/main"])
+        self.assertEqual(r["base"], "origin/main")
+        self.assertIsNone(r["base_fallback"])
+
+    def test_a_failed_fetch_falls_back_to_the_local_copy_and_carries_on(self):
+        """No network is not a reason to lose a spawn — it is a reason to fork from the
+        `origin/main` we already have."""
+        main = self._repo_with_origin()
+        self._git(main, "remote", "set-url", "origin", str(self.repo / "gone.git"))
+        r = Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
+        self.assertEqual(self.bases, ["origin/main"])        # the local copy of it
+        self.assertEqual(r["base_fallback"], "fetch_failed")
+        self.assertTrue(r["path"])                           # and the workspace exists
+        self.assertIn("api-lead", self.h.live)
+
+    def test_a_failed_fetch_is_in_the_event_log(self):
+        main = self._repo_with_origin()
+        self._git(main, "remote", "set-url", "origin", str(self.repo / "gone.git"))
+        Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
+        kinds = [e["kind"] for e in store.recent_events(self.db)]
+        self.assertIn("fetch_failed", kinds)
+
+    def test_no_remote_at_all_falls_back_to_the_local_base(self):
+        """A repo with one `main` and no remote: forking from it is not a degradation,
+        it is the only meaningful answer — so nothing is logged as a failure."""
+        main = self._git_repo()                              # no origin
+        r = Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
+        self.assertEqual(self.bases, ["main"])
+        self.assertEqual(r["base_fallback"], "no_remote")
+        self.assertNotIn("fetch_failed",
+                         [e["kind"] for e in store.recent_events(self.db)])
+
+    def test_a_remote_with_no_such_branch_falls_back_to_the_local_base(self):
+        """The fetch works and brings back nothing to fork from. Better the local branch
+        than `origin/main` pointing at nothing, which fails the create outright."""
+        main = self._git_repo()
+        origin = self.repo / "origin.git"
+        self._git(self.repo, "init", "-q", "--bare", "-b", "other", str(origin))
+        self._git(main, "remote", "add", "origin", str(origin))
+        r = Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
+        self.assertEqual(self.bases, ["main"])
+        self.assertEqual(r["base_fallback"], "no_remote_base")
+
+    def test_a_fork_from_delegate_fetches_too(self):
+        """The path that matters: the fork rule's own create, not just `workspace new`."""
+        main = self._repo_with_origin()
+        self._git(main, "update-ref", "-d", "refs/remotes/origin/main")
+        b = Broker(self.db, self.h, repo=main)
+        store.create_agent(self.db, name="root", role="main", cwd=str(main),
+                           pane_id="w1:p1")
+        b.delegate("t", role="worker", me="root")
+        self.assertEqual(self.bases, ["origin/main"])
+        self.assertTrue(self._tracking(main))
+
+    def test_the_fallback_reaches_the_fork_event(self):
+        main = self._git_repo()                              # no remote to fetch from
+        b = Broker(self.db, self.h, repo=main)
+        store.create_agent(self.db, name="root", role="main", cwd=str(main),
+                           pane_id="w1:p1")
+        b.delegate("t", role="worker", me="root")
+        import json
+        (fork,) = [e for e in store.recent_events(self.db) if e["kind"] == "fork"]
+        payload = json.loads(fork["payload"])
+        self.assertEqual(payload["base"], "main")
+        self.assertEqual(payload["base_fallback"], "no_remote")
+
+    def test_opening_an_existing_workspace_fetches_nothing(self):
+        """Nothing is being forked, so there is no base to be stale."""
+        main = self._repo_with_origin()
+        b = Broker(self.db, self.h, repo=main)
+        b.workspace_new("api", me=HUMAN)
+        r = b.workspace_new("api", me=HUMAN)                 # reopened
+        self.assertEqual(len(self.bases), 1)
+        self.assertIsNone(r["base"])
+
+
+class JoinWorkspaceTest(WorkspaceTest):
+    """`sb delegate --workspace <name>` — join a workspace somebody already opened.
+
+    The other half of the fork rule: a spawn either forks its own worktree or joins one by
+    name, and joining is shared exactly as `sb workspace new` is — same branch, same
+    checkout, same herdr workspace, however many agents are in it. The one thing it must
+    never do is create, because `--workspace` is what you type when a fork was refused.
+    """
+
+    def _join(self, name: str, *, me: str = "root") -> str:
+        return self.b.delegate("t", role="worker", me=me,
+                               **self.b.join_workspace(name))
+
+    def setUp(self):
+        super().setUp()
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo), pane_id="w1:p1")
+
+    def test_a_child_joins_the_named_workspace_instead_of_its_parents(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        row = store.get_agent(self.db, self._join("api"))
+        self.assertEqual(row["workspace"], "api")
+        self.assertEqual(row["branch"], "api")
+        self.assertEqual(row["cwd"], r["path"])
+        self.assertEqual(row["workspace_id"], r["workspace_id"])
+
+    def test_the_joiners_tab_is_placed_in_that_workspace(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        self._join("api")
+        self.assertEqual(self.h.tabs[-1], (r["workspace_id"], r["path"]))
+
+    def test_joining_creates_no_second_worktree(self):
+        """One name, one checkout — the whole point. A join that forks is a fork."""
+        self.b.workspace_new("api", me=HUMAN)
+        self._join("api")
+        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
+        self.assertEqual(self._branches(), ["api"])
+
+    def test_two_joiners_land_in_the_same_place(self):
+        self.b.workspace_new("api", me=HUMAN)
+        rows = [store.get_agent(self.db, self._join("api")) for _ in range(2)]
+        self.assertEqual({r["workspace_id"] for r in rows}, {rows[0]["workspace_id"]})
+        self.assertEqual({r["cwd"] for r in rows}, {rows[0]["cwd"]})
+
+    def test_the_joiner_is_told_it_is_sharing(self):
+        self.b.workspace_new("api", me=HUMAN)
+        self._join("api")
+        joined = " ".join(self.h.started[-1]["prompts"])
+        self.assertIn("workspace 'api'", joined)
+        self.assertIn("shared", joined)
+
+    def test_the_joiners_own_children_inherit_the_workspace(self):
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self._join("api")
+        grandkid = self.b.delegate("t", role="worker", me=kid)
+        self.assertEqual(store.get_agent(self.db, grandkid)["workspace"], "api")
+        self.assertEqual(store.get_agent(self.db, grandkid)["branch"], "api")
+
+    def test_joining_disturbs_no_lead(self):
+        """Joining is not opening: the workspace's lead is left exactly as it was."""
+        self.b.workspace_new("api", me=HUMAN)
+        started = len(self.h.started)
+        self._join("api")
+        self.assertEqual(len(self.h.started), started + 1)
+        self.assertEqual(store.get_agent(self.db, "api-lead")["state"], "working")
+
+    # -- what it refuses -------------------------------------------------
+
+    def test_a_workspace_nobody_opened_is_refused_never_forked(self):
+        with self.assertRaises(ValueError) as e:
+            self.b.join_workspace("nope")
+        self.assertIn("sb workspace new nope", str(e.exception))
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_bare_space_is_refused_and_forks_nothing(self):
+        """A top-level orchestrator's space has no checkout of its own to share, and
+        asking herdr for one by that name is how a label used to become a branch."""
+        with self.assertRaises(ValueError) as e:
+            self.b.join_workspace("scratch")
+        self.assertIn("bare space", str(e.exception))
+        self.assertEqual(self.h.calls, [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_refused_join_spawns_nothing(self):
+        before = set(self.h.live)
+        with self.assertRaises(ValueError):
+            self._join("nope")
+        self.assertEqual(set(self.h.live), before)
+
+    # -- the flag --------------------------------------------------------
+
+    def test_the_flag_parses_and_is_checked_as_a_branch_name(self):
+        from switchboard import validate
+        from switchboard.cli import _validate, build_parser
+
+        args = build_parser().parse_args(["delegate", "t", "--workspace", " api "])
+        _validate(args)
+        self.assertEqual(args.workspace, "api")          # normalised, as a ref name is
+
+        bad = build_parser().parse_args(["delegate", "t", "--workspace", "a b"])
+        with self.assertRaises(validate.Invalid):
+            _validate(bad)
+
+    def test_delegating_without_the_flag_is_unchanged(self):
+        from switchboard.cli import build_parser
+        self.assertIsNone(build_parser().parse_args(["delegate", "t"]).workspace)
+
+
+class PluginsOnEverySpawnPathTest(unittest.TestCase):
+    """A repo's plugin bindings reach EVERY spawn, not just `sb delegate`'s.
+
+    While resolution lived in the CLI's `delegate` branch, `sb workspace new` and
+    `sb start` called `Broker.delegate` straight past it, so a workspace lead and the
+    top-level orchestrator silently missed the repo's every-agent bindings — a lead never
+    received `own-files`. One resolution point in `Broker.delegate` is the fix.
+
+    Not a subclass of `WorkspaceTest`: these need repo bindings on disk, and inheriting
+    the setUp would re-run every workspace test with them.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = FakeHerdr(self.repo / "worktrees")
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        d = self.repo / ".switchboard" / "plugins"
+        d.mkdir(parents=True)
+        (d / "house-style").write_text("")     # a stray non-.md file must not register
+        (d / "house-style.md").write_text("# House style\n\nkeep it short\n")
+        (self.repo / ".switchboard" / "plugins.toml").write_text(
+            'all = ["house-style"]\n\n[roles]\nworker = ["be exact"]\n'
+        )
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _prompts_for(self, name: str) -> list[str]:
+        (started,) = [s for s in self.h.started if s["name"] == name]
+        return started["prompts"]
+
+    def test_delegate_resolves_the_repos_bindings(self):
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn("keep it short", " ".join(self._prompts_for(kid)))
+
+    def test_a_workspace_lead_gets_them_too(self):
+        lead = self.b.workspace_new("api", me=HUMAN)["agent"]
+        self.assertIn("keep it short", " ".join(self._prompts_for(lead)))
+
+    def test_the_top_level_orchestrator_gets_them_too(self):
+        top = self.b.start(focus=False, board=False)
+        self.assertIn("keep it short", " ".join(self._prompts_for(top)))
+
+    def test_every_spawn_path_resolves_the_same_bindings(self):
+        """The property the fix is really about: one resolution point, not three."""
+        kid = self.b.delegate("t", role="orchestrator", me=HUMAN)
+        lead = self.b.workspace_new("api", me=HUMAN)["agent"]
+        top = self.b.start(focus=False, board=False)
+        plugins = [[p for p in self._prompts_for(n) if "keep it short" in p]
+                   for n in (kid, lead, top)]
+        self.assertEqual(plugins[0], plugins[1])
+        self.assertEqual(plugins[1], plugins[2])
+        self.assertEqual(len(plugins[0]), 1, "flattened to one line, and not duplicated")
+
+    def test_a_per_role_binding_still_layers_on_top(self):
+        """`all` then the role's own — the layering survives the move."""
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        text = " ".join(self._prompts_for(kid))
+        self.assertIn("keep it short", text)
+        self.assertIn("be exact", text)
+
+    def test_a_callers_own_with_is_appended_last(self):
+        kid = self.b.delegate("t", role="worker", with_=["house-style", "and terse"],
+                              me=HUMAN)
+        prompts = self._prompts_for(kid)
+        self.assertIn("and terse", prompts)
+        self.assertEqual(len([p for p in prompts if "keep it short" in p]), 1,
+                         "already bound for every agent; naming it again adds nothing")
+
+    def test_a_plugin_that_cannot_flatten_names_the_plugin(self):
+        """The CLI's error quality has to survive the move: this is what becomes an agent
+        argument, so a plugin that flattens to something herdr rejects must say so."""
+        (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * 9000)
+        with self.assertRaises(ValueError) as cm:
+            self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn("plugin text", str(cm.exception))
 
 
 if __name__ == "__main__":

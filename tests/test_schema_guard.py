@@ -30,8 +30,10 @@ from switchboard.herdr import Herdr  # noqa: E402
 
 # A NOT NULL column with no literal default: ALTER TABLE cannot add it to existing rows,
 # so it is the shape that forces a rebuild. This is what splitting `workspace` in two did.
+# The name has to be one the real SCHEMA does NOT carry — `branch` ships for real now, and
+# a hypothetical column the store already has leaves nothing to be blocked on.
 _ENDED = "    ended_at      INTEGER\n"
-_SPLIT = "    ended_at      INTEGER,\n    branch        TEXT NOT NULL\n"
+_SPLIT = "    ended_at      INTEGER,\n    checkout      TEXT NOT NULL\n"
 
 
 class DegradedStoreTest(unittest.TestCase):
@@ -85,7 +87,7 @@ class DegradedStoreTest(unittest.TestCase):
     def test_spawning_is_refused_and_says_what_still_works(self):
         code, out, err = self._run("delegate", "do a thing")
         self.assertEqual(code, 1)                            # not 0, and not 2: the input
-        self.assertIn("branch", err)                         # was fine, the store is not
+        self.assertIn("checkout", err)                       # was fine, the store is not
         self.assertIn("done", err)                           # what an agent can still do
         self.assertIn("--reset-store --force", err)          # and the way out, by name
 

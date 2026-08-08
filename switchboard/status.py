@@ -56,7 +56,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from . import config
-from .herdr import BLOCKED, IDLE, WORKING, Herdr, HerdrError
+from .herdr import (
+    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_TIMEOUT_MS, WORKING, Herdr, HerdrError,
+)
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
 # the store's schema; the groupings are policy, and policy is config.
@@ -83,6 +85,20 @@ FINISHED = tuple(config.setting("states.finished"))
 # rows at all; a new state would have to be added to that list to work, at which point it
 # is `failed` with extra steps.
 GONE_STATE = "failed"
+
+# How long a row with no session id is read as a *claim* rather than as a live agent.
+#
+# `delegate` inserts the row before herdr is asked to start anything (the name is the lock
+# — see broker.delegate), and `agent start` is flaky enough to be retried with a backoff.
+# For that whole window there is a `working` row that herdr has never heard of, which is
+# indistinguishable from a pane that closed — and the board refreshes every 2 s, as does
+# every `sb` invocation, so something WILL look. Reaping there marks a live agent failed
+# during its own spawn.
+#
+# The window is herdr's own worst case, not a number of our own: every attempt it will
+# make, each running its full timeout. Erring long is the cheap direction — a genuinely
+# dead claim is reaped one window later, whereas erring short kills real agents.
+SPAWN_GRACE = (SPAWN_TIMEOUT_MS / 1000) * SPAWN_ATTEMPTS
 
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
@@ -272,6 +288,11 @@ def collect(
         hstate = agent.state if agent else None
         alive = (agent is not None) if consulted else None
         running = row["state"] in RUNNING and row["ended_at"] is None
+        # A row with no session id that is younger than the spawn window is a CLAIM, not a
+        # live agent: `delegate` writes it before herdr is called, and herdr will not list
+        # the name until `agent start` finally succeeds. Absence proves nothing yet, so it
+        # is neither gone nor stalled. See SPAWN_GRACE.
+        spawning = row["session_id"] is None and (now - row["created_at"]) < SPAWN_GRACE
         last = max(row["created_at"], activity.get(name, 0))
         agents.append(AgentStatus(
             name=name,
@@ -284,7 +305,7 @@ def collect(
             # The join this file exists for. Both halves must be known: an unreachable
             # herdr proves nothing, and neither does herdr's `unknown`.
             stalled=bool(running and alive and hstate in IDLE_LIKE),
-            gone=bool(running and alive is False),
+            gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),
             idle=max(0, now - last),

@@ -72,6 +72,17 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.update_agent(self.db, "w", state="done")  # must go through set_state
 
+    def test_mark_spawned_reopens_a_row_closed_under_the_spawn(self):
+        """The one narrow exception to that allowlist, and why it exists: the board can
+        close a claim while its `agent start` is still retrying, and nothing else in the
+        store can undo that."""
+        store.create_agent(self.db, name="w", role="worker")
+        store.set_state(self.db, "w", "failed")
+        store.mark_spawned(self.db, "w")
+        a = store.get_agent(self.db, "w")
+        self.assertEqual(a["state"], "working")
+        self.assertIsNone(a["ended_at"])
+
     def test_live_roots_is_what_is_running_not_what_ever_ran(self):
         """The store keeps every root ever created; without the filter this is history.
 
@@ -203,6 +214,114 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(store.schema_deficit(d2), [])     # and is fully caught up
             d2.close()
 
+    # -- the branch column -----------------------------------------------
+    #
+    # `workspace` is a NAME and nothing more — a branch for a worktree space, an agent-ish
+    # label for a bare one, with nothing to tell them apart. `branch` is the fact.
+
+    def test_a_row_has_no_branch_unless_it_is_given_one(self):
+        """Bare is the default: NULL means "no checkout of my own", and guessing the other
+        way hands an agent somebody else's tree."""
+        store.create_agent(self.db, name="root", role="main", workspace="main")
+        self.assertIsNone(store.get_agent(self.db, "root")["branch"])
+        self.assertIsNone(store.agent_branch(self.db, "root"))
+
+    def test_the_branch_is_recorded_and_read_back(self):
+        store.create_agent(self.db, name="lead", role="orchestrator", workspace="api",
+                           branch="api")
+        self.assertEqual(store.agent_branch(self.db, "lead"), "api")
+
+    def test_agent_branch_of_someone_we_have_no_row_for_is_none(self):
+        self.assertIsNone(store.agent_branch(self.db, "stranger"))
+
+    def test_a_workspaces_branch_comes_from_whichever_row_recorded_one(self):
+        """A checkout belongs to the workspace, so any row in it can answer for it."""
+        store.claim_agent(self.db, name="lead", role="orchestrator", workspace="api",
+                          branch="api")
+        store.claim_agent(self.db, name="kid", role="worker", workspace="api",
+                          branch="api")
+        self.assertEqual(store.workspace_branch(self.db, "api"), "api")
+
+    def test_a_bare_workspace_has_no_branch_but_is_still_known(self):
+        """The two answers that must not be confused: a place with no checkout, and a name
+        we have never heard of."""
+        store.create_agent(self.db, name="root", role="main", workspace="scratch")
+        self.assertIsNone(store.workspace_branch(self.db, "scratch"))
+        self.assertTrue(store.known_workspace(self.db, "scratch"))
+        self.assertFalse(store.known_workspace(self.db, "never-seen"))
+
+    def test_the_branch_may_be_updated(self):
+        store.create_agent(self.db, name="w", role="worker", workspace="api")
+        store.update_agent(self.db, "w", branch="api")
+        self.assertEqual(store.agent_branch(self.db, "w"), "api")
+
+    # -- migrating the rows that predate it ------------------------------
+
+    def _old_store(self, p: Path):
+        """A store as it was before `branch` existed."""
+        d = store.connect(path=p)
+        d.execute("ALTER TABLE agents DROP COLUMN branch")
+        d.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', 'old')")
+        d.commit()
+        return d
+
+    def _git_repo(self, name: str = "repo") -> Path:
+        import subprocess
+        main = Path(self.tmp.name) / name
+        main.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=main, capture_output=True)
+        return main
+
+    def test_existing_rows_are_given_the_branch_they_were_always_on(self):
+        """The migration. A row in a named workspace, running somewhere other than the
+        main checkout, was in a worktree — and the workspace name is the branch it was
+        forked as. A row in the main checkout was the bare space, and stays bare."""
+        main = self._git_repo()
+        p = Path(self.tmp.name) / "old.db"
+        d = self._old_store(p)
+        d.execute(
+            "INSERT INTO agents (name, role, state, cwd, workspace, cleanup, created_at) "
+            "VALUES ('lead', 'orchestrator', 'working', ?, 'api', 'keep', 1)",
+            (str(main / "worktrees" / "api"),))
+        d.execute(
+            "INSERT INTO agents (name, role, state, cwd, workspace, cleanup, created_at) "
+            "VALUES ('root', 'main', 'working', ?, 'main', 'keep', 1)", (str(main),))
+        d.commit(); d.close()
+
+        d2 = store.connect(main, path=p)
+        self.assertEqual(store.agent_branch(d2, "lead"), "api")
+        self.assertIsNone(store.agent_branch(d2, "root"))     # the bare space stays bare
+        d2.close()
+
+    def test_a_row_with_no_workspace_is_left_alone_by_the_migration(self):
+        main = self._git_repo()
+        p = Path(self.tmp.name) / "plain.db"
+        d = self._old_store(p)
+        d.execute("INSERT INTO agents (name, role, state, cwd, cleanup, created_at) "
+                  "VALUES ('w', 'worker', 'working', '/somewhere/else', 'close', 1)")
+        d.commit(); d.close()
+
+        d2 = store.connect(main, path=p)
+        self.assertIsNone(store.agent_branch(d2, "w"))
+        d2.close()
+
+    def test_the_migration_gives_up_rather_than_guess_outside_a_repo(self):
+        """No main checkout to compare against means no way to tell a worktree from the
+        primary tree. NULL costs a fork; a wrong branch costs somebody's main checkout."""
+        p = Path(self.tmp.name) / "norepo.db"
+        d = self._old_store(p)
+        d.execute("INSERT INTO agents (name, role, state, cwd, workspace, cleanup, "
+                  "created_at) VALUES ('lead', 'orchestrator', 'working', '/wt/api', "
+                  "'api', 'keep', 1)")
+        d.commit(); d.close()
+
+        nowhere = Path(self.tmp.name) / "not-a-repo"
+        nowhere.mkdir()
+        d2 = store.connect(nowhere, path=p)
+        self.assertIsNotNone(store.get_agent(d2, "lead"))      # the rows survive
+        self.assertIsNone(store.agent_branch(d2, "lead"))      # unguessed, not guessed
+        d2.close()
+
     def test_an_unknown_column_does_not_force_a_reset(self):
         """A newer `sb`, run from another checkout against the same store, adds a column
         this code has never heard of. Older code must keep working: two checkouts share
@@ -234,7 +353,10 @@ class StoreTest(unittest.TestCase):
     # A change that ALTER TABLE cannot apply — here a NOT NULL column with no literal
     # default, which is the shape that split `workspace` in two and bricked the fleet.
 
-    _SPLIT = "    ended_at      INTEGER,\n    branch        TEXT NOT NULL\n"
+    # NOT the real `branch` column, which this code now ships: a hypothetical column has
+    # to be one the schema does NOT have, or there is no gap to be blocked on and the test
+    # passes over a store that was never degraded.
+    _SPLIT = "    ended_at      INTEGER,\n    checkout      TEXT NOT NULL\n"
 
     def test_a_non_additive_change_under_a_live_fleet_degrades_not_deadlocks(self):
         from unittest import mock
@@ -267,7 +389,7 @@ class StoreTest(unittest.TestCase):
             with mock.patch.object(store, "_herdr_alive", lambda: set()):
                 d3 = store.connect(path=p)                     # last agent gone: rebuild
             self.assertEqual(store.schema_deficit(d3), [])
-            self.assertIn("branch", {r[1] for r in d3.execute("PRAGMA table_info(agents)")})
+            self.assertIn("checkout", {r[1] for r in d3.execute("PRAGMA table_info(agents)")})
             d3.close()
 
     def test_a_missing_table_is_blocking_not_addable(self):

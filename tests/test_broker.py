@@ -195,6 +195,46 @@ class BrokerTest(unittest.TestCase):
         joined = " ".join(self.h.started[0]["prompts"])
         self.assertIn("haiku critic", joined)
 
+    # -- the spawn race: a claim is not a dead agent -----------------------
+
+    def _collect_during_spawn(self):
+        """Make the board refresh in the middle of `agent start`.
+
+        Not contrived: `delegate` claims the row before herdr is called, `agent start`
+        retries a flaky first attempt over a couple of seconds, and the board refreshes
+        every 2 s — as does every `sb` invocation. herdr does not know the name yet
+        (`states_by_name` is empty), so this is exactly the look that used to reap it.
+        """
+        real = self.h.start_agent
+        seen = []
+
+        def racing(*a, **kw):
+            seen.append(status.collect(self.db, self.h))
+            return real(*a, **kw)
+
+        self.h.start_agent = racing
+        return seen
+
+    def test_a_claim_survives_a_status_collect_mid_spawn(self):
+        self._collect_during_spawn()
+        name = self.b.delegate("t", role="worker", me="orch")
+        a = store.get_agent(self.db, name)
+        self.assertEqual(a["state"], "working")
+        self.assertIsNone(a["ended_at"])
+        # And nothing was invented about it: no `gone` event was ever logged.
+        self.assertNotIn("gone", [e["kind"] for e in store.recent_events(self.db, agent=name)])
+
+    def test_a_spawn_slower_than_the_grace_is_repaired_when_it_lands(self):
+        """The second guard. If the spawn outruns the grace the reaper does close the
+        row — and only the successful spawn can undo that, because `update_agent` cannot
+        write `state` or `ended_at` and so the false `failed` used to stick forever."""
+        self._collect_during_spawn()
+        with mock.patch.object(status, "SPAWN_GRACE", 0):
+            name = self.b.delegate("t", role="worker", me="orch")
+        a = store.get_agent(self.db, name)
+        self.assertEqual(a["state"], "working")
+        self.assertIsNone(a["ended_at"])
+
     def test_names_do_not_collide(self):
         a = self.b.delegate("t", role="calc", me="orch")
         b = self.b.delegate("t", role="calc", me="orch")
@@ -456,8 +496,10 @@ class BrokerTest(unittest.TestCase):
         a crashed agent's row never gets there on its own — so until `sb status` writes
         the death back, the one agent that most needs sweeping is the one nothing can."""
         store.create_agent(self.db, name="orch", role="orchestrator")
+        # `session_id` marks it as past its spawn — status holds off on reaping a
+        # session-less row this young, since that is a claim mid-spawn.
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
         self.h.states_by_name = {}                     # herdr has never heard of it
         self.assertEqual(self.b.cleanup(me="orch"), [])          # still reads 'working'
         status.collect(self.db, self.h)

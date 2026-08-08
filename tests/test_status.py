@@ -141,7 +141,9 @@ class StatusTest(unittest.TestCase):
         self.assertFalse(self.by_name(snap)["w1"].stalled)
 
     def test_working_but_absent_from_herdr_is_gone(self):
-        store.create_agent(self.db, name="w1", role="worker")
+        # `session_id` is what says this one got past its spawn: a session-less row this
+        # young is a claim, and claims are held off (see the spawn-grace tests below).
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         snap = status.collect(self.db, FakeHerdr([]))
         a = self.by_name(snap)["w1"]
         self.assertTrue(a.gone)
@@ -157,7 +159,7 @@ class StatusTest(unittest.TestCase):
         """Nothing else ever closes a row that died abnormally. `sb done` is the agent's
         own, and `sb cleanup` only touches rows that are already finished — so without
         this the row claims `working` for good and no sweep can reach it."""
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         snap = status.collect(self.db, FakeHerdr([]))
         self.assertTrue(self.by_name(snap)["w1"].gone)   # still reported as observed
 
@@ -167,6 +169,33 @@ class StatusTest(unittest.TestCase):
         self.assertIn(a["state"], status.FINISHED)       # what `sb cleanup` gates on
         self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="w1")],
                          ["gone"])
+
+    # -- the spawn grace: a claim is not evidence of a live agent ----------
+
+    def test_a_fresh_session_less_row_is_a_claim_and_is_not_reaped(self):
+        """`delegate` writes the row before herdr is asked to start anything, and
+        `agent start` is retried for seconds. herdr not listing the name during that
+        window proves nothing — reaping there kills an agent during its own spawn."""
+        store.create_agent(self.db, name="w1", role="worker", pane_id="w1:p1")
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+        self.assertFalse(a.gone)
+        self.assertEqual(self.row("w1")["state"], "working")
+        self.assertIsNone(self.row("w1")["ended_at"])
+
+    def test_a_claim_older_than_the_grace_is_reaped(self):
+        """The grace is a window, not an exemption: a spawn that never landed must still
+        end up reachable by `sb cleanup`."""
+        store.create_agent(self.db, name="w1", role="worker", pane_id="w1:p1")
+        later = store.now() + int(status.SPAWN_GRACE) + 1
+        a = self.by_name(status.collect(self.db, FakeHerdr([]), now=later))["w1"]
+        self.assertTrue(a.gone)
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
+    def test_the_grace_only_covers_rows_with_no_session(self):
+        """A session id means the agent got past its spawn and called `sb` itself, so
+        herdr's silence about it is real drift however young the row is."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.assertTrue(self.by_name(status.collect(self.db, FakeHerdr([])))["w1"].gone)
 
     def test_an_unreachable_herdr_never_reaps_anything(self):
         """The guard. Absent herdr's side every row looks gone, and a hiccup would end
@@ -198,7 +227,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.row("w1")["ended_at"], ended)
 
     def test_a_reaped_agent_reads_as_ended_on_the_next_look(self):
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         status.collect(self.db, FakeHerdr([]))
         a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
         self.assertEqual(a.state, status.GONE_STATE)
