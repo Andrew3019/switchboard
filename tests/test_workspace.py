@@ -64,9 +64,24 @@ class FakeHerdr:
 
     @staticmethod
     def _facts(wt: dict) -> dict:
+        """The real dual shape, verified against `herdr worktree open`.
+
+        Two worktree objects, two different key names: `workspace.worktree` is a
+        `WorkspaceWorktreeInfo` and says `checkout_path`; the top-level one is a
+        `WorktreeInfo` and says `path`, with no `checkout_path` anywhere in it. Faking
+        `checkout_path` on the top-level object is what let broker.py read the path off the
+        wrong object for 602 green tests.
+        """
         return {"workspace": {"workspace_id": wt["id"], "label": wt["branch"],
-                              "worktree": {"checkout_path": wt["path"]}},
-                "worktree": {"checkout_path": wt["path"]},
+                              "worktree": {"checkout_path": wt["path"],
+                                           "repo_key": "/repo/.git",
+                                           "repo_name": "repo",
+                                           "repo_root": "/repo",
+                                           "is_linked_worktree": True}},
+                "worktree": {"path": wt["path"], "branch": wt["branch"],
+                             "label": "repo", "is_bare": False, "is_detached": False,
+                             "is_prunable": False, "is_linked_worktree": True,
+                             "open_workspace_id": wt["id"]},
                 "root_pane": {"pane_id": wt["root_pane"]},
                 "tab": {"tab_id": wt["id"] + ":t1"}}
 
@@ -211,8 +226,59 @@ class WorkspaceTest(unittest.TestCase):
     def test_the_lead_runs_inside_the_worktree_not_the_main_checkout(self):
         r = self.b.workspace_new("api", me=HUMAN)
         a = store.get_agent(self.db, "api-lead")
+        self.assertTrue(r["path"])          # "" degrades to the main checkout downstream
         self.assertEqual(a["cwd"], r["path"])
         self.assertNotEqual(a["cwd"], str(self.repo))
+
+    # -- reading the path off herdr's response ---------------------------
+    #
+    # herdr hands back two worktree objects with different key names. Reading the wrong one
+    # yields "" — and "" never errors, it just quietly means "the main checkout" in
+    # link_config, in the lead's system prompt, and in the recorded cwd the next open
+    # trusts. These pin the read itself, below workspace_new.
+
+    def test_the_path_is_read_off_the_workspace_scoped_worktree(self):
+        """Both objects present — the real shape. The workspace-scoped one is the truth."""
+        r = {"workspace": {"workspace_id": "w1",
+                           "worktree": {"checkout_path": "/wt/api",
+                                        "repo_root": "/repo",
+                                        "is_linked_worktree": True}},
+             "worktree": {"path": "/wt/api", "branch": "api", "is_bare": False},
+             "root_pane": {"pane_id": "w1:p1"}}
+        facts = self.b._workspace_facts("api", r, fresh=True)
+        self.assertEqual(facts["path"], "/wt/api")
+        self.assertEqual(facts["workspace_id"], "w1")
+        self.assertEqual(facts["pane_id"], "w1:p1")
+
+    def test_the_top_level_worktrees_path_key_is_accepted(self):
+        """The top-level object says `path`, never `checkout_path` — take it when it is
+        all we have, rather than reporting no worktree at all."""
+        r = {"workspace": {"workspace_id": "w1"},
+             "worktree": {"path": "/wt/api", "branch": "api"},
+             "root_pane": {"pane_id": "w1:p1"}}
+        self.assertEqual(self.b._workspace_facts("api", r, fresh=True)["path"], "/wt/api")
+
+    def test_a_response_with_no_path_anywhere_raises(self):
+        """Empty must never reach delegate: it is indistinguishable from the main
+        checkout, and gets recorded as this workspace's path for every later open."""
+        r = {"workspace": {"workspace_id": "w1"}, "worktree": {},
+             "root_pane": {"pane_id": "w1:p1"}}
+        with self.assertRaises(HerdrError) as e:
+            self.b._workspace_facts("api", r, fresh=True)
+        self.assertIn("workspace_no_path", str(e.exception))
+
+    def test_a_worktree_carrying_no_path_is_not_opened_silently(self):
+        """End to end: a herdr that answers with the wrong keys fails the open loudly
+        instead of handing the lead the main checkout."""
+        facts = FakeHerdr._facts
+        self.h._facts = lambda wt: {**facts(wt),                      # type: ignore[method-assign]
+                                    "workspace": {"workspace_id": wt["id"]},
+                                    "worktree": {"branch": wt["branch"]}}
+        with self.assertRaises(HerdrError) as e:
+            self.b.workspace_new("api", me=HUMAN)
+        self.assertIn("workspace_unavailable", str(e.exception))
+        self.assertIn("workspace_no_path", str(e.exception))
+        self.assertIsNone(store.get_agent(self.db, "api-lead"))
 
     def test_the_lead_takes_the_new_workspaces_root_pane(self):
         """A freshly created workspace already has an idle shell; do not waste a tab."""

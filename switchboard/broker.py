@@ -663,13 +663,32 @@ class Broker:
 
         Only `workspace_id` is load-bearing: it is how a child's tab is placed *in* this
         workspace rather than in whichever one the human happens to be looking at.
+
+        The response carries TWO worktree objects under different key names, and they are
+        not interchangeable: top-level `worktree` is a `WorktreeInfo`, whose path key is
+        `path`; `workspace.worktree` is a `WorkspaceWorktreeInfo`, whose path key is
+        `checkout_path`. Read the workspace-scoped one first — it is the checkout this
+        workspace actually sits in — and accept either key, because the top-level object is
+        always present and would otherwise win an `or` chain while carrying no
+        `checkout_path` at all, yielding "".
         """
         ws = r.get("workspace") or {}
-        wt = r.get("worktree") or ws.get("worktree") or {}
+        wt = ws.get("worktree") or r.get("worktree") or {}
+        path = wt.get("checkout_path") or wt.get("path") or ""
+        if not path:
+            # An empty path is worse than an error: it silently degrades to the main
+            # checkout everywhere downstream — `link_config` symlinks the wrong tree, the
+            # lead is *told* it works in the main checkout, and the bad path is recorded,
+            # so the next open attaches the workspace to the primary checkout for good.
+            raise HerdrError(
+                "workspace_no_path",
+                f"herdr returned no worktree path for workspace {name!r}; "
+                f"got worktree keys {sorted(wt)!r}",
+            )
         return {
             "workspace": name,
             "workspace_id": ws.get("workspace_id", ""),
-            "path": wt.get("checkout_path", ""),
+            "path": path,
             "pane_id": (r.get("root_pane") or {}).get("pane_id", ""),
             "fresh": fresh,
         }
