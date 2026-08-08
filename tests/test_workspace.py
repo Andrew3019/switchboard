@@ -47,6 +47,7 @@ class FakeHerdr:
         self.closed: list[str] = []
         self.calls: list[str] = []
         self.splits: list[tuple[str, str, float]] = []   # (from_pane, direction, ratio)
+        self.split_cwds: list[str] = []                  # where each split pane landed
         self.pane_prompts: list[tuple[str, str]] = []    # what was typed into a raw pane
         self.panes: set[str] = set()                     # every pane believed to exist
         self._n = 0
@@ -155,6 +156,7 @@ class FakeHerdr:
             self._n += 1
             new = f"{pane}s{self._n}"
         self.splits.append((pane, direction, ratio))
+        self.split_cwds.append(cwd or "")
         self.panes.add(new)
         return new
 
@@ -638,6 +640,41 @@ class WorkspaceTest(unittest.TestCase):
             kid = self.b.delegate("t", role="worker", me=HUMAN)
         self.assertEqual(self.h.tabs[-1][0], "")
         self.assertIsNotNone(store.get_agent(self.db, kid))
+
+    # -- the board -------------------------------------------------------
+    #
+    # `sb start` opened one and `sb workspace new` did not, for no reason anybody chose.
+    # The gate is the decided model: a board is the human's window onto agents somebody is
+    # running, so it belongs to an orchestrator lead and to nobody else.
+
+    def test_a_new_workspace_opens_a_board_beside_its_lead(self):
+        self.b.workspace_new("api", me=HUMAN)
+        lead = store.get_agent(self.db, "api-lead")
+        self.assertEqual(len(self.h.splits), 1)
+        from_pane, direction, _ratio = self.h.splits[0]
+        self.assertEqual(from_pane, lead["pane_id"])        # split the lead's own pane
+        self.assertEqual(direction, "right")
+        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+
+    def test_the_board_reads_the_workspace_checkout_not_the_main_one(self):
+        """A board pointed at the main checkout looks right and reports the wrong tree."""
+        r = self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(self.h.split_cwds, [r["path"]])
+        self.assertNotEqual(r["path"], str(self.repo))
+
+    def test_a_worker_lead_gets_no_board(self):
+        """A plain worker forked into its own worktree runs nobody; a panel there is half
+        a screen of empty view."""
+        self.b.workspace_new("api", role="worker", me=HUMAN)
+        self.assertIn("api-lead", self.h.live)              # the lead still spawned
+        self.assertEqual(self.h.splits, [])
+        self.assertEqual(self.h.pane_prompts, [])
+
+    def test_no_board_declines_the_split(self):
+        self.b.workspace_new("api", board=False, me=HUMAN)
+        self.assertIn("api-lead", self.h.live)
+        self.assertEqual(self.h.splits, [])
+        self.assertEqual(self.h.pane_prompts, [])
 
 
 class StartWorkspaceTest(WorkspaceTest):

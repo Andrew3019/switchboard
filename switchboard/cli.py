@@ -208,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     wn.add_argument("--base", default=broker_mod.BASE_BRANCH,
                     help="branch to fork the worktree from")
     wn.add_argument("--focus", action="store_true")
+    wn.add_argument("--no-board", dest="board", action="store_false",
+                    help="do not open the clickable board beside the lead")
 
     r = cmd("restore", help="bring a closed agent back with its context")
     r.add_argument("name")
@@ -645,7 +647,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "workspace":
         r = b.workspace_new(args.name, task=args.task, role=args.role, agent=args.agent,
-                            base=args.base, focus=args.focus, me=me)
+                            base=args.base, focus=args.focus, board=args.board, me=me)
         _emit(args, "\n".join(f"  {k}: {v}" for k, v in r.items()), r)
         return 0
 

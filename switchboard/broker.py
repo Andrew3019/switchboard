@@ -472,13 +472,18 @@ class Broker:
             n += 1
         return f"{MAIN_NAME}-{n}"
 
-    def _open_board(self, name: str, pane: Optional[str]) -> None:
+    def _open_board(self, name: str, pane: Optional[str], *,
+                    cwd: Optional[str] = None) -> None:
         """Open the human's board beside this orchestrator, unless one is up already.
 
         The pane id is remembered so re-running `sb start` returns you to a
         workspace with one board rather than stacking a new one every time. If we
         cannot ask herdr what is open we do nothing: a missing board is a minor
         annoyance, two boards is a mess someone has to close by hand.
+
+        `cwd` is where the board's shell lands: the main checkout for `sb start`, and the
+        workspace's own checkout for `sb workspace new`. A board that reads the wrong
+        checkout's `.switchboard` is worse than no board, because it looks right.
 
         Never raises. `sb start` must not fail because a view would not open.
         """
@@ -499,7 +504,7 @@ class Broker:
             return
 
         try:
-            new = board_mod.open_beside(self.h, pane, cwd=str(self.repo))
+            new = board_mod.open_beside(self.h, pane, cwd=cwd or str(self.repo))
         except Exception as e:
             # This method promises `sb start` cannot fail because of the board, and
             # a promise enforced only for the errors we predicted is not one. An
@@ -532,6 +537,7 @@ class Broker:
         agent: Optional[str] = None,
         base: str = BASE_BRANCH,
         focus: bool = False,
+        board: bool = True,
         me: Optional[str] = None,
     ) -> dict:
         """Open the workspace called `name`, creating it only if it isn't there.
@@ -545,6 +551,11 @@ class Broker:
         With no name, it means the checkout you ran it in — opening a workspace over where
         you already are, which is how you get a visual boundary around a line of work
         without moving anywhere.
+
+        A board opens beside the lead only when the lead is an orchestrator. The board is
+        the human's window onto agents somebody is running; a worker forked into its own
+        worktree runs nobody, so a panel there would be an empty view taking half the
+        screen. `board=False` declines it either way, as `sb start --no-board` does.
         """
         me = me or self.whoami()
         name = name or self._here()
@@ -576,6 +587,13 @@ class Broker:
         created = self._spawn_lead(lead, ws, role=role, task=task, me=me, prior=row)
         store.log_event(self.db, kind="workspace_open", agent=lead,
                         workspace=name, created=created)
+        if board and role == MAIN:
+            # Read the pane back rather than trusting `ws["pane_id"]`: `_spawn_lead` uses
+            # the workspace's root pane only when it is fresh, and opens a tab otherwise —
+            # so which pane the lead ended up in is a fact only the row has.
+            row = store.get_agent(self.db, lead)
+            self._open_board(lead, row["pane_id"] if row else ws["pane_id"],
+                             cwd=ws["path"] or None)
         self._focus(lead, focus)
         return self._result(ws, lead, created=created)
 
