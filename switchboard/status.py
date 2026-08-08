@@ -38,7 +38,11 @@ has not looked, undelivered means it was never told. Only one of those is the ag
 fault, and only one of them is invisible from inside the agent.
 
 Reading status never mutates: mail is counted, never consumed (`mark=False` semantics),
-and counting an undelivered message never delivers it.
+and counting an undelivered message never delivers it. With one exception, and it is worth
+knowing about — GONE is written back (`_record_gone`), because this is the only place that
+ever learns it. That write ends an agent's turn, so it belongs only to a process that lives
+for one command: a caller that outlives the code it started with passes `reap=False` and
+gets the same flags with none of the writes.
 
 Three commands live here because all three are the same join, at three widths:
 
@@ -237,6 +241,7 @@ def collect(
     live_only: bool = False,
     needs_me: bool = False,
     mine: Optional[str] = None,
+    reap: bool = True,
 ) -> Snapshot:
     """The whole readout: one herdr call, one pass over the store.
 
@@ -253,6 +258,15 @@ def collect(
 
     All three keep the ancestors of whatever survives, or the indentation would lie about
     who reports to whom. `mine` bounds that: it never re-adds anything above the caller.
+
+    `reap=False` computes every flag exactly as before but writes nothing: the drift is
+    still rendered, it is just not recorded (see `_record_gone`). It is for a caller that
+    is not a short-lived `sb` process. A `sb board` runs for hours on the `status.py`
+    Python imported at startup, so it re-collects every two seconds with whatever grace
+    window and heuristics were current when the human opened it — three of them, still
+    reaping on code from before `SPAWN_GRACE` existed, is how every spawn in one night
+    came to be marked `failed` during its own startup. A readout should not be able to
+    end an agent's life on the strength of code nobody is running any more.
     """
     from . import store                      # local: keeps this module importable alone
 
@@ -322,7 +336,7 @@ def collect(
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.
-    if consulted:
+    if consulted and reap:
         _record_gone(db, [a.name for a in agents if a.gone])
 
     kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine)

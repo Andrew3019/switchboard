@@ -41,6 +41,7 @@ from . import roles as roles_mod
 from . import store
 from . import validate
 from .herdr import BLOCKED, IDLE, WORKING, Herdr, HerdrError, StateWriteDropped
+from .status import GONE_STATE
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
 # addresses that are not agents, and the role a top-level orchestrator has (which is also
@@ -1586,11 +1587,15 @@ class Broker:
         Safe to be aggressive: closing costs only the pane. Session, summary, messages
         and the on-disk transcript all survive, and `sb restore` brings the agent back.
 
-        Three gates, and which of them a caller may lift is the whole design:
+        Four gates, and which of them a caller may lift is the whole design:
 
         - **finished, and no unread mail.** A sweep never lifts these. Closing an agent
           mid-turn would strand whatever it was doing, and discarding unread mail loses a
           message somebody is blocked on.
+        - **an end nobody reported is re-checked against herdr.** `done` is the agent's
+          own word; `failed` is `status._record_gone`'s inference from one `agent list`,
+          and that call can be taken mid-spawn or against a herdr that hiccupped. So for
+          a `failed` row we ask again, and a sweep never lifts it either.
         - **the role's `cleanup` disposition.** `include_kept` lifts this one, and only
           this one: it says "I mean the keepers too", not "close anything".
         - **everything.** `force` lifts all of it, and is only legal for agents named
@@ -1627,6 +1632,8 @@ class Broker:
             if not force:
                 if a["state"] not in FINISHED:
                     continue                  # only finished agents; --all-idle too
+                if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
+                    continue                  # nobody reported this end, and herdr disagrees
                 if store.unread_for(self.db, a["name"], mark=False):
                     continue                  # unread mail would be lost
                 # Naming an agent is itself the instruction to close it, so an explicit
@@ -1766,6 +1773,26 @@ class Broker:
             except HerdrError:
                 self._alive_unknown = True
         return self._alive_cache
+
+    def _end_still_holds(self, name: str) -> bool:
+        """Does herdr STILL agree that this agent's turn ended?
+
+        Only ever asked about a row whose end was inferred rather than reported —
+        `GONE_STATE`, whose one writer is `status._record_gone`. That row is a cached
+        observation of a single `agent list`, and the readout that took it may have been
+        looking during the agent's own spawn, or running old code with a shorter grace, or
+        racing another reader. Re-taking it here is the whole protection: `cleanup` is the
+        one caller that acts on the row irreversibly.
+
+        Fails CLOSED, and this is the one place in the file that does. `_agent_states()`
+        returns None for "cannot tell", and `_busy`/`_running_tops` read that as "carry
+        on" because the cost of their doubt is a doorbell or a duplicate root. Here the
+        costs are reversed: a wrong close takes a live agent's pane, and for a row that
+        never reached a session id it takes the work with it — `restore` needs a session
+        id, so there is nothing to come back to. A wrong SKIP costs one `--force <name>`.
+        """
+        states = self._agent_states()
+        return states is not None and name not in states
 
     def _busy(self, who: str) -> bool:
         """Is this agent mid-turn right now, per herdr?

@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,6 +33,7 @@ class FakeHerdrAPI:
         self.pane_prompts: list[tuple] = []
         self.unreachable: set = set()
         self.states_by_name: dict = {}
+        self.list_error: Optional[HerdrError] = None   # herdr itself cannot be asked
         self.workspaces: list = []
         self.tabs: list = []
         self._n = 0
@@ -57,6 +59,8 @@ class FakeHerdrAPI:
 
     def list_agents(self):
         from switchboard.herdr import Agent as _A
+        if self.list_error:
+            raise self.list_error
         return [_A(name=n, pane_id="w1:p0", state=st) for n, st in self.states_by_name.items()]
 
     def create_workspace(self, label, *, cwd=None, focus=False):
@@ -532,6 +536,72 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.cleanup(me="orch"), [])          # still reads 'working'
         status.collect(self.db, self.h)
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+
+    def test_cleanup_closes_a_finished_agent_herdr_still_has(self):
+        """The normal sweep, and the reason the liveness gate is scoped to `failed`: an
+        agent that called `sb done` keeps a live idle pane, and herdr lists it. Gating
+        every close on herdr's silence would leave nothing for `sb cleanup` to do."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")
+        self.h.states_by_name = {"kid": "idle"}
+        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+
+    def test_cleanup_never_closes_a_reaped_agent_herdr_still_has(self):
+        """The one that already destroyed two live agents. `failed` is not a report — it
+        is `status._record_gone`'s inference from one `agent list`, and a readout taken
+        during a slow spawn writes it about an agent that is very much alive. herdr still
+        listing the name refutes the row, so a bare sweep must leave it alone."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}                     # a readout mid-spawn sees nothing
+        status.collect(self.db, self.h)
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
+
+        self.h.states_by_name = {"kid": "working"}     # the spawn landed after all
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
+        self.assertEqual(self.h.closed, [])
+
+    def test_cleanup_will_not_close_a_reaped_agent_when_herdr_cannot_be_asked(self):
+        """Fail CLOSED, alone in this file. Everywhere else "cannot tell" means carry on,
+        because the cost is a doorbell or a duplicate root. Here it is a live pane, and
+        for a row that never got a session id there is no `sb restore` to undo it — so
+        an unreachable herdr must stop the sweep, not wave it through."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}
+        status.collect(self.db, self.h)                # reaped while herdr was answering
+
+        self.h.list_error = HerdrError("down", "no server")
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
+        self.assertEqual(self.h.closed, [])
+        # And it is a skip, not a state change: the row is untouched for the next sweep.
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
+
+    def test_cleanup_dry_run_does_not_offer_a_reaped_agent_herdr_still_has(self):
+        """`--dry-run` is what a human reads before sweeping; listing a live agent there
+        is how they learn to trust the sweep that kills it."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}
+        status.collect(self.db, self.h)
+        self.h.states_by_name = {"kid": "working"}
+        self.assertEqual(self.restart_sb().cleanup(me="orch", dry_run=True), [])
+
+    def test_cleanup_force_still_closes_a_named_agent_herdr_has(self):
+        """The escape hatch has to survive the new gate, or an agent herdr has genuinely
+        lost track of — listed but dead — becomes unreachable by any command."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}
+        status.collect(self.db, self.h)
+        self.h.states_by_name = {"kid": "working"}
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch", force=True), ["kid"])
 
     def test_cleanup_never_closes_a_blocked_agent(self):
         store.create_agent(self.db, name="orch", role="orchestrator")

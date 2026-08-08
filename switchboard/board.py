@@ -10,6 +10,12 @@ board appears nowhere in defaults/protocol.md, which is where an agent actually
 learns what `sb` can do. Everything here is read-only against the store, with
 exactly one side effect — `herdr agent focus`, a human jumping to a pane.
 
+That claim was false until `snapshot()` started passing `reap=False`: the
+refresh went through `status.collect`, which marks an agent `failed` when herdr
+no longer lists it, so every board was a reaper on a two-second tick running
+whatever `status.py` it imported at startup. Read `snapshot()` before removing
+that argument.
+
 Proved out by `scripts/05-mouse.py` and `scripts/06-board.py`: herdr forwards
 SGR mouse events to a pane, and a decoded row maps back to an agent. Those two
 stay as the record of what was proven; this is the version that is maintained.
@@ -287,6 +293,12 @@ def snapshot():
 
     A board that tracebacks into a raw terminal is worse than a board that says
     it cannot see anything, so every failure below becomes a line on screen.
+
+    `reap=False` is load-bearing, not a tidy-up. This process outlives the code
+    it was started with — hours of two-second ticks against the `status.py` that
+    existed when the human opened it — and drift written from here is written by
+    a version of the heuristic nobody can read any more. The flags still appear
+    on screen; ending an agent's turn is left to a short-lived `sb` process.
     """
     from . import store
     from .herdr import Herdr
@@ -296,7 +308,7 @@ def snapshot():
     except Exception as e:                       # not a repo, unreadable db, ...
         return _empty(), f"store unavailable: {e}"
     try:
-        snap = status_mod.collect(db, Herdr())
+        snap = status_mod.collect(db, Herdr(), reap=False)
     except Exception as e:
         return _empty(), f"could not read the tree: {e}"
     finally:

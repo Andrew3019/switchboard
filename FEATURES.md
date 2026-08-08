@@ -133,8 +133,10 @@ directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or
 
 ### `sb cleanup [name...] [--include-kept] [--force] [--dry-run]`
 Closes finished agents' panes — never their history; `sb restore` brings a closed agent
-back. With no names, sweeps the caller's own subtree (or everything, for a human). Three
-layered safety gates: must be finished with no unread mail; the agent's own recorded
+back. With no names, sweeps the caller's own subtree (or everything, for a human). Four
+layered safety gates: must be finished with no unread mail; an end that no agent reported
+(`failed`, written by `status._record_gone`) is re-checked against `agent list` and left
+alone if herdr still has the agent **or cannot be asked**; the agent's own recorded
 disposition (`--include-kept` lifts it); `--force` lifts every gate but only alongside an
 explicit name.
 - Entry point: `cli.py:801-806` → `Broker.cleanup` (`broker.py:1554-1626`)
@@ -263,7 +265,9 @@ marking any tier "UNAVAILABLE" if its provider has no backend wired.
 ### `sb board` — hidden, human-only
 A clickable live view of the agent tree (glyphs, click-to-focus, scroll), periodically
 refreshed. Read-only against the store except for one side effect: `herdr agent focus`
-when a human clicks an agent.
+when a human clicks an agent — and it is read-only only because `snapshot()` passes
+`status.collect(..., reap=False)`. Without that the refresh marks agents `failed`, on
+whatever `status.py` this long-lived process imported at startup.
 - Entry point: `cli.py:120` (registered `hidden=True`, so it does not appear in
   `sb --help`) → `broker._open_board` / `board.main`/`board.open_beside`
   (`switchboard/board.py`, 463 lines)

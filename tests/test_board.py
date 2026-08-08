@@ -6,19 +6,22 @@ like a row, and the click that follows focuses a different agent than the one un
 cursor — silently, and indistinguishably from a correct click.
 
 So what is pinned here is the mapping, not the appearance: decode → layout → agent_at.
-Everything in this file is pure, which is why the terminal, herdr and the store are all
-absent below.
+That half is pure, which is why the terminal, herdr and the store are absent from it. The
+last class is the exception, and says why it has to be.
 """
 
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import board, status  # noqa: E402
+from switchboard import board, status, store  # noqa: E402
+from switchboard import herdr as herdr_mod  # noqa: E402
 
 
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
@@ -147,6 +150,46 @@ class LayoutTest(unittest.TestCase):
         s = snap(agent("a", stalled=True), agent("b", gone=True, alive=False))
         rows = board.layout(s, top=0, height=10, width=200, msg="")
         self.assertIn(status.summary_line(s), rows[0][0])
+
+
+class SnapshotIsReadOnlyTest(unittest.TestCase):
+    """The one impure test in this file, and it earns the exception.
+
+    Everything above is pure because the board's bugs are drawing bugs. This one is not
+    about drawing: a board refreshes every two seconds for as long as a human leaves it
+    open, on the `status.py` that Python imported at startup, and `collect` writes. Three
+    boards older than a fix to the spawn grace once marked every agent spawned that night
+    `failed` during its own startup. Nothing else in the suite can catch that, because
+    every other caller of `collect` is a process that lives for one command.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "state.db"
+        db = store.connect(path=self.path)
+        # Absent from herdr, past its spawn: the row a reaping readout would end.
+        store.create_agent(db, name="w1", role="worker", session_id="s1")
+        db.close()
+
+    def test_a_refresh_shows_the_drift_and_writes_none_of_it(self):
+        class NoAgents:
+            def list_agents(self): return []
+
+        connect = store.connect                       # before the patch shadows it
+        with mock.patch.object(store, "connect", lambda: connect(path=self.path)), \
+             mock.patch.object(herdr_mod, "Herdr", NoAgents):
+            s, note = board.snapshot()
+
+        self.assertEqual(note, "")
+        self.assertTrue(s.agents[0].gone)             # the screen says it, exactly as before
+
+        db = store.connect(path=self.path)
+        self.addCleanup(db.close)
+        row = store.get_agent(db, "w1")
+        self.assertEqual(row["state"], "working")     # ...and the store is untouched
+        self.assertIsNone(row["ended_at"])
+        self.assertEqual(store.recent_events(db, agent="w1"), [])
 
 
 if __name__ == "__main__":

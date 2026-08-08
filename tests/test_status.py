@@ -205,6 +205,29 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.row("w1")["state"], "working")
         self.assertIsNone(self.row("w1")["ended_at"])
 
+    # -- reap=False: a reader that outlives its own code ------------------
+
+    def test_a_readout_can_see_the_drift_without_writing_it(self):
+        """What `sb board` passes. It refreshes every two seconds for hours on the
+        `status.py` it imported at startup, so drift written from there is written by a
+        heuristic nobody is running any more — three such boards reaped every spawn of one
+        night. The flag is still computed, so the screen says exactly what it said before."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        snap = status.collect(self.db, FakeHerdr([]), reap=False)
+        self.assertTrue(self.by_name(snap)["w1"].gone)   # still reported
+
+        self.assertEqual(self.row("w1")["state"], "working")
+        self.assertIsNone(self.row("w1")["ended_at"])
+        self.assertEqual(store.recent_events(self.db, agent="w1"), [])
+
+    def test_not_reaping_leaves_the_row_reachable_by_a_later_reap(self):
+        """`reap=False` defers the write, it does not veto it: the next `sb status` — a
+        short-lived process on current code — still closes a genuinely dead row."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        status.collect(self.db, FakeHerdr([]), reap=False)
+        status.collect(self.db, FakeHerdr([]))
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
     def test_no_herdr_at_all_never_reaps_anything(self):
         store.create_agent(self.db, name="w1", role="worker")
         status.collect(self.db, None)
