@@ -854,6 +854,115 @@ class WorktreeIsAFactTest(WorkspaceTest):
         self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
 
 
+class JoinWorkspaceTest(WorkspaceTest):
+    """`sb delegate --workspace <name>` — join a workspace somebody already opened.
+
+    The other half of the fork rule: a spawn either forks its own worktree or joins one by
+    name, and joining is shared exactly as `sb workspace new` is — same branch, same
+    checkout, same herdr workspace, however many agents are in it. The one thing it must
+    never do is create, because `--workspace` is what you type when a fork was refused.
+    """
+
+    def _join(self, name: str, *, me: str = "root") -> str:
+        return self.b.delegate("t", role="worker", me=me,
+                               **self.b.join_workspace(name))
+
+    def setUp(self):
+        super().setUp()
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo), pane_id="w1:p1")
+
+    def test_a_child_joins_the_named_workspace_instead_of_its_parents(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        row = store.get_agent(self.db, self._join("api"))
+        self.assertEqual(row["workspace"], "api")
+        self.assertEqual(row["branch"], "api")
+        self.assertEqual(row["cwd"], r["path"])
+        self.assertEqual(row["workspace_id"], r["workspace_id"])
+
+    def test_the_joiners_tab_is_placed_in_that_workspace(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        self._join("api")
+        self.assertEqual(self.h.tabs[-1], (r["workspace_id"], r["path"]))
+
+    def test_joining_creates_no_second_worktree(self):
+        """One name, one checkout — the whole point. A join that forks is a fork."""
+        self.b.workspace_new("api", me=HUMAN)
+        self._join("api")
+        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
+        self.assertEqual(self._branches(), ["api"])
+
+    def test_two_joiners_land_in_the_same_place(self):
+        self.b.workspace_new("api", me=HUMAN)
+        rows = [store.get_agent(self.db, self._join("api")) for _ in range(2)]
+        self.assertEqual({r["workspace_id"] for r in rows}, {rows[0]["workspace_id"]})
+        self.assertEqual({r["cwd"] for r in rows}, {rows[0]["cwd"]})
+
+    def test_the_joiner_is_told_it_is_sharing(self):
+        self.b.workspace_new("api", me=HUMAN)
+        self._join("api")
+        joined = " ".join(self.h.started[-1]["prompts"])
+        self.assertIn("workspace 'api'", joined)
+        self.assertIn("shared", joined)
+
+    def test_the_joiners_own_children_inherit_the_workspace(self):
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self._join("api")
+        grandkid = self.b.delegate("t", role="worker", me=kid)
+        self.assertEqual(store.get_agent(self.db, grandkid)["workspace"], "api")
+        self.assertEqual(store.get_agent(self.db, grandkid)["branch"], "api")
+
+    def test_joining_disturbs_no_lead(self):
+        """Joining is not opening: the workspace's lead is left exactly as it was."""
+        self.b.workspace_new("api", me=HUMAN)
+        started = len(self.h.started)
+        self._join("api")
+        self.assertEqual(len(self.h.started), started + 1)
+        self.assertEqual(store.get_agent(self.db, "api-lead")["state"], "working")
+
+    # -- what it refuses -------------------------------------------------
+
+    def test_a_workspace_nobody_opened_is_refused_never_forked(self):
+        with self.assertRaises(ValueError) as e:
+            self.b.join_workspace("nope")
+        self.assertIn("sb workspace new nope", str(e.exception))
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_bare_space_is_refused_and_forks_nothing(self):
+        """A top-level orchestrator's space has no checkout of its own to share, and
+        asking herdr for one by that name is how a label used to become a branch."""
+        with self.assertRaises(ValueError) as e:
+            self.b.join_workspace("scratch")
+        self.assertIn("bare space", str(e.exception))
+        self.assertEqual(self.h.calls, [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_refused_join_spawns_nothing(self):
+        before = set(self.h.live)
+        with self.assertRaises(ValueError):
+            self._join("nope")
+        self.assertEqual(set(self.h.live), before)
+
+    # -- the flag --------------------------------------------------------
+
+    def test_the_flag_parses_and_is_checked_as_a_branch_name(self):
+        from switchboard import validate
+        from switchboard.cli import _validate, build_parser
+
+        args = build_parser().parse_args(["delegate", "t", "--workspace", " api "])
+        _validate(args)
+        self.assertEqual(args.workspace, "api")          # normalised, as a ref name is
+
+        bad = build_parser().parse_args(["delegate", "t", "--workspace", "a b"])
+        with self.assertRaises(validate.Invalid):
+            _validate(bad)
+
+    def test_delegating_without_the_flag_is_unchanged(self):
+        from switchboard.cli import build_parser
+        self.assertIsNone(build_parser().parse_args(["delegate", "t"]).workspace)
+
+
 class PluginsOnEverySpawnPathTest(unittest.TestCase):
     """A repo's plugin bindings reach EVERY spawn, not just `sb delegate`'s.
 

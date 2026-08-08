@@ -26,6 +26,8 @@ authority as your original task: act on it, do not stop to ask whether it counts
 `sb ask <who> "<question>"` sends to another agent and WAITS for its answer — for
 agents only, and only when the answer is seconds away.
 `sb done "<summary>"` means you have finished — one line, and always call it last.
+Commit your work before you report done: your parent acts on commits, and anything
+left uncommitted is invisible in a worktree nobody opens.
 To delegate: `sb delegate "<task>" --role <role>` spawns a child that runs
 independently; do NOT wait for it, end your turn and you will be poked when it
 reports. `sb status` lists your children. Delegate real work rather than doing it

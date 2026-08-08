@@ -597,6 +597,43 @@ class Broker:
         self._focus(lead, focus)
         return self._result(ws, lead, created=created)
 
+    def join_workspace(self, name: str) -> dict:
+        """Where a child has to be placed to JOIN the existing workspace `name`.
+
+        What `sb delegate --workspace <name>` resolves: the answer is the placement
+        keywords `delegate` already takes, so the CLI is `delegate(..., **join)` and no
+        second spawn path exists to drift from the first.
+
+        Shared by name, exactly as `sb workspace new` is — one name is one branch, one
+        worktree, one herdr workspace, however many agents work in it. The one difference
+        is that this never CREATES. `--workspace` is what somebody types *because* a fork
+        was refused (the branch is already checked out); quietly forking them another one
+        is the single outcome they did not ask for. So a name nobody has opened is an
+        error naming the verb that opens it, not a new worktree.
+        """
+        if store.known_workspace(self.db, name) \
+                and store.workspace_branch(self.db, name) is None:
+            # A bare space — a top-level orchestrator's, laid over the main checkout.
+            # It has no checkout of its own to share, and asking herdr to open one by
+            # this name would fork the branch that `create=False` exists to prevent.
+            raise ValueError(
+                f"workspace {name!r} is a bare space with no checkout of its own, so "
+                f"there is no worktree to join — leave --workspace off to work where "
+                f"you are"
+            )
+        try:
+            ws = self._attach_workspace(name, create=False)
+        except HerdrError as e:
+            raise ValueError(
+                f"no workspace called {name!r} to join: --workspace joins one that "
+                f"already exists and never forks. Open it with `sb workspace new "
+                f"{name}`, or leave --workspace off to work where you are ({e.message})"
+            ) from e
+        store.log_event(self.db, kind="workspace_join", workspace=name,
+                        workspace_id=ws["workspace_id"])
+        return {"workspace": ws["workspace"], "branch": ws.get("branch"),
+                "workspace_id": ws["workspace_id"], "cwd": ws["path"] or None}
+
     @staticmethod
     def _result(ws: dict, lead: str, *, created: bool) -> dict:
         """What the caller gets. `created` is the only signal of newness — `fresh` stays

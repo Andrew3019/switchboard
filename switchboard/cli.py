@@ -123,6 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"prompt plugin from {_plugin_dir_help()} (repeatable); "
                         f"an unknown value is used as a literal instruction")
     d.add_argument("--name")
+    d.add_argument("--workspace", metavar="NAME",
+                   help="join this EXISTING workspace instead of working where you are "
+                        "(open one with: sb workspace new <name>)")
     d.add_argument("--model", help=_tier_help())
     d.add_argument("--keep", action="store_true", help="do not auto-close when finished")
     d.add_argument("--ephemeral", action="store_true", help="close as soon as it finishes")
@@ -282,6 +285,10 @@ def _validate(args) -> None:
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
         if args.name is not None:
             args.name = validate.agent_name(args.name, "--name")
+        # A workspace name IS a branch name, so it is checked as one — the same rule
+        # `sb workspace new` is held to, since both name the same place.
+        if args.workspace is not None:
+            args.workspace = validate.ref_name(args.workspace, "--workspace")
         if args.model is not None:
             args.model = validate.token(args.model, "--model")
         if args.as_prompt is not None:
@@ -529,11 +536,18 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # `_resolve_bindings`, because this branch is not the only way a spawn happens:
         # `sb workspace new` and `sb start` reach `delegate` directly, and while the
         # layering lived here their leads got nothing bound at all.
+        # `--workspace` says WHERE, and only where: the broker resolves the name to the
+        # placement keywords `delegate` already takes, so a join spawns through exactly
+        # the same call an inheriting child does. Without it, `delegate` inherits the
+        # caller's workspace or forks, as it always has.
+        join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           name=args.name or _derived_name(db, args.role),
                           model=args.model, with_=args.with_,
-                          cleanup=cleanup, me=me)
-        _emit(args, f"delegated to {name}", {"name": name})
+                          cleanup=cleanup, me=me, **join)
+        where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
+        _emit(args, f"delegated to {name}{where}",
+              {"name": name, "workspace": join.get("workspace")})
         return 0
 
     if cmd == "ask":
