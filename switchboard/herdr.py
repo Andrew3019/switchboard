@@ -40,6 +40,13 @@ PERMISSION_MODE = config.setting("herdr.permission_mode")
 # is the same branch every other layer means by "where work starts".
 BASE_BRANCH = config.setting("vocabulary.base_branch")
 
+# Our own ceiling on how long the `herdr` BINARY may take to hand control back. Distinct
+# from every `--timeout` we pass herdr: those bound herdr's internal waiting, not the
+# subprocess. Without this a stuck herdr process hangs `sb` forever — which is what a
+# minute-plus `sb delegate` hang turned out to be. `[timeouts]`, same knob every other
+# module bounds a `git`/`herdr` call with.
+SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+
 # Spawn is genuinely flaky: `agent start` fails outright if the pane has not yet reached an
 # interactive shell prompt. `[timeouts]` and `[retries]`.
 SPAWN_TIMEOUT_MS = config.setting("timeouts.spawn_ms")
@@ -109,11 +116,24 @@ class Agent:
         )
 
 
-Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
-def _run(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(list(argv), capture_output=True, text=True)
+def _run(argv: Sequence[str], *, timeout: float) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
+
+
+def _grace(timeout_ms: int) -> float:
+    """Our ceiling for a call that carries its own `--timeout`.
+
+    A call that is *supposed* to take ninety seconds must not be killed at ten, so the
+    flat ceiling is wrong for `agent start` and `agent wait`: they get whatever deadline
+    we already told herdr to honour, plus the ordinary allowance for it to return after
+    honouring it. That margin is what distinguishes "herdr timed out and said so" — the
+    error we want, since it names the agent and the phase — from "herdr never answered".
+    No new knob: both numbers are already `[timeouts]` entries.
+    """
+    return timeout_ms / 1000 + SUBPROCESS_TIMEOUT
 
 
 class Herdr:
@@ -132,10 +152,32 @@ class Herdr:
 
     # -- plumbing --------------------------------------------------------
 
-    def _call(self, *args: str) -> dict:
+    def _spawn(self, argv: Sequence[str], timeout: float) -> "subprocess.CompletedProcess[str]":
+        """Run the binary under a deadline, and make blowing it a legible failure.
+
+        Every call in this module goes through here, because the failure being prevented
+        is not herdr saying no — it is herdr saying nothing, forever, while `sb` waits.
+        `subprocess.run` kills the child on timeout, so the process is gone by the time
+        this raises; what the caller loses is only whatever herdr had not yet reported.
+        """
+        try:
+            return self._run(argv, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            what = " ".join(argv[1:]) or self.binary
+            if self._on_event:
+                self._on_event(kind="herdr", argv=what, ms=int(timeout * 1000), rc=-1,
+                               out="", err=f"timed out after {timeout:g}s")
+            raise HerdrError(
+                "timeout",
+                f"`herdr {what}` did not return within {timeout:g}s — the herdr process "
+                f"was stuck, not slow; killed it rather than wait for it",
+                argv,
+            ) from None
+
+    def _call(self, *args: str, timeout: Optional[float] = None) -> dict:
         argv = [self.binary, *args]
         t0 = time.time()
-        proc = self._run(argv)
+        proc = self._spawn(argv, SUBPROCESS_TIMEOUT if timeout is None else timeout)
         ms = int((time.time() - t0) * 1000)
 
         payload: dict[str, Any] = {}
@@ -167,7 +209,7 @@ class Herdr:
     # -- health ----------------------------------------------------------
 
     def version(self) -> str:
-        p = self._run([self.binary, "--version"])
+        p = self._spawn([self.binary, "--version"], SUBPROCESS_TIMEOUT)
         return (p.stdout or "").strip().split()[-1] if p.stdout else ""
 
     def check(self, *, kinds: Sequence[str] = ("claude",)) -> None:
@@ -188,7 +230,7 @@ class Herdr:
             )
 
     def integration_installed(self, kind: str) -> bool:
-        p = self._run([self.binary, "integration", "status"])
+        p = self._spawn([self.binary, "integration", "status"], SUBPROCESS_TIMEOUT)
         for line in (p.stdout or "").splitlines():
             if line.strip().startswith(f"{kind}:"):
                 return "not installed" not in line
@@ -286,7 +328,11 @@ class Herdr:
             args += ["--cwd", str(cwd)]
         if label:
             args += ["--label", label]
-        return self._call(*args)
+        # A git checkout is the other thing in here we do not get to bound: how long
+        # `worktree create` takes is a property of the repo, not of herdr being stuck. The
+        # flat ceiling would fail a spawn on a big repo, so it gets the same allowance as
+        # the other slow setup step rather than a knob of its own.
+        return self._call(*args, timeout=_grace(SPAWN_TIMEOUT_MS))
 
     def open_worktree(self, *, path: Optional[str] = None, branch: Optional[str] = None,
                       cwd: Optional[str] = None, label: Optional[str] = None) -> dict:
@@ -307,7 +353,7 @@ class Herdr:
             args += ["--cwd", str(cwd)]
         if label:
             args += ["--label", label]
-        return self._call(*args)
+        return self._call(*args, timeout=_grace(SPAWN_TIMEOUT_MS))   # checkout, as above
 
     def rename_workspace(self, workspace_id: str, label: str) -> None:
         self._call("workspace", "rename", workspace_id, label)
@@ -363,6 +409,10 @@ class Herdr:
                     "agent", "start", name,
                     "--kind", kind, "--pane", pane_id,
                     "--timeout", str(timeout_ms), "--", *agent_args,
+                    # The slow call, legitimately: herdr waits up to `timeout_ms` for the
+                    # session to become interactive. Its own timeout usually fires first and
+                    # says why; ours only catches a herdr that never answers at all.
+                    timeout=_grace(timeout_ms),
                 )
                 return Agent.from_json(r.get("agent", {}))
             except HerdrError as e:
@@ -434,7 +484,7 @@ class Herdr:
         argv = [self.binary, "pane", "read", pane_id, "--source", "recent",
                 "--lines", str(lines)]
         t0 = time.time()
-        p = self._run(argv)
+        p = self._spawn(argv, SUBPROCESS_TIMEOUT)
         text = p.stdout or ""
 
         if self._on_event:
@@ -563,7 +613,9 @@ class Herdr:
             remaining = max(1, int((deadline - time.time()) * 1000))
             started = time.time()
             self._call("agent", "wait", name, "--until", until,
-                       "--timeout", str(remaining))
+                       "--timeout", str(remaining),
+                       # Blocking by design, for as long as we asked it to block.
+                       timeout=_grace(remaining))
             a = self.get_agent(name)
             if a is None:
                 raise HerdrError("agent_gone", f"{name} vanished while waiting")
