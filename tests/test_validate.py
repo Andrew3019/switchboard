@@ -250,7 +250,7 @@ class CliBoundaryTest(unittest.TestCase):
         self.bad(["log", "--agent", "Worker"])
 
     def test_verbs_with_nothing_to_check_are_untouched(self):
-        for argv in (["status"], ["inbox"], ["doctor"], ["init"], ["plugins"],
+        for argv in (["status"], ["inbox"], ["doctor"], ["init"], ["presets"],
                      ["cleanup", "--all-idle"], ["start"]):
             _validate(parse(argv))           # must not raise
 

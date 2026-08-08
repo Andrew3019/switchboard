@@ -18,11 +18,19 @@ repo_dir = ".switchboard"
 roles_file    = "roles.toml"
 roles_dir     = "roles"
 models_file   = "models.toml"
-plugins_file  = "plugins.toml"
-plugins_dir   = "plugins"
+presets_file  = "presets.toml"
+presets_dir   = "presets"
 protocol_file = "protocol.md"
 prompts_file  = "prompts.toml"
 settings_file = "settings.toml"
+
+# The pre-rename spelling of `presets_file`/`presets_dir`. Read only when the new one is
+# genuinely absent, so a repo still holding `.switchboard/plugins/` and
+# `.switchboard/plugins.toml` keeps working untouched (see `config.path_for_legacy`).
+# The name moved because "plugin" is now a different thing: a preset is prompt text, a
+# plugin is code. Do not point anything new at these.
+plugins_file  = "plugins.toml"
+plugins_dir   = "plugins"
 
 # Per-user, between the shipped tiers and the repo's. Tiers only: this is where you say
 # what `strong` means on YOUR machine, and it is not shared with anyone.
@@ -131,8 +139,8 @@ agent_name = 32
 # have been a file. It also stops a runaway agent pasting a transcript into a mailbox.
 text = 4000
 
-# Authored prompt text (`--as`, and plugin files after flattening). Config rather than
-# traffic, so it gets more room — a plugin is allowed to be a substantial briefing.
+# Authored prompt text (`--as`, and preset files after flattening). Config rather than
+# traffic, so it gets more room — a preset is allowed to be a substantial briefing.
 prompt = 8000
 
 # A workspace name is used verbatim as a git branch name. Refs have no real length limit,

@@ -6,6 +6,6 @@ If you hit a bug in switchboard itself (the `sb` command or anything under
 - Append one entry to `BUGS.md` in the repo root: what you ran, what you expected, what
   happened, and the exact error text.
 - Keep going with your actual task afterwards.
-- If the bug blocks you entirely, run `sb ask human` instead.
+- If the bug blocks you entirely, run `sb block` instead.
 
 A silent workaround hides the bug from everyone else and is worse than the bug.

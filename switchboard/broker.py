@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from . import config
-from . import plugins as plugins_mod
+from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
 from . import validate
@@ -1101,21 +1101,21 @@ class Broker:
         the part that stays true either way.
 
         Layered, most general first: repo defaults -> the role's own -> the caller's
-        `--with`. Each layer appends (see `plugins.for_role`).
+        `--with`. Each layer appends (see `presets.for_role`).
 
         Resolved HERE rather than in the CLI, because `delegate` is the one place every
         spawn passes through. While the CLI's `delegate` branch owned this, `sb workspace
         new` and `sb start` reached `delegate` without it and their leads silently got no
-        plugins at all — not even the repo's every-agent bindings.
+        presets at all — not even the repo's every-agent bindings.
 
-        Validated after resolution because THIS is what becomes an agent argument: a plugin
-        file is flattened to one line on the way out, but a repo's plugins.toml can also
-        name a plugin that no longer flattens cleanly, and that failure should name the
-        plugin rather than arrive as invalid_agent_argument.
+        Validated after resolution because THIS is what becomes an agent argument: a preset
+        file is flattened to one line on the way out, but a repo's presets.toml can also
+        name a preset that no longer flattens cleanly, and that failure should name the
+        preset rather than arrive as invalid_agent_argument.
         """
-        names = plugins_mod.for_role(self.repo, role, extra)
-        return [validate.line(p, "plugin text", max_len=validate.MAX_PROMPT)
-                for p in plugins_mod.resolve(names, self.repo)]
+        names = presets_mod.for_role(self.repo, role, extra)
+        return [validate.line(p, "preset text", max_len=validate.MAX_PROMPT)
+                for p in presets_mod.resolve(names, self.repo)]
 
     def _fork_for(self, name: str, *, parent: str) -> Optional[dict]:
         """Give this child a worktree of its own. The branch is the agent's NAME.

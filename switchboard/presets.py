@@ -1,22 +1,27 @@
-"""Prompt plugins — drop-in behaviour, per repo.
+"""Presets — drop-in prompt text, per repo.
 
-A plugin is one markdown file in `<repo>/.switchboard/plugins/<name>.md`. Adding a
+A preset is one markdown file in `<repo>/.switchboard/presets/<name>.md`. Adding a
 behaviour means adding a file; nothing registers it, nothing imports it.
 
     sb delegate "review PR 42" --role reviewer --with adversarial --with report-bug
 
+This was called a "plugin" until the word was needed for something else. A preset is
+prompt text and cannot run; a plugin is Python and can. `.md` versus `.py` is the whole
+sorting rule, and it is why the two now have separate names, separate directories, and
+separate bindings files. See `.switchboard/design/PLUGIN-REDESIGN.md` §1.
+
 Why files rather than lines in the protocol:
 
-- The protocol is what EVERY agent needs. A plugin is what SOME agents need, and paying
+- The protocol is what EVERY agent needs. A preset is what SOME agents need, and paying
   for it on every spawn is exactly the context tax C0 warns about.
-- Plugins are per-repo, so what switchboard's agents need has no bearing on lore's.
+- Presets are per-repo, so what switchboard's agents need has no bearing on lore's.
 - They are editable without touching code, which is the point of "customizable".
 
-That last one is also why plugin FILES are not layered out of `defaults/`, while almost
-everything else here is: a shipped plugin would arrive in every repo whether or not it
+That last one is also why preset FILES are not layered out of `defaults/`, while almost
+everything else here is: a shipped preset would arrive in every repo whether or not it
 suited the work, and would then have to be argued back out. Only the BINDINGS — which
-plugin applies to which role — are shipped, in `defaults/plugins.toml`, and a repo's
-`.switchboard/plugins.toml` joins them rather than replacing them.
+preset applies to which role — are shipped, in `defaults/presets.toml`, and a repo's
+`.switchboard/presets.toml` joins them rather than replacing them.
 
 Files are written multi-line for humans and flattened to a single line on the way out,
 because herdr rejects newlines in agent arguments — the constraint that already forced
@@ -34,29 +39,34 @@ from typing import Iterable, Optional
 from . import config
 
 # Both of these are `[paths]` entries in settings.toml — see config.py. The functions stay
-# because "where do plugins live" is a question the rest of the code should ask rather than
+# because "where do presets live" is a question the rest of the code should ask rather than
 # assemble for itself.
+#
+# Each reads the new key and falls back to the pre-rename one, so a repo still holding
+# `.switchboard/plugins/` and `.switchboard/plugins.toml` keeps working untouched. There is
+# no flag day: the fallback only applies when the new spelling is genuinely absent, so a
+# repo that has moved never looks at the old path again.
 
 
-def plugin_dir(repo: Path) -> Path:
-    return config.path_for("plugins_dir", repo)
+def preset_dir(repo: Path) -> Optional[Path]:
+    return config.path_for_legacy("presets_dir", "plugins_dir", repo)
 
 
-def bindings_file(repo: Path) -> Path:
-    return config.path_for("plugins_file", repo)
+def bindings_file(repo: Path) -> Optional[Path]:
+    return config.path_for_legacy("presets_file", "plugins_file", repo)
 
 
 def available(repo: Path) -> dict[str, Path]:
-    """Every plugin this repo can name — shipped ones, then the repo's own.
+    """Every preset this repo can name — shipped ones, then the repo's own.
 
     Layered like everything else in `defaults/`: a repo's `<name>.md` replaces the shipped
-    one of that name, and a repo with no plugin directory still gets all the shipped ones.
-    Without this the shipped `plugins.toml` bound names to files that only existed in an
+    one of that name, and a repo with no preset directory still gets all the shipped ones.
+    Without this the shipped `presets.toml` bound names to files that only existed in an
     untracked directory, so a fresh clone had bindings pointing at nothing.
     """
     found: dict[str, Path] = {}
-    shipped = config.defaults_dir() / "plugins"
-    for d in (shipped, plugin_dir(repo)):
+    shipped = config.defaults_dir() / "presets"
+    for d in (shipped, preset_dir(repo)):
         if d is None or not d.is_dir():
             continue
         found.update({f.stem: f for f in sorted(d.glob("*.md"))})
@@ -74,7 +84,7 @@ def bindings(repo: Path) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
 
     Shipped bindings joined with this repo's: a repo adding one must not wipe the others.
     """
-    return config.plugin_bindings(repo)
+    return config.preset_bindings(repo)
 
 
 def for_role(repo: Path, role: str, extra: Iterable[str] = ()) -> list[str]:

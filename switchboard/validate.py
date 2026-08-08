@@ -59,8 +59,8 @@ LEAD_SUFFIX = config.setting("vocabulary.lead_suffix")
 # Named in the error you get for a multi-line prompt, because that error's whole job is to
 # say where multi-line guidance DOES belong. Assembled from `[paths]` so it cannot become
 # a lie the day someone moves the directory.
-PLUGIN_DIR_HINT = "{}/{}/".format(config.setting("paths.repo_dir"),
-                                  config.setting("paths.plugins_dir"))
+PRESET_DIR_HINT = "{}/{}/".format(config.setting("paths.repo_dir"),
+                                  config.setting("paths.presets_dir"))
 
 # C0 control characters, minus the whitespace we tolerate (\t \n \r). These arrive from
 # copy-paste and terminal escape sequences; they corrupt any pane they are echoed into.
@@ -114,7 +114,7 @@ def line(value: Optional[str], field: str, *, max_len: int = MAX_TEXT) -> str:
             f"{field} must be a single line: herdr refuses any agent argument containing "
             f"a newline (invalid_agent_argument), so this would fail at spawn. Put "
             f"multi-line guidance in a file and pass the path, or in a "
-            f"{PLUGIN_DIR_HINT}<name>.md plugin."
+            f"{PRESET_DIR_HINT}<name>.md preset."
         )
     return v
 

@@ -2,7 +2,7 @@
 
 Seven verbs for agents (`delegate`, `ask`, `tell`, `inbox`, `done`, `block`, `status`), a
 few more for the human (`init`, `doctor`, `cleanup`, `restore`, `interrupt`, `inspect`,
-`wait`, `log`, `plugins`, `models`, `workspace`).
+`wait`, `log`, `presets`, `models`, `workspace`).
 
 `wait` is the one verb that is *only* for a human: an agent that blocks on a child is
 burning a turn to do what the doorbell already does for free (see broker.done). It says so
@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from . import config
 from . import models as models_mod
-from . import plugins as plugins_mod
+from . import presets as presets_mod
 from . import status as status_mod
 from . import store
 from . import validate
@@ -44,14 +44,14 @@ def _emit(args, human: str, data: Any = None) -> None:
         print(human)
 
 
-def _plugin_dir_help() -> str:
-    """Where plugin files live, spelled the way the config says rather than restated here.
+def _preset_dir_help() -> str:
+    """Where preset files live, spelled the way the config says rather than restated here.
 
     Same reasoning as `_tier_help`: a path written into a help string is a path that lies
     the moment `[paths]` moves it, and help is exactly where someone looks to find out.
     """
     return "{}/{}/".format(config.setting("paths.repo_dir"),
-                           config.setting("paths.plugins_dir"))
+                           config.setting("paths.presets_dir"))
 
 
 def _tier_help() -> str:
@@ -119,8 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
-    d.add_argument("--with", dest="with_", action="append", default=[], metavar="PLUGIN",
-                   help=f"prompt plugin from {_plugin_dir_help()} (repeatable); "
+    d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
+                   help=f"preset from {_preset_dir_help()} (repeatable); "
                         f"an unknown value is used as a literal instruction")
     d.add_argument("--name")
     d.add_argument("--workspace", metavar="NAME",
@@ -164,8 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only agents that are blocked, at a prompt, or holding unread mail")
     ss.add_argument("--mine", action="store_true",
                     help="only your own subtree (for a human: every agent)")
-    cmd("plugins", help="list available prompt plugins")
-    # The sibling of `plugins`: both answer "what vocabulary does THIS repo have?", which
+    cmd("presets", help="list available presets and their bindings")
+    # Retired, and loud about it rather than silently gone: `sb plugins` used to be this
+    # verb, and the word now belongs to code plugins instead. Hidden, because a retired
+    # spelling should not be advertised, but still REGISTERED — an unregistered verb gets
+    # an argparse usage dump, which names neither replacement. See `_dispatch`.
+    cmd("plugins", hidden=True)
+    # The sibling of `presets`: both answer "what vocabulary does THIS repo have?", which
     # is the question you have right before typing `--model` or `--with`. Read-only, and
     # the only place a resolved model name is ever printed — a tier is opaque by design,
     # so without this the only way to learn what one maps to is to read three config files.
@@ -294,7 +299,7 @@ def _validate(args) -> None:
         if args.as_prompt is not None:
             args.as_prompt = validate.line(args.as_prompt, "--as",
                                            max_len=validate.MAX_PROMPT)
-        # A `--with` value is either a plugin name or a literal instruction; both become
+        # A `--with` value is either a preset name or a literal instruction; both become
         # prompt text, so both are checked again after resolution (see _dispatch).
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
@@ -402,6 +407,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         # 2, like argparse's own usage errors: nothing ran, and nothing is wrong with the
         # system — only with what was typed.
         print(f"sb: {e}", file=sys.stderr)
+        return 2
+
+    # Before the store, because a retired verb has no work to do and should say so wherever
+    # it is typed — including outside a repo, where connect() would answer with something
+    # else entirely. Exit 2, like a usage error: nothing ran, and nothing is wrong with the
+    # system, only with what was typed.
+    if args.cmd == "plugins":
+        print("sb: `sb plugins` has been split. Prompt fragments are now `sb presets`;\n"
+              "    code plugins are `sb plugin list`.", file=sys.stderr)
         return 2
 
     try:
@@ -614,16 +628,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         _emit(args, status_mod.render(snap), snap.as_dict())
         return 0
 
-    if cmd == "plugins":
-        found = plugins_mod.available(b.repo)
-        every, per_role = plugins_mod.bindings(b.repo)
+    if cmd == "presets":
+        found = presets_mod.available(b.repo)
+        every, per_role = presets_mod.bindings(b.repo)
         lines = []
         for n in found:
             using = [r for r, ps in per_role.items() if n in ps]
             tag = " [every agent]" if n in every else (f" [{', '.join(using)}]" if using else "")
             lines.append(f"  {n:16}{tag}")
-        _emit(args, "\n".join(lines) or f"(none — add {_plugin_dir_help()}<name>.md)",
-              {"plugins": sorted(found), "all": list(every),
+        _emit(args, "\n".join(lines) or f"(none — add {_preset_dir_help()}<name>.md)",
+              {"presets": sorted(found), "all": list(every),
                "roles": {k: list(v) for k, v in per_role.items()}})
         return 0
 

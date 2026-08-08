@@ -1,4 +1,4 @@
-"""Role and default-plugin layering."""
+"""Role and default-preset layering."""
 
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ class RolesTest(unittest.TestCase):
         r = roles.load(self.repo)
         self.assertIn("orchestrator", r)
 
-    def test_roles_carry_no_plugin_config(self):
-        """A role is what an agent IS; which plugins it gets lives in plugins.toml."""
+    def test_roles_carry_no_preset_config(self):
+        """A role is what an agent IS; which presets it gets lives in presets.toml."""
         r = roles.load(self.repo)
         self.assertFalse(hasattr(r["worker"], "with_"))
 

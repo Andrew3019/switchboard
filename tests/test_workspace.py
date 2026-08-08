@@ -1363,7 +1363,7 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * 9000)
         with self.assertRaises(ValueError) as cm:
             self.b.delegate("t", role="worker", me=HUMAN)
-        self.assertIn("plugin text", str(cm.exception))
+        self.assertIn("preset text", str(cm.exception))
 
 
 if __name__ == "__main__":
