@@ -264,7 +264,10 @@ agent_wait_backoff = 0.5
 # quietly do its child's work instead.
 spawn_attempts = 3
 
-# Linear backoff: attempt N sleeps N * this. Three attempts is 2s + 4s at worst.
+# Linear backoff: attempt N sleeps N * this. Every failure sleeps, the last one included —
+# `start_agent` naps before it gives up (`herdr.py:370`) — so three attempts is 2 + 4 + 6 =
+# 12 s of backoff, not 2 + 4. Reading it as 2 + 4 is how `status.SPAWN_GRACE` came to be
+# 12 s shorter than the spawn it guards; it now derives the whole worst case from here.
 spawn_backoff = 2
 
 
@@ -289,6 +292,47 @@ board_refresh = 2.0
 
 # Board rows that are not agents — header, blank, blank, status.
 board_chrome = 4
+
+# Draw every archived agent instead of collapsing whole archived subtrees into one
+# `+ N archived` row. An agent is archived when herdr no longer has its pane and it is
+# past the spawn grace — see `status.AgentStatus.archived`.
+#
+# False, because the alternative is what the board did before: on the store this was
+# written against, 59 of 68 rows were agents whose pane had closed, and every session
+# permanently adds more. `split-tab.md` §3.1 puts that same tree in EVERY pane at half a
+# pane's width, so this is the difference between a panel and a wall of dead names.
+#
+# Nothing is lost by it. The header still counts every agent, and DRIFT, NEEDS YOU and
+# UNDELIVERED still name each one — collapse shortens the tree, never the readout, and
+# `sb status --json` is not affected at all. Per invocation: `sb status --archived`, or
+# `a` in the board.
+show_archived = false
+
+
+[panel]
+# One collector, many renderers. See switchboard/panel.py — the collector is elected by an
+# flock, publishes `sb status --json` to a file every `display.board_refresh` seconds, and
+# every panel reads that file instead of the store.
+
+# When a panel starts saying its snapshot is old, in seconds.
+#
+# The design asked for "one refresh interval", and taken literally that flaps: a snapshot
+# written every 2 s is normally between 0 and 2 s old when it is read, so the threshold
+# would be crossed by ordinary phase. Two intervals plus a margin means STALE is only ever
+# shown for a tick that did not happen, which is the thing worth being loud about — a
+# warning that appears half the time is one people stop reading.
+stale_after = 5.0
+
+# How long the collector keeps going after the last panel stops looking, in seconds. It
+# outlives the pane that started it on purpose (a renderer must not take the fleet's
+# collector with it when it closes), and this is what stops that becoming a daemon nobody
+# owns: renderers stamp `panel/demand` as they draw, and the collector retires when
+# nothing has.
+collector_idle_exit = 60.0
+
+# How often ONE renderer will try to start a collector that is not there. Without it, a
+# collector that cannot start at all would be re-spawned by every panel on every tick.
+spawn_cooldown = 5.0
 
 
 [herdr]

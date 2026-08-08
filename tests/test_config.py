@@ -334,6 +334,27 @@ class SettingsLayeringTest(_Layered):
         with self.assertRaises(config.ConfigError):
             config.settings(self.repo)
 
+    def test_a_settings_file_predating_a_key_keeps_working_on_the_shipped_value(self):
+        """What makes adding a setting safe. Every repo settings.toml on disk predates
+        `display.show_archived`, and none of them may break for it — the merge is over the
+        shipped table, so an absent key is not a missing key."""
+        self.write("settings.toml", "[limits]\ntext = 10\n")   # no [display] at all
+        self.assertIs(config.flag("display.show_archived", self.repo), False)
+
+    def test_a_boolean_setting_written_as_a_string_is_refused_not_believed(self):
+        """The one type error that would otherwise pass silently. `"false"` is a non-empty
+        string, so `if value` is TRUE — a person who wrote "false" would get the opposite
+        of what they asked for, with nothing anywhere to say so."""
+        self.write("settings.toml", '[display]\nshow_archived = "false"\n')
+        with self.assertRaises(config.ConfigError) as e:
+            config.flag("display.show_archived", self.repo)
+        self.assertIn("display.show_archived", str(e.exception))
+        self.assertIn("true or false", str(e.exception))
+
+    def test_a_repo_can_turn_a_boolean_setting_on(self):
+        self.write("settings.toml", "[display]\nshow_archived = true\n")
+        self.assertIs(config.flag("display.show_archived", self.repo), True)
+
 
 class ProtocolLayeringTest(_Layered):
     def test_a_repo_replaces_the_protocol_wholesale(self):

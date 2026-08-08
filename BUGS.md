@@ -539,3 +539,43 @@ using it stops for a human on ordinary shell commands.
 `tiers.cheap` resolves to `sonnet` at `effort = "low"`. Cheapness comes from effort, not
 from a smaller model, because a model that blocks on ordinary commands costs a human's
 attention, which is the expensive thing.
+
+## `status.SPAWN_GRACE` is 25 s short of a spawn that outlives herdr's own deadline
+
+**Found:** 2026-08-08, merging `status-board` into `main`. Two branches fixed adjacent
+things and their arithmetic no longer agrees.
+
+`SPAWN_GRACE` is the window in which an agent row with no `session_id` is read as a
+*claim* rather than as a dead agent. It is derived, deliberately, from herdr's own retry
+policy: three attempts at the `--timeout` the loop asks for, plus the triangular backoff
+between them.
+
+```
+3 x 90 s + 2 s x (1+2+3)  =  282 s   (+ 5 s slack = SPAWN_GRACE 287)
+```
+
+`64a8099` then gave every herdr call a second, **outer** deadline —
+`herdr._grace(timeout_ms) = timeout_ms/1000 + timeouts.subprocess` — because a herdr that
+answers *nothing* used to hang `sb` forever. That bound is 100 s per attempt, not 90:
+
+```
+3 x 100 s + 12 s  =  312 s     against a 287 s grace  ->  25 s uncovered
+```
+
+**Consequence:** if herdr hangs past its own 90 s deadline, `status.collect` can mark a
+live agent `failed` during its own spawn — the thing `SPAWN_GRACE` exists to prevent.
+
+**Reachability:** only when herdr answers nothing at all on an `agent start`. Herdr's own
+`--timeout` normally fires first and reports why. The outer bound exists because the hang
+has been observed, so this is not hypothetical, only rare.
+
+**STATUS: KNOWN AND ACCEPTED**, human's decision at merge time. The alternative was
+deriving `_SPAWN_WORST_CASE` from `herdr._grace(SPAWN_TIMEOUT_MS)`, which puts the grace
+at 317 s and leaves a genuinely dead claim unreaped 30 s longer. Erring long is the cheap
+direction, so that fix stays available and is two lines:
+
+- `status.py` — derive `_SPAWN_WORST_CASE` from `herdr._grace(SPAWN_TIMEOUT_MS)`.
+- `tests/test_status.py::test_the_grace_outlasts_herdrs_own_retry_loop` — read the
+  runner's `timeout=` kwarg instead of `--timeout` out of argv. As written the test
+  measures herdr's inner bound only, and so passes while this hole is open; its docstring
+  says so.

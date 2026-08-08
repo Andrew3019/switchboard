@@ -41,6 +41,7 @@ from . import roles as roles_mod
 from . import store
 from . import validate
 from .herdr import BLOCKED, IDLE, WORKING, Herdr, HerdrError, StateWriteDropped
+from .status import GONE_STATE
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
 # addresses that are not agents, and the role a top-level orchestrator has (which is also
@@ -461,15 +462,26 @@ class Broker:
         """
         a = store.get_agent(self.db, name)
         if a is not None:
-            if not self._alive(name):
-                if a["session_id"]:
-                    self.restore(name)
-                else:
-                    # A row with no pane and no session is a husk; replace it rather than
-                    # orphan it. Same rule as `_spawn_lead`'s.
-                    store.drop_agent(self.db, name)
-                    return self._top(name, task, focus, board)
+            if not a["pane_id"] and not a["session_id"]:
+                # A row with no pane AND no session is a husk; replace it rather than
+                # orphan it. Same rule as `_spawn_lead`'s (`session id → restore; pane,
+                # no session → join; neither → husk`) — this used to claim that rule and
+                # test only the session id, which made "pane, no session" a husk too.
+                #
+                # That shape is not exotic, it is every agent's first turn. herdr's
+                # `agent list` carries no session id at all (`herdr.py:104`), so the only
+                # writer of the column is `_claim_session`, which needs the agent itself
+                # to have run an `sb` command. Until it does, an ordinary `sb start`
+                # DELETED its row: the session id went with it, so `restore` had nothing
+                # to restore, and `whoami` resolved the still-running agent to HUMAN.
+                store.drop_agent(self.db, name)
+                return self._top(name, task, focus, board)
+            if a["session_id"] and not self._alive_or_unknown(name):
+                self.restore(name)
             elif task:
+                # Alive, or a pane we cannot see an agent in yet — a claim somebody made
+                # moments ago and is still spawning into. Either way the name is somebody
+                # else's; hand it the work, as `_joined_lead` does.
                 self.tell([name], task, me=HUMAN)
             store.log_event(self.db, kind="start", agent=name, created=False)
             if board:
@@ -987,6 +999,31 @@ class Broker:
             return any(x.name == name for x in self.h.list_agents())
         except HerdrError:
             return False
+
+    def _alive_or_unknown(self, name: str) -> bool:
+        """`_alive`, except an unreachable herdr answers "still going".
+
+        One call stack, one posture. `_running_tops` fails OPEN and hands the name it
+        chose straight to `_top` (`:405`), which then asks the same question again — and
+        `_alive` fails CLOSED, throwing away the posture picked one line earlier. What
+        `_top` does with a "dead" answer is `restore`, which spawns: precisely the second
+        orchestrator on top of a live one that `_running_tops` fails open to avoid.
+
+        So take the reversible branch, which is what `design-c.md` asks of an unknown.
+        Guessing alive costs an `sb start` that only re-focuses, and the human types it
+        again. Guessing dead resumes a live agent's session in a second pane, and no
+        command undoes that.
+
+        No pane is not an unknown — that is our own row, not herdr's answer.
+
+        `_alive` itself is deliberately untouched: `restore` and `workspace` pay a
+        different price for doubt, and flipping it is its own landing.
+        """
+        a = store.get_agent(self.db, name)
+        if not a or not a["pane_id"]:
+            return False
+        known = self._agent_states()      # None is "cannot tell", not "nobody is running"
+        return known is None or name in known
 
     def _recorded_path(self, name: str) -> Optional[str]:
         """Where this workspace's CHECKOUT is, according to our own rows.
@@ -1510,7 +1547,7 @@ class Broker:
 
     # -- status ----------------------------------------------------------
 
-    def done(self, summary: str, *, me: Optional[str] = None) -> None:
+    def done(self, summary: str, *, me: Optional[str] = None) -> list[str]:
         """Report finished. The summary goes to the parent, if there is one.
 
         A ROOT agent has no parent and the human has no mailbox, so its summary is not
@@ -1518,6 +1555,17 @@ class Broker:
         show: `sb status` puts it on the done row, `sb inspect` prints it in full, `sb
         log` has it. Nothing is lost by not addressing anybody; a row in a mailbox nobody
         reads was only ever a second copy of this.
+
+        **Reporting done with children still working stays legal**, and the returned list
+        of their names is the whole change here. Refusing it would be a protocol change —
+        a parent that delegated and then hit its own end would have no legal move, and
+        the one it would reach for is closing its children, which ends work nobody asked
+        to end. It is also not where the harm is: `cleanup` is what closes the pane, and
+        `cleanup` now refuses (see `live_descendants`), so a done parent with live
+        children stays reachable and still collects their summaries.
+
+        So it is surfaced, not blocked: the names come back for the CLI to print, and
+        `done_with_live_children` goes in the log.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -1530,10 +1578,15 @@ class Broker:
         store.set_state(self.db, me, "done")
         self._push_state(a, IDLE, summary)   # herdr has no `done`; it derives it from idle
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP])
+        still_working = self.live_descendants(me)
+        if still_working:
+            store.log_event(self.db, kind="done_with_live_children", agent=me,
+                            children=",".join(still_working))
         if parent:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
             self._ring(parent, self._say("notify.child_done"))
+        return still_working
 
     def block(self, why: str, *, me: Optional[str] = None) -> None:
         """Stop and surface to the human — never to the parent.
@@ -1580,23 +1633,42 @@ class Broker:
 
     def cleanup(self, names: Sequence[str] = (), *, include_kept: bool = False,
                 force: bool = False, dry_run: bool = False,
+                leave_children: bool = False,
                 me: Optional[str] = None) -> list[str]:
         """Close agents. With no names, every finished one in the caller's scope.
 
         Safe to be aggressive: closing costs only the pane. Session, summary, messages
         and the on-disk transcript all survive, and `sb restore` brings the agent back.
 
-        Three gates, and which of them a caller may lift is the whole design:
+        Five gates, and which of them a caller may lift is the whole design:
 
         - **finished, and no unread mail.** A sweep never lifts these. Closing an agent
           mid-turn would strand whatever it was doing, and discarding unread mail loses a
           message somebody is blocked on.
+        - **an end nobody reported is re-checked against herdr.** `done` is the agent's
+          own word; `failed` is `status._record_gone`'s inference from one `agent list`,
+          and that call can be taken mid-spawn or against a herdr that hiccupped. So for
+          a `failed` row we ask again, and a sweep never lifts it either.
         - **the role's `cleanup` disposition.** `include_kept` lifts this one, and only
           this one: it says "I mean the keepers too", not "close anything".
         - **everything.** `force` lifts all of it, and is only legal for agents named
           outright — it is the escape hatch for an agent that is genuinely stuck (its
           state never advanced, its name was lost by herdr, it holds mail it can never
           read) and that no sweep can therefore ever reach. Naming it IS the confirmation.
+
+        - **live descendants**, and `force` does NOT lift this one. See
+          `live_descendants` for the invariant. Every other gate is a fact about the
+          agent you named — its state, its mail, its role — and `--force` is you saying
+          you know that fact and mean it anyway. Live children are facts about agents you
+          did NOT name, and no flag about this agent gets to decide their fate. So the
+          gate takes its own flag, `leave_children`, which says the thing it does: close
+          the parent's pane, leave the children running. The other way out is to close
+          the subtree from the leaves up, which never breaks the invariant at all.
+
+          Named agents get a refusal before anything is closed, rather than a skip: you
+          asked for this agent by name, so silence would be a lie. A sweep skips it the
+          way it skips every other gate, and logs `cleanup_held` so the log can answer
+          "why is that one still here".
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -1618,15 +1690,36 @@ class Broker:
                                  "it lifts every safety gate, so it is never a sweep")
             candidates = scope
 
+        # Computed for every candidate up front, so a named agent is refused before
+        # anything at all has been closed: half a `sb cleanup a b` is worse than none.
+        held = {} if leave_children else {
+            a["name"]: kids for a in candidates
+            if a["name"] != me and (kids := self.live_descendants(a["name"]))
+        }
+        if held and names:
+            raise ValueError(
+                "still working underneath: "
+                + "; ".join(f"{p} → {', '.join(kids)}" for p, kids in held.items())
+                + ". Close them first (the subtree closes from the leaves up), or "
+                  "--leave-children to close the parent and leave them running."
+            )
+
         closed = []
         for a in candidates:
             if a["name"] == me:
                 continue                      # never close the caller
             if a["ended_at"] and not a["pane_id"]:
                 continue                      # already gone
+            if a["name"] in held:
+                if not dry_run:               # a dry run reads; it never writes
+                    store.log_event(self.db, kind="cleanup_held", agent=a["name"],
+                                    live_children=",".join(held[a["name"]]))
+                continue                      # the invariant; see the docstring
             if not force:
                 if a["state"] not in FINISHED:
                     continue                  # only finished agents; --all-idle too
+                if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
+                    continue                  # nobody reported this end, and herdr disagrees
                 if store.unread_for(self.db, a["name"], mark=False):
                     continue                  # unread mail would be lost
                 # Naming an agent is itself the instruction to close it, so an explicit
@@ -1651,6 +1744,46 @@ class Broker:
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             closed.append(a["name"])
         return closed
+
+    def live_descendants(self, name: str) -> list[str]:
+        """Descendants of `name` whose work is still going. The invariant's one predicate.
+
+        > **INVARIANT: an agent whose pane is closed has no descendant whose pane is
+        > still working.**
+
+        Before this it was true by luck: `children_of` existed in exactly one place, to
+        scope a sweep to the caller's subtree, and nothing anywhere asked "does this
+        agent have live children?" before ending it. Everything that closes a pane on
+        purpose asks here now, so the invariant holds by construction rather than by
+        nobody having tried yet.
+
+        Why it matters is not tidiness: a child of a closed parent reports with `sb
+        done`, which writes the summary to the parent and rings it. The parent has no
+        pane, so the ring fails (`ring_failed`) and the summary sits unread in the store
+        forever, which is precisely the "the board looks fine and something is silently
+        not happening" class.
+
+        **The STORE only, deliberately not herdr** — the same call `_will_never_answer`
+        makes, for the same reason. An agent missing from `agent list` looks identical
+        whether it died or herdr hiccupped, and a hiccup that read as "no live children"
+        would wave through exactly the close this exists to stop. A row that says
+        `working` when the pane is long dead costs a refusal, which the human undoes by
+        closing that row; the other way round costs live work.
+
+        A row is born `working`, so a child mid-spawn counts as live. That is the safe
+        direction: it is also the child that would be hardest to notice missing.
+
+        **What this cannot cover, and nothing can: a parent's pane that simply dies** — a
+        crash, a closed tab, a herdr restart (route A1). There is no caller there to
+        refuse, so the invariant is a property of what switchboard *does*, not of what
+        the world does to it. What the model says about that shape is: it is not a state
+        anything here creates, it is already recorded when it bites (`ring_failed` on the
+        child's `done`), and it is nameable — this method, asked of the dead parent,
+        answers it. The board draws it as an ordinary archived row with its live children
+        under it, which is the honest picture and not a special case.
+        """
+        return [a["name"] for a in self._descendants(name)
+                if a["state"] in store.LIVE_STATES and not a["ended_at"]]
 
     def _descendants(self, name: str) -> list:
         out, frontier = [], [name]
@@ -1767,6 +1900,26 @@ class Broker:
                 self._alive_unknown = True
         return self._alive_cache
 
+    def _end_still_holds(self, name: str) -> bool:
+        """Does herdr STILL agree that this agent's turn ended?
+
+        Only ever asked about a row whose end was inferred rather than reported —
+        `GONE_STATE`, whose one writer is `status._record_gone`. That row is a cached
+        observation of a single `agent list`, and the readout that took it may have been
+        looking during the agent's own spawn, or running old code with a shorter grace, or
+        racing another reader. Re-taking it here is the whole protection: `cleanup` is the
+        one caller that acts on the row irreversibly.
+
+        Fails CLOSED, and this is the one place in the file that does. `_agent_states()`
+        returns None for "cannot tell", and `_busy`/`_running_tops` read that as "carry
+        on" because the cost of their doubt is a doorbell or a duplicate root. Here the
+        costs are reversed: a wrong close takes a live agent's pane, and for a row that
+        never reached a session id it takes the work with it — `restore` needs a session
+        id, so there is nothing to come back to. A wrong SKIP costs one `--force <name>`.
+        """
+        states = self._agent_states()
+        return states is not None and name not in states
+
     def _busy(self, who: str) -> bool:
         """Is this agent mid-turn right now, per herdr?
 
@@ -1776,12 +1929,20 @@ class Broker:
         return (self._agent_states() or {}).get(who) == WORKING
 
     def flush_pending(self, *, refresh: bool = False) -> list[str]:
-        """Ring the doorbell for anyone who has mail and is no longer mid-turn.
+        """Ring the doorbell for anyone who has mail they cannot know about, and is idle.
 
         Called at the start of every `sb` command (see `cli.main`) and on every pass of
         `ask`'s wait loop, so a deferred message lands as soon as anything at all touches
         the store — which, in a live session, is constantly. The store query is free when
         there is nothing pending; only then do we ask herdr.
+
+        `store.unseen`, NOT `store.undelivered`: the doorbell exists to tell an agent
+        something it does not already know, and an agent that read its inbox proactively
+        already knows. Ringing on un-announced alone burns that agent a turn to find an
+        empty inbox, and — because `_ring` unblocks first — silently cancels a `block`,
+        putting an agent that stopped to ask a person back to `working` with its question
+        never surfaced. `status._undelivered_counts` reads the same pair, so what the
+        board calls outstanding and what this chases can never drift apart.
 
         `refresh` discards the per-process view of who is busy. `sb` invocations are short
         enough that the cache cannot go stale inside one, but a blocked `ask` holds the
@@ -1794,7 +1955,7 @@ class Broker:
         # The human is excluded because they are not an agent and have no doorbell. Nothing
         # is addressed to them any more, but a store written before the human mailbox was
         # removed still holds rows that would otherwise be retried on every command.
-        pending = store.undelivered(self.db, exclude=(HUMAN,))
+        pending = store.unseen(self.db, exclude=(HUMAN,))
         if not pending:
             return []
         if refresh:

@@ -31,6 +31,7 @@ from typing import Any, NamedTuple, Optional
 
 from . import config
 from . import models as models_mod
+from . import panel as panel_mod
 from . import plugins as plugins_mod
 from . import presets as presets_mod
 from . import status as status_mod
@@ -169,6 +170,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only agents that are blocked, at a prompt, or holding unread mail")
     ss.add_argument("--mine", action="store_true",
                     help="only your own subtree (for a human: every agent)")
+    # Not a filter, unlike the three above: they drop rows and say so in `hidden`, this
+    # only stops fully-archived subtrees being drawn as one line each. `--json` is
+    # unaffected either way and always carries every row.
+    ss.add_argument("--archived", action="store_true",
+                    help="draw archived agents individually instead of collapsing them "
+                         "(the default is display.show_archived)")
     # Naming one prints it. A preset is not always a disposition stapled onto a spawn —
     # some are procedures an agent is TOLD to go and follow, and without a way to read one
     # on demand the only way to reach a procedure was to be spawned with it already
@@ -226,6 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--force", action="store_true",
                    help="close a NAMED agent whatever state it is in, unread mail and all "
                         "(the escape hatch for one that is genuinely stuck)")
+    # Its own flag rather than a corner of --force: --force is you overriding facts about
+    # the agent you named, and this overrides a fact about agents you did not name.
+    c.add_argument("--leave-children", action="store_true",
+                   help="close an agent whose children are still working, leaving them "
+                        "running with no pane above them (--force does not do this)")
     c.add_argument("--dry-run", action="store_true")
 
     w = cmd("workspace", help="workspaces (worktree + herdr workspace + lead)")
@@ -512,6 +524,12 @@ def main(argv: Optional[list[str]] = None) -> int:
               "    code plugins are `sb plugin list`.", file=sys.stderr)
         return 2
 
+    # Writable, deliberately, even for `sb status` and `sb log`. This is the short-lived
+    # process running current code that `store._connect_readonly` says the migration
+    # belongs to — make this readonly and nothing reconciles the schema at all. It is also
+    # not read-only in fact: `flush_pending` below writes, `whoami` revives, and `collect`
+    # reaps. Making the read verbs genuinely read-only is a bigger change than a flag —
+    # see `.switchboard/design/status-truth.md` §6(c).
     try:
         db = store.connect()
     except Exception as e:                       # not in a repo, or an unreadable store
@@ -607,12 +625,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # per plugin by `load_all`, so the one that will not import is a row here rather
         # than a traceback instead of the report.
         pl = _doctor_plugins(b.repo)
+        # Whether the panel every pane is drawing is actually fresh. The counters ride in
+        # the snapshot file the collector writes anyway, so this costs no store write —
+        # see `panel.doctor_line`, and split-tab.md §2.5 for why it is not an `on_event`.
+        panel_line = "\n" + panel_mod.doctor_line()
         try:
             h.check()
             _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}"
-                        f"{pl.text}",
+                        f"{panel_line}{pl.text}",
                   {"ok": not deficit and not pl.problems, "schema_deficit": deficit,
-                   **pl.data})
+                   "panel": panel_mod.doctor_dict(), **pl.data})
         except HerdrError as e:
             _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}{pl.text}",
                   {"ok": False, "code": e.code, "schema_deficit": deficit, **pl.data})
@@ -730,8 +752,14 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "done":
-        b.done(args.summary, me=me)
-        _emit(args, "done", {"agent": me})
+        still = b.done(args.summary, me=me)
+        # Legal, and worth saying out loud: the agent is finishing a turn its children
+        # have not finished, and their summaries will arrive here after it.
+        note = "done" if not still else (
+            "done — still working underneath you: " + ", ".join(still)
+            + ". Their summaries will reach you here, and nothing will close your pane "
+              "while they run.")
+        _emit(args, note, {"agent": me, "live_children": still})
         return 0
 
     if cmd == "block":
@@ -746,7 +774,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # drift two levels down is still drift the caller is being lied to about.
         snap = status_mod.collect(db, h, live_only=args.live, needs_me=args.needs_me,
                                   mine=(me if args.mine else None))
-        _emit(args, status_mod.render(snap), snap.as_dict())
+        # None, not False: the flag can only ever turn collapse OFF, so with no flag the
+        # answer comes from `display.show_archived` rather than from here.
+        _emit(args, status_mod.render(snap, show_archived=True if args.archived else None),
+              snap.as_dict())
         return 0
 
     if cmd == "presets":
@@ -805,7 +836,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "cleanup":
         names = b.cleanup(args.name, include_kept=args.include_kept, force=args.force,
-                          dry_run=args.dry_run, me=me)
+                          dry_run=args.dry_run, leave_children=args.leave_children, me=me)
         verb = "would close" if args.dry_run else "closed"
         _emit(args, f"{verb}: {', '.join(names) or '(nothing)'}", {"closed": names})
         return 0

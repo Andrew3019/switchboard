@@ -84,11 +84,14 @@ def snapshot():
     except Exception as e:
         return [], f"import failed: {e}"
     try:
-        db = store.connect()
+        # readonly + reap=False for the same reason `board.snapshot` uses them: this is a
+        # probe that ticks against the REAL store every 2s on whatever code it started
+        # with, and a plain `connect()` would let it stamp, ALTER or drop that store.
+        db = store.connect(readonly=True)
     except Exception as e:
         return [], f"store unavailable: {e}"
     try:
-        snap = status.collect(db, Herdr())
+        snap = status.collect(db, Herdr(), reap=False)
     except Exception as e:
         return [], f"collect failed: {e}"
     finally:

@@ -326,6 +326,28 @@ def setting(dotted: str, default: Any = _MISSING, repo: Optional[Path] = None) -
     return node
 
 
+def flag(dotted: str, repo: Optional[Path] = None) -> bool:
+    """A setting that must really be a boolean, e.g. `display.show_archived`.
+
+    Every other setting is a number or a string, where the wrong type raises on first use.
+    A boolean does not: `show_archived = "no"` is a non-empty string, so `if show_archived`
+    is TRUE and a person who wrote "no" gets the opposite of what they asked for, with
+    nothing anywhere to say so. Refusing it names the key and the value instead.
+
+    A key that is simply ABSENT never reaches this. `settings()` merges the repo's file
+    over the shipped one, so an older `.switchboard/settings.toml` that predates a key
+    keeps working and takes the shipped default — which is what makes adding a setting a
+    safe thing to do.
+    """
+    value = setting(dotted, repo=repo)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"setting '{dotted}' must be true or false, got {value!r} — "
+            f"a quoted \"true\"/\"no\" is a string, and every non-empty string is true"
+        )
+    return value
+
+
 # -- roles ---------------------------------------------------------------------
 
 

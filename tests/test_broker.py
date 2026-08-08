@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,6 +33,7 @@ class FakeHerdrAPI:
         self.pane_prompts: list[tuple] = []
         self.unreachable: set = set()
         self.states_by_name: dict = {}
+        self.list_error: Optional[HerdrError] = None   # herdr itself cannot be asked
         self.workspaces: list = []
         self.tabs: list = []
         self._n = 0
@@ -57,6 +59,8 @@ class FakeHerdrAPI:
 
     def list_agents(self):
         from switchboard.herdr import Agent as _A
+        if self.list_error:
+            raise self.list_error
         return [_A(name=n, pane_id="w1:p0", state=st) for n, st in self.states_by_name.items()]
 
     def create_workspace(self, label, *, cwd=None, focus=False):
@@ -425,6 +429,55 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
+    def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
+        """A ring says "you have mail" — to an agent that has already got it, that is a
+        whole turn spent discovering an empty inbox (C0).
+
+        The agent is mid-turn, so the ring is held back; it runs `sb inbox` of its own
+        accord and reads the message anyway. Those rows stay un-announced for good, and
+        ringing on un-announced alone would chase them every `sb` command from now on.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.assertEqual(self.h.prompts, [])                       # held back, mid-turn
+        self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["review the PR"])
+        self.h.states_by_name = {"w": "idle"}
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), [])               # nothing to announce
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(len(store.undelivered(self.db)), 1)       # still never announced
+        self.assertEqual(store.unseen(self.db), [])                # but the agent knows
+
+    def test_a_stale_doorbell_does_not_cancel_a_block(self):
+        """The block is the whole point: `_ring` unblocks before it prompts.
+
+        An agent reads its mail proactively, then stops to ask a person. If the flush
+        still rang for that already-read mail, the agent would be put back to `working`,
+        drop off `sb status --needs-me`, and the question would reach nobody — cancelled
+        by a doorbell carrying no news at all.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.b.inbox(me="w")                                       # read it, unrung
+        self.b.block("which branch?", me="w")
+        self.h.prompts.clear()
+        self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
+        self.b._alive_cache = None
+
+        rung = self.b.flush_pending()
+        # The harm first, so a regression reports what was actually lost rather than a
+        # list that differs. Both of these were the observed symptom: the agent went back
+        # to `working` and vanished from the one readout that would have shown a person
+        # the question.
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        self.assertEqual([a.name for a in
+                          status.collect(self.db, self.h, needs_me=True).agents], ["w"])
+        [needs] = status.collect(self.db, self.h, needs_me=True).agents
+        self.assertEqual(needs.blocked_why, "which branch?")
+        self.assertEqual((rung, self.h.prompts), ([], []))
+
     def test_flush_costs_nothing_when_there_is_no_pending_mail(self):
         self.assertEqual(self.b.flush_pending(), [])
         self.assertIsNone(self.b._alive_cache)                     # herdr never consulted
@@ -533,6 +586,72 @@ class BrokerTest(unittest.TestCase):
         status.collect(self.db, self.h)
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
 
+    def test_cleanup_closes_a_finished_agent_herdr_still_has(self):
+        """The normal sweep, and the reason the liveness gate is scoped to `failed`: an
+        agent that called `sb done` keeps a live idle pane, and herdr lists it. Gating
+        every close on herdr's silence would leave nothing for `sb cleanup` to do."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")
+        self.h.states_by_name = {"kid": "idle"}
+        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+
+    def test_cleanup_never_closes_a_reaped_agent_herdr_still_has(self):
+        """The one that already destroyed two live agents. `failed` is not a report — it
+        is `status._record_gone`'s inference from one `agent list`, and a readout taken
+        during a slow spawn writes it about an agent that is very much alive. herdr still
+        listing the name refutes the row, so a bare sweep must leave it alone."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}                     # a readout mid-spawn sees nothing
+        status.collect(self.db, self.h)
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
+
+        self.h.states_by_name = {"kid": "working"}     # the spawn landed after all
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
+        self.assertEqual(self.h.closed, [])
+
+    def test_cleanup_will_not_close_a_reaped_agent_when_herdr_cannot_be_asked(self):
+        """Fail CLOSED, alone in this file. Everywhere else "cannot tell" means carry on,
+        because the cost is a doorbell or a duplicate root. Here it is a live pane, and
+        for a row that never got a session id there is no `sb restore` to undo it — so
+        an unreachable herdr must stop the sweep, not wave it through."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}
+        status.collect(self.db, self.h)                # reaped while herdr was answering
+
+        self.h.list_error = HerdrError("down", "no server")
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
+        self.assertEqual(self.h.closed, [])
+        # And it is a skip, not a state change: the row is untouched for the next sweep.
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
+
+    def test_cleanup_dry_run_does_not_offer_a_reaped_agent_herdr_still_has(self):
+        """`--dry-run` is what a human reads before sweeping; listing a live agent there
+        is how they learn to trust the sweep that kills it."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}
+        status.collect(self.db, self.h)
+        self.h.states_by_name = {"kid": "working"}
+        self.assertEqual(self.restart_sb().cleanup(me="orch", dry_run=True), [])
+
+    def test_cleanup_force_still_closes_a_named_agent_herdr_has(self):
+        """The escape hatch has to survive the new gate, or an agent herdr has genuinely
+        lost track of — listed but dead — becomes unreachable by any command."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        self.h.states_by_name = {}
+        status.collect(self.db, self.h)
+        self.h.states_by_name = {"kid": "working"}
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch", force=True), ["kid"])
+
     def test_cleanup_never_closes_a_blocked_agent(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
@@ -566,6 +685,159 @@ class BrokerTest(unittest.TestCase):
                            pane_id="w1:p3", cleanup="close")
         store.set_state(self.db, "leaf", "done")
         self.assertIn("leaf", self.b.cleanup(me="top", include_kept=True))
+
+    # -- cleanup: the invariant ------------------------------------------
+    #
+    # INVARIANT: an agent whose pane is closed has no descendant whose pane is still
+    # working. Every test here asserts the HARM — the parent's pane being closed, or the
+    # summary that then cannot be delivered — and not what `cleanup` returned.
+
+    def _family(self, *, child_state: str = "working"):
+        """orch → lead (done, pane w1:p1) → worker (still going, pane w1:p2)."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="lead", role="orchestrator", parent="orch",
+                           pane_id="w1:p1", cleanup="close")
+        store.create_agent(self.db, name="worker", role="worker", parent="lead",
+                           pane_id="w1:p2", cleanup="close")
+        store.set_state(self.db, "lead", "done")
+        if child_state != "working":
+            store.set_state(self.db, "worker", child_state)
+
+    def test_a_sweep_leaves_a_done_parent_whose_child_is_still_working(self):
+        """The four old gates all pass for `lead`: finished, its own report, no mail, role
+        says close. Nothing asked whether anything was still running underneath it."""
+        self._family()
+        self.b.cleanup(me="orch")
+        self.assertNotIn("w1:p1", self.h.closed)
+        self.assertEqual(store.get_agent(self.db, "lead")["pane_id"], "w1:p1")
+        # and the log can answer "why is that one still here"
+        held = [e for e in store.recent_events(self.db, agent="lead")
+                if e["kind"] == "cleanup_held"]
+        self.assertEqual(len(held), 1)
+
+    def test_a_blocked_child_holds_its_parent_open_too(self):
+        """A blocked child is the sharp case: it is waiting on a person, and closing the
+        pane above it is how the answer stops being able to reach anyone."""
+        self._family(child_state="blocked")
+        self.b.cleanup(me="orch")
+        self.assertNotIn("w1:p1", self.h.closed)
+
+    def test_naming_a_parent_with_a_live_child_closes_nothing(self):
+        self._family()
+        with self.assertRaises(ValueError) as e:
+            self.b.cleanup(["lead"], me="orch")
+        self.assertIn("worker", str(e.exception))       # says which agent is holding it
+        self.assertEqual(self.h.closed, [])
+        self.assertEqual(store.get_agent(self.db, "lead")["pane_id"], "w1:p1")
+
+    def test_force_does_not_close_a_parent_over_its_live_child(self):
+        """The decision: `--force` overrides facts about the agent you NAMED — its state,
+        its mail, its role. A live child is a fact about an agent you did not name, and no
+        flag about the parent gets to end its work."""
+        self._family()
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["lead"], me="orch", force=True)
+        self.assertEqual(self.h.closed, [])
+
+    def test_one_held_parent_stops_the_whole_named_cleanup(self):
+        """Refused before anything is closed. Half of `sb cleanup a b` is worse than none:
+        the caller reads one error and cannot tell what already happened."""
+        self._family()
+        store.create_agent(self.db, name="sib", role="worker", parent="orch",
+                           pane_id="w1:p3", cleanup="close")
+        store.set_state(self.db, "sib", "done")
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["sib", "lead"], me="orch")
+        self.assertEqual(self.h.closed, [])
+
+    def test_a_dry_run_does_not_offer_a_parent_with_a_live_child(self):
+        """`--dry-run` is what a human reads before sweeping, and it writes nothing."""
+        self._family()
+        self.assertEqual(self.b.cleanup(me="orch", dry_run=True), [])
+        self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="lead")
+                          if e["kind"] == "cleanup_held"], [])
+
+    def test_closing_the_subtree_from_the_leaves_up_always_works(self):
+        """The way out that keeps the invariant rather than breaking it — and the reason
+        the gate needs no lifting to stay usable."""
+        self._family()
+        self.b.cleanup(["worker"], me="orch", force=True)
+        self.b.cleanup(["lead"], me="orch")
+        self.assertIn("w1:p1", self.h.closed)
+
+    def test_leave_children_is_the_one_way_to_close_over_a_live_child(self):
+        """The other way out, for a human who means it: the parent's pane goes, the
+        child's work does not. It has its own flag because it does its own harm."""
+        self._family()
+        self.b.cleanup(["lead"], me="orch", leave_children=True)
+        self.assertIn("w1:p1", self.h.closed)
+        self.assertNotIn("w1:p2", self.h.closed)        # the child keeps working
+
+    def test_a_fully_finished_subtree_still_sweeps(self):
+        """The gate must not cost the normal sweep. A finished child is not live work."""
+        self._family(child_state="done")
+        self.b.cleanup(me="orch")
+        self.assertIn("w1:p1", self.h.closed)
+        self.assertIn("w1:p2", self.h.closed)
+
+    def test_a_child_of_a_closed_parent_cannot_deliver_its_summary(self):
+        """WHY the gate exists, spelled out end to end.
+
+        The child reports `sb done`; the summary is written to the parent and the doorbell
+        rung. The parent has no pane and herdr has lost the binding that went with it, so
+        the ring fails and the summary sits in the store with nobody able to read it — the
+        failure class where the board looks fine and something is silently not happening.
+
+        Reached here only through `--leave-children`, which is the point: this is the harm
+        the flag names, and the only route to it that switchboard still has.
+        """
+        self._family()
+        self.b.cleanup(["lead"], me="orch", leave_children=True)
+        self.h.unreachable.add("lead")                  # the binding went with the pane
+
+        self.b.done("my part is finished", me="worker")
+        stranded = store.undelivered(self.db)
+        self.assertEqual([(m["to_agent"], m["kind"]) for m in stranded], [("lead", "done")])
+        self.assertIn("ring_failed",
+                      [e["kind"] for e in store.recent_events(self.db, agent="lead")])
+
+    def test_a_refused_close_keeps_the_childs_summary_deliverable(self):
+        """The same story with the gate doing its job: the pane is still there, so the
+        summary lands and the doorbell rings."""
+        self._family()
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["lead"], me="orch")
+
+        self.b.done("my part is finished", me="worker")
+        self.assertEqual(store.undelivered(self.db), [])
+        self.assertIn("lead", [p[0] for p in self.h.prompts])
+
+    def test_done_with_children_still_working_stays_legal_and_is_recorded(self):
+        """Deliberately NOT a protocol change: a parent that delegated and then reached
+        its own end must have a legal move, and the one it would reach for otherwise is
+        closing its children. The harm was never `done` — it was the close that follows,
+        and that is what is gated. So this reports, records, and stays closeable-proof.
+        """
+        self._family(child_state="working")
+        store.set_state(self.db, "lead", "working")      # about to report done itself
+        self.b.done("handing off", me="lead")
+
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "done")
+        self.assertIn("done_with_live_children",
+                      [e["kind"] for e in store.recent_events(self.db, agent="lead")])
+        # and the summary still reached its own parent, unchanged
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] handing off"])
+        # the pane survives the sweep that follows
+        self.b.cleanup(me="orch")
+        self.assertNotIn("w1:p1", self.h.closed)
+
+    def test_done_says_nothing_when_the_children_have_all_finished(self):
+        self._family(child_state="done")
+        store.set_state(self.db, "lead", "working")
+        self.b.done("all in", me="lead")
+        self.assertNotIn("done_with_live_children",
+                         [e["kind"] for e in store.recent_events(self.db, agent="lead")])
 
     def test_ask_fails_fast_on_an_unknown_target(self):
         """Otherwise the caller blocks the entire timeout waiting on nobody."""
@@ -939,6 +1211,78 @@ class BrokerTest(unittest.TestCase):
         for name in (MAIN_NAME, "main-2"):
             self._dead_top(name)
         self.assertEqual(self.b.start(new=True), "main-3")
+
+    # -- start: a spawning agent is not a husk ------------------------------
+
+    def _sessionless_top(self, name=MAIN_NAME, pane="w1:p1"):
+        """A live orchestrator that has not run an `sb` command of its own yet.
+
+        The normal shape, not an exotic one: herdr's `agent list` carries no session id,
+        so `_claim_session` is the only writer of the column and it needs the agent
+        itself to call `sb`. Backdated well past SPAWN_GRACE, because this is the steady
+        state until that happens and not a spawn-window race.
+        """
+        store.create_agent(self.db, name=name, role=MAIN, pane_id=pane)
+        self.db.execute("UPDATE agents SET created_at=? WHERE name=?",
+                        (store.now() - int(status.SPAWN_GRACE) - 100, name))
+        self.db.commit()
+        return store.get_agent(self.db, name)
+
+    def test_start_does_not_delete_an_agent_herdr_has_not_listed_yet(self):
+        """The harm is the DELETE, so assert the row, not the return value.
+
+        No herdr error is needed to get here: herdr answers normally and simply does not
+        list the name for the whole of `start_agent`'s 282 s retry window. `sb start`
+        read a pane with no session as a husk and dropped the row — session id, pane and
+        parentage with it, so `restore` had nothing left and `whoami` called the still
+        running agent HUMAN.
+        """
+        self.h.focus = lambda n: None
+        before = self._sessionless_top()
+        self.h.list_agents = lambda: []          # herdr is up; this name just is not in it
+        self.restart_sb().start()
+
+        after = store.get_agent(self.db, MAIN_NAME)
+        self.assertIsNotNone(after)
+        self.assertEqual(after["pane_id"], before["pane_id"])
+        self.assertEqual(after["created_at"], before["created_at"])   # the row, not a new one
+        self.assertEqual(self.h.started, [])     # and nothing was spawned over the top of it
+
+    def test_start_hands_its_task_to_the_agent_it_cannot_see(self):
+        """Same name means the same agent: join it and give it the work.
+
+        `_spawn_lead` already treats this shape as "a claim somebody made moments ago and
+        is still spawning into"; `_top` cited that rule and did the opposite.
+        """
+        self.h.focus = lambda n: None
+        self._sessionless_top()
+        self.h.list_agents = lambda: []
+        self.assertEqual(self.restart_sb().start(task="merge PR 41"), MAIN_NAME)
+        self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
+        self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
+
+    def test_an_unreachable_herdr_does_not_resume_a_live_orchestrator(self):
+        """One call stack, one posture.
+
+        `_running_tops` fails OPEN and hands this very name to `_top`, which asked the
+        same question again with the opposite posture and resumed the agent it had just
+        refused to give up on — a second pane on a live session, which nothing undoes.
+        """
+        self.h.focus = lambda n: None
+        store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1",
+                           session_id="sess-main")
+        self.h.list_error = HerdrError("no_server", "connection refused")
+        self.assertEqual(self.restart_sb().start(), MAIN_NAME)
+        self.assertEqual(self.h.started, [])
+        self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
+
+    def test_start_still_replaces_a_row_that_never_reached_a_pane(self):
+        """The husk branch survives the narrowing: no pane AND no session is still one."""
+        self.h.focus = lambda n: None
+        store.create_agent(self.db, name=MAIN_NAME, role=MAIN)
+        self.h.list_agents = lambda: []
+        self.assertEqual(self.restart_sb().start(), MAIN_NAME)
+        self.assertEqual(self.h.started[-1]["name"], MAIN_NAME)
 
     # -- worktree config links -------------------------------------------
 

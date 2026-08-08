@@ -1,4 +1,4 @@
-"""The clickable board — a human's live view of the tree.
+"""The clickable board — a human's live view of the tree. A RENDERER.
 
 Three ways in, all the same screen: `sb start` opens one beside the orchestrator
 it starts (`--no-board` declines), `sb board` opens one here, and
@@ -7,8 +7,26 @@ it starts (`--no-board` declines), `sb board` opens one here, and
 This is a HUMAN-ONLY surface and must stay one. `sb board` is hidden from
 `--help` and refuses any caller that `whoami()` resolves to an agent, and the
 board appears nowhere in defaults/protocol.md, which is where an agent actually
-learns what `sb` can do. Everything here is read-only against the store, with
-exactly one side effect — `herdr agent focus`, a human jumping to a pane.
+learns what `sb` can do. Its only side effect is `herdr agent focus`, a human
+jumping to a pane.
+
+**This file does not import `store`, and must not start.** It once did, inside
+`snapshot()`, and the claim that a two-second tick there was read-only was false
+twice: `collect` marked an agent `failed` when herdr stopped listing it
+(`reap=False` closed that), and `store.connect()` itself re-stamps `meta`, ALTERs
+tables and backfills every agent row, and can DROP `agents`, `messages` and
+`events` (`readonly=True` closed that, in `1c10745`). Both fixes are real and
+both are still in force — they moved, with the connect, into
+`switchboard/collector.py`. What changed here is that they stopped being a claim
+this file has to keep making. A panel now reads a file that one elected collector
+publishes, so the board has no database handle and no import that could get it
+one: read-only is a fact about `switchboard/panel.py`'s imports, checked by
+`tests/test_panel.py::RendererImports`, rather than a docstring somebody has to
+defend on every future edit. That is also what makes a panel per agent affordable
+— forty of these cost one collector between them.
+
+`refresh()` is the whole of the difference. Read `switchboard/panel.py` before
+reaching for the store from here.
 
 Proved out by `scripts/05-mouse.py` and `scripts/06-board.py`: herdr forwards
 SGR mouse events to a pane, and a decoded row maps back to an agent. Those two
@@ -35,6 +53,7 @@ import tty
 from typing import Optional
 
 from . import config
+from . import panel
 from . import status as status_mod
 
 # 1000h = press/release reporting. 1006h = SGR encoding, which is the only one
@@ -47,7 +66,9 @@ SHOW_CURSOR = "\033[?25h"
 SGR = re.compile(r"\033\[<(\d+);(\d+);(\d+)([Mm])")
 
 # Both `[display]` in defaults/settings.toml.
-REFRESH = config.setting("display.board_refresh")   # how often the tree is re-collected
+REFRESH = config.setting("display.board_refresh")   # how often the collector re-collects,
+                                                    # and so how often re-reading it can
+                                                    # tell us anything new
 CHROME = config.setting("display.board_chrome")       # header, blank, blank, status —
                                                      # lines not available to agents
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
@@ -195,18 +216,39 @@ def _note_color(a) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_group(row) -> bool:
+    """Is this display row a collapsed group rather than an agent?
+
+    One predicate, used by everything that reads a row, so there is exactly one
+    place that knows how the two are told apart. Everything downstream of
+    `layout` receives whatever the row carries, and reading `.name` off a group
+    is the failure `layout`'s closing comment is about.
+    """
+    return isinstance(row, status_mod.Collapsed)
+
+
 def layout(snap, *, top: int, height: int, width: int, msg: str,
-           note_text: str = "") -> list[tuple[str, Optional[object]]]:
+           note_text: str = "", show_archived: Optional[bool] = None
+           ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
     The agent a row belongs to is carried BY the row rather than recomputed from
     an index, so a click can never resolve to a different agent than the one the
     human is looking at. Everything downstream just indexes this list.
 
-    `top` is the scroll offset in agents. Returns at most `height` lines.
+    `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
+    being the same thing when collapse landed: `display_rows` replaces whole
+    archived subtrees with one `Collapsed`, so a window taken over `snap.agents`
+    would scroll past rows that are not drawn and the `+N more below` count would
+    contradict the screen. Everything here — the slice, the clamp, the tail —
+    counts what is actually on screen.
+
+    Returns at most `height` lines.
     """
     rows: list[tuple[str, Optional[object]]] = []
-    agents = snap.agents
+    if show_archived is None:                       # `display.show_archived`, via status,
+        show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
+    agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
     capacity = max(1, height - CHROME)
     top = max(0, min(top, max(0, len(agents) - capacity)))
     window = agents[top:top + capacity]
@@ -219,9 +261,21 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         why = note_text or "nothing running — sb start"
         rows.append((_c(f"  ({why})", DIM), None))
     else:
-        w_name = max(len(("  " * a.depth) + a.name) for a in window)
-        w_state = max(len(a.state) for a in window)
+        # Defaults, not `max(seq)`: a window can be nothing but collapsed rows —
+        # which is the ORDINARY end-of-session state, every agent finished and
+        # its pane closed — and there is then no agent to measure a name or a
+        # state against. Empty-sequence `max` raises, and a panel that raises at
+        # the end of every session is worse than one with a narrow column.
+        w_name = max([0] + [len(("  " * a.depth) + a.name)
+                            for a in window if not _is_group(a)])
+        w_state = max([0] + [len(a.state) for a in window if not _is_group(a)])
         for a in window:
+            if _is_group(a):
+                # No glyph, no state, no note. It is not an agent and must not
+                # read as one — `agent_at` hands this very object to the click
+                # handler, which has to be able to tell them apart.
+                rows.append((_c("   " + status_mod.collapsed_label(a), DIM), a))
+                continue
             g = glyph(a)
             label = ("  " * a.depth) + a.name
             # Measured plain and coloured in parallel: only the glyph is coloured,
@@ -244,7 +298,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     if note_text and agents:
         tail = note_text
     rows.append((_c(tail, DIM), None))
-    rows.append((_c("click a row to focus it · scroll to pan · q quits", DIM)
+    rows.append((_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
                  + ("   " + msg if msg else ""), None))
 
     # The one invariant this view rests on: no line may ever wrap. A wrapped line
@@ -254,7 +308,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
 
 def agent_at(rows, row: int):
-    """Screen row (1-based) -> the agent drawn there, or None."""
+    """Screen row (1-based) -> whatever is drawn there, or None.
+
+    May be a `Collapsed` as well as an agent, so every caller has to ask before
+    it reads a `.name` — see `_is_group`. Not filtered to agents here on
+    purpose: a click on a collapsed row is a real thing the human did, and the
+    handler that decides what it means should be the one that sees it.
+    """
     i = row - 1
     if i < 0 or i >= len(rows):
         return None
@@ -278,36 +338,27 @@ def _fit(text: str, width: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Impure: the store, herdr, the terminal
+# Impure: the snapshot file, herdr, the terminal. NOT the store — see the module note.
 # ---------------------------------------------------------------------------
 
 
-def snapshot():
-    """-> (snapshot, note). Never raises.
+def refresh(sup: panel.Supervisor):
+    """-> (snapshot, note). One tick of a renderer. Never raises.
 
-    A board that tracebacks into a raw terminal is worse than a board that says
-    it cannot see anything, so every failure below becomes a line on screen.
+    Two things, and neither of them touches the store. Say a panel is still
+    being looked at, starting a collector if none is up — which is how takeover
+    works: the dead holder's flock is gone, so the next panel to tick replaces
+    it. Then read the file.
+
+    `note` is the panel's own condition, ranked in `panel.Reading.note`, and the
+    staleness line is the reason it exists. A shared snapshot introduces exactly
+    one new failure — a wedged collector leaving forty screens quietly agreeing
+    on old data — so the age is printed the moment it is worth printing, and the
+    board says "snapshot 40s old" instead of presenting it as now.
     """
-    from . import store
-    from .herdr import Herdr
-
-    try:
-        db = store.connect()
-    except Exception as e:                       # not a repo, unreadable db, ...
-        return _empty(), f"store unavailable: {e}"
-    try:
-        snap = status_mod.collect(db, Herdr())
-    except Exception as e:
-        return _empty(), f"could not read the tree: {e}"
-    finally:
-        db.close()
-
-    return snap, (f"herdr unreachable ({snap.herdr_error}) — "
-                  f"alive and stalled are unknown" if snap.herdr_error else "")
-
-
-def _empty():
-    return status_mod.Snapshot(now=0, agents=[])
+    sup.tick()
+    r = panel.read(sup.paths)
+    return r.snap, r.note
 
 
 def focus(name: str) -> str:
@@ -364,10 +415,10 @@ def _size() -> tuple[int, int]:
         return 24, 80
 
 
-def draw(snap, top: int, msg: str, note_text: str) -> list:
+def draw(snap, top: int, msg: str, note_text: str, show_archived: bool) -> list:
     height, width = _size()
     rows = layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text)
+                  note_text=note_text, show_archived=show_archived)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -378,6 +429,15 @@ def draw(snap, top: int, msg: str, note_text: str) -> list:
 def main() -> int:
     if not sys.stdin.isatty():
         print("board: stdin is not a tty — run this in a pane.", file=sys.stderr)
+        return 2
+
+    # Resolved before raw mode, because this is the one failure a panel cannot
+    # draw its way out of: with no repo there is no snapshot to read and no
+    # collector to elect. Cheap and subprocess-free — see panel.git_common_dir.
+    try:
+        sup = panel.Supervisor(panel.Paths.resolve())
+    except (RuntimeError, OSError) as e:
+        print(f"board: {e}", file=sys.stderr)
         return 2
 
     fd = sys.stdin.fileno()
@@ -410,14 +470,20 @@ def main() -> int:
 
     signal.signal(signal.SIGWINCH, on_resize)
 
+    # `a` toggles from wherever `display.show_archived` starts it. The KEY is not
+    # persisted, deliberately: a panel is cheap, every pane has its own, and a
+    # toggle that outlives the pane is a setting — which is exactly what the
+    # setting it starts from is for. `layout` clamps `top` every call, so the row
+    # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
+    show_archived = status_mod.SHOW_ARCHIVED
     try:
         tty.setraw(fd)
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)
         sys.stdout.flush()
 
-        snap, note_text = snapshot()
-        rows = draw(snap, top, msg, note_text)
+        snap, note_text = refresh(sup)
+        rows = draw(snap, top, msg, note_text, show_archived)
         last = time.time()
 
         while True:
@@ -434,6 +500,9 @@ def main() -> int:
                             raise KeyboardInterrupt
                         if "r" in ev["raw"]:
                             last = 0.0
+                        if "a" in ev["raw"]:
+                            show_archived = not show_archived
+                            dirty[0] = True
                         continue
                     step = wheel(ev)
                     if step:
@@ -442,15 +511,21 @@ def main() -> int:
                         continue
                     if is_left_click(ev):
                         a = agent_at(rows, ev["row"])
-                        msg = focus(a.name) if a else ""
+                        if _is_group(a):
+                            # Focusing "the archived ones" is not a thing herdr can
+                            # do, and reading `.name` here is the misclick this
+                            # branch exists to prevent. Say what would work.
+                            msg = "press a to show archived"
+                        else:
+                            msg = focus(a.name) if a else ""
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
-                snap, note_text = snapshot()
+                snap, note_text = refresh(sup)
                 dirty[0] = True
                 last = time.time()
             if dirty[0]:
-                rows = draw(snap, top, msg, note_text)
+                rows = draw(snap, top, msg, note_text, show_archived)
                 dirty[0] = False
     except KeyboardInterrupt:
         pass

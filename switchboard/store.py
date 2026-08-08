@@ -13,9 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import subprocess
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -217,7 +219,12 @@ class LiveAgentsError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def connect(cwd: Optional[Path] = None, *, path: Optional[Path] = None) -> sqlite3.Connection:
+def connect(
+    cwd: Optional[Path] = None,
+    *,
+    path: Optional[Path] = None,
+    readonly: bool = False,
+) -> sqlite3.Connection:
     """Open the store, reconciling the schema as needed. NEVER raises over a schema change.
 
     Compatibility is judged structurally, not by version equality: a store is usable if it
@@ -226,7 +233,12 @@ def connect(cwd: Optional[Path] = None, *, path: Optional[Path] = None) -> sqlit
     forcing one — see `_reconcile`. `connect()` is what every `sb` command calls, including
     the `sb done` an agent needs to stop being live, so nothing decided here may be able to
     stop a fleet from draining itself.
+
+    `readonly=True` is a different connection entirely — see `_connect_readonly`. Reconciling
+    a schema is a WRITER's job, and this default path is where it happens.
     """
+    if readonly:
+        return _connect_readonly(path or db_path(cwd))
     p = path or db_path(cwd)
     p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -246,6 +258,56 @@ def connect(cwd: Optional[Path] = None, *, path: Optional[Path] = None) -> sqlit
         # column another checkout added, therefore costs one PRAGMA sweep and nothing else.
         # `cwd` goes along for the backfills, which need to know which checkout is asking.
         _reconcile(db, cwd)
+    return db
+
+
+def _connect_readonly(p: Path) -> sqlite3.Connection:
+    """A connection that CANNOT change the store, and never reconciles its schema.
+
+    `connect()` is not a reader. It stamps `meta`, it ALTERs tables and backfills every
+    agent row, and — when a table is missing outright — it drops `agents`, `messages` and
+    `events` (`_reconcile` -> `_reset`). All three are correct for a short-lived `sb`
+    running current code, and all three are wrong for something that merely wants to look:
+    a process that connects every two seconds for hours is the likeliest migrator in the
+    tree, running whatever `SCHEMA` string it happened to import at startup. Two checkouts
+    on different branches sharing one store is the normal case here, and the SCHEMA text
+    differing between them — a comment edit is enough — is what arms all of it.
+
+    So a reader gets `mode=ro`, where sqlite itself is the guarantee rather than our
+    discipline: every write, DDL included, raises `sqlite3.OperationalError: attempt to
+    write a readonly database`. Loudly, not silently — a reader that quietly no-ops its
+    way past a migration would be a worse bug than the one this fixes.
+
+    A store this code is genuinely too old or too new for therefore surfaces as an
+    OperationalError out of the query, which is the right answer for a viewer: say "I
+    cannot read this" on screen and let a writer running current code fix the schema.
+
+    Two things `mode=ro` does NOT mean, both deliberate:
+
+    - sqlite may still create the `-shm`/`-wal` sidecars, because that is how a WAL reader
+      coordinates with writers. It needs the *directory* to be writable, not the database.
+      Nothing in the store's content can change.
+    - it will not create a missing database, and we do not either — see below.
+    """
+    # `mode=ro` on a path that does not exist fails with a bare "unable to open database
+    # file", which tells a reader nothing about which of the several possible reasons it
+    # was. Answer the question the reader actually has. Creating it is not on the table:
+    # an empty store created by a viewer would be indistinguishable from a real one and
+    # would make the NEXT writer think the schema was current. Nothing has run here yet is
+    # a true and useful thing to display, and a writer creates the store on its first `sb`.
+    if not p.exists():
+        raise FileNotFoundError(
+            f"no store yet at {p} — nothing has been recorded in this repo. "
+            f"A store is created by the first `sb` command that runs here, never by a reader."
+        )
+    # Percent-encoded: a URI filename is parsed, so a '?' or '#' anywhere in the path would
+    # otherwise be read as the start of the query part and silently open the wrong file.
+    uri = f"file:{urllib.parse.quote(str(p))}?mode=ro"
+    db = sqlite3.connect(uri, uri=True, timeout=_DB_TIMEOUT)
+    db.row_factory = sqlite3.Row
+    db.execute(f"PRAGMA busy_timeout={int(_DB_TIMEOUT * 1000)}")
+    # No `journal_mode`, no `CREATE TABLE IF NOT EXISTS meta`, no hash check and no
+    # `_reconcile`. The absence of those four lines is the whole fix.
     return db
 
 
@@ -444,12 +506,22 @@ def _reset(db: sqlite3.Connection, *, force: bool = False) -> None:
         ).fetchall()]
     except sqlite3.OperationalError:
         live = []                              # no agents table: nothing is running
+    unknown = False
     if live and not force:
-        live = [n for n in live if n in _herdr_alive()]
+        known = _herdr_alive()
+        if known is None:
+            # Could not ask. The store's own list is then the only evidence there is, and
+            # it stays — narrowing it here would be narrowing it on a guess, in the one
+            # branch where guessing wrong is unrecoverable.
+            unknown = True
+        else:
+            live = [n for n in live if n in known]
     if live and not force:
         raise LiveAgentsError(
             "the store's schema changed under a running fleet: "
             + ", ".join(live)
+            + ("\n(herdr could not be reached, so this is what the store says is live"
+               "\nrather than what is confirmed running — refusing on that.)" if unknown else "")
             + "\nThey keep working on the old store, which is rebuilt automatically once"
               "\nthe last one finishes. To rebuild NOW and lose their state:"
               "\n  sb doctor --reset-store --force"
@@ -459,18 +531,39 @@ def _reset(db: sqlite3.Connection, *, force: bool = False) -> None:
     _create(db)
 
 
-def _herdr_alive() -> set:
-    """Agent names herdr currently knows about. Empty on any failure — an unreachable
-    herdr must not be able to wedge the store."""
+def _herdr_alive() -> Optional[set]:
+    """Agent names herdr currently knows about, or **None** when we could not tell.
+
+    None is not an empty set, and that distinction is the whole function. Its only caller
+    is the guard on dropping `agents`, `messages` and `events` (`_reset`), where an empty
+    set reads as "nobody is running, safe to wipe". So every failure here used to fail
+    toward the wipe: herdr installed anywhere other than `~/.local/bin`, a non-zero exit,
+    a slow answer that timed out, output that did not parse — any of them was enough to
+    turn a schema mismatch into an unrecoverable, unlogged loss under a live fleet.
+
+    Wrong direction for an irreversible branch. Unknown now means unknown, and the guard
+    refuses; the cost of refusing is a store that stays degraded a while longer, which is
+    the same cost `_reconcile` already pays deliberately everywhere else.
+
+    Resolved the way the adapter resolves it (`herdr.Herdr.__init__`) rather than by a
+    hardcoded path — but not by importing it: `store` is the bottom of the stack and
+    `herdr` is a view over it, so the two-line duplication is the price of the layering.
+    """
+    binary = shutil.which("herdr") or str(Path.home() / ".local/bin/herdr")
     try:
         p = subprocess.run(
-            [str(Path.home() / ".local/bin/herdr"), "agent", "list"],
+            [binary, "agent", "list"],
             capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT,
         )
-        return {a.get("name") for a in json.loads(p.stdout)["result"]["agents"]
-                if a.get("name")}
-    except Exception:
-        return set()
+    except Exception:                          # noqa: BLE001 — missing, unrunnable, hung
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        agents = json.loads(p.stdout)["result"]["agents"]
+        return {a.get("name") for a in agents if a.get("name")}
+    except Exception:                          # noqa: BLE001 — not the answer we asked for
+        return None
 
 
 def now() -> int:
@@ -762,12 +855,17 @@ def unread_for(db: sqlite3.Connection, name: str, *, mark: bool = True) -> list[
 
 
 def undelivered(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[sqlite3.Row]:
-    """Messages written but never announced, oldest first.
+    """Messages written but never announced, oldest first. Says nothing about read.
 
     A message is only 'delivered' once we have rung the target's doorbell. We hold the
     ring back while the target is mid-turn, because `agent prompt` INTERLEAVES — it is
     injected into the current turn rather than queued after it — so ringing a working
     agent interrupts whatever it was doing.
+
+    This answers "did our doorbell ring?", which is a question about US and is the right
+    one for a sender checking its own send (`sb tell`'s report): a message written a
+    moment ago cannot have been read yet, so there the two predicates coincide. It is the
+    WRONG one for anything asking whether the target knows — use `unseen` for that.
 
     `exclude` is for addresses that are not agents and have no doorbell. The human is the
     only one: nothing is addressed to them any more (they have no mailbox — see
@@ -775,10 +873,36 @@ def undelivered(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[
     ever going to come for them. Passed in rather than written here because what the human
     is CALLED is `[vocabulary]`.
     """
+    return _pending(db, exclude=exclude)
+
+
+def unseen(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[sqlite3.Row]:
+    """Messages the target has no way of knowing about: never announced AND never read.
+
+    The two come apart the moment an agent runs `sb inbox` of its own accord instead of
+    waiting to be rung. It is mid-turn, so the doorbell is held back; it reads the mail
+    anyway; `read_at` is set and `delivered_at` stays NULL — forever, because the ring
+    those rows were owed is the ring that would have cleared it. Every one of them is
+    still `undelivered`, and not one of them is news to the agent.
+
+    So this is the predicate for anyone acting on the agent's behalf. Ringing on
+    `delivered_at` alone costs the agent a whole turn to discover an empty inbox, and
+    `Broker._ring` unblocks before it prompts — so a ring for mail already read puts an
+    agent that stopped to ask a person back to `working` and drops it off
+    `sb status --needs-me`, with the question never reaching anyone.
+    """
+    return _pending(db, exclude=exclude, unread_only=True)
+
+
+def _pending(
+    db: sqlite3.Connection, *, exclude: Iterable[str], unread_only: bool = False
+) -> list[sqlite3.Row]:
+    """Shared body of `undelivered`/`unseen` — one predicate apart, oldest first."""
     names = list(exclude)
     holes = ",".join("?" * len(names))
     return db.execute(
         "SELECT * FROM messages WHERE delivered_at IS NULL"
+        + (" AND read_at IS NULL" if unread_only else "")
         + (f" AND to_agent NOT IN ({holes})" if names else "")
         + " ORDER BY id",
         names,
@@ -904,7 +1028,15 @@ def _main(argv: Optional[list[str]] = None) -> int:
 
     p = db_path()
     print(f"store: {p}  ({'exists' if p.exists() else 'not created yet'})")
-    db = connect()
+    # A debugging window onto a store that is usually somebody else's and usually live.
+    # Looking at it must not migrate it: `connect()` would stamp, ALTER, backfill or drop
+    # to suit whichever checkout this module was imported from. `reset` is a write by
+    # definition and is the only subcommand that gets a writable connection.
+    try:
+        db = connect(readonly=args.cmd != "reset")
+    except FileNotFoundError as e:
+        print(f"  {e}")
+        return 1
 
     if args.cmd == "info":
         for t in ("agents", "messages", "events"):

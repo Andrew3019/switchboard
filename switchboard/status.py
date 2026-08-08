@@ -26,19 +26,31 @@ hesitate to run is the same as not having one.
 
 A third disagreement, in the mailbox rather than the pane:
 
-    written, never announced                  →  UNDELIVERED
+    never announced AND never read            →  UNDELIVERED
 
 `agent prompt` INTERLEAVES — it is injected into the current turn rather than queued after
 it — so ringing a working agent interrupts whatever it is doing. `sb tell` therefore holds
 the ring back while the target is mid-turn, and `broker.flush_pending` rings once it goes
 idle. That is right, and it introduces a way for mail to sit forever: if the flush never
-runs, nothing is on the agent's screen and nothing is in its inbox count. Undelivered mail
-is reported separately from unread for exactly that reason — unread means we rang and it
-has not looked, undelivered means it was never told. Only one of those is the agent's
-fault, and only one of them is invisible from inside the agent.
+runs, nothing is on the agent's screen and nothing is in its inbox count.
+
+Both halves of that predicate carry weight. Announcement alone says only whether WE rang;
+it does not say whether the agent knows. An agent that runs `sb inbox` of its own accord
+while mid-turn reads mail the doorbell was still holding back, and those rows stay
+un-announced for good — so counting announcement alone warns that an agent is in the dark
+about messages already in its context, on the same row where MAIL says `-`. Counting what
+is BOTH un-announced and unread keeps UNDELIVERED a strict subset of MAIL: unread means we
+rang and it has not looked, undelivered means it has no way to know yet. Only one of those
+is the agent's fault, and only one of them is invisible from inside the agent.
+`broker.flush_pending` rings on the same predicate, so the doorbell and this board cannot
+disagree about what is still outstanding.
 
 Reading status never mutates: mail is counted, never consumed (`mark=False` semantics),
-and counting an undelivered message never delivers it.
+and counting an undelivered message never delivers it. With one exception, and it is worth
+knowing about — GONE is written back (`_record_gone`), because this is the only place that
+ever learns it. That write ends an agent's turn, so it belongs only to a process that lives
+for one command: a caller that outlives the code it started with passes `reap=False` and
+gets the same flags with none of the writes.
 
 Three commands live here because all three are the same join, at three widths:
 
@@ -57,7 +69,8 @@ from typing import Any, Callable, Optional
 
 from . import config
 from .herdr import (
-    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_TIMEOUT_MS, WORKING, Herdr, HerdrError,
+    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF, SPAWN_TIMEOUT_MS, WORKING, Herdr,
+    HerdrError,
 )
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
@@ -96,9 +109,31 @@ GONE_STATE = "failed"
 # during its own spawn.
 #
 # The window is herdr's own worst case, not a number of our own: every attempt it will
-# make, each running its full timeout. Erring long is the cheap direction — a genuinely
-# dead claim is reaped one window later, whereas erring short kills real agents.
-SPAWN_GRACE = (SPAWN_TIMEOUT_MS / 1000) * SPAWN_ATTEMPTS
+# make, each running its full timeout, and every backoff sleep between them — including
+# the sleep `start_agent` takes after its LAST failure, before it raises (`herdr.py:370`).
+# The backoff is linear, so those sleeps are a triangular number, not one interval:
+#
+#     3 attempts x 90 s  +  2 s x (1 + 2 + 3)  =  282 s
+#
+# Derived from `[retries]` and `[timeouts]` rather than restated, because restating it is
+# how it went stale: it read `timeout x attempts` = 270 s, which is 12 s SHORT of the spawn
+# it guards, and the 12 s it dropped are exactly the backoff. `test_status` pins the
+# relationship by running the real retry loop, so a change to herdr's policy fails a test
+# instead of quietly shortening this.
+_SPAWN_WORST_CASE = (
+    SPAWN_ATTEMPTS * (SPAWN_TIMEOUT_MS / 1000)
+    + SPAWN_BACKOFF * (SPAWN_ATTEMPTS * (SPAWN_ATTEMPTS + 1) / 2)
+)
+
+# The per-attempt timeout is enforced on herdr's side, and it overshoots: the slowest
+# `agent start` in the store is 90 198 ms against a 90 000 ms bound, three of which puts
+# the true worst case ~0.6 s past the derivation. The row is also claimed a moment before
+# the first attempt begins, and `age` is measured from the claim. A few seconds cover both.
+#
+# Erring long is the cheap direction — a genuinely dead claim is reaped one window later,
+# whereas erring short kills real agents during their own spawn.
+SPAWN_SLACK = 5
+SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
@@ -107,6 +142,12 @@ DONE_PREFIX = config.setting("vocabulary.done_prefix")
 
 # Long enough to say what an agent is doing, short enough not to wrap a terminal.
 TASK_CLIP = config.setting("limits.task_clip")
+
+# Whether whole archived subtrees are drawn row by row or collapsed to one line. Read here
+# rather than in each renderer so `sb status` and the panel cannot end up on different
+# defaults — `board.layout` takes this one too. `config.flag`, not `config.setting`,
+# because a quoted "false" is a true string and would silently invert it.
+SHOW_ARCHIVED = config.flag("display.show_archived")
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
 # is still needed here because `--mine` accepts it — for a person, "my subtree" is every
@@ -135,7 +176,7 @@ class AgentStatus:
     task: Optional[str]
     blocked_why: Optional[str]
     summary: Optional[str] = None   # what it said when it last called `sb done`
-    # Mail written but never announced — see `undelivered_age` and the module note.
+    # Mail neither announced nor read — see `undelivered_age` and the module note.
     undelivered: int = 0
     undelivered_age: int = 0        # seconds since the OLDEST one was written; 0 = none
 
@@ -159,12 +200,13 @@ class AgentStatus:
 
     @property
     def waiting_to_be_rung(self) -> bool:
-        """Mail is sitting here that nobody has ever announced to this agent.
+        """Mail is sitting here that this agent has no way of knowing about.
 
         Distinct from unread, and the distinction is the whole point (see the module
-        note): unread means we rang and it has not looked, so the agent still knows.
-        Undelivered means the doorbell was deliberately held back — and if the ring never
-        comes, this mail sits forever with nothing on screen to say so.
+        note): unread means we rang and it has not looked, so the agent knows. This is the
+        subset it was never told about AND has not read of its own accord either — nothing
+        on its screen, nothing in its context. If the ring never comes, this mail sits
+        forever with nothing to say so.
         """
         return self.undelivered > 0
 
@@ -172,6 +214,37 @@ class AgentStatus:
     def needs_human(self) -> bool:
         return (self.blocked or self.at_prompt or self.unread > 0
                 or self.waiting_to_be_rung)
+
+    @property
+    def archived(self) -> bool:
+        """Its pane is not on herdr, and it is old enough for that to mean something.
+
+        A RENDERING FACT. Computed every tick and never written anywhere — no column, no
+        state, no event. "Absent from herdr" is the same signal that, when it was
+        *recorded*, ended live agents (`_record_gone` writing `failed` from a read path).
+        Using it to decide what to DRAW is safe for one reason: a wrong guess costs one
+        frame and the next tick corrects it. The moment anything stores this, that
+        argument is gone and so is the safety.
+
+        `alive is False`, not `if not self.alive`. `alive` is a tri-state and `None`
+        means herdr could not be reached at all, so `is False` is reachable only when
+        herdr *answered*. A herdr outage therefore archives nothing and the whole tree
+        draws, with no branch anywhere having to remember to check for it — the type
+        carries the rule, and a `None` cannot be forgotten the way an `if` can.
+
+        `age >= SPAWN_GRACE` and deliberately not the exact `spawning` predicate, which
+        also reads `session_id` (see `collect`) — not a field of this dataclass, so a
+        renderer could not recompute it. Dropping that half makes the guard strictly
+        WIDER, so this never archives anything the collector's own predicate would have
+        spared; at worst a genuinely dead agent stays on screen for one grace window.
+        That is the reversible direction: showing a dead row costs a line, hiding a live
+        one costs the human an agent.
+
+        It does not read `state`. Not `finished`, not `gone`, not `blocked`. Archived
+        means one thing — herdr does not have this pane — and what the store believes
+        about the agent is the STATE column's question, answered next to it.
+        """
+        return self.alive is False and self.age >= SPAWN_GRACE
 
     def as_dict(self) -> dict:
         d = {f: getattr(self, f) for f in (
@@ -184,7 +257,8 @@ class AgentStatus:
         # from a rule that lives in this file.
         d.update(blocked=self.blocked, at_prompt=self.at_prompt,
                  finished=self.finished, needs_human=self.needs_human,
-                 waiting_to_be_rung=self.waiting_to_be_rung)
+                 waiting_to_be_rung=self.waiting_to_be_rung,
+                 archived=self.archived)
         return d
 
 
@@ -237,6 +311,7 @@ def collect(
     live_only: bool = False,
     needs_me: bool = False,
     mine: Optional[str] = None,
+    reap: bool = True,
 ) -> Snapshot:
     """The whole readout: one herdr call, one pass over the store.
 
@@ -253,6 +328,15 @@ def collect(
 
     All three keep the ancestors of whatever survives, or the indentation would lie about
     who reports to whom. `mine` bounds that: it never re-adds anything above the caller.
+
+    `reap=False` computes every flag exactly as before but writes nothing: the drift is
+    still rendered, it is just not recorded (see `_record_gone`). It is for a caller that
+    is not a short-lived `sb` process. A `sb board` runs for hours on the `status.py`
+    Python imported at startup, so it re-collects every two seconds with whatever grace
+    window and heuristics were current when the human opened it — three of them, still
+    reaping on code from before `SPAWN_GRACE` existed, is how every spawn in one night
+    came to be marked `failed` during its own startup. A readout should not be able to
+    end an agent's life on the strength of code nobody is running any more.
     """
     from . import store                      # local: keeps this module importable alone
 
@@ -292,6 +376,16 @@ def collect(
         # live agent: `delegate` writes it before herdr is called, and herdr will not list
         # the name until `agent start` finally succeeds. Absence proves nothing yet, so it
         # is neither gone nor stalled. See SPAWN_GRACE.
+        #
+        # Both halves, and the session half is the one to be careful with: it ends the
+        # grace EARLY, so if anything could set a session id while herdr still did not
+        # have the agent, the window would close mid-spawn and the guard would be a
+        # formality. Nothing can, today — herdr's `agent start` reply carries no
+        # `agent_session` at all (checked against every stored reply in the event log), so
+        # `delegate`'s write lands NULL and the only real writer is `_claim_session`, which
+        # needs the agent itself to have run an `sb` command. An agent that has run `sb` is
+        # an agent herdr had. Should `agent start` ever start returning a session id, this
+        # becomes a live hole and the condition has to go.
         spawning = row["session_id"] is None and (now - row["created_at"]) < SPAWN_GRACE
         last = max(row["created_at"], activity.get(name, 0))
         agents.append(AgentStatus(
@@ -322,7 +416,7 @@ def collect(
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.
-    if consulted:
+    if consulted and reap:
         _record_gone(db, [a.name for a in agents if a.gone])
 
     kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine)
@@ -376,11 +470,17 @@ def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
 
 
 def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int]]:
-    """Per agent: how much mail was never announced, and when the oldest of it arrived.
+    """Per agent: how much mail it cannot know about, and when the oldest of it arrived.
 
     Aggregated for the same reason as `_unread_counts` — one pass, and strictly read-only.
-    `store.undelivered()` is the per-message reader and takes the same view; this is the
+    `store.unseen()` is the per-message reader and takes exactly this view; this is the
     counting version, so a board with fifty agents does not become fifty queries.
+
+    `read_at IS NULL` is half the predicate and it is not optional. A message an agent read
+    proactively, before the ring it was owed, is un-announced and already in that agent's
+    context at the same time; counting it here is what let one row read `MAIL -` and
+    `<< UNDELIVERED 8` about the same mailbox. `broker.flush_pending` rings on the same
+    pair, so what this counts and what the doorbell chases are one set.
 
     The human is excluded because they are not an agent and have no doorbell. Nothing is
     addressed to them any more, but a store written before the human mailbox was removed
@@ -389,7 +489,8 @@ def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int]]:
     """
     return {r["to_agent"]: (r["n"], r["oldest"]) for r in db.execute(
         "SELECT to_agent, COUNT(*) n, MIN(created_at) oldest FROM messages "
-        "WHERE delivered_at IS NULL AND to_agent <> ? GROUP BY to_agent", (HUMAN,)
+        "WHERE delivered_at IS NULL AND read_at IS NULL AND to_agent <> ? "
+        "GROUP BY to_agent", (HUMAN,)
     )}
 
 
@@ -580,8 +681,163 @@ def fmt_age(seconds: int) -> str:
     return f"{d}d{h:02d}h"
 
 
-def render(snap: Snapshot) -> str:
-    """Compact enough to run reflexively; loud enough that drift cannot be missed."""
+@dataclass
+class Collapsed:
+    """One row standing in for whole archived subtrees, at the depth they were drawn.
+
+    Not an agent and deliberately not shaped like one: a renderer that maps a screen row
+    back to an object must be made to notice the difference (`board.agent_at` returns
+    whatever the row carries, and a click on this must not focus somebody).
+    """
+
+    depth: int
+    count: int                      # every agent hidden here, the whole subtree
+    needs_human: int = 0            # how many of them were still asking for a person
+
+
+def collapsed_label(c: Collapsed) -> str:
+    """The text of a collapsed row, indented to the level it stands in for.
+
+    `· N need you` is what stops the collapse from being able to bury anything. Archived
+    is archived and a blocked agent whose pane died still collapses — but a blocked agent
+    is a question nobody can answer any more, so the row that replaced it says how many it
+    is carrying. No per-row logic and nothing extra hidden: it labels a row that is
+    already there. (Every one of them is still listed by name in NEEDS YOU below, which
+    reads `snap.agents` and never sees this.)
+    """
+    out = ("  " * c.depth) + f"+ {c.count} archived"
+    if c.needs_human:
+        out += f" · {c.needs_human} need you"
+    return out
+
+
+def display_rows(agents: list[AgentStatus], *, show_archived: bool = False
+                 ) -> list[Any]:
+    """The tree with fully-archived subtrees replaced by one `+ N archived` row each.
+
+    ONE function for every renderer. `sb status` and the panel are two drawings of one
+    snapshot, and a tree rule written twice is a tree rule that ends up disagreeing with
+    itself — which is the failure `summary_line`'s docstring already names.
+
+        sealed(x)  ≡  archived(x)  ∧  ∀ c ∈ children(x): sealed(c)
+
+    A *collapse root* is a sealed node whose parent is not sealed. Everything under a
+    collapse root is hidden, and for each drawn parent its sealed children merge into a
+    single row carrying the size of all their subtrees.
+
+    Two properties do all the work, and both are consequences of the rule rather than
+    cases handled in it:
+
+    - **No row that is not archived is ever hidden**, because every hidden node lies in a
+      sealed subtree and every node of a sealed subtree is archived.
+    - **No row with a visible descendant is ever hidden.** If `x` has a drawn descendant
+      then that descendant is not archived, so `x` is not sealed. So there is no such
+      thing here as an archived parent whose live child must still be drawn — the rule
+      simply declines to hide it, and draws it as an ordinary archived row.
+
+    Collapse is per *whole subtree, at the highest level*: nested sealed levels give ONE
+    row, never a chain of `+ 1 archived` at each depth, and `count` is the whole subtree
+    rather than the number of direct children.
+
+    The collapsed row goes AFTER its visible siblings so that a live row never changes
+    position when an unrelated sibling archives. A group appearing, growing or vanishing
+    then moves only the footer of that sibling block, and this is a thing people click.
+
+    Computed over the rows it is GIVEN and nothing else — it never re-derives the tree
+    from the store and never re-reads herdr. Under `--live` or `--mine` the filter has
+    already dropped rows, so this counts only the archived rows that survived, which is
+    the honest reading of "N archived, of what you asked to see"; the filter's own drop
+    is `Snapshot.hidden` and stays a separate number.
+    """
+    rows = list(agents)
+    if show_archived or not rows:
+        return rows
+
+    # From the rows PRESENT, the same way `_tree` and `_subtree` do it: a parent that was
+    # filtered out, or an agent that is its own parent, is a root here. Re-deriving from
+    # the store instead would collapse against a tree the caller is not looking at.
+    names = {a.name for a in rows}
+    kids: dict[Optional[str], list[AgentStatus]] = {}
+    for a in rows:
+        parent = a.parent if a.parent in names and a.parent != a.name else None
+        kids.setdefault(parent, []).append(a)
+
+    sealed: dict[str, bool] = {}
+    walking: set[str] = set()
+
+    def is_sealed(a: AgentStatus) -> bool:
+        if a.name in sealed:
+            return sealed[a.name]
+        if a.name in walking:
+            # A cycle, which `_tree` breaks rather than follows. Treat the way back round
+            # as no obstacle: the cycle's members then stand or fall on being archived,
+            # which is what makes a stranded loop one collapse group instead of a hang.
+            return True
+        walking.add(a.name)
+        try:
+            out = a.archived and all(is_sealed(c) for c in kids.get(a.name, ()))
+        finally:
+            walking.discard(a.name)
+        sealed[a.name] = out
+        return out
+
+    def subtree(a: AgentStatus) -> list[AgentStatus]:
+        out, frontier, seen_here = [], [a], set()
+        while frontier:
+            cur = frontier.pop()
+            if cur.name in seen_here:
+                continue                    # a cycle is broken, not followed (see _tree)
+            seen_here.add(cur.name)
+            out.append(cur)
+            frontier.extend(kids.get(cur.name, ()))
+        return out
+
+    def collapsed(group: list[AgentStatus]) -> Collapsed:
+        hidden = [a for g in group for a in subtree(g)]
+        # The depth the hidden rows would have been drawn at — they are siblings, so they
+        # share one. Taken from the rows themselves rather than from this walk, so the row
+        # lands at the nest level of what it replaced even for a tree `_tree` had to
+        # straighten out.
+        return Collapsed(depth=min(g.depth for g in group), count=len(hidden),
+                         needs_human=sum(1 for a in hidden if a.needs_human))
+
+    out: list[Any] = []
+    drawn: set[str] = set()
+
+    def emit(siblings) -> list[AgentStatus]:
+        """Draw the visible ones in order; hand back the sealed roots among them."""
+        group = []
+        for a in siblings:
+            if a.name in drawn:
+                continue
+            if is_sealed(a):
+                group.append(a)
+                drawn.update(x.name for x in subtree(a))
+                continue
+            drawn.add(a.name)
+            out.append(a)
+            inner = emit(kids.get(a.name, ()))
+            if inner:
+                out.append(collapsed(inner))
+        return group
+
+    group = emit(kids.get(None, ()))
+    # Anything a cycle kept out of the walk, exactly as `_tree` rescues it — at the left
+    # margin, and into the SAME root-level group, because one level gets one row.
+    group += emit([a for a in rows if a.name not in drawn])
+    if group:
+        out.append(collapsed(group))
+    return out
+
+
+def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
+    """Compact enough to run reflexively; loud enough that drift cannot be missed.
+
+    `show_archived=None` means "whatever `display.show_archived` says", so a caller with
+    no opinion cannot accidentally hard-code one. `sb status --archived` passes True.
+    """
+    if show_archived is None:
+        show_archived = SHOW_ARCHIVED
     lines: list[str] = []
     if snap.herdr_error:
         lines.append(f"! herdr unreachable ({snap.herdr_error}) — "
@@ -590,14 +846,22 @@ def render(snap: Snapshot) -> str:
         lines.append("(no agents)" + (f"  [{snap.hidden} hidden by filters]" if snap.hidden else ""))
         return "\n".join(lines)
 
-    labels = [("  " * a.depth) + a.name for a in snap.agents]
-    w_name = max(len("AGENT"), *(len(x) for x in labels))
-    w_role = max(len("ROLE"), *(len(a.role) for a in snap.agents))
-    w_ws = max(len("WORKSPACE"), *(len(a.workspace or "-") for a in snap.agents))
+    rows = display_rows(snap.agents, show_archived=show_archived)
+    labels = [collapsed_label(r) if isinstance(r, Collapsed)
+              else ("  " * r.depth) + r.name for r in rows]
+    # Defaults rather than `max(x, *seq)`: with every root archived, `rows` is a single
+    # collapsed row and there is no agent left to measure a ROLE or a WORKSPACE against.
+    w_name = max([len("AGENT")] + [len(x) for x in labels])
+    w_role = max([len("ROLE")] + [len(r.role) for r in rows if not isinstance(r, Collapsed)])
+    w_ws = max([len("WORKSPACE")]
+               + [len(r.workspace or "-") for r in rows if not isinstance(r, Collapsed)])
 
     lines.append(f"{'AGENT':<{w_name}}  {'ROLE':<{w_role}}  {'STATE':<8}  {'HERDR':<7}  "
                  f"{'MAIL':>4}  {'AGE':>6}  {'IDLE':>6}  {'WORKSPACE':<{w_ws}}")
-    for label, a in zip(labels, snap.agents):
+    for label, a in zip(labels, rows):
+        if isinstance(a, Collapsed):
+            lines.append(label)     # no columns: it is not an agent and must not read as one
+            continue
         lines.append(
             f"{label:<{w_name}}  {a.role:<{w_role}}  {a.state:<8}  {_herdr_cell(a):<7}  "
             f"{(str(a.unread) if a.unread else '-'):>4}  {fmt_age(a.age):>6}  "
@@ -702,7 +966,12 @@ def _attention(snap: Snapshot) -> list[str]:
                 # BEFORE the unread branch, because undelivered mail is unread by
                 # definition — nobody told the agent it exists. Reporting it as "not
                 # picked up" would blame the agent for silence that is ours.
-                told = max(0, a.unread - a.undelivered)
+                #
+                # Plain subtraction, no clamp: undelivered is `unread AND un-announced`,
+                # so it is a subset of unread and this cannot go negative. It used to be
+                # clamped, which is how the impossible case printed a fluent wrong
+                # sentence instead of an obviously broken one.
+                told = a.unread - a.undelivered
                 extra = f", plus {told} unread it WAS told about" if told else ""
                 out.append(f"  {a.name:<{w}}  {a.undelivered} never announced to it, "
                            f"oldest {fmt_age(a.undelivered_age)}{extra}"
@@ -715,15 +984,16 @@ def _attention(snap: Snapshot) -> list[str]:
     if pending:
         w = max(len(a.name) for a in pending)
         out.append("")
-        out.append("UNDELIVERED — written, never announced. The doorbell is held back while")
-        out.append("an agent is mid-turn (`agent prompt` interleaves), and released when it")
-        out.append("goes idle. Anything still here has not been released, so the agent does")
-        out.append("not know it has mail and nothing on its screen says so.")
+        out.append("UNDELIVERED — written, never announced, and unread, so the agent has no")
+        out.append("way to know it exists. The doorbell is held back while an agent is")
+        out.append("mid-turn (`agent prompt` interleaves), and released when it goes idle.")
+        out.append("Mail an agent read of its own accord is never counted here, however we")
+        out.append("came to ring — it is already in front of it.")
         for a in pending:
             out.append(f"  {a.name:<{w}}  {a.undelivered} waiting, "
                        f"oldest {fmt_age(a.undelivered_age)}, "
                        f"{'still working' if a.state in RUNNING and not a.stalled else a.state}")
-        out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; it is delivered when "
+        out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; the doorbell rings when "
                    f"the agent next goes idle")
 
     drift = [a for a in snap.agents if a.stalled or a.gone]
@@ -779,8 +1049,9 @@ class Detail:
     session_id: Optional[str] = None
     transcript: Optional[str] = None
     unread: list[dict] = field(default_factory=list)
-    # Written but never announced. Separate from `unread` for the reason the module note
-    # gives: this agent has not been told these exist, so they are not mail it ignored.
+    # Never announced and never read. A subset of `unread`, kept apart for the reason the
+    # module note gives: this agent has no way to know these exist, so they are not mail
+    # it ignored.
     undelivered: list[dict] = field(default_factory=list)
     # Asks with no reply, in both directions. Kept apart because they mean opposite
     # things: one is somebody stuck on this agent, the other is this agent stuck on
@@ -843,8 +1114,11 @@ def inspect(
         unread=[_msg(m) for m in db.execute(
             "SELECT * FROM messages WHERE to_agent=? AND read_at IS NULL ORDER BY id",
             (name,))],
+        # Same predicate as `_undelivered_counts`, and it must stay the same or the count
+        # in the header and the bodies underneath it would be about different sets.
         undelivered=[_msg(m) for m in db.execute(
-            "SELECT * FROM messages WHERE to_agent=? AND delivered_at IS NULL ORDER BY id",
+            "SELECT * FROM messages WHERE to_agent=? AND delivered_at IS NULL "
+            "AND read_at IS NULL ORDER BY id",
             (name,))],
         owed=[_msg(m) for m in _unanswered(db, name, mine=False)],
         waiting_on=[_msg(m) for m in _unanswered(db, name, mine=True)],
@@ -925,10 +1199,11 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
 
     if d.undelivered:
         out.append("")
-        out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it "
-                   f"(oldest {fmt_age(a.undelivered_age)})")
+        out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it, "
+                   f"never read (oldest {fmt_age(a.undelivered_age)})")
         out.append("  The doorbell is held while an agent is mid-turn and released when it")
-        out.append("  goes idle; until then this agent does not know these exist.")
+        out.append("  goes idle; until then this agent does not know these exist. Anything")
+        out.append("  it has already read is excluded — every row below has `read: false`.")
         for m in d.undelivered:
             out.append(f"  [{m['id']}] from {m['from']}: {clip(m['body'], 90)}")
 

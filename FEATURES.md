@@ -63,7 +63,10 @@ mailbox.
 ### `sb done <summary>`
 Reports the calling agent finished. The summary is delivered to the parent's mailbox
 (`[done] ` prefix) if it has one, otherwise only logged (root agents have no parent).
-Also pushes `idle` to herdr and rings the parent's doorbell.
+Also pushes `idle` to herdr and rings the parent's doorbell. Reporting done with children
+still working is legal — a parent that delegated must have a legal way to end its turn —
+but it is named back to the caller and logged as `done_with_live_children`; `sb cleanup`
+will not close the pane while they run.
 - Entry point: `cli.py:727-730` → `Broker.done` (`broker.py:1486-1509`)
 - Depends on: same doorbell mechanism as `tell`
 - Config: `settings.toml [vocabulary] done_prefix`
@@ -81,9 +84,10 @@ until a human answers via `sb tell`.
 The whole agent tree as one join of store state against herdr's live pane state,
 flagging drift: **STALLED** (store says working, herdr says idle/done, and `sb done` was
 never called), **GONE** (the pane closed under it — self-heals by writing `state=failed`),
-**UNDELIVERED** (mail was written but the doorbell never rang because the target was
-mid-turn).
-- Entry point: `cli.py:738-745` → `status.collect`/`status.render` (`status.py:232-331`, `583-611`)
+**UNDELIVERED** (mail the target cannot know about — the doorbell never rang for it,
+usually because the target was mid-turn, and the target has not read it of its own accord
+either).
+- Entry point: `cli.py:738-745` → `status.collect`/`status.render` (`status.py:216-726`)
 - Depends on: `store` (agents/messages/events tables), single batched `herdr.list_agents`
   call
 - Status: working
@@ -131,12 +135,18 @@ directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or
   §4.6 asserts this check; it is deliberately not built, and §4.6 says why.
 - Config: `settings.toml [herdr] min_version`
 
-### `sb cleanup [name...] [--include-kept] [--force] [--dry-run]`
+### `sb cleanup [name...] [--include-kept] [--force] [--leave-children] [--dry-run]`
 Closes finished agents' panes — never their history; `sb restore` brings a closed agent
-back. With no names, sweeps the caller's own subtree (or everything, for a human). Three
-layered safety gates: must be finished with no unread mail; the agent's own recorded
-disposition (`--include-kept` lifts it); `--force` lifts every gate but only alongside an
-explicit name.
+back. With no names, sweeps the caller's own subtree (or everything, for a human). Five
+layered safety gates: must be finished with no unread mail; an end that no agent reported
+(`failed`, written by `status._record_gone`) is re-checked against `agent list` and left
+alone if herdr still has the agent **or cannot be asked**; the agent's own recorded
+disposition (`--include-kept` lifts it); `--force` lifts those three but only alongside an
+explicit name; and **no agent is closed while a descendant is still `working` or
+`blocked`** — the invariant that an agent with no pane has no live children under it.
+`--force` does NOT lift the last one, because it is a fact about agents the caller did not
+name; `--leave-children` does, and says what it costs. The other way out is to close the
+subtree from the leaves up.
 - Entry point: `cli.py:801-806` → `Broker.cleanup` (`broker.py:1554-1626`)
 - Depends on: the store's per-agent `cleanup` column, written at spawn
 - Status: working. The disposition is a **run-time** decision, not a role's property: no
@@ -263,7 +273,9 @@ marking any tier "UNAVAILABLE" if its provider has no backend wired.
 ### `sb board` — hidden, human-only
 A clickable live view of the agent tree (glyphs, click-to-focus, scroll), periodically
 refreshed. Read-only against the store except for one side effect: `herdr agent focus`
-when a human clicks an agent.
+when a human clicks an agent — and it is read-only only because `snapshot()` passes
+`status.collect(..., reap=False)`. Without that the refresh marks agents `failed`, on
+whatever `status.py` this long-lived process imported at startup.
 - Entry point: `cli.py:120` (registered `hidden=True`, so it does not appear in
   `sb --help`) → `broker._open_board` / `board.main`/`board.open_beside`
   (`switchboard/board.py`, 463 lines)
@@ -289,7 +301,9 @@ when a human clicks an agent.
 (`cli.py:531-534`). Herdr's `agent prompt` interleaves into a running turn, so a message
 to a mid-turn agent is held back and delivered the next time that agent calls `sb`, once
 it has gone idle. Underlies `tell`, `ask`, `done`, and `block`; surfaced to humans in
-`sb status`/`sb inspect` as `UNDELIVERED`.
+`sb status`/`sb inspect` as `UNDELIVERED`. The flush and both readouts ring/count on the
+same predicate — un-announced AND unread — so mail an agent read proactively while
+mid-turn drops out of all three rather than being chased forever.
 - Entry point: `broker.py` `Broker._ring`, `Broker.flush_pending`
 
 ### Identity resolution
