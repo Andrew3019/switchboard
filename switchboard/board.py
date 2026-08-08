@@ -1,4 +1,4 @@
-"""The clickable board — a human's live view of the tree.
+"""The clickable board — a human's live view of the tree. A RENDERER.
 
 Three ways in, all the same screen: `sb start` opens one beside the orchestrator
 it starts (`--no-board` declines), `sb board` opens one here, and
@@ -7,18 +7,26 @@ it starts (`--no-board` declines), `sb board` opens one here, and
 This is a HUMAN-ONLY surface and must stay one. `sb board` is hidden from
 `--help` and refuses any caller that `whoami()` resolves to an agent, and the
 board appears nowhere in defaults/protocol.md, which is where an agent actually
-learns what `sb` can do. Everything here is read-only against the store, with
-exactly one side effect — `herdr agent focus`, a human jumping to a pane.
+learns what `sb` can do. Its only side effect is `herdr agent focus`, a human
+jumping to a pane.
 
-That claim was false twice, and both repairs are one line in `snapshot()`.
-`reap=False`: the refresh goes through `status.collect`, which marks an agent
-`failed` when herdr no longer lists it, so every board was a reaper on a
-two-second tick running whatever `status.py` it imported at startup.
-`readonly=True`: `store.connect()` is itself a writer — it re-stamps `meta`, it
-ALTERs tables and backfills every agent row, and it can DROP `agents`,
-`messages` and `events` — so a board was also a schema migrator on that same
-tick, and the worst of those three is not recoverable. Read `snapshot()` before
-removing either argument.
+**This file does not import `store`, and must not start.** It once did, inside
+`snapshot()`, and the claim that a two-second tick there was read-only was false
+twice: `collect` marked an agent `failed` when herdr stopped listing it
+(`reap=False` closed that), and `store.connect()` itself re-stamps `meta`, ALTERs
+tables and backfills every agent row, and can DROP `agents`, `messages` and
+`events` (`readonly=True` closed that, in `1c10745`). Both fixes are real and
+both are still in force — they moved, with the connect, into
+`switchboard/collector.py`. What changed here is that they stopped being a claim
+this file has to keep making. A panel now reads a file that one elected collector
+publishes, so the board has no database handle and no import that could get it
+one: read-only is a fact about `switchboard/panel.py`'s imports, checked by
+`tests/test_panel.py::RendererImports`, rather than a docstring somebody has to
+defend on every future edit. That is also what makes a panel per agent affordable
+— forty of these cost one collector between them.
+
+`refresh()` is the whole of the difference. Read `switchboard/panel.py` before
+reaching for the store from here.
 
 Proved out by `scripts/05-mouse.py` and `scripts/06-board.py`: herdr forwards
 SGR mouse events to a pane, and a decoded row maps back to an agent. Those two
@@ -45,6 +53,7 @@ import tty
 from typing import Optional
 
 from . import config
+from . import panel
 from . import status as status_mod
 
 # 1000h = press/release reporting. 1006h = SGR encoding, which is the only one
@@ -57,7 +66,9 @@ SHOW_CURSOR = "\033[?25h"
 SGR = re.compile(r"\033\[<(\d+);(\d+);(\d+)([Mm])")
 
 # Both `[display]` in defaults/settings.toml.
-REFRESH = config.setting("display.board_refresh")   # how often the tree is re-collected
+REFRESH = config.setting("display.board_refresh")   # how often the collector re-collects,
+                                                    # and so how often re-reading it can
+                                                    # tell us anything new
 CHROME = config.setting("display.board_chrome")       # header, blank, blank, status —
                                                      # lines not available to agents
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
@@ -288,50 +299,27 @@ def _fit(text: str, width: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Impure: the store, herdr, the terminal
+# Impure: the snapshot file, herdr, the terminal. NOT the store — see the module note.
 # ---------------------------------------------------------------------------
 
 
-def snapshot():
-    """-> (snapshot, note). Never raises.
+def refresh(sup: panel.Supervisor):
+    """-> (snapshot, note). One tick of a renderer. Never raises.
 
-    A board that tracebacks into a raw terminal is worse than a board that says
-    it cannot see anything, so every failure below becomes a line on screen.
+    Two things, and neither of them touches the store. Say a panel is still
+    being looked at, starting a collector if none is up — which is how takeover
+    works: the dead holder's flock is gone, so the next panel to tick replaces
+    it. Then read the file.
 
-    `readonly=True` and `reap=False` are load-bearing, not tidy-ups, and they
-    close the same hole from two ends. This process outlives the code it was
-    started with — hours of two-second ticks against the `status.py` and the
-    `store.SCHEMA` that existed when the human opened it — so anything it writes
-    is written by a version nobody can read any more. `reap=False` stops
-    `collect` ending an agent's turn; `readonly=True` stops `connect` migrating
-    the schema, which is the larger of the two (it can drop the store) and the
-    one a flag on `collect` could not reach. Ending turns and reconciling
-    schemas are both jobs for a short-lived `sb` running current code.
-
-    A store too old or too new for this board therefore reads as "could not read
-    the tree: no such column: agents.branch" on screen, which is what a viewer
-    should say — rather than being quietly migrated to suit a stale reader.
+    `note` is the panel's own condition, ranked in `panel.Reading.note`, and the
+    staleness line is the reason it exists. A shared snapshot introduces exactly
+    one new failure — a wedged collector leaving forty screens quietly agreeing
+    on old data — so the age is printed the moment it is worth printing, and the
+    board says "snapshot 40s old" instead of presenting it as now.
     """
-    from . import store
-    from .herdr import Herdr
-
-    try:
-        db = store.connect(readonly=True)
-    except Exception as e:                       # not a repo, no store yet, unreadable, ...
-        return _empty(), f"store unavailable: {e}"
-    try:
-        snap = status_mod.collect(db, Herdr(), reap=False)
-    except Exception as e:
-        return _empty(), f"could not read the tree: {e}"
-    finally:
-        db.close()
-
-    return snap, (f"herdr unreachable ({snap.herdr_error}) — "
-                  f"alive and stalled are unknown" if snap.herdr_error else "")
-
-
-def _empty():
-    return status_mod.Snapshot(now=0, agents=[])
+    sup.tick()
+    r = panel.read(sup.paths)
+    return r.snap, r.note
 
 
 def focus(name: str) -> str:
@@ -404,6 +392,15 @@ def main() -> int:
         print("board: stdin is not a tty — run this in a pane.", file=sys.stderr)
         return 2
 
+    # Resolved before raw mode, because this is the one failure a panel cannot
+    # draw its way out of: with no repo there is no snapshot to read and no
+    # collector to elect. Cheap and subprocess-free — see panel.git_common_dir.
+    try:
+        sup = panel.Supervisor(panel.Paths.resolve())
+    except (RuntimeError, OSError) as e:
+        print(f"board: {e}", file=sys.stderr)
+        return 2
+
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     restored = False
@@ -440,7 +437,7 @@ def main() -> int:
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)
         sys.stdout.flush()
 
-        snap, note_text = snapshot()
+        snap, note_text = refresh(sup)
         rows = draw(snap, top, msg, note_text)
         last = time.time()
 
@@ -470,7 +467,7 @@ def main() -> int:
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
-                snap, note_text = snapshot()
+                snap, note_text = refresh(sup)
                 dirty[0] = True
                 last = time.time()
             if dirty[0]:

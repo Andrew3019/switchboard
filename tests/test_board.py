@@ -20,8 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import board, status, store  # noqa: E402
-from switchboard import herdr as herdr_mod  # noqa: E402
+from switchboard import board, panel, status  # noqa: E402
 
 
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
@@ -152,45 +151,68 @@ class LayoutTest(unittest.TestCase):
         self.assertIn(status.summary_line(s), rows[0][0])
 
 
-class SnapshotIsReadOnlyTest(unittest.TestCase):
+class RefreshTest(unittest.TestCase):
     """The one impure test in this file, and it earns the exception.
 
-    Everything above is pure because the board's bugs are drawing bugs. This one is not
-    about drawing: a board refreshes every two seconds for as long as a human leaves it
-    open, on the `status.py` that Python imported at startup, and `collect` writes. Three
-    boards older than a fix to the spawn grace once marked every agent spawned that night
-    `failed` during its own startup. Nothing else in the suite can catch that, because
-    every other caller of `collect` is a process that lives for one command.
+    Everything above is pure because the board's bugs are drawing bugs. This one is about
+    where the rows come from, which used to be the store and is now a file one elected
+    collector publishes. It used to prove that a two-second tick here wrote nothing —
+    three boards older than a fix to the spawn grace once marked every agent spawned that
+    night `failed` during their own startup. That guarantee did not weaken; it moved,
+    with the connect, to `tests/test_readonly.py::CollectorTick`, and `tests/test_panel.py
+    ::RendererImports` now makes it structural: this file cannot reach the store to write
+    to it. What is left to check here is the renderer's half of the bargain — that it
+    reads what was published, and that it says so when what it read is old.
     """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.path = Path(self.tmp.name) / "state.db"
-        db = store.connect(path=self.path)
-        # Absent from herdr, past its spawn: the row a reaping readout would end.
-        store.create_agent(db, name="w1", role="worker", session_id="s1")
-        db.close()
+        self.paths = panel.Paths(Path(self.tmp.name) / "panel")
+        self.sup = panel.Supervisor(self.paths)
 
-    def test_a_refresh_shows_the_drift_and_writes_none_of_it(self):
-        class NoAgents:
-            def list_agents(self): return []
+    def _publish(self, **counters):
+        meta = {"pid": 7, "started_at": 0.0, "polls": 3, "errors": 0,
+                "collected_at": panel.now(), "wrote_at": panel.now(), "tick_ms": 9.0,
+                "last_error": None, "last_error_at": None}
+        meta.update(counters)
+        snap = status.Snapshot(now=100, agents=[agent("w1", gone=True, alive=False)])
+        panel.publish(self.paths, panel.envelope(snap.as_dict(), meta))
 
-        # `db_path`, not `connect`: shadowing `connect` would fake the very call whose
-        # arguments are now half the guarantee (see tests/test_readonly.py).
-        with mock.patch.object(store, "db_path", lambda *a, **k: self.path), \
-             mock.patch.object(herdr_mod, "Herdr", NoAgents):
-            s, note = board.snapshot()
+    def test_a_refresh_draws_what_the_collector_published(self):
+        self._publish()
+        with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
+            snap, note_text = board.refresh(self.sup)
+        self.assertEqual(note_text, "")
+        self.assertTrue(snap.agents[0].gone)          # the screen says it, exactly as before
+        rows = board.layout(snap, top=0, height=10, width=120, msg="", note_text=note_text)
+        self.assertEqual(board.agent_at(rows, 3).name, "w1")
 
-        self.assertEqual(note, "")
-        self.assertTrue(s.agents[0].gone)             # the screen says it, exactly as before
+    def test_an_old_snapshot_is_labelled_rather_than_drawn_as_now(self):
+        """The failure a shared cache introduces, and the one thing the design asked to be
+        loud: forty panes quietly agreeing on stale data."""
+        self._publish(collected_at=panel.now() - 40)
+        with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
+            snap, note_text = board.refresh(self.sup)
+        self.assertIn("snapshot 40s old", note_text)
+        rows = board.layout(snap, top=0, height=10, width=120, msg="", note_text=note_text)
+        self.assertIn("snapshot 40s old", "".join(t for t, _ in rows))
 
-        db = store.connect(path=self.path)
-        self.addCleanup(db.close)
-        row = store.get_agent(db, "w1")
-        self.assertEqual(row["state"], "working")     # ...and the store is untouched
-        self.assertIsNone(row["ended_at"])
-        self.assertEqual(store.recent_events(db, agent="w1"), [])
+    def test_a_refresh_says_a_panel_is_still_being_looked_at(self):
+        """The collector's only reason to keep running, and so the only reason it cannot
+        outlive the panels."""
+        self._publish()
+        with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
+            board.refresh(self.sup)
+        self.assertLess(panel.demand_age(self.paths), 5)
+
+    def test_a_refresh_with_nothing_published_yet_draws_a_screen_anyway(self):
+        with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
+            snap, note_text = board.refresh(self.sup)
+        self.assertEqual(snap.agents, [])
+        self.assertIn("collector", note_text)
+        self.assertEqual(len(board.layout(snap, top=0, height=12, width=80, msg="",
+                                          note_text=note_text)), 12)
 
 
 if __name__ == "__main__":

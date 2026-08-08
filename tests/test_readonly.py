@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from switchboard import board, store
+from switchboard import collector, store
 from switchboard import herdr as herdr_mod
 
 FOREIGN = "ffffffffffffffff"          # some other checkout's SCHEMA text stamped the store
@@ -149,11 +149,18 @@ class ReadonlyConnection(unittest.TestCase):
         self.assertEqual(store.live_agents(db), [])
 
 
-class BoardTick(unittest.TestCase):
+class CollectorTick(unittest.TestCase):
     """The same thing end to end, through the process that actually does it.
 
-    `ReadonlyConnection` proves the connection cannot write. This proves the board asks for
-    that connection — the one line that turns the guarantee into a fix.
+    `ReadonlyConnection` proves the connection cannot write. This proves the long-lived
+    poller asks for that connection — the one line that turns the guarantee into a fix.
+
+    It used to say `board`. The connect moved to `switchboard/collector.py` when the panel
+    split into one collector and many renderers, and this test moved with it, unchanged in
+    substance: the subject was never "the board" but "the process that connects every two
+    seconds for hours on the code it imported at startup". There is now exactly one of
+    those per repo instead of one per pane, and the board cannot reach the store at all
+    (`tests/test_panel.py::RendererImports`).
     """
 
     def setUp(self):
@@ -173,9 +180,9 @@ class BoardTick(unittest.TestCase):
 
         with mock.patch.object(store, "db_path", lambda *a, **k: self.path), \
              mock.patch.object(herdr_mod, "Herdr", NoAgents):
-            s, note = board.snapshot()
+            s, err = collector.snapshot()
 
-        self.assertEqual(note, "")
+        self.assertIsNone(err)
         self.assertTrue(s.agents[0].gone)        # it still renders the drift
 
         db = sqlite3.connect(str(self.path))
@@ -187,12 +194,14 @@ class BoardTick(unittest.TestCase):
         self.assertIsNone(row[1])
         self.assertEqual(db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
 
-    def test_a_board_against_a_store_that_does_not_exist_says_so(self):
+    def test_a_collector_against_a_store_that_does_not_exist_says_so(self):
+        """And says it into the snapshot, where every panel shows it — see
+        `tests/test_panel.py::Staleness`."""
         missing = Path(self.tmp.name) / "gone.db"
         with mock.patch.object(store, "db_path", lambda *a, **k: missing):
-            s, note = board.snapshot()
-        self.assertEqual(s.agents, [])
-        self.assertIn("no store yet", note)
+            s, err = collector.snapshot()
+        self.assertIsNone(s)
+        self.assertIn("no store yet", err)
         self.assertFalse(missing.exists())
 
 

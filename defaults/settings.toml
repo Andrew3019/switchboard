@@ -291,6 +291,32 @@ board_refresh = 2.0
 board_chrome = 4
 
 
+[panel]
+# One collector, many renderers. See switchboard/panel.py — the collector is elected by an
+# flock, publishes `sb status --json` to a file every `display.board_refresh` seconds, and
+# every panel reads that file instead of the store.
+
+# When a panel starts saying its snapshot is old, in seconds.
+#
+# The design asked for "one refresh interval", and taken literally that flaps: a snapshot
+# written every 2 s is normally between 0 and 2 s old when it is read, so the threshold
+# would be crossed by ordinary phase. Two intervals plus a margin means STALE is only ever
+# shown for a tick that did not happen, which is the thing worth being loud about — a
+# warning that appears half the time is one people stop reading.
+stale_after = 5.0
+
+# How long the collector keeps going after the last panel stops looking, in seconds. It
+# outlives the pane that started it on purpose (a renderer must not take the fleet's
+# collector with it when it closes), and this is what stops that becoming a daemon nobody
+# owns: renderers stamp `panel/demand` as they draw, and the collector retires when
+# nothing has.
+collector_idle_exit = 60.0
+
+# How often ONE renderer will try to start a collector that is not there. Without it, a
+# collector that cannot start at all would be re-spawned by every panel on every tick.
+spawn_cooldown = 5.0
+
+
 [herdr]
 # Facts about the adapter's counterpart. Not preferences — changing one of these is
 # claiming something about the binary on your PATH.

@@ -7,6 +7,7 @@ every case worth testing here is "what happens when the two disagree".
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import status, store  # noqa: E402
-from switchboard.herdr import Agent, HerdrError  # noqa: E402
+from switchboard import herdr as herdr_mod, status, store  # noqa: E402
+from switchboard.herdr import Agent, Herdr, HerdrError  # noqa: E402
 
 
 class FakeHerdr:
@@ -197,6 +198,33 @@ class StatusTest(unittest.TestCase):
         herdr's silence about it is real drift however young the row is."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         self.assertTrue(self.by_name(status.collect(self.db, FakeHerdr([])))["w1"].gone)
+
+    def test_the_grace_outlasts_herdrs_own_retry_loop(self):
+        """The relationship, not the number: whatever herdr's retry policy becomes, the
+        window still has to cover a spawn running its whole worst case.
+
+        Measured by driving the real loop rather than by restating its arithmetic — every
+        attempt allowed the timeout it asked herdr for, plus every sleep the loop actually
+        took. Restating it is what went wrong: the grace was `timeout x attempts` = 270 s
+        against a 282 s loop, having missed the backoff — including the sleep the loop
+        takes after its LAST failure, which no reading of `2 + 4` predicts.
+        """
+        naps: list[float] = []
+        bounds: list[int] = []
+
+        def runner(argv):
+            argv = list(argv)
+            bounds.append(int(argv[argv.index("--timeout") + 1]))
+            body = {"id": "x", "error": {"code": "timeout", "message": "startup"}}
+            return subprocess.CompletedProcess([], 0, json.dumps(body), "")
+
+        h = Herdr("herdr", runner=runner, sleep=naps.append)
+        with self.assertRaises(HerdrError):
+            h.start_agent("w1", "w1:p1")            # the real loop, real policy defaults
+
+        worst = sum(bounds) / 1000 + sum(naps)
+        self.assertEqual(len(bounds), herdr_mod.SPAWN_ATTEMPTS)
+        self.assertGreaterEqual(status.SPAWN_GRACE, worst)
 
     def test_an_unreachable_herdr_never_reaps_anything(self):
         """The guard. Absent herdr's side every row looks gone, and a hiccup would end

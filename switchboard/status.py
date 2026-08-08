@@ -69,7 +69,8 @@ from typing import Any, Callable, Optional
 
 from . import config
 from .herdr import (
-    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_TIMEOUT_MS, WORKING, Herdr, HerdrError,
+    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF, SPAWN_TIMEOUT_MS, WORKING, Herdr,
+    HerdrError,
 )
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
@@ -108,9 +109,31 @@ GONE_STATE = "failed"
 # during its own spawn.
 #
 # The window is herdr's own worst case, not a number of our own: every attempt it will
-# make, each running its full timeout. Erring long is the cheap direction — a genuinely
-# dead claim is reaped one window later, whereas erring short kills real agents.
-SPAWN_GRACE = (SPAWN_TIMEOUT_MS / 1000) * SPAWN_ATTEMPTS
+# make, each running its full timeout, and every backoff sleep between them — including
+# the sleep `start_agent` takes after its LAST failure, before it raises (`herdr.py:370`).
+# The backoff is linear, so those sleeps are a triangular number, not one interval:
+#
+#     3 attempts x 90 s  +  2 s x (1 + 2 + 3)  =  282 s
+#
+# Derived from `[retries]` and `[timeouts]` rather than restated, because restating it is
+# how it went stale: it read `timeout x attempts` = 270 s, which is 12 s SHORT of the spawn
+# it guards, and the 12 s it dropped are exactly the backoff. `test_status` pins the
+# relationship by running the real retry loop, so a change to herdr's policy fails a test
+# instead of quietly shortening this.
+_SPAWN_WORST_CASE = (
+    SPAWN_ATTEMPTS * (SPAWN_TIMEOUT_MS / 1000)
+    + SPAWN_BACKOFF * (SPAWN_ATTEMPTS * (SPAWN_ATTEMPTS + 1) / 2)
+)
+
+# The per-attempt timeout is enforced on herdr's side, and it overshoots: the slowest
+# `agent start` in the store is 90 198 ms against a 90 000 ms bound, three of which puts
+# the true worst case ~0.6 s past the derivation. The row is also claimed a moment before
+# the first attempt begins, and `age` is measured from the claim. A few seconds cover both.
+#
+# Erring long is the cheap direction — a genuinely dead claim is reaped one window later,
+# whereas erring short kills real agents during their own spawn.
+SPAWN_SLACK = 5
+SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
@@ -315,6 +338,16 @@ def collect(
         # live agent: `delegate` writes it before herdr is called, and herdr will not list
         # the name until `agent start` finally succeeds. Absence proves nothing yet, so it
         # is neither gone nor stalled. See SPAWN_GRACE.
+        #
+        # Both halves, and the session half is the one to be careful with: it ends the
+        # grace EARLY, so if anything could set a session id while herdr still did not
+        # have the agent, the window would close mid-spawn and the guard would be a
+        # formality. Nothing can, today — herdr's `agent start` reply carries no
+        # `agent_session` at all (checked against every stored reply in the event log), so
+        # `delegate`'s write lands NULL and the only real writer is `_claim_session`, which
+        # needs the agent itself to have run an `sb` command. An agent that has run `sb` is
+        # an agent herdr had. Should `agent start` ever start returning a session id, this
+        # becomes a live hole and the condition has to go.
         spawning = row["session_id"] is None and (now - row["created_at"]) < SPAWN_GRACE
         last = max(row["created_at"], activity.get(name, 0))
         agents.append(AgentStatus(
