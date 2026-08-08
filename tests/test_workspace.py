@@ -764,6 +764,96 @@ class StartWorkspaceTest(WorkspaceTest):
         self.assertIsNotNone(store.get_agent(self.db, name))
 
 
+class WorktreeIsAFactTest(WorkspaceTest):
+    """"Does this agent have a worktree?" is read from the store, never from the name.
+
+    The `workspace` column says a branch for a worktree space and an agent-ish label for a
+    bare one, and nothing distinguishes the two. `branch` does: NULL means bare. The fork
+    rule asks `Broker.has_worktree`, and the landmine below is what the conflation cost —
+    looking up a bare space's herdr id used to fork it a git branch and a checkout.
+    """
+
+    def test_a_workspace_lead_records_the_branch_it_works_on(self):
+        r = self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(r["branch"], "api")
+        self.assertEqual(store.get_agent(self.db, "api-lead")["branch"], "api")
+        self.assertTrue(self.b.has_worktree("api-lead"))
+        self.assertEqual(self.b.worktree_branch("api-lead"), "api")
+
+    def test_children_inherit_the_branch_with_the_workspace(self):
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        grandkid = self.b.delegate("t", role="worker", me=kid)
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], "api")
+        self.assertTrue(self.b.has_worktree(grandkid))
+
+    def test_the_top_level_orchestrators_space_is_bare(self):
+        """`sb start` lays a workspace over the main checkout and never forks. The row has
+        to say so, or its children inherit a checkout that is the human's."""
+        b = Broker(self.db, self.h, repo=self._git_repo())
+        name = b.start(focus=False)
+        self.assertIsNone(store.get_agent(self.db, name)["branch"])
+        self.assertFalse(b.has_worktree(name))
+
+    def test_nobody_and_the_human_have_no_worktree(self):
+        self.assertFalse(self.b.has_worktree(HUMAN))
+        self.assertFalse(self.b.has_worktree("never-existed"))
+
+    def test_a_bare_space_is_not_mistaken_for_a_named_checkout(self):
+        """The recorded cwd of a bare space is the main checkout — real, and not this
+        workspace's. Reading it as one is what made a label look like a worktree."""
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo))
+        self.assertIsNone(self.b._recorded_path("scratch"))
+
+    # -- the landmine ----------------------------------------------------
+
+    def test_looking_up_a_bare_spaces_id_creates_no_branch_and_no_worktree(self):
+        """`_workspace_id` fell through to `_attach_workspace`, whose create step runs
+        `worktree create --branch <name>`. Merely resolving an id therefore forked a git
+        branch and a checkout for a space that never had one."""
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo))
+        self.assertEqual(self.b._workspace_id("scratch"), "")
+        self.assertEqual(self.h.calls, [])                   # herdr was not even asked
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_childs_placement_never_forks_its_parents_bare_space(self):
+        """End to end, through the path that actually reached it: the last-resort tab
+        placement for a child whose parent's workspace id we never recorded."""
+        import os
+        from unittest import mock
+        store.create_agent(self.db, name="root", role="main", workspace="scratch",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            kid = self.b.delegate("t", role="worker", me="root")
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
+        self.assertIsNone(store.get_agent(self.db, kid)["branch"])
+        self.assertEqual(store.get_agent(self.db, kid)["workspace"], "scratch")
+
+    def test_an_unknown_name_is_looked_up_never_created(self):
+        """No row at all is not permission to fork one. The open is tried — a herdr
+        restart loses workspaces our store never knew — and failing it is harmless."""
+        self.assertEqual(self.b._workspace_id("mystery"), "")
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
+        self.assertEqual(self.h.checkouts, {})
+
+    def test_a_bare_space_never_shadows_a_worktree_of_the_same_name(self):
+        """Two spaces may share a name — that is what the split is for. A branch belongs
+        to the workspace it was recorded in, and is not inherited by name."""
+        self.b.workspace_new("api", me=HUMAN)                # worktree space 'api'
+        store.create_agent(self.db, name="root", role="main", workspace="api",
+                           cwd=str(self.repo))              # a bare row, same name
+        self.assertIsNone(store.get_agent(self.db, "root")["branch"])
+        kid = self.b.delegate("t", role="worker", me="root")
+        self.assertIsNone(store.get_agent(self.db, kid)["branch"])
+
+    def test_workspace_new_still_creates_the_worktree_it_is_asked_for(self):
+        """The lookup stopped creating; the verb that means "make me one" must not."""
+        self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
+
+
 class PluginsOnEverySpawnPathTest(unittest.TestCase):
     """A repo's plugin bindings reach EVERY spawn, not just `sb delegate`'s.
 

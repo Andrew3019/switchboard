@@ -601,11 +601,13 @@ class Broker:
     def _result(ws: dict, lead: str, *, created: bool) -> dict:
         """What the caller gets. `created` is the only signal of newness — `fresh` stays
         internal, because two near-synonyms in one payload is how a caller picks wrong."""
-        return {"workspace": ws["workspace"], "workspace_id": ws["workspace_id"],
+        return {"workspace": ws["workspace"], "branch": ws.get("branch"),
+                "workspace_id": ws["workspace_id"],
                 "path": ws["path"], "pane_id": ws["pane_id"],
                 "agent": lead, "created": created}
 
-    def _attach_workspace(self, name: str, *, base: str = BASE_BRANCH) -> dict:
+    def _attach_workspace(self, name: str, *, base: str = BASE_BRANCH,
+                          create: bool = True) -> dict:
         """Resolve `name` to one herdr workspace over one git worktree.
 
         Open-or-create, and create-or-open, depending on whether the branch is already
@@ -613,10 +615,17 @@ class Broker:
         succeed first, never in the outcome. Whichever wins, both callers of a concurrent
         race end up holding the same workspace id, because the loser's failure is exactly
         "it already exists".
+
+        `create=False` is for callers that only want to LOOK a workspace up. Creating is a
+        side effect nobody asks for by accident: `worktree create --branch <name>` forks a
+        git branch and a checkout, so a lookup that falls through to it turns a question
+        into a commitment (see `_workspace_id`).
         """
         branch = name
         known = self._recorded_path(name) or self._checkout_of(branch)
         steps = ("open", "create") if known else ("create", "open")
+        if not create:
+            steps = ("open",)
 
         first: Optional[HerdrError] = None
         for step in steps:
@@ -706,6 +715,10 @@ class Broker:
             )
         return {
             "workspace": name,
+            # This IS a worktree space, and `branch` is what says so downstream — the name
+            # alone cannot, because a bare space has one of those too. herdr's own answer
+            # first; the name is what we asked for and what a fork uses verbatim.
+            "branch": wt.get("branch") or name,
             "workspace_id": ws.get("workspace_id", ""),
             "path": path,
             "pane_id": (r.get("root_pane") or {}).get("pane_id", ""),
@@ -741,7 +754,8 @@ class Broker:
         try:
             self.delegate(task or self._say("spawn.workspace_task"), role=role,
                           name=lead, cleanup="keep", me=me,
-                          workspace=ws["workspace"], workspace_id=ws["workspace_id"],
+                          workspace=ws["workspace"], branch=ws.get("branch"),
+                          workspace_id=ws["workspace_id"],
                           cwd=ws["path"] or None, pane=pane)
         except (AgentNameTaken, HerdrError) as e:
             # Two openers, one instant: the other won the name. Same name means the same
@@ -789,7 +803,8 @@ class Broker:
             self.db, name=name, role=role, parent=(None if me == HUMAN else me),
             session_id=live.session_id or None,
             cwd=(live.raw.get("cwd") or ws.get("path") or str(self.repo)),
-            workspace=ws.get("workspace"), terminal_id=live.terminal_id,
+            workspace=ws.get("workspace"), branch=ws.get("branch"),
+            terminal_id=live.terminal_id,
             pane_id=live.pane_id, cleanup="keep",
         ):
             store.log_event(self.db, kind="adopt", agent=name,
@@ -806,17 +821,38 @@ class Broker:
             return False
 
     def _recorded_path(self, name: str) -> Optional[str]:
-        """Where this workspace's checkout is, according to our own rows.
+        """Where this workspace's CHECKOUT is, according to our own rows.
 
         The store is the truth (C7): agent rows carry the workspace name and the cwd they
         ran in, so a workspace is still resolvable after a herdr server restart has
         forgotten every live workspace.
+
+        Only rows that have a branch answer. A bare space records a cwd too — the main
+        checkout it was laid over — and taking that as "the workspace's checkout" is how a
+        bare name came to look like a worktree: the path is real, it just belongs to
+        somebody else's tree. No branch, no checkout of its own, no answer.
         """
         row = self.db.execute(
             "SELECT cwd FROM agents WHERE workspace=? AND cwd IS NOT NULL "
-            "ORDER BY created_at LIMIT 1", (name,)
+            "AND branch IS NOT NULL ORDER BY created_at LIMIT 1", (name,)
         ).fetchone()
         return row["cwd"] if row else None
+
+    def has_worktree(self, agent: str) -> bool:
+        """Does this agent work in a checkout of its own?
+
+        The fork rule's question, and the reason `agents.branch` exists. Read from the
+        store, never inferred from the workspace name: the human and an agent we have no
+        row for both answer False, which forks rather than assuming somebody else's tree.
+        """
+        return self.worktree_branch(agent) is not None
+
+    def worktree_branch(self, agent: str) -> Optional[str]:
+        """The branch of that agent's worktree, or None if it has no worktree."""
+        if agent == HUMAN:
+            return None
+        row = store.get_agent(self.db, agent)
+        return (_column(row, "branch") or None) if row is not None else None
 
     def _checkout_of(self, branch: str) -> Optional[str]:
         """Where this branch is already checked out, if it is.
@@ -849,17 +885,32 @@ class Broker:
         Cached per process because each `sb` invocation is a fresh one; a stale id can
         therefore never outlive the call that fetched it. Failure is not fatal — the child
         still spawns, just not inside the workspace — so it is logged, not raised.
+
+        **Looks, never creates.** This used to fall through to a plain
+        `_attach_workspace`, whose create step runs `worktree create --branch <name>` — so
+        asking for the id of a space that was never a checkout forked a branch for it.
+        A bare space now says so in the store, and is answered from there; an unrecorded
+        name gets an open-only attach, which fails harmlessly if there is nothing to open.
         """
         if not name:
             return ""
-        if name not in self._ws_ids:
+        if name in self._ws_ids:
+            return self._ws_ids[name]
+
+        wsid = ""
+        if store.known_workspace(self.db, name) \
+                and store.workspace_branch(self.db, name) is None:
+            # A bare space: there is no worktree to attach to, and asking herdr for one
+            # would be asking it to make one.
+            store.log_event(self.db, kind="workspace_bare", workspace=name)
+        else:
             try:
-                self._ws_ids[name] = self._attach_workspace(name)["workspace_id"]
+                wsid = self._attach_workspace(name, create=False)["workspace_id"]
             except HerdrError as e:
                 store.log_event(self.db, kind="workspace_resolve_failed",
                                 workspace=name, error=str(e))
-                self._ws_ids[name] = ""
-        return self._ws_ids[name]
+        self._ws_ids[name] = wsid
+        return wsid
 
     def _parent_workspace_id(self, me: str, ws: Optional[str]) -> str:
         """Where a child of `me` belongs: the herdr workspace the PARENT is in.
@@ -938,6 +989,7 @@ class Broker:
         cleanup: Optional[str] = None,
         me: Optional[str] = None,
         workspace: Optional[str] = None,
+        branch: Optional[str] = None,
         workspace_id: str = "",
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
@@ -948,7 +1000,15 @@ class Broker:
 
         # A child inherits its parent's workspace unless told otherwise, so a whole
         # delegation subtree stays inside one worktree without anyone passing it down.
-        ws = workspace if workspace is not None else self._workspace_of(me)
+        inherited = workspace is None
+        ws = self._workspace_of(me) if inherited else workspace
+        # The parent's branch comes with the parent's workspace, and only with it: an
+        # agent placed in a workspace by NAME is told which branch that is (or told
+        # nothing, and is bare). Reading the branch off the name instead would hand a bare
+        # space the checkout of a worktree space that shares its name — which is the
+        # confusion `agents.branch` exists to end.
+        if branch is None and inherited:
+            branch = self.worktree_branch(me)
         if cwd:
             where = Path(cwd)
         elif ws:
@@ -984,7 +1044,7 @@ class Broker:
         # replace, whereas this one belongs to a spawn that is happening right now.
         if not store.claim_agent(
             self.db, name=name, role=role, parent=(None if me == HUMAN else me), task=task,
-            cwd=str(where), workspace=ws,
+            cwd=str(where), workspace=ws, branch=branch,
             # Recorded, not re-derived later: this is the id its own children inherit.
             workspace_id=wsid or None, pane_id=pane, cleanup=cleanup or r.cleanup,
         ):
