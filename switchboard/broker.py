@@ -1803,12 +1803,20 @@ class Broker:
         return (self._agent_states() or {}).get(who) == WORKING
 
     def flush_pending(self, *, refresh: bool = False) -> list[str]:
-        """Ring the doorbell for anyone who has mail and is no longer mid-turn.
+        """Ring the doorbell for anyone who has mail they cannot know about, and is idle.
 
         Called at the start of every `sb` command (see `cli.main`) and on every pass of
         `ask`'s wait loop, so a deferred message lands as soon as anything at all touches
         the store — which, in a live session, is constantly. The store query is free when
         there is nothing pending; only then do we ask herdr.
+
+        `store.unseen`, NOT `store.undelivered`: the doorbell exists to tell an agent
+        something it does not already know, and an agent that read its inbox proactively
+        already knows. Ringing on un-announced alone burns that agent a turn to find an
+        empty inbox, and — because `_ring` unblocks first — silently cancels a `block`,
+        putting an agent that stopped to ask a person back to `working` with its question
+        never surfaced. `status._undelivered_counts` reads the same pair, so what the
+        board calls outstanding and what this chases can never drift apart.
 
         `refresh` discards the per-process view of who is busy. `sb` invocations are short
         enough that the cache cannot go stale inside one, but a blocked `ask` holds the
@@ -1821,7 +1829,7 @@ class Broker:
         # The human is excluded because they are not an agent and have no doorbell. Nothing
         # is addressed to them any more, but a store written before the human mailbox was
         # removed still holds rows that would otherwise be retried on every command.
-        pending = store.undelivered(self.db, exclude=(HUMAN,))
+        pending = store.unseen(self.db, exclude=(HUMAN,))
         if not pending:
             return []
         if refresh:

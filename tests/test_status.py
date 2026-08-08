@@ -73,8 +73,9 @@ class StatusTest(unittest.TestCase):
     # -- drift in the mailbox: written, never announced --------------------
 
     def test_mail_never_announced_is_counted_apart_from_mail_ignored(self):
-        """Unread means we rang and it has not looked. Undelivered means it was never
-        told — invisible from inside the agent, so it can sit forever."""
+        """Unread means we rang and it has not looked. Undelivered is the subset it was
+        never told about and has not read either — invisible from inside the agent, with
+        nothing on its screen and nothing in its context, so it can sit forever."""
         store.create_agent(self.db, name="w1", role="worker")
         mid = store.put_message(self.db, from_agent="human", to_agent="w1",
                                 kind="tell", body="hello")
@@ -371,7 +372,12 @@ class StatusTest(unittest.TestCase):
         self.assertTrue(a.waiting_to_be_rung)
 
     def test_delivered_mail_is_no_longer_undelivered_but_is_still_unread(self):
-        """The two are independent: ringing does not read, and reading is not ringing."""
+        """Ringing announces; it does not read. The mail stays the agent's to pick up.
+
+        Not symmetric, and deliberately: reading DOES clear the warning (see
+        `test_mail_the_agent_read_itself_is_not_undelivered`), because the warning is
+        about whether the agent knows, and a read message is known however it got there.
+        """
         store.create_agent(self.db, name="w1", role="worker")
         store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
         self.deliver("w1")
@@ -379,6 +385,50 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.undelivered, 0)
         self.assertFalse(a.waiting_to_be_rung)
         self.assertEqual(a.unread, 1)
+
+    def test_mail_the_agent_read_itself_is_not_undelivered(self):
+        """An agent may read its inbox without waiting to be rung, and then it knows.
+
+        It is mid-turn, so the doorbell is held back; it runs `sb inbox` anyway; the rows
+        stay un-announced for good, because the ring that would have cleared them is the
+        ring they were owed. Counting those is how one row came to read `MAIL -` and
+        `<< UNDELIVERED 8` about the same mailbox.
+        """
+        store.create_agent(self.db, name="w1", role="worker")
+        for body in ("a", "b", "c"):
+            store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body=body)
+        store.unread_for(self.db, "w1")                   # proactive: read, never rung
+        self.assertEqual(len(store.undelivered(self.db, exclude=["human"])), 3)
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")])))["w1"]
+        self.assertEqual((a.unread, a.undelivered), (0, 0))
+        self.assertFalse(a.waiting_to_be_rung)
+        self.assertFalse(a.needs_human)
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
+        self.assertNotIn("UNDELIVERED", out)
+
+    def test_only_the_unread_part_of_unannounced_mail_is_counted(self):
+        """The I > R case: more un-announced than unread, and the warning follows unread.
+
+        Three rows nobody ever rang about, two of which the agent read itself. Only the
+        third is news to it, and only the third may drive the age, the flag, or NEEDS YOU.
+        """
+        store.create_agent(self.db, name="w1", role="worker")
+        t = store.now()
+        for body in ("old1", "old2"):
+            store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body=body)
+        self.db.execute("UPDATE messages SET created_at=?", (t - 600,))
+        self.db.commit()
+        store.unread_for(self.db, "w1")                   # it read those two, unrung
+        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="fresh")
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")]), now=t))["w1"]
+        self.assertEqual(len(store.undelivered(self.db, exclude=["human"])), 3)  # all unrung
+        self.assertEqual((a.unread, a.undelivered), (1, 1))
+        # The age of the one it does not know about, NOT of the pair it handled at once.
+        self.assertEqual(a.undelivered_age, 0)
+        self.assertTrue(a.waiting_to_be_rung)
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")]), now=t))
+        self.assertIn("1 never announced to it", out)
+        self.assertNotIn("unread it WAS told about", out)   # there is no such remainder
 
     def test_the_age_is_of_the_oldest_not_the_newest(self):
         """A fresh message arriving behind a stuck one must not reset the clock."""

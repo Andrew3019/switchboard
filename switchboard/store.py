@@ -762,12 +762,17 @@ def unread_for(db: sqlite3.Connection, name: str, *, mark: bool = True) -> list[
 
 
 def undelivered(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[sqlite3.Row]:
-    """Messages written but never announced, oldest first.
+    """Messages written but never announced, oldest first. Says nothing about read.
 
     A message is only 'delivered' once we have rung the target's doorbell. We hold the
     ring back while the target is mid-turn, because `agent prompt` INTERLEAVES — it is
     injected into the current turn rather than queued after it — so ringing a working
     agent interrupts whatever it was doing.
+
+    This answers "did our doorbell ring?", which is a question about US and is the right
+    one for a sender checking its own send (`sb tell`'s report): a message written a
+    moment ago cannot have been read yet, so there the two predicates coincide. It is the
+    WRONG one for anything asking whether the target knows — use `unseen` for that.
 
     `exclude` is for addresses that are not agents and have no doorbell. The human is the
     only one: nothing is addressed to them any more (they have no mailbox — see
@@ -775,10 +780,36 @@ def undelivered(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[
     ever going to come for them. Passed in rather than written here because what the human
     is CALLED is `[vocabulary]`.
     """
+    return _pending(db, exclude=exclude)
+
+
+def unseen(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[sqlite3.Row]:
+    """Messages the target has no way of knowing about: never announced AND never read.
+
+    The two come apart the moment an agent runs `sb inbox` of its own accord instead of
+    waiting to be rung. It is mid-turn, so the doorbell is held back; it reads the mail
+    anyway; `read_at` is set and `delivered_at` stays NULL — forever, because the ring
+    those rows were owed is the ring that would have cleared it. Every one of them is
+    still `undelivered`, and not one of them is news to the agent.
+
+    So this is the predicate for anyone acting on the agent's behalf. Ringing on
+    `delivered_at` alone costs the agent a whole turn to discover an empty inbox, and
+    `Broker._ring` unblocks before it prompts — so a ring for mail already read puts an
+    agent that stopped to ask a person back to `working` and drops it off
+    `sb status --needs-me`, with the question never reaching anyone.
+    """
+    return _pending(db, exclude=exclude, unread_only=True)
+
+
+def _pending(
+    db: sqlite3.Connection, *, exclude: Iterable[str], unread_only: bool = False
+) -> list[sqlite3.Row]:
+    """Shared body of `undelivered`/`unseen` — one predicate apart, oldest first."""
     names = list(exclude)
     holes = ",".join("?" * len(names))
     return db.execute(
         "SELECT * FROM messages WHERE delivered_at IS NULL"
+        + (" AND read_at IS NULL" if unread_only else "")
         + (f" AND to_agent NOT IN ({holes})" if names else "")
         + " ORDER BY id",
         names,

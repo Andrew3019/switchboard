@@ -429,6 +429,49 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
+    def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
+        """A ring says "you have mail" — to an agent that has already got it, that is a
+        whole turn spent discovering an empty inbox (C0).
+
+        The agent is mid-turn, so the ring is held back; it runs `sb inbox` of its own
+        accord and reads the message anyway. Those rows stay un-announced for good, and
+        ringing on un-announced alone would chase them every `sb` command from now on.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.assertEqual(self.h.prompts, [])                       # held back, mid-turn
+        self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["review the PR"])
+        self.h.states_by_name = {"w": "idle"}
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), [])               # nothing to announce
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(len(store.undelivered(self.db)), 1)       # still never announced
+        self.assertEqual(store.unseen(self.db), [])                # but the agent knows
+
+    def test_a_stale_doorbell_does_not_cancel_a_block(self):
+        """The block is the whole point: `_ring` unblocks before it prompts.
+
+        An agent reads its mail proactively, then stops to ask a person. If the flush
+        still rang for that already-read mail, the agent would be put back to `working`,
+        drop off `sb status --needs-me`, and the question would reach nobody — cancelled
+        by a doorbell carrying no news at all.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.b.inbox(me="w")                                       # read it, unrung
+        self.b.block("which branch?", me="w")
+        self.h.prompts.clear()
+        self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
+        self.b._alive_cache = None
+
+        self.assertEqual(self.b.flush_pending(), [])
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        [needs] = status.collect(self.db, self.h, needs_me=True).agents
+        self.assertEqual((needs.name, needs.blocked_why), ("w", "which branch?"))
+
     def test_flush_costs_nothing_when_there_is_no_pending_mail(self):
         self.assertEqual(self.b.flush_pending(), [])
         self.assertIsNone(self.b._alive_cache)                     # herdr never consulted

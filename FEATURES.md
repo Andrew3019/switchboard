@@ -81,9 +81,10 @@ until a human answers via `sb tell`.
 The whole agent tree as one join of store state against herdr's live pane state,
 flagging drift: **STALLED** (store says working, herdr says idle/done, and `sb done` was
 never called), **GONE** (the pane closed under it — self-heals by writing `state=failed`),
-**UNDELIVERED** (mail was written but the doorbell never rang because the target was
-mid-turn).
-- Entry point: `cli.py:738-745` → `status.collect`/`status.render` (`status.py:232-331`, `583-611`)
+**UNDELIVERED** (mail the target cannot know about — the doorbell never rang for it,
+usually because the target was mid-turn, and the target has not read it of its own accord
+either).
+- Entry point: `cli.py:738-745` → `status.collect`/`status.render` (`status.py:216-726`)
 - Depends on: `store` (agents/messages/events tables), single batched `herdr.list_agents`
   call
 - Status: working
@@ -293,7 +294,9 @@ whatever `status.py` this long-lived process imported at startup.
 (`cli.py:531-534`). Herdr's `agent prompt` interleaves into a running turn, so a message
 to a mid-turn agent is held back and delivered the next time that agent calls `sb`, once
 it has gone idle. Underlies `tell`, `ask`, `done`, and `block`; surfaced to humans in
-`sb status`/`sb inspect` as `UNDELIVERED`.
+`sb status`/`sb inspect` as `UNDELIVERED`. The flush and both readouts ring/count on the
+same predicate — un-announced AND unread — so mail an agent read proactively while
+mid-turn drops out of all three rather than being chased forever.
 - Entry point: `broker.py` `Broker._ring`, `Broker.flush_pending`
 
 ### Identity resolution

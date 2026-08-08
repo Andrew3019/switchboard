@@ -26,16 +26,24 @@ hesitate to run is the same as not having one.
 
 A third disagreement, in the mailbox rather than the pane:
 
-    written, never announced                  →  UNDELIVERED
+    never announced AND never read            →  UNDELIVERED
 
 `agent prompt` INTERLEAVES — it is injected into the current turn rather than queued after
 it — so ringing a working agent interrupts whatever it is doing. `sb tell` therefore holds
 the ring back while the target is mid-turn, and `broker.flush_pending` rings once it goes
 idle. That is right, and it introduces a way for mail to sit forever: if the flush never
-runs, nothing is on the agent's screen and nothing is in its inbox count. Undelivered mail
-is reported separately from unread for exactly that reason — unread means we rang and it
-has not looked, undelivered means it was never told. Only one of those is the agent's
-fault, and only one of them is invisible from inside the agent.
+runs, nothing is on the agent's screen and nothing is in its inbox count.
+
+Both halves of that predicate carry weight. Announcement alone says only whether WE rang;
+it does not say whether the agent knows. An agent that runs `sb inbox` of its own accord
+while mid-turn reads mail the doorbell was still holding back, and those rows stay
+un-announced for good — so counting announcement alone warns that an agent is in the dark
+about messages already in its context, on the same row where MAIL says `-`. Counting what
+is BOTH un-announced and unread keeps UNDELIVERED a strict subset of MAIL: unread means we
+rang and it has not looked, undelivered means it has no way to know yet. Only one of those
+is the agent's fault, and only one of them is invisible from inside the agent.
+`broker.flush_pending` rings on the same predicate, so the doorbell and this board cannot
+disagree about what is still outstanding.
 
 Reading status never mutates: mail is counted, never consumed (`mark=False` semantics),
 and counting an undelivered message never delivers it. With one exception, and it is worth
@@ -139,7 +147,7 @@ class AgentStatus:
     task: Optional[str]
     blocked_why: Optional[str]
     summary: Optional[str] = None   # what it said when it last called `sb done`
-    # Mail written but never announced — see `undelivered_age` and the module note.
+    # Mail neither announced nor read — see `undelivered_age` and the module note.
     undelivered: int = 0
     undelivered_age: int = 0        # seconds since the OLDEST one was written; 0 = none
 
@@ -163,12 +171,13 @@ class AgentStatus:
 
     @property
     def waiting_to_be_rung(self) -> bool:
-        """Mail is sitting here that nobody has ever announced to this agent.
+        """Mail is sitting here that this agent has no way of knowing about.
 
         Distinct from unread, and the distinction is the whole point (see the module
-        note): unread means we rang and it has not looked, so the agent still knows.
-        Undelivered means the doorbell was deliberately held back — and if the ring never
-        comes, this mail sits forever with nothing on screen to say so.
+        note): unread means we rang and it has not looked, so the agent knows. This is the
+        subset it was never told about AND has not read of its own accord either — nothing
+        on its screen, nothing in its context. If the ring never comes, this mail sits
+        forever with nothing to say so.
         """
         return self.undelivered > 0
 
@@ -390,11 +399,17 @@ def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
 
 
 def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int]]:
-    """Per agent: how much mail was never announced, and when the oldest of it arrived.
+    """Per agent: how much mail it cannot know about, and when the oldest of it arrived.
 
     Aggregated for the same reason as `_unread_counts` — one pass, and strictly read-only.
-    `store.undelivered()` is the per-message reader and takes the same view; this is the
+    `store.unseen()` is the per-message reader and takes exactly this view; this is the
     counting version, so a board with fifty agents does not become fifty queries.
+
+    `read_at IS NULL` is half the predicate and it is not optional. A message an agent read
+    proactively, before the ring it was owed, is un-announced and already in that agent's
+    context at the same time; counting it here is what let one row read `MAIL -` and
+    `<< UNDELIVERED 8` about the same mailbox. `broker.flush_pending` rings on the same
+    pair, so what this counts and what the doorbell chases are one set.
 
     The human is excluded because they are not an agent and have no doorbell. Nothing is
     addressed to them any more, but a store written before the human mailbox was removed
@@ -403,7 +418,8 @@ def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int]]:
     """
     return {r["to_agent"]: (r["n"], r["oldest"]) for r in db.execute(
         "SELECT to_agent, COUNT(*) n, MIN(created_at) oldest FROM messages "
-        "WHERE delivered_at IS NULL AND to_agent <> ? GROUP BY to_agent", (HUMAN,)
+        "WHERE delivered_at IS NULL AND read_at IS NULL AND to_agent <> ? "
+        "GROUP BY to_agent", (HUMAN,)
     )}
 
 
@@ -716,7 +732,12 @@ def _attention(snap: Snapshot) -> list[str]:
                 # BEFORE the unread branch, because undelivered mail is unread by
                 # definition — nobody told the agent it exists. Reporting it as "not
                 # picked up" would blame the agent for silence that is ours.
-                told = max(0, a.unread - a.undelivered)
+                #
+                # Plain subtraction, no clamp: undelivered is `unread AND un-announced`,
+                # so it is a subset of unread and this cannot go negative. It used to be
+                # clamped, which is how the impossible case printed a fluent wrong
+                # sentence instead of an obviously broken one.
+                told = a.unread - a.undelivered
                 extra = f", plus {told} unread it WAS told about" if told else ""
                 out.append(f"  {a.name:<{w}}  {a.undelivered} never announced to it, "
                            f"oldest {fmt_age(a.undelivered_age)}{extra}"
@@ -729,15 +750,16 @@ def _attention(snap: Snapshot) -> list[str]:
     if pending:
         w = max(len(a.name) for a in pending)
         out.append("")
-        out.append("UNDELIVERED — written, never announced. The doorbell is held back while")
-        out.append("an agent is mid-turn (`agent prompt` interleaves), and released when it")
-        out.append("goes idle. Anything still here has not been released, so the agent does")
-        out.append("not know it has mail and nothing on its screen says so.")
+        out.append("UNDELIVERED — written, never announced, and unread, so the agent has no")
+        out.append("way to know it exists. The doorbell is held back while an agent is")
+        out.append("mid-turn (`agent prompt` interleaves), and released when it goes idle.")
+        out.append("Mail an agent read of its own accord is never counted here, however we")
+        out.append("came to ring — it is already in front of it.")
         for a in pending:
             out.append(f"  {a.name:<{w}}  {a.undelivered} waiting, "
                        f"oldest {fmt_age(a.undelivered_age)}, "
                        f"{'still working' if a.state in RUNNING and not a.stalled else a.state}")
-        out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; it is delivered when "
+        out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; the doorbell rings when "
                    f"the agent next goes idle")
 
     drift = [a for a in snap.agents if a.stalled or a.gone]
@@ -793,8 +815,9 @@ class Detail:
     session_id: Optional[str] = None
     transcript: Optional[str] = None
     unread: list[dict] = field(default_factory=list)
-    # Written but never announced. Separate from `unread` for the reason the module note
-    # gives: this agent has not been told these exist, so they are not mail it ignored.
+    # Never announced and never read. A subset of `unread`, kept apart for the reason the
+    # module note gives: this agent has no way to know these exist, so they are not mail
+    # it ignored.
     undelivered: list[dict] = field(default_factory=list)
     # Asks with no reply, in both directions. Kept apart because they mean opposite
     # things: one is somebody stuck on this agent, the other is this agent stuck on
@@ -857,8 +880,11 @@ def inspect(
         unread=[_msg(m) for m in db.execute(
             "SELECT * FROM messages WHERE to_agent=? AND read_at IS NULL ORDER BY id",
             (name,))],
+        # Same predicate as `_undelivered_counts`, and it must stay the same or the count
+        # in the header and the bodies underneath it would be about different sets.
         undelivered=[_msg(m) for m in db.execute(
-            "SELECT * FROM messages WHERE to_agent=? AND delivered_at IS NULL ORDER BY id",
+            "SELECT * FROM messages WHERE to_agent=? AND delivered_at IS NULL "
+            "AND read_at IS NULL ORDER BY id",
             (name,))],
         owed=[_msg(m) for m in _unanswered(db, name, mine=False)],
         waiting_on=[_msg(m) for m in _unanswered(db, name, mine=True)],
@@ -939,10 +965,11 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
 
     if d.undelivered:
         out.append("")
-        out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it "
-                   f"(oldest {fmt_age(a.undelivered_age)})")
+        out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it, "
+                   f"never read (oldest {fmt_age(a.undelivered_age)})")
         out.append("  The doorbell is held while an agent is mid-turn and released when it")
-        out.append("  goes idle; until then this agent does not know these exist.")
+        out.append("  goes idle; until then this agent does not know these exist. Anything")
+        out.append("  it has already read is excluded — every row below has `read: false`.")
         for m in d.undelivered:
             out.append(f"  [{m['id']}] from {m['from']}: {clip(m['body'], 90)}")
 
