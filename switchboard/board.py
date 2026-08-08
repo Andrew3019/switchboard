@@ -216,18 +216,37 @@ def _note_color(a) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_group(row) -> bool:
+    """Is this display row a collapsed group rather than an agent?
+
+    One predicate, used by everything that reads a row, so there is exactly one
+    place that knows how the two are told apart. Everything downstream of
+    `layout` receives whatever the row carries, and reading `.name` off a group
+    is the failure `layout`'s closing comment is about.
+    """
+    return isinstance(row, status_mod.Collapsed)
+
+
 def layout(snap, *, top: int, height: int, width: int, msg: str,
-           note_text: str = "") -> list[tuple[str, Optional[object]]]:
+           note_text: str = "", show_archived: bool = False
+           ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
     The agent a row belongs to is carried BY the row rather than recomputed from
     an index, so a click can never resolve to a different agent than the one the
     human is looking at. Everything downstream just indexes this list.
 
-    `top` is the scroll offset in agents. Returns at most `height` lines.
+    `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
+    being the same thing when collapse landed: `display_rows` replaces whole
+    archived subtrees with one `Collapsed`, so a window taken over `snap.agents`
+    would scroll past rows that are not drawn and the `+N more below` count would
+    contradict the screen. Everything here — the slice, the clamp, the tail —
+    counts what is actually on screen.
+
+    Returns at most `height` lines.
     """
     rows: list[tuple[str, Optional[object]]] = []
-    agents = snap.agents
+    agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
     capacity = max(1, height - CHROME)
     top = max(0, min(top, max(0, len(agents) - capacity)))
     window = agents[top:top + capacity]
@@ -240,9 +259,21 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         why = note_text or "nothing running — sb start"
         rows.append((_c(f"  ({why})", DIM), None))
     else:
-        w_name = max(len(("  " * a.depth) + a.name) for a in window)
-        w_state = max(len(a.state) for a in window)
+        # Defaults, not `max(seq)`: a window can be nothing but collapsed rows —
+        # which is the ORDINARY end-of-session state, every agent finished and
+        # its pane closed — and there is then no agent to measure a name or a
+        # state against. Empty-sequence `max` raises, and a panel that raises at
+        # the end of every session is worse than one with a narrow column.
+        w_name = max([0] + [len(("  " * a.depth) + a.name)
+                            for a in window if not _is_group(a)])
+        w_state = max([0] + [len(a.state) for a in window if not _is_group(a)])
         for a in window:
+            if _is_group(a):
+                # No glyph, no state, no note. It is not an agent and must not
+                # read as one — `agent_at` hands this very object to the click
+                # handler, which has to be able to tell them apart.
+                rows.append((_c("   " + status_mod.collapsed_label(a), DIM), a))
+                continue
             g = glyph(a)
             label = ("  " * a.depth) + a.name
             # Measured plain and coloured in parallel: only the glyph is coloured,
@@ -265,7 +296,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     if note_text and agents:
         tail = note_text
     rows.append((_c(tail, DIM), None))
-    rows.append((_c("click a row to focus it · scroll to pan · q quits", DIM)
+    rows.append((_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
                  + ("   " + msg if msg else ""), None))
 
     # The one invariant this view rests on: no line may ever wrap. A wrapped line
@@ -275,7 +306,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
 
 def agent_at(rows, row: int):
-    """Screen row (1-based) -> the agent drawn there, or None."""
+    """Screen row (1-based) -> whatever is drawn there, or None.
+
+    May be a `Collapsed` as well as an agent, so every caller has to ask before
+    it reads a `.name` — see `_is_group`. Not filtered to agents here on
+    purpose: a click on a collapsed row is a real thing the human did, and the
+    handler that decides what it means should be the one that sees it.
+    """
     i = row - 1
     if i < 0 or i >= len(rows):
         return None
@@ -376,10 +413,10 @@ def _size() -> tuple[int, int]:
         return 24, 80
 
 
-def draw(snap, top: int, msg: str, note_text: str) -> list:
+def draw(snap, top: int, msg: str, note_text: str, show_archived: bool = False) -> list:
     height, width = _size()
     rows = layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text)
+                  note_text=note_text, show_archived=show_archived)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -431,14 +468,18 @@ def main() -> int:
 
     signal.signal(signal.SIGWINCH, on_resize)
 
-    top, msg, buf = 0, "", ""
+    # In-process and deliberately not persisted: a panel is cheap, every pane has
+    # its own, and a toggle that outlives the pane is a setting — which is what
+    # `display.show_archived` is for. `layout` clamps `top` every call, so the row
+    # count changing under the toggle needs nothing here.
+    top, msg, buf, show_archived = 0, "", "", False
     try:
         tty.setraw(fd)
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)
         sys.stdout.flush()
 
         snap, note_text = refresh(sup)
-        rows = draw(snap, top, msg, note_text)
+        rows = draw(snap, top, msg, note_text, show_archived)
         last = time.time()
 
         while True:
@@ -455,6 +496,9 @@ def main() -> int:
                             raise KeyboardInterrupt
                         if "r" in ev["raw"]:
                             last = 0.0
+                        if "a" in ev["raw"]:
+                            show_archived = not show_archived
+                            dirty[0] = True
                         continue
                     step = wheel(ev)
                     if step:
@@ -463,7 +507,13 @@ def main() -> int:
                         continue
                     if is_left_click(ev):
                         a = agent_at(rows, ev["row"])
-                        msg = focus(a.name) if a else ""
+                        if _is_group(a):
+                            # Focusing "the archived ones" is not a thing herdr can
+                            # do, and reading `.name` here is the misclick this
+                            # branch exists to prevent. Say what would work.
+                            msg = "press a to show archived"
+                        else:
+                            msg = focus(a.name) if a else ""
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
@@ -471,7 +521,7 @@ def main() -> int:
                 dirty[0] = True
                 last = time.time()
             if dirty[0]:
-                rows = draw(snap, top, msg, note_text)
+                rows = draw(snap, top, msg, note_text, show_archived)
                 dirty[0] = False
     except KeyboardInterrupt:
         pass
