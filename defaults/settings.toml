@@ -24,13 +24,28 @@ protocol_file = "protocol.md"
 prompts_file  = "prompts.toml"
 settings_file = "settings.toml"
 
-# The pre-rename spelling of `presets_file`/`presets_dir`. Read only when the new one is
-# genuinely absent, so a repo still holding `.switchboard/plugins/` and
-# `.switchboard/plugins.toml` keeps working untouched (see `config.path_for_legacy`).
-# The name moved because "plugin" is now a different thing: a preset is prompt text, a
-# plugin is code. Do not point anything new at these.
+# One directory and one file, each meaning two things during the transition — and needing
+# no disambiguation, because the two are told apart by SHAPE rather than by name:
+#
+#   .switchboard/plugins/       a `<name>.md` FILE is a pre-rename preset (read only while
+#                               `.switchboard/presets/` is absent — see
+#                               `config.path_for_legacy`); a `<name>/` DIRECTORY with an
+#                               `__init__.py` is a plugin package.
+#   .switchboard/plugins.toml   top-level `all` / `[roles]` are pre-rename preset bindings;
+#                               `enabled = [...]` is plugin enablement. The keys are
+#                               disjoint, so a file holding both parses correctly as both.
+#
+# So these are not legacy keys to be retired: they are where plugins live. What was
+# retired is the pre-rename MEANING of what is found there, and nothing new should be
+# pointed at that.
 plugins_file  = "plugins.toml"
 plugins_dir   = "plugins"
+
+# Plugin state for `SCOPE = "user"` — per machine rather than per repo, for a plugin whose
+# data is a fact about the tool and not about whichever repo you were standing in. Repo
+# scope needs no entry: it is `<shared .git>/<store_dirname>/plugins/<name>/`, keyed on the
+# same repo identity as the store.
+user_state    = "~/.local/state/switchboard"
 
 # Per-user, between the shipped tiers and the repo's. Tiers only: this is where you say
 # what `strong` means on YOUR machine, and it is not shared with anyone.

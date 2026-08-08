@@ -75,8 +75,18 @@ def worktree_root(cwd: Optional[Path] = None) -> Path:
     return Path(out.stdout.strip()).resolve()
 
 
+def store_dir(cwd: Optional[Path] = None) -> Path:
+    """The shared directory under this repo's `.git` — the store's, and its neighbours'.
+
+    Everything keyed on repo identity lands here: `state.db`, `config.json`, and each
+    enabled plugin's state directory. Named once, rather than assembled from
+    `_STORE_DIRNAME` at three call sites.
+    """
+    return repo_root(cwd) / _STORE_DIRNAME
+
+
 def db_path(cwd: Optional[Path] = None) -> Path:
-    return repo_root(cwd) / _STORE_DIRNAME / "state.db"
+    return store_dir(cwd) / "state.db"
 
 
 def config_path(cwd: Optional[Path] = None) -> Path:
@@ -85,7 +95,7 @@ def config_path(cwd: Optional[Path] = None) -> Path:
     Deliberately NOT in the store's `meta` table: the database is disposable by design
     and gets dropped on a schema change, whereas this must survive that.
     """
-    return repo_root(cwd) / _STORE_DIRNAME / "config.json"
+    return store_dir(cwd) / "config.json"
 
 
 def read_config(cwd: Optional[Path] = None) -> dict:

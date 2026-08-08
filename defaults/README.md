@@ -23,6 +23,8 @@ For any repo, two layers, most general first:
 | `defaults/roles/<name>.md`  | `.switchboard/roles/<name>.md`, `.switchboard/roles.toml` |
 | `defaults/models.toml`      | `~/.config/switchboard/models.toml`, then `.switchboard/models.toml` |
 | `defaults/presets.toml`     | `.switchboard/presets.toml`            |
+| `defaults/plugins.toml`     | `.switchboard/plugins.toml`            |
+| `defaults/plugins/<name>/`  | `.switchboard/plugins/<name>/`         |
 | `defaults/protocol.md`      | `.switchboard/protocol.md`             |
 | `defaults/prompts.toml`     | `.switchboard/prompts.toml`            |
 | `defaults/settings.toml`    | `.switchboard/settings.toml`           |
@@ -35,6 +37,13 @@ which preset applies to which role — are shipped and layered.
 Both were called "plugins" until the word was needed for code that runs. A preset is
 markdown and cannot run; a plugin is Python and can. A repo still holding the pre-rename
 `.switchboard/plugins/` and `.switchboard/plugins.toml` is read from there until it moves.
+
+Plugin *packages* — `defaults/plugins/<name>/`, holding an `__init__.py` — are layered by
+name, and a repo's directory replaces a shipped one of that name wholesale rather than
+merging field by field, which is the only rule that makes sense for code. They share
+`.switchboard/plugins/` with the pre-rename presets during the transition and are told
+apart by shape: a `<name>.md` FILE is a preset, a `<name>/` DIRECTORY with an
+`__init__.py` is a plugin. Nothing has to guess, and there is no flag day.
 
 ## Merge rules
 
@@ -66,6 +75,8 @@ suite; also the escape hatch for shipping a different baseline to a team.
 | `roles/*.md`        | one role each: TOML front matter for the fields, markdown for the prompt |
 | `models.toml`       | what `cheap`, `default`, `strong` mean — the only place model names appear |
 | `presets.toml`      | which presets apply to which role                                   |
+| `plugins.toml`      | which plugins are enabled — `sb plugin list` shows the rest          |
+| `plugins/<name>/`   | one plugin each: `__init__.py` defines `register()`, `agent.md` is its prompt fragment |
 | `protocol.md`       | the agent protocol, injected as a system prompt at every spawn      |
 | `prompts.toml`      | the other spawn-time prompt fragments and the doorbell texts        |
 | `settings.toml`     | paths, vocabulary, limits, timeouts, retries, display               |

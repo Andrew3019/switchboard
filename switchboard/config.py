@@ -447,6 +447,28 @@ def preset_bindings(repo: Optional[Path] = None) -> tuple[tuple[str, ...], dict[
     return every, per_role
 
 
+# -- plugin enablement ---------------------------------------------------------
+
+
+def plugin_enablement(repo: Optional[Path] = None) -> tuple[str, ...]:
+    """Which plugins are enabled: `enabled = [...]` in `plugins.toml`, shipped then repo's.
+
+    The same `merge` every other file gets, so a repo adding one plugin cannot wipe the
+    shipped ones and `["!reset"]` is how you say "exactly this, or nothing".
+
+    `plugins.toml` means two things during the transition and needs no disambiguation to
+    read: a pre-rename file binds presets with top-level `all` and `[roles]`, and an
+    enablement file lists `enabled`. The keys are disjoint, so a file holding both parses
+    as both — this function ignores `all` and `roles`, and `preset_bindings` ignores
+    `enabled`. There is no path-level fallback here and none is owed: unlike `presets_file`,
+    `plugins_file` was never renamed, so the old spelling and the new one are the same path.
+    """
+    shipped = read_toml(defaults_dir() / "plugins.toml")
+    p = path_for("plugins_file", repo)
+    data = merge(shipped, read_toml(p) if p is not None else {})
+    return tuple(data.get("enabled") or ())
+
+
 # -- model tiers ---------------------------------------------------------------
 
 

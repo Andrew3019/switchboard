@@ -1,0 +1,28 @@
+# Which plugins are enabled.
+#
+# A plugin is a Python package — `defaults/plugins/<name>/` or a repo's own
+# `.switchboard/plugins/<name>/` — that owns a CLI verb and a directory of durable state.
+# A preset is markdown and cannot run; a plugin is Python and can. Presets and their
+# bindings live in `presets.toml`, which is a different file for a different thing.
+#
+# Three states, and this file sets the middle one:
+#
+#     available   sb can see it and describe it        present in either directory
+#     enabled     its commands dispatch, it gets       listed here
+#                 a state directory
+#     bound       its `@<name>` fragment goes into     listed in presets.toml
+#                 every spawn it is bound to
+#
+# Enabling and binding are separate on purpose. Enabling costs a directory under the
+# repo's shared `.git`; binding costs context in every system prompt, forever. Those are
+# different decisions with different costs, and collapsing them would make "use
+# `sb plugin todo` myself without taxing every spawn" impossible to say.
+#
+# Layered like everything else: shipped first, then `<repo>/.switchboard/plugins.toml`,
+# arrays joining rather than replacing. To turn everything off in one repo:
+#
+#     enabled = ["!reset"]
+#
+# Shipped empty because switchboard ships no plugins yet. `todo` and `report-bug` arrive
+# with the machinery that runs them, not before it.
+enabled = []

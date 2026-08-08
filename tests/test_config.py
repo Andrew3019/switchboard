@@ -342,8 +342,8 @@ class NothingLeftInPythonTest(unittest.TestCase):
 
     # Every module that could plausibly hold one. Not a whitelist of the guilty — the point
     # is that adding a role name to ANY of these is caught.
-    MODULES = ("config", "roles", "models", "broker", "cli", "presets", "status",
-               "output", "herdr", "store", "validate")
+    MODULES = ("config", "roles", "models", "broker", "cli", "presets", "plugins",
+               "status", "output", "herdr", "store", "validate")
 
     def _literals(self, *names: str) -> dict[str, list[str]]:
         """Every string LITERAL in each module, docstrings excluded.

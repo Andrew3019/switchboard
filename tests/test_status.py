@@ -783,6 +783,13 @@ class StatusCliTest(unittest.TestCase):
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
             # so it can print that instead of an argparse usage dump.
             "plugins": [],
+            # A namespace, not a verb. Its own arguments are a REMAINDER handed to the
+            # subparser sb builds from the plugin's declaration, so `--json` typed AFTER a
+            # plugin name belongs to that parser rather than this one — `sb plugin todo
+            # list --json` still emits JSON, and `tests/test_plugins.py` is where that is
+            # checked. With no name typed there is no remainder yet, so the rule below
+            # holds here too.
+            "plugin": [],
         }
         verbs = build_parser()._subparsers._group_actions[0].choices
         self.assertEqual(set(verbs), set(sample), "a verb was added or removed")

@@ -183,6 +183,7 @@ class FakeHerdr:
         return [self.live[n] for n in sorted(self.live)]
 
     def prompt(self, name, text): self.prompts.append((name, text))
+    def send_keys(self, name, *keys): self.calls.append(f"send_keys:{name}:{','.join(keys)}")
     def notify(self, text): self.notifications.append(text)
     def focus(self, name): pass
     def report_state(self, pane, name, state, seq, **kw): pass
