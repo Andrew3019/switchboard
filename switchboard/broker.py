@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from . import config
+from . import plugins as plugins_mod
 from . import roles as roles_mod
 from . import store
 from . import validate
@@ -883,6 +884,26 @@ class Broker:
 
     # -- spawning --------------------------------------------------------
 
+    def _plugins(self, role: str, extra: Sequence[str] = ()) -> list[str]:
+        """The prompt lines this spawn's plugins contribute.
+
+        Layered, most general first: repo defaults -> the role's own -> the caller's
+        `--with`. Each layer appends (see `plugins.for_role`).
+
+        Resolved HERE rather than in the CLI, because `delegate` is the one place every
+        spawn passes through. While the CLI's `delegate` branch owned this, `sb workspace
+        new` and `sb start` reached `delegate` without it and their leads silently got no
+        plugins at all — not even the repo's every-agent bindings.
+
+        Validated after resolution because THIS is what becomes an agent argument: a plugin
+        file is flattened to one line on the way out, but a repo's plugins.toml can also
+        name a plugin that no longer flattens cleanly, and that failure should name the
+        plugin rather than arrive as invalid_agent_argument.
+        """
+        names = plugins_mod.for_role(self.repo, role, extra)
+        return [validate.line(p, "plugin text", max_len=validate.MAX_PROMPT)
+                for p in plugins_mod.resolve(names, self.repo)]
+
     def delegate(
         self,
         task: str,
@@ -891,7 +912,7 @@ class Broker:
         as_prompt: Optional[str] = None,
         name: Optional[str] = None,
         model: Optional[str] = None,
-        with_: Sequence[str] = (),
+        with_: Sequence[str] = (),      # plugin NAMES (or literal lines) — see `_plugins`
         cleanup: Optional[str] = None,
         me: Optional[str] = None,
         workspace: Optional[str] = None,
@@ -923,7 +944,7 @@ class Broker:
             prompts.append(as_prompt)
         elif r.prompt:
             prompts.append(r.prompt)
-        prompts.extend(with_)
+        prompts.extend(self._plugins(role, with_))
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
         wsid = workspace_id or self._parent_workspace_id(me, ws)

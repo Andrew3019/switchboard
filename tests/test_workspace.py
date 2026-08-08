@@ -727,5 +727,85 @@ class StartWorkspaceTest(WorkspaceTest):
         self.assertIsNotNone(store.get_agent(self.db, name))
 
 
+class PluginsOnEverySpawnPathTest(unittest.TestCase):
+    """A repo's plugin bindings reach EVERY spawn, not just `sb delegate`'s.
+
+    While resolution lived in the CLI's `delegate` branch, `sb workspace new` and
+    `sb start` called `Broker.delegate` straight past it, so a workspace lead and the
+    top-level orchestrator silently missed the repo's every-agent bindings — a lead never
+    received `own-files`. One resolution point in `Broker.delegate` is the fix.
+
+    Not a subclass of `WorkspaceTest`: these need repo bindings on disk, and inheriting
+    the setUp would re-run every workspace test with them.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = FakeHerdr(self.repo / "worktrees")
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        d = self.repo / ".switchboard" / "plugins"
+        d.mkdir(parents=True)
+        (d / "house-style").write_text("")     # a stray non-.md file must not register
+        (d / "house-style.md").write_text("# House style\n\nkeep it short\n")
+        (self.repo / ".switchboard" / "plugins.toml").write_text(
+            'all = ["house-style"]\n\n[roles]\nworker = ["be exact"]\n'
+        )
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _prompts_for(self, name: str) -> list[str]:
+        (started,) = [s for s in self.h.started if s["name"] == name]
+        return started["prompts"]
+
+    def test_delegate_resolves_the_repos_bindings(self):
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn("keep it short", " ".join(self._prompts_for(kid)))
+
+    def test_a_workspace_lead_gets_them_too(self):
+        lead = self.b.workspace_new("api", me=HUMAN)["agent"]
+        self.assertIn("keep it short", " ".join(self._prompts_for(lead)))
+
+    def test_the_top_level_orchestrator_gets_them_too(self):
+        top = self.b.start(focus=False, board=False)
+        self.assertIn("keep it short", " ".join(self._prompts_for(top)))
+
+    def test_every_spawn_path_resolves_the_same_bindings(self):
+        """The property the fix is really about: one resolution point, not three."""
+        kid = self.b.delegate("t", role="orchestrator", me=HUMAN)
+        lead = self.b.workspace_new("api", me=HUMAN)["agent"]
+        top = self.b.start(focus=False, board=False)
+        plugins = [[p for p in self._prompts_for(n) if "keep it short" in p]
+                   for n in (kid, lead, top)]
+        self.assertEqual(plugins[0], plugins[1])
+        self.assertEqual(plugins[1], plugins[2])
+        self.assertEqual(len(plugins[0]), 1, "flattened to one line, and not duplicated")
+
+    def test_a_per_role_binding_still_layers_on_top(self):
+        """`all` then the role's own — the layering survives the move."""
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        text = " ".join(self._prompts_for(kid))
+        self.assertIn("keep it short", text)
+        self.assertIn("be exact", text)
+
+    def test_a_callers_own_with_is_appended_last(self):
+        kid = self.b.delegate("t", role="worker", with_=["house-style", "and terse"],
+                              me=HUMAN)
+        prompts = self._prompts_for(kid)
+        self.assertIn("and terse", prompts)
+        self.assertEqual(len([p for p in prompts if "keep it short" in p]), 1,
+                         "already bound for every agent; naming it again adds nothing")
+
+    def test_a_plugin_that_cannot_flatten_names_the_plugin(self):
+        """The CLI's error quality has to survive the move: this is what becomes an agent
+        argument, so a plugin that flattens to something herdr rejects must say so."""
+        (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * 9000)
+        with self.assertRaises(ValueError) as cm:
+            self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn("plugin text", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

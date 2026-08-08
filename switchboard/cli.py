@@ -523,19 +523,13 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "delegate":
         cleanup = "keep" if args.keep else ("close" if args.ephemeral else None)
-        # Layered here, not in the broker: the broker takes prompt strings and knows
-        # nothing about plugins, so the vocabulary can change without touching it (C13).
-        # repo defaults -> the role's own -> per-call --with. Each appends.
-        names = plugins_mod.for_role(b.repo, args.role, args.with_)
-        # Re-checked after resolution because THIS is what becomes an agent argument: a
-        # plugin file is flattened to one line on the way out, but a repo's plugins.toml
-        # can also name a plugin that no longer flattens cleanly, and that failure should
-        # name the plugin rather than arrive as invalid_agent_argument.
-        with_ = [validate.line(p, "plugin text", max_len=validate.MAX_PROMPT)
-                 for p in plugins_mod.resolve(names, b.repo)]
+        # `--with` goes down as NAMES. Resolution and layering live in `Broker._plugins`,
+        # because this branch is not the only way a spawn happens: `sb workspace new` and
+        # `sb start` reach `delegate` directly, and while the layering lived here their
+        # leads got no plugins at all.
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           name=args.name or _derived_name(db, args.role),
-                          model=args.model, with_=with_,
+                          model=args.model, with_=args.with_,
                           cleanup=cleanup, me=me)
         _emit(args, f"delegated to {name}", {"name": name})
         return 0
