@@ -574,6 +574,28 @@ def update_agent(db: sqlite3.Connection, name: str, **fields: Any) -> None:
     db.commit()
 
 
+def mark_spawned(db: sqlite3.Connection, name: str) -> None:
+    """The claim became a real agent: it is `working`, and it has not ended.
+
+    Separate from `update_agent` because `state` and `ended_at` are deliberately NOT in
+    that allowlist — nothing should be able to rewrite an end as a side effect of
+    recording a pane id. This is the one narrow exception, and it exists because the row
+    can be closed UNDER a spawn that is still in flight: `delegate` claims the row before
+    herdr is called, `agent start` retries a flaky first attempt for seconds, and any
+    `status.collect` in that window sees a running row herdr does not know yet and reaps
+    it (`status._record_gone`). The reaper now holds off for the spawn window too, so this
+    is the second of two guards rather than the only one — but it is the one that repairs
+    a row already wrongly closed, which no reaper grace can do after the fact.
+
+    Only ever called on the success path of a spawn, where `working` is the truth by
+    construction: herdr has just returned an agent.
+    """
+    db.execute(
+        "UPDATE agents SET state='working', ended_at=NULL WHERE name=?", (name,)
+    )
+    db.commit()
+
+
 def next_seq(db: sqlite3.Connection, name: str) -> int:
     """The `--seq` for our next herdr state write.
 

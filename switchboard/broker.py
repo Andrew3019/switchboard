@@ -982,6 +982,11 @@ class Broker:
             raise
         store.update_agent(self.db, name, session_id=agent.session_id or None,
                            terminal_id=agent.terminal_id, pane_id=agent.pane_id or pane)
+        # The spawn is real now — and it may have taken long enough (a retried `agent
+        # start`) that a `status.collect` in the gap reaped the claim out from under it.
+        # Say so unconditionally rather than checking first: `working, not ended` is what
+        # this row is, whoever wrote what to it while we were waiting on herdr.
+        store.mark_spawned(self.db, name)
         store.log_event(self.db, kind="delegate", agent=name, parent=me, role=role,
                         workspace=ws)
         self.h.prompt(name, task)

@@ -72,6 +72,17 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.update_agent(self.db, "w", state="done")  # must go through set_state
 
+    def test_mark_spawned_reopens_a_row_closed_under_the_spawn(self):
+        """The one narrow exception to that allowlist, and why it exists: the board can
+        close a claim while its `agent start` is still retrying, and nothing else in the
+        store can undo that."""
+        store.create_agent(self.db, name="w", role="worker")
+        store.set_state(self.db, "w", "failed")
+        store.mark_spawned(self.db, "w")
+        a = store.get_agent(self.db, "w")
+        self.assertEqual(a["state"], "working")
+        self.assertIsNone(a["ended_at"])
+
     def test_live_roots_is_what_is_running_not_what_ever_ran(self):
         """The store keeps every root ever created; without the filter this is history.
 
