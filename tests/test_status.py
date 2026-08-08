@@ -6,17 +6,22 @@ every case worth testing here is "what happens when the two disagree".
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import inspect
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import cli as cli_mod, config  # noqa: E402
 from switchboard import herdr as herdr_mod, status, store  # noqa: E402
 from switchboard.herdr import Agent, Herdr, HerdrError  # noqa: E402
 
@@ -932,11 +937,79 @@ class StatusCliTest(unittest.TestCase):
         self.assertTrue(args.mine)
 
     def test_collapsing_is_the_default_and_archived_opts_out(self):
-        """Collapse has to be the default or it fixes nothing: 55 of 64 rows are archived
+        """Collapse has to be the default or it fixes nothing: 59 of 68 rows were archived
         and every session adds more."""
         from switchboard.cli import build_parser
         self.assertFalse(build_parser().parse_args(["status"]).archived)
         self.assertTrue(build_parser().parse_args(["status", "--archived"]).archived)
+
+
+class StatusArchivedCliTest(unittest.TestCase):
+    """`sb status` end to end, because the parser alone cannot see the wiring.
+
+    A flag that parses and is then dropped on the way to `render` looks identical to a
+    working one from the parser's side, and so does a call site that passes `False` where
+    it should pass "no opinion" and let `display.show_archived` answer.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(cmd, cwd=self.repo, capture_output=True)
+
+        db = store.connect(self.repo)
+        store.create_agent(db, name="lead", role="lead", session_id="s0")
+        store.create_agent(db, name="w1", role="worker", parent="lead", session_id="s1")
+        old = store.now() - int(status.SPAWN_GRACE) - 1     # past the spawn grace
+        db.execute("UPDATE agents SET created_at = ?", (old,))
+        db.commit()
+        db.close()
+
+        cwd = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, cwd)
+        # herdr answers, and lists nobody: `alive is False`, which is what archived needs.
+        h = mock.patch.object(herdr_mod, "Herdr", lambda *a, **k: FakeHerdr([]))
+        h.start()
+        self.addCleanup(h.stop)
+
+    def run_sb(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli_mod.main(list(argv))
+        self.assertEqual(code, 0, err.getvalue())
+        return out.getvalue()
+
+    def tree(self, text):
+        return text.split("\n\n")[0]
+
+    def test_sb_status_collapses_by_default(self):
+        self.assertIn("archived", self.tree(self.run_sb("status")))
+        self.assertNotIn("w1", self.tree(self.run_sb("status")))
+
+    def test_the_archived_flag_reaches_the_renderer(self):
+        """Not just that it parses — that the value arrives."""
+        self.assertIn("w1", self.tree(self.run_sb("status", "--archived")))
+
+    def test_a_repo_that_sets_show_archived_gets_it_without_passing_a_flag(self):
+        """The call site must pass "no opinion", not `False`. Passing `False` parses the
+        same, renders the same by default, and silently ignores the setting forever."""
+        sb = self.repo / ".switchboard"
+        sb.mkdir()
+        (sb / "settings.toml").write_text("[display]\nshow_archived = true\n")
+        with mock.patch.object(status, "SHOW_ARCHIVED",
+                               config.flag("display.show_archived", self.repo)):
+            self.assertIn("w1", self.tree(self.run_sb("status")))
+
+    def test_json_carries_every_row_whatever_the_tree_does(self):
+        payload = json.loads(self.run_sb("status", "--json"))
+        self.assertEqual(sorted(a["name"] for a in payload["agents"]), ["lead", "w1"])
+        self.assertTrue(all(a["archived"] for a in payload["agents"]))
 
 
 class ArchivedTest(unittest.TestCase):
@@ -1109,6 +1182,29 @@ class ArchivedTest(unittest.TestCase):
         shown = self.tree(snap, show_archived=True)
         self.assertIn("w1", shown)
         self.assertNotIn("archived", shown)
+
+    def test_the_setting_decides_when_no_caller_has_an_opinion(self):
+        """`display.show_archived`. A caller that passes nothing must not silently
+        hard-code a default of its own, or the setting is a setting in name only."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+
+        self.assertIs(status.SHOW_ARCHIVED, False)          # what the repo ships
+        self.assertNotIn("w1", self.tree(snap))
+        with mock.patch.object(status, "SHOW_ARCHIVED", True):
+            self.assertIn("w1", self.tree(snap))
+            self.assertNotIn("archived", self.tree(snap))
+
+    def test_the_flag_can_only_turn_collapse_off_never_on(self):
+        """`--archived` shows them; there is no flag that re-collapses, so a repo that has
+        set `show_archived = true` is not silently overridden by every bare `sb status`."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        with mock.patch.object(status, "SHOW_ARCHIVED", True):
+            self.assertIn("w1", self.tree(snap))            # no flag: the setting stands
+        self.assertIn("w1", self.tree(snap, show_archived=True))
 
     def test_a_board_of_nothing_but_archived_agents_still_renders(self):
         """Every root collapses, so there is no agent left to size the ROLE column

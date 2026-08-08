@@ -228,7 +228,7 @@ def _is_group(row) -> bool:
 
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
-           note_text: str = "", show_archived: bool = False
+           note_text: str = "", show_archived: Optional[bool] = None
            ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
@@ -246,6 +246,8 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     Returns at most `height` lines.
     """
     rows: list[tuple[str, Optional[object]]] = []
+    if show_archived is None:                       # `display.show_archived`, via status,
+        show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
     agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
     capacity = max(1, height - CHROME)
     top = max(0, min(top, max(0, len(agents) - capacity)))
@@ -413,7 +415,7 @@ def _size() -> tuple[int, int]:
         return 24, 80
 
 
-def draw(snap, top: int, msg: str, note_text: str, show_archived: bool = False) -> list:
+def draw(snap, top: int, msg: str, note_text: str, show_archived: bool) -> list:
     height, width = _size()
     rows = layout(snap, top=top, height=height, width=width, msg=msg,
                   note_text=note_text, show_archived=show_archived)
@@ -468,11 +470,13 @@ def main() -> int:
 
     signal.signal(signal.SIGWINCH, on_resize)
 
-    # In-process and deliberately not persisted: a panel is cheap, every pane has
-    # its own, and a toggle that outlives the pane is a setting — which is what
-    # `display.show_archived` is for. `layout` clamps `top` every call, so the row
+    # `a` toggles from wherever `display.show_archived` starts it. The KEY is not
+    # persisted, deliberately: a panel is cheap, every pane has its own, and a
+    # toggle that outlives the pane is a setting — which is exactly what the
+    # setting it starts from is for. `layout` clamps `top` every call, so the row
     # count changing under the toggle needs nothing here.
-    top, msg, buf, show_archived = 0, "", "", False
+    top, msg, buf = 0, "", ""
+    show_archived = status_mod.SHOW_ARCHIVED
     try:
         tty.setraw(fd)
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)

@@ -174,7 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     # only stops fully-archived subtrees being drawn as one line each. `--json` is
     # unaffected either way and always carries every row.
     ss.add_argument("--archived", action="store_true",
-                    help="draw archived agents individually instead of collapsing them")
+                    help="draw archived agents individually instead of collapsing them "
+                         "(the default is display.show_archived)")
     # Naming one prints it. A preset is not always a disposition stapled onto a spawn —
     # some are procedures an agent is TOLD to go and follow, and without a way to read one
     # on demand the only way to reach a procedure was to be spawned with it already
@@ -773,7 +774,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # drift two levels down is still drift the caller is being lied to about.
         snap = status_mod.collect(db, h, live_only=args.live, needs_me=args.needs_me,
                                   mine=(me if args.mine else None))
-        _emit(args, status_mod.render(snap, show_archived=args.archived), snap.as_dict())
+        # None, not False: the flag can only ever turn collapse OFF, so with no flag the
+        # answer comes from `display.show_archived` rather than from here.
+        _emit(args, status_mod.render(snap, show_archived=True if args.archived else None),
+              snap.as_dict())
         return 0
 
     if cmd == "presets":

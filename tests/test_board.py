@@ -337,6 +337,18 @@ class CollapseLayoutTest(unittest.TestCase):
         self.assertEqual([a.name for a in self.drawn(rows)], ["a0", "a1", "a2", "a3"])
         self.assertNotIn("archived", self.body(rows))
 
+    def test_the_panel_and_sb_status_share_one_default(self):
+        """Two renderings of one snapshot. If the panel kept its own default they could
+        disagree about the same fleet on the same screen, and `display.show_archived`
+        would be a setting that only half the product obeyed."""
+        s = snap(agent("main"), agent("gone", depth=1, parent="main", archived=True))
+        rows = board.layout(s, top=0, height=12, width=100, msg="")
+        self.assertEqual([getattr(a, "name", "GROUP") for a in self.drawn(rows)],
+                         ["main", "GROUP"])
+        with mock.patch.object(status, "SHOW_ARCHIVED", True):
+            rows = board.layout(s, top=0, height=12, width=100, msg="")
+            self.assertEqual([a.name for a in self.drawn(rows)], ["main", "gone"])
+
     def test_the_hint_line_says_how_to_see_them(self):
         """The collapsed row is visible where a keybinding is not."""
         rows = board.layout(snap(agent("one")), top=0, height=12, width=200, msg="")

@@ -143,6 +143,12 @@ DONE_PREFIX = config.setting("vocabulary.done_prefix")
 # Long enough to say what an agent is doing, short enough not to wrap a terminal.
 TASK_CLIP = config.setting("limits.task_clip")
 
+# Whether whole archived subtrees are drawn row by row or collapsed to one line. Read here
+# rather than in each renderer so `sb status` and the panel cannot end up on different
+# defaults — `board.layout` takes this one too. `config.flag`, not `config.setting`,
+# because a quoted "false" is a true string and would silently invert it.
+SHOW_ARCHIVED = config.flag("display.show_archived")
+
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
 # is still needed here because `--mine` accepts it — for a person, "my subtree" is every
 # root and everything under it.
@@ -824,8 +830,14 @@ def display_rows(agents: list[AgentStatus], *, show_archived: bool = False
     return out
 
 
-def render(snap: Snapshot, *, show_archived: bool = False) -> str:
-    """Compact enough to run reflexively; loud enough that drift cannot be missed."""
+def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
+    """Compact enough to run reflexively; loud enough that drift cannot be missed.
+
+    `show_archived=None` means "whatever `display.show_archived` says", so a caller with
+    no opinion cannot accidentally hard-code one. `sb status --archived` passes True.
+    """
+    if show_archived is None:
+        show_archived = SHOW_ARCHIVED
     lines: list[str] = []
     if snap.herdr_error:
         lines.append(f"! herdr unreachable ({snap.herdr_error}) — "

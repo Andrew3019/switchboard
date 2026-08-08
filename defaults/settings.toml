@@ -293,6 +293,21 @@ board_refresh = 2.0
 # Board rows that are not agents — header, blank, blank, status.
 board_chrome = 4
 
+# Draw every archived agent instead of collapsing whole archived subtrees into one
+# `+ N archived` row. An agent is archived when herdr no longer has its pane and it is
+# past the spawn grace — see `status.AgentStatus.archived`.
+#
+# False, because the alternative is what the board did before: on the store this was
+# written against, 59 of 68 rows were agents whose pane had closed, and every session
+# permanently adds more. `split-tab.md` §3.1 puts that same tree in EVERY pane at half a
+# pane's width, so this is the difference between a panel and a wall of dead names.
+#
+# Nothing is lost by it. The header still counts every agent, and DRIFT, NEEDS YOU and
+# UNDELIVERED still name each one — collapse shortens the tree, never the readout, and
+# `sb status --json` is not affected at all. Per invocation: `sb status --archived`, or
+# `a` in the board.
+show_archived = false
+
 
 [panel]
 # One collector, many renderers. See switchboard/panel.py — the collector is elected by an
