@@ -31,6 +31,7 @@ from typing import Any, NamedTuple, Optional
 
 from . import config
 from . import models as models_mod
+from . import panel as panel_mod
 from . import plugins as plugins_mod
 from . import presets as presets_mod
 from . import status as status_mod
@@ -613,12 +614,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # per plugin by `load_all`, so the one that will not import is a row here rather
         # than a traceback instead of the report.
         pl = _doctor_plugins(b.repo)
+        # Whether the panel every pane is drawing is actually fresh. The counters ride in
+        # the snapshot file the collector writes anyway, so this costs no store write —
+        # see `panel.doctor_line`, and split-tab.md §2.5 for why it is not an `on_event`.
+        panel_line = "\n" + panel_mod.doctor_line()
         try:
             h.check()
             _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}"
-                        f"{pl.text}",
+                        f"{panel_line}{pl.text}",
                   {"ok": not deficit and not pl.problems, "schema_deficit": deficit,
-                   **pl.data})
+                   "panel": panel_mod.doctor_dict(), **pl.data})
         except HerdrError as e:
             _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}{pl.text}",
                   {"ok": False, "code": e.code, "schema_deficit": deficit, **pl.data})

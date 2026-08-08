@@ -430,7 +430,7 @@ class Staleness(PanelTest):
     def test_no_snapshot_at_all_says_a_collector_is_coming(self):
         r = panel.read(self.paths)
         self.assertTrue(r.stale)
-        self.assertIn("starting a collector", r.note)
+        self.assertIn("no collector has published one", r.note)
         self.assertEqual(r.snap.agents, [])
 
     def test_staleness_outranks_a_herdr_hiccup(self):

@@ -264,7 +264,10 @@ agent_wait_backoff = 0.5
 # quietly do its child's work instead.
 spawn_attempts = 3
 
-# Linear backoff: attempt N sleeps N * this. Three attempts is 2s + 4s at worst.
+# Linear backoff: attempt N sleeps N * this. Every failure sleeps, the last one included —
+# `start_agent` naps before it gives up (`herdr.py:370`) — so three attempts is 2 + 4 + 6 =
+# 12 s of backoff, not 2 + 4. Reading it as 2 + 4 is how `status.SPAWN_GRACE` came to be
+# 12 s shorter than the spawn it guards; it now derives the whole worst case from here.
 spawn_backoff = 2
 
 

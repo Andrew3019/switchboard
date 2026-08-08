@@ -23,7 +23,7 @@ So this module must never import `store`, at module scope or inside a function �
 `repo_root`, not for `now()`, not for a type. Two consequences that look like detours and
 are not:
 
-- `agentflow_dir` resolves `.git` in Python rather than calling `store.repo_root()`.
+- `git_common_dir` resolves `.git` in Python rather than calling `store.repo_root()`.
   That is also the only way the `git rev-parse --git-common-dir` subprocess stays off the
   renderer: it was measured at 12.3 ms of a 23.4 ms tick — more than herdr and the SQL
   put together — and forty renderers paying it every two seconds is most of what this
@@ -254,7 +254,8 @@ def read(paths: Paths, *, at: Optional[float] = None) -> Reading:
     try:
         raw = paths.snapshot.read_bytes()
     except FileNotFoundError:
-        return Reading(_empty(), {}, None, "no panel snapshot yet — starting a collector")
+        return Reading(_empty(), {}, None,
+                       "no panel snapshot yet — no collector has published one")
     except OSError as e:
         return Reading(_empty(), {}, None, f"snapshot unreadable: {e}")
 
@@ -483,7 +484,10 @@ def doctor_line(paths: Optional[Paths] = None, *, at: Optional[float] = None) ->
     writing anyway, at zero extra writes; `doctor` reads that file. It also answers a
     question `on_event` could not: whether the thing on forty screens is current.
     """
-    paths = Paths.resolve() if paths is None else paths
+    try:
+        paths = Paths.resolve() if paths is None else paths
+    except (RuntimeError, OSError) as e:      # `doctor` must report, never traceback
+        return f"panel  cannot locate the panel directory: {e}"
     at = now() if at is None else at
     r = read(paths, at=at)
     c = r.collector or {}
@@ -508,7 +512,10 @@ def doctor_line(paths: Optional[Paths] = None, *, at: Optional[float] = None) ->
 
 def doctor_dict(paths: Optional[Paths] = None, *, at: Optional[float] = None) -> dict:
     """The same, for `--json`."""
-    paths = Paths.resolve() if paths is None else paths
+    try:
+        paths = Paths.resolve() if paths is None else paths
+    except (RuntimeError, OSError) as e:
+        return {"up": False, "age": None, "stale": True, "error": str(e)}
     at = now() if at is None else at
     r = read(paths, at=at)
     return {"up": collector_running(paths), "age": r.age, "stale": r.stale,
