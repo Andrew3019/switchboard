@@ -68,7 +68,7 @@ class Role:
 def load(repo: Optional[Path] = None) -> dict[str, Role]:
     """Role definitions only — what an agent IS.
 
-    Which behaviours get injected into it is a separate concern; see plugins.py.
+    Which behaviours get injected into it is a separate concern; see presets.py.
     """
     merged = config.roles(repo)
     tiers = models.load(repo)

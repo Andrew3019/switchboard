@@ -18,11 +18,34 @@ repo_dir = ".switchboard"
 roles_file    = "roles.toml"
 roles_dir     = "roles"
 models_file   = "models.toml"
-plugins_file  = "plugins.toml"
-plugins_dir   = "plugins"
+presets_file  = "presets.toml"
+presets_dir   = "presets"
 protocol_file = "protocol.md"
 prompts_file  = "prompts.toml"
 settings_file = "settings.toml"
+
+# One directory and one file, each meaning two things during the transition — and needing
+# no disambiguation, because the two are told apart by SHAPE rather than by name:
+#
+#   .switchboard/plugins/       a `<name>.md` FILE is a pre-rename preset (read only while
+#                               `.switchboard/presets/` is absent — see
+#                               `config.path_for_legacy`); a `<name>/` DIRECTORY with an
+#                               `__init__.py` is a plugin package.
+#   .switchboard/plugins.toml   top-level `all` / `[roles]` are pre-rename preset bindings;
+#                               `enabled = [...]` is plugin enablement. The keys are
+#                               disjoint, so a file holding both parses correctly as both.
+#
+# So these are not legacy keys to be retired: they are where plugins live. What was
+# retired is the pre-rename MEANING of what is found there, and nothing new should be
+# pointed at that.
+plugins_file  = "plugins.toml"
+plugins_dir   = "plugins"
+
+# Plugin state for `SCOPE = "user"` — per machine rather than per repo, for a plugin whose
+# data is a fact about the tool and not about whichever repo you were standing in. Repo
+# scope needs no entry: it is `<shared .git>/<store_dirname>/plugins/<name>/`, keyed on the
+# same repo identity as the store.
+user_state    = "~/.local/state/switchboard"
 
 # Per-user, between the shipped tiers and the repo's. Tiers only: this is where you say
 # what `strong` means on YOUR machine, and it is not shared with anyone.
@@ -131,9 +154,18 @@ agent_name = 32
 # have been a file. It also stops a runaway agent pasting a transcript into a mailbox.
 text = 4000
 
-# Authored prompt text (`--as`, and plugin files after flattening). Config rather than
-# traffic, so it gets more room — a plugin is allowed to be a substantial briefing.
+# Authored prompt text (`--as`, and preset files after flattening). Config rather than
+# traffic, so it gets more room — a preset is allowed to be a substantial briefing.
 prompt = 8000
+
+# One plugin's `agent.md` fragment, after flattening. Far below `prompt` on purpose: a
+# preset is bound because somebody decided this role needs it, while a fragment is bound
+# because a plugin is installed, and protocol.md's own header says what that costs —
+# everything in a system prompt is "paid for on every single spawn, by every agent,
+# forever". Enough to name a plugin's verbs and the rule for using them; not enough to
+# explain them. Over-budget text is truncated at a word boundary with an event logged,
+# never rejected: a chatty plugin must not break spawning.
+plugin_fragment = 400
 
 # A workspace name is used verbatim as a git branch name. Refs have no real length limit,
 # but a path built from one does, and nothing legitimate comes close.

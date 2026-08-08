@@ -183,6 +183,7 @@ class FakeHerdr:
         return [self.live[n] for n in sorted(self.live)]
 
     def prompt(self, name, text): self.prompts.append((name, text))
+    def send_keys(self, name, *keys): self.calls.append(f"send_keys:{name}:{','.join(keys)}")
     def notify(self, text): self.notifications.append(text)
     def focus(self, name): pass
     def report_state(self, pane, name, state, seq, **kw): pass
@@ -1363,7 +1364,7 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * 9000)
         with self.assertRaises(ValueError) as cm:
             self.b.delegate("t", role="worker", me=HUMAN)
-        self.assertIn("plugin text", str(cm.exception))
+        self.assertIn("preset text", str(cm.exception))
 
 
 if __name__ == "__main__":

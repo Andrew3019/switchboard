@@ -1,7 +1,7 @@
 """Configuration, layered — the only module that reads a config file.
 
 Everything switchboard ships as its out-of-the-box behaviour lives in `defaults/` at the
-repo root: role definitions, model tiers, plugin bindings, the agent protocol, the spawn
+repo root: role definitions, model tiers, preset bindings, the agent protocol, the spawn
 prompts, and every number worth tuning. None of it is in Python any more. A repo adds its
 own layer in `<repo>/.switchboard/`, and this module is what joins the two.
 
@@ -26,7 +26,7 @@ Three, applied recursively and identically to every file:
    preserved.
 
 Joining is the interesting one, and it is the default because the alternative is a trap: a
-repo that adds one plugin binding must not silently lose the shipped ones, and neither
+repo that adds one preset binding must not silently lose the shipped ones, and neither
 layer can tell whether it is the only one there. When replacing really is what you mean,
 say so with a `"!reset"` sentinel as the array's first element.
 
@@ -91,6 +91,25 @@ def path_for(key: str, repo: Optional[Path] = None) -> Optional[Path]:
     """A `[paths]` entry resolved inside the repo's config directory."""
     d = repo_dir(repo)
     return None if d is None else d / setting(f"paths.{key}", repo=repo)
+
+
+def path_for_legacy(key: str, old_key: str, repo: Optional[Path] = None) -> Optional[Path]:
+    """`path_for(key)`, falling back to `path_for(old_key)` when only the old one exists.
+
+    A `[paths]` entry that has been RENAMED. A repo written against the old name — either
+    because it overrode the old key, or simply because it still has the file the old key
+    pointed at — keeps working without being touched. There is no flag day: the moment the
+    new path exists it wins outright, and the old one is never consulted again.
+
+    Deliberately keyed on what is on disk rather than on which key the repo set. Most repos
+    set neither: they inherit both from the shipped layer and just have a directory with
+    the old name in it, which is exactly the case that has to keep working.
+    """
+    new = path_for(key, repo)
+    if new is None or new.exists():
+        return new
+    old = path_for(old_key, repo)
+    return old if old is not None and old.exists() else new
 
 
 # -- reading -------------------------------------------------------------------
@@ -408,21 +427,46 @@ def prompt(dotted: str, repo: Optional[Path] = None, **fields: Any) -> str:
         raise ConfigError(f"prompt '{dotted}' uses a placeholder nothing fills: {e}") from e
 
 
-# -- plugin bindings -----------------------------------------------------------
+# -- preset bindings -----------------------------------------------------------
 
 
-def plugin_bindings(repo: Optional[Path] = None) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+def preset_bindings(repo: Optional[Path] = None) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
     """`(applied to every agent, per-role additions)`, shipped joined with the repo's.
 
     Joined, not replaced: a repo adding one binding must not wipe the shipped ones. See
     `join` for the `"!reset"` escape hatch when replacing really is what you mean.
+
+    A repo still holding the pre-rename `plugins.toml` is read from there — see
+    `path_for_legacy`.
     """
-    shipped = read_toml(defaults_dir() / "plugins.toml")
-    p = path_for("plugins_file", repo)
+    shipped = read_toml(defaults_dir() / "presets.toml")
+    p = path_for_legacy("presets_file", "plugins_file", repo)
     data = merge(shipped, read_toml(p) if p is not None else {})
     every = tuple(data.get("all") or ())
     per_role = {k: tuple(v) for k, v in (data.get("roles") or {}).items()}
     return every, per_role
+
+
+# -- plugin enablement ---------------------------------------------------------
+
+
+def plugin_enablement(repo: Optional[Path] = None) -> tuple[str, ...]:
+    """Which plugins are enabled: `enabled = [...]` in `plugins.toml`, shipped then repo's.
+
+    The same `merge` every other file gets, so a repo adding one plugin cannot wipe the
+    shipped ones and `["!reset"]` is how you say "exactly this, or nothing".
+
+    `plugins.toml` means two things during the transition and needs no disambiguation to
+    read: a pre-rename file binds presets with top-level `all` and `[roles]`, and an
+    enablement file lists `enabled`. The keys are disjoint, so a file holding both parses
+    as both — this function ignores `all` and `roles`, and `preset_bindings` ignores
+    `enabled`. There is no path-level fallback here and none is owed: unlike `presets_file`,
+    `plugins_file` was never renamed, so the old spelling and the new one are the same path.
+    """
+    shipped = read_toml(defaults_dir() / "plugins.toml")
+    p = path_for("plugins_file", repo)
+    data = merge(shipped, read_toml(p) if p is not None else {})
+    return tuple(data.get("enabled") or ())
 
 
 # -- model tiers ---------------------------------------------------------------

@@ -1,0 +1,61 @@
+# Which presets apply where.
+#
+# A preset is one markdown file in `<repo>/.switchboard/presets/<name>.md`, flattened to a
+# single line and appended to a spawn's system prompt. This file says which of them a role
+# gets automatically; `sb delegate --with <name>` adds more per call.
+#
+# Layered, most general first, each layer APPENDING:
+#
+#     defaults/presets.toml  ->  <repo>/.switchboard/presets.toml  ->  --with
+#
+# Appending, not replacing. A repo adding one binding cannot silently drop a shipped one,
+# and a caller cannot drop what the repo decided every agent gets. To start from nothing
+# anyway, make `"!reset"` the first element of the list:
+#
+#     all = ["!reset", "own-files"]
+#
+# A name here is a preset file. A name with an `@` in front of it is a PLUGIN's fragment —
+# the `agent.md` shipped by the plugin of that name, which has to be enabled in
+# plugins.toml:
+#
+#     all = ["own-files", "@todo"]
+#
+# The sigil is what lets a preset and a plugin share a name, and it makes the provenance of
+# every injected line visible here. It is also required: a bare `todo` naming an enabled
+# plugin is an error rather than a literal, because otherwise it would ship the one-word
+# string "todo" into an agent's system prompt and look like it had worked.
+#
+# An `@name` that does not resolve is SKIPPED with a warning when it comes from this file,
+# and an error when someone typed `--with @name`. A half-installed plugin must not stop the
+# fleet spawning; a fragment you asked for by hand must not vanish silently.
+#
+# Kept out of roles.toml deliberately: a role is what an agent IS (its tier, its
+# disposition, its own prompt), a preset is behaviour injected into it. Mixing the two made
+# "add a preset" look like "redefine the role".
+#
+# Preset FILES are not layered — only these bindings are. The protocol is what every agent
+# needs; a preset is what some agents need, and what switchboard's own agents need has no
+# bearing on yours.
+#
+# This file was `plugins.toml` until "plugin" was needed for the other thing — a preset is
+# prompt text and cannot run, a plugin is Python and can. A repo still holding
+# `plugins.toml` is read from there until it moves; see `config.path_for_legacy`.
+
+# Applied to every agent, whatever its role. Paid on every single spawn, so the bar is
+# "genuinely universal" and nothing that is merely useful belongs here.
+#
+# Two entries clear it, both plugin fragments (`@` — see above). `@todo` because a shared
+# list nobody is told about is a list nobody reads, and `@report-bug` because an agent that
+# works around an sb bug silently costs everyone after it more than the bug did. Both are
+# capped at [limits] plugin_fragment and both are written to fit under the cap rather than
+# be cut by it.
+#
+# A repo that does not want the tax says `all = ["!reset"]` in its own presets.toml. That
+# keeps `sb plugin todo` working for the human and stops it being told to every spawn —
+# which is the one thing collapsing "enabled" and "bound" into one state would have made
+# impossible to say.
+all = ["@todo", "@report-bug"]
+
+# Per-role additions, appended to `all`. Also shipped empty: which behaviours a role needs
+# is a property of the work a repo does, not of switchboard.
+[roles]

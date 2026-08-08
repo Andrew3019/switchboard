@@ -2,7 +2,9 @@
 
 Seven verbs for agents (`delegate`, `ask`, `tell`, `inbox`, `done`, `block`, `status`), a
 few more for the human (`init`, `doctor`, `cleanup`, `restore`, `interrupt`, `inspect`,
-`wait`, `log`, `plugins`, `models`, `workspace`).
+`wait`, `log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
+than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
+says what this repo has.
 
 `wait` is the one verb that is *only* for a human: an agent that blocks on a child is
 burning a turn to do what the doorbell already does for free (see broker.done). It says so
@@ -22,13 +24,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from . import config
 from . import models as models_mod
 from . import plugins as plugins_mod
+from . import presets as presets_mod
 from . import status as status_mod
 from . import store
 from . import validate
@@ -44,14 +48,14 @@ def _emit(args, human: str, data: Any = None) -> None:
         print(human)
 
 
-def _plugin_dir_help() -> str:
-    """Where plugin files live, spelled the way the config says rather than restated here.
+def _preset_dir_help() -> str:
+    """Where preset files live, spelled the way the config says rather than restated here.
 
     Same reasoning as `_tier_help`: a path written into a help string is a path that lies
     the moment `[paths]` moves it, and help is exactly where someone looks to find out.
     """
     return "{}/{}/".format(config.setting("paths.repo_dir"),
-                           config.setting("paths.plugins_dir"))
+                           config.setting("paths.presets_dir"))
 
 
 def _tier_help() -> str:
@@ -119,8 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
-    d.add_argument("--with", dest="with_", action="append", default=[], metavar="PLUGIN",
-                   help=f"prompt plugin from {_plugin_dir_help()} (repeatable); "
+    d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
+                   help=f"preset from {_preset_dir_help()} (repeatable); "
                         f"an unknown value is used as a literal instruction")
     d.add_argument("--name")
     d.add_argument("--workspace", metavar="NAME",
@@ -164,8 +168,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only agents that are blocked, at a prompt, or holding unread mail")
     ss.add_argument("--mine", action="store_true",
                     help="only your own subtree (for a human: every agent)")
-    cmd("plugins", help="list available prompt plugins")
-    # The sibling of `plugins`: both answer "what vocabulary does THIS repo have?", which
+    cmd("presets", help="list available presets and their bindings")
+    # REMAINDER, so the top-level parser stays static and unbreakable by anything on
+    # disk. Registering plugin commands here would mean importing plugin code to print
+    # `sb --help` — and `_tier_help` above already has to wrap a config read in a bare
+    # `except Exception` so that `sb --help` outside a repo does not traceback. One such
+    # hazard is enough. The plugin's own arguments are parsed after dispatch, by the
+    # subparser sb builds from what `register()` declared, so deferring costs nothing in
+    # error quality: `sb plugin todo add --labl x` still names the flag that was typed.
+    pl = cmd("plugin", help="run an installed plugin (see: sb plugin list)")
+    pl.add_argument("name", nargs="?", help="plugin name, or `list`")
+    pl.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    # Retired, and loud about it rather than silently gone: `sb plugins` used to be this
+    # verb, and the word now belongs to code plugins instead. Hidden, because a retired
+    # spelling should not be advertised, but still REGISTERED — an unregistered verb gets
+    # an argparse usage dump, which names neither replacement. See `_dispatch`.
+    cmd("plugins", hidden=True)
+    # The sibling of `presets`: both answer "what vocabulary does THIS repo have?", which
     # is the question you have right before typing `--model` or `--with`. Read-only, and
     # the only place a resolved model name is ever printed — a tier is opaque by design,
     # so without this the only way to learn what one maps to is to read three config files.
@@ -294,7 +313,7 @@ def _validate(args) -> None:
         if args.as_prompt is not None:
             args.as_prompt = validate.line(args.as_prompt, "--as",
                                            max_len=validate.MAX_PROMPT)
-        # A `--with` value is either a plugin name or a literal instruction; both become
+        # A `--with` value is either a preset name or a literal instruction; both become
         # prompt text, so both are checked again after resolution (see _dispatch).
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
@@ -348,6 +367,72 @@ def _validate(args) -> None:
         if args.agent is not None:
             args.agent = validate.agent_name(args.agent, "--agent")
         args.n = validate.positive_int(args.n, "-n")
+
+    elif cmd == "plugin":
+        _validate_plugin(args)
+
+
+def _plugins_file() -> str:
+    """Where enablement is written, spelled the way the config says. See `_preset_dir_help`."""
+    return "{}/{}".format(config.setting("paths.repo_dir"),
+                          config.setting("paths.plugins_file"))
+
+
+def _validate_plugin(args) -> None:
+    """Resolve the plugin, its command, and its arguments — here, like everything else.
+
+    This is level 3 and level 3 only happens for `sb plugin …`: the name is looked up, the
+    module is imported, `register()` is called, and the rest of the command line is parsed
+    by the subparser sb builds from what it declared. Doing it in `_validate` rather than in
+    `_dispatch` keeps cli.py's one rule intact — arguments are checked at the boundary and
+    nowhere else — and means a typo is answered before the store is even opened.
+
+    Everything resolvable is stashed on the namespace, so `_dispatch` looks nothing up
+    twice and the import happens exactly once per invocation.
+    """
+    if args.name is None:
+        raise validate.Invalid("`sb plugin` needs a plugin name — see `sb plugin list`")
+
+    if args.name == "list":
+        # A verb, not a plugin: `list` and `info` are reserved names. Parsed rather than
+        # waved through, so `sb plugin list --oops` is a usage error like any other.
+        lp = argparse.ArgumentParser(prog="sb plugin list",
+                                     description="what this repo has, and its state")
+        lp.add_argument("--json", action="store_true", help="machine-readable output")
+        args.json = lp.parse_args(args.rest).json or args.json
+        return
+
+    try:
+        repo = store.worktree_root()
+    except Exception:
+        # Not in a repo. `store.connect()` is a few lines below and says so far better than
+        # a complaint about a plugin name could.
+        return
+
+    found = plugins_mod.available(repo)
+    if args.name not in found:
+        raise validate.Invalid(
+            f"no such plugin: '{args.name}'{plugins_mod.did_you_mean(args.name, found)}"
+            f" — see `sb plugin list`")
+    if args.name not in plugins_mod.enabled(repo):
+        raise validate.Invalid(
+            f"plugin '{args.name}' is not enabled — add it to "
+            f"{_plugins_file()}: enabled = [\"{args.name}\"]")
+
+    p = plugins_mod.must_load(repo, args.name)          # PluginError -> caught in main
+    if args.rest and not args.rest[0].startswith("-") and args.rest[0] not in p.commands:
+        raise validate.Invalid(
+            f"plugin '{p.name}' has no command '{args.rest[0]}'"
+            f"{plugins_mod.did_you_mean(args.rest[0], p.commands)} — "
+            f"try: {', '.join(sorted(p.commands))}")
+
+    # argparse from here: `--help`, a missing command, an unknown flag and a bad choice all
+    # come back in sb's own voice and exit 2, because they ARE sb's parser.
+    ns = plugins_mod.build_parser(p).parse_args(args.rest)
+    args.plugin = p
+    args.command = p.commands[ns._command]
+    args.pargs = ns
+    args.json = getattr(ns, "json", False) or args.json
 
 
 def _derived_name(db, role: str) -> Optional[str]:
@@ -403,6 +488,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         # system — only with what was typed.
         print(f"sb: {e}", file=sys.stderr)
         return 2
+    except plugins_mod.PluginError as e:
+        # A plugin that will not import. 1, not 2: what was typed was fine.
+        return _plugin_failed(e)
+
+    # Before the store, because a retired verb has no work to do and should say so wherever
+    # it is typed — including outside a repo, where connect() would answer with something
+    # else entirely. Exit 2, like a usage error: nothing ran, and nothing is wrong with the
+    # system, only with what was typed.
+    if args.cmd == "plugins":
+        print("sb: `sb plugins` has been split. Prompt fragments are now `sb presets`;\n"
+              "    code plugins are `sb plugin list`.", file=sys.stderr)
+        return 2
 
     try:
         db = store.connect()
@@ -444,9 +541,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(_degraded(deficit, args.cmd) if deficit else f"sb: store: {e}",
               file=sys.stderr)
         return 1
+    except plugins_mod.PluginError as e:
+        # Already logged, by the dispatch that raised it — one event per handler
+        # invocation, not two for the ones that failed.
+        return _plugin_failed(e)
     except (ValueError, KeyError) as e:
         print(f"sb: {_reason(e)}", file=sys.stderr)
         return 1
+
+
+def _plugin_failed(e: plugins_mod.PluginError) -> int:
+    """One line naming the plugin, never a traceback. Exit 1, like every other failure.
+
+    No exit code is reserved for this, and that is a decision rather than an omission: sb
+    has no reserved codes at all, and minting one here would add a second machine-readable
+    channel beside the one `--json` already is, where a failed handler is `ok: false` with
+    a reason. A plugin that wants a code of its own sets `Result.code`.
+    """
+    print(e.tb if e.tb and os.environ.get("SB_DEBUG") else f"sb: {e}", file=sys.stderr)
+    return 1
 
 
 def _reason(e: Exception) -> str:
@@ -479,18 +592,29 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         schema = "".join(f"\n       PENDING REBUILD — {d}" for d in deficit)
         if schema:
             schema += ("\n       (a fleet is live; it rebuilds when the last one finishes)")
+        # Level 3: `doctor` imports every plugin, which is exactly what it is for. Wrapped
+        # per plugin by `load_all`, so the one that will not import is a row here rather
+        # than a traceback instead of the report.
+        pl = _doctor_plugins(b.repo)
         try:
             h.check()
-            _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}",
-                  {"ok": not deficit, "schema_deficit": deficit})
+            _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}"
+                        f"{pl.text}",
+                  {"ok": not deficit and not pl.problems, "schema_deficit": deficit,
+                   **pl.data})
         except HerdrError as e:
-            _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}",
-                  {"ok": False, "code": e.code, "schema_deficit": deficit})
+            _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}{pl.text}",
+                  {"ok": False, "code": e.code, "schema_deficit": deficit, **pl.data})
             return 1
         # Non-zero for a pending rebuild, so the exit code and the `ok` field cannot
         # disagree. Nothing is broken — but `doctor` is the verb whose whole job is to
         # say so out loud, and a script checking it should see the difference.
-        return 1 if deficit else 0
+        #
+        # Plugin PROBLEMS join it; plugin NOTICES do not. An orphaned state directory is
+        # permanent by design — nothing ever deletes it and the human may well be keeping
+        # it — so letting one hold `sb doctor` at non-zero forever would train everybody to
+        # stop reading the exit code, which is the only thing it is for.
+        return 1 if (deficit or pl.problems) else 0
 
     if cmd == "init":
         p = b.init()
@@ -614,18 +738,21 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         _emit(args, status_mod.render(snap), snap.as_dict())
         return 0
 
-    if cmd == "plugins":
-        found = plugins_mod.available(b.repo)
-        every, per_role = plugins_mod.bindings(b.repo)
+    if cmd == "presets":
+        found = presets_mod.available(b.repo)
+        every, per_role = presets_mod.bindings(b.repo)
         lines = []
         for n in found:
             using = [r for r, ps in per_role.items() if n in ps]
             tag = " [every agent]" if n in every else (f" [{', '.join(using)}]" if using else "")
             lines.append(f"  {n:16}{tag}")
-        _emit(args, "\n".join(lines) or f"(none — add {_plugin_dir_help()}<name>.md)",
-              {"plugins": sorted(found), "all": list(every),
+        _emit(args, "\n".join(lines) or f"(none — add {_preset_dir_help()}<name>.md)",
+              {"presets": sorted(found), "all": list(every),
                "roles": {k: list(v) for k, v in per_role.items()}})
         return 0
+
+    if cmd == "plugin":
+        return _plugin_list(args, b) if args.name == "list" else _plugin_run(args, b, db, me)
 
     if cmd == "models":
         tiers = models_mod.load(b.repo)
@@ -698,6 +825,146 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     return 2
+
+
+def _plugin_list(args, b: Broker) -> int:
+    """`sb plugin list` — every available plugin and how far sb got with it.
+
+    Level 3: each one is imported, and each import is wrapped. One plugin with a
+    SyntaxError is a row saying so, and costs the others nothing. `SB_DEBUG=1` prints the
+    tracebacks after the table rather than instead of it, so a broken plugin never hides
+    the working ones.
+    """
+    rows = plugins_mod.load_all(b.repo)
+    binds = plugins_mod.bound(b.repo)
+    lines, tracebacks = [], []
+    for p in rows:
+        tags = ["enabled" if p.enabled else "not enabled"]
+        if p.name in binds:
+            tags.append(f"@{p.name} bound to {', '.join(binds[p.name])}")
+        note = p.error or f"[{', '.join(tags)}]"
+        lines.append(f"  {p.name:<14}{p.version:<8}{p.status:<14}{note}")
+        if p.traceback:
+            tracebacks.append(f"--- {p.name}\n{p.traceback}")
+    if tracebacks and os.environ.get("SB_DEBUG"):
+        print("\n".join(tracebacks), file=sys.stderr)
+    _emit(args, "\n".join(lines) or f"(no plugins — a plugin is a directory in "
+                                    f"{_plugin_dir_help()} with an __init__.py)",
+          {"plugins": [p.as_dict() for p in rows],
+           "enabled": list(plugins_mod.enabled(b.repo))})
+    return 0
+
+
+class _PluginReport(NamedTuple):
+    """What `sb doctor` has to say about plugins: what is wrong, and what is merely so."""
+
+    problems: list[str]
+    notices: list[str]
+    data: dict
+
+    @property
+    def text(self) -> str:
+        return "".join(f"\n  {'PROBLEM' if kind else 'note'}  {line}"
+                       for kind, group in ((1, self.problems), (0, self.notices))
+                       for line in group)
+
+
+def _doctor_plugins(repo) -> _PluginReport:
+    """The four plugin questions `doctor` answers, and which of them are problems.
+
+    **Problems** — a plugin that will not import, and one targeting an API this sb does not
+    support. Both mean a command an agent may have been told to run does not exist, and
+    incompatibility in particular is not caught at spawn time by design (§11 item 4): the
+    fragment is injected anyway, because `delegate` never imports, so this is the only place
+    the mismatch is visible before an agent trips over it.
+
+    **Notices** — an orphaned state directory (§5.6), a plugin sb is importing out of the
+    repo rather than out of `defaults/`, and the pre-rename spellings of §8.2. None of these
+    is broken; all three are things a person should know and cannot otherwise see.
+
+    The repo-sourced note is visibility, not a gate. There is no trust prompt and no content
+    pinning, because the party who can write `.switchboard/plugins/` can already run code on
+    this machine through `conftest.py`, a `Makefile`, or a git hook. What `doctor` adds is
+    that you find out sb is importing it.
+    """
+    problems, notices = [], []
+    rows = plugins_mod.load_all(repo)
+    for p in rows:
+        if p.status in ("broken", "incompatible"):
+            problems.append(f"plugin '{p.name}' {p.status}: {p.error}")
+        elif p.source == "repo":
+            notices.append(f"plugin '{p.name}' is loaded from {_plugin_dir_help()}, "
+                           f"not from defaults/ — sb imports it as-is")
+    orphans = plugins_mod.orphans(repo)
+    for o in orphans:
+        notices.append(f"orphaned plugin state: {o.path}/  (no such plugin; "
+                       f"rm -rf to discard)")
+    deprecated = presets_mod.deprecations(repo)
+    notices.extend(deprecated)
+    return _PluginReport(problems, notices, {
+        "plugins": [p.as_dict() for p in rows],
+        "plugin_problems": problems,
+        "orphaned_state": [o.as_dict() for o in orphans],
+        "deprecations": deprecated,
+    })
+
+
+def _plugin_dir_help() -> str:
+    return "{}/{}/".format(config.setting("paths.repo_dir"),
+                           config.setting("paths.plugins_dir"))
+
+
+def _plugin_run(args, b: Broker, db, me: str) -> int:
+    """`sb plugin <name> <verb> …` — level 4, the only level that invokes a handler.
+
+    `audience` is enforced here rather than inside the plugin: declared once, and
+    impossible for a plugin author to forget (C6). The refusal names what to do instead,
+    the same treatment `sb ask human` gets.
+    """
+    p, c = args.plugin, args.command
+    agent = None if me == HUMAN else me
+    if c.audience == "human" and agent is not None:
+        print(f"sb: `{p.name} {c.name}` is for the human, and you are '{me}'.\n"
+              f"    Ask for it with `sb block \"...\"`, which surfaces to them.",
+              file=sys.stderr)
+        return 1
+    if c.audience == "agent" and agent is None:
+        print(f"sb: `{p.name} {c.name}` is for agents, and you are the human.\n"
+              f"    Run `sb plugin {p.name} --help` for what is meant for you.",
+              file=sys.stderr)
+        return 1
+
+    d = plugins_mod.state_dir(p, b.repo)
+    ctx = plugins_mod.Context(
+        api=plugins_mod.API, name=p.name, state_dir=d, repo=store.repo_root(b.repo),
+        worktree=b.repo, agent=agent, json=bool(args.json))
+    try:
+        # sb holds the lock, so a plugin doing read-modify-write on a JSON file is correct
+        # without its author knowing the word "lock". Around the handler and nothing else.
+        with plugins_mod.locked(d, p.lock):
+            r = plugins_mod.run(p, c, ctx, args.pargs)
+    except plugins_mod.PluginError:
+        _log_plugin(db, agent, p.name, c.name, ok=False)
+        raise
+    # One event per handler invocation, written by sb on the plugin's behalf: plugin,
+    # command, ok. Plugins get no database handle of their own, and this is why they do not
+    # need one to show up in `sb log` beside agent activity.
+    _log_plugin(db, agent, p.name, c.name, ok=r.ok)
+
+    payload = {"ok": r.ok, "plugin": p.name, "command": c.name, "data": r.data}
+    if r.ok:
+        _emit(args, r.human, payload)
+    elif args.json:
+        _emit(args, "", payload)
+    elif r.human:
+        print(r.human, file=sys.stderr)
+    # The plugin's own exit status to spend. A handler that reported failure and no code
+    # still has to be non-zero, or `sb plugin … && …` in a shell means the wrong thing.
+    return r.code or (0 if r.ok else 1)
+
+
+def _log_plugin(db, agent: Optional[str], plugin: str, command: str, *, ok: bool) -> None:
+    store.log_event(db, kind="plugin", agent=agent, plugin=plugin, command=command, ok=ok)
 
 
 if __name__ == "__main__":

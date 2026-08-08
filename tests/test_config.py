@@ -156,7 +156,12 @@ class ShippedDefaultsTest(_Layered):
         bare.mkdir()
         self.assertTrue(config.roles(bare))
         self.assertTrue(config.protocol(bare))
-        self.assertEqual(config.plugin_bindings(bare), ((), {}))
+        every, per_role = config.preset_bindings(bare)
+        # Shipped bindings are no longer empty (§7.4), and what is in them is not this
+        # test's business — what is, is that a repo with no config of its own gets exactly
+        # what `defaults/presets.toml` says and nothing invented on the way.
+        self.assertEqual(every, tuple(config.read_toml(SHIPPED / "presets.toml")["all"]))
+        self.assertEqual(per_role, {})
 
     def test_roles_come_from_markdown_files_not_a_python_dict(self):
         names = {f.stem for f in (SHIPPED / "roles").glob("*.md")}
@@ -260,25 +265,25 @@ class RoleLayeringTest(_Layered):
         self.assertEqual(config.roles(self.repo)["researcher"]["model"], "cheap")
 
 
-class PluginBindingLayeringTest(_Layered):
+class PresetBindingLayeringTest(_Layered):
     def test_a_repo_binding_joins_the_shipped_ones(self):
         """The requirement: adding a binding must not wipe what was shipped."""
         with mock.patch.object(config, "defaults_dir", return_value=self._fixture()):
-            self.write("plugins.toml", 'all = ["mine"]\n\n[roles]\nreviewer = ["extra"]\n')
-            every, per_role = config.plugin_bindings(self.repo)
+            self.write("presets.toml", 'all = ["mine"]\n\n[roles]\nreviewer = ["extra"]\n')
+            every, per_role = config.preset_bindings(self.repo)
         self.assertEqual(every, ("shipped", "mine"))
         self.assertEqual(per_role["reviewer"], ("adversarial", "extra"))
 
     def test_a_repo_can_reset_a_binding_list_when_it_means_to(self):
         with mock.patch.object(config, "defaults_dir", return_value=self._fixture()):
-            self.write("plugins.toml", 'all = ["!reset", "mine"]\n')
-            every, _ = config.plugin_bindings(self.repo)
+            self.write("presets.toml", 'all = ["!reset", "mine"]\n')
+            every, _ = config.preset_bindings(self.repo)
         self.assertEqual(every, ("mine",))
 
     def test_a_role_the_shipped_layer_never_mentions_still_works(self):
         with mock.patch.object(config, "defaults_dir", return_value=self._fixture()):
-            self.write("plugins.toml", '[roles]\nqa = ["verify"]\n')
-            _, per_role = config.plugin_bindings(self.repo)
+            self.write("presets.toml", '[roles]\nqa = ["verify"]\n')
+            _, per_role = config.preset_bindings(self.repo)
         self.assertEqual(per_role["qa"], ("verify",))
         self.assertEqual(per_role["reviewer"], ("adversarial",))   # still there
 
@@ -291,7 +296,7 @@ class PluginBindingLayeringTest(_Layered):
         d = self.repo / "shipped"
         d.mkdir(exist_ok=True)
         (d / "settings.toml").write_text((SHIPPED / "settings.toml").read_text())
-        (d / "plugins.toml").write_text(
+        (d / "presets.toml").write_text(
             'all = ["shipped"]\n\n[roles]\nreviewer = ["adversarial"]\n')
         return d
 
@@ -342,8 +347,8 @@ class NothingLeftInPythonTest(unittest.TestCase):
 
     # Every module that could plausibly hold one. Not a whitelist of the guilty — the point
     # is that adding a role name to ANY of these is caught.
-    MODULES = ("config", "roles", "models", "broker", "cli", "plugins", "status",
-               "output", "herdr", "store", "validate")
+    MODULES = ("config", "roles", "models", "broker", "cli", "presets", "plugins",
+               "status", "output", "herdr", "store", "validate")
 
     def _literals(self, *names: str) -> dict[str, list[str]]:
         """Every string LITERAL in each module, docstrings excluded.

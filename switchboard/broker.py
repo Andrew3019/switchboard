@@ -29,13 +29,14 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
+import sys
 import time
 import re
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from . import config
-from . import plugins as plugins_mod
+from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
 from . import validate
@@ -1101,21 +1102,47 @@ class Broker:
         the part that stays true either way.
 
         Layered, most general first: repo defaults -> the role's own -> the caller's
-        `--with`. Each layer appends (see `plugins.for_role`).
+        `--with`. Each layer appends (see `presets.for_role`).
 
         Resolved HERE rather than in the CLI, because `delegate` is the one place every
         spawn passes through. While the CLI's `delegate` branch owned this, `sb workspace
         new` and `sb start` reached `delegate` without it and their leads silently got no
-        plugins at all — not even the repo's every-agent bindings.
+        presets at all — not even the repo's every-agent bindings.
 
-        Validated after resolution because THIS is what becomes an agent argument: a plugin
-        file is flattened to one line on the way out, but a repo's plugins.toml can also
-        name a plugin that no longer flattens cleanly, and that failure should name the
-        plugin rather than arrive as invalid_agent_argument.
+        Validated after resolution because THIS is what becomes an agent argument: a preset
+        file is flattened to one line on the way out, but a repo's presets.toml can also
+        name a preset that no longer flattens cleanly, and that failure should name the
+        preset rather than arrive as invalid_agent_argument.
+
+        `extra` is `explicit`: it is exactly the names a caller handed in by hand, which is
+        the property the explicit-vs-bound asymmetry is about (§6). A fragment named there
+        that will not load is fatal; the same fragment arriving from a binding is skipped
+        with a warning, because a repo's `presets.toml` must not be able to stop every
+        spawn. Threaded from `extra` rather than from the CLI's `--with` flag, so the rule
+        keeps holding for any other caller that reaches delegation with names of its own.
         """
-        names = plugins_mod.for_role(self.repo, role, extra)
-        return [validate.line(p, "plugin text", max_len=validate.MAX_PROMPT)
-                for p in plugins_mod.resolve(names, self.repo)]
+        names = presets_mod.for_role(self.repo, role, extra)
+        return [validate.line(p, "preset text", max_len=validate.MAX_PROMPT)
+                for p in presets_mod.resolve(names, self.repo,
+                                             explicit=frozenset(extra),
+                                             on_event=self._fragment_note())]
+
+    def _fragment_note(self) -> Callable[..., None]:
+        """What `presets.resolve` does with a fragment it dropped or cut.
+
+        Everything is logged; only the skip is printed. A skipped fragment means an agent
+        was spawned without an instruction somebody's `presets.toml` says it should have
+        had, and the one line naming the plugin is the only signal that happened — the
+        spawn itself succeeds, which is the whole point of skipping. A truncation is a
+        note for whoever edits `agent.md` next, and printing it on every spawn would train
+        the reader to ignore both.
+        """
+        def note(*, kind: str, plugin: str, **payload) -> None:
+            store.log_event(self.db, kind=kind, plugin=plugin, **payload)
+            if kind == "fragment_skipped":
+                print(f"sb: {payload['reason']} — skipped, so this agent is spawning "
+                      f"without it", file=sys.stderr)
+        return note
 
     def _fork_for(self, name: str, *, parent: str) -> Optional[dict]:
         """Give this child a worktree of its own. The branch is the agent's NAME.

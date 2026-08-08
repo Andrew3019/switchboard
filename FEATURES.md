@@ -7,8 +7,8 @@ everything below: `bin/sb` → `switchboard.cli.main()` (there is no pip install
 is not packaged, `bin/sb` just puts the repo root on `sys.path`).
 
 Verified by reading cli.py, broker.py, status.py, store.py, output.py, board.py,
-config.py, models.py, roles.py, plugins.py, validate.py, herdr.py in full, plus every
-file under `defaults/`, and by grepping every call site of `board.py`.
+config.py, models.py, roles.py, presets.py, plugins.py, validate.py, herdr.py in full,
+plus every file under `defaults/`, and by grepping every call site of `board.py`.
 
 ## Agent-facing verbs (the seven in `defaults/protocol.md`)
 
@@ -16,11 +16,11 @@ file under `defaults/`, and by grepping every call site of `board.py`.
 Spawns a child agent in its own pane to do a task independently; the caller does not
 wait for it — it ends its turn and is woken (doorbell) when the child calls `sb done`.
 - Entry point: `cli.py:473-490` → `Broker.delegate` (`broker.py:867-948`)
-- Depends on: `roles.get` (role → tier/cleanup/prompt), `plugins.for_role`/`resolve`
+- Depends on: `roles.get` (role → tier/cleanup/prompt), `presets.for_role`/`resolve`
   (`--with`), `models.Tiers.resolve` (`--model`), `store.claim_agent` (race-safe name
   claim), `herdr.start_agent`
 - Status: working; has tests specifically covering name-claim races
-- Config: `defaults/roles/*.md`, `defaults/models.toml`, `defaults/plugins.toml`,
+- Config: `defaults/roles/*.md`, `defaults/models.toml`, `defaults/presets.toml`,
   `defaults/prompts.toml [spawn] identity/workspace`
 
 ### `sb ask <who...> <question> [--timeout]`
@@ -178,12 +178,39 @@ doorbell is free, whereas `wait` burns a turn/process doing the same thing synch
 Prints recent rows from the append-only `events` table. Debugging only.
 - Entry point: `cli.py:632-636` → `store.recent_events`
 
-### `sb plugins`
-Lists available prompt-plugin files and which roles/bindings use them.
-- Entry point: `cli.py:556-567` → `plugins.available`/`plugins.bindings`
-- Config: `defaults/plugins.toml`, repo's `.switchboard/plugins.toml` and
-  `.switchboard/plugins/*.md`
-- Note: ships **inert** — see **Prompt plugins** below.
+### `sb presets`
+Lists available preset files and which roles/bindings use them.
+- Entry point: `cli.py` `presets` branch → `presets.available`/`presets.bindings`
+- Config: `defaults/presets.toml`, repo's `.switchboard/presets.toml` and
+  `.switchboard/presets/*.md`
+- Note: ships **inert** — see **Presets** below.
+
+### `sb plugin list`
+Lists every plugin this repo can see, with its `VERSION`, its status
+(`ok` / `not enabled` / `incompatible` / `broken`) and its bindings. Each import is wrapped
+per plugin, so a broken one is a row saying so rather than a traceback; `SB_DEBUG=1` adds
+the tracebacks after the table.
+- Entry point: `cli.py` `plugin` branch → `_plugin_list` → `plugins.load_all`
+- Config: `defaults/plugins.toml`, repo's `.switchboard/plugins.toml`, both plugin roots
+- Note: ships **empty** — switchboard ships no plugins yet.
+
+### `sb plugin <name> <verb> …`
+Runs a command a plugin declared. The top-level parser takes the rest as `REMAINDER`; the
+plugin's own arguments are parsed by a subparser sb builds from what its `register()`
+declared, so `--help`, flag-level errors and `--json` are sb's throughout. sb creates the
+state directory, takes an exclusive `flock` around the handler, enforces the command's
+`audience`, and logs one event per dispatch.
+- Entry point: `cli.py` `_validate_plugin` (resolve, import, parse) → `_plugin_run`
+- Depends on: `plugins.must_load`/`build_parser`/`state_dir`/`locked`/`run`,
+  `store.repo_root` (repo identity), `store.log_event`
+- Status: machinery only — no plugins ship, `tests/test_plugins.py` exercises the contract
+- Config: `settings.toml [paths] plugins_dir/plugins_file/user_state/store_dirname`
+
+### `sb plugins` — retired
+Was `sb presets`. Now a hard error naming both replacements (`sb presets` for prompt text,
+`sb plugin list` for code plugins), for one release, then removed. The `--json` key was
+renamed from `plugins` to `presets` at the same time so the two payloads cannot be
+confused.
 
 ### `sb models`
 Prints the resolved tier → (provider, model, effort, CLI flags) table for this repo,
@@ -251,9 +278,18 @@ own) then `<repo>/.switchboard/` (that repo's differences only). Merge rules
 - `models`: `defaults/models.toml` → `~/.config/switchboard/models.toml` (or
   `$SWITCHBOARD_MODELS_CONFIG`) → `<repo>/.switchboard/models.toml`, per-tier
   (`models.py:230-247`) — the only layering with a global per-user middle tier.
-- `plugins.toml` bindings join shipped + repo's (`config.plugin_bindings`,
-  `config.py:414-425`). Plugin **files** (`.switchboard/plugins/*.md`) are not shipped or
-  layered at all — switchboard ships zero plugin files, only binding rules.
+- `presets.toml` bindings join shipped + repo's (`config.preset_bindings`). Preset
+  **files** are layered by name out of `defaults/presets/*.md`, and a repo's
+  `.switchboard/presets/<name>.md` replaces the shipped one of that name; the shipped
+  bindings are empty, so nothing shipped is ever *applied* unless bound or `--with`-ed.
+  The pre-rename `.switchboard/plugins/` and `plugins.toml` are still read when a repo has
+  not moved them (`config.path_for_legacy`).
+- `plugins.toml` enablement (`enabled = [...]`) joins shipped + repo's
+  (`config.plugin_enablement`); plugin *packages* are layered by name out of
+  `defaults/plugins/<name>/`, a repo's directory replacing a shipped one of that name
+  wholesale. `plugins.toml` carries both meanings during the transition — `all`/`[roles]`
+  are pre-rename preset bindings, `enabled` is plugin enablement — and the keys are
+  disjoint, so a file holding both parses correctly as both.
 - `protocol.md` is the one exception to "join": a repo's `.switchboard/protocol.md`
   **fully replaces** the shipped one (`config.py:360-367`), rather than merging.
 - `prompts.toml`/`settings.toml` merge entry-by-entry / table-by-table.
@@ -263,7 +299,7 @@ own) then `<repo>/.switchboard/` (that repo's differences only). Merge rules
 - `SWITCHBOARD_DEFAULTS` env var replaces the whole `defaults/` directory (used by tests).
 - Reads are cached by `(path, mtime_ns, size)` (`config.py:99-149`).
 - Entry point: `switchboard/config.py`
-- Depended on by: nearly everything — roles, models, plugins, prompts, protocol,
+- Depended on by: nearly everything — roles, models, presets, prompts, protocol,
   timeouts/paths/vocabulary settings all resolve through this layer
 
 ### The store
@@ -278,13 +314,76 @@ destructive triggers a full drop/recreate, refused while agents are live (breaka
 liveness, prompt injection). Nearly every verb above calls into it. `sb doctor` checks it
 directly.
 
-## Prompt plugins
-`defaults/plugins.toml` ships `all = []` and an empty `[roles]` table — **zero shipped
-plugin bindings and zero shipped plugin files.** The mechanism itself
-(`plugins.available`/`bindings`/`for_role`/`resolve`) is fully implemented and wired into
-`sb delegate --with` and `sb plugins`, but ships inert; a repo populates
-`.switchboard/plugins/*.md` and `.switchboard/plugins.toml` itself to use it. An
-unrecognized `--with` name is treated as a literal inline instruction, not an error.
+## Presets
+Called "prompt plugins" until the word was needed for code that runs: a preset is markdown
+and cannot run, a plugin is Python and can.
+
+`defaults/presets.toml` ships `all = []` and an empty `[roles]` table — **zero shipped
+bindings.** Six preset *files* do ship (`defaults/presets/*.md`), so every repo can name
+them, but shipping only makes a preset available; only a binding makes it applied. The
+mechanism (`presets.available`/`bindings`/`for_role`/`resolve`) is wired into
+`sb delegate --with` and `sb presets`. An unrecognized `--with` name is treated as a
+literal inline instruction, not an error.
+
+One notation covers both kinds of prompt text, in `presets.toml` and in `--with` alike,
+and the `@` sigil says which is meant (`presets.resolve`). Three rules, in order:
+
+| the name | what happens |
+|---|---|
+| `@<name>` | that plugin's `agent.md`, or a failure — the `@` prefix is reserved, and never passes through as a literal |
+| a bare name matching no preset file but matching an enabled plugin | an error naming the sigil: `'todo' is a plugin fragment — write '@todo'` |
+| any other bare name | unchanged — preset file if one matches, otherwise a literal instruction |
+
+**Failure is asymmetric for `@<name>` and only for it.** A fragment named explicitly (it is
+in `delegate`'s `extra`, i.e. `--with`) that will not resolve is an error; one that arrived
+from a binding is skipped with a line on stderr and a `fragment_skipped` event, because
+delegation must not fail over a half-installed plugin. A name in both counts as explicit.
+The bare-name error is not asymmetric: an unresolvable `@name` is a fact about this
+machine, while a bare plugin name is wrong in the file wherever it is read.
+
+## Plugins
+A plugin is a Python package sb imports — `defaults/plugins/<name>/` or a repo's
+`.switchboard/plugins/<name>/`, holding an `__init__.py` that defines `register(reg)`. It
+owns a CLI verb and a directory of durable state. Machinery only as of this release:
+**no plugins ship**, and `defaults/plugins.toml` is `enabled = []`.
+
+Three states, separately settable: **available** (present in either root), **enabled**
+(listed in `plugins.toml` — its commands dispatch and it gets a state directory), **bound**
+(`@<name>` listed in `presets.toml` — its `agent.md` is flattened and appended to the spawn,
+riding the existing `with_` list in resolution order with no slot of its own).
+
+A fragment is capped at `[limits] plugin_fragment = 400` characters, against `prompt = 8000`
+for presets and role prompts. Over-budget text is truncated at a word boundary with a
+`fragment_truncated` event, never rejected: a chatty plugin must not break spawning.
+
+The load model is the load-bearing part. Four levels, and the assignment of verbs to them
+is fixed and tested (`tests/test_plugins.py::IsolationTest`):
+
+| level | operation | verbs |
+|---|---|---|
+| 0 | nothing | `status`, `done`, `ask`, `tell`, `inbox`, `block`, `log`, `cleanup`, `inspect`, `wait`, `init`, `restore`, `interrupt`, `board`, `models` |
+| 1 | glob the roots, merge `plugins.toml` | `presets` |
+| 2 | + read `<plugin>/agent.md`, flatten | `delegate`, `start`, `workspace` |
+| 3 | + import, call `register()` | `plugin list`, `plugin <name> …` |
+| 4 | + invoke one handler | `plugin <name> <verb>` only |
+
+**No verb that spawns imports plugin code.** A plugin with a `SyntaxError`, or one that is
+`raise SystemExit(3)` at module scope, cannot break `sb delegate`, `sb start` or
+`sb workspace new`, because those verbs read a markdown file and stop.
+
+State is a directory sb creates and never reads inside:
+`<shared .git>/agentflow/plugins/<name>/` for `SCOPE = "repo"` (byte-identical from every
+worktree, the same repo identity `state.db` uses), or
+`~/.local/state/switchboard/plugins/<name>/` for `SCOPE = "user"`. sb takes an exclusive
+`flock` around each handler call unless the plugin sets `LOCK = False`. Nothing goes in
+`state.db`.
+
+What a handler is handed is the contract, and so is what it is not: `Context` carries
+`api`, `name`, `state_dir`, `repo`, `worktree`, `agent`, `json` — no `Broker`, no store
+handle, no spawn authority. `Context`, `Result` and the parsed args are all
+JSON-serialisable, which keeps a future out-of-process hatch open without building one.
+- Entry point: `switchboard/plugins.py`
+- Design of record: `.switchboard/design/PLUGIN-REDESIGN.md` §4–§7
 
 ## Roles
 `defaults/roles/*.md` — front matter (`model`, `cleanup`) plus a markdown body used as
@@ -314,7 +413,7 @@ config field placeholder with no backend behind it yet.
   state; it is not "ask, deferred" — agents already get deferred delivery for free.
 - **`inspect` vs the old `output`**: `sb output` no longer exists as its own verb;
   `output.py` is called directly by `inspect`.
-- **`sb models` vs `sb plugins`**: deliberately kept as two separate answers to "what
+- **`sb models` vs `sb presets`**: deliberately kept as two separate answers to "what
   vocabulary does this repo have."
 
 ## Known issues
