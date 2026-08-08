@@ -588,20 +588,32 @@ will do all of those to the sb process. Decision 3 trades that away knowingly. T
 isolation claimed above is about import errors and handler exceptions — the common
 failures, not the malicious ones.
 
-**The internals-import check is NOT BUILT. This is an open item, not a deferral.** This
-section says `sb doctor` flags a plugin importing anything from `switchboard` other than
-`switchboard.plugins`, which is the check that catches the coupling that would foreclose the
-future escape hatch. It is not among the four questions `doctor` actually answers (§5.6),
-because it was not in phase 4's scope and because it needs source scanning rather than the
-directory read the other four are. Phase 4 flagged it rather than deciding it, and so does
-this reconciliation: **the document is right here and the implementation diverged**, which
-is not a case to settle by editing the document.
+**The internals-import check is NOT BUILT, and stays not built. This is an open item, not
+a deferral.** This section says `sb doctor` flags a plugin importing anything from
+`switchboard` other than `switchboard.plugins`, which is the check that catches the coupling
+that would foreclose the future escape hatch. It is not among the four questions `doctor`
+actually answers (§5.6), because it was not in phase 4's scope and because it needs source
+scanning rather than the directory read the other four are. **The document is right here and
+the implementation diverged**, which is not a case to settle by editing the document.
 
-The case for building it is stronger than it was when it was written, because it has already
-had something to catch: `report-bug` reaches sb's checkout through `plugins.__file__`
-(§4.4). That is inside the letter of the rule, so a naive check on the import statement
-would still pass it — which is itself worth knowing before anyone writes the check. Pending
-a decision, this paragraph is the record that the claim above describes intent and not code.
+The case for building it is real: it has already had something to catch, since `report-bug`
+reaches sb's checkout through `plugins.__file__` (§4.4, §11 item 15). **That same instance
+is what decides against building it now.** `report-bug` imports only `switchboard.plugins`
+— the one module the rule permits — and reaches the checkout through an attribute of it. A
+scan of import statements, which is the obvious implementation and the cheap one, therefore
+**passes the only violation we know exists.** A check that green-lights the single case it
+was written for is worse than no check, because a clean `doctor` then reads as evidence of
+decoupling that was never verified. That is F2 in this project's own appendix — a mechanism
+that parses, merges and prints, and never executes — and shipping it here would be
+committing F2 knowingly.
+
+So the ruling is: **not built, and the reason is recorded rather than the gap being
+papered over.** The claim in this section describes intent and not code, and `doctor`'s
+four questions (§5.6) do not include a fifth. Whoever builds it later inherits the wrinkle
+along with the requirement: the check has to reason about *what a permitted module hands
+back* — attribute access on `switchboard.plugins`, `__file__`, `importlib` by name — not
+just about what appears after `import`. That is a source-analysis problem, not a grep, and
+sizing it that way from the start is the point of writing this down.
 
 ### 4.7 Versioning
 
@@ -931,6 +943,12 @@ but enumeration is not enforcement, and anything destructive declares `audience=
 ## 7. Layering and bindings
 
 ### 7.1 What today's rule actually is
+
+**Read as of the design, not as of now.** This section describes the pre-redesign state,
+including `defaults/plugins.toml` shipping `all = []`. §7.4 changes that: two plugin
+fragments ship bound. The *rule* below — shipping makes available, binding makes applied —
+is what survived, and it is now stated in `presets.py` and in `defaults/README.md`, both of
+which said the opposite when this was written.
 
 The current `plugins.py` docstring says plugin files are "not layered from `defaults/`."
 The code says something more precise: `available()` **does** read `defaults/plugins/*.md`
@@ -1383,14 +1401,17 @@ the second instance of any of them is the trigger:
     its own test that it fits; the mechanism truncates silently by design and cannot tell
     an author before the fact.
 
-**Open, and NOT deferred — awaiting a decision:**
+**Open, and NOT deferred — decided, and decided against building:**
 
-19. **§4.6's `sb doctor` check for a plugin importing `switchboard` internals is not built.**
-    This document asserts it; `doctor` does not do it. It is the check that would have
-    caught item 15, and item 15 also shows that the obvious implementation — scanning import
-    statements — would not have caught it, since `report-bug` imports only
-    `switchboard.plugins`. It is recorded here so that its absence is a decision someone
-    makes rather than a claim nobody checked. §4.6 carries the full note.
+19. **§4.6's `sb doctor` check for a plugin importing `switchboard` internals is not built,
+    and stays not built.** This document asserts it; `doctor` does not do it. It is the
+    check that would have caught item 15 — except item 15 is also the reason not to ship
+    the cheap version of it: `report-bug` imports only `switchboard.plugins` and reaches
+    the checkout through `plugins.__file__`, so a scan of import statements passes the one
+    violation the check exists to catch. Shipping a check that green-lights its only known
+    instance is F2, and doing it knowingly is worse than leaving the gap named. The gap is
+    named here and in §4.6, which carries the full reasoning and the shape the real
+    implementation would have to take.
 
 **The trigger to revisit the whole stance:** five plugins, or the first person who is not
 you wanting to install one. At that point `API` needs a real policy, plugin code needs to

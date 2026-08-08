@@ -33,9 +33,10 @@
 # disposition, its own prompt), a preset is behaviour injected into it. Mixing the two made
 # "add a preset" look like "redefine the role".
 #
-# Preset FILES are not layered — only these bindings are. The protocol is what every agent
-# needs; a preset is what some agents need, and what switchboard's own agents need has no
-# bearing on yours.
+# Preset FILES are layered, the same as these bindings: `defaults/presets/<name>.md` is
+# replaced by name by your `.switchboard/presets/<name>.md`. Shipping a file only makes a
+# preset NAMEABLE — nothing below binds a shipped preset file, so none of them costs you
+# anything unless you bind it yourself or pass `--with`.
 #
 # This file was `plugins.toml` until "plugin" was needed for the other thing — a preset is
 # prompt text and cannot run, a plugin is Python and can. A repo still holding

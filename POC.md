@@ -14,9 +14,12 @@ and both transcripts are irrelevant, because the store alone says what happened.
 >
 > - **The command is `sb`, not `wf`.** `wf` was always a placeholder (`PLAN.md` says so),
 >   and nothing depended on it. Read every `wf x` below as `sb x`.
-> - **Plugins and skills ARE in, and Codex is not.** `--with` plugins shipped as part of
->   M3 rather than after it (`switchboard/plugins.py`), so the "not in the PoC" line above
->   is out of date on that one item only.
+> - **Plugins and skills ARE in, and Codex is not.** What shipped in M3 as `--with`
+>   "plugins" is now called **presets** (`switchboard/presets.py`) — prompt text, no code.
+>   The word "plugin" was later taken for the other thing: Python that sb imports
+>   (`switchboard/plugins.py`, `sb plugin <name> <verb>`), which shipped after the PoC.
+>   Read every "plugin" below as **preset** unless it is herdr's plugin system being
+>   discussed. Either way the "not in the PoC" line above is out of date on that item.
 >
 > Everything else that has moved is marked where it sits.
 
