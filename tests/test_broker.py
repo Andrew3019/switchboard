@@ -466,11 +466,17 @@ class BrokerTest(unittest.TestCase):
         self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
         self.b._alive_cache = None
 
-        self.assertEqual(self.b.flush_pending(), [])
-        self.assertEqual(self.h.prompts, [])
+        rung = self.b.flush_pending()
+        # The harm first, so a regression reports what was actually lost rather than a
+        # list that differs. Both of these were the observed symptom: the agent went back
+        # to `working` and vanished from the one readout that would have shown a person
+        # the question.
         self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        self.assertEqual([a.name for a in
+                          status.collect(self.db, self.h, needs_me=True).agents], ["w"])
         [needs] = status.collect(self.db, self.h, needs_me=True).agents
-        self.assertEqual((needs.name, needs.blocked_why), ("w", "which branch?"))
+        self.assertEqual(needs.blocked_why, "which branch?")
+        self.assertEqual((rung, self.h.prompts), ([], []))
 
     def test_flush_costs_nothing_when_there_is_no_pending_mail(self):
         self.assertEqual(self.b.flush_pending(), [])
