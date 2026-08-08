@@ -209,6 +209,37 @@ class AgentStatus:
         return (self.blocked or self.at_prompt or self.unread > 0
                 or self.waiting_to_be_rung)
 
+    @property
+    def archived(self) -> bool:
+        """Its pane is not on herdr, and it is old enough for that to mean something.
+
+        A RENDERING FACT. Computed every tick and never written anywhere — no column, no
+        state, no event. "Absent from herdr" is the same signal that, when it was
+        *recorded*, ended live agents (`_record_gone` writing `failed` from a read path).
+        Using it to decide what to DRAW is safe for one reason: a wrong guess costs one
+        frame and the next tick corrects it. The moment anything stores this, that
+        argument is gone and so is the safety.
+
+        `alive is False`, not `if not self.alive`. `alive` is a tri-state and `None`
+        means herdr could not be reached at all, so `is False` is reachable only when
+        herdr *answered*. A herdr outage therefore archives nothing and the whole tree
+        draws, with no branch anywhere having to remember to check for it — the type
+        carries the rule, and a `None` cannot be forgotten the way an `if` can.
+
+        `age >= SPAWN_GRACE` and deliberately not the exact `spawning` predicate, which
+        also reads `session_id` (see `collect`) — not a field of this dataclass, so a
+        renderer could not recompute it. Dropping that half makes the guard strictly
+        WIDER, so this never archives anything the collector's own predicate would have
+        spared; at worst a genuinely dead agent stays on screen for one grace window.
+        That is the reversible direction: showing a dead row costs a line, hiding a live
+        one costs the human an agent.
+
+        It does not read `state`. Not `finished`, not `gone`, not `blocked`. Archived
+        means one thing — herdr does not have this pane — and what the store believes
+        about the agent is the STATE column's question, answered next to it.
+        """
+        return self.alive is False and self.age >= SPAWN_GRACE
+
     def as_dict(self) -> dict:
         d = {f: getattr(self, f) for f in (
             "name", "role", "parent", "depth", "state", "herdr_state", "alive",
@@ -220,7 +251,8 @@ class AgentStatus:
         # from a rule that lives in this file.
         d.update(blocked=self.blocked, at_prompt=self.at_prompt,
                  finished=self.finished, needs_human=self.needs_human,
-                 waiting_to_be_rung=self.waiting_to_be_rung)
+                 waiting_to_be_rung=self.waiting_to_be_rung,
+                 archived=self.archived)
         return d
 
 
@@ -643,7 +675,156 @@ def fmt_age(seconds: int) -> str:
     return f"{d}d{h:02d}h"
 
 
-def render(snap: Snapshot) -> str:
+@dataclass
+class Collapsed:
+    """One row standing in for whole archived subtrees, at the depth they were drawn.
+
+    Not an agent and deliberately not shaped like one: a renderer that maps a screen row
+    back to an object must be made to notice the difference (`board.agent_at` returns
+    whatever the row carries, and a click on this must not focus somebody).
+    """
+
+    depth: int
+    count: int                      # every agent hidden here, the whole subtree
+    needs_human: int = 0            # how many of them were still asking for a person
+
+
+def collapsed_label(c: Collapsed) -> str:
+    """The text of a collapsed row, indented to the level it stands in for.
+
+    `· N need you` is what stops the collapse from being able to bury anything. Archived
+    is archived and a blocked agent whose pane died still collapses — but a blocked agent
+    is a question nobody can answer any more, so the row that replaced it says how many it
+    is carrying. No per-row logic and nothing extra hidden: it labels a row that is
+    already there. (Every one of them is still listed by name in NEEDS YOU below, which
+    reads `snap.agents` and never sees this.)
+    """
+    out = ("  " * c.depth) + f"+ {c.count} archived"
+    if c.needs_human:
+        out += f" · {c.needs_human} need you"
+    return out
+
+
+def display_rows(agents: list[AgentStatus], *, show_archived: bool = False
+                 ) -> list[Any]:
+    """The tree with fully-archived subtrees replaced by one `+ N archived` row each.
+
+    ONE function for every renderer. `sb status` and the panel are two drawings of one
+    snapshot, and a tree rule written twice is a tree rule that ends up disagreeing with
+    itself — which is the failure `summary_line`'s docstring already names.
+
+        sealed(x)  ≡  archived(x)  ∧  ∀ c ∈ children(x): sealed(c)
+
+    A *collapse root* is a sealed node whose parent is not sealed. Everything under a
+    collapse root is hidden, and for each drawn parent its sealed children merge into a
+    single row carrying the size of all their subtrees.
+
+    Two properties do all the work, and both are consequences of the rule rather than
+    cases handled in it:
+
+    - **No row that is not archived is ever hidden**, because every hidden node lies in a
+      sealed subtree and every node of a sealed subtree is archived.
+    - **No row with a visible descendant is ever hidden.** If `x` has a drawn descendant
+      then that descendant is not archived, so `x` is not sealed. So there is no such
+      thing here as an archived parent whose live child must still be drawn — the rule
+      simply declines to hide it, and draws it as an ordinary archived row.
+
+    Collapse is per *whole subtree, at the highest level*: nested sealed levels give ONE
+    row, never a chain of `+ 1 archived` at each depth, and `count` is the whole subtree
+    rather than the number of direct children.
+
+    The collapsed row goes AFTER its visible siblings so that a live row never changes
+    position when an unrelated sibling archives. A group appearing, growing or vanishing
+    then moves only the footer of that sibling block, and this is a thing people click.
+
+    Computed over the rows it is GIVEN and nothing else — it never re-derives the tree
+    from the store and never re-reads herdr. Under `--live` or `--mine` the filter has
+    already dropped rows, so this counts only the archived rows that survived, which is
+    the honest reading of "N archived, of what you asked to see"; the filter's own drop
+    is `Snapshot.hidden` and stays a separate number.
+    """
+    rows = list(agents)
+    if show_archived or not rows:
+        return rows
+
+    # From the rows PRESENT, the same way `_tree` and `_subtree` do it: a parent that was
+    # filtered out, or an agent that is its own parent, is a root here. Re-deriving from
+    # the store instead would collapse against a tree the caller is not looking at.
+    names = {a.name for a in rows}
+    kids: dict[Optional[str], list[AgentStatus]] = {}
+    for a in rows:
+        parent = a.parent if a.parent in names and a.parent != a.name else None
+        kids.setdefault(parent, []).append(a)
+
+    sealed: dict[str, bool] = {}
+    walking: set[str] = set()
+
+    def is_sealed(a: AgentStatus) -> bool:
+        if a.name in sealed:
+            return sealed[a.name]
+        if a.name in walking:
+            # A cycle, which `_tree` breaks rather than follows. Treat the way back round
+            # as no obstacle: the cycle's members then stand or fall on being archived,
+            # which is what makes a stranded loop one collapse group instead of a hang.
+            return True
+        walking.add(a.name)
+        try:
+            out = a.archived and all(is_sealed(c) for c in kids.get(a.name, ()))
+        finally:
+            walking.discard(a.name)
+        sealed[a.name] = out
+        return out
+
+    def subtree(a: AgentStatus) -> list[AgentStatus]:
+        out, frontier, seen_here = [], [a], set()
+        while frontier:
+            cur = frontier.pop()
+            if cur.name in seen_here:
+                continue                    # a cycle is broken, not followed (see _tree)
+            seen_here.add(cur.name)
+            out.append(cur)
+            frontier.extend(kids.get(cur.name, ()))
+        return out
+
+    def collapsed(group: list[AgentStatus]) -> Collapsed:
+        hidden = [a for g in group for a in subtree(g)]
+        # The depth the hidden rows would have been drawn at — they are siblings, so they
+        # share one. Taken from the rows themselves rather than from this walk, so the row
+        # lands at the nest level of what it replaced even for a tree `_tree` had to
+        # straighten out.
+        return Collapsed(depth=min(g.depth for g in group), count=len(hidden),
+                         needs_human=sum(1 for a in hidden if a.needs_human))
+
+    out: list[Any] = []
+    drawn: set[str] = set()
+
+    def emit(siblings) -> list[AgentStatus]:
+        """Draw the visible ones in order; hand back the sealed roots among them."""
+        group = []
+        for a in siblings:
+            if a.name in drawn:
+                continue
+            if is_sealed(a):
+                group.append(a)
+                drawn.update(x.name for x in subtree(a))
+                continue
+            drawn.add(a.name)
+            out.append(a)
+            inner = emit(kids.get(a.name, ()))
+            if inner:
+                out.append(collapsed(inner))
+        return group
+
+    group = emit(kids.get(None, ()))
+    # Anything a cycle kept out of the walk, exactly as `_tree` rescues it — at the left
+    # margin, and into the SAME root-level group, because one level gets one row.
+    group += emit([a for a in rows if a.name not in drawn])
+    if group:
+        out.append(collapsed(group))
+    return out
+
+
+def render(snap: Snapshot, *, show_archived: bool = False) -> str:
     """Compact enough to run reflexively; loud enough that drift cannot be missed."""
     lines: list[str] = []
     if snap.herdr_error:
@@ -653,14 +834,22 @@ def render(snap: Snapshot) -> str:
         lines.append("(no agents)" + (f"  [{snap.hidden} hidden by filters]" if snap.hidden else ""))
         return "\n".join(lines)
 
-    labels = [("  " * a.depth) + a.name for a in snap.agents]
-    w_name = max(len("AGENT"), *(len(x) for x in labels))
-    w_role = max(len("ROLE"), *(len(a.role) for a in snap.agents))
-    w_ws = max(len("WORKSPACE"), *(len(a.workspace or "-") for a in snap.agents))
+    rows = display_rows(snap.agents, show_archived=show_archived)
+    labels = [collapsed_label(r) if isinstance(r, Collapsed)
+              else ("  " * r.depth) + r.name for r in rows]
+    # Defaults rather than `max(x, *seq)`: with every root archived, `rows` is a single
+    # collapsed row and there is no agent left to measure a ROLE or a WORKSPACE against.
+    w_name = max([len("AGENT")] + [len(x) for x in labels])
+    w_role = max([len("ROLE")] + [len(r.role) for r in rows if not isinstance(r, Collapsed)])
+    w_ws = max([len("WORKSPACE")]
+               + [len(r.workspace or "-") for r in rows if not isinstance(r, Collapsed)])
 
     lines.append(f"{'AGENT':<{w_name}}  {'ROLE':<{w_role}}  {'STATE':<8}  {'HERDR':<7}  "
                  f"{'MAIL':>4}  {'AGE':>6}  {'IDLE':>6}  {'WORKSPACE':<{w_ws}}")
-    for label, a in zip(labels, snap.agents):
+    for label, a in zip(labels, rows):
+        if isinstance(a, Collapsed):
+            lines.append(label)     # no columns: it is not an agent and must not read as one
+            continue
         lines.append(
             f"{label:<{w_name}}  {a.role:<{w_role}}  {a.state:<8}  {_herdr_cell(a):<7}  "
             f"{(str(a.unread) if a.unread else '-'):>4}  {fmt_age(a.age):>6}  "

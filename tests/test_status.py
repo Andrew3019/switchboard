@@ -6,6 +6,8 @@ every case worth testing here is "what happens when the two disagree".
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
 import subprocess
 import sys
@@ -928,6 +930,364 @@ class StatusCliTest(unittest.TestCase):
         args = build_parser().parse_args(["status", "--needs-me", "--mine"])
         self.assertTrue(args.needs_me)
         self.assertTrue(args.mine)
+
+    def test_collapsing_is_the_default_and_archived_opts_out(self):
+        """Collapse has to be the default or it fixes nothing: 55 of 64 rows are archived
+        and every session adds more."""
+        from switchboard.cli import build_parser
+        self.assertFalse(build_parser().parse_args(["status"]).archived)
+        self.assertTrue(build_parser().parse_args(["status", "--archived"]).archived)
+
+
+class ArchivedTest(unittest.TestCase):
+    """The `archived` predicate: absent from herdr, past the grace, never written.
+
+    The store half is real, so "never written" is checked against the database rather
+    than argued.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = store.connect(path=Path(self.tmp.name) / "state.db")
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def old(self):
+        """A `now` far enough ahead that the spawn grace has certainly passed."""
+        return store.now() + int(status.SPAWN_GRACE) + 1
+
+    def collect(self, herdr, **kw):
+        kw.setdefault("reap", False)
+        return status.collect(self.db, herdr, **kw)
+
+    def by_name(self, snap):
+        return {a.name: a for a in snap.agents}
+
+    def tree(self, snap, **kw):
+        """Just the tree body — collapse touches that and nothing below it.
+
+        Asserting against the whole readout would be the wrong test: an archived agent is
+        still named in DRIFT, in NEEDS YOU and in UNDELIVERED, deliberately.
+        """
+        body = status.render(snap, **kw).split("\n\n")[0].splitlines()
+        return "\n".join(body[1:])          # drop the column header
+
+    # -- the predicate ----------------------------------------------------
+
+    def test_an_agent_herdr_no_longer_lists_is_archived_once_the_grace_has_passed(self):
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        a = self.by_name(self.collect(FakeHerdr([]), now=self.old()))["w1"]
+        self.assertTrue(a.archived)
+
+    def test_an_agent_herdr_still_lists_is_never_archived(self):
+        """Including one that has reported done: it is on herdr, so it can still be
+        clicked, read and talked to."""
+        store.create_agent(self.db, name="w1", role="worker")
+        store.set_state(self.db, "w1", "done")
+        a = self.by_name(self.collect(FakeHerdr([alive("w1", "idle")]), now=self.old()))["w1"]
+        self.assertFalse(a.archived)
+
+    def test_an_agent_mid_spawn_is_not_archived_and_stays_on_the_board(self):
+        """herdr does not list an agent until it has started, and a spawn is retried for
+        minutes. Without the grace every new agent vanishes from the board during its own
+        spawn — the row the human is waiting to see appear is the row that disappears."""
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead")
+        snap = self.collect(FakeHerdr([alive("lead")]))          # w1 not started yet
+        self.assertFalse(self.by_name(snap)["w1"].archived)
+        self.assertIn("w1", status.render(snap))
+
+    def test_a_herdr_outage_archives_nothing_and_the_whole_tree_still_draws(self):
+        """The failure this predicate exists to survive. Absent herdr's answer every row
+        looks missing, and a naive read collapses a live fleet to one `+ N archived` line
+        on a subprocess hiccup. `alive` is None, not False, so nothing qualifies."""
+        for n in ("lead", "w1", "w2"):
+            store.create_agent(self.db, name=n, role="worker",
+                               parent=None if n == "lead" else "lead")
+        snap = self.collect(FakeHerdr(error=HerdrError("down", "no server")),
+                            now=self.old())
+        self.assertEqual([a.alive for a in snap.agents], [None, None, None])
+        self.assertFalse(any(a.archived for a in snap.agents))
+        out = status.render(snap)
+        for n in ("lead", "w1", "w2"):
+            self.assertIn(n, out)
+        self.assertNotIn("archived", out)
+
+    def test_archived_does_not_read_the_stores_state(self):
+        """Archived means one thing — herdr does not have this pane. What the store
+        believes is the STATE column's question, and `blocked` must not buy an exemption
+        (nor `working`, nor `done`)."""
+        for n, st in (("a", "working"), ("b", "blocked"), ("c", "done")):
+            store.create_agent(self.db, name=n, role="worker", session_id=f"s-{n}")
+            store.set_state(self.db, n, st)
+        by = self.by_name(self.collect(FakeHerdr([]), now=self.old()))
+        self.assertEqual([by[n].archived for n in "abc"], [True, True, True])
+
+    # -- never stored -----------------------------------------------------
+
+    def test_drawing_an_archived_agent_writes_nothing_at_all(self):
+        """The whole safety argument. This is the same signal that ended live agents when
+        it was RECORDED; it is only safe because a wrong guess costs one frame."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        before = dict(store.get_agent(self.db, "w1"))
+        events = self.db.execute("SELECT count(*) FROM events").fetchone()[0]
+
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        status.render(snap)
+
+        self.assertTrue(self.by_name(snap)["w1"].archived)
+        self.assertEqual(dict(store.get_agent(self.db, "w1")), before)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM events").fetchone()[0], events)
+
+    def test_archived_is_a_property_and_not_a_column(self):
+        """A collector can run for hours against a stale SPAWN_GRACE. A property makes
+        every renderer decide with its own code; a field would let a renderer draw a rule
+        some older process decided.
+
+        Pinned two ways because they fail differently: the field check is what a careless
+        `archived: bool = False` in the dataclass trips, and `getattr_static` is what
+        catches it being replaced by anything that is no longer computed per read.
+        """
+        self.assertNotIn("archived", {f.name for f in dataclasses.fields(status.AgentStatus)})
+        self.assertIsInstance(inspect.getattr_static(status.AgentStatus, "archived"), property)
+
+    def test_json_carries_archived_and_a_reader_recomputes_it_rather_than_reading_it(self):
+        """The key is in `--json` for consumers, and the round trip drops it: a renderer
+        rebuilding an `AgentStatus` gets the answer ITS OWN code gives for the `alive` and
+        `age` it was handed, never the answer a collector running older code wrote down.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        d = self.by_name(self.collect(FakeHerdr([]), now=self.old()))["w1"].as_dict()
+        self.assertTrue(d["archived"])
+
+        fields = {f.name for f in dataclasses.fields(status.AgentStatus)}
+        self.assertNotIn("archived", fields)
+        # The stale flag says archived; the inputs say herdr could not be reached. The
+        # inputs win, which is the whole reason it is a property.
+        back = status.AgentStatus(**{k: v for k, v in d.items() if k in fields} | {"alive": None})
+        self.assertFalse(back.archived)
+
+    def test_the_json_still_carries_every_row_when_the_board_collapses_them(self):
+        """`--json` never collapses: machine consumers keep every row and gain one key."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        self.assertEqual(len(snap.as_dict()["agents"]), 2)
+        self.assertNotIn("w1", self.tree(snap))
+
+    # -- render -----------------------------------------------------------
+
+    def test_the_counts_still_count_every_agent_a_collapse_hid(self):
+        """Collapse shortens the tree, not the readout."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        self.assertEqual(snap.counts["agents"], 2)
+        self.assertIn("2 agents", status.render(snap))
+
+    def test_an_archived_agent_that_needs_a_person_is_still_named_in_full(self):
+        """The sharp end of "archived is archived". A blocked agent whose pane died is a
+        question nobody can answer any more, so it may be collapsed out of the tree but it
+        must not become invisible: NEEDS YOU reads `snap.agents` and never sees collapse.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_state(self.db, "w1", "blocked")
+        store.log_event(self.db, kind="blocked", agent="w1", why="which database?")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        out = status.render(snap)
+
+        self.assertEqual(self.tree(snap), "+ 1 archived · 1 need you")
+        self.assertIn("w1", out)                    # by name, below, in NEEDS YOU
+        self.assertIn("which database?", out)
+
+    def test_show_archived_draws_every_row_again(self):
+        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        self.assertNotIn("w1", self.tree(snap))
+        shown = self.tree(snap, show_archived=True)
+        self.assertIn("w1", shown)
+        self.assertNotIn("archived", shown)
+
+    def test_a_board_of_nothing_but_archived_agents_still_renders(self):
+        """Every root collapses, so there is no agent left to size the ROLE column
+        against — which is a crash, not a narrower table, if the widths are taken from
+        `max(x, *rows)`."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        snap = self.collect(FakeHerdr([]), now=self.old())
+        self.assertEqual(self.tree(snap), "+ 1 archived")
+
+
+def _mk(name, *, parent=None, depth=0, archived=False, needs_human=False):
+    """One `AgentStatus`, archived or not, via the real predicate.
+
+    `alive=False` plus a big `age` is what being absent from herdr looks like after the
+    grace; `alive=True` is what herdr listing it looks like. Nothing here mocks
+    `archived` — these tests fail if the predicate changes meaning.
+    """
+    return status.AgentStatus(
+        name=name, role="worker", parent=parent, depth=depth,
+        state="blocked" if needs_human else "working", herdr_state=None,
+        alive=False if archived else True,
+        stalled=False, gone=False, unread=0,
+        age=int(status.SPAWN_GRACE) + 1 if archived else 0,
+        idle=0, last_activity=0, workspace=None, task=None,
+        blocked_why="?" if needs_human else None,
+    )
+
+
+class CollapseTest(unittest.TestCase):
+    """The tree rule, over the worked examples in `.switchboard/design/archived.md` §4.2.
+
+    Pure: `display_rows` takes the rows it is given and touches neither store nor herdr.
+    """
+
+    def rows(self, agents, **kw):
+        """What gets drawn: agent names in order, and `+N` for a collapsed row."""
+        return [f"+{r.count}" if isinstance(r, status.Collapsed) else r.name
+                for r in status.display_rows(agents, **kw)]
+
+    def groups(self, agents, **kw):
+        return [r for r in status.display_rows(agents, **kw)
+                if isinstance(r, status.Collapsed)]
+
+    def test_a_live_agent_is_never_hidden(self):
+        agents = [_mk("main"), _mk("w1", parent="main", depth=1)]
+        self.assertEqual(self.rows(agents), ["main", "w1"])
+
+    def test_example_a_all_children_archived_becomes_one_row(self):
+        agents = [_mk("main"),
+                  _mk("a", parent="main", depth=1, archived=True),
+                  _mk("b", parent="main", depth=1, archived=True)]
+        self.assertEqual(self.rows(agents), ["main", "+2"])
+        self.assertEqual(self.groups(agents)[0].depth, 1)   # the level they were drawn at
+
+    def test_example_b_nested_levels_give_one_row_at_the_highest_level(self):
+        """Not a chain of `+ 1 archived` at each depth — the collapse root is the HIGHEST
+        sealed node, so its sealed children are inside its subtree, not separate groups."""
+        agents = [_mk("main"),
+                  _mk("lead", parent="main", depth=1, archived=True),
+                  _mk("w1", parent="lead", depth=2, archived=True),
+                  _mk("w2", parent="lead", depth=2, archived=True),
+                  _mk("w2a", parent="w2", depth=3, archived=True)]
+        self.assertEqual(self.rows(agents), ["main", "+4"])
+        self.assertEqual(len(self.groups(agents)), 1)
+        self.assertEqual(self.groups(agents)[0].depth, 1)
+
+    def test_example_c_a_parent_with_one_live_child_is_drawn(self):
+        agents = [_mk("main"),
+                  _mk("lead", parent="main", depth=1),
+                  _mk("w1", parent="lead", depth=2, archived=True),
+                  _mk("w2", parent="lead", depth=2),
+                  _mk("w3", parent="lead", depth=2, archived=True),
+                  _mk("w3a", parent="w3", depth=3, archived=True)]
+        self.assertEqual(self.rows(agents), ["main", "lead", "w2", "+3"])
+        self.assertEqual(self.groups(agents)[0].depth, 2)
+
+    def test_example_d_groups_at_two_levels_at_once(self):
+        agents = [_mk("main"),
+                  _mk("lead", parent="main", depth=1),
+                  _mk("w2", parent="lead", depth=2),
+                  _mk("g1", parent="w2", depth=3, archived=True),
+                  _mk("g2", parent="w2", depth=3, archived=True),
+                  _mk("w1", parent="lead", depth=2, archived=True),
+                  _mk("w3", parent="lead", depth=2, archived=True),
+                  _mk("w3a", parent="w3", depth=3, archived=True),
+                  _mk("other", parent=None, depth=0, archived=True),
+                  _mk("o1", parent="other", depth=1, archived=True),
+                  _mk("g0", parent=None, depth=0, archived=True)]
+        self.assertEqual(self.rows(agents), ["main", "lead", "w2", "+2", "+3", "+3"])
+        self.assertEqual([g.depth for g in self.groups(agents)], [3, 2, 0])
+
+    def test_example_f_an_archived_parent_with_a_live_child_is_drawn_not_hidden(self):
+        """The shape the invariant says must not exist. It is not a rendering case: the
+        rule declines to hide a parent whose child must be drawn, and that falls out of
+        `sealed` rather than being handled."""
+        agents = [_mk("lead", archived=True),
+                  _mk("w1", parent="lead", depth=1),
+                  _mk("w2", parent="lead", depth=1, archived=True)]
+        self.assertEqual(self.rows(agents), ["lead", "w1", "+1"])
+
+    def test_the_count_is_the_whole_subtree_not_the_direct_children(self):
+        agents = [_mk("main"),
+                  _mk("other", parent="main", depth=1, archived=True),
+                  _mk("o1", parent="other", depth=2, archived=True),
+                  _mk("o2", parent="o1", depth=3, archived=True)]
+        self.assertEqual(self.groups(agents)[0].count, 3)
+
+    def test_a_collapsed_group_sits_after_its_visible_siblings(self):
+        """So a live row never moves when an unrelated sibling archives — the board is a
+        thing people click, and a row that shifts under the cursor is a misclick."""
+        agents = [_mk("main"),
+                  _mk("a", parent="main", depth=1, archived=True),
+                  _mk("b", parent="main", depth=1),
+                  _mk("c", parent="main", depth=1)]
+        self.assertEqual(self.rows(agents), ["main", "b", "c", "+1"])
+
+    def test_show_archived_returns_every_row_and_no_group(self):
+        agents = [_mk("main"), _mk("a", parent="main", depth=1, archived=True)]
+        self.assertEqual(self.rows(agents, show_archived=True), ["main", "a"])
+
+    def test_the_row_carries_how_many_of_the_hidden_still_need_a_person(self):
+        agents = [_mk("main"),
+                  _mk("a", parent="main", depth=1, archived=True, needs_human=True),
+                  _mk("b", parent="main", depth=1, archived=True, needs_human=True),
+                  _mk("c", parent="main", depth=1, archived=True)]
+        g = self.groups(agents)[0]
+        self.assertEqual((g.count, g.needs_human), (3, 2))
+        self.assertEqual(status.collapsed_label(g), "  + 3 archived · 2 need you")
+
+    def test_a_row_whose_parent_was_filtered_out_is_a_root_here(self):
+        """Computed over the rows it is GIVEN. `--mine` and `--live` have already dropped
+        rows, and re-deriving the tree from the store would collapse against a tree the
+        caller is not looking at."""
+        agents = [_mk("w1", parent="missing", depth=1, archived=True)]
+        self.assertEqual(self.rows(agents), ["+1"])
+
+    def test_a_cycle_is_one_group_and_does_not_hang(self):
+        """`_tree` breaks cycles rather than following them and shows the stranded rows at
+        the left margin; this must do the same instead of recursing forever."""
+        a = _mk("x", parent="y", archived=True)
+        b = _mk("y", parent="x", archived=True)
+        self.assertEqual(self.rows([a, b]), ["+2"])
+
+    def test_a_live_cycle_is_still_drawn(self):
+        a, b = _mk("x", parent="y"), _mk("y", parent="x")
+        self.assertEqual(sorted(n for n in self.rows([a, b])), ["x", "y"])
+
+    def test_the_real_board_collapses_to_the_measured_shape(self):
+        """The live store on the night this was designed: 64 rows, 55 of them archived,
+        9 alive. The whole point of the exercise is this number."""
+        live = {"main", "status-board", "panel-core", "fix-invariant", "archived-2",
+                "prompt-work", "t-done", "t-bug", "t-block"}
+        tree = [("main", None), ("status-board", "main"), ("prompt-work", "main")]
+        tree += [("panel-core", "status-board"), ("fix-invariant", "status-board"),
+                 ("archived-2", "status-board")]
+        tree += [(n, "prompt-work") for n in ("t-done", "t-bug", "t-block")]
+        tree += [(f"sb-{i}", "status-board") for i in range(17)]      # sealed leaves
+        tree += [("plugins-redesign-lead", "main")]
+        tree += [(f"pr-{i}", "plugins-redesign-lead") for i in range(16)]
+        tree += [("workspace-model-lead", "main")]
+        tree += [(f"wm-{i}", "workspace-model-lead") for i in range(11)]
+        tree += [("spawn-prompts", "main")]
+        tree += [(f"sp-{i}", "spawn-prompts") for i in range(6)]
+        tree += [("workspace-debug", "main"), ("sb-guard", "main")]
+
+        depth = {}
+        agents = []
+        for name, parent in tree:
+            depth[name] = 0 if parent is None else depth[parent] + 1
+            agents.append(_mk(name, parent=parent, depth=depth[name],
+                              archived=name not in live))
+        self.assertEqual(len(agents), 64)
+        self.assertEqual(sum(1 for a in agents if a.archived), 55)
+
+        self.assertEqual(
+            self.rows(agents),
+            ["main", "status-board", "panel-core", "fix-invariant", "archived-2", "+17",
+             "prompt-work", "t-done", "t-bug", "t-block", "+38"])
+        self.assertEqual(len(status.display_rows(agents)), 11)
 
 
 if __name__ == "__main__":
