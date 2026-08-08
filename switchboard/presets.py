@@ -8,7 +8,7 @@ behaviour means adding a file; nothing registers it, nothing imports it.
 This was called a "plugin" until the word was needed for something else. A preset is
 prompt text and cannot run; a plugin is Python and can. `.md` versus `.py` is the whole
 sorting rule, and it is why the two now have separate names, separate directories, and
-separate bindings files. See `.switchboard/design/PLUGIN-REDESIGN.md` §1.
+separate bindings files. See `design/PLUGIN-REDESIGN.md` §1.
 
 Why files rather than lines in the protocol:
 
@@ -17,11 +17,14 @@ Why files rather than lines in the protocol:
 - Presets are per-repo, so what switchboard's agents need has no bearing on lore's.
 - They are editable without touching code, which is the point of "customizable".
 
-That last one is also why preset FILES are not layered out of `defaults/`, while almost
-everything else here is: a shipped preset would arrive in every repo whether or not it
-suited the work, and would then have to be argued back out. Only the BINDINGS — which
-preset applies to which role — are shipped, in `defaults/presets.toml`, and a repo's
-`.switchboard/presets.toml` joins them rather than replacing them.
+Preset FILES were originally not layered out of `defaults/`, on the argument that a shipped
+preset arrives in every repo whether or not it suits the work and then has to be argued back
+out. That was reversed — see `available()` — because shipping BINDINGS without shipping the
+files they name left a fresh clone pointing at an untracked directory. What the original
+argument was protecting is now carried by the shipped bindings staying empty of preset names
+instead: shipping a file makes a preset NAMEABLE, and only a binding makes it APPLIED, so an
+unwanted shipped preset costs a repo nothing. Bindings are shipped in `defaults/presets.toml`
+and a repo's `.switchboard/presets.toml` joins them rather than replacing them.
 
 Files are written multi-line for humans and flattened to a single line on the way out,
 because herdr rejects newlines in agent arguments — the constraint that already forced

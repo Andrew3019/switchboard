@@ -124,8 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
     d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
-                   help=f"preset from {_preset_dir_help()} (repeatable); "
-                        f"an unknown value is used as a literal instruction")
+                   help=f"preset from {_preset_dir_help()}, or @<plugin> for that plugin's "
+                        f"fragment (repeatable); an unknown BARE value is used as a literal "
+                        f"instruction, but @ is reserved and an unknown @name is an error")
     d.add_argument("--name")
     d.add_argument("--workspace", metavar="NAME",
                    help="join this EXISTING workspace instead of working where you are "

@@ -162,7 +162,7 @@ Exit 2 on a blocking hook (Stop, PreToolUse, etc.) is **"prevent this action"**.
 | **Recommendation** | ⏸️ Build after Stop hook is stable. Optional; current piggyback is acceptable. |
 
 ### PreToolUse
-**Purpose:** Enforce file ownership mechanically instead of via `own-files` prompt plugin.
+**Purpose:** Enforce file ownership mechanically instead of via the `own-files` preset.
 
 | Aspect | Detail |
 |--------|--------|
