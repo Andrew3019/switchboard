@@ -424,14 +424,25 @@ def ensure_collector(paths: Paths, *, cwd: Optional[Path] = None) -> bool:
     it, and silenced because there is no terminal it could usefully write to — a
     collector's errors belong in the snapshot, where forty panes can see them, not in one
     pane's scrollback.
+
+    `PYTHONPATH` carries the checkout, and it is not optional. `switchboard` is not
+    installed — `bin/sb` puts the checkout on `sys.path` itself — so `-m` in a child with a
+    different cwd cannot import it, and the collector dies before it can publish the error
+    saying why. Every panel then shows "no collector has published one" forever with
+    nothing to point at. The child must run the same code as the renderer that started it
+    in any case, so naming the parent's package directory is the correct thing to pass and
+    not merely a workaround.
     """
     if collector_running(paths):
         return False
+    checkout = str(Path(__file__).resolve().parent.parent)
+    existing = os.environ.get("PYTHONPATH")
     try:
         subprocess.Popen(
             [sys.executable, "-m", "switchboard.collector"],
             cwd=str(cwd) if cwd else None,
-            env={**os.environ, DIR_ENV: str(paths.dir)},
+            env={**os.environ, DIR_ENV: str(paths.dir),
+                 "PYTHONPATH": f"{checkout}{os.pathsep}{existing}" if existing else checkout},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

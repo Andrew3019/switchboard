@@ -377,6 +377,26 @@ class Election(PanelTest):
             self.assertEqual(popen.call_args.args[0][1:],
                              ["-m", "switchboard.collector"])
 
+    def test_the_collector_is_told_where_to_import_switchboard_from(self):
+        """`switchboard` is not installed — `bin/sb` puts the checkout on `sys.path`
+        itself — so `-m` in a child with a different cwd cannot import it. Without this
+        the collector dies before it can publish the error saying why, and every panel
+        shows "no collector has published one" forever with nothing to point at.
+        `TwoRealProcesses` caught exactly that; this pins it without spawning anything.
+        """
+        with mock.patch.object(panel.subprocess, "Popen") as popen:
+            panel.ensure_collector(self.paths, cwd=Path("/"))
+        env = popen.call_args.kwargs["env"]
+        self.assertIn(str(ROOT), env["PYTHONPATH"].split(os.pathsep))
+        self.assertEqual(env[panel.DIR_ENV], str(self.paths.dir))
+
+    def test_an_existing_pythonpath_is_kept_rather_than_replaced(self):
+        with mock.patch.dict(os.environ, {"PYTHONPATH": "/somewhere/else"}), \
+             mock.patch.object(panel.subprocess, "Popen") as popen:
+            panel.ensure_collector(self.paths)
+        parts = popen.call_args.kwargs["env"]["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(parts, [str(ROOT), "/somewhere/else"])
+
     def test_a_collector_that_cannot_start_is_not_respawned_every_tick(self):
         """Otherwise a broken checkout means forty panes forking twice a second forever."""
         with mock.patch.object(panel.subprocess, "Popen") as popen:
@@ -589,6 +609,69 @@ class GitIsPaidOncePerCollector(PanelTest):
         self.assertEqual(dbp.call_count, 1)
         # ...and every tick was handed that path, so `connect` never looks it up again.
         self.assertEqual(seen, [Path("/x/state.db")] * 5)
+
+
+class TwoRealProcesses(unittest.TestCase):
+    """The mechanism as processes rather than as functions.
+
+    Everything above stubs one side or the other. This runs an actual collector, started
+    the way an actual renderer starts one, against an actual store in an actual repo, and
+    reads what lands on disk. It is the only test that would catch the whole thing being
+    wired up correctly and not working — a bad module path in `ensure_collector`, an env
+    var the child does not read, a collector that elects itself and then exits.
+
+    It leaves nothing behind: the collector is killed in cleanup, and it would retire on
+    its own inside a minute anyway (`panel.collector_idle_exit`) because no renderer is
+    stamping `demand`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        for cmd in (["init", "-q", "-b", "main"],
+                    ["-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(["git", *cmd], cwd=str(self.repo), check=True,
+                           capture_output=True)
+        db = store.connect(path=store.db_path(self.repo))
+        store.create_agent(db, name="w1", role="worker", session_id="s1", task="do it")
+        db.close()
+        self.paths = panel.Paths.resolve(self.repo)
+        self.addCleanup(self._kill)
+
+    def _kill(self):
+        r = panel.read(self.paths)
+        pid = (r.collector or {}).get("pid")
+        if pid:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def test_a_renderer_starts_a_collector_and_reads_what_it_publishes(self):
+        sup = panel.Supervisor(self.paths, cwd=self.repo)
+        self.assertTrue(sup.tick(), "no collector was launched")
+
+        for _ in range(150):
+            r = panel.read(self.paths)
+            if not r.error:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail(f"the collector published nothing: {panel.read(self.paths).error}")
+
+        self.assertEqual([a.name for a in r.snap.agents], ["w1"])
+        self.assertEqual(r.snap.agents[0].task, "do it")
+        self.assertFalse(r.stale)
+        self.assertGreaterEqual(r.collector["polls"], 1)
+        self.assertTrue(panel.collector_running(self.paths))
+        # ...and the store it read is byte-for-byte what it was handed.
+        db = store.connect(path=store.db_path(self.repo), readonly=True)
+        self.addCleanup(db.close)
+        row = store.get_agent(db, "w1")
+        self.assertEqual((row["state"], row["ended_at"]), ("working", None))
 
 
 if __name__ == "__main__":
