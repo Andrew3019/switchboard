@@ -13,7 +13,7 @@ when the job comes up. `text()` below is that path, and `adversarial` is why it 
 This was called a "plugin" until the word was needed for something else. A preset is
 prompt text and cannot run; a plugin is Python and can. `.md` versus `.py` is the whole
 sorting rule, and it is why the two now have separate names, separate directories, and
-separate bindings files. See `.switchboard/design/PLUGIN-REDESIGN.md` §1.
+separate bindings files. See `design/PLUGIN-REDESIGN.md` §1.
 
 Why files rather than lines in the protocol:
 
@@ -22,15 +22,17 @@ Why files rather than lines in the protocol:
 - Presets are per-repo, so what switchboard's agents need has no bearing on lore's.
 - They are editable without touching code, which is the point of "customizable".
 
-Preset files ARE layered, and this docstring claimed for a while that they were not. See
-`available()`: the shipped directory is read first and a repo's `<name>.md` replaces the
-shipped one of that name. It has to work that way — the shipped `presets.toml` binds
-`verify` and `evidence` by name, so if the bodies did not ship too, a fresh clone would
-have bindings pointing at nothing.
+Preset FILES are layered, and this docstring claimed for a long time that they were not —
+as did `defaults/presets.toml` and `verify.md`, which built an argument on top of the claim.
+See `available()`: the shipped directory is read first and a repo's `<name>.md` replaces the
+shipped one of that name. It has to work that way, because shipping BINDINGS without the
+files they name leaves a fresh clone pointing at an untracked directory.
 
-What is true, and is what the old claim was reaching for, is that a shipped preset is not
-imposed: it ships as a FILE, and a repo decides whether anything is bound to it. Bindings
-join across layers rather than replacing, so adding one cannot silently drop another.
+What the original no-layering argument was protecting — that a shipped preset should not
+arrive in every repo whether or not it suits the work — is carried instead by the split
+between shipping and binding. Shipping a file makes a preset NAMEABLE; only a binding makes
+it APPLIED. Bindings join across layers rather than replacing, so adding one cannot silently
+drop another, and an unwanted shipped preset costs a repo nothing.
 
 Files are written multi-line for humans and flattened to a single line on the way out,
 because herdr rejects newlines in agent arguments — the constraint that already forced

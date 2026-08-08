@@ -34,10 +34,12 @@ class FakeHerdr:
 
     def __init__(self, *responses):
         self.calls: list[list[str]] = []
+        self.timeouts: list[float | None] = []
         self.responses = list(responses)
 
-    def __call__(self, argv):
+    def __call__(self, argv, *, timeout=None):
         self.calls.append(list(argv))
+        self.timeouts.append(timeout)
         if not self.responses:
             return ok({})
         r = self.responses.pop(0)
@@ -252,7 +254,7 @@ class IntegrationConflictTest(unittest.TestCase):
     STATUS_ABSENT = "  claude: not installed (/Users/x/.claude/hooks/herdr-agent-state.sh)"
 
     def _herdr(self, status_line, version="0.8.0"):
-        def runner(argv):
+        def runner(argv, **_):
             if "--version" in argv:
                 return subprocess.CompletedProcess([], 0, f"herdr {version}", "")
             return subprocess.CompletedProcess([], 0, status_line, "")
@@ -333,7 +335,7 @@ class WaitTest(unittest.TestCase):
         """A wait that is nearly out of time must not nap for half a second past it."""
         stale = ok({"agents": [dict(AGENT_JSON, state_change_seq=88)]})
 
-        def runner(argv):
+        def runner(argv, **_):
             return ok({}) if argv[1:3] == ["agent", "wait"] else stale
 
         naps: list[float] = []
@@ -354,6 +356,57 @@ class ReadTest(unittest.TestCase):
         Herdr("herdr", runner=fake).read_pane("w1:p9")
         # without --source recent, an alt-screen agent reads back as an empty prompt frame
         self.assertIn("--source recent", fake.argv())
+
+
+class SubprocessTimeoutTest(unittest.TestCase):
+    """A stuck `herdr` binary must fail, loudly, rather than hang `sb` forever.
+
+    herdr's own `--timeout` bounds only its internal wait for readiness; nothing bounded
+    how long our process would wait for the CLI to return at all, which is how one
+    `sb delegate` hung until a human killed it from outside.
+    """
+
+    def _stuck(self, argv, *, timeout=None):
+        raise subprocess.TimeoutExpired(list(argv), timeout or 0)
+
+    def test_a_stuck_binary_becomes_an_error_naming_the_call_and_the_limit(self):
+        h = Herdr("herdr", runner=self._stuck)
+        with self.assertRaises(HerdrError) as cm:
+            h.prompt("w1", "mail")
+        self.assertEqual(cm.exception.code, "timeout")
+        self.assertIn("agent prompt w1", cm.exception.message)   # what timed out
+        self.assertIn("10s", cm.exception.message)               # and its ceiling
+
+    def test_the_timeout_is_logged_like_any_other_call(self):
+        seen = []
+        h = Herdr("herdr", runner=self._stuck, on_event=lambda **kw: seen.append(kw))
+        with self.assertRaises(HerdrError):
+            h.list_agents()
+        self.assertEqual(seen[0]["argv"], "agent list")
+        self.assertIn("timed out", seen[0]["err"])
+
+    def test_a_stuck_pane_read_times_out_too(self):
+        with self.assertRaises(HerdrError) as cm:
+            Herdr("herdr", runner=self._stuck).read_pane("w1:p9")
+        self.assertEqual(cm.exception.code, "timeout")
+
+    def test_ordinary_calls_get_the_flat_ceiling(self):
+        fake = FakeHerdr()
+        Herdr("herdr", runner=fake).prompt("w1", "mail")
+        self.assertEqual(fake.timeouts, [10])
+
+    def test_spawn_is_allowed_its_own_ninety_seconds_plus_margin(self):
+        """A flat 10s would kill every spawn: `agent start` is slow on purpose."""
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        Herdr("herdr", runner=fake).start_agent("w1", "w1:p9", timeout_ms=90000)
+        self.assertEqual(fake.timeouts, [100])       # herdr's 90s deadline + 10s to return
+        self.assertIn("--timeout 90000", fake.argv())
+
+    def test_a_wait_is_allowed_the_deadline_it_asked_herdr_for(self):
+        fake = FakeHerdr(ok({}), ok({"agents": [AGENT_JSON]}))
+        Herdr("herdr", runner=fake).wait("w1", timeout_ms=300000)
+        self.assertGreater(fake.timeouts[0], 300)    # the blocking call
+        self.assertEqual(fake.timeouts[1], 10)       # the `agent list` after it
 
 
 if __name__ == "__main__":

@@ -249,7 +249,7 @@ class ReadPaneFailureTest(unittest.TestCase):
     """herdr's `pane read` reports a gone pane as JSON on stdout with rc=0."""
 
     def _runner(self, proc):
-        return lambda argv: proc
+        return lambda argv, **_: proc
 
     def test_error_payload_raises_instead_of_being_returned_as_output(self):
         payload = json.dumps({"id": "x", "error": {"code": "pane_not_found",

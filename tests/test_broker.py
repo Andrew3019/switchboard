@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
-from switchboard.broker import HUMAN, MAIN, MAIN_NAME, Broker  # noqa: E402
+from switchboard.broker import HUMAN, MAIN, MAIN_NAME, Broker, Undeliverable  # noqa: E402
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
 
@@ -436,13 +436,41 @@ class BrokerTest(unittest.TestCase):
         self.b.interrupt("w", "stop")
         self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
 
-    def test_doorbell_falls_back_to_pane_input(self):
-        """herdr can permanently lose an agent's name binding; pane input still lands."""
+    def test_an_unrung_doorbell_never_falls_back_to_the_pane_shell(self):
+        """`pane run` types into the pane's SHELL, so the fallback executed the text.
+
+        It was not a recovery path either: herdr drops the name binding when the agent
+        leaves the foreground, and an agent whose TUI is gone cannot read typed-in text
+        any more than it can read a prompt. So the ring just fails, and the message stays
+        queued for the next `flush_pending`.
+        """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.unreachable.add("w")
         self.b.tell(["w"], "you have mail", me=HUMAN)
-        self.assertEqual(self.h.pane_prompts[-1][0], "w1:p1")
+        self.assertEqual(self.h.pane_prompts, [])
         self.assertEqual(self.h.prompts, [])
+        # Still undelivered, so the next `sb` command rings it again.
+        self.assertEqual([m["to_agent"] for m in store.undelivered(self.db)], ["w"])
+
+    def test_an_undeliverable_interrupt_fails_loudly_instead_of_being_marked_read(self):
+        """`mark_collected` used to fire before delivery was attempted, so an interrupt
+        that never arrived was recorded as one the agent had already read."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.unreachable.add("w")
+        with self.assertRaises(Undeliverable) as cm:
+            self.b.interrupt("w", "stop what you are doing")
+        self.assertEqual(cm.exception.who, "w")
+        self.assertIn("agent_not_found", cm.exception.message)   # what herdr actually said
+        self.assertIn("sb inbox", cm.exception.message)          # and what to do about it
+        self.assertEqual(self.h.pane_prompts, [])                # no shell fallback
+        [m] = store.undelivered(self.db)                         # queued, not read
+        self.assertIsNone(m["read_at"])
+
+    def test_a_delivered_interrupt_is_still_marked_read(self):
+        """It travelled inline, so there is nothing left for `sb inbox` to announce."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.b.interrupt("w", "change course")
+        self.assertEqual(store.undelivered(self.db), [])
 
     def test_messaging_a_blocked_agent_unblocks_it_first(self):
         """herdr makes a blocked agent un-targetable, so the doorbell would silently fail.

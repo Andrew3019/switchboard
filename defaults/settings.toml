@@ -239,8 +239,10 @@ interrupt_settle = 0.5
 # and waiting is the right response to it.
 database = 10.0
 
-# Any `git` or `herdr` call made outside the adapter. Bounded so a hung binary cannot wedge
-# an `sb` invocation.
+# Any `git` or `herdr` call, inside the adapter or out. Bounded so a hung binary cannot
+# wedge an `sb` invocation — it once wedged one for over a minute, until a human killed it.
+# The adapter's slow calls (`agent start`, `agent wait`, a worktree checkout) do not get
+# this flat number: they get their own deadline plus this as the margin to return within.
 subprocess = 10
 
 # `agent start`. Generous: spawning a Claude Code session in a fresh pane is slow.

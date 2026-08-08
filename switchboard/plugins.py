@@ -11,8 +11,8 @@ a plugin, and nothing has to guess.
     sb plugin list                 what this repo has, and what state each one is in
     sb plugin <name> <verb> …      whatever the plugin declared
 
-See `.switchboard/design/PLUGIN-REDESIGN.md` §4 for the contract this implements and §11
-for what it knowingly does not do.
+See `design/PLUGIN-REDESIGN.md` §4 for the contract this implements and §11 for what it
+knowingly does not do.
 
 The load model
 --------------

@@ -26,8 +26,12 @@ wait for it — it ends its turn and is woken (doorbell) when the child calls `s
   disposition; no role file carries one any more, so without a flag the store's default
   (`[vocabulary] default_cleanup`, `close`) stands.
 - Status: working; has tests specifically covering name-claim races
+- `--with` takes a preset name, `@<plugin>` for a plugin's fragment, or any other string,
+  which is passed through as a literal instruction. `@` is a **reserved prefix**: an
+  `@<name>` that does not resolve fails rather than passing through. See **Presets** for
+  the three rules and for which failures are fatal.
 - Config: `defaults/roles/*.md`, `defaults/models.toml`, `defaults/presets.toml`,
-  `defaults/prompts.toml [spawn] identity/workspace`
+  `defaults/presets/*.md`, `defaults/prompts.toml [spawn] identity/workspace`
 
 ### `sb ask <who...> <question> [--timeout]`
 Sends a question to one or more agents and blocks the caller's own turn until every
@@ -107,20 +111,24 @@ being auto-opened beside it unless declined.
 
 ### `sb doctor [--reset-store [--force]]`
 Health check: confirms the `herdr` binary is present, at a compatible version, and that
-no conflicting herdr integration is installed; reports the store's condition (a pending
-schema rebuild is otherwise invisible by design) and every plugin's, since this is the one
-verb whose job is to import them all and say which will not load. `--reset-store` drops
-and recreates the sqlite schema; refuses if any agent is currently live, unless `--force`.
-- Entry point: `cli.py:585-623` → `Herdr.check` / `store.reset` / `_doctor_plugins`
-- Note: plugin **problems** (one that will not import, one targeting an API this sb does
-  not support) join a pending rebuild in making the exit code non-zero. Plugin **notices**
-  — an orphaned state directory, a plugin being imported out of `.switchboard/` rather
-  than `defaults/`, a pre-rename spelling still on disk — deliberately do not, because an
-  orphan is permanent and would hold the exit code non-zero forever.
+no conflicting herdr integration is installed. `--reset-store` drops and recreates the
+sqlite schema; refuses if any agent is currently live, unless `--force`.
+
+It is also the only verb that imports **every** plugin, which is what it is for. It
+separates plugin **problems** (will not import; targets an unsupported `API`) from plugin
+**notices** (an orphaned state directory, a plugin loaded from the repo rather than from
+`defaults/`, pre-rename `plugins.toml`/`plugins/` spellings). Problems clear `--json`'s
+`ok`; notices do not. Neither changes the **exit code**, which is 1 only when herdr itself
+fails — a broken plugin is a report, not a failed health check. Nothing under a state
+directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or does not.
+- Entry point: `cli.py` `doctor` branch → `Herdr.check` / `store.reset` /
+  `_doctor_plugins` → `plugins.load_all`/`plugins.orphans`/`presets.deprecations`
 - Status: working. The store has no migration system by design: schema changes are
   compared by hash, additive column changes auto-apply, anything destructive triggers a
   full drop/recreate (`store.py:220-304`). See `BUGS.md` #4 for a case where this
   deadlocked running agents.
+- Not checked: whether a plugin imports `switchboard` internals. `design/PLUGIN-REDESIGN.md`
+  §4.6 asserts this check; it is deliberately not built, and §4.6 says why.
 - Config: `settings.toml [herdr] min_version`
 
 ### `sb cleanup [name...] [--include-kept] [--force] [--dry-run]`
@@ -207,6 +215,10 @@ so an agent can run it mid-turn.
   `.switchboard/presets.toml` and `.switchboard/presets/*.md`
 - Note: the naming form exists because of `adversarial` — see **Presets** below. An
   unknown name exits 1 and lists the ones that do exist.
+- Lists preset **files** only. A plugin fragment bound with `@<name>` has no file to glob,
+  so it gets no row here even though it is injected into every spawn it is bound to;
+  `sb plugin list` is where those bindings show up. Two commands, one question — worth
+  knowing before concluding from `sb presets` alone that nothing is being injected.
 
 ### `sb plugin list`
 Lists every plugin this repo can see, with its `VERSION`, its status
@@ -233,10 +245,12 @@ state directory, takes an exclusive `flock` around the handler, enforces the com
 - Config: `settings.toml [paths] plugins_dir/plugins_file/user_state/store_dirname`
 
 ### `sb plugins` — retired
-Was `sb presets`. Now a hard error naming both replacements (`sb presets` for prompt text,
-`sb plugin list` for code plugins), for one release, then removed. The `--json` key was
-renamed from `plugins` to `presets` at the same time so the two payloads cannot be
-confused.
+This verb listed prompt fragments; the word "plugin" now means code, so the verb split in
+two. It is still *registered* — hidden from `sb --help`, but present — so that typing it
+gets a sentence naming both replacements (`sb presets` for prompt text, `sb plugin list`
+for code plugins) and exit 2, rather than an argparse usage dump that names neither. Kept
+for one release, then removed. The `--json` key was renamed from `plugins` to `presets` at
+the same time so the two payloads cannot be confused.
 
 ### `sb models`
 Prints the resolved tier → (provider, model, effort, CLI flags) table for this repo,
@@ -358,6 +372,12 @@ Plus `all = ["@report-bug"]`, the one fragment every agent carries whatever its 
 
 Shipping a file only makes a preset available; a binding is what makes it applied. The
 mechanism (`presets.available`/`bindings`/`for_role`/`resolve`/`text`) is wired into
+
+This paragraph was wrong twice before, in both directions, and the correction is worth
+keeping visible: it once said preset files ship *inert with zero shipped bindings* while six
+files shipped and, later, while two bindings shipped. The claim to check when this changes
+again is not "does anything ship" but "which of the two lists is non-empty" — they move
+independently and always have.
 `sb delegate --with` and `sb presets`. An unrecognized `--with` name is treated as a
 literal inline instruction, not an error.
 
@@ -389,6 +409,18 @@ machine, while a bare plugin name is wrong in the file wherever it is read.
 A plugin is a Python package sb imports — `defaults/plugins/<name>/` or a repo's
 `.switchboard/plugins/<name>/`, holding an `__init__.py` that defines `register(reg)`. It
 owns a CLI verb and a directory of durable state.
+
+**Two plugins ship**, and `defaults/plugins.toml` is `enabled = ["report-bug"]` — one on,
+one off. `todo` is present and available but not enabled and not bound: it is the shipped
+example of the three states being separately settable, and turning it on is one line.
+Default-on for `report-bug` is the single-user assumption spent deliberately, not an
+oversight; the reasoning and the trigger to reverse it are in `design/PLUGIN-REDESIGN.md`
+§11 item 8.
+
+| plugin | `SCOPE` | ships | what it is |
+|---|---|---|---|
+| `report-bug` | `user` | enabled, bound to every agent | files a markdown bug report per machine rather than per repo, so it is findable from anywhere. Carries a bounded tail of the filing agent's session. |
+| `todo` | `repo` | available only | a deliberately dumb shared list, per repo identity, shared across worktrees. Humans and agents use the same CLI. |
 
 Three states, separately settable: **available** (present in either root), **enabled**
 (listed in `plugins.toml` — its commands dispatch and it gets a state directory), **bound**
@@ -437,7 +469,10 @@ What a handler is handed is the contract, and so is what it is not: `Context` ca
 handle, no spawn authority. `Context`, `Result` and the parsed args are all
 JSON-serialisable, which keeps a future out-of-process hatch open without building one.
 - Entry point: `switchboard/plugins.py`
-- Design of record: `.switchboard/design/PLUGIN-REDESIGN.md` §4–§7
+- Design of record: `design/PLUGIN-REDESIGN.md` §4–§7; §11 lists what it knowingly does not
+  do, including one item (§4.6's internals-import check) that is deliberately **not built**
+  rather than deferred — the cheap implementation would pass the only violation it exists
+  to catch.
 
 ## Roles
 `defaults/roles/*.md` — front matter (`model` only) plus a markdown body used as the

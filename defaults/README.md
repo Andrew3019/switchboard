@@ -31,13 +31,18 @@ For any repo, two layers, most general first:
 | `defaults/prompts.toml`     | `.switchboard/prompts.toml`            |
 | `defaults/settings.toml`    | `.switchboard/settings.toml`           |
 
-Preset *files* are layered by name, and a repo's `<name>.md` replaces the shipped one of
-that name. They have to be: the shipped `presets.toml` binds `evidence` and `verify` by
-name, and if the bodies did not ship too, a fresh clone would have bindings pointing at
-nothing. Three ship — `evidence`, `verify`, and `adversarial`, which is bound to nothing
-and read on demand with `sb presets adversarial`. What is *shipped* is still small on
-purpose: the protocol is what every agent needs, a preset is what some agents need, and
-what switchboard's own agents need has little bearing on another repo's.
+Preset *files* are layered too — `defaults/presets/<name>.md`, replaced by name by a repo's
+`.switchboard/presets/<name>.md`. This reverses an earlier decision, and the reversal is
+worth stating rather than quietly reflecting: preset files were originally *not* shipped, on
+the grounds that what switchboard's own agents need has no bearing on another repo's. That
+held until `defaults/presets.toml` started shipping bindings, at which point a fresh clone
+had bindings pointing at files that existed only in an untracked directory.
+
+What survives the reversal is the distinction it was protecting, now carried by binding
+instead of by shipping: **shipping a preset makes it nameable; only a binding makes it
+applied.** Three files ship. `evidence` and `verify` are bound to roles, which is precisely
+why their bodies must ship; `adversarial` is bound to nothing at all and is read on demand
+with `sb presets adversarial`.
 
 Both were called "plugins" until the word was needed for code that runs. A preset is
 markdown and cannot run; a plugin is Python and can. A repo still holding the pre-rename
@@ -81,8 +86,8 @@ suite; also the escape hatch for shipping a different baseline to a team.
 | ------------------- | ------------------------------------------------------------------ |
 | `roles/*.md`        | one role each — `orchestrator`, `researcher`, `reviewer`, `qa`: TOML front matter for the fields, markdown for the prompt |
 | `models.toml`       | what `cheap`, `default`, `strong` mean — the only place model names appear |
-| `presets.toml`      | which presets apply to which role, and which every agent gets       |
-| `presets/*.md`      | one preset each: prompt text bound to a role, or a procedure read by name with `sb presets <name>` |
+| `presets.toml`      | which presets and plugin fragments apply to which role — a bare name is a preset file, `@name` is a plugin's fragment |
+| `presets/*.md`      | one preset each: markdown flattened to a line and appended to a spawn's prompt, or a procedure read by name with `sb presets <name>` |
 | `plugins.toml`      | which plugins are enabled — `sb plugin list` shows the rest          |
 | `plugins/<name>/`   | one plugin each: `__init__.py` defines `register()`, `agent.md` is its prompt fragment |
 | `protocol.md`       | the agent protocol, injected as a system prompt at every spawn      |

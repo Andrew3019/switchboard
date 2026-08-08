@@ -33,12 +33,16 @@
 # disposition, its own prompt), a preset is behaviour injected into it. Mixing the two made
 # "add a preset" look like "redefine the role".
 #
-# Preset FILES layer the same way everything else here does: a repo's
-# `.switchboard/presets/<name>.md` REPLACES the shipped one of that name. (This comment
-# used to say the opposite. It was wrong — see `presets.available()`, and the shipped
-# bindings below, which name files that therefore have to ship.) The protocol is what every
-# agent needs; a preset is what some agents need, and a repo that disagrees with a shipped
-# one overrides the file rather than arguing with it.
+# Preset FILES layer the same way these bindings do: `defaults/presets/<name>.md` is
+# replaced by name by your `.switchboard/presets/<name>.md`. (This comment claimed the
+# opposite for a long time, and so did presets.py and verify.md — all three were wrong; see
+# `presets.available()`.) Shipping a file only makes a preset NAMEABLE. A binding is what
+# makes it APPLIED, which is the distinction that keeps a shipped preset from costing a repo
+# anything it did not ask for.
+#
+# Note that the shipped bindings below are no longer empty of preset names — `evidence` and
+# `verify` are bound to roles here. That is deliberate and it is the reason the files have
+# to ship: a binding naming a file nobody ships points at nothing in a fresh clone.
 #
 # This file was `plugins.toml` until "plugin" was needed for the other thing — a preset is
 # prompt text and cannot run, a plugin is Python and can. A repo still holding
