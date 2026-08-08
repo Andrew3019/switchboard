@@ -102,6 +102,9 @@ GONE_GRACE = config.setting("timeouts.gone_grace")
 # What `sb interrupt` waits for the escape keypress to land before sending the new
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
+# Every git we shell out to. A fork waits on `git fetch`, which is a network call and the
+# one command here that can hang for as long as a bad connection wants it to.
+SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # How much of a summary or a reason reaches the event log and a desktop notification.
 EVENT_CLIP = config.setting("limits.event_clip")
 NOTIFY_CLIP = config.setting("limits.notify_clip")
@@ -120,6 +123,32 @@ class AgentNameTaken(ValueError):
     def __init__(self, name: str):
         self.name = name
         super().__init__(f"the agent name {name!r} is already taken")
+
+
+class BranchTaken(ValueError):
+    """A fork would have to reuse a branch that already exists.
+
+    A ValueError so `sb` reports it as a caller mistake rather than a traceback, and
+    refused BEFORE anything is claimed or spawned.
+
+    Never silently attached to, which is the difference between this and
+    `workspace_new`: opening a NAMED workspace means "take me to that branch", so an
+    existing one is somewhere to go. A fork means "give this agent a tree of its own", and
+    an existing branch of that name is somebody else's work, with somebody else's commits
+    on it. Both ways forward are in the message because they are genuinely different
+    intents — a different agent, or joining the workspace this branch already has.
+    """
+
+    def __init__(self, name: str):
+        # One argument, because the branch IS the agent's name — that is the rule, and
+        # two parameters holding the same string would only invite them to drift apart.
+        self.branch = self.agent = name
+        super().__init__(
+            f"the branch {name!r} already exists, so {name!r} cannot be forked a worktree "
+            f"of its own — that branch is somebody else's work, and switchboard will not "
+            f"reuse it. Either spawn under a different name (--name <other>), or join the "
+            f"workspace that branch already has (--workspace {name})"
+        )
 
 
 def _slug(name: str) -> str:
@@ -641,6 +670,11 @@ class Broker:
         return {"workspace": ws["workspace"], "branch": ws.get("branch"),
                 "workspace_id": ws["workspace_id"],
                 "path": ws["path"], "pane_id": ws["pane_id"],
+                # What this worktree was actually forked from, and why that is not what
+                # was asked for when it is not. A stale fork is invisible otherwise: the
+                # branch is there, the checkout works, and the commits it is missing only
+                # surface as a conflict much later.
+                "base": ws.get("base"), "base_fallback": ws.get("base_fallback"),
                 "agent": lead, "created": created}
 
     def _attach_workspace(self, name: str, *, base: str = BASE_BRANCH,
@@ -668,14 +702,20 @@ class Broker:
         for step in steps:
             try:
                 if step == "create":
+                    # Fetched HERE rather than once at startup: this is the moment the
+                    # base is read, and a fork from a base fetched ten minutes ago is a
+                    # fork from a stale base.
+                    forked_from, fallback = self._fork_base(base)
                     # --cwd names WHICH REPO. Without it herdr uses the focused
                     # workspace's repo, so a worktree asked for from a pane sitting in
                     # another project silently targets that one.
-                    r = self._call_adapter("create_worktree", branch, base=base,
+                    r = self._call_adapter("create_worktree", branch, base=forked_from,
                                            cwd=str(self.repo))
                 else:
                     r = self._open_worktree(name, path=known, branch=branch)
+                    forked_from, fallback = None, None
                 facts = self._workspace_facts(name, r or {}, fresh=(step == "create"))
+                facts["base"], facts["base_fallback"] = forked_from, fallback
                 self._ws_ids[name] = facts["workspace_id"]
                 return facts
             except HerdrError as e:
@@ -684,6 +724,69 @@ class Broker:
             "workspace_unavailable",
             f"could not open or create workspace {name!r} (branch {branch}): {first}",
         )
+
+    def _fork_base(self, base: str) -> tuple[str, Optional[str]]:
+        """Bring `base` up to date, and say what we ended up forking from.
+
+        The base is a REMOTE-tracking ref (`origin/main`), because the local branch of the
+        same name is however stale the human's last pull left it. Fetching it on the spot
+        is the difference between a fork that starts at today's main and one that starts
+        wherever this checkout happened to be.
+
+        Nothing here is fatal, and that is deliberate: a spawn that dies because a laptop
+        is on a train is a worse failure than a fork from a base an hour old. Two
+        fallbacks, in order of how much they cost:
+
+          - the fetch failed, but we still have `origin/main` locally: fork from that,
+            just older than it could have been;
+          - no remote at all, or nothing under that remote to fork from: fork from the
+            LOCAL branch (`main`), which in a repo with no remote is the only real one.
+
+        Returns `(what to fork from, what went wrong)` — the second is None on the happy
+        path, and is carried into the event log and the workspace result so a stale fork
+        is something the caller can see rather than something they discover in a merge.
+        """
+        remote, _, ref = base.partition("/")
+        if not ref:
+            return base, None                    # a plain local branch: nothing to fetch
+        if remote not in self._remotes():
+            # Not an error and not worth a warning: a repo with no `origin` has exactly
+            # one `main`, and it is the local one.
+            return ref, "no_remote"
+
+        why = None
+        if not self._git("fetch", remote, ref, check=True):
+            why = "fetch_failed"
+            store.log_event(self.db, kind="fetch_failed", base=base,
+                            note="forking from the local copy instead")
+        if self._git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=True):
+            return base, why
+        # The fetch failed AND we have never had this ref. Nothing remote to fork from.
+        store.log_event(self.db, kind="base_fallback", base=base, fallback=ref)
+        return ref, "no_remote_base"
+
+    def _remotes(self) -> set[str]:
+        out = self._git("remote")
+        return {ln.strip() for ln in (out or "").splitlines() if ln.strip()}
+
+    def _git(self, *args: str, check: bool = False):
+        """Run git in this repo. Returns its stdout, or "" — never raises.
+
+        `check=True` asks the yes/no form instead: whether it succeeded. Every caller here
+        is asking git a question it may legitimately have no answer to (no remote, no such
+        ref, not a repo at all), and a timeout because the network hung is one of those
+        answers too.
+        """
+        try:
+            out = subprocess.run(
+                ["git", *args], cwd=str(self.repo), capture_output=True, text=True,
+                timeout=SUBPROCESS_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False if check else ""
+        if check:
+            return out.returncode == 0
+        return out.stdout if out.returncode == 0 else ""
 
     def _open_worktree(self, name: str, *, path: Optional[str], branch: str) -> dict:
         """Attach to a checkout that already exists.
@@ -1014,6 +1117,52 @@ class Broker:
         return [validate.line(p, "plugin text", max_len=validate.MAX_PROMPT)
                 for p in plugins_mod.resolve(names, self.repo)]
 
+    def _fork_for(self, name: str, *, parent: str) -> Optional[dict]:
+        """Give this child a worktree of its own. The branch is the agent's NAME.
+
+        No prefix and no suffix: the name is already unique (`agents.name` is the primary
+        key), already legal as a branch, and already short. Anything else would be a
+        second identity for the same agent, and two names for one thing is how a workspace
+        stops being findable by the one everybody uses.
+
+        An existing branch of that name is REFUSED, not attached to — see `BranchTaken`.
+
+        Everything else that can go wrong is not fatal. A herdr with no `worktree create`,
+        a repo that is not a repo, a disk that is full: the child still spawns, in its
+        parent's space, and the event log says a fork was wanted and did not happen.
+        Refusing to spawn at all would take the whole delegation down with it, and the
+        collision refusal above is deliberately the ONE case worth that — because there
+        the failure is somebody's existing branch, and reusing it is unrecoverable in a
+        way that sharing a checkout is not.
+        """
+        if self._branch_exists(name):
+            raise BranchTaken(name)
+        try:
+            ws = self._attach_workspace(name)
+        except HerdrError as e:
+            store.log_event(self.db, kind="fork_failed", agent=name, parent=parent,
+                            error=str(e))
+            return None
+        store.log_event(self.db, kind="fork", agent=name, parent=parent,
+                        workspace=ws["workspace"], branch=ws.get("branch"),
+                        path=ws["path"], base=ws.get("base"),
+                        base_fallback=ws.get("base_fallback"))
+        return ws                # `delegate` links this worktree's config on its way past
+
+    def _branch_exists(self, branch: str) -> bool:
+        """Is there already a branch of this name?
+
+        Local heads only, and on purpose: a remote-tracking `origin/<name>` is not a
+        branch in this repo, and `git worktree add` would fork a fresh local branch from
+        the base regardless — refusing on it would block a name whose only claim is that
+        somebody once pushed it.
+
+        A repo git cannot answer for answers False, which lets the fork proceed to herdr
+        and fail there with a message about the real problem.
+        """
+        return bool(self._git(
+            "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=True))
+
     def delegate(
         self,
         task: str,
@@ -1046,6 +1195,34 @@ class Broker:
         # confusion `agents.branch` exists to end.
         if branch is None and inherited:
             branch = self.worktree_branch(me)
+
+        # THE FORK RULE. A worktree is forked when your parent does not have one;
+        # otherwise you inherit your parent's and share it as a tab. Role-agnostic: a
+        # researcher that only reads gets its own tree too, because "it will not write"
+        # is a claim about the future, and the one bare space in the model — the root
+        # orchestrator's, over the human's main checkout — is the one place a wrong claim
+        # costs somebody's uncommitted work.
+        #
+        # `has_worktree` is a fact READ FROM THE STORE (`agents.branch`), never inferred
+        # from the workspace name: the name says branch for a worktree space and an
+        # agent-ish label for a bare one, with nothing to tell them apart. The human
+        # answers False and so forks, which is the same rule and not an exception to it —
+        # a child of a person is a child of somebody with no tree to lend.
+        #
+        # Only on the INHERITED path. A caller that named a workspace — `sb start`, a
+        # workspace lead, `sb delegate --workspace <name>` — has already said where this
+        # agent goes, and forking over that would ignore the instruction.
+        forked = None
+        if inherited and not self.has_worktree(me):
+            forked = self._fork_for(name, parent=me)
+        if forked:
+            ws, branch = forked["workspace"], forked["branch"]
+            workspace_id = workspace_id or forked["workspace_id"]
+            cwd = cwd or forked["path"]
+            # A freshly forked workspace already has an idle shell; spending a tab on top
+            # of it leaves an empty pane behind forever. Same trade as `_spawn_lead`'s.
+            pane = pane or forked["pane_id"]
+
         if cwd:
             where = Path(cwd)
         elif ws:

@@ -81,8 +81,11 @@ default_cleanup = "close"
 # characters herdr allows in an agent name, which is why the slug is truncated first.
 lead_suffix = "-lead"
 
-# What a new worktree is forked from when `--base` is not given.
-base_branch = "main"
+# What a new worktree is forked from when `--base` is not given. The REMOTE-tracking ref,
+# not the local branch: a local `main` is however stale the last `git pull` left it, and a
+# fork from it starts life behind. It is fetched on the spot before every fork, and falls
+# back to the local branch when there is no remote to fetch from (see `Broker._fork_base`).
+base_branch = "origin/main"
 
 # How `sb done "<summary>"` reaches the parent's mailbox. Readers strip it, so the prefix
 # stays an implementation detail of the mailbox rather than something everyone must know.
