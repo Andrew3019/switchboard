@@ -510,6 +510,16 @@ class CountersInsteadOfEvents(PanelTest):
         self.assertIn("no collector", panel.doctor_line(self.paths))
         self.assertFalse(panel.doctor_dict(self.paths)["up"])
 
+    def test_doctor_creates_nothing_by_asking(self):
+        """A diagnostic that conjures a `panel/` directory and a lock file in a repo where
+        no panel has ever run is reporting on a state it just invented — the same
+        objection `store._connect_readonly` makes about a reader creating an empty store.
+        Caught for real: `sb doctor` left a `collector.lock` in this repo."""
+        panel.doctor_line(self.paths)
+        panel.doctor_dict(self.paths)
+        panel.collector_running(self.paths)
+        self.assertFalse(self.paths.dir.exists(), "doctor created the panel directory")
+
 
 # ---------------------------------------------------------------------------
 

@@ -379,12 +379,29 @@ def release(fd: Optional[int]) -> None:
 
 
 def collector_running(paths: Paths) -> bool:
-    """Is anyone holding the lock? Asked by taking it and giving it straight back."""
-    fd = acquire(paths)
-    if fd is None:
+    """Is anyone holding the lock? Asked by taking it and giving it straight back.
+
+    Creates nothing. That matters because `sb doctor` asks this, and a diagnostic that
+    conjures a `panel/` directory and a lock file in a repo where no panel has ever run
+    would be reporting on a state it had just invented — the same objection
+    `store._connect_readonly` makes about a reader creating an empty store. A lock file
+    that is not there is proof enough that nobody holds it.
+    """
+    if not paths.lock.exists():
+        return False
+    try:
+        fd = os.open(str(paths.lock), os.O_WRONLY)        # no O_CREAT
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:                                       # somebody is collecting
         return True
-    release(fd)
-    return False
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def want(paths: Paths) -> None:
