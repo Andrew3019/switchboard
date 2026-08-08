@@ -27,7 +27,7 @@ import json
 import os
 import sqlite3
 import sys
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from . import config
 from . import models as models_mod
@@ -592,18 +592,29 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         schema = "".join(f"\n       PENDING REBUILD — {d}" for d in deficit)
         if schema:
             schema += ("\n       (a fleet is live; it rebuilds when the last one finishes)")
+        # Level 3: `doctor` imports every plugin, which is exactly what it is for. Wrapped
+        # per plugin by `load_all`, so the one that will not import is a row here rather
+        # than a traceback instead of the report.
+        pl = _doctor_plugins(b.repo)
         try:
             h.check()
-            _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}",
-                  {"ok": not deficit, "schema_deficit": deficit})
+            _emit(args, f"herdr {h.version()} ok\nstore  {store.db_path()}{schema}"
+                        f"{pl.text}",
+                  {"ok": not deficit and not pl.problems, "schema_deficit": deficit,
+                   **pl.data})
         except HerdrError as e:
-            _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}",
-                  {"ok": False, "code": e.code, "schema_deficit": deficit})
+            _emit(args, f"PROBLEM [{e.code}]\n  {e.message}{schema}{pl.text}",
+                  {"ok": False, "code": e.code, "schema_deficit": deficit, **pl.data})
             return 1
         # Non-zero for a pending rebuild, so the exit code and the `ok` field cannot
         # disagree. Nothing is broken — but `doctor` is the verb whose whole job is to
         # say so out loud, and a script checking it should see the difference.
-        return 1 if deficit else 0
+        #
+        # Plugin PROBLEMS join it; plugin NOTICES do not. An orphaned state directory is
+        # permanent by design — nothing ever deletes it and the human may well be keeping
+        # it — so letting one hold `sb doctor` at non-zero forever would train everybody to
+        # stop reading the exit code, which is the only thing it is for.
+        return 1 if (deficit or pl.problems) else 0
 
     if cmd == "init":
         p = b.init()
@@ -842,6 +853,60 @@ def _plugin_list(args, b: Broker) -> int:
           {"plugins": [p.as_dict() for p in rows],
            "enabled": list(plugins_mod.enabled(b.repo))})
     return 0
+
+
+class _PluginReport(NamedTuple):
+    """What `sb doctor` has to say about plugins: what is wrong, and what is merely so."""
+
+    problems: list[str]
+    notices: list[str]
+    data: dict
+
+    @property
+    def text(self) -> str:
+        return "".join(f"\n  {'PROBLEM' if kind else 'note'}  {line}"
+                       for kind, group in ((1, self.problems), (0, self.notices))
+                       for line in group)
+
+
+def _doctor_plugins(repo) -> _PluginReport:
+    """The four plugin questions `doctor` answers, and which of them are problems.
+
+    **Problems** — a plugin that will not import, and one targeting an API this sb does not
+    support. Both mean a command an agent may have been told to run does not exist, and
+    incompatibility in particular is not caught at spawn time by design (§11 item 4): the
+    fragment is injected anyway, because `delegate` never imports, so this is the only place
+    the mismatch is visible before an agent trips over it.
+
+    **Notices** — an orphaned state directory (§5.6), a plugin sb is importing out of the
+    repo rather than out of `defaults/`, and the pre-rename spellings of §8.2. None of these
+    is broken; all three are things a person should know and cannot otherwise see.
+
+    The repo-sourced note is visibility, not a gate. There is no trust prompt and no content
+    pinning, because the party who can write `.switchboard/plugins/` can already run code on
+    this machine through `conftest.py`, a `Makefile`, or a git hook. What `doctor` adds is
+    that you find out sb is importing it.
+    """
+    problems, notices = [], []
+    rows = plugins_mod.load_all(repo)
+    for p in rows:
+        if p.status in ("broken", "incompatible"):
+            problems.append(f"plugin '{p.name}' {p.status}: {p.error}")
+        elif p.source == "repo":
+            notices.append(f"plugin '{p.name}' is loaded from {_plugin_dir_help()}, "
+                           f"not from defaults/ — sb imports it as-is")
+    orphans = plugins_mod.orphans(repo)
+    for o in orphans:
+        notices.append(f"orphaned plugin state: {o.path}/  (no such plugin; "
+                       f"rm -rf to discard)")
+    deprecated = presets_mod.deprecations(repo)
+    notices.extend(deprecated)
+    return _PluginReport(problems, notices, {
+        "plugins": [p.as_dict() for p in rows],
+        "plugin_problems": problems,
+        "orphaned_state": [o.as_dict() for o in orphans],
+        "deprecations": deprecated,
+    })
 
 
 def _plugin_dir_help() -> str:

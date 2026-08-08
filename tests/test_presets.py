@@ -12,6 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from switchboard import presets  # noqa: E402
 
 
+def shipped_all() -> list[str]:
+    """What `defaults/presets.toml` binds to every agent, read rather than repeated.
+
+    Since §7.4 that list is not empty, and these tests are about the LAYERING — a repo
+    appends to the shipped baseline and no caller can drop it — not about which fragments
+    happen to be in the baseline this release. Reading it keeps every one of them from
+    failing the next time a plugin is bound or unbound in `defaults/`. That the shipped
+    entries are the *right* ones is `test_plugins.ShippedPluginTest`'s job.
+    """
+    return list(presets.bindings(Path("/nonexistent-repo"))[0])
+
+
 class PresetTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -97,32 +109,40 @@ class BindingTest(unittest.TestCase):
     def write(self, toml):
         (self.repo / ".switchboard" / "presets.toml").write_text(toml)
 
-    def test_no_file_means_no_bindings(self):
-        self.assertEqual(presets.for_role(self.repo, "worker"), [])
+    def test_no_file_means_only_the_shipped_bindings(self):
+        self.assertEqual(presets.for_role(self.repo, "worker"), shipped_all())
 
     def test_all_applies_to_every_role(self):
         self.write('all = ["own-files"]\n')
-        self.assertEqual(presets.for_role(self.repo, "anything"), ["own-files"])
+        self.assertEqual(presets.for_role(self.repo, "anything"),
+                         [*shipped_all(), "own-files"])
 
     def test_role_bindings_append_to_all(self):
         self.write('all = ["own-files"]\n\n[roles]\nreviewer = ["adversarial"]\n')
         self.assertEqual(presets.for_role(self.repo, "reviewer"),
-                         ["own-files", "adversarial"])
-        self.assertEqual(presets.for_role(self.repo, "worker"), ["own-files"])
+                         [*shipped_all(), "own-files", "adversarial"])
+        self.assertEqual(presets.for_role(self.repo, "worker"),
+                         [*shipped_all(), "own-files"])
 
     def test_caller_extras_append_last(self):
         self.write('all = ["own-files"]\n')
         self.assertEqual(presets.for_role(self.repo, "worker", ["evidence"]),
-                         ["own-files", "evidence"])
+                         [*shipped_all(), "own-files", "evidence"])
 
     def test_a_caller_cannot_drop_a_repo_default(self):
         """`all` is what the repo decided every agent gets; --with adds, never replaces."""
         self.write('all = ["own-files"]\n')
-        self.assertIn("own-files", presets.for_role(self.repo, "worker", ["own-files"]))
-        self.assertEqual(presets.for_role(self.repo, "worker", ["own-files"]), ["own-files"])
+        self.assertEqual(presets.for_role(self.repo, "worker", ["own-files"]),
+                         [*shipped_all(), "own-files"])
+
+    def test_a_caller_cannot_drop_a_shipped_binding_either(self):
+        """The shipped layer is the same rule one layer further out, and since §7.4 it is
+        the layer with something in it — so this is now testable rather than vacuous."""
+        self.write('all = ["!reset", "own-files"]\n')
+        self.assertEqual(presets.for_role(self.repo, "worker"), ["own-files"])
 
     def test_duplicates_are_collapsed(self):
-        self.write('all = ["a"]\n\n[roles]\nr = ["a", "b"]\n')
+        self.write('all = ["!reset", "a"]\n\n[roles]\nr = ["a", "b"]\n')
         self.assertEqual(presets.for_role(self.repo, "r", ["b"]), ["a", "b"])
 
 
@@ -149,7 +169,8 @@ class PreRenameSpellingTest(unittest.TestCase):
 
     def test_an_unmoved_bindings_file_is_still_read(self):
         (self.repo / ".switchboard" / "plugins.toml").write_text('all = ["own-files"]\n')
-        self.assertEqual(presets.for_role(self.repo, "worker"), ["own-files"])
+        self.assertEqual(presets.for_role(self.repo, "worker"),
+                         [*shipped_all(), "own-files"])
 
     def test_the_new_spelling_wins_outright(self):
         """Not merged. A repo that has moved must not keep dragging the old directory
@@ -164,7 +185,7 @@ class PreRenameSpellingTest(unittest.TestCase):
 
     def test_the_new_bindings_file_wins_outright(self):
         (self.repo / ".switchboard" / "plugins.toml").write_text('all = ["old"]\n')
-        (self.repo / ".switchboard" / "presets.toml").write_text('all = ["new"]\n')
+        (self.repo / ".switchboard" / "presets.toml").write_text('all = ["!reset", "new"]\n')
         self.assertEqual(presets.for_role(self.repo, "worker"), ["new"])
 
 

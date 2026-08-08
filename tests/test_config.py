@@ -156,7 +156,12 @@ class ShippedDefaultsTest(_Layered):
         bare.mkdir()
         self.assertTrue(config.roles(bare))
         self.assertTrue(config.protocol(bare))
-        self.assertEqual(config.preset_bindings(bare), ((), {}))
+        every, per_role = config.preset_bindings(bare)
+        # Shipped bindings are no longer empty (§7.4), and what is in them is not this
+        # test's business — what is, is that a repo with no config of its own gets exactly
+        # what `defaults/presets.toml` says and nothing invented on the way.
+        self.assertEqual(every, tuple(config.read_toml(SHIPPED / "presets.toml")["all"]))
+        self.assertEqual(per_role, {})
 
     def test_roles_come_from_markdown_files_not_a_python_dict(self):
         names = {f.stem for f in (SHIPPED / "roles").glob("*.md")}

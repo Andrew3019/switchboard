@@ -119,7 +119,18 @@ def register(reg):
 
 
 class Sandbox(unittest.TestCase):
-    """A throwaway repo with its own copy of `defaults/`, so shipping a plugin is a write."""
+    """A throwaway repo with its own copy of `defaults/`, so shipping a plugin is a write.
+
+    The sandbox ships **no plugins and no bindings** unless a subclass sets `SHIPPED`.
+    These tests are about the loader, the sigil and the CLI — not about what switchboard
+    happens to ship this release — and since §7.4 flipped `todo` and `report-bug` to
+    enabled-and-bound, every assertion of the form "and nothing else" would otherwise be a
+    silent assertion about those two. `ShippedPluginTest` is where the shipped defaults are
+    checked, deliberately in one place, so that binding a third plugin someday breaks one
+    test class rather than twenty tests.
+    """
+
+    SHIPPED = False
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -128,6 +139,8 @@ class Sandbox(unittest.TestCase):
 
         self.defaults = root / "defaults"
         shutil.copytree(Path(__file__).resolve().parent.parent / "defaults", self.defaults)
+        if not self.SHIPPED:
+            self._unship()
         old = os.environ.get(config.ENV_DEFAULTS)
         os.environ[config.ENV_DEFAULTS] = str(self.defaults)
         self.addCleanup(lambda: os.environ.pop(config.ENV_DEFAULTS)
@@ -143,6 +156,12 @@ class Sandbox(unittest.TestCase):
         self.sw.mkdir()
 
         self.addCleanup(self._forget_plugin_modules)
+
+    def _unship(self) -> None:
+        """Empty this sandbox's `defaults/` of plugins, enablement and bindings."""
+        shutil.rmtree(self.defaults / "plugins", ignore_errors=True)
+        (self.defaults / "plugins.toml").write_text("enabled = []\n")
+        (self.defaults / "presets.toml").write_text("all = []\n\n[roles]\n")
 
     @staticmethod
     def _forget_plugin_modules() -> None:

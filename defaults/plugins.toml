@@ -23,6 +23,19 @@
 #
 #     enabled = ["!reset"]
 #
-# Shipped empty because switchboard ships no plugins yet. `todo` and `report-bug` arrive
-# with the machinery that runs them, not before it.
-enabled = []
+# Both shipped plugins ship ON, and both are bound in presets.toml as well.
+#
+# This is the single-user assumption cashed in directly. An off-by-default plugin that its
+# only user turns on in every repo he touches is a line of ceremony, not a guarantee — the
+# hazard default-off protects against ("a repo you cloned decides what goes under your
+# .git") needs somebody else's repo to exist first. When plugin code starts arriving from
+# somewhere other than this directory, or a second person installs one, flip these two
+# lines back; the three states stay separately settable precisely so that is two lines and
+# not a redesign.
+#
+# The cost, stated rather than discovered: any repo where `sb plugin todo` is run grows
+# `<shared .git>/agentflow/plugins/todo/`, and every spawn everywhere carries both
+# fragments. `enabled = ["!reset"]` here turns the commands off; `all = ["!reset"]` in a
+# repo's presets.toml keeps the commands and stops the per-spawn tax. They are different
+# levers because they are different costs.
+enabled = ["todo", "report-bug"]

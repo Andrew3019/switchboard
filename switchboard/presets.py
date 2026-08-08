@@ -234,3 +234,80 @@ def _unresolved(repo: Path, name: str) -> str:
 def _report(on_event: Optional[Callable[..., None]], **payload: Any) -> None:
     if on_event is not None:
         on_event(**payload)
+
+
+# -- the transition, reported rather than enforced (§8.2) ----------------------
+
+
+def deprecations(repo: Path) -> list[str]:
+    """Pre-rename spellings still on disk, each with the exact command that moves it.
+
+    There is no flag day. `.switchboard/plugins/` holding `*.md` and `.switchboard/plugins.toml`
+    holding `all`/`[roles]` both still work — a preset is a FILE and a plugin is a DIRECTORY
+    with an `__init__.py`, and the two TOML vocabularies are disjoint, so nothing has to
+    guess. What is missing without this is any signal that a repo is on the old spelling at
+    all, and the whole job of `sb doctor` is to say so out loud before the fallback is
+    someday retired.
+
+    Notices, not problems: nothing here is broken and none of it changes the exit code. The
+    `git mv` is exact so the fix is a paste, not a puzzle.
+    """
+    out: list[str] = []
+    d = config.repo_dir(repo)
+    if d is None:
+        return out
+
+    old_dir = config.path_for("plugins_dir", repo)
+    new_dir = config.path_for("presets_dir", repo)
+    stale = sorted(p for p in old_dir.glob("*.md")) if old_dir and old_dir.is_dir() else []
+    for p in stale:
+        note = (f"preset in the pre-rename directory: {_rel(p, repo)}\n"
+                f"       git mv {_rel(p, repo)} {_rel(new_dir / p.name, repo)}")
+        # Only when the new directory is genuinely absent is the old one still read
+        # (`config.path_for_legacy`). Once it exists, the old one is dead weight that looks
+        # live — a strictly worse state than being on the old spelling, and the one worth
+        # shouting about.
+        if new_dir is not None and new_dir.is_dir():
+            note += (f"\n       (ignored — {_rel(new_dir, repo)}/ exists, so nothing "
+                     f"reads this file)")
+        out.append(note)
+
+    old_file = config.path_for("plugins_file", repo)
+    new_file = config.path_for("presets_file", repo)
+    if old_file is not None and old_file.is_file():
+        data = config.read_toml(old_file)
+        binds = [k for k in ("all", "roles") if k in data]
+        if binds:
+            what = " and ".join(f"`{k}`" for k in binds)
+            if "enabled" in data:
+                # Both meanings in one file. It parses correctly — the keys are disjoint —
+                # but `git mv` would carry the enablement away with the bindings, so the
+                # fix is a split and saying "mv" here would be wrong.
+                out.append(
+                    f"{_rel(old_file, repo)} holds both meanings: {what} are preset "
+                    f"bindings, `enabled` is plugin enablement\n"
+                    f"       move {what} into {_rel(new_file, repo)} and leave "
+                    f"`enabled` where it is")
+            elif new_file is not None and new_file.is_file():
+                out.append(
+                    f"preset bindings in {_rel(old_file, repo)} are ignored — "
+                    f"{_rel(new_file, repo)} exists and wins\n"
+                    f"       merge {what} into {_rel(new_file, repo)} and delete the old file")
+            else:
+                out.append(
+                    f"preset bindings in the pre-rename file: {_rel(old_file, repo)}\n"
+                    f"       git mv {_rel(old_file, repo)} {_rel(new_file, repo)}")
+    return out
+
+
+def _rel(p: Path, repo: Path) -> str:
+    """Relative to the worktree when it can be, so the `git mv` is runnable where you are.
+
+    Deliberately not resolved: `.switchboard/` is frequently a symlink into the main
+    checkout, and resolving it would take the path outside the worktree and turn a runnable
+    `git mv` into an absolute one that git may refuse.
+    """
+    try:
+        return str(Path(p).relative_to(Path(repo)))
+    except ValueError:
+        return str(p)

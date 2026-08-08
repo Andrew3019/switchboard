@@ -586,27 +586,70 @@ def did_you_mean(word: str, known: Sequence[str]) -> str:
 # -- state (level 4) -----------------------------------------------------------
 
 
-def state_dir(p: Loaded, worktree: Optional[Path] = None, *, create: bool = True) -> Path:
-    """Where this plugin's data lives. sb creates the path and **never reads inside it**.
+def state_root(scope: str, worktree: Optional[Path] = None) -> Path:
+    """The directory every plugin of one scope keeps its own directory inside.
 
     Two scopes. `repo` is keyed on the shared `.git`, which is byte-identical from the main
     checkout and every worktree — three working trees, one identity, one todo list, with no
     new mechanism and no id to generate or collide. `user` is per machine, for a plugin
     whose data is a fact about the tool rather than about whichever repo you were standing
     in when you produced it.
+    """
+    root = (Path(config.setting("paths.user_state", repo=worktree)).expanduser()
+            if scope == "user" else store.store_dir(worktree))
+    return root / _STATE_SUBDIR
+
+
+def state_dir(p: Loaded, worktree: Optional[Path] = None, *, create: bool = True) -> Path:
+    """Where this plugin's data lives. sb creates the path and **never reads inside it**.
 
     Nothing goes in `state.db`. A plugin's table is the one shape of schema change that
     cannot be migrated in place, and the store's answer to it is to drop `agents`,
     `messages` and `events`. A todo list must not be able to do that to the agent tree.
     """
-    if p.scope == "user":
-        root = Path(config.setting("paths.user_state", repo=worktree)).expanduser()
-    else:
-        root = store.store_dir(worktree)
-    d = root / _STATE_SUBDIR / p.name
+    d = state_root(p.scope, worktree) / p.name
     if create:
         d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+@dataclass(frozen=True)
+class Orphan:
+    """A state directory whose plugin is no longer here."""
+
+    name: str
+    scope: str
+    path: Path
+
+    def as_dict(self) -> dict:
+        return {"name": self.name, "scope": self.scope, "path": str(self.path)}
+
+
+def orphans(repo: Optional[Path] = None) -> list[Orphan]:
+    """State directories with no plugin left to own them. Reported, never deleted.
+
+    Removing a plugin — including by a `git pull` dropping a directory out of `defaults/`
+    — must not delete data the user put there, so nothing here unlinks anything. `sb doctor`
+    prints the `rm -rf` and the human runs it or does not. `rm` is the only reset, and it is
+    always theirs.
+
+    Keyed on *available*, not on *enabled*: disabling a plugin leaves its state intact and
+    re-enabling finds it, so a disabled plugin's directory is not an orphan and must not be
+    reported as one.
+
+    sb still never reads *inside* one of these. It reads the names of the directories, which
+    are sb's own — it made them — and stops there.
+    """
+    live = set(available(repo))
+    out: list[Orphan] = []
+    for scope in SCOPES:
+        root = state_root(scope, repo)
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if d.is_dir() and d.name not in live:
+                out.append(Orphan(name=d.name, scope=scope, path=d))
+    return out
 
 
 @contextlib.contextmanager
