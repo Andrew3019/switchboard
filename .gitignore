@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local, per-machine switchboard config. `defaults/` ships the baseline; anything here is
+# this checkout's own override and is deliberately not shared. Worktrees get symlinks to
+# the main checkout's copy rather than their own.
+/.switchboard/
+/CLAUDE.md
+
+# Claude Code's per-machine permission grants
+/.claude/
+
+# Scratch
+*.tmp
+.DS_Store

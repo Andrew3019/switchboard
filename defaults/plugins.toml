@@ -1,0 +1,33 @@
+# Which prompt plugins apply where.
+#
+# A plugin is one markdown file in `<repo>/.switchboard/plugins/<name>.md`, flattened to a
+# single line and appended to a spawn's system prompt. This file says which of them a role
+# gets automatically; `sb delegate --with <name>` adds more per call.
+#
+# Layered, most general first, each layer APPENDING:
+#
+#     defaults/plugins.toml  ->  <repo>/.switchboard/plugins.toml  ->  --with
+#
+# Appending, not replacing. A repo adding one binding cannot silently drop a shipped one,
+# and a caller cannot drop what the repo decided every agent gets. To start from nothing
+# anyway, make `"!reset"` the first element of the list:
+#
+#     all = ["!reset", "own-files"]
+#
+# Kept out of roles.toml deliberately: a role is what an agent IS (its tier, its
+# disposition, its own prompt), a plugin is behaviour injected into it. Mixing the two made
+# "add a plugin" look like "redefine the role".
+#
+# Plugin FILES are not layered — only these bindings are. The protocol is what every agent
+# needs; a plugin is what some agents need, and what switchboard's own agents need has no
+# bearing on yours.
+
+# Applied to every agent, whatever its role. Shipped empty, and it should stay that way
+# unless something is genuinely universal: this is paid on every single spawn, and the
+# context tax is the one cost switchboard cannot amortise. A repo that wants a baseline
+# says so in its own file — switchboard's does.
+all = []
+
+# Per-role additions, appended to `all`. Also shipped empty: which behaviours a role needs
+# is a property of the work a repo does, not of switchboard.
+[roles]

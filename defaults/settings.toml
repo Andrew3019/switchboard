@@ -1,0 +1,260 @@
+# Everything else that is configuration rather than code: where files live, what things are
+# called, how big they may get, how long we wait, and how often we retry.
+#
+# A repo overrides any of it in `<repo>/.switchboard/settings.toml`, one key at a time —
+# tables merge, so setting `[limits] text` leaves every other limit alone. Arrays JOIN
+# rather than replace; put `"!reset"` first to replace instead.
+#
+# One exception: `[paths] repo_dir` is read from THIS file only. It is the name of the
+# directory the repo's own settings are read from, so a repo cannot use it to move itself.
+
+
+[paths]
+# The repo's own configuration layer, relative to the repo root.
+repo_dir = ".switchboard"
+
+# Within it. Roles may be a single TOML file, a directory of markdown files, or both —
+# roles.toml first, then roles/, so the more specific form wins field by field.
+roles_file    = "roles.toml"
+roles_dir     = "roles"
+models_file   = "models.toml"
+plugins_file  = "plugins.toml"
+plugins_dir   = "plugins"
+protocol_file = "protocol.md"
+prompts_file  = "prompts.toml"
+settings_file = "settings.toml"
+
+# Per-user, between the shipped tiers and the repo's. Tiers only: this is where you say
+# what `strong` means on YOUR machine, and it is not shared with anyone.
+# SWITCHBOARD_MODELS_CONFIG overrides it.
+global_models = "~/.config/switchboard/models.toml"
+
+# The store lives under the repo's shared `.git`, which every worktree already sees — this
+# is the directory name inside it. Required, not a convenience: a top-level orchestrator on
+# the main checkout and its children in worktrees must share one store or parent links do
+# not survive.
+store_dirname = "agentflow"
+
+# Config that must follow work into a worktree, symlinked from the main checkout. Local
+# setup, not source, so it is never committed — there is exactly one true copy and no
+# per-worktree `sb init`.
+linked_config = ["CLAUDE.md", ".switchboard"]
+
+
+[vocabulary]
+# Names, not behaviour. Every one of these used to be a string literal in Python.
+
+# The two addresses that are not agents. `parent` is an ordinary target; `human` is not a
+# target at all — a person has no mailbox, so `sb tell human` and `sb ask human` are both
+# refused and point at `sb block`. The name is still needed to recognise those cases.
+human  = "human"
+parent = "parent"
+
+# The role `sb start` spawns. There is exactly ONE orchestrator role: the top-level agent,
+# a workspace lead, and a sub-orchestrator spawned by another orchestrator are all the same
+# thing at different scopes, and scope is told to them at spawn. Two roles meant two prompts
+# to keep in sync, and they drifted.
+main_role = "orchestrator"
+
+# The default NAME of the agent `sb start` spawns — separate from its role, so that
+# `sb start` with no arguments lands you somewhere obvious.
+main_name = "main"
+
+# What `sb delegate` uses when no `--role` is given.
+default_role = "worker"
+
+# What an UNDEFINED role inherits — its fields, never its name. `--role archaeologist`
+# works with nobody having defined an archaeologist; it just behaves like this one.
+fallback_role = "worker"
+
+# The lead agent `sb workspace new` puts in a workspace — the same role as everything else
+# that orchestrates.
+workspace_role = "orchestrator"
+
+# What a role file gets for a field it does not set. Every shipped role sets both, so these
+# only ever apply to a role somebody wrote in three lines — which is exactly the case that
+# should not have to know what a tier is called.
+default_tier    = "default"
+default_cleanup = "close"
+
+# Appended to a workspace's slug to name its lead. Slug + this must still fit the 32
+# characters herdr allows in an agent name, which is why the slug is truncated first.
+lead_suffix = "-lead"
+
+# What a new worktree is forked from when `--base` is not given.
+base_branch = "main"
+
+# How `sb done "<summary>"` reaches the parent's mailbox. Readers strip it, so the prefix
+# stays an implementation detail of the mailbox rather than something everyone must know.
+done_prefix = "[done] "
+
+# There is deliberately no `blocked_prefix`. A block is not mail: the human has no mailbox,
+# so `sb block` records the reason against the agent and it reaches you through
+# `sb status --needs-me`, which needs no marker to tell it apart from anything else.
+
+
+[states]
+# Groupings of the store's states. The state names themselves are the store's schema; which
+# of them count as what is policy, and policy belongs here.
+
+# Still going, and therefore contradictable by what herdr says the pane is doing.
+running = ["working"]
+
+# Will never move again. Waiting on one of these is waiting forever.
+finished = ["done", "failed"]
+
+# Counts as "an agent is live", which is what makes the store refuse to drop and recreate
+# itself on a schema change.
+live = ["working", "blocked"]
+
+# herdr's `done` is a display state meaning "idle and not looked at yet". For drift it
+# means exactly what idle means: no turn is running. Treating it as its own thing is how a
+# stalled agent gets missed.
+idle_like = ["idle", "done"]
+
+# What `sb wait --for` accepts. The first four are store states; `idle` is the honest name
+# for "its turn ended", however it ended — the one a stalled agent still reaches.
+wait = ["done", "failed", "blocked", "working", "idle"]
+
+
+[limits]
+# Caps, in characters. None of these is a buffer limit; they are smell detectors.
+
+# herdr's rule, not ours: an agent name must match [a-z][a-z0-9_-]{0,31}.
+agent_name = 32
+
+# A task, a message, a question, a summary. The protocol says pass file paths and never
+# file contents, so anything longer than about a page and a half is a payload that should
+# have been a file. It also stops a runaway agent pasting a transcript into a mailbox.
+text = 4000
+
+# Authored prompt text (`--as`, and plugin files after flattening). Config rather than
+# traffic, so it gets more room — a plugin is allowed to be a substantial briefing.
+prompt = 8000
+
+# A workspace name is used verbatim as a git branch name. Refs have no real length limit,
+# but a path built from one does, and nothing legitimate comes close.
+ref = 200
+
+# `--model` and friends: an identifier, not prose.
+token = 64
+
+# A task line in `sb status`. Long enough to say what an agent is doing, short enough not
+# to wrap a terminal.
+task_clip = 96
+
+# One transcript entry becomes one line in `sb inspect`, clipped rather than wrapped: a
+# 200-line tool result would push the actual failure off the top of the window.
+output_clip = 400
+
+# A desktop notification. Anything past this is truncated by the OS anyway.
+notify_clip = 120
+
+# How much of a summary or a reason is copied into the event log.
+event_clip = 200
+
+# How much of a herdr call's stdout/stderr is copied into the event log. Bigger than
+# event_clip because this is what a spawn failure is diagnosed from.
+herdr_log_clip = 500
+
+
+[timeouts]
+# Seconds, unless the name says _ms.
+
+# `sb ask` — the only blocking verb. Fifteen minutes: long enough for a human to come back
+# from lunch, short enough that a forgotten ask does not hold a pane all day.
+ask = 900
+
+# How often a blocked `ask` re-reads the store for its answer. Cheap (one indexed query),
+# so this is about latency, not load.
+ask_poll = 2.0
+# How long a target must stay absent from herdr before `ask` gives up on it. A single
+# missing reading is indistinguishable from a hiccup; a minute of them is a death.
+gone_grace = 60.0
+
+# `sb wait`, which is for humans and shell scripts.
+wait = 900
+
+# A ceiling on ONE server-side block inside `sb wait`, not a poll interval. herdr can drop
+# a state report silently — a stale seq or a session-owner conflict both return ok — and
+# then no change is ever announced for a `done` that really happened. This bounds what that
+# costs without turning a blocking wait into a busy one.
+wait_slice_ms = 30000
+
+# How long `sb interrupt` lets the escape keypress land before sending the new instruction.
+# Without the pause the interrupt races the cancel and can be swallowed by the turn it was
+# meant to stop.
+interrupt_settle = 0.5
+
+# sqlite. Many short-lived `sb` processes write to one file, so a busy database is normal
+# and waiting is the right response to it.
+database = 10.0
+
+# Any `git` or `herdr` call made outside the adapter. Bounded so a hung binary cannot wedge
+# an `sb` invocation.
+subprocess = 10
+
+# `agent start`. Generous: spawning a Claude Code session in a fresh pane is slow.
+spawn_ms = 90000
+
+# `agent wait`, the adapter's own ceiling.
+agent_wait_ms = 300000
+
+# How long the adapter pauses before re-issuing an `agent wait` that came straight back
+# without the agent having moved. herdr returns instantly when the agent is ALREADY in the
+# state asked for, so the stale-seq guard would otherwise re-ask as fast as two subprocesses
+# will spawn — measured at 77% of a core for a six-second wait.
+agent_wait_backoff = 0.5
+
+
+[retries]
+# Spawn is genuinely flaky — `agent start` fails outright if the pane has not yet reached
+# an interactive shell prompt — and a silent failure there is what makes an orchestrator
+# quietly do its child's work instead.
+spawn_attempts = 3
+
+# Linear backoff: attempt N sleeps N * this. Three attempts is 2s + 4s at worst.
+spawn_backoff = 2
+
+
+[display]
+# Defaults for the readouts. All of them are overridable per invocation by a flag.
+
+# Lines of terminal output `sb inspect` shows.
+output_lines = 40
+
+# Recent events `sb inspect` includes.
+events = 12
+
+# Rows `sb log` prints.
+log_events = 30
+
+# A transcript record can render to zero lines (thinking, meta), so the reader walks back
+# this many times further than asked and trims afterwards.
+record_overscan = 6
+
+# `sb board`: how often the tree is re-collected, in seconds.
+board_refresh = 2.0
+
+# Board rows that are not agents — header, blank, blank, status.
+board_chrome = 4
+
+
+[herdr]
+# Facts about the adapter's counterpart. Not preferences — changing one of these is
+# claiming something about the binary on your PATH.
+
+# Behaviour was verified against this. Older binaries are refused by `sb doctor` rather
+# than allowed to fail later in ways that name neither cause nor fix.
+min_version = "0.8.0"
+
+# One source id, forever. Authority in herdr is per-source and NOT exclusive, so two ids in
+# our own code would silently fight each other.
+source = "switchboard"
+
+# What kind of agent herdr starts.
+agent_kind = "claude"
+
+# The provider CLI's default is manual, under which every agent stalls on its first tool
+# call waiting for a human who is not watching.
+permission_mode = "auto"

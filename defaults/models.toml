@@ -1,0 +1,73 @@
+# What a model TIER means. The only file in the tree where a model name appears.
+#
+# A tier is a human-readable name — `cheap`, `default`, `strong`, or anything you invent —
+# that maps to a provider, a model and an effort level. Roles and commands name tiers only;
+# nothing outside models.py ever learns what one resolves to. The set is open vocabulary,
+# so inventing a tier is editing a file, not editing code.
+#
+# Layered, most general first, each level overriding the last PER TIER:
+#
+#     defaults/models.toml  ->  ~/.config/switchboard/models.toml  ->  <repo>/.switchboard/models.toml
+#
+# Per-tier means overriding one field of `strong` leaves its provider and model alone.
+# `sb models` prints the resolved table.
+
+[defaults]
+# Used by tiers that omit `provider`, and by the passthrough escape hatch: an unknown tier
+# name is handed to this provider verbatim as a model id, so you can pin a specific model
+# without inventing a tier for it.
+provider = "claude"
+
+
+# -- the shipped tiers ---------------------------------------------------------
+#
+# Small on purpose: this only has to be good enough that switchboard works with no config
+# file at all.
+#
+# ALIASES, never pinned ids. `claude --help` documents --model as taking "an alias for the
+# latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
+# follows the current model of its class and keeps working as models churn; a pinned id
+# fails outright the day it is retired or your plan loses access to it.
+
+# No tier uses haiku. `--permission-mode auto` is MODEL-DEPENDENT: it runs a classifier
+# that decides what still needs approval, and haiku's is far more conservative. Verified
+# with the identical command under the identical flag — haiku blocked on a permission
+# prompt ("Multiple directory changes in one command require approval for clarity") while
+# opus ran it. An agent that stops for a human on ordinary shell commands is not cheap,
+# it is unusable unattended. Cheapness comes from effort, not from a smaller model.
+[tiers.cheap]
+provider = "claude"
+model    = "sonnet"
+effort   = "low"
+
+[tiers.default]
+# No model and no effort: whatever the provider CLI itself defaults to. Deliberately not a
+# pinned choice — the CLI's own default is the best-maintained answer to that question.
+provider = "claude"
+
+[tiers.standard]
+# The older name for `default`. Still honoured so config written against it keeps working.
+provider = "claude"
+
+[tiers.strong]
+provider = "claude"
+model    = "opus"
+effort   = "high"
+
+
+# -- what the code can actually do ---------------------------------------------
+#
+# These two are facts about the backends switchboard has, not preferences, so a repo does
+# not get to override them: claiming an effort level the CLI rejects, or a provider with no
+# adapter behind it, would fail at spawn time instead of at resolution time — where the
+# message can still say what is wrong.
+
+[providers]
+# Only `claude` is wired. `provider` stays a real field so config written today remains
+# valid, but there is no codex backend yet.
+wired = ["claude"]
+
+# From `claude --help`: "--effort <level>  Effort level for the current session
+# (low, medium, high, xhigh, max)". A flag, not CLAUDE_EFFORT: an inherited env var would
+# silently give every child its parent's effort.
+effort_levels = ["low", "medium", "high", "xhigh", "max"]

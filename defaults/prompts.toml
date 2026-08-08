@@ -1,0 +1,56 @@
+# The prompt text that is not the protocol and not a role.
+#
+# Two kinds live here. The `[spawn]` fragments are appended to a new agent's system prompt,
+# after the protocol and before its role's own prompt. The `[notify]` lines are the
+# doorbell: what an agent is told when something is waiting for it in the store.
+#
+# All of it is flattened to one line before it is sent — herdr refuses any agent argument
+# containing a newline — so write these wrapped and readable.
+#
+# `{...}` placeholders are substituted at send time. Only the ones documented on each entry
+# exist; a placeholder nothing fills is a crash at spawn, so add fields to the code and the
+# text together.
+#
+# A repo overrides individual entries in `<repo>/.switchboard/prompts.toml`; unmentioned
+# entries keep their shipped text.
+
+[spawn]
+
+# Who this agent is. Every agent gets this one.
+#   {name}   the agent's own name        {role}   its role
+#   {parent} the agent that spawned it, or the human
+identity = "You are agent '{name}', role '{role}'. Your parent is '{parent}'."
+
+# Added only when the agent is being placed in a named workspace.
+#   {workspace} the workspace name       {path} the checkout it sits over
+workspace = """
+You are working in workspace '{workspace}' at {path}. Everything you and your children do
+belongs there. Other agents and the human may be in this same workspace at the same time —
+it is shared, so coordinate through `sb`, and never assume you are alone in it.
+"""
+
+# The first instruction a top-level orchestrator gets when `sb start` was given no task.
+# It must be an instruction to STOP, not to start: the human is about to type the real one.
+start_task = "Await my instructions."
+
+# The same, for the lead of a freshly opened workspace.
+workspace_task = "Await instructions for this workspace."
+
+
+[notify]
+
+# The doorbell carries no payload — the message itself is in the store, and telling an
+# agent to go and read it is what keeps a message off the wire and out of the pane.
+mail = "You have mail. Run: sb inbox"
+
+# A pending `ask` is worth distinguishing: somebody is BLOCKED on the answer.
+mail_question = "You have mail (a question). Run: sb inbox"
+
+# What restarts a parent whose turn ended while a child was working. Without this the
+# parent would have to poll, which costs it a turn every time it looks.
+child_done = "A child finished. Run: sb inbox"
+
+# `sb interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
+# running, so it has to say plainly that the previous instruction is void.
+#   {text} what the human typed
+interrupt = "[INTERRUPT — stop what you are doing] {text}"

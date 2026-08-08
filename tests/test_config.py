@@ -1,0 +1,466 @@
+"""The configuration layer: `defaults/` as the base, `.switchboard/` joined on top.
+
+Three things are worth testing here and they are not the same thing:
+
+  1. the MERGE RULES in isolation — tables merge, scalars replace, arrays join;
+  2. the LAYERING of each real file through those rules;
+  3. that nothing which is configuration has stayed behind in Python.
+
+The third is the one that rots. A role name, a model alias or a line of prompt text can be
+reintroduced into a .py file in one careless edit and nothing else will notice, so the
+source itself is asserted against.
+"""
+
+from __future__ import annotations
+
+import ast
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from switchboard import config  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+SHIPPED = REPO / "defaults"
+
+
+class MergeRuleTest(unittest.TestCase):
+    """Rules 1-3, on plain dicts. No files, no repo, nothing to set up."""
+
+    def test_tables_merge_key_by_key(self):
+        """Rule 1 — and the reason a repo can override one field of a role."""
+        got = config.merge({"a": {"x": 1, "y": 2}}, {"a": {"y": 3}})
+        self.assertEqual(got, {"a": {"x": 1, "y": 3}})
+
+    def test_merging_is_recursive(self):
+        got = config.merge({"a": {"b": {"c": 1, "d": 2}}}, {"a": {"b": {"d": 9}}})
+        self.assertEqual(got, {"a": {"b": {"c": 1, "d": 9}}})
+
+    def test_scalars_replace(self):
+        """Rule 2."""
+        self.assertEqual(config.merge({"n": 1, "s": "a"}, {"n": 2}), {"n": 2, "s": "a"})
+
+    def test_arrays_join_rather_than_replace(self):
+        """Rule 3, and the whole reason joining is the default: adding must not remove."""
+        self.assertEqual(config.merge({"all": ["a"]}, {"all": ["b"]})["all"], ["a", "b"])
+
+    def test_joined_arrays_keep_base_order_and_drop_duplicates(self):
+        self.assertEqual(config.join(["a", "b"], ["b", "c", "a"]), ["a", "b", "c"])
+
+    def test_reset_replaces_an_array_instead_of_joining_it(self):
+        """The escape hatch. Without it, 'exactly this' is unsayable once joining wins."""
+        self.assertEqual(config.join(["a", "b"], [config.RESET, "c"]), ["c"])
+
+    def test_reset_can_empty_an_array(self):
+        self.assertEqual(config.join(["a"], [config.RESET]), [])
+
+    def test_reset_anywhere_but_first_is_just_a_value(self):
+        """It is a sentinel, not a keyword: a lone 'do not do this' late in a list must not
+        silently discard everything before it."""
+        self.assertEqual(config.join(["a"], ["b", config.RESET]), ["a", "b", config.RESET])
+
+    def test_a_key_absent_from_the_override_is_untouched(self):
+        base = {"keep": {"deep": [1, 2]}}
+        self.assertEqual(config.merge(base, {"other": 1})["keep"], {"deep": [1, 2]})
+
+    def test_merge_does_not_mutate_either_side(self):
+        """The shipped tables are cached and merged into repeatedly; one mutation would
+        leak a repo's settings into every other repo in the process."""
+        base = {"a": {"l": [1]}}
+        config.merge(base, {"a": {"l": [2], "n": 3}})
+        self.assertEqual(base, {"a": {"l": [1]}})
+
+    def test_a_type_change_replaces(self):
+        """Not an error: a repo is allowed to decide a key means something else, and there
+        is no sane join of a list with a string."""
+        self.assertEqual(config.merge({"x": ["a"]}, {"x": "b"})["x"], "b")
+
+
+class FlattenTest(unittest.TestCase):
+    """Markdown on disk, one line on the wire — herdr refuses newlines in agent args."""
+
+    def test_html_comments_are_dropped_entirely(self):
+        """That is where the notes to whoever edits the file live. They must not be paid
+        for on every spawn."""
+        got = config.flatten("<!--\nnotes for humans\n-->\nthe actual text")
+        self.assertEqual(got, "the actual text")
+
+    def test_headings_are_dropped(self):
+        self.assertEqual(config.flatten("# title\nbody"), "body")
+
+    def test_bullets_become_separators(self):
+        self.assertIn("do this ; do that", config.flatten("- do this\n- do that"))
+
+    def test_result_never_contains_a_newline(self):
+        self.assertNotIn("\n", config.flatten("a\n\nb\n- c\n"))
+
+
+class FrontMatterTest(unittest.TestCase):
+    def test_toml_between_fences_is_parsed_and_the_rest_is_prose(self):
+        fields, body = config.front_matter('+++\nmodel = "cheap"\n+++\n\nbe brief\n')
+        self.assertEqual(fields, {"model": "cheap"})
+        self.assertEqual(body.strip(), "be brief")
+
+    def test_a_file_with_no_fence_is_all_prose(self):
+        """The shortest legal role: one line of prompt and no fields at all."""
+        self.assertEqual(config.front_matter("just a prompt"), ({}, "just a prompt"))
+
+    def test_an_unclosed_fence_is_an_error_rather_than_silently_all_prose(self):
+        with self.assertRaises(config.ConfigError):
+            config.front_matter('+++\nmodel = "cheap"\n\nbe brief\n')
+
+    def test_bad_toml_in_front_matter_names_itself(self):
+        with self.assertRaises(config.ConfigError):
+            config.front_matter("+++\nmodel = = =\n+++\nbody")
+
+
+class _Layered(unittest.TestCase):
+    """A temp repo with a `.switchboard/`, over the REAL shipped defaults."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.sb = self.repo / ".switchboard"
+        self.sb.mkdir()
+        # Otherwise a developer's own ~/.config/switchboard/models.toml decides what a tier
+        # means and this suite passes or fails per machine.
+        env = mock.patch.dict(
+            os.environ, {"SWITCHBOARD_MODELS_CONFIG": str(self.repo / "none.toml")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write(self, rel: str, text: str) -> Path:
+        p = self.sb / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        return p
+
+
+class ShippedDefaultsTest(_Layered):
+    """`defaults/` alone has to be a complete, working configuration."""
+
+    def test_the_defaults_directory_is_not_dot_prefixed(self):
+        """It is the reference copy — meant to be opened, read and copied from. A hidden
+        directory says 'internal', and this is the opposite of internal."""
+        self.assertTrue(SHIPPED.is_dir())
+        self.assertFalse(SHIPPED.name.startswith("."))
+
+    def test_everything_works_with_no_repo_layer_at_all(self):
+        bare = Path(self.tmp.name) / "bare"
+        bare.mkdir()
+        self.assertTrue(config.roles(bare))
+        self.assertTrue(config.protocol(bare))
+        self.assertEqual(config.plugin_bindings(bare), ((), {}))
+
+    def test_roles_come_from_markdown_files_not_a_python_dict(self):
+        names = {f.stem for f in (SHIPPED / "roles").glob("*.md")}
+        self.assertEqual(set(config.roles(None)), names)
+
+    def test_every_shipped_role_has_a_tier_a_disposition_and_a_prompt(self):
+        for name, r in config.roles(None).items():
+            with self.subTest(role=name):
+                self.assertTrue(r.get("model"), f"{name} names no tier")
+                self.assertTrue(r.get("cleanup"), f"{name} has no disposition")
+                self.assertTrue(r.get("prompt"), f"{name} has no prompt")
+
+    def test_the_roles_named_in_settings_all_exist(self):
+        """`sb delegate` with no --role, an undefined role, `sb start` and
+        `sb workspace new` each name a role in settings.toml. A typo in one of those is a
+        role that silently resolves to nothing."""
+        roles = config.roles(None)
+        for key in ("default_role", "fallback_role", "main_role", "workspace_role"):
+            with self.subTest(key=key):
+                self.assertIn(config.setting(f"vocabulary.{key}"), roles)
+
+    def test_the_protocol_is_a_single_line_and_names_the_verbs(self):
+        line = config.protocol(None)
+        self.assertNotIn("\n", line)
+        for verb in ("sb inbox", "sb tell", "sb ask", "sb done", "sb delegate", "sb status"):
+            self.assertIn(verb, line)
+
+    def test_the_protocols_editing_notes_do_not_reach_the_agent(self):
+        """They are in an HTML comment precisely so they are free. If they start being sent
+        the protocol has silently tripled in size on every spawn, forever."""
+        self.assertNotIn("Notes for whoever edits", config.protocol(None))
+
+    def test_every_spawn_prompt_placeholder_is_one_the_code_fills(self):
+        """A placeholder nobody fills reaches an agent as a literal `{whatever}`, which is
+        invisible until someone reads a transcript."""
+        filled = {
+            "spawn.identity": {"name": "a", "role": "b", "parent": "c"},
+            "spawn.workspace": {"workspace": "w", "path": "/p"},
+            "spawn.start_task": {},
+            "spawn.workspace_task": {},
+            "notify.mail": {}, "notify.mail_question": {}, "notify.child_done": {},
+            "notify.interrupt": {"text": "t"},
+        }
+        for key, fields in filled.items():
+            with self.subTest(prompt=key):
+                out = config.prompt(key, repo=None, **fields)
+                self.assertNotIn("{", out)
+
+    def test_an_unfilled_placeholder_fails_loudly(self):
+        with self.assertRaises(config.ConfigError):
+            config.prompt("spawn.identity", repo=None, name="a")
+
+    def test_an_unknown_prompt_names_itself(self):
+        with self.assertRaises(config.ConfigError):
+            config.prompt("spawn.nope", repo=None)
+
+
+class RoleLayeringTest(_Layered):
+    def test_a_repo_overriding_one_field_keeps_the_rest_of_the_role(self):
+        """The requirement, in one test: change a tier, keep the prompt."""
+        shipped = config.roles(None)["researcher"]
+        self.write("roles.toml", '[researcher]\nmodel = "strong"\n')
+        got = config.roles(self.repo)["researcher"]
+        self.assertEqual(got["model"], "strong")
+        self.assertEqual(got["prompt"], shipped["prompt"])
+        self.assertEqual(got["cleanup"], shipped["cleanup"])
+
+    def test_a_repo_can_add_a_role_of_its_own(self):
+        self.write("roles.toml", '[archivist]\ncleanup = "keep"\n')
+        self.assertIn("archivist", config.roles(self.repo))
+
+    def test_a_repo_markdown_role_overrides_the_shipped_prompt(self):
+        self.write("roles/researcher.md", "+++\n+++\n\nDig, then say what you found.\n")
+        got = config.roles(self.repo)["researcher"]
+        self.assertEqual(got["prompt"], "Dig, then say what you found.")
+        self.assertEqual(got["model"], config.roles(None)["researcher"]["model"])
+
+    def test_a_repo_markdown_role_with_no_body_keeps_the_shipped_prompt(self):
+        """Front matter alone adjusts the fields. Blanking the prompt would be a surprising
+        thing for a file that says nothing about it to do."""
+        self.write("roles/researcher.md", '+++\ncleanup = "keep"\n+++\n')
+        got = config.roles(self.repo)["researcher"]
+        self.assertEqual(got["cleanup"], "keep")
+        self.assertEqual(got["prompt"], config.roles(None)["researcher"]["prompt"])
+
+    def test_the_markdown_directory_wins_over_the_toml_file(self):
+        """Most specific last: a whole file about one role beats one line about it."""
+        self.write("roles.toml", '[researcher]\ncleanup = "close"\n')
+        self.write("roles/researcher.md", '+++\ncleanup = "keep"\n+++\n')
+        self.assertEqual(config.roles(self.repo)["researcher"]["cleanup"], "keep")
+
+    def test_a_role_that_is_not_a_table_says_so(self):
+        self.write("roles.toml", 'researcher = "strong"\n')
+        with self.assertRaises(config.ConfigError):
+            config.roles(self.repo)
+
+    def test_an_edit_is_picked_up_rather_than_cached_forever(self):
+        self.write("roles.toml", '[researcher]\nmodel = "strong"\n')
+        self.assertEqual(config.roles(self.repo)["researcher"]["model"], "strong")
+        self.write("roles.toml", '[researcher]\nmodel = "cheap"\n')
+        self.assertEqual(config.roles(self.repo)["researcher"]["model"], "cheap")
+
+
+class PluginBindingLayeringTest(_Layered):
+    def test_a_repo_binding_joins_the_shipped_ones(self):
+        """The requirement: adding a binding must not wipe what was shipped."""
+        with mock.patch.object(config, "defaults_dir", return_value=self._fixture()):
+            self.write("plugins.toml", 'all = ["mine"]\n\n[roles]\nreviewer = ["extra"]\n')
+            every, per_role = config.plugin_bindings(self.repo)
+        self.assertEqual(every, ("shipped", "mine"))
+        self.assertEqual(per_role["reviewer"], ("adversarial", "extra"))
+
+    def test_a_repo_can_reset_a_binding_list_when_it_means_to(self):
+        with mock.patch.object(config, "defaults_dir", return_value=self._fixture()):
+            self.write("plugins.toml", 'all = ["!reset", "mine"]\n')
+            every, _ = config.plugin_bindings(self.repo)
+        self.assertEqual(every, ("mine",))
+
+    def test_a_role_the_shipped_layer_never_mentions_still_works(self):
+        with mock.patch.object(config, "defaults_dir", return_value=self._fixture()):
+            self.write("plugins.toml", '[roles]\nqa = ["verify"]\n')
+            _, per_role = config.plugin_bindings(self.repo)
+        self.assertEqual(per_role["qa"], ("verify",))
+        self.assertEqual(per_role["reviewer"], ("adversarial",))   # still there
+
+    def _fixture(self) -> Path:
+        """A stand-in `defaults/` that actually ships bindings.
+
+        The real one ships none — deliberately, because `all` is paid on every spawn — so
+        joining has to be proved against something that does, or the test proves nothing.
+        """
+        d = self.repo / "shipped"
+        d.mkdir(exist_ok=True)
+        (d / "settings.toml").write_text((SHIPPED / "settings.toml").read_text())
+        (d / "plugins.toml").write_text(
+            'all = ["shipped"]\n\n[roles]\nreviewer = ["adversarial"]\n')
+        return d
+
+
+class SettingsLayeringTest(_Layered):
+    def test_a_repo_overrides_one_setting_and_keeps_the_rest_of_the_table(self):
+        shipped_prompt = config.setting("limits.prompt")
+        self.write("settings.toml", "[limits]\ntext = 10\n")
+        self.assertEqual(config.setting("limits.text", repo=self.repo), 10)
+        self.assertEqual(config.setting("limits.prompt", repo=self.repo), shipped_prompt)
+
+    def test_a_repo_cannot_move_the_directory_its_own_settings_are_read_from(self):
+        """`[paths] repo_dir` is shipped-only. A file that relocates the place it is looked
+        for is a file that is never read again."""
+        self.write("settings.toml", '[paths]\nrepo_dir = "elsewhere"\n')
+        self.assertEqual(config.repo_dir(self.repo), self.sb)
+
+    def test_a_missing_setting_falls_back_rather_than_raising(self):
+        self.assertEqual(config.setting("nope.at.all", "fallback"), "fallback")
+
+    def test_a_broken_settings_file_names_itself(self):
+        self.write("settings.toml", "[limits\ntext = 1\n")
+        with self.assertRaises(config.ConfigError):
+            config.settings(self.repo)
+
+
+class ProtocolLayeringTest(_Layered):
+    def test_a_repo_replaces_the_protocol_wholesale(self):
+        """The one file that does NOT join: a protocol assembled from two halves is a
+        protocol nobody can read."""
+        self.write("protocol.md", "# ours\n\nSAY LESS.\n")
+        self.assertEqual(config.protocol(self.repo), "SAY LESS.")
+
+    def test_with_no_repo_file_the_shipped_protocol_stands(self):
+        self.assertEqual(config.protocol(self.repo), config.protocol(None))
+
+    def test_the_override_is_flattened_like_everything_else(self):
+        self.write("protocol.md", "line one\nline two\n")
+        self.assertNotIn("\n", config.protocol(self.repo))
+
+
+class NothingLeftInPythonTest(unittest.TestCase):
+    """Requirement 4: reading the shipped defaults is HOW the code gets these.
+
+    Asserted against the source text, because that is the only thing that catches a role
+    name or a prompt line being typed back into a .py file six months from now.
+    """
+
+    # Every module that could plausibly hold one. Not a whitelist of the guilty — the point
+    # is that adding a role name to ANY of these is caught.
+    MODULES = ("config", "roles", "models", "broker", "cli", "plugins", "status",
+               "output", "herdr", "store", "validate")
+
+    def _literals(self, *names: str) -> dict[str, list[str]]:
+        """Every string LITERAL in each module, docstrings excluded.
+
+        The AST rather than the raw text, deliberately. Comments and docstrings are where
+        the reasoning lives — `defaults/roles/reviewer.md` is worth naming in prose, and a
+        test that forbids it would push the explanations out of the code. What must not
+        survive is a value the program actually uses.
+        """
+        out: dict[str, list[str]] = {}
+        for n in names or self.MODULES:
+            tree = ast.parse((REPO / "switchboard" / f"{n}.py").read_text())
+            docstrings = {
+                id(node.body[0].value)
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef))
+                and node.body and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)
+            }
+            out[n] = [c.value for c in ast.walk(tree)
+                      if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                      and id(c) not in docstrings]
+        return out
+
+    def test_no_role_name_is_a_string_literal_in_python(self):
+        roles = sorted(config.roles(None))
+        for mod, lits in self._literals().items():
+            for role in roles:
+                with self.subTest(module=mod, role=role):
+                    self.assertNotIn(role, lits)
+
+    def test_no_model_name_is_a_string_literal_in_python(self):
+        """Not even in models.py — the file that resolves them. `defaults/models.toml` is
+        the one place, which is what makes `sb models` the only way to see them."""
+        names = sorted({t.get("model") for t in
+                        (config.shipped_models().get("tiers") or {}).values()} - {None})
+        for mod, lits in self._literals().items():
+            for model in names:
+                with self.subTest(module=mod, model=model):
+                    self.assertNotIn(model, lits)
+
+    def test_no_tier_name_is_a_string_literal_in_python(self):
+        """The regression this replaces: a --model help string that listed three tiers by
+        hand and went stale the moment anyone invented a fourth. Not even models.py, the
+        file that resolves them, may name one — including the tier a caller who asked for
+        nothing gets, which comes from `[vocabulary] default_tier`."""
+        for mod, lits in self._literals().items():
+            for tier in sorted(config.shipped_models().get("tiers") or {}):
+                with self.subTest(module=mod, tier=tier):
+                    self.assertNotIn(tier, lits)
+
+    def test_no_prompt_text_is_quoted_in_python(self):
+        """Every sentence an agent is sent lives in defaults/. Sampled by first clause, so
+        rewording a file does not require rewording this test."""
+        fragments = [config.protocol(None).split(".")[0]]
+        for table in config.prompts(None).values():
+            fragments += [t.split(".")[0].split("{")[0].strip()
+                          for t in table.values() if len(t.split(".")[0]) > 12]
+        for mod, lits in self._literals().items():
+            blob = "\n".join(lits)
+            for frag in fragments:
+                with self.subTest(module=mod, fragment=frag[:40]):
+                    self.assertNotIn(frag, blob)
+
+    def test_the_tunable_numbers_come_from_settings(self):
+        """Every one of these used to be a literal. If a value stops matching the file, the
+        module has quietly reverted to a hardcoded one."""
+        from switchboard import broker, herdr, output, status, validate
+        pairs = [
+            (validate.MAX_TEXT, "limits.text"),
+            (validate.MAX_PROMPT, "limits.prompt"),
+            (validate.MAX_AGENT_NAME, "limits.agent_name"),
+            (validate.MAX_REF, "limits.ref"),
+            (validate.MAX_TOKEN, "limits.token"),
+            (broker.ASK_TIMEOUT, "timeouts.ask"),
+            (broker.ASK_POLL, "timeouts.ask_poll"),
+            (broker.INTERRUPT_SETTLE, "timeouts.interrupt_settle"),
+            (status.WAIT_SLICE_MS, "timeouts.wait_slice_ms"),
+            (status.WAIT_TIMEOUT, "timeouts.wait"),
+            (status.DEFAULT_EVENTS, "display.events"),
+            (status.TASK_CLIP, "limits.task_clip"),
+            (output.DEFAULT_LINES, "display.output_lines"),
+            (output.CLIP, "limits.output_clip"),
+            (herdr.SPAWN_ATTEMPTS, "retries.spawn_attempts"),
+            (herdr.SPAWN_TIMEOUT_MS, "timeouts.spawn_ms"),
+            (herdr.MIN_VERSION, "herdr.min_version"),
+        ]
+        for value, key in pairs:
+            with self.subTest(setting=key):
+                self.assertEqual(value, config.setting(key))
+
+    def test_the_vocabulary_comes_from_settings(self):
+        from switchboard import broker
+        self.assertEqual(broker.HUMAN, config.setting("vocabulary.human"))
+        self.assertEqual(broker.PARENT, config.setting("vocabulary.parent"))
+        self.assertEqual(broker.MAIN, config.setting("vocabulary.main_role"))
+        self.assertEqual(broker.LEAD_SUFFIX, config.setting("vocabulary.lead_suffix"))
+        self.assertEqual(list(broker.LINKED_CONFIG), config.setting("paths.linked_config"))
+
+
+class DefaultsRelocationTest(unittest.TestCase):
+    """SWITCHBOARD_DEFAULTS replaces the shipped baseline wholesale."""
+
+    def test_the_defaults_directory_can_be_pointed_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "settings.toml").write_text((SHIPPED / "settings.toml").read_text())
+            (d / "roles").mkdir()
+            (d / "roles" / "hermit.md").write_text('+++\nmodel = "cheap"\n+++\n\nWork alone.\n')
+            with mock.patch.dict(os.environ, {config.ENV_DEFAULTS: str(d)}):
+                self.assertEqual(sorted(config.roles(None)), ["hermit"])
+
+    def test_the_env_var_is_not_consulted_once_it_is_gone(self):
+        self.assertIn("worker", config.roles(None))
+
+
+if __name__ == "__main__":
+    unittest.main()
