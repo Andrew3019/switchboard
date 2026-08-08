@@ -215,11 +215,24 @@ class StatusTest(unittest.TestCase):
         took. Restating it is what went wrong: the grace was `timeout x attempts` = 270 s
         against a 282 s loop, having missed the backoff — including the sleep the loop
         takes after its LAST failure, which no reading of `2 + 4` predicts.
+
+        WHAT THIS DELIBERATELY DOES NOT COVER, decided by the human when the two branches
+        met: `--timeout` is what the loop asks HERDR to spend, and since `64a8099` there
+        is a second, outer deadline — `herdr._grace(timeout_ms)`, ten seconds longer —
+        that only fires when herdr answers nothing at all. Against that bound the true
+        worst case is 3 x 100 + 12 = 312 s, and `SPAWN_GRACE` is 287. So a spawn CAN
+        outlive the grace by 25 s and be reaped mid-spawn, but only in the herdr-hung
+        case the outer bound was added for. The grace stays derived from herdr's own
+        policy; see `BUGS.md` for the hole that leaves open.
+
+        `**_` because the runner is the injected `_run`, and `_spawn` passes it the outer
+        deadline as `timeout=`. Reading that kwarg here instead of `--timeout` is exactly
+        the change that would close the gap above.
         """
         naps: list[float] = []
         bounds: list[int] = []
 
-        def runner(argv):
+        def runner(argv, **_):
             argv = list(argv)
             bounds.append(int(argv[argv.index("--timeout") + 1]))
             body = {"id": "x", "error": {"code": "timeout", "message": "startup"}}
