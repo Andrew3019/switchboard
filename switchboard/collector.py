@@ -16,9 +16,10 @@ on the board: this process outlives the code it started with. It ticks for hours
 the `status.py` and the `store.SCHEMA` string that existed when the human opened a panel,
 so anything it writes is written by a version nobody is running any more. `reap=False`
 stops `collect` ending an agent's turn (`status._record_gone`); `readonly=True` stops
-`connect` migrating the schema, which is the larger of the two — it can DROP `agents`,
-`messages` and `events` — and the one a flag on `collect` could not reach. Both remain
-verified end to end by `tests/test_readonly.py`, which follows them here.
+`connect` migrating the schema, which is the larger of the two — when something missing
+can be given to no existing row it REBUILDS the store, dropping every table `SCHEMA`
+declares — and the one a flag on `collect` could not reach. Both remain verified end to
+end by `tests/test_readonly.py`, which follows them here.
 
 **The `git rev-parse` is paid once per collector, not once per tick.** `store.connect()`
 reaches `db_path()` -> `repo_root()` -> `git rev-parse --git-common-dir`, measured at

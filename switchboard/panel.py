@@ -9,9 +9,10 @@ Cost is not why this exists. This is:
 
     A RENDERER IMPORTS `status` AND NOT `store`.
 
-`store.connect()` re-stamps `meta`, ALTERs tables and backfills every agent row, and when
-a table is missing it DROPS `agents`, `messages` and `events` (see `store._reconcile`, and
-`tests/test_readonly.py` for each path reproduced). `1c10745` closed all three for a
+`store.connect()` re-stamps `meta`, CREATEs and ALTERs tables and backfills every agent
+row, and when something missing can be given to no existing row it REBUILDS the store,
+dropping every table `SCHEMA` declares (see `store._reconcile`, and
+`tests/test_readonly.py` for each path reproduced). `1c10745` closed those paths for a
 reader with `readonly=True`, and that fix is real — but it is a fix somebody has to keep
 choosing, on every future edit, in every process that connects. The collector/renderer
 split makes it structural instead: 39 of 40 panes hold no database handle and have no

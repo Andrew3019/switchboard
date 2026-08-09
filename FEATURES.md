@@ -19,6 +19,8 @@ which is where they started and where the flags that qualify them live.
 ### `sb delegate <task> [--role] [--as] [--with] [--name] [--workspace] [--model] [--keep|--ephemeral]`
 Spawns a child agent in its own pane to do a task independently; the caller does not
 wait for it — it ends its turn and is woken (doorbell) when the child calls `sb done`.
+The child's pane is split once and **`sb board`** opened in the smaller half, so every
+agent lands with the tree beside it (see **`sb board`**).
 - Entry point: `cli.py:663-681` → `Broker.delegate` (`broker.py:1193-1316`)
 - Depends on: `roles.get` (role → tier and prompt), `presets.for_role`/`resolve`
   (`--with`), `models.Tiers.resolve` (`--model`), `store.claim_agent` (race-safe name
@@ -83,7 +85,11 @@ until a human answers via `sb tell`.
 ### `sb status [--active/--live] [--needs-me] [--mine]`
 The whole agent tree as one join of store state against herdr's live pane state,
 flagging drift: **STALLED** (store says working, herdr says idle/done, and `sb done` was
-never called), **GONE** (the pane closed under it — self-heals by writing `state=failed`),
+never called — but never for an agent nobody has given work to yet, which is idle for the
+only reason it could be; `agents.awaiting_task`, set at spawn and cleared by the first
+message), **GONE** (the pane closed under it — self-heals by writing `state=failed`, and
+only after herdr has failed to list the row continuously past
+`status.GONE_CONFIRM_GRACE`, so one short `agent list` cannot end a live agent),
 **UNDELIVERED** (mail the target cannot know about — the doorbell never rang for it,
 usually because the target was mid-turn, and the target has not read it of its own accord
 either).
@@ -130,10 +136,13 @@ fails — a broken plugin is a report, not a failed health check. Nothing under 
 directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or does not.
 - Entry point: `cli.py` `doctor` branch → `Herdr.check` / `store.reset` /
   `_doctor_plugins` → `plugins.load_all`/`plugins.orphans`/`presets.deprecations`
-- Status: working. The store has no migration system by design: schema changes are
-  compared by hash, additive column changes auto-apply, anything destructive triggers a
-  full drop/recreate (`store.py:220-304`). See `BUGS.md` #4 for a case where this
-  deadlocked running agents.
+- Status: working. The store has no migration system by design, and the hash is only a
+  cache key: what the store actually lacks is read off `PRAGMA table_info`. Nullable
+  columns are ALTERed in and a whole missing table whose columns are all nullable is
+  created and backfilled; only a gap no existing row can be given (a `NOT NULL` column
+  with no literal default) forces the full drop/recreate, which is then deferred rather
+  than refused while agents are live (`store.connect`/`_reconcile`/`_deficit`). See
+  `BUGS.md` #4 for the case where this deadlocked running agents.
 - Not checked: whether a plugin imports `switchboard` internals. `design/PLUGIN-REDESIGN.md`
   §4.6 asserts this check; it is deliberately not built, and §4.6 says why.
 - Config: `settings.toml [herdr] min_version`
@@ -141,8 +150,10 @@ directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or
 ### `sb cleanup [name...] [--include-kept] [--force] [--leave-children] [--dry-run]`
 Closes finished agents' panes — never their history; `sb restore` brings a closed agent
 back. With no names, sweeps the caller's own subtree (or everything, for a human). Five
-layered safety gates: must be finished with no unread mail; an end that no agent reported
-(`failed`, written by `status._record_gone`) is re-checked against `agent list` and left
+layered safety gates: must be finished with no unread mail it could still read — mail for
+an agent that has finished and whose name no longer binds holds nothing, since nothing can
+ever announce or read it, and the row would otherwise jam forever; an end that no agent
+reported (`failed`, by `status._record_gone`) is re-checked against `agent list` and left
 alone if herdr still has the agent **or cannot be asked**; the agent's own recorded
 disposition (`--include-kept` lifts it); `--force` lifts those three but only alongside an
 explicit name; and **no agent is closed while a descendant is still `working` or
@@ -150,6 +161,9 @@ explicit name; and **no agent is closed while a descendant is still `working` or
 `--force` does NOT lift the last one, because it is a fact about agents the caller did not
 name; `--leave-children` does, and says what it costs. The other way out is to close the
 subtree from the leaves up.
+Closing an agent also closes the **`sb board`** pane opened beside it
+(`Broker._close_board`), so no empty tab is left behind — never a board another live
+agent is on, and a board already closed by hand is not an error.
 - Entry point: `cli.py:801-806` → `Broker.cleanup` (`broker.py:1554-1626`)
 - Depends on: the store's per-agent `cleanup` column, written at spawn
 - Status: working. The disposition is a **run-time** decision, not a role's property: no
@@ -174,6 +188,131 @@ rather than erroring.
   re-check `BUGS.md` before relying on the concurrent case being solid.
 - Config: `settings.toml [vocabulary] workspace_role/base_branch/lead_suffix`,
   `[paths] linked_config`
+
+### `sb workspace list`
+Every workspace this repo has and what stands in the way of each one ever going away —
+the cross-reference that otherwise means reading `git worktree list` against the store by
+hand. Built from the **union** of three sources — git's worktrees, the `workspaces` table,
+and the distinct workspace names on agent rows — because none of them is a superset of the
+others: only git knows a checkout no agent was ever recorded in, only the table knows a
+retired workspace with neither checkout nor rows, and only `agents` knows a workspace that
+predates or escaped the table. Bare workspaces are why git cannot be the starting point:
+`git worktree list` reports the primary checkout once, so four orchestrators laid over it
+are four names and one line. Per workspace it answers what somebody tidying up is actually
+deciding on — the recorded path and which verdict it gets (`ok`/`absent`/`unusable`, or
+`retired`/`bare`), how many agent rows it has and how many are unfinished, whether it is
+retired or currently being closed and by whom, the branch a safe delete would have to get
+past and whether that branch is unmerged, the weight of ignored content a removal would
+take with it, and whether anything is live under the path. `UNKNOWN` in the live column is
+not the same cell as "clear": a scan that could not be made is not the answer "nobody is in
+there", and printing them the same way is how a person comes to believe the wrong one.
+- Entry point: `cli.py:873-876` → `Broker.workspace_list` (`broker.py:910-1008`), rendered
+  by `cli._workspace_listing`
+- Depends on: `store.all_workspaces`/`get_workspace`/`checkout_verdict`/
+  `workspace_fill_gap`, `live.scan`/`live.is_under` (`switchboard/live.py`), `git worktree
+  list --porcelain`, `git status --porcelain --ignored`
+- Status: working, and read-only by design — one `lsof` scan serves the whole listing,
+  since asking twenty times would be twenty different snapshots of the machine. This is
+  where the two signals `sb workspace close` is gated on get exercised somewhere being
+  wrong costs a wrong line of text. `tests/test_workspace_list.py`, `tests/test_live.py`
+- Note: an incomplete `workspaces` backfill is said first, above the table
+  (`store.workspace_fill_gap`), because a listing built on partial records is not the whole
+  story and reads exactly like one that is.
+
+### `sb workspace close <name> [--yes] [--resume]`
+Ends a workspace's life and destroys its checkout when it has one — a separate, explicit
+verb, never something another command does on the way past. Three routes, chosen by what
+the recorded path resolves to and never by a flag, and the two cheap ones are their own
+code rather than the destructive one with steps skipped. A workspace with **no checkout of
+its own** is retired and nothing else — no path gate, no live observation, no inventory, no
+git at all, since nothing there can be lost and the directory it was laid over is the
+human's own clone; its only gate is that its own agent rows are finished. One whose
+directory is **already gone** is deregistered — by name, never a repo-global `git worktree
+prune`, which would take every prunable checkout in the repository with it — and its branch
+safely deleted when anything can name that branch. A checkout **still on disk** takes the
+destructive route, which is check → stop the panes → check again → delete: the second
+evaluation is what authorises the deletion, because it sees what arrived while the panes
+were coming down, and the first exists so a refusal costs only its message rather than
+somebody's panes. That second check waits, briefly and boundedly, for the panes it has just
+closed to leave the process table — measured rather than assumed, an idle shell and a shell
+with an ordinary child are gone before the scan lands, but a process that catches the hangup
+and winds down over half a second is still there every time, which is the shape of an agent
+shutting down cleanly and would otherwise be the one refusal that costs a person their
+panes. It is a delay and never an exemption: the pids of those panes still count, so
+anything still in the directory when the wait expires refuses exactly as it always did, and
+a scan that could not be *made* refuses on the spot rather than being retried. An
+unresolvable path is a refusal and never a fallback to the repo root.
+
+A name with **no record of its own but a checkout git knows about** is recorded first and
+then takes whichever of the three routes its path earns — that is exactly the case `sb
+workspace list`'s three-source union exists to surface, and listing something no verb can
+close is half a feature. Being adopted buys it no trust: the path is re-validated to choose
+the route, and the gate, the inventory, the confirmation and the primary-checkout refusal
+all run as they would for a workspace that had a row all along.
+
+Almost all of the command is the refusing, and refusing is the ordinary outcome rather than
+the exception. It refuses any unfinished agent row whose cwd sits under the checkout —
+component-wise, never as a string prefix, since sibling checkout names nest as strings —
+minus the caller's own row; any process actually sitting in the directory, ours or not,
+minus the caller's own process tree; work git can see, outright, because that is work a
+person can commit or stash and ask again (ignored content is classified against
+switchboard's own symlinks instead, and only *unrecognised* ignored content demands `--yes`,
+quoting a count and a sample); the repository's primary checkout, by an explicit rule
+rather than by letting git object at the last step, when the inventory has already listed
+the human's `.env` and the panes are already closed; and a workspace already being taken
+apart. The one people find surprising is that it also refuses when it **cannot tell** what
+is running: herdr's `agent list` has no failure branch, so a restarted herdr answers an
+empty success that reads identically to an empty workspace — unknown is not empty, and a
+scan that cannot be made is a mandatory refusal. The scan that *can* be made has a limit of
+its own, said here rather than papered over: an unprivileged `lsof` omits every process the
+caller does not own and still exits 0, so what it really answers is "nothing of **mine** is
+in that directory", and a root-owned daemon or a `sudo`-run editor sitting in the checkout
+is invisible to the gate about to delete around it. Widening that means elevated
+privileges, and narrowing the refusal to match what it can see would mean lying. The
+retiring mark is claimed before
+anything is destroyed and released by every refusal after it, so only a crash can leave one
+behind; a mark that is set discloses its owner and when it was claimed, and the refusal
+names `--resume` unless that owner is confirmed *live* — which re-runs the whole command
+from the start rather than inheriting a dead invocation's findings. Not "confirmed gone",
+and the difference is the whole point: an owner nobody can adjudicate is the ordinary case
+rather than the exotic one, since a human holds no agent row and so can never be confirmed
+gone, and a human is the likeliest caller of a destructive command. Under the stricter rule
+a mark left behind by a person's crashed teardown was reachable by no flag and no caller at
+all, the name refused by every other verb as well. What must never happen is a live mark
+being taken *automatically*, and a flag somebody types is the opposite of automatic — so an
+unadjudicable owner is offered it and a confirmed-live one is still refused it. Everywhere
+else in this command, cannot-tell still reads as live.
+
+Three things it deliberately never does, all settled decisions approved by the human rather
+than unfinished edges. An unmerged branch is never force-deleted — `git branch -d` and
+never `-D` — so it simply stays, forever, until a person decides otherwise; the command
+says so out loud, because somebody who does not know that is somebody who thinks the
+cleanup finished. It never guesses which branch that `-d` is aimed at either: the branch is
+the one a row recorded, else the one git's registry reports for that checkout, looked up
+before the deregistration takes that entry away — never the workspace's own name, which
+looks like the same fact only because `sb workspace new` makes the two strings equal. When
+nothing names a branch, none is deleted and the output says exactly that, which is different
+news from a branch kept because it is unmerged: a person told the second goes looking for a
+branch, and a person told the first knows there was never one to find. That is deliberately
+not a refusal — the only state it could fire in is one where retiring destroys nothing and
+refusing would strand the name in a row no verb could ever retire, and the cost of not
+refusing is one orphan branch a person can see and delete. And old agent records are never
+reclaimed: retiring a workspace closes panes and clears the recorded path, and every row,
+summary, message and transcript survives.
+- Entry point: `cli.py:878-884` → `Broker.workspace_close` (`broker.py:1125-1180`) →
+  `_adopt_orphan`/`_close_bare`/`_close_gone`/`_close_checkout`, rendered by
+  `cli._workspace_closed`
+- Depends on: `Broker._gate`/`_records_gate`/`_inventory_gate`/`_live_under` and
+  `live.processes_in`, `Broker._stop_panes` (herdr `release_agent`/`close_pane`, plus the
+  agent's **`sb board`** pane), `Broker._branch_for` over `store.workspace_branch` and `git
+  worktree list`, `store.checkout_verdict`/`record_workspace`/`claim_retiring`/
+  `release_retiring`/`retire_workspace`, `git worktree remove <path>` and `git branch -d`
+- Config: `settings.toml [timeouts] teardown_settle` (how long the second check waits for
+  closed panes to leave) and `teardown_settle_poll`
+- Status: working. Its "is this owner really gone" question is asked of the same trust
+  layer `sb cleanup` uses rather than re-derived, and herdr keeps its veto in the one
+  direction it can be trusted in: a name it lists right now is running, whatever the row
+  says. `tests/test_workspace_close.py`
 
 ### `sb restore <name>`
 Brings a closed agent back with full context via herdr `--resume`, into a fresh tab in
@@ -287,11 +426,17 @@ whatever `status.py` this long-lived process imported at startup.
 - Status: **working and reachable — not dead code.** It was flagged as a suspect (POC
   wired into `broker.start()`, "nobody could tell you what it does"). Verified reachable
   two ways: (1) `sb board` is a real subcommand — `cli.py:634-647` dispatches it, gated
-  to refuse any caller `whoami()` resolves as an agent; (2) `Broker._top`
-  (`broker.py:449,473`), which is `sb start`'s code path, calls `_open_board` →
-  `board.open_beside` automatically, unless `--no-board` is passed. `board.py`'s own
-  docstring confirms `open_beside()` was briefly dead code before `_top` started calling
-  it. It is deliberately absent from `--help` and from `defaults/protocol.md` — hidden
+  to refuse any caller `whoami()` resolves as an agent; (2) `Broker.delegate` calls
+  `_open_board` → `board.open_beside` on every spawn, so each agent — orchestrator,
+  workspace lead or delegated child — opens with a board beside it, unless `--no-board`
+  is passed to `sb start`/`sb workspace new`. `_top` and `workspace_new` ask a second
+  time, which is a no-op when the board is already up and is what covers a restored
+  agent. The board is the SMALL pane (`board.BOARD_SHARE`, a third of the width): what a
+  human reads is the agent's own session. Note herdr's `--ratio` is the share kept by the
+  pane being split, so `open_beside` passes `1 - share`. The pane switchboard opened is a
+  pane switchboard takes away: `sb cleanup` closes it with the agent
+  (`Broker._close_board`), which is what keeps a session from filling with empty tabs now
+  that every agent has one. It is deliberately absent from `--help` and from `defaults/protocol.md` — hidden
   from agents on purpose, not orphaned. `tests/test_board.py` exercises it, and
   `scripts/05-mouse.py`/`scripts/06-board.py` are kept as the proof-of-concept record the
   maintained version was built from.
@@ -306,7 +451,12 @@ to a mid-turn agent is held back and delivered the next time that agent calls `s
 it has gone idle. Underlies `tell`, `ask`, `done`, and `block`; surfaced to humans in
 `sb status`/`sb inspect` as `UNDELIVERED`. The flush and both readouts ring/count on the
 same predicate — un-announced AND unread — so mail an agent read proactively while
-mid-turn drops out of all three rather than being chased forever.
+mid-turn drops out of all three rather than being chased forever. An agent that has called
+`sb done` is not rung at all: the guard is in `_ring`, so it covers the flush as well as
+`tell`, and mail for one whose pane is also gone is marked read-and-announced by the flush
+that would otherwise chase it. Nothing is discarded — the message is still in the store and
+`sb restore` brings back an inbox that holds it. Unknown is never gone: the guard needs a
+positive answer from herdr, so a herdr outage cannot silence a live fleet.
 - Entry point: `broker.py` `Broker._ring`, `Broker.flush_pending`
 
 ### Identity resolution
@@ -361,10 +511,13 @@ own) then `<repo>/.switchboard/` (that repo's differences only). Merge rules
   timeouts/paths/vocabulary settings all resolve through this layer
 
 ### The store
-Sqlite schema for agents/messages/events (`switchboard/store.py`). No migration system:
-schema changes are compared by hash; additive column changes auto-apply; anything
-destructive triggers a full drop/recreate, refused while agents are live (breakable via
-`sb doctor --reset-store --force`).
+Sqlite schema for agents/messages/events/workspaces (`switchboard/store.py`). No migration
+system: the store is compared against what this code needs, column by column. Nullable
+columns are added in place, and so is a whole missing table whose columns are all nullable
+— each with a one-time backfill, recorded so it cannot be skipped. Only a gap that no
+existing row can be given forces a full drop/recreate; that is deferred while agents are
+live (the old store stays open and degraded, and the next `sb` after the fleet drains
+rebuilds it) and can be demanded outright via `sb doctor --reset-store --force`.
 - Depended on by: every verb above
 
 ### The herdr adapter
@@ -550,8 +703,9 @@ stops for a human on ordinary shell commands.
 See `BUGS.md` for the full write-ups. As of the last entries there: `Broker._adopt`
 race (**FIXED**), herdr `wait` sending the wrong `--until` value and spinning CPU
 (**FIXED**, both in the adapter), a schema change that deadlocked running agents
-(**FIXED**, one shape still open — check `BUGS.md` #4 before relying on schema changes
-being fully safe), and `sb wait` returning success early (**NOT REPRODUCIBLE**).
+(**FIXED**, and adding a table no longer costs the store either — `BUGS.md` #4 says which
+narrower shape still forces a rebuild), and `sb wait` returning success early
+(**NOT REPRODUCIBLE**).
 
 ## Keeping this current
 The cheapest rule that will actually survive delegated agents who haven't read this

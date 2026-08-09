@@ -11,7 +11,7 @@ measurement and the wrong theories are the useful part.
 | 1 | `Broker._adopt` races on `agents.name` | **FIXED** — 60/60 clean, was 2/25 failing |
 | 2 | `Herdr.wait` sends `--until idle,blocked` | **FIXED** in the adapter, not just around it |
 | 3 | `Herdr.wait` spins at 100% CPU | **FIXED** in the adapter, not just around it |
-| 4 | A schema change deadlocks every running agent | **FIXED**, with one shape still open |
+| 4 | A schema change deadlocks every running agent | **FIXED** — the deadlock, and the wipe that adding a table used to cost |
 | 5 | `sb wait` returns success while still working | **NOT REPRODUCIBLE** — property pinned by tests |
 
 ---
@@ -112,8 +112,10 @@ arbitrate. Fixed by inverting it:
 - `store.claim_agent` (`store.py`) is `INSERT OR IGNORE` and returns whether this process
   got the row. The PRIMARY KEY on `agents.name` is the arbiter, which is what a PRIMARY KEY
   is for.
-- `Broker.delegate` claims the name **before** `agent start`, and `store.drop_agent`s it if
-  the spawn then fails, so a failed spawn cannot hold a name hostage.
+- `Broker.delegate` claims the name **before** `agent start`. A spawn that then fails
+  leaves the row as a husk (`failed`, no pane, no session) plus a `spawn_failed` event
+  rather than deleting it, and the claim carves that shape out, so a failed spawn still
+  cannot hold a name hostage.
 - `Broker._adopt` claims instead of inserting, and re-reads on a loss.
 - `Broker._spawn_lead` now distinguishes three shapes of prior row rather than two: a
   session id means restore; a pane and no session means another opener is mid-spawn into
@@ -370,6 +372,27 @@ with the explanation rather than showing a partial tree. Not a brick, and not th
 fleet hit — but `status.py` belongs to another agent, so it is written down rather than
 fixed here.
 
+### STATUS: adding a table is no longer one of the destructive shapes (2026-08-09)
+
+The **Still open** paragraph above names dropping a column and adding a table together;
+only the first is still true. A missing table whose columns are all nullable is now
+created and filled in place — the same test `_deficit` already applied to a column, one
+level up and for the same reason — so appending a table to `SCHEMA` costs nothing. The
+column half had been proved by `agents.workspace_id`; the table half was measured against
+a copy of the real store with the fleet drained, which is the ordinary state between
+sessions: the old code took 117 agents, 284 messages and 13324 events to zero, the
+corrected code ends with all of them and the new table created and filled.
+
+What remains is narrower and no longer has the deadlock shape. A gap no existing row can
+be given — a `NOT NULL` column with no literal default, or a missing table that declares
+one — still forces `_reset`, and `_reset` now derives what it drops from `SCHEMA`, so it
+is every declared table rather than the three it used to name. Under a live fleet that
+rebuild is deferred rather than refused (the STATUS above), so nobody is wedged; the cost
+when it does run is still the whole store.
+
+The **Known gap** above is unchanged: `status.py` still reads `events` unguarded in
+`_last_activity`, `_block_reasons` and `_last_summaries`.
+
 ## `sb wait` returns success while the agent is still working
 
 - **Ran:** `sb wait refactor-config --for done --timeout 5400`
@@ -508,9 +531,11 @@ because pane ids are recycled once a pane closes. Two regression tests.
 **`ask` waiting out its timeout on a child that died recording nothing — FIXED.**
 `_will_never_answer` is store-only by design (an agent missing from `agent list` looks the
 same whether it died or herdr hiccupped). `ask` now also counts *consecutive* absences
-from herdr and gives up after `timeouts.gone_grace` (60s, in `defaults/settings.toml`).
-One missing reading is a hiccup; a minute of them is a death. Two tests, including one
-asserting a single absence does **not** end the wait.
+from herdr and gives up after `timeouts.gone_grace` (300 s, in `defaults/settings.toml`).
+One missing reading is a hiccup; a run of them lasting longer than a whole spawn is a
+death — and the grace is floored at `status.SPAWN_GRACE` by an assertion, because an agent
+that is merely starting slowly is unlisted for that entire window. Two tests, including
+one asserting a single absence does **not** end the wait.
 
 ## `--permission-mode auto` is model-dependent — haiku blocks where opus does not
 

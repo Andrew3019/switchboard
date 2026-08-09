@@ -13,10 +13,11 @@ jumping to a pane.
 **This file does not import `store`, and must not start.** It once did, inside
 `snapshot()`, and the claim that a two-second tick there was read-only was false
 twice: `collect` marked an agent `failed` when herdr stopped listing it
-(`reap=False` closed that), and `store.connect()` itself re-stamps `meta`, ALTERs
-tables and backfills every agent row, and can DROP `agents`, `messages` and
-`events` (`readonly=True` closed that, in `1c10745`). Both fixes are real and
-both are still in force — they moved, with the connect, into
+(`reap=False` closed that), and `store.connect()` itself re-stamps `meta`,
+CREATEs and ALTERs tables and backfills every agent row, and when something
+missing can be given to no existing row it REBUILDS the store, dropping every
+table `SCHEMA` declares (`readonly=True` closed that, in `1c10745`). Both fixes
+are real and both are still in force — they moved, with the connect, into
 `switchboard/collector.py`. What changed here is that they stopped being a claim
 this file has to keep making. A panel now reads a file that one elected collector
 publishes, so the board has no database handle and no import that could get it
@@ -33,10 +34,11 @@ SGR mouse events to a pane, and a decoded row maps back to an agent. Those two
 stay as the record of what was proven; this is the version that is maintained.
 
 `open_beside()` below was once removed as dead code, because it was written a
-turn before anything called it. It is now called from `broker._top`, and that is
-the only reason it belongs here — if that call ever goes away, this should go
-with it. Auto-opening a board IS a decision about a human's screen, which is why
-it is one `--no-board` can decline rather than one nobody gets a say in.
+turn before anything called it. It is now called from `broker._open_board`, which
+every spawn reaches through `broker.delegate` — so every agent, not only a
+top-level orchestrator, opens with a board beside it. Auto-opening a board IS a
+decision about a human's screen, which is why it is one `--no-board` can decline
+rather than one nobody gets a say in.
 """
 
 from __future__ import annotations
@@ -72,6 +74,11 @@ REFRESH = config.setting("display.board_refresh")   # how often the collector re
 CHROME = config.setting("display.board_chrome")       # header, blank, blank, status —
                                                      # lines not available to agents
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+
+# How much of the width the board takes when it opens beside an agent. A third:
+# the tree is a glance, and the pane a human actually reads is the agent's own
+# session. See `open_beside`, which inverts this into herdr's `--ratio`.
+BOARD_SHARE = 0.34
 
 # Colour is a nicety, never load-bearing: every distinction below is also carried
 # by a glyph or a word, so NO_COLOR loses nothing but polish.
@@ -376,15 +383,21 @@ def focus(name: str) -> str:
     return f"→ {name}"
 
 
-def open_beside(h, pane_id: str, *, cwd: str, ratio: float = 0.38) -> Optional[str]:
+def open_beside(h, pane_id: str, *, cwd: str, share: float = BOARD_SHARE) -> Optional[str]:
     """Split `pane_id` and run the board in the new pane. -> new pane id, or None.
 
-    Called by `broker._top`, so `sb start` lands you on the orchestrator with the
-    tree already up beside it.
+    Called by `broker._open_board`, so every agent lands with the tree up beside
+    it — `sb start`'s orchestrator and every `sb delegate` child alike.
 
-    Returns None rather than raising on any herdr failure, and `_top` ignores the
-    result: `sb start` failing because a *view* would not open is a far worse bug
-    than starting without one.
+    `share` is the BOARD's share of the width, which is the number a reader wants
+    to reason about; herdr's `--ratio` is the *other* number — what the pane being
+    split keeps — so it is inverted on the way out. The board is the small pane:
+    the agent's own session is the thing being read, and the tree beside it is a
+    glance.
+
+    Returns None rather than raising on any herdr failure, and callers ignore the
+    result: a spawn failing because a *view* would not open is a far worse bug
+    than spawning without one.
 
     Launches `sys.executable -m switchboard.board` rather than `sb board`, so it
     does not depend on `sb` being on PATH in that pane, and cannot trip the
@@ -393,7 +406,7 @@ def open_beside(h, pane_id: str, *, cwd: str, ratio: float = 0.38) -> Optional[s
     from .herdr import HerdrError
 
     try:
-        pane = h.split_pane(pane_id, direction="right", ratio=ratio, cwd=cwd)
+        pane = h.split_pane(pane_id, direction="right", ratio=1 - share, cwd=cwd)
     except (HerdrError, OSError):
         return None
     try:
