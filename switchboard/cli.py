@@ -105,10 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
             visible.append(name)
         return sub.add_parser(name, parents=[common], **kw)
 
-    st = cmd("start", help="start (or return to) the top-level orchestrator")
+    st = cmd("start", help="start a top-level orchestrator in a workspace of its own")
     st.add_argument("task", nargs="?", help="optional first instruction")
-    st.add_argument("--name", help="explicit name (implies a distinct orchestrator)")
-    st.add_argument("--new", action="store_true", help="always start another one")
+    st.add_argument("--name", help="name it — and, if that name is already yours, "
+                                   "return to it instead of starting another")
     st.add_argument("--no-focus", dest="focus", action="store_false")
     st.add_argument("--no-board", dest="board", action="store_false",
                     help="do not open the clickable board beside it")
@@ -674,17 +674,17 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return board_mod.main()
 
     if cmd == "start":
-        def _confirm(existing: list[str]) -> bool:
-            # Only ask when a human is actually there; scripts get the safe default.
-            if args.json or not sys.stdin.isatty():
-                return False
-            print(f"already running: {', '.join(existing)}")
-            return input("start another? [y/N] ").strip().lower().startswith("y")
-
+        # Read BEFORE starting, or the one we are about to make is in the list. This is
+        # the only thing left standing between "always start another" and losing track of
+        # the ones you have: nothing here reuses them, so the way back has to be said.
+        others = [] if args.name else b.running_tops()
         name = b.start(name=args.name, task=args.task, focus=args.focus,
-                       new=args.new, board=args.board, confirm=_confirm)
+                       board=args.board)
+        also = (f"\n  still running: {', '.join(others)}"
+                f" — back to one with: sb start --name {others[-1]}") if others else ""
         _emit(args, f"orchestrator '{name}' ready in its own workspace — switch to it, "
-                    f"or: sb tell {name} \"...\"", {"name": name})
+                    f"or: sb tell {name} \"...\"{also}",
+              {"name": name, "running": others})
         return 0
 
     if cmd == "delegate":

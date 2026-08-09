@@ -188,10 +188,24 @@ class Herdr:
             except json.JSONDecodeError:
                 payload = {}
 
+        err_text = (proc.stderr or "").strip()
         if self._on_event:
             self._on_event(kind="herdr", argv=" ".join(args), ms=ms,
                            rc=proc.returncode, out=text[:LOG_CLIP],
-                           err=(proc.stderr or "").strip()[:LOG_CLIP])
+                           err=err_text[:LOG_CLIP])
+
+        # herdr reports a refusal as the same JSON envelope either way, but writes it to
+        # STDERR — `tab create --workspace <gone>` returns rc=1, empty stdout and
+        # `{"error":{"code":"workspace_not_found",...}}` on stderr. Reading only stdout
+        # turned every such refusal into an opaque `cli_failure` carrying the real code
+        # buried in its message, so nothing could branch on it.
+        if proc.returncode != 0 and "error" not in payload and err_text:
+            try:
+                stderr_payload = json.loads(err_text)
+            except json.JSONDecodeError:
+                stderr_payload = {}
+            if isinstance(stderr_payload, dict) and "error" in stderr_payload:
+                payload = stderr_payload
 
         if "error" in payload:
             e = payload["error"]

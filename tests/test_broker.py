@@ -1068,49 +1068,45 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(a["parent"])          # root: parent NULL, not "human"
         self.assertEqual(a["cleanup"], "keep")  # never swept away
 
-    def test_start_returns_to_the_existing_one_by_default(self):
-        from switchboard.herdr import Agent as HAgent
-        self.h.focus = lambda n: None
-        self.h.list_agents = lambda: []
-        self.b.start()
-        self.h.list_agents = lambda: [HAgent(name=MAIN_NAME, pane_id="w1:p1")]
-        before = len(self.h.started)
-        self.b.start()
-        self.assertEqual(len(self.h.started), before)   # "take me back" is the default
+    def test_start_always_starts_another_one(self):
+        """The contract: unnamed, `sb start` is only ever the start of something.
 
-    def test_start_new_spawns_another_top_level(self):
+        It used to mean "take me back" — reusing the last orchestrator, or restoring it.
+        Reuse now has to be asked for by name, so a bare second run must SPAWN.
+        """
         from switchboard.herdr import Agent as HAgent
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         first = self.b.start()
         self.h.list_agents = lambda: [HAgent(name=first, pane_id="w1:p1")]
-        second = self.b.start(new=True)
-        self.assertNotEqual(first, second)
-        self.assertEqual(second, "main-2")
-        self.assertIsNone(store.get_agent(self.db, second)["parent"])
+        before = len(self.h.started)
+        second = self.b.start()
+        self.assertEqual((first, second), (MAIN_NAME, "main-2"))
+        self.assertEqual(len(self.h.started), before + 1)
+        self.assertIsNone(store.get_agent(self.db, second)["parent"])   # a root, not a kid
 
-    def test_start_asks_before_creating_a_second(self):
+    def test_a_bare_start_never_restores(self):
+        """A closed orchestrator with a session id is the tempting case: `--resume` would
+        work, and that is exactly what the old default did. Its context is reachable by
+        name; an unnamed start must not reach for it."""
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        self.b.start()
+        store.update_agent(self.db, MAIN_NAME, session_id="sess-main")
+        self.assertEqual(self.restart_sb().start(), "main-2")
+        self.assertIsNone(self.h.started[-1]["resume"])
+
+    def test_a_bare_start_leaves_a_running_orchestrator_alone(self):
+        """No prompt, no interruption, and above all no task delivered to somebody
+        else's orchestrator — the new one is where the work goes."""
         from switchboard.herdr import Agent as HAgent
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         self.b.start()
         self.h.list_agents = lambda: [HAgent(name=MAIN_NAME, pane_id="w1:p1")]
-        self.restart_sb()
-        asked = {}
-
-        def yes(existing):
-            asked["existing"] = existing
-            return True
-        self.assertEqual(self.b.start(confirm=yes), "main-2")
-        self.assertEqual(asked["existing"], [MAIN_NAME])
-
-    def test_declining_the_prompt_returns_to_the_existing_one(self):
-        from switchboard.herdr import Agent as HAgent
-        self.h.focus = lambda n: None
-        self.h.list_agents = lambda: []
-        self.b.start()
-        self.h.list_agents = lambda: [HAgent(name=MAIN_NAME, pane_id="w1:p1")]
-        self.assertEqual(self.restart_sb().start(confirm=lambda _: False), MAIN_NAME)
+        second = self.restart_sb().start(task="merge PR 41")
+        self.assertEqual(store.unread_for(self.db, MAIN_NAME), [])
+        self.assertEqual(store.get_agent(self.db, second)["task"], "merge PR 41")
 
     def test_explicit_name_creates_a_distinct_orchestrator(self):
         self.h.focus = lambda n: None
@@ -1118,25 +1114,34 @@ class BrokerTest(unittest.TestCase):
         self.b.start()
         self.assertEqual(self.b.start(name="triage"), "triage")
 
-    def test_start_restores_a_closed_orchestrator(self):
-        """Not running is not the same as gone. `sb start` still means "take me back"."""
+    # -- start --name: the way back ---------------------------------------
+
+    def test_naming_a_closed_orchestrator_restores_it(self):
+        """Not running is not the same as gone — and now this is the only spelling of
+        "take me back"."""
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         self.b.start()
         store.update_agent(self.db, MAIN_NAME, session_id="sess-main")
-        self.restart_sb().start()
+        self.assertEqual(self.restart_sb().start(name=MAIN_NAME), MAIN_NAME)
         self.assertEqual(self.h.started[-1]["resume"], "sess-main")
 
-    def test_start_with_a_task_tells_an_existing_orchestrator(self):
+    def test_naming_a_running_orchestrator_hands_it_the_task(self):
         from switchboard.herdr import Agent as HAgent
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         self.b.start()
         self.h.list_agents = lambda: [HAgent(name=MAIN_NAME, pane_id="w1:p1")]
-        self.restart_sb().start(task="merge PR 41")
+        before = len(self.h.started)
+        self.restart_sb().start(name=MAIN_NAME, task="merge PR 41")
+        self.assertEqual(len(self.h.started), before)          # joined, not spawned over
         self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
 
-    # -- start: what "already running" is allowed to mean -------------------
+    # -- what "already running" is allowed to mean --------------------------
+    #
+    # Nothing branches on this any more; it is what `sb start` tells the human so they
+    # can get back to the orchestrators it is no longer reusing for them. A wrong answer
+    # costs them the way back, which is why it still has these tests.
 
     def _dead_top(self, name, state="done"):
         """A top-level orchestrator that ended and said so.
@@ -1159,11 +1164,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="main-5", role=MAIN, pane_id="w1:p5")
         self.h.list_agents = lambda: [HAgent(name="main-5", pane_id="w1:p5")]
 
-        asked = {}
-        self.assertEqual(
-            self.b.start(confirm=lambda e: asked.setdefault("existing", e) and False),
-            "main-5")
-        self.assertEqual(asked["existing"], ["main-5"])
+        self.assertEqual(self.b.running_tops(), ["main-5"])
 
     def test_an_orchestrator_herdr_has_never_heard_of_is_not_running(self):
         """Nothing writes a row back on an abnormal death — a crash, a pane closed from
@@ -1171,48 +1172,43 @@ class BrokerTest(unittest.TestCase):
         self.h.focus = lambda n: None
         store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1")
         self.h.list_agents = lambda: []
-        self.assertEqual(self.b._running_tops(), [])
+        self.assertEqual(self.b.running_tops(), [])
 
     def test_an_unreachable_herdr_leaves_the_list_alone(self):
-        """Fails OPEN, and this is the one that matters: guessing death here spawns a
-        second orchestrator on top of a live one."""
+        """Fails OPEN: herdr being down proves nothing about who is working."""
         self.h.focus = lambda n: None
         store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1")
 
         def down():
             raise HerdrError("no_server", "connection refused")
         self.h.list_agents = down
-        self.assertEqual(self.b._running_tops(), [MAIN_NAME])
+        self.assertEqual(self.b.running_tops(), [MAIN_NAME])
 
-        asked = {}
-        self.assertEqual(
-            self.restart_sb().start(confirm=lambda e: asked.setdefault("existing", e) and False),
-            MAIN_NAME)
-        self.assertEqual(asked["existing"], [MAIN_NAME])
-
-    def test_nothing_running_is_not_worth_asking_about(self):
-        """With no orchestrator up there is no "another" to start, so `sb start` does
-        what it usually means and takes you back to the last one."""
+    def test_a_finished_orchestrator_is_not_resurrected(self):
+        """Its name stays taken and its session stays where it is; the next `sb start`
+        is a new line of work, not the old one reopened."""
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         self._dead_top(MAIN_NAME)
         store.update_agent(self.db, MAIN_NAME, session_id="sess-main")
 
-        def never(existing):
-            raise AssertionError(f"asked about {existing}")
-        self.assertEqual(self.b.start(confirm=never), MAIN_NAME)
-        self.assertEqual(self.h.started[-1]["resume"], "sess-main")   # taken back, not
-                                                                     # replaced
+        self.assertEqual(self.b.start(), "main-2")
+        self.assertIsNone(self.h.started[-1]["resume"])
+        self.assertEqual(store.get_agent(self.db, MAIN_NAME)["state"], "done")
 
     def test_the_name_slots_of_dead_orchestrators_stay_taken(self):
-        """Slot reuse is unchanged: `--new` gets the next free name, not a dead one's."""
+        """Free means never used, not merely not-running: two agents with two unrelated
+        histories must never be filed under one name."""
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         for name in (MAIN_NAME, "main-2"):
             self._dead_top(name)
-        self.assertEqual(self.b.start(new=True), "main-3")
+        self.assertEqual(self.b.start(), "main-3")
 
-    # -- start: a spawning agent is not a husk ------------------------------
+    # -- a spawning agent is not a husk -------------------------------------
+    #
+    # All of these are `_top` reached BY NAME, which is the only way an existing row is
+    # reached at all now. The shapes it has to tell apart are unchanged.
 
     def _sessionless_top(self, name=MAIN_NAME, pane="w1:p1"):
         """A live orchestrator that has not run an `sb` command of its own yet.
@@ -1240,7 +1236,7 @@ class BrokerTest(unittest.TestCase):
         self.h.focus = lambda n: None
         before = self._sessionless_top()
         self.h.list_agents = lambda: []          # herdr is up; this name just is not in it
-        self.restart_sb().start()
+        self.restart_sb().start(name=MAIN_NAME)
 
         after = store.get_agent(self.db, MAIN_NAME)
         self.assertIsNotNone(after)
@@ -1257,7 +1253,8 @@ class BrokerTest(unittest.TestCase):
         self.h.focus = lambda n: None
         self._sessionless_top()
         self.h.list_agents = lambda: []
-        self.assertEqual(self.restart_sb().start(task="merge PR 41"), MAIN_NAME)
+        self.assertEqual(self.restart_sb().start(name=MAIN_NAME, task="merge PR 41"),
+                         MAIN_NAME)
         self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
         self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
 
@@ -1272,7 +1269,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1",
                            session_id="sess-main")
         self.h.list_error = HerdrError("no_server", "connection refused")
-        self.assertEqual(self.restart_sb().start(), MAIN_NAME)
+        self.assertEqual(self.restart_sb().start(name=MAIN_NAME), MAIN_NAME)
         self.assertEqual(self.h.started, [])
         self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
 
@@ -1281,7 +1278,7 @@ class BrokerTest(unittest.TestCase):
         self.h.focus = lambda n: None
         store.create_agent(self.db, name=MAIN_NAME, role=MAIN)
         self.h.list_agents = lambda: []
-        self.assertEqual(self.restart_sb().start(), MAIN_NAME)
+        self.assertEqual(self.restart_sb().start(name=MAIN_NAME), MAIN_NAME)
         self.assertEqual(self.h.started[-1]["name"], MAIN_NAME)
 
     # -- worktree config links -------------------------------------------
@@ -1607,3 +1604,63 @@ class WorkspacePlacementTest(unittest.TestCase):
         self.b._workspace_id = lambda name: "wB"
         self.b.restore("parent")
         self.assertEqual(self.h.tabs[-1], "wA")
+
+    # -- ids do not survive a herdr restart -------------------------------
+
+    def _workspace_gone(self):
+        """herdr's answer for a recorded id whose workspace no longer exists."""
+        real = self.h.create_tab
+
+        def create_tab(*, workspace=None, **kw):
+            if workspace == "wA":
+                raise HerdrError("workspace_not_found", f"workspace {workspace} not found")
+            return real(workspace=workspace, **kw)
+
+        self.h.create_tab = create_tab
+
+    def test_a_vanished_workspace_costs_the_placement_not_the_spawn(self):
+        """Ids are per herdr RUN. After a restart the store still names wG, and
+        `tab create --workspace wG` fails — which used to kill `sb start` entirely."""
+        self._parent(workspace_id="wA")
+        self._workspace_gone()
+        tab, child = self._spawn()
+        self.assertIsNone(tab)                                  # a plain tab, wherever
+        self.assertIsNotNone(store.get_agent(self.db, child))   # but it did spawn
+
+    def test_the_misplacement_is_recorded(self):
+        self._parent(workspace_id="wA")
+        self._workspace_gone()
+        self._spawn()
+        kinds = [r["kind"] for r in self.db.execute("SELECT kind FROM events").fetchall()]
+        self.assertIn("workspace_gone", kinds)
+
+    def test_a_dead_id_is_forgotten_by_every_row_holding_it(self):
+        """One failed call, not one per spawn forever after."""
+        self._parent(workspace_id="wA")
+        store.create_agent(self.db, name="sibling", role="worker", workspace="main",
+                           cwd=str(self.repo), pane_id="p-sib", workspace_id="wA")
+        self._workspace_gone()
+        self._spawn()
+        self.assertIsNone(store.get_agent(self.db, "parent")["workspace_id"])
+        self.assertIsNone(store.get_agent(self.db, "sibling")["workspace_id"])
+
+    def test_any_other_herdr_failure_still_raises(self):
+        """Only a missing workspace is survivable; a dead herdr is not something to
+        paper over with a tab that will not be created either."""
+        self._parent(workspace_id="wA")
+
+        def create_tab(*, workspace=None, **kw):
+            raise HerdrError("connection_refused", "no herdr")
+
+        self.h.create_tab = create_tab
+        with self.assertRaises(HerdrError):
+            self._spawn()
+
+    def test_restore_survives_a_vanished_workspace_too(self):
+        """The path `sb start` actually took: restore a top-level orchestrator whose
+        recorded workspace died with the previous herdr."""
+        self._parent(workspace_id="wA", session_id="sess-parent")
+        self._workspace_gone()
+        self.b.restore("parent")
+        self.assertIsNone(self.h.tabs[-1])
+        self.assertEqual(store.get_agent(self.db, "parent")["state"], "working")

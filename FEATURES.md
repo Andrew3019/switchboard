@@ -101,10 +101,13 @@ Pins the current repo for switchboard: writes `main_checkout` into the store's
 no `CLAUDE.md` — the protocol is delivered as a system prompt only, not a repo file.
 - Entry point: `cli.py:625-632` → `Broker.init` (`broker.py:354-365`)
 
-### `sb start [task] [--name] [--new] [--no-focus] [--no-board]`
-Starts a top-level orchestrator agent, or returns to the existing one if re-run with no
-args (asks for confirmation, but only at an interactive tty). Depends on **`sb board`**
-being auto-opened beside it unless declined.
+### `sb start [task] [--name] [--no-focus] [--no-board]`
+Starts a top-level orchestrator agent in a bare herdr workspace of its own, laid over the
+current checkout. Always another one: run with no args it takes the next free name
+(`main`, `main-2`, …) and never reuses or restores an existing orchestrator — it names
+the ones still running so you can get back to them. `--name` is the way back: an existing
+name returns to that orchestrator, restoring it if its pane was closed, and hands it the
+task. Depends on **`sb board`** being auto-opened beside it unless declined.
 - Entry point: `cli.py:649-661` → `Broker.start`/`Broker._top` (`broker.py:367-475`)
 - Depends on: `store.live_roots`, `herdr.create_workspace`/`start_agent`,
   `board.open_beside` (auto-fires here — see **`sb board`**), `config.prompt`

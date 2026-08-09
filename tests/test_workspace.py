@@ -536,12 +536,23 @@ class WorkspaceTest(unittest.TestCase):
         self.assertIsNone(row["parent"])                     # still a root
         self.assertEqual(row["cleanup"], "keep")
 
-    def test_restarting_returns_to_the_running_orchestrator(self):
+    def test_restarting_opens_another_workspace_rather_than_returning(self):
+        """Unnamed, `sb start` is only ever the start of something — a second line of
+        work in a second bare space over the same checkout. Naming one is how you go
+        back to it, and that is what the test below pins."""
         b = Broker(self.db, self.h, repo=self._git_repo())
-        b.start(focus=False)
-        b.start(task="merge PR 41", focus=False)
+        first = b.start(focus=False)
+        second = b.start(task="merge PR 41", focus=False)
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(self.h.started), 2)
+        self.assertEqual(store.unread_for(self.db, first), [])   # left entirely alone
+
+    def test_naming_the_running_orchestrator_returns_to_it(self):
+        b = Broker(self.db, self.h, repo=self._git_repo())
+        name = b.start(focus=False)
+        b.start(name=name, task="merge PR 41", focus=False)
         self.assertEqual(len(self.h.started), 1)             # nothing spawned twice
-        self.assertEqual(store.unread_for(self.db, "main")[-1]["body"], "merge PR 41")
+        self.assertEqual(store.unread_for(self.db, name)[-1]["body"], "merge PR 41")
 
     def test_the_orchestrators_children_never_land_in_the_main_checkout(self):
         """The fork rule, at the depth that matters most.
@@ -717,17 +728,17 @@ class StartWorkspaceTest(WorkspaceTest):
         self.b.start(focus=False)
         self.assertIn("main", self.h.calls_of("create_workspace"))
 
-    def test_each_new_orchestrator_gets_its_own_workspace(self):
+    def test_each_start_gets_its_own_workspace(self):
         first = self.b.start(focus=False)
-        second = self.b.start(new=True, focus=False)
+        second = self.b.start(focus=False)
         self.assertNotEqual(first, second)
         made = self.h.calls_of("create_workspace")
         self.assertEqual(made, [first, second])
 
-    def test_returning_to_an_orchestrator_makes_no_new_workspace(self):
-        self.b.start(focus=False)
+    def test_returning_to_an_orchestrator_by_name_makes_no_new_workspace(self):
+        name = self.b.start(focus=False)
         before = len(self.h.calls_of("create_workspace"))
-        self.b.start(focus=False)                    # "take me back" is the default
+        self.b.start(name=name, focus=False)
         self.assertEqual(len(self.h.calls_of("create_workspace")), before)
 
     def test_start_creates_no_branch_and_no_worktree(self):

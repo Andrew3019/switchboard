@@ -394,47 +394,25 @@ class Broker:
 
     def start(
         self, *, name: Optional[str] = None, task: Optional[str] = None,
-        focus: bool = True, new: bool = False, board: bool = True,
-        confirm: Optional[Callable[[list[str]], bool]] = None,
+        focus: bool = True, board: bool = True,
     ) -> str:
         """The one command worth remembering. Everything else, an agent does for you.
 
-        Running more than one top-level orchestrator is legitimate — separate lines of
-        work, separate contexts. But re-running `sb start` usually means "take me back",
-        so an existing one is reused unless you say otherwise: `--new`, an explicit
-        `--name`, or answering yes when asked.
+        Always a NEW orchestrator, in a new workspace of its own — a bare one, laid over
+        the main checkout rather than a checkout of its own, because a top-level
+        orchestrator does no writes (see `_top`). Everything it delegates lands in that
+        workspace, so a line of work stays in one findable place.
 
-        Each top-level orchestrator gets its OWN herdr workspace, laid over the main
-        checkout — see `_top`. Everything it delegates then lands in that workspace, so a
-        line of work stays in one findable place. `--new` and `--name` make another
-        *workspace over the same checkout*, never another checkout.
+        It used to mean "take me back", reusing or restoring the last orchestrator unless
+        told otherwise. That is a different intent and now has a different spelling: name
+        the one you want, `sb start --name main`, which still reuses, restores and hands
+        it a task. Unnamed, `sb start` is only ever the start of something.
         """
         if name:
             return self._top(name, task, focus, board)
+        return self._top(self._next_top_name(), task, focus, board)
 
-        # Two different questions, and conflating them is what made `sb start` say
-        # "already running: main, main-2, main-3, main-4, main-5" with only main-6 up.
-        # Which name slots are taken is every root ever created — `_next_top_name` reads
-        # that off the store itself, and says why. Which orchestrators are actually going
-        # is a much smaller set, and that is what the human is shown and taken back to.
-        tops = [r["name"] for r in self.db.execute(
-            "SELECT name FROM agents WHERE parent IS NULL AND role=? ORDER BY created_at",
-            (MAIN,)
-        ).fetchall()]
-        running = self._running_tops() if tops else []   # no rows, nothing to ask herdr
-
-        if tops and not new:
-            # Only worth asking when something really is up. With nothing running there
-            # is no "another" to start, and `sb start` means what it usually means: take
-            # me back to where I was — restoring it if its pane closed (see `_top`).
-            if confirm is not None and running and confirm(running):
-                new = True
-            elif not new:
-                return self._top((running or tops)[-1], task, focus, board)
-
-        return self._top(self._next_top_name(tops), task, focus, board)
-
-    def _running_tops(self) -> list[str]:
+    def running_tops(self) -> list[str]:
         """Top-level orchestrators that could still be going, oldest first.
 
         Two filters, and the second is why this is not just a query. `live_roots` drops
@@ -443,9 +421,11 @@ class Broker:
         so a crash, an externally closed pane or a herdr restart leaves one claiming to
         work forever.
 
-        Fails OPEN. An unreachable herdr proves nothing, and here the cost of guessing
-        death is the worst one available: a second orchestrator spawned on top of a live
-        one. Same rule as `_is_registered` and `status.collect`.
+        Fails OPEN: an unreachable herdr proves nothing, so a row claiming to work is
+        left claiming it. Same rule as `_is_registered` and `status.collect`. Nothing
+        branches on this any more — `sb start` reads it only to tell the human which
+        orchestrators they already have, and naming a dead one there costs a line of
+        text, while omitting a live one costs them the way back to it.
         """
         tops = [r["name"] for r in store.live_roots(self.db, MAIN)]
         known = self._agent_states()
@@ -526,13 +506,13 @@ class Broker:
         branch = (out.stdout or "").strip()
         return branch if out.returncode == 0 and branch and branch != "HEAD" else None
 
-    def _next_top_name(self, tops: Sequence[str]) -> str:
+    def _next_top_name(self) -> str:
         """The next free top-level name.
 
-        Free means *never used*, not merely not-running. `tops` holds the ones that are
-        live, which is the right list to offer the human but the wrong one to name
-        against: reusing a finished orchestrator's name would file two unrelated agents,
-        with two unrelated histories, under one name in the store.
+        Free means *never used*, not merely not-running — asked of the store, which keeps
+        every root ever created, and never of what is live. Reusing a finished
+        orchestrator's name would file two unrelated agents, with two unrelated
+        histories, under one name.
         """
         if not store.get_agent(self.db, MAIN_NAME):
             return MAIN_NAME
@@ -1151,9 +1131,33 @@ class Broker:
         return os.environ.get("HERDR_WORKSPACE_ID", "") or self._workspace_id(ws)
 
     def _tab_for(self, workspace_id: str, cwd) -> str:
-        """A child belongs in its parent's workspace, not in whatever tab has focus."""
+        """A child belongs in its parent's workspace, not in whatever tab has focus.
+
+        A RECORDED id, though, outlives the herdr that issued it: ids are handed out per
+        herdr run, so a row written before a restart names a workspace that is simply
+        gone. That is what killed `sb start` outright — the stored `main` row still said
+        `wG`, and `tab create --workspace wG` fails, taking the whole spawn with it.
+
+        Where the tab goes is a preference; that the agent starts is not. A vanished
+        workspace therefore degrades to a plain tab rather than an error, and says so in
+        the log so the misplacement is explainable.
+        """
         if workspace_id and _accepts(self.h.create_tab, "workspace"):
-            return self.h.create_tab(cwd=str(cwd), workspace=workspace_id)
+            try:
+                return self.h.create_tab(cwd=str(cwd), workspace=workspace_id)
+            except HerdrError as e:
+                if e.code != "workspace_not_found":
+                    raise
+                # Forget it everywhere, not just here. herdr ids are unique within a run,
+                # so an id it disowns is dead for every row holding it — leaving them be
+                # would make each later spawn pay the same failed call and go on claiming
+                # a placement that has not been true since the restart. Cleared to NULL,
+                # they fall through to the live-pane and env tiers, which are facts.
+                self.db.execute(
+                    "UPDATE agents SET workspace_id=NULL WHERE workspace_id=?",
+                    (workspace_id,))
+                self.db.commit()
+                store.log_event(self.db, kind="workspace_gone", workspace=workspace_id)
         return self.h.create_tab(cwd=str(cwd))
 
     # -- spawning --------------------------------------------------------

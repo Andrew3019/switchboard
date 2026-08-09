@@ -77,6 +77,28 @@ class ErrorTest(unittest.TestCase):
             Herdr("herdr", runner=fake).list_agents()
         self.assertIn("connection refused", cm.exception.message)
 
+    def test_structured_error_on_stderr_keeps_its_code(self):
+        """Where herdr puts the envelope is not the caller's problem.
+
+        Verified against the live binary: `tab create --workspace <gone>` exits 1 with
+        EMPTY stdout and the error JSON on stderr. Reading stdout only turned that into
+        `cli_failure`, so `_tab_for` could not tell a missing workspace from a dead herdr.
+        """
+        fake = FakeHerdr(subprocess.CompletedProcess(
+            [], 1, "",
+            '{"error":{"code":"workspace_not_found","message":"workspace wG not found"},'
+            '"id":"cli:tab:create"}'))
+        with self.assertRaises(HerdrError) as cm:
+            Herdr("herdr", runner=fake).create_tab(workspace="wG")
+        self.assertEqual(cm.exception.code, "workspace_not_found")
+        self.assertIn("wG", cm.exception.message)
+
+    def test_unparseable_stderr_still_fails_as_cli_failure(self):
+        fake = FakeHerdr(subprocess.CompletedProcess([], 1, "", "connection refused"))
+        with self.assertRaises(HerdrError) as cm:
+            Herdr("herdr", runner=fake).list_agents()
+        self.assertEqual(cm.exception.code, "cli_failure")
+
     def test_silent_success_is_not_an_error(self):
         # report-agent / release-agent return no output on success
         fake = FakeHerdr(subprocess.CompletedProcess([], 0, "", ""))
