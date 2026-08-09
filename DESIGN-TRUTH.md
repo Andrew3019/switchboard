@@ -34,8 +34,9 @@ Entry format: one short claim, plus the date it was confirmed.
 **Starting work.** On some terminal in a repo, I call `sb start`. It makes a new bare
 space on main. This is a top orchestrator. — confirmed 2026-08-09
 
-**Anything that might need code changes.** It gets a workspace/worktree, and an
-orchestrator. That agent can be called `<name>-lead`. — confirmed 2026-08-09
+**Anything that might need code changes.** It gets a workspace/worktree. Unless it is
+small and clear enough for one agent end to end, it gets an orchestrator with it, and
+that agent can be called `<name>-lead`. — confirmed 2026-08-09
 
 **Where each spawn lands.** `sb start` = new bare space + orchestrator. Top spawns a
 bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
@@ -51,13 +52,14 @@ read-only task that is 100% clear we will not need a write for later on. — con
 2026-08-09
 
 **While the work runs.** The top orchestrator is just idle. It should not be monitoring.
-— confirmed 2026-08-09
+It persists until Andrew closes it. — confirmed 2026-08-09
 
-**When a workspace lead finishes.** It should clean up, push the PR if relevant, and
-summarize. Then it blocks Andrew — unless it is done, in which case it reports to the
-main orchestrator and the main orchestrator blocks. Either way, one of them has to block
-to get his attention. After that, either the space orchestrator marks itself done or the
-main orchestrator cleans everything up; that depends. — confirmed 2026-08-09
+**When work finishes.** A lead cleans up, pushes the PR if relevant, and summarizes. It
+blocks Andrew itself while it still needs something from him; when the work is complete
+it reports done to the main orchestrator and the main orchestrator blocks. For a bare
+agent under the top, the top blocks. The block does not matter to what follows: once it
+is resolved the agent finishes and reports done, and the parent cleans up. — confirmed
+2026-08-09
 
 ---
 
@@ -93,7 +95,8 @@ there are roles, and what roles there are. — confirmed 2026-08-09
 2026-08-09
 
 **We should detect failures, and can start with just telling the parent that it has
-failed.** — confirmed 2026-08-09
+failed.** How detection works, whether anything retries, and what becomes of
+half-finished work are all deferred for now. — confirmed 2026-08-09
 
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
@@ -124,6 +127,9 @@ that are not needed. — confirmed 2026-08-09
 **Like any orchestrator, it can spawn discovery or scout or research agents or
 whatever, to improve its decisions and actions.** — confirmed 2026-08-09
 
+**A lead's children share its worktree, so the lead assigns disjoint files and
+serialises anything that overlaps.** — confirmed 2026-08-09
+
 **A workspace orchestrator's job is to orchestrate other agents and stuff.** Review is
 coordinated by it. There is no prompt for that yet, so nothing about how it runs is
 anchored here — Andrew will have prompts for it. — confirmed 2026-08-09
@@ -143,8 +149,9 @@ confirmed 2026-08-09
 **Only agents have the scope constraints.** The board is shared, and from it Andrew
 crosses freely into any tree. — confirmed 2026-08-09
 
-**Agents the top orchestrator spawns directly can only talk to their parent, which is
-the top orchestrator, and it owns them — no other agent does.** — confirmed 2026-08-09
+**Agents the top orchestrator spawns directly are owned by it — no other agent owns
+them — and they answer to it.** They can talk to each other, but they should not: keeping
+it simple is the point. — confirmed 2026-08-09
 
 ### Interface
 
@@ -184,7 +191,8 @@ fires the moment the top is idle, so it is woken rather than monitoring. — con
 2026-08-09
 
 **Cleanup closes the agents, closes the tab, and closes the entire space and deletes the
-worktree if everything else is closed too.** — confirmed 2026-08-09
+worktree if everything else is closed too.** Work is usually pushed before its worktree
+is deleted. — confirmed 2026-08-09
 
 **`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
 
@@ -199,7 +207,9 @@ waiting for a reply. — confirmed 2026-08-09
   Claude while it is working. It waits for nothing and cancels nothing.
 - **when idle.** sb holds the doorbell and sends it once the agent marks itself idle —
   no more turns, and if we waited an hour there would be no new activity. That is a safe
-  idle signal, and herdr's status is the more accurate place to derive it from.
+  idle signal, and herdr's status is the more accurate place to derive it from. A
+  blocked agent is not idle: when-idle mail is held until its block is answered, so a
+  reply is never buried under it.
 - **interrupt.** Injected mid-turn, cancelling what the agent was doing. Used when we
   need to change course, or the agent is doing something wrong.
 
@@ -213,6 +223,9 @@ for bookkeeping. This must be made clear. — confirmed 2026-08-09
 
 **After Andrew answers a block, the agent just continues.** — confirmed 2026-08-09
 
+**A lead may only clean up a blocked child if it reads the block as stale** — already
+resolved elsewhere, or the status simply has not updated. — confirmed 2026-08-09
+
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
 
@@ -222,6 +235,9 @@ more tail — like 100 lines.** — confirmed 2026-08-09
 be brought up again.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
+
+**Who merges depends, but merging needs explicit approval from Andrew.** — confirmed
+2026-08-09
 
 **`sb log` is not for Andrew either, but it stays — it could be useful.** — confirmed
 2026-08-09
