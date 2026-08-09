@@ -105,6 +105,10 @@ GONE_GRACE = config.setting("timeouts.gone_grace")
 # What `sb interrupt` waits for the escape keypress to land before sending the new
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
+# How long `sb workspace close`'s re-confirmation waits for the panes it just closed to
+# leave the process table before it is allowed to refuse on them. See `_gate`.
+TEARDOWN_SETTLE = config.setting("timeouts.teardown_settle")
+TEARDOWN_SETTLE_POLL = config.setting("timeouts.teardown_settle_poll")
 # Every git we shell out to. A fork waits on `git fetch`, which is a network call and the
 # one command here that can hang for as long as a bad connection wants it to.
 SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
@@ -245,10 +249,14 @@ def _resolved(path: str) -> Optional[Path]:
 
     `store.checkout_verdict` answers by resolving both sides too, which is what makes the
     two ends of that route agree about which directory is being talked about.
+
+    `RuntimeError` alongside `OSError` because `pathlib` catches the loop's `ELOOP` itself
+    and re-raises it as one — so the case this comment names was the case it let through,
+    as a traceback out of the middle of the destructive window.
     """
     try:
         return Path(path).resolve()
-    except OSError:                            # unreadable, or a symlink loop
+    except (OSError, RuntimeError):            # unreadable, or a symlink loop
         return None
 
 
@@ -1259,13 +1267,16 @@ class Broker:
         the repository, including ones other agents are relying on.
         """
         self._records_gate(name, checkout, me=me)
+        # Before the deregistration, because git's registry is one of the two things that
+        # can name the branch and the deregistration takes the entry out of it.
+        branch = self._branch_for(name, checkout)
         self._claim(name, me)
         try:
             removed = self._deregister(checkout)
         except BaseException:
             store.release_retiring(self.db, name, me)
             raise
-        return self._finish(name, checkout, removed, kind="gone")
+        return self._finish(name, checkout, removed, kind="gone", branch=branch)
 
     def _close_checkout(self, name: str, checkout: str, *, me: str,
                         confirm: bool) -> dict:
@@ -1311,20 +1322,58 @@ class Broker:
             )
         self._gate(name, checkout, me=me)
         self._inventory_gate(name, checkout, confirm=confirm)
+        # Before the deregistration, because git's registry is one of the two things that
+        # can name the branch and the deregistration takes the entry out of it.
+        branch = self._branch_for(name, checkout)
         self._claim(name, me)
         try:
             closed = self._stop_panes(name, me=me)
             # What authorises the deletion: the panes are down, so this is the answer for
-            # the directory as it is about to be destroyed rather than as it was.
-            self._gate(name, checkout, me=me)
+            # the directory as it is about to be destroyed rather than as it was. The
+            # settle is the one difference from the first evaluation, and it buys the
+            # panes we just closed a bounded moment to actually leave — see `_gate`.
+            self._gate(name, checkout, me=me, settle=TEARDOWN_SETTLE)
             removed = self._deregister(checkout)
         except BaseException:
             store.release_retiring(self.db, name, me)
             raise
-        return self._finish(name, checkout, removed, kind="worktree", closed=closed)
+        return self._finish(name, checkout, removed, kind="worktree", branch=branch,
+                            closed=closed)
+
+    def _branch_for(self, name: str, checkout: str) -> Optional[str]:
+        """The branch this workspace's checkout is on, or None when nothing names one.
+
+        Asked BEFORE the destruction, by both routes that delete, because git's registry
+        is one of the two things that can answer and `_deregister` is about to take the
+        entry out of it. Matched by `_resolved`, the same one notion of directory identity
+        the deregistration uses — two ways of spelling a path is how the last bug here got
+        in.
+
+        What it will not do is fall back to the workspace's own NAME. That fallback read
+        as harmless because `sb workspace new` makes the two strings equal, but they are
+        different facts: a workspace with no row carrying a branch would aim `git branch
+        -d` at whatever unrelated branch happened to share its name. `-d` bounds the
+        damage to a merged branch and the reflog keeps the tip, so it was small — but it
+        was a guess, at the one step in this command where a guess is aimed at something
+        that is not the thing being closed.
+
+        None is not a refusal. A refusal here would have to fire before the panes come
+        down to be worth anything, and the state it fires in — a workspace whose checkout
+        git no longer registers and whose rows never carried a branch — is one where
+        retiring destroys nothing and refusing strands the name in a row no verb can ever
+        retire. That is the failure this branch spent a commit removing. So: delete the
+        branch we can name, delete nothing when we cannot, and say which happened.
+        """
+        recorded = store.workspace_branch(self.db, name)
+        if recorded:
+            return recorded
+        mine = _resolved(checkout)
+        found = None if mine is None else next(
+            (wt for wt in self._worktrees() if _resolved(wt["path"]) == mine), None)
+        return found["branch"] if found else None
 
     def _finish(self, name: str, checkout: str, removed: str, *, kind: str,
-                closed: Sequence[str] = ()) -> dict:
+                branch: Optional[str], closed: Sequence[str] = ()) -> dict:
         """The last two steps, shared by both routes that delete something.
 
         `git branch -d` and never `-D`: an unmerged branch simply stays, which is a far
@@ -1332,9 +1381,12 @@ class Broker:
         deleted branch's tip survives in the reflog. Then the retired mark, which clears
         the recorded path with it: the command has just deleted that directory, and a row
         left pointing at it starts every later question from a path we know is gone.
+
+        `branch` arrives established rather than being worked out here — see `_branch_for`
+        for why it is looked up before anything is destroyed, and why None means no branch
+        is deleted rather than a name being guessed at.
         """
-        branch = store.workspace_branch(self.db, name) or name
-        deleted = self._git("branch", "-d", branch, check=True)
+        deleted = bool(branch) and self._git("branch", "-d", branch, check=True)
         store.retire_workspace(self.db, name)
         store.log_event(self.db, kind="workspace_retired", workspace=name,
                         checkout=checkout, branch=branch if deleted else None,
@@ -1353,7 +1405,7 @@ class Broker:
 
     # -- the gate ---------------------------------------------------------------------
 
-    def _gate(self, name: str, checkout: str, *, me: str) -> None:
+    def _gate(self, name: str, checkout: str, *, me: str, settle: float = 0.0) -> None:
         """Is anything still in that directory? Asked of our records AND of the machine.
 
         Two halves, because each is blind to what the other sees.
@@ -1368,9 +1420,30 @@ class Broker:
         which is finished, and nothing was ever "unknown". An empty success there is not
         weak evidence of an empty workspace, it is no evidence either way — which is why a
         scan that cannot be MADE is a refusal rather than a shrug. Unknown is not empty.
+
+        `settle` is for the second evaluation only, and it is a delay rather than an
+        exemption. `close_pane` returning is not the pane's shell having left the process
+        table, and that shell's cwd is under the checkout — it is nobody's descendant of
+        ours, so no exclusion covers it, and the re-confirmation runs AFTER the panes are
+        down, which makes a refusal on it the one refusal that costs the person something.
+        Measured rather than assumed (`notes/review-destructive-workspace-close.md`, F4):
+        an idle shell and a shell with an ordinary child are already gone when the scan
+        lands, so the ordinary success path never hit this; a process that catches the
+        hangup and takes half a second to wind down is still there at the first look every
+        time, and that is the shape of an agent shutting down cleanly.
+
+        What it does NOT do is exclude those pids. A process still in the directory when
+        the wait expires is live, whoever started it, and the deletion is refused on it —
+        excluding the panes we closed would delete a directory around a process that is
+        demonstrably still in it, which is the one thing this whole gate is for.
         """
         self._records_gate(name, checkout, me=me)
         found = self._live_under(checkout)
+        if found and settle:
+            deadline = time.monotonic() + settle
+            while found and time.monotonic() < deadline:
+                time.sleep(TEARDOWN_SETTLE_POLL)
+                found = self._live_under(checkout)
         if found is None:
             raise ValueError(
                 f"cannot close {name!r}: this machine could not be asked what is running "
@@ -1726,16 +1799,30 @@ class Broker:
         checkout still on disk and still registered. A path that will not resolve at all
         matches nothing rather than everything: the first entry `git worktree list` gives
         is the primary checkout.
+
+        The removal is the one subprocess in this command that used to run with no `try`
+        of its own, and it is the worst place for that: it runs inside the destructive
+        window, so a git that would not start or would not finish came out as an `OSError`
+        or a `TimeoutExpired` rather than as a refusal — a traceback where the command's
+        whole voice is "cannot tell, so nothing is deleted". Nothing is deleted either
+        way; what changes is whether the person is told why.
         """
         mine = _resolved(checkout)
         found = None if mine is None else next(
             (wt for wt in self._worktrees() if _resolved(wt["path"]) == mine), None)
         if found is None:
             return "unregistered"
-        out = subprocess.run(
-            ["git", "worktree", "remove", found["path"]],
-            cwd=str(self.repo), capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
-        )
+        try:
+            out = subprocess.run(
+                ["git", "worktree", "remove", found["path"]],
+                cwd=str(self.repo), capture_output=True, text=True,
+                timeout=SUBPROCESS_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            raise ValueError(
+                f"git would not deregister {checkout}: {e} — the checkout is still there "
+                f"and still registered, and nothing else has been deleted"
+            ) from None
         if out.returncode != 0:
             raise ValueError(
                 f"git would not deregister {checkout}: {(out.stderr or '').strip()}"

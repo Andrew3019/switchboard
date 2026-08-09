@@ -1162,6 +1162,11 @@ def checkout_verdict(path: Optional[str], cwd: Optional[Path] = None) -> str:
       workspace that is not bare, or a git that would not answer. This is where "unknown
       is not empty" keeps its full force, and a caller that cannot tell refuses.
 
+    "A git that would not answer" includes one that never answers: this call is bounded
+    like every other subprocess in this command, because the alternative to a refusal here
+    is not a wrong verdict but no verdict at all — a hung git hanging the whole command,
+    which for the destructive caller means hanging it before it has decided anything.
+
     `cwd` is where git is asked from, and it is deliberately not the path being validated:
     a directory that turns out to be a checkout of some OTHER repo would happily report
     itself as a worktree of itself.
@@ -1179,12 +1184,16 @@ def checkout_verdict(path: Optional[str], cwd: Optional[Path] = None) -> str:
         return CHECKOUT_UNUSABLE
     try:
         resolved = p.resolve()
-    except OSError:                            # unreadable, or a symlink loop
+    except (OSError, RuntimeError):            # unreadable, or a symlink loop
         return CHECKOUT_UNUSABLE
-    out = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=str(cwd) if cwd else None, capture_output=True, text=True,
-    )
+    try:
+        out = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return CHECKOUT_UNUSABLE               # unrunnable or hung is not the answer "no"
     if out.returncode != 0:
         return CHECKOUT_UNUSABLE               # no answer is not the answer "no"
     for line in out.stdout.splitlines():
@@ -1193,7 +1202,7 @@ def checkout_verdict(path: Optional[str], cwd: Optional[Path] = None) -> str:
         try:
             if Path(line[len("worktree "):]).resolve() == resolved:
                 return CHECKOUT_OK
-        except OSError:
+        except (OSError, RuntimeError):
             continue
     return CHECKOUT_UNUSABLE
 

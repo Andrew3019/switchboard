@@ -1106,6 +1106,26 @@ class WorkspacesTableTest(unittest.TestCase):
         self.assertEqual(store.checkout_verdict(str(wt), outside),
                          store.CHECKOUT_UNUSABLE)
 
+    def test_a_git_that_never_answers_is_bounded_and_refuses(self):
+        """The regression. This call was the one subprocess in the teardown change with no
+        timeout, so a hung git did not produce a wrong verdict — it produced no verdict at
+        all, hanging the destructive command before it had decided anything."""
+        import subprocess
+        wt = self._worktree(self._repo("repo"), "side")
+        seen = {}
+        real = subprocess.run
+
+        def run(args, **kw):
+            seen.update(kw)
+            raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+        subprocess.run = run
+        try:
+            verdict = store.checkout_verdict(str(wt), Path(self.tmp.name))
+        finally:
+            subprocess.run = real
+        self.assertEqual(verdict, store.CHECKOUT_UNUSABLE)
+        self.assertTrue(seen.get("timeout"), "the call runs with no timeout")
+
 
 if __name__ == "__main__":
     unittest.main()

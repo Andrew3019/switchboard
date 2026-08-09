@@ -250,6 +250,18 @@ wait_slice_ms = 30000
 # meant to stop.
 interrupt_settle = 0.5
 
+# How long `sb workspace close` lets the panes it just closed leave the process table
+# before the re-confirmation is allowed to refuse on them. `pane close` returning is not
+# the shell having exited: measured on this machine, an idle shell and a shell with an
+# ordinary child are gone before the scan lands (~68ms, which is the scan's own runtime),
+# but a process that catches the hangup and winds down is still there at the first look
+# and stays for as long as its shutdown takes. Refusing on those costs the panes, because
+# the re-confirmation runs after they are down. This only delays the answer; it never
+# changes what counts as live, so anything that is still there when it expires refuses
+# exactly as it would have.
+teardown_settle = 3.0
+teardown_settle_poll = 0.1
+
 # sqlite. Many short-lived `sb` processes write to one file, so a busy database is normal
 # and waiting is the right response to it.
 database = 10.0

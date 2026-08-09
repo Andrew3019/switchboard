@@ -123,10 +123,15 @@ def is_under(path: str, root: str) -> bool:
     A cwd that no longer exists still answers, which is the direction that matters: macOS
     reports the original path string for a process whose directory was deleted underneath
     it, with no marker, so the comparison still catches it.
+
+    `RuntimeError` alongside `OSError` because that is the one this comment was written
+    for and the one it did not catch: `pathlib` handles the loop's `ELOOP` internally and
+    re-raises it as `RuntimeError`, so "unreadable, or a symlink loop" documented handling
+    for a case that came out of here as a traceback.
     """
     try:
         p, r = Path(path).resolve(), Path(root).resolve()
-    except OSError:                            # unreadable, or a symlink loop
+    except (OSError, RuntimeError):            # unreadable, or a symlink loop
         return False
     return p.parts[:len(r.parts)] == r.parts
 

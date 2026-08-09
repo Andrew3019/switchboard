@@ -22,19 +22,51 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import live, store  # noqa: E402
+from switchboard import broker, cli, live, store  # noqa: E402
 from switchboard.broker import HUMAN  # noqa: E402
 from switchboard.herdr import HerdrError  # noqa: E402
 from test_workspace_list import Harness  # noqa: E402
 
+REAL_RUN = subprocess.run                   # before anything here can have replaced it
+
 
 class CloseHarness(Harness):
     """A worktree workspace recorded the way an attach would have recorded it."""
+
+    def setUp(self):
+        super().setUp()
+        # The re-confirmation waits for the panes it closed to leave the process table,
+        # and a real wind-down is measured in seconds. Nothing here is a real process, so
+        # the tests want the BEHAVIOUR of the wait and none of its duration; the two that
+        # are about the wait itself set their own.
+        self.settle = (broker.TEARDOWN_SETTLE, broker.TEARDOWN_SETTLE_POLL)
+        broker.TEARDOWN_SETTLE, broker.TEARDOWN_SETTLE_POLL = 0.5, 0.01
+
+    def tearDown(self):
+        broker.TEARDOWN_SETTLE, broker.TEARDOWN_SETTLE_POLL = self.settle
+        super().tearDown()
+
+    def arrives_during_the_stop_step(self, proc: "live.Proc"):
+        """Clear at the first gate, `proc` at every look after it.
+
+        Every look after it, not just the next one: the second gate polls until the
+        directory reads clear or the wait runs out, so a fake that answered once and then
+        went quiet would be a process that LEFT, and a process that left is not one the
+        re-confirmation is supposed to refuse on.
+        """
+        self.machine(proc)
+        looks = [0]
+
+        def scan(*a, **kw):
+            looks[0] += 1
+            return [] if looks[0] == 1 else [proc]
+        live.scan = scan
 
     def space(self, name: str = "api", *, commit: bool = False) -> str:
         path = self.worktree(name, commit=commit)
@@ -255,9 +287,7 @@ class OrderingTest(CloseHarness, unittest.TestCase):
     def test_the_re_confirmation_catches_what_arrived_during_the_stop_step(self):
         path = self.space()
         self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
-        self.machine(live.Proc(4242, "vim", path))
-        answers = [[], [live.Proc(4242, "vim", path)]]
-        live.scan = lambda *a, **kw: answers.pop(0) if answers else []
+        self.arrives_during_the_stop_step(live.Proc(4242, "vim", path))
         with self.assertRaises(ValueError) as e:
             self.b.workspace_close("api", me=HUMAN)
         self.assertIn("vim", str(e.exception))
@@ -279,9 +309,7 @@ class OrderingTest(CloseHarness, unittest.TestCase):
         """Only a crash may leave a mark set. A refusal that left one would lock a live
         workspace's name out of itself over a command that did nothing."""
         path = self.space()
-        self.machine(live.Proc(4242, "vim", path))
-        answers = [[], [live.Proc(4242, "vim", path)]]
-        live.scan = lambda *a, **kw: answers.pop(0) if answers else []
+        self.arrives_during_the_stop_step(live.Proc(4242, "vim", path))
         with self.assertRaises(ValueError):
             self.b.workspace_close("api", me=HUMAN)
         self.assertIsNone(self.mark("api"))
@@ -334,6 +362,221 @@ class OrderingTest(CloseHarness, unittest.TestCase):
         r = self.b.workspace_close("api", me=HUMAN)
         self.assertEqual(r["closed"], ["api-lead"])
         self.assertNotIn(path, self.registered())
+
+
+class SettleTest(CloseHarness, unittest.TestCase):
+    """The re-confirmation waits for the panes it just closed, and waits for nothing else.
+
+    Measured before it was written (`notes/review-destructive-workspace-close.md`, F4):
+    `close_pane` returning is not the pane's shell having left the process table, that
+    shell's cwd is under the checkout, and it is nobody's descendant of ours so no
+    exclusion covers it. An idle shell and a shell with an ordinary child are gone before
+    the scan lands — the ordinary success path never hit this — but a process that catches
+    the hangup and winds down was still there at the first look every time, at 0.5s and at
+    2s, and that is the shape of an agent shutting down cleanly. It would have refused
+    AFTER the panes were down, which is the one refusal that costs the person something.
+    """
+
+    def leaves_during_the_settle(self, proc: "live.Proc", *, looks: int):
+        """`proc` for the first `looks` scans after the gate's first, then gone."""
+        self.machine(proc)
+        seen = [0]
+
+        def scan(*a, **kw):
+            seen[0] += 1
+            return [] if seen[0] == 1 or seen[0] > looks + 1 else [proc]
+        live.scan = scan
+        return seen
+
+    def test_a_pane_still_winding_down_is_waited_for_rather_than_refused_on(self):
+        """The regression. One look, immediately after `close_pane` returned, and the
+        shell of the pane this command had just closed refused the command — with the
+        panes already down, so the person lost them and got nothing for it."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        self.leaves_during_the_settle(live.Proc(4242, "zsh", path), looks=3)
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(r["worktree"], "removed")
+        self.assertNotIn(path, self.registered())
+
+    def test_something_that_stays_still_refuses_when_the_wait_runs_out(self):
+        """A delay, not an exemption. Waiting for a process that is leaving must not turn
+        into passing a process that is not — the pids are never excluded, so whatever is
+        still in the directory when the wait expires refuses exactly as it always did."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        self.arrives_during_the_stop_step(live.Proc(4242, "vim", path))
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("vim", str(e.exception))
+        self.assertIn(path, self.registered())
+
+    def test_the_first_gate_does_not_wait_at_all(self):
+        """A refusal before anything is touched costs only the message, and it should
+        cost that immediately: there is nothing winding down yet to wait for."""
+        path = self.space()
+        self.machine(live.Proc(4242, "vim", path))
+        broker.TEARDOWN_SETTLE = 30
+        start = time.monotonic()
+        with self.assertRaises(ValueError):
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_the_wait_is_bounded(self):
+        """It is a bounded wait and not a poll-until-clear: a directory somebody really is
+        working in must reach the refusal, not hang the command until they stop."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        self.arrives_during_the_stop_step(live.Proc(4242, "vim", path))
+        broker.TEARDOWN_SETTLE = 0.3
+        start = time.monotonic()
+        with self.assertRaises(ValueError):
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertLess(time.monotonic() - start, 5)
+
+
+class BranchTest(CloseHarness, unittest.TestCase):
+    """Which branch the last step deletes, and what it does when nothing names one."""
+
+    def test_the_recorded_branch_is_what_gets_deleted(self):
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path)
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(r["branch"], "api")
+        self.assertTrue(r["branch_deleted"])
+        self.assertNotIn("api", self.git("branch").stdout)
+
+    def test_with_no_row_to_record_one_git_names_it(self):
+        """An orphan has no rows by definition, and git knows perfectly well what its
+        checkout is on — so this is a fact to look up, not a gap to fill in."""
+        path = self.worktree("orphan")
+        self.assertIsNone(store.workspace_branch(self.db, "orphan"))
+        r = self.b.workspace_close("orphan", me=HUMAN)
+        self.assertEqual(r["branch"], "orphan")
+        self.assertTrue(r["branch_deleted"])
+        self.assertNotIn(path, self.registered())
+
+    def test_a_branch_nothing_names_is_not_guessed_at_from_the_workspace_name(self):
+        """The regression. The fallback was the workspace's own NAME, which reads as
+        harmless because `sb workspace new` makes the two strings equal — but they are
+        different facts, and here `api` is somebody else's branch that merely shares the
+        name with a workspace whose checkout git no longer registers. `-d` bounded the
+        damage to a merged branch and the reflog kept the tip; it was still a guess, at
+        the one step in this command aimed at something other than what is being closed.
+        """
+        gone = str(self.root / "wt" / "api")
+        store.record_workspace(self.db, "api", gone)
+        self.git("branch", "api")                       # an unrelated branch, merged
+        self.assertEqual(store.checkout_verdict(gone, cwd=self.repo),
+                         store.CHECKOUT_ABSENT)
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertIsNone(r["branch"])
+        self.assertFalse(r["branch_deleted"])
+        self.assertIn("api", self.git("branch").stdout)  # still there, untouched
+
+    def test_and_the_workspace_is_still_retired_rather_than_stranded(self):
+        """Refusing here would have to fire before the panes come down to be worth
+        anything, and the state it fires in is one where retiring destroys nothing and a
+        refusal leaves the name in a row no verb can ever retire."""
+        store.record_workspace(self.db, "api", str(self.root / "wt" / "api"))
+        self.b.workspace_close("api", me=HUMAN)
+        self.assertTrue(store.get_workspace(self.db, "api")["retired_at"])
+
+    def test_the_output_says_which_kind_of_branch_was_left_behind(self):
+        """"kept, git will not delete an unmerged branch" and "none was named" are not
+        the same news, and the second used to render as `branch None kept`."""
+        store.record_workspace(self.db, "api", str(self.root / "wt" / "api"))
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("no branch deleted", cli._workspace_closed(r))
+        self.assertNotIn("None", cli._workspace_closed(r))
+
+
+class SymlinkLoopTest(CloseHarness, unittest.TestCase):
+    """A path that cannot be resolved is refused or reported, never a traceback.
+
+    `Path.resolve()` answers a symlink loop with `RuntimeError`, not `OSError`: `pathlib`
+    catches the `ELOOP` itself and re-raises it as one. So three docstrings that said
+    "unreadable, or a symlink loop" documented handling for the single case they did not
+    have, and the loop came out of the middle of the destructive window as a traceback.
+    """
+
+    def loop(self, name: str = "api") -> str:
+        """A path whose resolution cycles: `a` -> `b` -> `a`, asked about `a/x`."""
+        if not (self.root / "a").is_symlink():
+            (self.root / "a").symlink_to(self.root / "b")
+            (self.root / "b").symlink_to(self.root / "a")
+        return str(self.root / "a" / "x")
+
+    def test_resolving_one_answers_rather_than_raising(self):
+        with self.assertRaises(RuntimeError):            # what pathlib really does
+            Path(self.loop()).resolve()
+        self.assertIsNone(broker._resolved(self.loop()))
+
+    def test_two_of_them_are_the_same_directory_because_it_is_never_a_guess(self):
+        """`_same_dir`'s only caller is asking "is this the one directory I must never
+        touch", and that answer is not allowed to be a guess."""
+        self.assertTrue(broker._same_dir(self.loop(), str(self.repo)))
+
+    def test_containment_answers_rather_than_raising(self):
+        self.assertFalse(live.is_under(self.loop(), str(self.repo)))
+        self.assertFalse(live.is_under(str(self.repo), self.loop()))
+
+    def test_closing_a_workspace_recorded_at_one_does_not_crash(self):
+        """The regression, end to end: the mark released on the way out — that much was
+        already fixed — but the person got a `RuntimeError` traceback where this command's
+        whole voice is "cannot tell, so nothing is deleted"."""
+        path = self.loop()
+        store.record_workspace(self.db, "api", path)
+        self.row("worker", workspace="api", branch="api", cwd=path, state="done")
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(r["worktree"], "unregistered")
+        self.assertIsNone(self.mark("api"))
+
+    def test_the_verdict_on_one_is_not_ok(self):
+        """Whatever else it is, a path that will not resolve is not a checkout this
+        command has established anything about."""
+        self.assertNotEqual(store.checkout_verdict(self.loop(), cwd=self.repo),
+                            store.CHECKOUT_OK)
+
+
+class DeregisterTest(CloseHarness, unittest.TestCase):
+    """The removal is the one subprocess here that runs inside the destructive window."""
+
+    def refuses_when_the_removal(self, boom: BaseException) -> ValueError:
+        """Close a workspace whose `git worktree remove` will not run, or not finish.
+
+        Patched on the module rather than the broker because that call is a bare
+        `subprocess.run`, and restored to the genuine original — `subprocess.run` read at
+        teardown would be whatever this had just put there.
+        """
+        def run(args, **kw):
+            if args[:3] == ["git", "worktree", "remove"]:
+                raise boom
+            return REAL_RUN(args, **kw)
+        subprocess.run = run
+        try:
+            with self.assertRaises(ValueError) as e:
+                self.b.workspace_close("api", me=HUMAN)
+        finally:
+            subprocess.run = REAL_RUN
+        return e.exception
+
+    def test_a_git_that_will_not_start_refuses_instead_of_tracebacking(self):
+        """The regression. Every other subprocess in this command has a `try` of its own;
+        this one did not, so an `OSError` came out as a traceback from inside the window
+        rather than as the refusal it means."""
+        path = self.space()
+        e = self.refuses_when_the_removal(OSError("no git here"))
+        self.assertIn("would not deregister", str(e))
+        self.assertIn(path, self.registered())
+        self.assertIsNone(self.mark("api"))
+
+    def test_a_git_that_hangs_says_the_checkout_is_still_there(self):
+        path = self.space()
+        e = self.refuses_when_the_removal(subprocess.TimeoutExpired("git", 10))
+        self.assertIn("still there", str(e))
+        self.assertIn(path, self.registered())
+        self.assertIsNone(self.mark("api"))
 
 
 class DeleteTest(CloseHarness, unittest.TestCase):

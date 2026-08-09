@@ -681,9 +681,10 @@ it goes first:
 2. **Close the panes** for that workspace's agents and *confirm* them stopped.
 3. **Re-confirm the gate**, now that the panes are down — this is the check that
    catches anything that arrived during step 2, and it is the one that authorises
-   destruction.
-4. **Delete**: `git worktree remove`, then `git branch -d`, then the retired
-   mark.
+   destruction. It gives the panes step 2 closed a bounded moment to actually
+   leave before it is allowed to refuse on them; see the amendment below.
+4. **Delete**: `git worktree remove`, then `git branch -d` against a branch
+   something NAMED, then the retired mark.
 
 Deleting a directory around a process still running in it is not an exotic state
 here — it is precisely the one "Where the designs collide" (#1) constructs, where
@@ -692,6 +693,41 @@ the panes may still be alive. Step 3 is what step 2 exists to make true, and
 destruction is still the last step, not the first. The first evaluation does not
 make the second redundant; it makes the *cheap* answer available before anything
 irreversible or even inconvenient has happened.
+
+**Step 3 waits for step 2 before it refuses, because `close_pane` returning is
+not the shell having exited.** An amendment, and the ordering above is the reason
+it matters: step 3 runs *after* the panes are down, so a refusal there is the one
+refusal in this command that costs the person something. A pane's shell has its
+cwd under the checkout and is a child of the herdr server rather than of us, so
+no exclusion covers it — one look, immediately, and the command could refuse on
+the wreckage of its own step 2.
+
+Measured rather than reasoned about, on a throwaway repo and a private tmux
+socket. An idle shell, and a shell with an ordinary child, are already out of the
+process table when the scan lands: the scan's own runtime is ~68ms and they were
+gone in every run, so **the ordinary success path never hit this** and the
+destructive route was not refusing every time. What does hit it is a process that
+catches the hangup and winds down — one that took 0.5s to exit was still there at
+the first look in every run, as was one that took 2s — and that is the shape of
+an agent shutting down cleanly rather than an exotic case.
+
+So step 3 polls until the directory reads clear or a bounded wait expires
+(`timeouts.teardown_settle`), and then answers. Two things it deliberately is
+not. It is **not an exclusion**: the pids of the panes we closed are never
+removed from what counts, so anything still in the directory when the wait
+expires refuses exactly as it always did — excluding them would delete a
+directory around a process demonstrably still in it, which is the one thing this
+gate exists for. And it is **not unbounded**: a directory somebody really is
+working in must reach the refusal rather than hang the command until they stop.
+The wait changes when the answer is taken, never what the answer counts.
+
+It is also not the retry loop the live-observation rules forbid, and the
+difference is which answer is being re-asked. A scan that *failed* — a non-zero
+exit, a missing binary, a timeout — is still "could not tell" and still refuses
+on the spot, exactly as specified above; the wait ends the moment one of those
+comes back rather than papering over it with another attempt. What is re-asked is
+a scan that *succeeded* and found something, and re-asking that is not retrying a
+failure, it is watching a directory empty.
 
 **Re-entrancy: ship the state before the destruction, inside the command too.**
 Section A's staging argument applies within a single invocation. The retiring/
@@ -776,8 +812,11 @@ argument holds only while the mark stays set for the whole destructive phase,
 which is precisely what the owned claim above buys.
 
 **Confirmation, when it is demanded.** Typing the branch name back is not a
-confirmation. For a workspace with a worktree, workspace name *is* branch name
-(`_attach_workspace`: `branch = name`, `broker.py:715`) — the bare case above is
+confirmation. For a workspace this tool attached, workspace name *is* branch name
+(`_attach_workspace`: `branch = name`, `broker.py:715`) — which is an argument
+about what the human would be retyping, and not a licence to derive one from the
+other anywhere it matters; see "which branch `-d` is aimed at" below, where the
+two being usually equal is exactly what made a guess look harmless. The bare case above is
 the exception, and there the answer is that no confirmation is demanded at all
 because nothing is destroyed. So the token asks the human to retype the string
 they typed one argument earlier on the same command line; it asserts nothing
@@ -800,6 +839,32 @@ isn't one." Retired-with-a-stale-path is the state that makes re-validation's
 three verdicts ambiguous for no reason: the row would re-validate as *absent* and
 route a reopened workspace to the already-gone path when nothing is gone that
 matters.
+
+**Which branch `-d` is aimed at is looked up, never guessed from the workspace
+name.** Two things can name it — the branch a row in this workspace recorded, and
+the branch git's own registry reports for that checkout — and the lookup happens
+*before* the deregistration, since the deregistration is about to take that
+registry entry away. The path it replaces fell back to the workspace's own NAME,
+which reads as harmless because `sb workspace new` makes the two strings equal;
+they are still different facts, and for a workspace with no row carrying a branch
+that aimed `git branch -d` at whatever unrelated branch happened to share the
+name. `-d` bounded the damage to a merged branch and the reflog keeps the tip, so
+it was small — but it was a guess, at the one step in a command that otherwise
+refuses rather than guesses, and the guess was aimed at something other than the
+thing being closed.
+
+**When nothing names one, no branch is deleted and the output says so.** Not a
+refusal, and this is the one place in this command where "cannot tell" does not
+end in one. A refusal would have to fire before the panes come down to be worth
+anything at all, and the state it would fire in — a workspace whose checkout git
+no longer registers and whose rows never carried a branch — is one where retiring
+destroys nothing and refusing strands the name in a row no verb can ever retire.
+That is the failure this design already spent a rule removing, and it is not
+worth re-introducing to avoid leaving one branch standing that a person can see
+and delete. What the standard does demand is that the non-action is stated: "kept
+because git will not delete an unmerged branch" and "none was deleted because
+nothing named one" are different news for the person reading it, and only one of
+them means there is a branch to go and look at.
 
 **Reopening a retired workspace clears the mark.** `workspace_new` given the name
 of a *retired* workspace reopens it: the `retired_at` fact is cleared and the
@@ -2290,6 +2355,20 @@ worth carrying forward so nobody re-checks it:
 - `git worktree remove` refuses a main working tree (`fatal: '.' is a main
   working tree`), which bounds — but does not excuse — the `or self.repo`
   fallback trap.
+- `Path.resolve()` answers a symlink loop with **`RuntimeError`**, not `OSError`:
+  `pathlib` catches the `ELOOP` itself and re-raises it as one (CPython 3.11,
+  `RuntimeError: Symlink loop from '...'`). Every `except OSError` around a
+  resolution in this design was written with the comment "unreadable, or a
+  symlink loop" and handled the first case only, so the case each comment named
+  was the case each one let through — as a traceback, and in the gate's own
+  helper from inside the destructive window. All of them catch both now. A path
+  that cannot be resolved is exactly what this command must refuse cleanly on.
+- Every subprocess in this command is bounded, including the `git worktree list`
+  behind re-validation and the `git worktree remove` inside the destructive
+  window, which were the two that were not. A hung git does not produce a wrong
+  verdict; it produces no verdict, which for a destructive command means hanging
+  before it has decided anything — a strictly worse failure than the refusal it
+  is supposed to be able to reach.
 
 **Not covered by that round**: herdr's own source, whether it has a
 worktree-removal path of its own and what it does; `git worktree remove` under

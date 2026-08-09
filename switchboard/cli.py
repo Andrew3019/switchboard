@@ -930,7 +930,10 @@ def _workspace_closed(r: dict) -> str:
     Which of the three routes the workspace took is the first thing to say, because "bare"
     doing nothing to a directory and "worktree" deleting one are the same word otherwise.
     A branch left behind is said out loud with the reason: it stays forever, and a person
-    who does not know that is a person who thinks the cleanup finished.
+    who does not know that is a person who thinks the cleanup finished. Two reasons it can
+    be left, and they are not the same news — git refusing an unmerged branch is one, and
+    nothing being able to NAME the branch is the other, which leaves a person looking for
+    a branch this command never identified.
     """
     lines = []
     if r["closed"]:
@@ -940,7 +943,11 @@ def _workspace_closed(r: dict) -> str:
                      f"deleted")
     else:
         lines.append(f"retired {r['workspace']}: worktree {r['worktree']}")
-        if not r["branch_deleted"]:
+        if not r["branch"]:
+            lines.append(f"  no branch deleted — nothing recorded one for "
+                         f"{r['workspace']} and git named none for its checkout, and a "
+                         f"branch is not guessed at from a workspace name")
+        elif not r["branch_deleted"]:
             lines.append(f"  branch {r['branch']} kept — git will not delete an unmerged "
                          f"branch, and it stays until somebody decides otherwise")
     return "\n".join(lines)
