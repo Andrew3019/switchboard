@@ -20,6 +20,10 @@ in this repo, because everything else may be inferred and this may not.
 - **If in doubt, leave it out.** Uncertain or half-remembered items do not go in. A thin
   file that is entirely true is the point; a fuller file that is partly guessed is worse
   than no file.
+- **Every addition triggers a pass over the whole file.** Whoever writes an entry then
+  re-reads all of it and leaves it consistent: contradictions resolved, overlapping
+  entries merged, anything redundant removed. Where two statements disagree, the newest
+  one wins and the older goes — and Andrew is told what was dropped.
 
 Entry format: one short claim, plus the date it was confirmed.
 
@@ -36,11 +40,9 @@ orchestrator. That agent can be called `<name>-lead`. — confirmed 2026-08-09
 **Where each spawn lands.** `sb start` = new bare space + orchestrator. Top spawns a
 bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
 Top spawns an orchestrator = same thing. An orchestrator spawning anything = new tab in
-the same exact space. (This has not been the case.) — confirmed 2026-08-09
-
-**Only the top orchestrator ever creates a space.** A sub-orchestrator a lead spawns is
-a tab in the lead's space, and its whole subtree stays in that one space. — confirmed
-2026-08-09
+the same exact space. So only the top ever creates a space: a sub-orchestrator a lead
+spawns is a tab in the lead's space, and its whole subtree stays in that one space.
+(This has not been the case.) — confirmed 2026-08-09
 
 **When a workspace lead finishes.** It should clean up, push the PR if relevant,
 summarize, and `sb block`. (More to come as part of a general process CUJ.) — confirmed
@@ -50,12 +52,16 @@ summarize, and `sb block`. (More to come as part of a general process CUJ.) — 
 
 ## Product decisions
 
-**The top orchestrator's job is to orchestrate the creation of worktrees and new
-orchestrators and workspaces.** — confirmed 2026-08-09
+### Orchestrators
 
-**The top orchestrator can also spawn well-directed bare agents, if the task is clear
-and unambiguous enough** — e.g. small changes. This skips extra layers that are not
-needed. — confirmed 2026-08-09
+**The top orchestrator is everything: its scope is the whole of its own tree, and its
+job is to orchestrate the creation of worktrees and new orchestrators and workspaces.**
+It is above that layer. — confirmed 2026-08-09
+
+**A small task that a single agent can do end to end without interruption goes to a bare
+agent; otherwise, an orchestrator.** The top spawning a well-directed bare agent
+directly is how a clear, unambiguous task — e.g. a small change — skips extra layers
+that are not needed. — confirmed 2026-08-09
 
 **Like any orchestrator, it can spawn discovery or scout or research agents or
 whatever, to improve its decisions and actions.** — confirmed 2026-08-09
@@ -68,57 +74,46 @@ whatever, to improve its decisions and actions.** — confirmed 2026-08-09
 **Top and workspace orchestrators must be clearly differentiated, and some mechanism
 other than the prompt must make that true as well.** — confirmed 2026-08-09
 
-**The top orchestrator is everything: its scope is the whole of its own tree.** It
-spawns worktrees and stuff — it is above that. — confirmed 2026-08-09
+### Scope
 
-**Top orchestrators never cross into another top orchestrator's tree.** Multiple top
-orchestrators, and anything they spawn, are completely separate. — confirmed 2026-08-09
-
-**The invisibility rule is: siblings are not invisible to each other; any other top
-orchestrator's entire tree is invisible.** Separating two subtrees inside one top
-orchestrator's tree is not something we have to do. — confirmed 2026-08-09
-
-**Across that boundary agents cannot `sb tell` or anything else — they are invisible to
-other groups.** The board is shared. — confirmed 2026-08-09
-
-**Only agents have the scope constraints.** From the shared board Andrew crosses freely
-into any tree. — confirmed 2026-08-09
-
-**Agents the top orchestrator spawns directly can only talk to their parent, which is
-the top orchestrator, and it owns them — no other agent does.** They may or may not
-have separate worktrees, but by intent they should usually have separate worktrees. —
+**Siblings are not invisible to each other; any other top orchestrator's entire tree is
+invisible.** Across that boundary agents cannot `sb tell` or anything else. Separating
+two subtrees inside one top orchestrator's tree is not something we have to do. —
 confirmed 2026-08-09
 
-**A small task that a single agent can do end to end without interruption goes to a
-bare agent. Otherwise, an orchestrator.** — confirmed 2026-08-09
+**Only agents have the scope constraints.** The board is shared, and from it Andrew
+crosses freely into any tree. — confirmed 2026-08-09
+
+**Agents the top orchestrator spawns directly can only talk to their parent, which is
+the top orchestrator, and it owns them — no other agent does.** — confirmed 2026-08-09
+
+### Interface
 
 **Every single view I see that is made by sb — `sb start`, orchestrators, agents, etc.
-— needs to be a split pane with `sb board`.** — confirmed 2026-08-09
+— needs to be a split pane with `sb board`.** There is no `--no-board`. — confirmed
+2026-08-09
 
 **`sb board` is navigation: I can click on an agent and it jumps to that pane.** It is
 like a fake UI I can use to move around quickly. — confirmed 2026-08-09
 
-**`sb start` should focus the pane. Anything else should never focus on spawn.** —
-confirmed 2026-08-09
+**`sb start` focuses the pane and nothing else ever does.** Focus is not a flag; nothing
+can ask for it. — confirmed 2026-08-09
 
 **When something needs me, the board shows it, and `sb block`.** (To be explained
 later.) — confirmed 2026-08-09
 
-**`--no-board` is deleted.** — confirmed 2026-08-09
+### Commands
 
-**Focus is not a flag.** Only `sb start` focuses; nothing else can ask for it. —
+**`sb delegate` figures out where a spawn lands rather than the caller passing flags for
+it.** The top can spawn a space with either an orchestrator or a single worker. —
 confirmed 2026-08-09
-
-**Only the top creates spaces, and `sb delegate` figures out where a spawn lands rather
-than the caller passing flags for it.** The top can spawn a space with either an
-orchestrator or a single worker. — confirmed 2026-08-09
-
-**Andrew will never call these commands himself other than `sb start`.** — confirmed
-2026-08-09
 
 **The `--keep` / `--ephemeral` flags are removed.** The orchestrator handles cleanup
 itself, and it should do this aggressively — probably literally every agent that is
 done. — confirmed 2026-08-09
+
+**Andrew will never call these commands himself other than `sb start`.** — confirmed
+2026-08-09
 
 ---
 
