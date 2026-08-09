@@ -52,6 +52,12 @@ summarize, and `sb block`. (More to come as part of a general process CUJ.) — 
 
 ## Product decisions
 
+### General
+
+**Everything an agent needs arrives at spawn, for now.** Anything an agent might need,
+put it at spawn. We can always clean up and prune later — we want to get things working
+right now first. — confirmed 2026-08-09
+
 ### Orchestrators
 
 **The top orchestrator is everything: its scope is the whole of its own tree, and its
@@ -153,6 +159,17 @@ more tail — like 100 lines.** — confirmed 2026-08-09
 be brought up again.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
+
+**`sb wait` has no reason to exist.** — confirmed 2026-08-09
+
+**`sb log` is not for Andrew either, but it stays — it could be useful.** — confirmed
+2026-08-09
+
+**`sb presets` needs a parameter to list, and one to apply the prompt to the current
+chat or just read it.** Picking a preset should inject a prompt. This must be known to
+all sessions. — confirmed 2026-08-09
+
+**`sb models` is fine as it is.** — confirmed 2026-08-09
 
 **Andrew will never call these commands himself other than `sb start`.** — confirmed
 2026-08-09
