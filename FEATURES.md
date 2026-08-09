@@ -85,7 +85,11 @@ until a human answers via `sb tell`.
 ### `sb status [--active/--live] [--needs-me] [--mine]`
 The whole agent tree as one join of store state against herdr's live pane state,
 flagging drift: **STALLED** (store says working, herdr says idle/done, and `sb done` was
-never called), **GONE** (the pane closed under it — self-heals by writing `state=failed`),
+never called — but never for an agent nobody has given work to yet, which is idle for the
+only reason it could be; `agents.awaiting_task`, set at spawn and cleared by the first
+message), **GONE** (the pane closed under it — self-heals by writing `state=failed`, and
+only after herdr has failed to list the row continuously past
+`status.GONE_CONFIRM_GRACE`, so one short `agent list` cannot end a live agent),
 **UNDELIVERED** (mail the target cannot know about — the doorbell never rang for it,
 usually because the target was mid-turn, and the target has not read it of its own accord
 either).
@@ -132,10 +136,13 @@ fails — a broken plugin is a report, not a failed health check. Nothing under 
 directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or does not.
 - Entry point: `cli.py` `doctor` branch → `Herdr.check` / `store.reset` /
   `_doctor_plugins` → `plugins.load_all`/`plugins.orphans`/`presets.deprecations`
-- Status: working. The store has no migration system by design: schema changes are
-  compared by hash, additive column changes auto-apply, anything destructive triggers a
-  full drop/recreate (`store.py:220-304`). See `BUGS.md` #4 for a case where this
-  deadlocked running agents.
+- Status: working. The store has no migration system by design, and the hash is only a
+  cache key: what the store actually lacks is read off `PRAGMA table_info`. Nullable
+  columns are ALTERed in and a whole missing table whose columns are all nullable is
+  created and backfilled; only a gap no existing row can be given (a `NOT NULL` column
+  with no literal default) forces the full drop/recreate, which is then deferred rather
+  than refused while agents are live (`store.connect`/`_reconcile`/`_deficit`). See
+  `BUGS.md` #4 for the case where this deadlocked running agents.
 - Not checked: whether a plugin imports `switchboard` internals. `design/PLUGIN-REDESIGN.md`
   §4.6 asserts this check; it is deliberately not built, and §4.6 says why.
 - Config: `settings.toml [herdr] min_version`
@@ -143,8 +150,10 @@ directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or
 ### `sb cleanup [name...] [--include-kept] [--force] [--leave-children] [--dry-run]`
 Closes finished agents' panes — never their history; `sb restore` brings a closed agent
 back. With no names, sweeps the caller's own subtree (or everything, for a human). Five
-layered safety gates: must be finished with no unread mail; an end that no agent reported
-(`failed`, written by `status._record_gone`) is re-checked against `agent list` and left
+layered safety gates: must be finished with no unread mail it could still read — mail for
+an agent that has finished and whose name no longer binds holds nothing, since nothing can
+ever announce or read it, and the row would otherwise jam forever; an end that no agent
+reported (`failed`, by `status._record_gone`) is re-checked against `agent list` and left
 alone if herdr still has the agent **or cannot be asked**; the agent's own recorded
 disposition (`--include-kept` lifts it); `--force` lifts those three but only alongside an
 explicit name; and **no agent is closed while a descendant is still `working` or
@@ -317,7 +326,12 @@ to a mid-turn agent is held back and delivered the next time that agent calls `s
 it has gone idle. Underlies `tell`, `ask`, `done`, and `block`; surfaced to humans in
 `sb status`/`sb inspect` as `UNDELIVERED`. The flush and both readouts ring/count on the
 same predicate — un-announced AND unread — so mail an agent read proactively while
-mid-turn drops out of all three rather than being chased forever.
+mid-turn drops out of all three rather than being chased forever. An agent that has called
+`sb done` is not rung at all: the guard is in `_ring`, so it covers the flush as well as
+`tell`, and mail for one whose pane is also gone is marked read-and-announced by the flush
+that would otherwise chase it. Nothing is discarded — the message is still in the store and
+`sb restore` brings back an inbox that holds it. Unknown is never gone: the guard needs a
+positive answer from herdr, so a herdr outage cannot silence a live fleet.
 - Entry point: `broker.py` `Broker._ring`, `Broker.flush_pending`
 
 ### Identity resolution
@@ -372,10 +386,13 @@ own) then `<repo>/.switchboard/` (that repo's differences only). Merge rules
   timeouts/paths/vocabulary settings all resolve through this layer
 
 ### The store
-Sqlite schema for agents/messages/events (`switchboard/store.py`). No migration system:
-schema changes are compared by hash; additive column changes auto-apply; anything
-destructive triggers a full drop/recreate, refused while agents are live (breakable via
-`sb doctor --reset-store --force`).
+Sqlite schema for agents/messages/events/workspaces (`switchboard/store.py`). No migration
+system: the store is compared against what this code needs, column by column. Nullable
+columns are added in place, and so is a whole missing table whose columns are all nullable
+— each with a one-time backfill, recorded so it cannot be skipped. Only a gap that no
+existing row can be given forces a full drop/recreate; that is deferred while agents are
+live (the old store stays open and degraded, and the next `sb` after the fleet drains
+rebuilds it) and can be demanded outright via `sb doctor --reset-store --force`.
 - Depended on by: every verb above
 
 ### The herdr adapter
@@ -561,8 +578,9 @@ stops for a human on ordinary shell commands.
 See `BUGS.md` for the full write-ups. As of the last entries there: `Broker._adopt`
 race (**FIXED**), herdr `wait` sending the wrong `--until` value and spinning CPU
 (**FIXED**, both in the adapter), a schema change that deadlocked running agents
-(**FIXED**, one shape still open — check `BUGS.md` #4 before relying on schema changes
-being fully safe), and `sb wait` returning success early (**NOT REPRODUCIBLE**).
+(**FIXED**, and adding a table no longer costs the store either — `BUGS.md` #4 says which
+narrower shape still forces a rebuild), and `sb wait` returning success early
+(**NOT REPRODUCIBLE**).
 
 ## Keeping this current
 The cheapest rule that will actually survive delegated agents who haven't read this
