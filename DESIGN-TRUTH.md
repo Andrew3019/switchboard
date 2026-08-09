@@ -104,6 +104,18 @@ confirmed 2026-08-09
 **When something needs me, the board shows it, and `sb block`.** (To be explained
 later.) — confirmed 2026-08-09
 
+**`--no-board` is deleted.** — confirmed 2026-08-09
+
+**Focus is not a flag.** Only `sb start` focuses; nothing else can ask for it. —
+confirmed 2026-08-09
+
+**Only the top creates spaces, and `sb delegate` figures out where a spawn lands rather
+than the caller passing flags for it.** The top can spawn a space with either an
+orchestrator or a single worker. — confirmed 2026-08-09
+
+**Andrew will never call these commands himself other than `sb start`.** — confirmed
+2026-08-09
+
 ---
 
 ## Explicitly rejected
@@ -122,3 +134,7 @@ than quietly assumed.*
 beyond the prompt saying so.** We need to find it. It can be different prompts with
 conditional routing, or a reminder, preset, etc. Not to be found now. — raised
 2026-08-09
+
+**Whether clearly marking top vs non-top orchestrators lets a lot of the flags be
+removed.** Andrew's words: "i'm starting to think" — a direction, not yet a decision. —
+raised 2026-08-09
