@@ -1476,6 +1476,106 @@ class JoinWorkspaceTest(WorkspaceTest):
         self.assertIsNone(build_parser().parse_args(["delegate", "t"]).workspace)
 
 
+class RetiringMarkExcludesTest(WorkspaceTest):
+    """The retiring mark keeps people OUT — which is the whole reason it is written first.
+
+    `sb workspace close` commits the mark before it starts destroying, and its concurrency
+    argument rests on nobody being able to walk into the workspace while it is being taken
+    apart. Written and read only by the command that wrote it, the mark excludes nobody, so
+    there is a test per door into a workspace: opening one, joining one, starting a
+    top-level orchestrator in a bare one, and restoring an agent back into one.
+
+    It refuses either way, alive owner or dead one — a teardown that died partway through
+    leaves a half-taken-apart checkout, and the way back is `--resume` on the command that
+    set the mark, not a second verb that clears it by joining the name.
+    """
+
+    def marked(self, name: str = "api", owner: str = "tidy-up", *,
+               state: str = "working", bare: bool = False) -> None:
+        """A workspace some other agent is mid-teardown of."""
+        store.record_workspace(self.db, name, None if bare else f"/wt/{name}")
+        store.create_agent(self.db, name=owner, role="worker", cwd=str(self.repo))
+        store.set_state(self.db, owner, state)
+        if state in ("working", "blocked"):
+            self.h.live[owner] = Agent(name=owner, pane_id="w9:p1", state="working")
+        self.assertTrue(store.claim_retiring(self.db, name, owner))
+
+    def test_opening_a_workspace_being_taken_apart_is_refused(self):
+        self.marked()
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_new("api", me=HUMAN)
+        self.assertIn("tidy-up", str(e.exception))
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
+        self.assertNotIn("api-lead", self.h.live)
+
+    def test_joining_a_workspace_being_taken_apart_is_refused(self):
+        self.marked()
+        with self.assertRaises(ValueError) as e:
+            self.b.join_workspace("api")
+        self.assertIn("tidy-up", str(e.exception))
+
+    def test_the_refusal_says_why_and_where_to_look(self):
+        """A bare refusal is worse than none: the person cannot tell whether to wait, to
+        retry, or to go and intervene."""
+        self.marked()
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_new("api", me=HUMAN)
+        self.assertIn("taken apart", str(e.exception))
+        self.assertIn("sb workspace close api", str(e.exception))
+
+    def test_it_still_refuses_when_the_mark_owner_is_confirmed_gone(self):
+        """Deliberate. `--resume` belongs to `sb workspace close`, which discloses the dead
+        owner and re-runs the teardown; it is not an invitation to walk into a
+        half-destroyed checkout."""
+        self.marked(state="failed")
+        for verb in (lambda: self.b.workspace_new("api", me=HUMAN),
+                     lambda: self.b.join_workspace("api")):
+            with self.assertRaises(ValueError) as e:
+                verb()
+            self.assertIn("tidy-up", str(e.exception))
+
+    def test_starting_an_orchestrator_in_a_bare_workspace_being_closed_is_refused(self):
+        """Bare workspaces are closeable too, and `sb start --name` is the other door in."""
+        self.marked("main-2", bare=True)
+        with self.assertRaises(ValueError) as e:
+            self.b.start(name="main-2", focus=False)
+        self.assertIn("tidy-up", str(e.exception))
+        self.assertIsNone(store.get_agent(self.db, "main-2"))
+
+    def test_restore_will_not_bring_an_agent_back_into_one(self):
+        """A restored agent comes back into the checkout it was recorded in — which here is
+        the directory the teardown is about to remove."""
+        self.marked()
+        store.create_agent(self.db, name="api-lead", role="workspace", workspace="api",
+                           session_id="sess", cwd="/wt/api")
+        with self.assertRaises(ValueError) as e:
+            self.b.restore("api-lead")
+        self.assertIn("tidy-up", str(e.exception))
+        self.assertEqual(self.h.tabs, [])
+
+    # -- and nothing else changed ----------------------------------------
+
+    def test_an_unmarked_workspace_is_opened_and_joined_exactly_as_before(self):
+        """The regression that matters most: ordinary workspace creation is untouched."""
+        r = self.b.workspace_new("api", me=HUMAN)
+        self.assertTrue(r["created"])
+        self.assertEqual(self._branches(), ["api"])
+        self.assertEqual(self.b.join_workspace("api")["workspace_id"], r["workspace_id"])
+
+    def test_a_retired_workspace_is_not_a_marked_one_and_reopens(self):
+        """Retired is a past tense; retiring is a lock."""
+        store.record_workspace(self.db, "api", "/wt/api")
+        store.retire_workspace(self.db, "api")
+        self.assertTrue(self.b.workspace_new("api", me=HUMAN)["created"])
+
+    def test_releasing_the_mark_makes_the_name_usable_again(self):
+        """A teardown that refuses clears its own mark, and the workspace it declined to
+        destroy is an ordinary one again."""
+        self.marked()
+        store.release_retiring(self.db, "api", "tidy-up")
+        self.assertTrue(self.b.workspace_new("api", me=HUMAN)["created"])
+
+
 class PluginsOnEverySpawnPathTest(unittest.TestCase):
     """A repo's plugin bindings reach EVERY spawn, not just `sb delegate`'s.
 

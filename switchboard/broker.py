@@ -505,6 +505,10 @@ class Broker:
                 f"workspace. Go to that one with `sb workspace new {name}`, or start this "
                 f"orchestrator under another name."
             )
+        # A bare space is closeable too, and `sb start --name X` is the other door into
+        # one: without this the refusal would guard `sb workspace new` and leave a
+        # top-level orchestrator free to reopen the name a teardown is mid-way through.
+        self._refuse_retiring(name)
         self._record_workspace(name, None)
 
         a = store.get_agent(self.db, name)
@@ -835,6 +839,7 @@ class Broker:
                 f"one workspace. Open this workspace under another name, or go back to "
                 f"that orchestrator with `sb start --name {name}`."
             )
+        self._refuse_retiring(name)
 
         ws = self._attach_workspace(name, base=base)
         self.link_config(Path(ws["path"]) if ws["path"] else None)
@@ -882,6 +887,7 @@ class Broker:
         is the single outcome they did not ask for. So a name nobody has opened is an
         error naming the verb that opens it, not a new worktree.
         """
+        self._refuse_retiring(name)
         if store.known_workspace(self.db, name) \
                 and store.workspace_branch(self.db, name) is None:
             # A bare space — a top-level orchestrator's, laid over the main checkout.
@@ -1488,6 +1494,40 @@ class Broker:
             )
         raise ValueError(
             self._retiring_refusal(name, held, self._owner_gone(held["retiring"])))
+
+    def _refuse_retiring(self, name: Optional[str]) -> None:
+        """Nobody walks into a workspace that is being taken apart. -> or raises.
+
+        The whole reason the mark is committed before the first destructive step is that
+        this refusal can exist: it is the exclusion `sb workspace close` is built out of,
+        and without it the mark is written, read only by the command that wrote it, and
+        keeps nobody out. It is still not a lock and there is no lock verb —
+        `workspace_new` keeps its non-exclusive posture everywhere else, and this reads
+        one column the record carries anyway.
+
+        Refused whether or not the mark's owner is still alive, and that is where this
+        parts company with `sb workspace close`. A dead owner means a teardown died
+        partway through, which makes the checkout a half-taken-apart one rather than a
+        free one; the way back is `--resume` on the command that set the mark, which
+        discloses the dead owner and runs the whole teardown again from the start.
+        Joining the name is not an escape hatch, it is a way to be standing in the
+        wreckage when somebody resumes.
+
+        The refusal says what it found, because a bare one leaves the person unable to
+        tell whether to wait, to retry, or to go and look.
+        """
+        row = store.get_workspace(self.db, name) if name else None
+        if row is None or not row["retiring"]:
+            return
+        who, when = row["retiring"], row["retiring_at"]
+        held = f" by {who}" if who else ""
+        since = f", claimed {fmt_age(store.now() - when)} ago" if when else ""
+        raise ValueError(
+            f"workspace {name!r} is being taken apart{held}{since} — nothing joins a "
+            f"workspace mid-teardown, because its checkout may be gone by the time you "
+            f"get there. `sb workspace close {name}` says where that teardown stands, "
+            f"and is the only thing that ends one whose owner died holding it."
+        )
 
     def _take_over(self, name: str, row, *, me: str, resume: bool) -> None:
         """What to do about a retiring mark that is already set. Refuse, or take it over.
@@ -2887,6 +2927,11 @@ class Broker:
                 f"{name} is already running — nothing to restore. "
                 f"To reach it: sb inspect {name}, or sb tell {name} \"...\""
             )
+        # And never back into a workspace that is being taken apart. Restoring is the
+        # third door into one — the agent comes back into the checkout it was recorded
+        # in, which is the directory the teardown is about to remove — and a door that
+        # only `sb workspace new` guards is not guarded.
+        self._refuse_retiring(a["workspace"])
         # Come back into the workspace it belongs to, not into whichever one has focus.
         ws = workspace or {}
         # What we recorded when it was spawned, before the ambiguous name lookup: a
