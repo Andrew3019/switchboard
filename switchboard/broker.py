@@ -237,6 +237,10 @@ class Broker:
         # cache, which means herdr answered and is running nothing — see `_agent_states`.
         self._alive_unknown = False
         self._ws_ids: dict[str, str] = {}   # workspace name -> herdr id, this call only
+        # Whether `_check_integration` has run in THIS process. Not a result, just "asked
+        # already": the answer cannot change under us often enough to be worth re-asking,
+        # and the cost it saves is a subprocess spawn per state write.
+        self._integration_checked = False
         # Only if this repo wrote one. Absent — the normal case — leaves the module-level
         # PROTOCOL_LINE in charge, which is also what makes it patchable in a test.
         self._protocol_override = config.protocol_override(self.repo)
@@ -1494,15 +1498,27 @@ class Broker:
         # below. `pane_id` is set from the start so the claim can be told apart from a husk
         # — a row with neither pane nor session is a dead run's leftovers and is safe to
         # replace, whereas this one belongs to a spawn that is happening right now.
-        if not store.claim_agent(
-            self.db, name=name, role=role, parent=(None if me == HUMAN else me), task=task,
+        claim = dict(
+            name=name, role=role, parent=(None if me == HUMAN else me), task=task,
             cwd=str(where), workspace=ws, branch=branch,
             # Recorded, not re-derived later: this is the id its own children inherit —
             # which is exactly why only a confirmed one goes down. A guess written here
             # is indistinguishable from a fact by every reader after it.
             workspace_id=(wsid if confirmed else None) or None,
             pane_id=pane, cleanup=cleanup or r.cleanup, awaiting_task=awaiting_task,
-        ):
+        )
+        claimed = store.claim_agent(self.db, **claim)
+        if not claimed and self._spawn_husk(name):
+            # THE NAME-REUSE CARVE-OUT. The one row that may hold this name and not be
+            # somebody is the husk a previous spawn's failure left below — evidence, not
+            # an owner, and `claim_agent`'s `INSERT OR IGNORE` cannot tell the two apart.
+            # Drop it and claim again, the same replacement `_top` and `_spawn_lead` make
+            # for a husk of their own. Check-then-act, so two spawners can both find the
+            # husk — but the second claim is still the arbiter, and the loser is refused
+            # below exactly as before.
+            store.drop_agent(self.db, name)
+            claimed = store.claim_agent(self.db, **claim)
+        if not claimed:
             raise AgentNameTaken(name)
 
         # `model` is a TIER name (`sb delegate --model strong`), not a model id, and it
@@ -1512,10 +1528,21 @@ class Broker:
             agent = self.h.start_agent(
                 name, pane, prompts=prompts, model_args=r.spec(model).cli_args()
             )
-        except Exception:
-            # Give the name back. A claim whose spawn failed would otherwise hold it
-            # against every later attempt, and the pane is ours to take away too.
-            store.drop_agent(self.db, name)
+        except Exception as e:
+            # Leave a HUSK, not nothing. Deleting the row gave the name back and threw
+            # the attempt away with it: herdr spent real effort over `SPAWN_ATTEMPTS`
+            # tries and failed loudly, and afterwards nothing on the board, in the store
+            # or in the log said this agent had ever been asked for — which is no answer
+            # at all for a caller who backgrounded the spawn and came looking later.
+            #
+            # `failed` with no pane and no session is the shape `_top` and `_spawn_lead`
+            # already read as "a dead run's leftovers, safe to replace", and the claim
+            # above carves the same rule out for this name — so the name is no more held
+            # against a later attempt than it was, and the failure survives as a fact.
+            store.update_agent(self.db, name, pane_id=None)
+            store.set_state(self.db, name, GONE_STATE)
+            store.log_event(self.db, kind="spawn_failed", agent=name, parent=me,
+                            role=role, pane_id=pane, error=str(e))
             raise
         store.update_agent(self.db, name, session_id=agent.session_id or None,
                            terminal_id=agent.terminal_id, pane_id=agent.pane_id or pane)
@@ -1538,6 +1565,19 @@ class Broker:
             self._open_board(name, agent.pane_id or pane, cwd=str(where))
         self.h.prompt(name, task)
         return name
+
+    def _spawn_husk(self, name: str) -> bool:
+        """Is the row under this name the leftovers of a spawn that failed?
+
+        `failed`, no pane, no session — what `delegate`'s except path writes, and the
+        same shape `_top` and `_spawn_lead` replace. Every other row under a name is
+        somebody: a claim mid-spawn carries a pane, an agent that ran carries a session,
+        and a `failed` row with either of those is a real agent `status` reaped, whose
+        pane may still be open and whose session `sb restore` can still bring back.
+        """
+        a = store.get_agent(self.db, name)
+        return (a is not None and a["state"] == GONE_STATE
+                and not a["pane_id"] and not a["session_id"])
 
     def _unique_name(self, role: str) -> str:
         n = 1
@@ -1899,6 +1939,15 @@ class Broker:
                     continue
             if dry_run:
                 closed.append(a["name"]); continue
+            if force and a["state"] == WORKING:
+                # Force cannot tell stuck from busy — every gate above is skipped, so an
+                # agent mid-turn is closed exactly like a wedged one and the only trace
+                # was `cleanup(forced=True)`, which says nothing about what was taken
+                # away. Say it, in the shape `cleanup_held` already uses for "why is that
+                # one still here". Nothing is sent first and nothing is refused: this is
+                # the escape hatch, and naming the agent is the confirmation.
+                store.log_event(self.db, kind="cleanup_forced_live", agent=a["name"],
+                                state=a["state"])
             try:
                 if a["pane_id"]:
                     self.h.release_agent(a["pane_id"], a["name"], store.next_seq(self.db, a["name"]))
@@ -1915,6 +1964,20 @@ class Broker:
                                     error=str(e))
                     if not force:
                         continue
+                    # Under force we fall straight on into the bookkeeping below and mark
+                    # this row `done` with no pane, having just failed to close its pane.
+                    # That is deliberate — `--force` is documented as the override that
+                    # always ends done, and making the commit conditional would leave
+                    # somebody's genuinely stuck agent still stuck after a herdr blip —
+                    # but committing it silently is the row asserting a pane is gone that
+                    # nobody confirmed is gone. So say so, by name, and carry the pane id
+                    # into the event: the next line discards the only reference to it, and
+                    # a still-live pane is then unreachable through the store forever.
+                    store.log_event(self.db, kind="cleanup_forced_unconfirmed",
+                                    agent=a["name"], pane_id=a["pane_id"], error=str(e))
+                    print(f"sb: {a['name']}: pane {a['pane_id']} could not be closed "
+                          f"({e}) — forcing it done anyway, so the pane may still be "
+                          f"open with nothing left pointing at it", file=sys.stderr)
             # The board went up beside this agent, so it comes down with it — otherwise
             # closing an agent leaves an empty tab behind, once per agent. After the
             # skip above, so a close we abandoned leaves the board with its live pane.
@@ -2100,7 +2163,8 @@ class Broker:
         """Does herdr STILL agree that this agent's turn ended?
 
         Only ever asked about a row whose end was inferred rather than reported —
-        `GONE_STATE`, whose one writer is `status._record_gone`. That row is a cached
+        `GONE_STATE`, written by `status._record_gone` and, for a spawn that exhausted
+        herdr's retries, by `delegate`'s own except path. That row is a cached
         observation of a single `agent list`, and the readout that took it may have been
         looking during the agent's own spawn, or running old code with a shorter grace, or
         racing another reader. Re-taking it here is the whole protection: `cleanup` is the
@@ -2302,6 +2366,7 @@ class Broker:
         a = store.get_agent(self.db, who)
         if not a or a["state"] != "blocked" or not a["pane_id"]:
             return
+        self._check_integration()   # the other place a state write is attempted
         try:
             self.h.report_state(a["pane_id"], who, WORKING,
                                 store.next_seq(self.db, who), verify=False)
@@ -2316,9 +2381,34 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="notify_failed", agent=who, error=str(e))
 
+    def _check_integration(self) -> None:
+        """Is a conflicting `claude` integration silently eating our state writes?
+
+        `Herdr.check` says it fails "at startup", and nothing calls it at startup: `sb
+        doctor` is its only caller, so an installed integration makes every state write
+        in every session look successful and be dropped, for as long as it is installed.
+
+        Asked HERE rather than in `main()`, and logged rather than raised. The blast
+        radius is the two `report_state` call sites, so a process that never writes state
+        — `sb status`, `sb log` — should neither pay for a subprocess nor be hard-failed
+        by a fault that cannot reach it. Once per process, the way `_alive_cache` and
+        `_ws_ids` are once per process, and the flag is set before the call so a herdr
+        that is slow or broken costs that price exactly once either way.
+
+        `doctor` keeps `check()` as the loud, deliberate diagnosis it reads as.
+        """
+        if self._integration_checked:
+            return
+        self._integration_checked = True
+        try:
+            self.h.check()
+        except HerdrError as e:
+            store.log_event(self.db, kind="herdr_check_failed", code=e.code, error=str(e))
+
     def _push_state(self, a, state: str, message: str = "") -> None:
         if not a or not a["pane_id"]:
             return
+        self._check_integration()   # a write is actually about to be attempted
         try:
             self.h.report_state(a["pane_id"], a["name"], state,
                                 store.next_seq(self.db, a["name"]), message=message[:NOTIFY_CLIP])

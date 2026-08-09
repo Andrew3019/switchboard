@@ -588,7 +588,21 @@ class Herdr:
             # focusing the pane flips it back to idle). Reporting `idle` and reading back
             # `done` is success, not a dropped write.
             equivalent = {state, "done"} if state == IDLE else {state}
-            if got is not None and got.state not in equivalent:
+            if got is None:
+                # Gone by the time we read back. After an `idle` report that is the
+                # ordinary end of a life — `idle` is what an agent sends moments before
+                # it disappears, which is why the line above special-cases it — so a
+                # vanish there says nothing and raising on it would fire on every exit.
+                # After `working`/`blocked` it is the corruption signal this exception
+                # exists for: nothing reaches gone from those without an intervening
+                # idle/done, so the write we just made landed nowhere.
+                if state != IDLE:
+                    raise StateWriteDropped(
+                        f"{name}: reported {state!r} (seq={seq}) and herdr no longer "
+                        f"knows the agent. The write landed nowhere — the agent went "
+                        f"away mid-turn, or an agent integration owns this pane's session."
+                    )
+            elif got.state not in equivalent:
                 raise StateWriteDropped(
                     f"{name}: reported {state!r} (seq={seq}) but herdr still says "
                     f"{got.state!r}. Causes: stale/reused seq, or an agent integration "

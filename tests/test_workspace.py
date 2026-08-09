@@ -193,6 +193,7 @@ class FakeHerdr:
     def report_state(self, pane, name, state, seq, **kw): pass
     def report_session(self, pane, name, sid, seq, **kw): pass
     def release_agent(self, pane, name, seq): pass
+    def check(self, **kw): pass
 
 
 class WorkspaceTest(unittest.TestCase):

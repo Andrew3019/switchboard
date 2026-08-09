@@ -263,6 +263,23 @@ class SilentDropTest(unittest.TestCase):
         fake = FakeHerdr(ok({}), ok({"agents": [derived]}))
         Herdr("herdr", runner=fake).report_state("w1:p9", "w1", "idle", 7)
 
+    def test_a_vanish_after_a_working_report_is_a_dropped_write(self):
+        """`got is None` used to return silently, so a write that landed nowhere read as
+        confirmed. Nothing reaches gone from `working` without an intervening idle/done,
+        so the agent being unknown here means the write went into a hole."""
+        fake = FakeHerdr(ok({}), ok({"agents": []}))
+        with self.assertRaises(StateWriteDropped) as cm:
+            Herdr("herdr", runner=fake).report_state("w1:p9", "w1", "working", 7)
+        self.assertIn("no longer knows", str(cm.exception))
+
+    def test_a_vanish_after_an_idle_report_is_an_ordinary_exit(self):
+        """The other half of the pick, and the reason it is not "raise on every vanish":
+        `idle` is what an agent sends moments before it disappears, so raising here would
+        fire on every ordinary end of a life and dilute the one event that means the
+        board has gone stale."""
+        fake = FakeHerdr(ok({}), ok({"agents": []}))
+        Herdr("herdr", runner=fake).report_state("w1:p9", "w1", "idle", 7)
+
     def test_verify_can_be_disabled(self):
         fake = FakeHerdr(ok({}))
         Herdr("herdr", runner=fake).report_state("w1:p9", "w1", "blocked", 7, verify=False)
