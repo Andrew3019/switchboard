@@ -54,11 +54,12 @@ summarize, and `sb block`. (More to come as part of a general process CUJ.) — 
 
 ### General
 
-**Everything an agent might need to know about arrives at spawn** — that the thing
-exists, and when to use it. The agent can then go in and poke it. Agents cannot be
-trusted to take the initiative and work out what is available. Put anything an agent
-might need at spawn for now; we can clean up and prune later, but we want to get things
-working first. — confirmed 2026-08-09
+**If it needs to be known, it is known at spawn.** An agent needs to know a thing exists
+and that it can call it — not specifically how to use it; it can then go in and poke it.
+Agents cannot be trusted to take the initiative and work out what is available. What
+needs to be known differs by agent and by role: not every plugin for every agent. Put
+what is needed at spawn for now; we can clean up and prune later, but we want to get
+things working first. — confirmed 2026-08-09
 
 ### Orchestrators
 
@@ -101,8 +102,14 @@ the top orchestrator, and it owns them — no other agent does.** — confirmed 
 — needs to be a split pane with `sb board`.** There is no `--no-board`. — confirmed
 2026-08-09
 
-**`sb board` is navigation: I can click on an agent and it jumps to that pane.** It is
-like a fake UI I can use to move around quickly. — confirmed 2026-08-09
+**`sb board` stays as it is right now.** It shows the full tree with its nest structure;
+an archived agent shows collapsed, which it already does. Clicking an agent's name in
+the tree brings that agent into focus automatically — it is like a fake UI to move
+around quickly. That is all it needs for now; the rest of what it has works fine and
+auditing it comes later. — confirmed 2026-08-09
+
+**The click is not working sometimes.** Andrew believes this is because of the side
+panel. — confirmed 2026-08-09
 
 **`sb start` focuses the pane and nothing else ever does.** Focus is not a flag; nothing
 can ask for it. — confirmed 2026-08-09
