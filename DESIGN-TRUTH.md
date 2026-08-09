@@ -123,7 +123,15 @@ one useful part becomes `tell --needs-reply`, which inserts a static prompt sayi
 must reply to that agent at some point, since it is waiting for a reply. — confirmed
 2026-08-09
 
-**`sb tell` has three delivery modes.** — confirmed 2026-08-09
+**`sb tell` has three delivery modes, and the `sb interrupt` verb is deleted — that is
+now one of them.** — confirmed 2026-08-09
+
+- **next turn** (the default). The doorbell is sent instantly; the agent's own system
+  queues it and delivers it at its next turn boundary — the same as sending a message to
+  Claude while it is working. It waits for nothing and cancels nothing.
+- **when idle.** sb holds the doorbell and rings it only once the agent is idle: no more
+  turns, not doing any more work.
+- **interrupt.** Injected mid-turn. What the agent was doing is cancelled.
 
 **`sb tell` is for agents only, both ways round.** Andrew does not use it — he types
 directly into the session — and it cannot address a human. Anything needing a human is
