@@ -21,8 +21,7 @@ in this repo, because everything else may be inferred and this may not.
   file that is entirely true is the point; a fuller file that is partly guessed is worse
   than no file.
 
-Entry format: one short claim, plus the date it was confirmed. See the commented-out
-template under Product decisions.
+Entry format: one short claim, plus the date it was confirmed.
 
 ---
 
@@ -35,12 +34,6 @@ template under Product decisions.
 ## Product decisions
 
 *Empty until Andrew confirms entries.*
-
-<!-- TEMPLATE — format only, not content. Delete nothing above; add entries like this:
-
-- **A parent never reads its child's transcript.** — confirmed 2026-01-31
-
--->
 
 ---
 
