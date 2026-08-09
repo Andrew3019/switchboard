@@ -3,7 +3,7 @@
 The single source of truth. Every other module is a view over this; modules never call
 each other, they meet here (C7).
 
-Three tables, all *operational* state. The only durable data (learnings) lives in JSON
+Four tables, all *operational* state. The only durable data (learnings) lives in JSON
 files, so this database is disposable by construction — see `connect()` for what that
 buys us.
 """
@@ -210,6 +210,32 @@ CREATE TABLE events (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX idx_events_agent ON events(agent, id);
+
+CREATE TABLE workspaces (
+    name          TEXT PRIMARY KEY,   -- the workspace NAME, and identity is nothing else.
+                                      -- Not `workspace_id`: one id spans two checkouts on
+                                      -- this machine and a live workspace can have none.
+                                      -- Not the checkout path: every bare workspace over
+                                      -- one clone shares it, so four live orchestrators
+                                      -- would be one row and retiring any of them would
+                                      -- retire the rest.
+    checkout      TEXT,               -- where this workspace's own checkout is, or NULL.
+                                      -- NULL is not "unknown": it is exactly how a BARE
+                                      -- workspace — one with no checkout of its own — is
+                                      -- represented, the same fact `agents.branch` says
+                                      -- by being NULL. A recorded path is never trusted
+                                      -- as a live one; see `checkout_verdict`.
+    retired_at    INTEGER,            -- epoch the workspace was retired. Not a tombstone
+                                      -- on the name: reopening one clears this.
+    retiring      TEXT,               -- who holds the retiring mark — an agent name, not a
+                                      -- boolean. Claimed by conditional write (see
+                                      -- `claim_retiring`), so a losing invocation cannot
+                                      -- release a mark it never held. Not a lock, and no
+                                      -- lock primitive enters the tree for it.
+    retiring_at   INTEGER,            -- epoch the mark was claimed, so a refusal can say
+                                      -- how long a crashed one has been sitting there.
+    created_at    INTEGER
+);
 """
 
 # A cache key, NOT a version. It covers the SCHEMA string verbatim, so editing a comment
@@ -468,15 +494,60 @@ def _backfill_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
 # (table, column), run once, right after the ALTER that added them — see `_reconcile`.
 _BACKFILLS = {("agents", "branch"): _backfill_branch}
 
+# The bare-versus-worktree selector, written down once. A row means a worktree workspace
+# and that `cwd` is its checkout; no row means bare and the path is NULL — the rule reads
+# the PRESENCE of a branch rather than the absence of one, and the difference is not
+# academic. Two names on the reference machine have rows that disagree about `branch`
+# (fourteen with and three without; eleven and one), which is the shape `delegate` writes
+# when `branch is None` and the workspace was named rather than inherited. Read as "any
+# NULL-branch row means bare", both are permanently recorded as having no checkout — which
+# destroys nothing today and routes them to the bare teardown path forever: no gate, no
+# live observation, worktree and branch left standing with nothing that can ever remove
+# them. The fill runs once, so the wrong answer is the permanent one.
+_WORKSPACE_CHECKOUT = """SELECT cwd FROM agents
+ WHERE workspace = ? AND cwd IS NOT NULL AND branch IS NOT NULL
+ ORDER BY created_at LIMIT 1"""
+
+
+def _backfill_workspaces(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
+    """Give the workspaces that predate the table the rows they have always deserved.
+
+    One row per workspace NAME, so the four bare orchestrators over the primary clone
+    become four rows rather than one — which is the whole reason the key is the name.
+    The checkout comes from the agent rows under that name, by the selector above, and
+    NULL is a real answer rather than a missing one.
+
+    This is deliberately the same lookup this design forbids for deciding *membership*:
+    asking at every call which rows belong to a workspace by matching a name is an
+    invitation to the failure mode `agents.branch` exists to end, whereas populating a
+    column once, at a known moment, from the only evidence there is, is an ordinary
+    migration. What makes it safe is the other half of the rule: a filled-in path is never
+    trusted as a live fact — `checkout_verdict` re-validates it at every use.
+
+    Safe to run twice and against a table somebody else created, as every table fill must
+    be: it adds the rows that are missing and touches no row that is already there.
+    """
+    for r in db.execute(
+        "SELECT workspace, MIN(created_at) AS first_seen FROM agents "
+        "WHERE workspace IS NOT NULL GROUP BY workspace"
+    ).fetchall():
+        name = r["workspace"]
+        found = db.execute(_WORKSPACE_CHECKOUT, (name,)).fetchone()
+        db.execute(
+            "INSERT OR IGNORE INTO workspaces(name, checkout, created_at) VALUES(?,?,?)",
+            (name, found["cwd"] if found else None, r["first_seen"]),
+        )
+
+
 # The same thing for a whole table that arrives after the store did: keyed by table name,
-# handed the store the moment the table exists. Empty until something needs one — the
-# capability is what `_reconcile` needs in order to add a table at all, and a table whose
-# rows are derived from the ones already here is the reason it exists.
+# handed the store the moment the table exists. The capability is what `_reconcile` needs
+# in order to add a table at all, and a table whose rows are derived from the ones already
+# here is the reason it exists — `workspaces` is exactly that table.
 #
 # These are held to a stricter rule than the column fills above, because a table's create
 # and its fill are two transactions (see `_fill_table`): they must be safe to run twice,
 # and they must be safe to run against a table somebody else created.
-_TABLE_BACKFILLS: dict = {}
+_TABLE_BACKFILLS: dict = {"workspaces": _backfill_workspaces}
 
 
 def _backfill_recorded(db: sqlite3.Connection, table: str) -> bool:
@@ -881,7 +952,7 @@ def live_roots(db: sqlite3.Connection, role: str) -> list[sqlite3.Row]:
 
     Still only the store's word. A row leaves `working` when the agent itself reports it,
     so a crashed one reads as live here forever; the caller is the one who has to ask
-    herdr (see `Broker._running_tops`).
+    herdr (see `Broker.running_tops`).
     """
     return db.execute(
         f"SELECT * FROM agents WHERE parent IS NULL AND role=? "
@@ -948,6 +1019,209 @@ def next_seq(db: sqlite3.Connection, name: str) -> int:
     if cur is None:
         raise KeyError(f"no such agent: {name}")
     return cur["seq"]
+
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+#
+# The first first-class workspace entity in the store. Everything before it derived "the
+# workspace" by grouping `agents` rows (`workspace_branch`, `known_workspace`), which
+# cannot represent a workspace with no rows — a retired one, or a worktree nobody ever
+# worked in — and has nowhere to put a fact about the workspace itself.
+
+
+def get_workspace(db: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
+    return db.execute("SELECT * FROM workspaces WHERE name=?", (name,)).fetchone()
+
+
+def all_workspaces(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every workspace the table knows about, retired ones included.
+
+    One of the three sources a workspace enumeration has to hold, and the only one that
+    knows about a workspace with no worktree and no agent rows. Git knows the orphan
+    worktree nobody was ever recorded in; `agents` knows the workspace that escaped this
+    table. None of the three is a superset of the others.
+    """
+    return db.execute("SELECT * FROM workspaces ORDER BY name").fetchall()
+
+
+def record_workspace(
+    db: sqlite3.Connection, name: str, checkout: Optional[str] = None
+) -> None:
+    """Write down where a workspace's checkout is — on creation, and on every attach.
+
+    A record of where the checkout *is*, not of where it once was, which is why attaching
+    re-writes it rather than leaving the first answer standing. NULL is a value here like
+    any other: passing it says "this workspace has no checkout of its own", which is what
+    bare means.
+    """
+    db.execute(
+        "INSERT INTO workspaces(name, checkout, created_at) VALUES(?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout",
+        (name, checkout, now()),
+    )
+    db.commit()
+
+
+def retire_workspace(db: sqlite3.Connection, name: str) -> None:
+    """Stamp a workspace retired, clear its path, and drop the retiring mark.
+
+    The path goes because it is a record of where the checkout is, and after a retirement
+    there is no checkout: leaving the old one behind would hand the next reader a path
+    that re-validates as absent and reads as something still to clean up.
+    """
+    db.execute(
+        "UPDATE workspaces SET retired_at=?, checkout=NULL, retiring=NULL, "
+        "retiring_at=NULL WHERE name=?",
+        (now(), name),
+    )
+    db.commit()
+
+
+def reopen_workspace(
+    db: sqlite3.Connection, name: str, checkout: Optional[str] = None
+) -> None:
+    """Make a retired workspace live again, at wherever its checkout is now.
+
+    Retirement is not a tombstone on the name — the name is identity, and a person who
+    types it again means the workspace they are naming.
+    """
+    db.execute(
+        "INSERT INTO workspaces(name, checkout, created_at) VALUES(?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout, retired_at=NULL",
+        (name, checkout, now()),
+    )
+    db.commit()
+
+
+def claim_retiring(db: sqlite3.Connection, name: str, owner: str) -> bool:
+    """Take the retiring mark, or find out somebody else already holds it. -> did we?
+
+    The same shape as `claim_agent`, for the same reason: a `get_workspace(...) is None`
+    check followed by an `UPDATE` is two statements with a race between them, and this one
+    guards a destructive command. The claim IS the write — `WHERE retiring IS NULL` — and
+    `rowcount` is the arbiter, so of two invocations arriving together exactly one gets 1.
+
+    The mark records its OWNER rather than being a flag, so a losing invocation cannot
+    release a mark it never held (see `release_retiring`). It is still not a lock and no
+    lock verb enters the tree for it: `workspace_new`'s docstring advertises
+    non-exclusivity as deliberate policy, and one path is no reason to teach the rest of
+    the codebase a rule it does not otherwise follow.
+
+    False for a workspace with no row at all, which is a caller that skipped
+    `record_workspace` — nothing here invents a row for a workspace nobody has recorded.
+    """
+    cur = db.execute(
+        "UPDATE workspaces SET retiring=?, retiring_at=? WHERE name=? AND retiring IS NULL",
+        (owner, now(), name),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
+def release_retiring(db: sqlite3.Connection, name: str, owner: str) -> bool:
+    """Clear a retiring mark we hold. -> was it ours to clear?
+
+    Only ever clears, and never restores an earlier value: there is one mark, its rollback
+    is the owner's, and a mark held by somebody else is left exactly where it is.
+    """
+    cur = db.execute(
+        "UPDATE workspaces SET retiring=NULL, retiring_at=NULL WHERE name=? AND retiring=?",
+        (name, owner),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
+# What re-validating a recorded checkout can conclude. Three answers, not a boolean: a
+# path that is simply GONE is a resolved answer — nothing is there, so nothing can be lost
+# — while a path that resolves to something unintelligible is not an answer at all. One
+# boolean collapses those, and collapsing them makes the cheapest safe path refuse on
+# precisely the workspaces it was written for: every path in the store is a filled-in one,
+# and six of them point at directories that no longer exist.
+CHECKOUT_OK = "ok"
+CHECKOUT_ABSENT = "absent"
+CHECKOUT_UNUSABLE = "unusable"
+
+
+def checkout_verdict(path: Optional[str], cwd: Optional[Path] = None) -> str:
+    """Re-validate a recorded checkout path against git. The record proposes; git decides.
+
+    A path on a workspace row was derived once, at migration time, from rows that had no
+    idea they were describing a checkout — so it is a candidate and never a live fact.
+    This is what every use of it goes through first:
+
+    - `CHECKOUT_OK` — the directory is there and `git worktree list` reports it as a
+      worktree of this repo.
+    - `CHECKOUT_ABSENT` — nothing is at that path. A *resolved* answer: the workspace's
+      checkout is already gone, which is a route (deregister the worktree, delete the
+      branch) rather than a refusal.
+    - `CHECKOUT_UNUSABLE` — anything else. A path that is not a worktree of this repo, a
+      directory that cannot be read, a path that is not a directory, no path at all on a
+      workspace that is not bare, or a git that would not answer. This is where "unknown
+      is not empty" keeps its full force, and a caller that cannot tell refuses.
+
+    `cwd` is where git is asked from, and it is deliberately not the path being validated:
+    a directory that turns out to be a checkout of some OTHER repo would happily report
+    itself as a worktree of itself.
+
+    A bare workspace never reaches here. Its NULL path is read off the row as the fact it
+    is, before any of this; a NULL arriving here is a workspace with nothing recorded,
+    which is the third verdict.
+    """
+    if not path:
+        return CHECKOUT_UNUSABLE
+    p = Path(path)
+    if not p.exists():
+        return CHECKOUT_ABSENT
+    if not p.is_dir():
+        return CHECKOUT_UNUSABLE
+    try:
+        resolved = p.resolve()
+    except OSError:                            # unreadable, or a symlink loop
+        return CHECKOUT_UNUSABLE
+    out = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return CHECKOUT_UNUSABLE               # no answer is not the answer "no"
+    for line in out.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        try:
+            if Path(line[len("worktree "):]).resolve() == resolved:
+                return CHECKOUT_OK
+        except OSError:
+            continue
+    return CHECKOUT_UNUSABLE
+
+
+def workspace_fill_gap(db: sqlite3.Connection) -> Optional[str]:
+    """Why this store cannot be asked about workspaces yet, or None when it can.
+
+    The `workspaces` table is filled exactly once, from `agents.cwd`, and that input is
+    not durable: anything that empties or rebuilds the store between this code shipping
+    and the first `sb` that runs the fill leaves the fill permanently unperformed, and
+    every workspace that predates the table unrecorded forever. Nothing recovers that
+    except running it again by hand.
+
+    What makes it *legible* is that the fill records its own completion. Without asking,
+    an unfilled store and a store with genuinely no workspaces are the same empty query —
+    so a destructive command that inferred "unrecorded" from an empty table would refuse
+    every real workspace while reporting nothing wrong. Anything about to act on the
+    absence of a workspace row asks this first and refuses with what it says.
+    """
+    if _backfill_recorded(db, "workspaces"):
+        return None
+    return (
+        "the workspaces table has never been filled in from the agent rows, so this store"
+        "\ncannot say which workspaces predate it — and an empty answer here is not the"
+        "\nsame as no workspaces. Run any `sb` command that opens the store for writing"
+        "\n(`sb status` will do) to fill it, and if that does not, the agent rows it"
+        "\nderives from are gone and the workspaces have to be re-recorded by hand."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -821,5 +821,291 @@ CREATE INDEX idx_notes_subject ON notes(subject, created_at);
             db.close()
 
 
+class WorkspacesTableTest(unittest.TestCase):
+    """The `workspaces` table itself, arriving through the capability above.
+
+    Same grain as `AddingATableTest`: a store the shape and size of the real one, stamped
+    by another checkout, met by code that declares a table it does not have. What differs
+    is that the table is the real one, so the fill has a rule to get right rather than a
+    stand-in — and the fixture carries the two names on this machine whose rows disagree
+    about `branch`, because that disagreement is where the rule was wrong.
+    """
+
+    # Rows per bare orchestrator, and the primary clone they all share. Four of them over
+    # one directory is why the key is the name: keyed on the path they would be one row,
+    # and retiring any one of them would retire the other three.
+    _BARE = ("main", "main-2", "main-3", "main-4")
+    _CLONE = "/Users/andrew/Code/switchboard"
+
+    # The regression fixture, from the real store: one cwd, one workspace, genuinely
+    # worktree-backed, and some rows whose `branch` was never written — the shape
+    # `delegate` produces when `branch is None` and the workspace was named rather than
+    # inherited. Read as "any NULL-branch row means bare", both come out with no checkout
+    # and are routed to the bare teardown path forever.
+    _MIXED = {"plugins-redesign": (14, 3), "workspace-model": (11, 1)}
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._made = 0
+
+    # -- the fixture -----------------------------------------------------
+
+    def _rows(self) -> list:
+        """101 agent rows over 18 workspace names, in the proportions the real store has."""
+        rows, at = [], 0
+
+        def row(name, workspace, branch, cwd):
+            nonlocal at
+            at += 1
+            rows.append((name, "working" if at % 5 else "done", cwd, workspace, branch, at))
+
+        for ws in self._BARE:                              # bare: no branch, one clone
+            for i in range(3):
+                row(f"{ws}-{i}", ws, None, self._CLONE)
+        for ws, (with_branch, without) in self._MIXED.items():
+            for i in range(without):                       # earliest, so "first row wins"
+                row(f"{ws}-n{i}", ws, None, f"/wt/{ws}")   # readings fail here too
+            for i in range(with_branch):
+                row(f"{ws}-b{i}", ws, ws, f"/wt/{ws}")
+        for n in range(12):                                # ordinary worktree spaces
+            for i in range(5):
+                row(f"ws{n}-{i}", f"ws{n}", f"ws{n}", f"/wt/ws{n}")
+        return rows
+
+    def _populated_store(self) -> Path:
+        """A real-ish store that predates the table: no `workspaces`, no fill recorded."""
+        self._made += 1
+        p = Path(self.tmp.name) / f"real-ish-{self._made}.db"
+        db = store.connect(path=p)
+        db.executemany(
+            "INSERT INTO agents (name, role, state, cwd, workspace, branch, cleanup,"
+            " created_at) VALUES (?, 'worker', ?, ?, ?, ?, 'close', ?)", self._rows(),
+        )
+        db.executemany(
+            "INSERT INTO messages (from_agent, to_agent, kind, body, created_at) "
+            "VALUES ('a1', 'a2', 'tell', ?, 1)", [(f"m{i}",) for i in range(254)],
+        )
+        db.executemany(
+            "INSERT INTO events (agent, kind, created_at) VALUES ('a1', 'tick', 1)",
+            [() for _ in range(11752)],
+        )
+        # What a store written before this code looks like: the table is not there, its
+        # fill was never recorded, and the hash is some other checkout's.
+        db.execute("DROP TABLE workspaces")
+        db.execute("DELETE FROM meta WHERE key='backfill:workspaces'")
+        db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', 'older')")
+        db.commit()
+        db.close()
+        return p
+
+    def _counts(self, db) -> tuple:
+        return tuple(db.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                     for t in ("agents", "messages", "events"))
+
+    def _migrated(self, p: Path = None):
+        with mock.patch.object(store, "_herdr_alive", lambda: set()):
+            return store.connect(path=p or self._populated_store())
+
+    # -- the migration ---------------------------------------------------
+
+    def test_the_table_arrives_and_every_row_survives_it(self):
+        db = self._migrated()
+        self.assertEqual(self._counts(db), (101, 254, 11752))
+        self.assertEqual(store.schema_deficit(db), [])
+        self.assertTrue(store._backfill_recorded(db, "workspaces"))
+        db.close()
+
+    def test_one_row_per_workspace_name(self):
+        """Per NAME, which is the whole argument for the key: the four bare orchestrators
+        over one clone are four workspaces, and a table that held one row for them would
+        retire all four together and lock three live ones out of their own space."""
+        db = self._migrated()
+        names = [r["name"] for r in store.all_workspaces(db)]
+        self.assertEqual(len(names), 18)
+        for ws in self._BARE:
+            self.assertIn(ws, names)
+        self.assertEqual(
+            [r["checkout"] for r in store.all_workspaces(db) if r["name"] in self._BARE],
+            [None] * 4,                                    # NULL is what bare means
+        )
+        db.close()
+
+    def test_a_workspace_is_bare_only_when_no_row_carries_a_branch(self):
+        """The selector reads the PRESENCE of a branch, never the absence of one.
+
+        `plugins-redesign` and `workspace-model` are real names with real worktrees whose
+        rows disagree about `branch`. Under the looser reading they fill in as having no
+        checkout — which destroys nothing on the day, and permanently routes two real
+        worktrees to the bare path: no gate, no live observation, and nothing left that
+        can ever remove the worktree or the branch. The fill runs once, so it is the
+        permanent answer.
+        """
+        db = self._migrated()
+        for ws in self._MIXED:
+            with self.subTest(ws):
+                self.assertEqual(store.get_workspace(db, ws)["checkout"], f"/wt/{ws}")
+        db.close()
+
+    def test_the_fill_is_safe_to_run_a_second_time(self):
+        """Its create and its fill are two transactions, so a fill may meet a table
+        somebody else made and rows somebody else wrote."""
+        db = self._migrated()
+        store.record_workspace(db, "main", "/somewhere/else")
+        store._backfill_workspaces(db, None)
+        self.assertEqual(store.get_workspace(db, "main")["checkout"], "/somewhere/else")
+        self.assertEqual(len(store.all_workspaces(db)), 18)
+        db.close()
+
+    # -- the fill's completion, and a store where it never ran -----------
+
+    def test_a_store_where_the_fill_never_ran_says_so_rather_than_reading_empty(self):
+        """The fill's only input is `agents.cwd`, and it is not durable: anything that
+        empties the store between this shipping and the first `sb` that runs the fill
+        leaves it permanently unperformed. An unfilled store and a store with genuinely no
+        workspaces are the same empty query, so anything about to act on a workspace being
+        unrecorded has to ask — and refuse with what it is told, naming what a person can
+        do about it, rather than silently treating every workspace as unrecorded."""
+        p = self._populated_store()
+        db = sqlite3.connect(str(p))                       # opened without reconciling
+        db.row_factory = sqlite3.Row
+        gap = store.workspace_fill_gap(db)
+        self.assertIsNotNone(gap)
+        self.assertIn("never been filled", gap)
+        self.assertIn("sb status", gap)                    # and what to do about it
+        db.close()
+        self.assertIsNone(store.workspace_fill_gap(self._migrated()))
+
+    def test_a_fresh_store_has_no_gap_to_report(self):
+        """Nothing to derive, so nothing outstanding — a new store is not a broken one."""
+        db = store.connect(path=Path(self.tmp.name) / "fresh.db")
+        self.assertIsNone(store.workspace_fill_gap(db))
+        self.assertEqual(store.all_workspaces(db), [])
+        db.close()
+
+    # -- the retiring mark -----------------------------------------------
+
+    def test_only_one_of_two_racing_callers_takes_the_retiring_mark(self):
+        """Two connections, one row, the same instant. `rowcount` on a write guarded by
+        `retiring IS NULL` is the arbiter — the same shape as `claim_agent`, and for the
+        same reason: a read followed by a write is two statements with a race between
+        them, and this one guards a destructive command."""
+        p = self._populated_store()
+        one, two = self._migrated(p), store.connect(path=p)   # one store, two processes
+        store.record_workspace(one, "adv-r4", "/wt/adv-r4")
+        won = [store.claim_retiring(db, "adv-r4", owner)
+               for db, owner in ((one, "alice"), (two, "bob"))]
+        self.assertEqual(won, [True, False])
+        row = store.get_workspace(two, "adv-r4")
+        self.assertEqual(row["retiring"], "alice")
+        self.assertIsNotNone(row["retiring_at"])           # and when, so a refusal can say
+        one.close(); two.close()
+
+    def test_a_mark_is_released_by_its_owner_and_by_nobody_else(self):
+        """A flag has no owner and a losing invocation could clear it. This one cannot."""
+        db = self._migrated()
+        store.record_workspace(db, "adv-r4", "/wt/adv-r4")
+        self.assertTrue(store.claim_retiring(db, "adv-r4", "alice"))
+        self.assertFalse(store.release_retiring(db, "adv-r4", "bob"))
+        self.assertEqual(store.get_workspace(db, "adv-r4")["retiring"], "alice")
+        self.assertTrue(store.release_retiring(db, "adv-r4", "alice"))
+        self.assertIsNone(store.get_workspace(db, "adv-r4")["retiring"])
+        self.assertTrue(store.claim_retiring(db, "adv-r4", "bob"))   # free again
+        db.close()
+
+    def test_nothing_claims_a_mark_on_a_workspace_that_has_no_row(self):
+        db = self._migrated()
+        self.assertFalse(store.claim_retiring(db, "never-heard-of-it", "alice"))
+        self.assertIsNone(store.get_workspace(db, "never-heard-of-it"))
+        db.close()
+
+    # -- the path as a record, and retirement ----------------------------
+
+    def test_the_path_records_where_the_checkout_is_not_where_it_was(self):
+        db = self._migrated()
+        store.record_workspace(db, "ws0", "/wt/moved")     # re-written on every attach
+        self.assertEqual(store.get_workspace(db, "ws0")["checkout"], "/wt/moved")
+        db.close()
+
+    def test_retiring_clears_the_path_and_reopening_makes_the_name_live_again(self):
+        """Retirement is not a tombstone on a name: the name is identity, and a person who
+        types it again means the workspace they are naming."""
+        db = self._migrated()
+        store.claim_retiring(db, "ws0", "alice")
+        store.retire_workspace(db, "ws0")
+        row = store.get_workspace(db, "ws0")
+        self.assertIsNotNone(row["retired_at"])
+        self.assertIsNone(row["checkout"])                 # there is no checkout now
+        self.assertIsNone(row["retiring"])
+        store.reopen_workspace(db, "ws0", "/wt/ws0")
+        row = store.get_workspace(db, "ws0")
+        self.assertIsNone(row["retired_at"])
+        self.assertEqual(row["checkout"], "/wt/ws0")
+        db.close()
+
+    # -- re-validation, which has three answers ---------------------------
+
+    def _repo(self, name: str) -> Path:
+        import subprocess
+        d = Path(self.tmp.name) / name
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=d, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+                        "-q", "--allow-empty", "-m", "x"], cwd=d, capture_output=True)
+        return d
+
+    def _worktree(self, repo: Path, name: str) -> Path:
+        import subprocess
+        wt = Path(self.tmp.name) / name
+        subprocess.run(["git", "worktree", "add", "-q", str(wt), "-b", name],
+                       cwd=repo, capture_output=True)
+        return wt
+
+    def test_a_live_worktree_of_this_repo_is_the_first_verdict(self):
+        repo = self._repo("repo")
+        wt = self._worktree(repo, "side")
+        self.assertEqual(store.checkout_verdict(str(wt), repo), store.CHECKOUT_OK)
+        # git reports the primary checkout alongside the linked ones, and it is one.
+        self.assertEqual(store.checkout_verdict(str(repo), repo), store.CHECKOUT_OK)
+
+    def test_a_directory_that_is_gone_is_a_resolved_answer_not_an_unresolvable_one(self):
+        """The second verdict is the whole reason there are three. Every path in the store
+        is a filled-in one and six of them point at directories that no longer exist —
+        exactly the population the cheap already-gone path exists for. Collapsed into a
+        boolean, the rule that stops a filled-in path being trusted is the rule that makes
+        that path refuse on the rows it was written for."""
+        import shutil as sh
+        repo = self._repo("repo")
+        wt = self._worktree(repo, "side")
+        sh.rmtree(wt)                                      # the worktree is still registered
+        self.assertEqual(store.checkout_verdict(str(wt), repo), store.CHECKOUT_ABSENT)
+        self.assertEqual(store.checkout_verdict(str(repo / "never-existed"), repo),
+                         store.CHECKOUT_ABSENT)
+
+    def test_anything_else_refuses_because_unknown_is_not_empty(self):
+        repo = self._repo("repo")
+        other = self._repo("other")                        # a real checkout of another repo
+        plain = Path(self.tmp.name) / "plain"; plain.mkdir()
+        afile = Path(self.tmp.name) / "afile"; afile.write_text("x")
+        cases = {
+            "another repo": str(other),
+            "not a worktree at all": str(plain),
+            "not a directory": str(afile),
+            "no path on a workspace that is not bare": None,
+        }
+        for label, path in cases.items():
+            with self.subTest(label):
+                self.assertEqual(store.checkout_verdict(path, repo),
+                                 store.CHECKOUT_UNUSABLE)
+
+    def test_a_git_that_will_not_answer_refuses_too(self):
+        """"Cannot tell" is not "nobody is there", and this is asked in front of a
+        destructive command."""
+        wt = self._worktree(self._repo("repo"), "side")
+        outside = Path(self.tmp.name) / "outside"; outside.mkdir()
+        self.assertEqual(store.checkout_verdict(str(wt), outside),
+                         store.CHECKOUT_UNUSABLE)
+
+
 if __name__ == "__main__":
     unittest.main()
