@@ -68,6 +68,9 @@ like a fake UI I can use to move around quickly. — confirmed 2026-08-09
 **`sb start` should focus the pane. Anything else should never focus on spawn.** —
 confirmed 2026-08-09
 
+**When something needs me, the board shows it, and `sb block`.** (To be explained
+later.) — confirmed 2026-08-09
+
 ---
 
 ## Explicitly rejected
