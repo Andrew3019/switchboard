@@ -44,7 +44,9 @@ the same exact space. So only the top ever creates a space: a sub-orchestrator a
 spawns is a tab in the lead's space, and its whole subtree stays in that one space.
 (This has not been the case.) — confirmed 2026-08-09
 
-**A bare agent gets its own worktree too.** The only time we do not use a worktree is a
+**A worktree belongs to a space, not to an agent.** Everything in a lead's space shares
+that lead's worktree, since a lead's spawns are tabs in it. A bare agent gets its own
+worktree because it gets its own space. The only time we do not use a worktree is a
 read-only task that is 100% clear we will not need a write for later on. — confirmed
 2026-08-09
 
