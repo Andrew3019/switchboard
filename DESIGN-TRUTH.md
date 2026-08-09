@@ -70,6 +70,14 @@ needs to be known differs by agent and by role: not every plugin for every agent
 what is needed at spawn for now; we can clean up and prune later, but we want to get
 things working first. — confirmed 2026-08-09
 
+**How herdr actually talks to Claude.** It types into the chat box and presses enter, so
+a message from sb arrives looking exactly like one Andrew typed — they are the same
+thing to Claude. If Andrew is halfway through typing when a message is sent, the
+half-written text goes along with it, because sb pastes and hits enter. While Claude is
+working, a message is queued by Claude's own system and delivered on the next turn.
+Interrupt is pressing escape on the chat window, which interrupts the model, and then
+the message goes in directly without waiting. — confirmed 2026-08-09
+
 ### Orchestrators
 
 **The top orchestrator is everything: its scope is the whole of its own tree, and its
