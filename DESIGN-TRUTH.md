@@ -116,6 +116,10 @@ orchestrator or a single worker. — confirmed 2026-08-09
 **Andrew will never call these commands himself other than `sb start`.** — confirmed
 2026-08-09
 
+**The `--keep` / `--ephemeral` flags are removed.** The orchestrator handles cleanup
+itself, and it should do this aggressively — probably literally every agent that is
+done. — confirmed 2026-08-09
+
 ---
 
 ## Explicitly rejected
@@ -134,7 +138,3 @@ than quietly assumed.*
 beyond the prompt saying so.** We need to find it. It can be different prompts with
 conditional routing, or a reminder, preset, etc. Not to be found now. — raised
 2026-08-09
-
-**Whether clearly marking top vs non-top orchestrators lets a lot of the flags be
-removed.** Andrew's words: "i'm starting to think" — a direction, not yet a decision. —
-raised 2026-08-09
