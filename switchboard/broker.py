@@ -41,7 +41,8 @@ from . import roles as roles_mod
 from . import store
 from . import validate
 from .herdr import BLOCKED, IDLE, WORKING, Herdr, HerdrError, StateWriteDropped
-from .status import GONE_STATE
+from .status import GONE_STATE, fmt_age
+from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
 # addresses that are not agents, and the role a top-level orchestrator has (which is also
@@ -461,6 +462,19 @@ class Broker:
         what makes several of them navigable — switching workspaces is one keystroke,
         while hunting the right tab among everyone else's is not.
         """
+        held = self._name_held_by(name)
+        if held == "worktree":
+            # One namespace, one kind of workspace per name. Silently sharing it is how a
+            # bare space and a worktree space come to be one row describing two places in
+            # two directories — the exact confusion `agents.branch` exists to end.
+            raise ValueError(
+                f"the name {name!r} already belongs to a workspace with a checkout of its "
+                f"own, and a top-level orchestrator's space has none — one name is one "
+                f"workspace. Go to that one with `sb workspace new {name}`, or start this "
+                f"orchestrator under another name."
+            )
+        self._record_workspace(name, None)
+
         a = store.get_agent(self.db, name)
         if a is not None:
             if not a["pane_id"] and not a["session_id"]:
@@ -538,13 +552,66 @@ class Broker:
         every root ever created, and never of what is live. Reusing a finished
         orchestrator's name would file two unrelated agents, with two unrelated
         histories, under one name.
+
+        And "used" is a question about WORKSPACES, not only about agent rows. This used to
+        ask `get_agent` alone, which is blind to the other minter of names: `sb workspace
+        new main-3` installs an agent called `main-3-lead`, not `main-3`, so nothing here
+        saw the name was taken and the two mints handed one name to two workspaces in two
+        different directories. Both tables are asked now.
         """
-        if not store.get_agent(self.db, MAIN_NAME):
+        if self._name_free(MAIN_NAME):
             return MAIN_NAME
         n = 2
-        while store.get_agent(self.db, f"{MAIN_NAME}-{n}"):
+        while not self._name_free(f"{MAIN_NAME}-{n}"):
             n += 1
         return f"{MAIN_NAME}-{n}"
+
+    def _name_free(self, name: str) -> bool:
+        """Has this name ever been used — by an agent, or by a workspace of either kind?"""
+        return (store.get_agent(self.db, name) is None
+                and self._name_held_by(name) is None)
+
+    def _name_held_by(self, name: str) -> Optional[str]:
+        """Which kind of workspace already holds this name: `bare`, `worktree`, or None.
+
+        The name is the identity of a workspace, and it is only unique because this asks:
+        two places mint into one namespace — the auto-minter behind a bare `sb start`, and
+        a human typing `sb workspace new <name>` — and neither used to consult the other.
+        A name is one kind of workspace or the other and never both.
+
+        The record first, and the agent rows only for a workspace that predates or escaped
+        it. A RETIRED name holds nothing: retirement is a record of end-of-life, not a
+        tombstone on the name, and typing it again reopens it.
+        """
+        row = store.get_workspace(self.db, name)
+        if row is not None:
+            if row["retired_at"]:
+                return None
+            return "bare" if row["checkout"] is None else "worktree"
+        if store.known_workspace(self.db, name):
+            return "bare" if store.workspace_branch(self.db, name) is None else "worktree"
+        return None
+
+    def _record_workspace(self, name: str, path: Optional[str]) -> None:
+        """Write down where this workspace's checkout is — on every attach, not just the first.
+
+        A record of where the checkout *is* rather than of where it once was, which is the
+        whole reason an attach re-writes it: a row left pointing at a directory that has
+        moved (or one that a teardown deleted) makes every later question about the
+        workspace start from an answer the code already knows is wrong.
+
+        NULL is a value, not a gap: it says this workspace has no checkout of its own,
+        which is what bare means. It is never written over a live worktree workspace's
+        path, and reopening a retired name is what typing it again means.
+        """
+        row = store.get_workspace(self.db, name)
+        if path is None and row is not None and row["checkout"] and not row["retired_at"]:
+            return
+        if row is not None and row["retired_at"]:
+            store.reopen_workspace(self.db, name, path)
+            store.log_event(self.db, kind="workspace_reopen", workspace=name)
+        else:
+            store.record_workspace(self.db, name, path)
 
     def _open_board(self, name: str, pane: Optional[str], *,
                     cwd: Optional[str] = None) -> None:
@@ -725,6 +792,17 @@ class Broker:
                 f"bad workspace name {name!r}: it is used verbatim as the git branch "
                 "name, so no whitespace, no '..', and it may not start with '-' or '/'"
             )
+        if self._name_held_by(name) == "bare":
+            # The other half of the single namespace (see `_name_held_by`). Forking a
+            # worktree under a name a top-level orchestrator is already living under would
+            # give one record two checkouts — and this one is worth refusing loudly, since
+            # the person can see the name is theirs.
+            raise ValueError(
+                f"the name {name!r} already belongs to a top-level orchestrator's space "
+                f"over the main checkout, which has no checkout of its own — one name is "
+                f"one workspace. Open this workspace under another name, or go back to "
+                f"that orchestrator with `sb start --name {name}`."
+            )
 
         ws = self._attach_workspace(name, base=base)
         self.link_config(Path(ws["path"]) if ws["path"] else None)
@@ -795,6 +873,308 @@ class Broker:
         return {"workspace": ws["workspace"], "branch": ws.get("branch"),
                 "workspace_id": ws["workspace_id"], "cwd": ws["path"] or None}
 
+    # -- the workspaces themselves, as things rather than as groups of agent rows ------
+
+    def workspace_list(self) -> dict:
+        """Every workspace this repo has, from the UNION of three sources.
+
+        `git worktree list`, the `workspaces` table, and the distinct workspace names in
+        `agents`. None of the three is a superset of the others, and a listing built on any
+        one of them is a listing that lies:
+
+          - only git knows a checkout no agent was ever recorded in — one is on disk right
+            now with zero rows, and reporting exactly that orphan is much of the point;
+          - only the table knows a workspace with no checkout and no rows, which is every
+            retired one;
+          - only `agents` knows a workspace that predates or escaped the table.
+
+        And bare workspaces are why "start from git and join the table" is not enough:
+        `git worktree list` shows the primary checkout once, so four orchestrators over it
+        cannot appear as four things from that side at all.
+
+        Read-only, and deliberately so: it runs the two signals a teardown will later be
+        built on — whether anything is live under the checkout, and what ignored content
+        would go with it — where being wrong costs a wrong line of text rather than
+        somebody's `.env`. Until that command exists this is also what the person pruning
+        by hand should be told.
+        """
+        names: dict[str, set] = {}
+        for r in self.db.execute(
+            "SELECT DISTINCT workspace FROM agents WHERE workspace IS NOT NULL"
+        ).fetchall():
+            names.setdefault(r["workspace"], set()).add("agents")
+        for row in store.all_workspaces(self.db):
+            names.setdefault(row["name"], set()).add("table")
+        worktrees = self._worktrees()
+        for wt in worktrees:
+            # A worktree's workspace name IS its branch name (`_attach_workspace`), so that
+            # is what an orphan checkout is filed under; a detached one has only its
+            # directory to be known by.
+            names.setdefault(wt["branch"] or Path(wt["path"]).name, set()).add("git")
+
+        by_path = {wt["path"]: wt for wt in worktrees}
+        merged, existing = self._branch_facts()
+        # One scan for the whole listing rather than one per workspace: the answer is a
+        # snapshot of the machine, and asking twenty times would be twenty snapshots.
+        seen = live.scan()
+
+        out = []
+        for name in sorted(names):
+            out.append(self._listed_workspace(
+                name, sorted(names[name]), by_path, merged, existing, seen))
+        return {"workspaces": out, "gap": store.workspace_fill_gap(self.db)}
+
+    def _listed_workspace(self, name, sources, by_path, merged, existing, seen) -> dict:
+        """One workspace's row in the listing: where it is, what state it is in, what is in
+        the way of it ever going away."""
+        row = store.get_workspace(self.db, name)
+        checkout = row["checkout"] if row is not None else None
+        if row is None:
+            # Not in the table: an agent row's own answer, or — for a checkout nobody was
+            # ever recorded in — git's. `_recorded_path` answers None for a bare space,
+            # which is the same fact the table's NULL states.
+            checkout = self._recorded_path(name) or next(
+                (p for p, wt in by_path.items()
+                 if (wt["branch"] or Path(p).name) == name), None)
+        retired = bool(row is not None and row["retired_at"])
+        bare = checkout is None and not retired and (
+            row is not None or store.known_workspace(self.db, name))
+
+        if retired:
+            verdict = "retired"
+        elif bare:
+            verdict = "bare"                       # no checkout of its own; nothing to lose
+        else:
+            verdict = store.checkout_verdict(checkout, cwd=self.repo)
+
+        facts = {
+            "name": name, "sources": sources, "checkout": checkout, "verdict": verdict,
+            "retired_at": row["retired_at"] if row is not None else None,
+            "retiring": row["retiring"] if row is not None else None,
+            "retiring_at": row["retiring_at"] if row is not None else None,
+            "rows": self._row_counts(name),
+            # The branch a safe delete would have to get past. `git branch -d` refuses an
+            # unmerged one on its own and that refusal is permanent by design, so it is
+            # worth seeing before anyone plans a cleanup around it. A bare workspace has no
+            # branch of its own — it is laid over somebody else's checkout — so a branch
+            # that happens to share its name is not something it left behind.
+            "branch": name if name in existing and not bare else None,
+            "unmerged": name in existing and not bare and name not in merged,
+            "prunable": bool(checkout and (by_path.get(checkout) or {}).get("prunable")),
+            "ignored": None, "live": [], "live_verdict": "skipped",
+        }
+        if verdict == store.CHECKOUT_OK:
+            facts["ignored"] = self._ignored_weight(checkout)
+            found = None if seen is None else [
+                p for p in seen if live.is_under(p.cwd, checkout)]
+            # Unknown is not empty, here as everywhere: a scan that could not be made is
+            # not the answer "nobody is in there", and this readout is where that
+            # distinction gets exercised before a destructive command depends on it.
+            facts["live_verdict"] = ("unknown" if found is None
+                                     else "live" if found else "clear")
+            facts["live"] = [p._asdict() for p in (found or [])]
+        return facts
+
+    def _row_counts(self, name: str) -> dict:
+        """How many agent rows this workspace has, and how many of them are not finished."""
+        r = self.db.execute(
+            f"SELECT COUNT(*) AS n, SUM(state NOT IN {FINISHED}) AS busy "
+            "FROM agents WHERE workspace=?", (name,)
+        ).fetchone()
+        return {"total": r["n"], "unfinished": r["busy"] or 0}
+
+    def _worktrees(self) -> list[dict]:
+        """What git says is checked out where. Empty when git will not answer.
+
+        `prunable` is git's own word for a registration whose directory is no longer there
+        — the state the already-gone path exists for.
+        """
+        found: list[dict] = []
+        for line in (self._git("worktree", "list", "--porcelain") or "").splitlines():
+            if line.startswith("worktree "):
+                found.append({"path": line[len("worktree "):], "branch": None,
+                              "prunable": False})
+            elif not found:
+                continue
+            elif line.startswith("branch refs/heads/"):
+                found[-1]["branch"] = line[len("branch refs/heads/"):]
+            elif line.startswith("prunable"):
+                found[-1]["prunable"] = True
+        return found
+
+    def _branch_facts(self) -> tuple[set, set]:
+        """(branches already merged into the base, every local branch).
+
+        The first is what `git branch -d` will agree to delete; the difference between the
+        two is what stays forever unless somebody decides otherwise by hand.
+        """
+        # The remote-tracking base when we have it, the local branch of the same name when
+        # we do not — a repo with no `origin` has exactly one `main`, and it is that one.
+        base = BASE_BRANCH if self._git("rev-parse", "--verify", "--quiet",
+                                        f"{BASE_BRANCH}^{{commit}}", check=True) \
+            else BASE_BRANCH.partition("/")[2] or BASE_BRANCH
+
+        def names(*args: str) -> set:
+            out = self._git("branch", "--format=%(refname:short)", *args) or ""
+            return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+        return names("--merged", base), names()
+
+    def _ignored_weight(self, path: str) -> dict:
+        """What is in this checkout that git does not track and would go with it.
+
+        Plain `git status --porcelain` is the wrong question: it does not list ignored
+        files, and a worktree removal deletes them anyway — so a real `.env`, a
+        `.claude/settings.local.json`, a local override made in a worktree precisely
+        because it was never meant to be committed, are all invisible to the obvious check
+        and all destroyed.
+
+        Switchboard's own furniture is told apart from the human's rather than shown
+        beside it, and it can be because switchboard planted it: the `LINKED_CONFIG`
+        symlinks are ours, unlinking one leaves the target standing in the main checkout,
+        and a prompt that lists them every time is a prompt people learn to dismiss.
+        """
+        try:
+            out = subprocess.run(
+                ["git", "status", "--porcelain", "--ignored"],
+                cwd=path, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            out = None                             # the directory went while we looked
+        if out is None or out.returncode != 0:
+            # Unknown, and said so rather than counted as nothing: this is one of the two
+            # facts a person deciding whether to delete a checkout is deciding on.
+            return {"dirty": None, "mine": 0, "unknown": None, "sample": []}
+        dirty, mine, unknown = 0, 0, []
+        for line in out.stdout.splitlines():
+            code, _, entry = line.partition(" ")
+            entry = entry.strip().strip('"')
+            if code != "!!":
+                dirty += 1                         # tracked-dirty or untracked: git sees it
+            elif entry.rstrip("/") in LINKED_CONFIG and Path(path, entry).is_symlink():
+                mine += 1
+            else:
+                unknown.append(entry)
+        return {"dirty": dirty, "mine": mine, "unknown": len(unknown),
+                "sample": unknown[:3]}
+
+    def workspace_close(self, name: str, *, me: Optional[str] = None) -> dict:
+        """Close a workspace whose checkout is already gone: deregister it, drop its branch.
+
+        The cheapest real win available, and the safest case rather than an unknown one:
+        nothing is at that path, so nothing there can be lost. That is what the second of
+        `checkout_verdict`'s three answers is for — *absent* is a resolved answer, and this
+        is the path it resolves to. A boolean "is the recorded path still good" would have
+        made this refuse on precisely the workspaces it was written for.
+
+        It needs none of the machinery a live checkout needs: no cleanliness check, no
+        inventory of what would be destroyed, no confirmation. It keeps the two rules that
+        do apply. The gate is that no unfinished agent row sits under the path — compared
+        component-wise, never as a string prefix, because sibling checkout names nest as
+        strings here. And the deregistration NAMES the one path: `git worktree prune` is
+        repo-global, and one bare prune deregisters every prunable checkout in the
+        repository, including ones other agents are relying on.
+
+        The branch goes with `git branch -d`, which refuses an unmerged one on its own and
+        is never `-D`: an unmerged branch simply stays, which is a far cheaper failure than
+        losing commits.
+
+        Every other verdict refuses. A checkout that is still there is the destructive
+        command's business and it is not built yet; anything unintelligible is where
+        "unknown is not empty" keeps its full force.
+        """
+        me = me or self.whoami()
+        gap = store.workspace_fill_gap(self.db)
+        if gap:
+            raise ValueError(f"cannot close {name!r}: {gap}")
+        row = store.get_workspace(self.db, name)
+        if row is None:
+            raise ValueError(
+                f"no workspace called {name!r} is recorded, so there is nothing here to "
+                f"close — `sb workspace list` shows every one this repo knows about"
+            )
+        if row["retired_at"] and not row["checkout"]:
+            return {"workspace": name, "checkout": None, "already": True,
+                    "worktree": "gone", "branch": None, "branch_deleted": False}
+        checkout = row["checkout"]
+        verdict = "bare" if checkout is None else store.checkout_verdict(
+            checkout, cwd=self.repo)
+        if verdict != store.CHECKOUT_ABSENT:
+            raise ValueError(self._close_refusal(name, checkout, verdict))
+
+        busy = [r["name"] for r in self._unfinished_under(checkout)]
+        if busy:
+            raise ValueError(
+                f"cannot close {name!r}: {', '.join(sorted(busy))} "
+                f"{'is' if len(busy) == 1 else 'are'} still recorded as working under "
+                f"{checkout} — close them first (`sb cleanup <name>`)"
+            )
+        if not store.claim_retiring(self.db, name, me):
+            held = store.get_workspace(self.db, name)
+            since = (f"{fmt_age(store.now() - held['retiring_at'])} ago"
+                     if held["retiring_at"] else "at some point")
+            raise ValueError(
+                f"{name!r} is already being closed by {held['retiring']}, claimed {since} "
+                f"— one teardown at a time"
+            )
+
+        try:
+            removed = self._deregister(checkout)
+        except ValueError:
+            store.release_retiring(self.db, name, me)
+            raise
+        branch = store.workspace_branch(self.db, name) or name
+        deleted = self._git("branch", "-d", branch, check=True)
+        store.retire_workspace(self.db, name)
+        store.log_event(self.db, kind="workspace_retired", workspace=name,
+                        checkout=checkout, branch=branch if deleted else None,
+                        worktree=removed)
+        return {"workspace": name, "checkout": checkout, "already": False,
+                "worktree": removed, "branch": branch, "branch_deleted": deleted}
+
+    def _close_refusal(self, name: str, checkout: Optional[str], verdict: str) -> str:
+        if verdict == "bare":
+            return (f"{name!r} is a bare workspace — a place to work with no checkout of "
+                    f"its own — so there is no worktree to deregister and no branch to "
+                    f"delete. Close its agents with `sb cleanup <name>`.")
+        if verdict == store.CHECKOUT_OK:
+            return (f"the checkout at {checkout} is still there, and removing a checkout "
+                    f"that exists is not what this does: it clears the workspaces whose "
+                    f"directory is already gone. Remove it by hand if you mean to.")
+        return (f"cannot tell what {name!r}'s recorded checkout is: {checkout or '(none)'} "
+                f"is not a worktree of this repo. Unknown is not empty, so nothing is "
+                f"deregistered and nothing is deleted.")
+
+    def _unfinished_under(self, path: str) -> list:
+        """Agent rows that are not finished and whose cwd sits under `path`.
+
+        Whatever their `workspace_id` — the column is not consulted, because two workspace
+        ids can sit over one checkout and enumerating one of them says nothing about who
+        else is in the directory.
+        """
+        return [r for r in self.db.execute(
+            f"SELECT * FROM agents WHERE cwd IS NOT NULL AND state NOT IN {FINISHED}"
+        ).fetchall() if live.is_under(r["cwd"], path)]
+
+    def _deregister(self, checkout: str) -> str:
+        """Take one gone checkout out of git's registry, by name. Never a bare prune.
+
+        Already absent from the registry is success, not an error: a command that died
+        halfway through must be resumable, and a directory that is already gone is a
+        resumable state.
+        """
+        if not any(wt["path"] == checkout for wt in self._worktrees()):
+            return "unregistered"
+        out = subprocess.run(
+            ["git", "worktree", "remove", checkout],
+            cwd=str(self.repo), capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+        )
+        if out.returncode != 0:
+            raise ValueError(
+                f"git would not deregister {checkout}: {(out.stderr or '').strip()}"
+            )
+        return "removed"
+
     @staticmethod
     def _result(ws: dict, lead: str, *, created: bool) -> dict:
         """What the caller gets. `created` is the only signal of newness — `fresh` stays
@@ -849,6 +1229,11 @@ class Broker:
                 facts = self._workspace_facts(name, r or {}, fresh=(step == "create"))
                 facts["base"], facts["base_fallback"] = forked_from, fallback
                 self._ws_ids[name] = facts["workspace_id"]
+                # Every attach, not only the first: this is the one place that knows where
+                # the checkout actually is, and a record that is only written at creation
+                # is a memory rather than a fact. It is also what reopens a name somebody
+                # retired — the attach is what makes it live again.
+                self._record_workspace(name, facts["path"] or None)
                 return facts
             except HerdrError as e:
                 first = first or e
