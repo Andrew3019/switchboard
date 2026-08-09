@@ -13,10 +13,11 @@ jumping to a pane.
 **This file does not import `store`, and must not start.** It once did, inside
 `snapshot()`, and the claim that a two-second tick there was read-only was false
 twice: `collect` marked an agent `failed` when herdr stopped listing it
-(`reap=False` closed that), and `store.connect()` itself re-stamps `meta`, ALTERs
-tables and backfills every agent row, and can DROP `agents`, `messages` and
-`events` (`readonly=True` closed that, in `1c10745`). Both fixes are real and
-both are still in force — they moved, with the connect, into
+(`reap=False` closed that), and `store.connect()` itself re-stamps `meta`,
+CREATEs and ALTERs tables and backfills every agent row, and when something
+missing can be given to no existing row it REBUILDS the store, dropping every
+table `SCHEMA` declares (`readonly=True` closed that, in `1c10745`). Both fixes
+are real and both are still in force — they moved, with the connect, into
 `switchboard/collector.py`. What changed here is that they stopped being a claim
 this file has to keep making. A panel now reads a file that one elected collector
 publishes, so the board has no database handle and no import that could get it

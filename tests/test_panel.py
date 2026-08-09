@@ -77,12 +77,13 @@ class PanelTest(unittest.TestCase):
 class RendererImports(unittest.TestCase):
     """The load-bearing property, and the only test here that is not about plumbing.
 
-    `store.connect()` re-stamps `meta`, ALTERs tables and backfills every agent row, and
-    when a table is missing it drops `agents`, `messages` and `events` — 53 agent rows and
-    162 messages in the probe that found it. `1c10745` closed all three for a reader, and
-    that fix holds (tests/test_readonly.py). But it is a fix that has to be chosen again on
-    every future edit of every process that connects, and a panel per agent is forty such
-    processes. This is the version that cannot be un-chosen by accident.
+    `store.connect()` re-stamps `meta`, CREATEs and ALTERs tables and backfills every agent
+    row, and when something missing can be given to no existing row it rebuilds the store,
+    dropping every table `SCHEMA` declares — 53 agent rows and 162 messages in the probe
+    that found it. `1c10745` closed those paths for a reader, and that fix holds
+    (tests/test_readonly.py). But it is a fix that has to be chosen again on every future
+    edit of every process that connects, and a panel per agent is forty such processes.
+    This is the version that cannot be un-chosen by accident.
     """
 
     def test_a_renderer_does_not_load_the_store_even_transitively(self):
