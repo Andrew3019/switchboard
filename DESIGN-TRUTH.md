@@ -101,6 +101,12 @@ half-finished work are all deferred for now. — confirmed 2026-08-09
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
 
+**A reconciler runs on a loop — maybe the same loop `sb board` runs on.** If an agent is
+idle and neither blocked nor done, it pings that agent to say it should probably report
+done or blocked, unless it is awaiting instructions. The ping goes to the agent itself
+rather than to its parent, because the agent has more context on what its true status
+is. That is how we avoid stale idle agents. — confirmed 2026-08-09
+
 **Human-facing output is concise, skimmable and well formatted.** That covers anything
 an agent puts in front of Andrew, including what it writes before `sb block`. Prefer
 bullet points, lists, nested lists and diagrams — things that can be visually skimmed.
