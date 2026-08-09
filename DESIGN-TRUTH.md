@@ -32,7 +32,8 @@ Entry format: one short claim, plus the date it was confirmed.
 ## Critical user journeys (CUJs)
 
 **Starting work.** On some terminal in a repo, I call `sb start`. It makes a new bare
-space on main. This is a top orchestrator. — confirmed 2026-08-09
+space on main — bare meaning no worktree of its own; forking from `origin/main` is what
+a workspace does. This is a top orchestrator. — confirmed 2026-08-09
 
 **Anything that might need code changes.** It gets a workspace/worktree. Unless it is
 small and clear enough for one agent end to end, it gets an orchestrator with it, and
@@ -54,7 +55,9 @@ read-only task that is 100% clear we will not need a write for later on. — con
 **While the work runs.** The top orchestrator is just idle. It should not be monitoring.
 It persists until Andrew closes it. — confirmed 2026-08-09
 
-**When work finishes.** A lead cleans up, pushes the PR if relevant, and summarizes. It
+**When work finishes.** A lead cleans up its children, pushes the PR if relevant, and
+summarizes — it does not close itself, since cleaning an orchestrator takes its children
+and it still has to report. It
 blocks Andrew itself while it still needs something from him; when the work is complete
 it reports done to the main orchestrator and the main orchestrator blocks. For a bare
 agent under the top, the top blocks. The block does not matter to what follows: once it
