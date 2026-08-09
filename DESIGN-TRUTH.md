@@ -78,6 +78,9 @@ working, a message is queued by Claude's own system and delivered on the next tu
 Interrupt is pressing escape on the chat window, which interrupts the model, and then
 the message goes in directly without waiting. — confirmed 2026-08-09
 
+**Every sb message is prefixed so it is clearly an sb message**, and the prefix can
+carry more — the sender agent's name and the like. — confirmed 2026-08-09
+
 ### Orchestrators
 
 **The top orchestrator is everything: its scope is the whole of its own tree, and its
@@ -165,9 +168,11 @@ now one of them.** — confirmed 2026-08-09
 - **next turn** (the default). The doorbell is sent instantly; the agent's own system
   queues it and delivers it at its next turn boundary — the same as sending a message to
   Claude while it is working. It waits for nothing and cancels nothing.
-- **when idle.** sb holds the doorbell and rings it only once the agent is idle: no more
-  turns, not doing any more work.
-- **interrupt.** Injected mid-turn. What the agent was doing is cancelled.
+- **when idle.** sb holds the doorbell and sends it once the agent marks itself idle —
+  no more turns, and if we waited an hour there would be no new activity. That is a safe
+  idle signal, and herdr's status is the more accurate place to derive it from.
+- **interrupt.** Injected mid-turn, cancelling what the agent was doing. Used when we
+  need to change course, or the agent is doing something wrong.
 
 **`sb tell` is for agents only, both ways round.** Andrew does not use it — he types
 directly into the session — and it cannot address a human. Anything needing a human is
