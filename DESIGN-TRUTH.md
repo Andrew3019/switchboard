@@ -121,6 +121,9 @@ worktree if everything else is closed too.** — confirmed 2026-08-09
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
 
+**`sb inbox --peek` stays, and it must be clear that once a message is read it will not
+be brought up again.** — confirmed 2026-08-09
+
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
 **Andrew will never call these commands himself other than `sb start`.** — confirmed
