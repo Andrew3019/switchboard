@@ -218,13 +218,22 @@ ask = 900
 # so this is about latency, not load.
 ask_poll = 2.0
 # How long a target must stay absent from herdr before `ask` gives up on it. A single
-# missing reading is indistinguishable from a hiccup; a minute of them is a death.
-gone_grace = 60.0
+# missing reading is indistinguishable from a hiccup; a run of them is a death.
+#
+# It must never be shorter than `status.SPAWN_GRACE` (~287 s — herdr's whole retry worst
+# case), and that floor is asserted at load time in `switchboard/status.py`. An agent that
+# is still spawning is not listed by herdr yet and looks exactly like a dead one, so a
+# grace under that window makes `sb ask` write off a target that has done nothing but start
+# slowly. This was 60 s and did exactly that until the assertion was added. Tuning it DOWN
+# means moving that floor, which means changing what a spawn costs — not this line alone.
+gone_grace = 300.0
 
 # How long a `working` row must stay CONTINUOUSLY absent from herdr before that absence is
-# recorded as a death (`status.GONE_CONFIRM_GRACE`). Same reasoning as `gone_grace` and the
-# same order of magnitude, but a separate question — one is `ask` giving up on a target,
-# the other is the store writing a verdict nothing else will ever revise.
+# recorded as a death (`status.GONE_CONFIRM_GRACE`). Same reasoning as `gone_grace`, but a
+# separate question — one is `ask` giving up on a target, the other is the store writing a
+# verdict nothing else will ever revise — and it is bound to neither `gone_grace` nor the
+# spawn window: `gone` is already forced false for a row that is still spawning, so nothing
+# here can be confirmed dead during its own spawn.
 gone_confirm_grace = 60.0
 
 # `sb wait`, which is for humans and shell scripts.

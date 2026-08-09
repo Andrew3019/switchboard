@@ -361,6 +361,33 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(got["w"])
         self.assertGreater(time.time() - started, 0.3)  # it kept waiting
 
+    def test_ask_waits_out_a_target_that_is_still_spawning(self):
+        """A target herdr has never listed is not necessarily dead — it may not have
+        finished starting. herdr does not list a spawning agent for the whole of
+        `status.SPAWN_GRACE`, so a `gone_grace` under that window makes `ask` write off a
+        child that has done nothing but start slowly. That is what the load-time assertion
+        in `status.py` prevents, and this is the behaviour it buys.
+
+        Both windows are minutes, so both are compressed by ONE factor: what is under test
+        is the shipped ratio between them, not either number.
+        """
+        from switchboard import broker as bmod
+        from switchboard import config
+        store.create_agent(self.db, name="slow", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {}                  # not listed yet: still spawning
+
+        spawn = 0.5
+        scale = status.SPAWN_GRACE / spawn
+        grace = config.setting("timeouts.gone_grace") / scale
+        # 0.01 is the floor `ask` puts under `poll` when it turns the grace into a count of
+        # readings; anything shorter here would compress the grace and not the loop.
+        with mock.patch.object(bmod, "GONE_GRACE", grace):
+            got = self.b.ask(["slow"], "q?", me="orch", timeout=spawn, poll=0.01)
+
+        self.assertIsNone(got["slow"])              # it ran out of time waiting, ...
+        kinds = [e["kind"] for e in store.recent_events(self.db, agent="slow")]
+        self.assertNotIn("ask_target_vanished", kinds)      # ... it never gave up on it
+
     def test_ask_times_out_with_none_rather_than_hanging(self):
         store.create_agent(self.db, name="z", role="worker")
         got = self.b.ask(["z"], "q?", me="orch", timeout=0.2, poll=0.05)

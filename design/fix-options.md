@@ -1471,8 +1471,11 @@ precedent on the read side.
 **Pick: A**, expressed as a wall-clock grace window rather than a call count.
 `collect()` has no sleep loop, so "N polls" means "N separate `sb`
 invocations," which could be seconds or hours apart and therefore means
-nothing. A new `GONE_CONFIRM_GRACE` on the order of the existing 60s
-`gone_grace` — not `SPAWN_GRACE`'s 282s, which guards a different question.
+nothing. A new `GONE_CONFIRM_GRACE` on the order of the 60s `gone_grace` was
+then — not `SPAWN_GRACE`'s 282s, which guards a different question. (`gone_grace`
+has since been raised to 300s for a reason that does not apply here; see the
+constants paragraph below. `GONE_CONFIRM_GRACE` stayed at 60s, and stays
+independent of both.)
 
 **Cost if wrong.** Too short reproduces today's bug in smaller form; too long
 means a genuinely dead agent sits `working` for longer, which is the *next*
@@ -1562,8 +1565,8 @@ what A′ does; A′ closes it for the common case of *someone using `sb`*, whic
 different and, on this machine, more frequent event.
 
 Fold in the constants question here, since it is the same family.
-`GONE_GRACE = 60.0` (`defaults/settings.toml:222`, used only by `ask()`'s
-debounce) and `SPAWN_GRACE`'s 282s are independently tuned with nothing
+`GONE_GRACE` (`timeouts.gone_grace`, used only by `ask()`'s debounce) and
+`SPAWN_GRACE`'s 282s are independently tuned with nothing
 keeping them in sync. They answer genuinely different questions — how long a
 claim looks like a spawn in progress, versus how long an `ask` target must
 stay unlisted before giving up — so they should not become one constant. But
@@ -1571,6 +1574,29 @@ stay unlisted before giving up — so they should not become one constant. But
 legitimately spawning agent looks absent, or `ask()` abandons a target that
 simply has not finished spawning. A one-line assertion at config-load time is
 cheap insurance; a shared derivation is not needed.
+
+**What happened when the assertion was written, because it is the finding and not
+a footnote.** The shipped defaults violated it: `gone_grace = 60.0` against a
+`SPAWN_GRACE` of 287s. So `sb ask` has been giving up on targets that were merely
+still spawning — herdr does not list an agent for the whole of its retry worst
+case, and 60s in, `ask` logged `ask_target_vanished` and stopped waiting on a
+child that was alive and starting normally. Nobody had noticed; this paragraph
+predicted it and the assertion is what found it.
+
+**The resolution, and the two things deliberately NOT done.** The shipped default
+was raised to `gone_grace = 300.0` — above the 287s window, with the settings file
+carrying the reason so the next person to tune it down meets it — and the
+assertion now enforces the floor at load time (`status.py`, beside `SPAWN_GRACE`).
+The assertion was **not** weakened to fit the defaults: it is the thing that
+caught a real bug, and a bound relaxed to match what shipped bounds nothing. The
+two constants were **not** merged: the argument above still holds, and the raise
+made them numerically close, which is a coincidence of tuning and not a
+relationship. `GONE_CONFIRM_GRACE` is unaffected in both directions — it is
+bound to neither, because `gone` is already forced false for a row still inside
+`SPAWN_GRACE`, so nothing can be confirmed dead during its own spawn. Pinned by
+`test_status.test_the_ask_grace_covers_the_spawn_window` and
+`test_a_gone_grace_under_the_spawn_window_will_not_load`, and the bug itself by
+`test_broker.test_ask_waits_out_a_target_that_is_still_spawning`.
 
 **Cost if wrong.** Too broad a repair scope and an ordinary `sb` command ends a
 live agent's turn off a stale grace window — the same hazard the collector's

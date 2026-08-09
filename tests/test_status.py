@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import importlib
 import inspect
 import io
 import json
@@ -307,6 +308,30 @@ class StatusTest(unittest.TestCase):
         worst = sum(bounds) / 1000 + sum(naps)
         self.assertEqual(len(bounds), herdr_mod.SPAWN_ATTEMPTS)
         self.assertGreaterEqual(status.SPAWN_GRACE, worst)
+
+    def test_the_ask_grace_covers_the_spawn_window(self):
+        """The shipped defaults, checked against each other. `ask` gives up on a target
+        that has stayed unlisted for `gone_grace`, and a spawning row is unlisted for the
+        whole of SPAWN_GRACE — the two are tuned separately and nothing but the load-time
+        assertion keeps the ask grace above the window."""
+        self.assertGreaterEqual(config.setting("timeouts.gone_grace"), status.SPAWN_GRACE)
+
+    def test_a_gone_grace_under_the_spawn_window_will_not_load(self):
+        """And it is enforced at import, not left to whoever reads the comment. Loudly:
+        a config that makes `sb ask` abandon spawning agents takes every command down
+        rather than shipping the bug quietly."""
+        real = config.setting
+
+        def shorter(dotted, *a, **kw):
+            if dotted == "timeouts.gone_grace":
+                return status.SPAWN_GRACE - 1
+            return real(dotted, *a, **kw)
+
+        self.addCleanup(importlib.reload, status)
+        with mock.patch.object(config, "setting", shorter):
+            with self.assertRaises(AssertionError) as e:
+                importlib.reload(status)
+        self.assertIn("gone_grace", str(e.exception))
 
     def test_an_unreachable_herdr_never_reaps_anything(self):
         """The guard. Absent herdr's side every row looks gone, and a hiccup would end
