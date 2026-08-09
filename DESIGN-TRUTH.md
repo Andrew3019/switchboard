@@ -137,8 +137,14 @@ now one of them.** — confirmed 2026-08-09
 directly into the session — and it cannot address a human. Anything needing a human is
 `sb block`. There is no human inbox. — confirmed 2026-08-09
 
+**An agent blocking writes the full message in the chat first — "need human input: ..."
+at full length — and then calls `sb block`.** Andrew will not see the `why`; it is just
+for bookkeeping. This must be made clear. — confirmed 2026-08-09
+
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
+
+**`sb restore` is gone if the worktree is gone.** — confirmed 2026-08-09
 
 **`sb inbox --peek` stays, and it must be clear that once a message is read it will not
 be brought up again.** — confirmed 2026-08-09
