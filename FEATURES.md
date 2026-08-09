@@ -229,11 +229,26 @@ git at all, since nothing there can be lost and the directory it was laid over i
 human's own clone; its only gate is that its own agent rows are finished. One whose
 directory is **already gone** is deregistered — by name, never a repo-global `git worktree
 prune`, which would take every prunable checkout in the repository with it — and its branch
-safely deleted. A checkout **still on disk** takes the destructive route, which is check →
-stop the panes → check again → delete: the second evaluation is what authorises the
-deletion, because it sees what arrived while the panes were coming down, and the first
-exists so a refusal costs only its message rather than somebody's panes. An unresolvable
-path is a refusal and never a fallback to the repo root.
+safely deleted when anything can name that branch. A checkout **still on disk** takes the
+destructive route, which is check → stop the panes → check again → delete: the second
+evaluation is what authorises the deletion, because it sees what arrived while the panes
+were coming down, and the first exists so a refusal costs only its message rather than
+somebody's panes. That second check waits, briefly and boundedly, for the panes it has just
+closed to leave the process table — measured rather than assumed, an idle shell and a shell
+with an ordinary child are gone before the scan lands, but a process that catches the hangup
+and winds down over half a second is still there every time, which is the shape of an agent
+shutting down cleanly and would otherwise be the one refusal that costs a person their
+panes. It is a delay and never an exemption: the pids of those panes still count, so
+anything still in the directory when the wait expires refuses exactly as it always did, and
+a scan that could not be *made* refuses on the spot rather than being retried. An
+unresolvable path is a refusal and never a fallback to the repo root.
+
+A name with **no record of its own but a checkout git knows about** is recorded first and
+then takes whichever of the three routes its path earns — that is exactly the case `sb
+workspace list`'s three-source union exists to surface, and listing something no verb can
+close is half a feature. Being adopted buys it no trust: the path is re-validated to choose
+the route, and the gate, the inventory, the confirmation and the primary-checkout refusal
+all run as they would for a workspace that had a row all along.
 
 Almost all of the command is the refusing, and refusing is the ordinary outcome rather than
 the exception. It refuses any unfinished agent row whose cwd sits under the checkout —
@@ -248,25 +263,52 @@ the human's `.env` and the panes are already closed; and a workspace already bei
 apart. The one people find surprising is that it also refuses when it **cannot tell** what
 is running: herdr's `agent list` has no failure branch, so a restarted herdr answers an
 empty success that reads identically to an empty workspace — unknown is not empty, and a
-scan that cannot be made is a mandatory refusal. The retiring mark is claimed before
+scan that cannot be made is a mandatory refusal. The scan that *can* be made has a limit of
+its own, said here rather than papered over: an unprivileged `lsof` omits every process the
+caller does not own and still exits 0, so what it really answers is "nothing of **mine** is
+in that directory", and a root-owned daemon or a `sudo`-run editor sitting in the checkout
+is invisible to the gate about to delete around it. Widening that means elevated
+privileges, and narrowing the refusal to match what it can see would mean lying. The
+retiring mark is claimed before
 anything is destroyed and released by every refusal after it, so only a crash can leave one
-behind; a mark that is set discloses its owner, when it was claimed and whether that owner
-is *confirmed* gone, and only then does the refusal name `--resume`, which re-runs the whole
-command from the start rather than inheriting a dead invocation's findings. Cannot-tell
-reads as live there too.
+behind; a mark that is set discloses its owner and when it was claimed, and the refusal
+names `--resume` unless that owner is confirmed *live* — which re-runs the whole command
+from the start rather than inheriting a dead invocation's findings. Not "confirmed gone",
+and the difference is the whole point: an owner nobody can adjudicate is the ordinary case
+rather than the exotic one, since a human holds no agent row and so can never be confirmed
+gone, and a human is the likeliest caller of a destructive command. Under the stricter rule
+a mark left behind by a person's crashed teardown was reachable by no flag and no caller at
+all, the name refused by every other verb as well. What must never happen is a live mark
+being taken *automatically*, and a flag somebody types is the opposite of automatic — so an
+unadjudicable owner is offered it and a confirmed-live one is still refused it. Everywhere
+else in this command, cannot-tell still reads as live.
 
-Two things it deliberately never does, both settled decisions approved by the human rather
+Three things it deliberately never does, all settled decisions approved by the human rather
 than unfinished edges. An unmerged branch is never force-deleted — `git branch -d` and
 never `-D` — so it simply stays, forever, until a person decides otherwise; the command
 says so out loud, because somebody who does not know that is somebody who thinks the
-cleanup finished. And old agent records are never reclaimed: retiring a workspace closes
-panes and clears the recorded path, and every row, summary, message and transcript survives.
-- Entry point: `cli.py:878-884` → `Broker.workspace_close` (`broker.py:1093-1142`) →
-  `_close_bare`/`_close_gone`/`_close_checkout`, rendered by `cli._workspace_closed`
+cleanup finished. It never guesses which branch that `-d` is aimed at either: the branch is
+the one a row recorded, else the one git's registry reports for that checkout, looked up
+before the deregistration takes that entry away — never the workspace's own name, which
+looks like the same fact only because `sb workspace new` makes the two strings equal. When
+nothing names a branch, none is deleted and the output says exactly that, which is different
+news from a branch kept because it is unmerged: a person told the second goes looking for a
+branch, and a person told the first knows there was never one to find. That is deliberately
+not a refusal — the only state it could fire in is one where retiring destroys nothing and
+refusing would strand the name in a row no verb could ever retire, and the cost of not
+refusing is one orphan branch a person can see and delete. And old agent records are never
+reclaimed: retiring a workspace closes panes and clears the recorded path, and every row,
+summary, message and transcript survives.
+- Entry point: `cli.py:878-884` → `Broker.workspace_close` (`broker.py:1125-1180`) →
+  `_adopt_orphan`/`_close_bare`/`_close_gone`/`_close_checkout`, rendered by
+  `cli._workspace_closed`
 - Depends on: `Broker._gate`/`_records_gate`/`_inventory_gate`/`_live_under` and
   `live.processes_in`, `Broker._stop_panes` (herdr `release_agent`/`close_pane`, plus the
-  agent's **`sb board`** pane), `store.checkout_verdict`/`claim_retiring`/
+  agent's **`sb board`** pane), `Broker._branch_for` over `store.workspace_branch` and `git
+  worktree list`, `store.checkout_verdict`/`record_workspace`/`claim_retiring`/
   `release_retiring`/`retire_workspace`, `git worktree remove <path>` and `git branch -d`
+- Config: `settings.toml [timeouts] teardown_settle` (how long the second check waits for
+  closed panes to leave) and `teardown_settle_poll`
 - Status: working. Its "is this owner really gone" question is asked of the same trust
   layer `sb cleanup` uses rather than re-derived, and herdr keeps its veto in the one
   direction it can be trusted in: a name it lists right now is running, whatever the row
