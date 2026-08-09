@@ -44,9 +44,18 @@ the same exact space. So only the top ever creates a space: a sub-orchestrator a
 spawns is a tab in the lead's space, and its whole subtree stays in that one space.
 (This has not been the case.) — confirmed 2026-08-09
 
-**When a workspace lead finishes.** It should clean up, push the PR if relevant,
-summarize, and `sb block`. (More to come as part of a general process CUJ.) — confirmed
+**A bare agent gets its own worktree too.** The only time we do not use a worktree is a
+read-only task that is 100% clear we will not need a write for later on. — confirmed
 2026-08-09
+
+**While the work runs.** The top orchestrator is just idle. It should not be monitoring.
+— confirmed 2026-08-09
+
+**When a workspace lead finishes.** It should clean up, push the PR if relevant, and
+summarize. Then it blocks Andrew — unless it is done, in which case it reports to the
+main orchestrator and the main orchestrator blocks. Either way, one of them has to block
+to get his attention. After that, either the space orchestrator marks itself done or the
+main orchestrator cleans everything up; that depends. — confirmed 2026-08-09
 
 ---
 
@@ -75,8 +84,9 @@ that are not needed. — confirmed 2026-08-09
 **Like any orchestrator, it can spawn discovery or scout or research agents or
 whatever, to improve its decisions and actions.** — confirmed 2026-08-09
 
-**A workspace orchestrator's job is to orchestrate other agents and stuff.** — confirmed
-2026-08-09
+**A workspace orchestrator's job is to orchestrate other agents and stuff.** Review is
+coordinated by it. There is no prompt for that yet, so nothing about how it runs is
+anchored here — Andrew will have prompts for it. — confirmed 2026-08-09
 
 **The orchestrator prompt is mostly good already.** — confirmed 2026-08-09
 
@@ -158,6 +168,8 @@ directly into the session — and it cannot address a human. Anything needing a 
 **An agent blocking writes the full message in the chat first — "need human input: ..."
 at full length — and then calls `sb block`.** Andrew will not see the `why`; it is just
 for bookkeeping. This must be made clear. — confirmed 2026-08-09
+
+**After Andrew answers a block, the agent just continues.** — confirmed 2026-08-09
 
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
