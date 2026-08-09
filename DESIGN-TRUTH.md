@@ -118,6 +118,13 @@ worktree if everything else is closed too.** — confirmed 2026-08-09
 
 **`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
 
+**`sb ask` is removed — there is `tell` only, and nothing an agent does blocks.** Its
+one useful part becomes `tell --needs-reply`, which inserts a static prompt saying you
+must reply to that agent at some point, since it is waiting for a reply. — confirmed
+2026-08-09
+
+**`sb tell` has three delivery modes.** — confirmed 2026-08-09
+
 **`sb tell` is for agents only, both ways round.** Andrew does not use it — he types
 directly into the session — and it cannot address a human. Anything needing a human is
 `sb block`. There is no human inbox. — confirmed 2026-08-09
