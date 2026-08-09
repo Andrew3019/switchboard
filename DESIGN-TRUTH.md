@@ -55,13 +55,15 @@ read-only task that is 100% clear we will not need a write for later on. — con
 **While the work runs.** The top orchestrator is just idle. It should not be monitoring.
 It persists until Andrew closes it. — confirmed 2026-08-09
 
-**When work finishes.** A lead cleans up its children, pushes the PR if relevant, and
-summarizes — it does not close itself, since cleaning an orchestrator takes its children
-and it still has to report. It
-blocks Andrew itself while it still needs something from him; when the work is complete
-it reports done to the main orchestrator and the main orchestrator blocks. For a bare
-agent under the top, the top blocks. The block does not matter to what follows: once it
-is resolved the agent finishes and reports done, and the parent cleans up. — confirmed
+**When work finishes.** It depends who is done and who is reporting it. A worker that is
+done reports done, and its parent orchestrator sees it. Once all of its children are
+done, that orchestrator either reports done or blocks, depending on whether the task is
+fully complete: fully complete, report done; Andrew's input needed to finish it, block.
+Once that is done it reports done, and the top orchestrator blocks. A lead cleans up its
+children, pushes the PR if relevant, and summarizes — it does not close itself, since
+cleaning an orchestrator takes its children and it still has to report. A bare agent
+under the top pushes and opens its own PR; the top blocks for it. Once a block is
+resolved the agent finishes and reports done, and the parent cleans up. — confirmed
 2026-08-09
 
 ---
@@ -99,7 +101,9 @@ there are roles, and what roles there are. — confirmed 2026-08-09
 
 **We should detect failures, and can start with just telling the parent that it has
 failed.** How detection works, whether anything retries, and what becomes of
-half-finished work are all deferred for now. — confirmed 2026-08-09
+half-finished work are all deferred for now. One known hole to be aware of while it is
+deferred: a dead agent's half-finished edits sit in the worktree its whole space shares,
+and nobody owns them. — confirmed 2026-08-09
 
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
@@ -119,8 +123,8 @@ confirmed 2026-08-09
 
 **Agents should avoid blocking unless it is really needed** — a genuine, big,
 behaviour-changing design question; being blocked on running some command; being
-explicitly told to block; or going back and forth with the agent itself. — confirmed
-2026-08-09
+explicitly told to block; going back and forth with the agent itself; or finished work
+that needs Andrew's input or approval to complete. — confirmed 2026-08-09
 
 ### Orchestrators
 
@@ -232,13 +236,18 @@ for bookkeeping. This must be made clear. — confirmed 2026-08-09
 
 **After Andrew answers a block, the agent just continues.** — confirmed 2026-08-09
 
+**A parent is not told that its child blocked.** It is not needed: that is more layers
+and more out-of-sync problems, and the board already shows it. — confirmed 2026-08-09
+
 **A lead may only clean up a blocked child if it reads the block as stale** — already
 resolved elsewhere, or the status simply has not updated. — confirmed 2026-08-09
 
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
 
-**`sb restore` is gone if the worktree is gone.** — confirmed 2026-08-09
+**`sb restore` is gone if the worktree is gone.** Aggressive cleanup therefore destroys
+it, and that is accepted: the push is the recovery path for the work, not restore. —
+confirmed 2026-08-09
 
 **`sb inbox --peek` stays, and it must be clear that once a message is read it will not
 be brought up again.** — confirmed 2026-08-09
