@@ -1000,12 +1000,16 @@ class Broker:
         # The freshly-created workspace's root pane is already an idle shell; a
         # re-attached one may not be, so give that case its own tab.
         fresh_root = ws["pane_id"] if ws.get("fresh") and ws["pane_id"] else ""
-        pane = fresh_root or self._tab_for(ws["workspace_id"], ws["path"] or self.repo)
+        pane, wsid = fresh_root, ws["workspace_id"]
+        if not pane:
+            # `wsid` comes back corrected: if herdr has forgotten this workspace, the tab
+            # call says so and the lead is recorded with no id rather than the dead one.
+            pane, wsid = self._tab_for(wsid, ws["path"] or self.repo)
         try:
             self.delegate(task or self._say("spawn.workspace_task"), role=role,
                           name=lead, cleanup="keep", me=me,
                           workspace=ws["workspace"], branch=ws.get("branch"),
-                          workspace_id=ws["workspace_id"],
+                          workspace_id=wsid,
                           cwd=ws["path"] or None, pane=pane, board=board)
         except (AgentNameTaken, HerdrError) as e:
             # Two openers, one instant: the other won the name. Same name means the same
@@ -1187,7 +1191,7 @@ class Broker:
         self._ws_ids[name] = wsid
         return wsid
 
-    def _parent_workspace_id(self, me: str, ws: Optional[str]) -> str:
+    def _parent_workspace_id(self, me: str, ws: Optional[str]) -> tuple[str, bool]:
         """Where a child of `me` belongs: the herdr workspace the PARENT is in.
 
         An empty id means "wherever herdr is focused", which is whatever the last --focus
@@ -1205,10 +1209,16 @@ class Broker:
         holds it — a one-to-many lookup with nothing to validate the answer, which is how
         a child of `main` (workspace w7, over the main checkout) landed in w1, the OTHER
         workspace over that same checkout. It stays only as a fallback.
+
+        Which is why the answer comes with a second half: whether it is CONFIRMED. The
+        first three tiers are statements of fact and are worth recording; tier 4 is a
+        guess, good enough to aim a tab at and never good enough to write down as where
+        this agent is — recorded, it would be inherited by every later child as though
+        somebody had checked.
         """
         row = store.get_agent(self.db, me) if me != HUMAN else None
         if row is not None and _column(row, "workspace_id"):
-            return _column(row, "workspace_id")
+            return _column(row, "workspace_id"), True
 
         if me != HUMAN:
             try:
@@ -1216,11 +1226,14 @@ class Broker:
             except (HerdrError, AttributeError):
                 live = None
             if live is not None and getattr(live, "workspace_id", ""):
-                return live.workspace_id
+                return live.workspace_id, True
 
-        return os.environ.get("HERDR_WORKSPACE_ID", "") or self._workspace_id(ws)
+        env = os.environ.get("HERDR_WORKSPACE_ID", "")
+        if env:
+            return env, True
+        return self._workspace_id(ws), False
 
-    def _tab_for(self, workspace_id: str, cwd) -> str:
+    def _tab_for(self, workspace_id: str, cwd) -> tuple[str, str]:
         """A child belongs in its parent's workspace, not in whatever tab has focus.
 
         A RECORDED id, though, outlives the herdr that issued it: ids are handed out per
@@ -1231,10 +1244,16 @@ class Broker:
         Where the tab goes is a preference; that the agent starts is not. A vanished
         workspace therefore degrades to a plain tab rather than an error, and says so in
         the log so the misplacement is explainable.
+
+        Returns the pane AND the id still worth believing — the one it was given, or ""
+        once herdr has disowned it. Callers record THAT rather than the value they were
+        holding before the call: clearing the id from every row and then letting the
+        caller re-plant it on the row it is spawning is how a dead id survived its own
+        purge and got inherited all over again.
         """
         if workspace_id and _accepts(self.h.create_tab, "workspace"):
             try:
-                return self.h.create_tab(cwd=str(cwd), workspace=workspace_id)
+                return self.h.create_tab(cwd=str(cwd), workspace=workspace_id), workspace_id
             except HerdrError as e:
                 if e.code != "workspace_not_found":
                     raise
@@ -1247,8 +1266,13 @@ class Broker:
                     "UPDATE agents SET workspace_id=NULL WHERE workspace_id=?",
                     (workspace_id,))
                 self.db.commit()
+                # And out of this process's own cache, for the same reason: a second
+                # lookup of that workspace name would otherwise hand back the id we just
+                # watched herdr disown, and pay the failed call again.
+                self._ws_ids = {n: i for n, i in self._ws_ids.items() if i != workspace_id}
                 store.log_event(self.db, kind="workspace_gone", workspace=workspace_id)
-        return self.h.create_tab(cwd=str(cwd))
+                workspace_id = ""
+        return self.h.create_tab(cwd=str(cwd)), workspace_id
 
     # -- spawning --------------------------------------------------------
 
@@ -1361,7 +1385,7 @@ class Broker:
         me: Optional[str] = None,
         workspace: Optional[str] = None,
         branch: Optional[str] = None,
-        workspace_id: str = "",
+        workspace_id: Optional[str] = None,     # "" is "there is none", not "work it out"
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
         board: bool = True,
@@ -1429,8 +1453,15 @@ class Broker:
         prompts.extend(self._resolve_bindings(role, with_))
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
-        wsid = workspace_id or self._parent_workspace_id(me, ws)
-        pane = pane or self._tab_for(wsid, where)
+        # `confirmed` is what decides whether this id gets WRITTEN DOWN below. A caller
+        # that named one is stating a fact (it just opened that workspace); a derived one
+        # is only a fact for the first three tiers.
+        if workspace_id is None:
+            wsid, confirmed = self._parent_workspace_id(me, ws)
+        else:
+            wsid, confirmed = workspace_id, True
+        if not pane:
+            pane, wsid = self._tab_for(wsid, where)
 
         # Claim the name BEFORE herdr is asked to start anything. `agents.name` is a
         # PRIMARY KEY, and that index is the only arbiter two concurrent spawners share —
@@ -1445,8 +1476,11 @@ class Broker:
         if not store.claim_agent(
             self.db, name=name, role=role, parent=(None if me == HUMAN else me), task=task,
             cwd=str(where), workspace=ws, branch=branch,
-            # Recorded, not re-derived later: this is the id its own children inherit.
-            workspace_id=wsid or None, pane_id=pane, cleanup=cleanup or r.cleanup,
+            # Recorded, not re-derived later: this is the id its own children inherit —
+            # which is exactly why only a confirmed one goes down. A guess written here
+            # is indistinguishable from a fact by every reader after it.
+            workspace_id=(wsid if confirmed else None) or None,
+            pane_id=pane, cleanup=cleanup or r.cleanup,
         ):
             raise AgentNameTaken(name)
 
@@ -1929,7 +1963,9 @@ class Broker:
         # workspaces, so deriving it would bring the agent back somewhere else.
         wsid = (ws.get("workspace_id") or _column(a, "workspace_id")
                 or self._workspace_id(a["workspace"]))
-        pane = self._tab_for(wsid, ws.get("path") or a["cwd"] or str(self.repo))
+        # The corrected id is deliberately dropped: restore rewrites pane and state, never
+        # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
+        pane, _ = self._tab_for(wsid, ws.get("path") or a["cwd"] or str(self.repo))
         # Same tier it was spawned on. The role is what we recorded, and the tier table is
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with

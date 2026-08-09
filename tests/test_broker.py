@@ -1664,3 +1664,71 @@ class WorkspacePlacementTest(unittest.TestCase):
         self.b.restore("parent")
         self.assertIsNone(self.h.tabs[-1])
         self.assertEqual(store.get_agent(self.db, "parent")["state"], "working")
+
+    # -- and the spawn that detected it does not re-plant it ---------------
+    #
+    # The clear above is store-wide, and both spawn paths used to write the id they were
+    # holding BEFORE the call straight back onto the new row. So the one spawn that proved
+    # the id dead was also the one that resurrected it, and every child inherited it from
+    # there via tier 1 — the poisoning `restore` never had, because it rewrites the pane
+    # and not the workspace.
+
+    def test_the_spawn_that_purges_a_dead_id_does_not_record_it(self):
+        self._parent(workspace_id="wA")
+        self._workspace_gone()
+        _, child = self._spawn(env=None)
+        self.assertIsNone(store.get_agent(self.db, child)["workspace_id"])
+
+    def test_a_lead_is_not_recorded_in_a_workspace_herdr_has_forgotten(self):
+        """`_spawn_lead`'s copy of the same bug: it holds `ws["workspace_id"]` across the
+        tab call and passed that, not what the call learned."""
+        self._parent(workspace_id="wA")
+        self._workspace_gone()
+        self.b._spawn_lead("api-lead", {"workspace": "api", "branch": "api",
+                                        "workspace_id": "wA", "path": str(self.repo),
+                                        "pane_id": "", "fresh": False},
+                           role="worker", task="t", me="parent", prior=None, board=False)
+        self.assertIsNone(store.get_agent(self.db, "api-lead")["workspace_id"])
+
+    def test_a_live_id_a_lead_is_given_is_still_recorded(self):
+        """The other half: correcting the dead case must not stop recording the good one."""
+        self._parent(workspace_id="wA")
+        self.b._spawn_lead("api-lead", {"workspace": "api", "branch": "api",
+                                        "workspace_id": "wB", "path": str(self.repo),
+                                        "pane_id": "", "fresh": False},
+                           role="worker", task="t", me="parent", prior=None, board=False)
+        self.assertEqual(store.get_agent(self.db, "api-lead")["workspace_id"], "wB")
+
+    def test_the_dead_id_is_dropped_from_this_processs_cache_too(self):
+        """The store is cleared but `_ws_ids` was not, so a second lookup of the same name
+        within one invocation handed the dead id straight back out."""
+        self.b._workspace_id = Broker._workspace_id.__get__(self.b)   # the real one
+        self.b._ws_ids["main"] = "wA"
+        self._parent(workspace_id="wA")
+        self._workspace_gone()
+        self._spawn(env=None)
+        self.assertNotIn("main", self.b._ws_ids)
+
+    # -- a guess is not a fact --------------------------------------------
+
+    def test_a_name_derived_guess_places_the_tab_but_is_never_recorded(self):
+        """Tier 4 asks herdr which workspace holds a checkout — a one-to-many lookup with
+        nothing to validate the answer. Written down, it becomes indistinguishable from
+        the three tiers above it, and every later child inherits it as fact."""
+        self._parent()
+        self.h.get_agent = lambda n: None
+        tab, child = self._spawn(env=None)
+        self.assertEqual(tab, "w-derived")                        # still aims the tab
+        self.assertIsNone(store.get_agent(self.db, child)["workspace_id"])
+
+    def test_the_tiers_above_it_are_still_recorded(self):
+        self._parent()
+        self._live("w-live")
+        _, child = self._spawn()
+        self.assertEqual(store.get_agent(self.db, child)["workspace_id"], "w-live")
+
+    def test_an_env_answer_is_recorded(self):
+        self._parent()
+        self.h.get_agent = lambda n: None
+        _, child = self._spawn(env="w-env")
+        self.assertEqual(store.get_agent(self.db, child)["workspace_id"], "w-env")
