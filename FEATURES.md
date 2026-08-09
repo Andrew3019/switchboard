@@ -189,6 +189,89 @@ rather than erroring.
 - Config: `settings.toml [vocabulary] workspace_role/base_branch/lead_suffix`,
   `[paths] linked_config`
 
+### `sb workspace list`
+Every workspace this repo has and what stands in the way of each one ever going away —
+the cross-reference that otherwise means reading `git worktree list` against the store by
+hand. Built from the **union** of three sources — git's worktrees, the `workspaces` table,
+and the distinct workspace names on agent rows — because none of them is a superset of the
+others: only git knows a checkout no agent was ever recorded in, only the table knows a
+retired workspace with neither checkout nor rows, and only `agents` knows a workspace that
+predates or escaped the table. Bare workspaces are why git cannot be the starting point:
+`git worktree list` reports the primary checkout once, so four orchestrators laid over it
+are four names and one line. Per workspace it answers what somebody tidying up is actually
+deciding on — the recorded path and which verdict it gets (`ok`/`absent`/`unusable`, or
+`retired`/`bare`), how many agent rows it has and how many are unfinished, whether it is
+retired or currently being closed and by whom, the branch a safe delete would have to get
+past and whether that branch is unmerged, the weight of ignored content a removal would
+take with it, and whether anything is live under the path. `UNKNOWN` in the live column is
+not the same cell as "clear": a scan that could not be made is not the answer "nobody is in
+there", and printing them the same way is how a person comes to believe the wrong one.
+- Entry point: `cli.py:873-876` → `Broker.workspace_list` (`broker.py:910-1008`), rendered
+  by `cli._workspace_listing`
+- Depends on: `store.all_workspaces`/`get_workspace`/`checkout_verdict`/
+  `workspace_fill_gap`, `live.scan`/`live.is_under` (`switchboard/live.py`), `git worktree
+  list --porcelain`, `git status --porcelain --ignored`
+- Status: working, and read-only by design — one `lsof` scan serves the whole listing,
+  since asking twenty times would be twenty different snapshots of the machine. This is
+  where the two signals `sb workspace close` is gated on get exercised somewhere being
+  wrong costs a wrong line of text. `tests/test_workspace_list.py`, `tests/test_live.py`
+- Note: an incomplete `workspaces` backfill is said first, above the table
+  (`store.workspace_fill_gap`), because a listing built on partial records is not the whole
+  story and reads exactly like one that is.
+
+### `sb workspace close <name> [--yes] [--resume]`
+Ends a workspace's life and destroys its checkout when it has one — a separate, explicit
+verb, never something another command does on the way past. Three routes, chosen by what
+the recorded path resolves to and never by a flag, and the two cheap ones are their own
+code rather than the destructive one with steps skipped. A workspace with **no checkout of
+its own** is retired and nothing else — no path gate, no live observation, no inventory, no
+git at all, since nothing there can be lost and the directory it was laid over is the
+human's own clone; its only gate is that its own agent rows are finished. One whose
+directory is **already gone** is deregistered — by name, never a repo-global `git worktree
+prune`, which would take every prunable checkout in the repository with it — and its branch
+safely deleted. A checkout **still on disk** takes the destructive route, which is check →
+stop the panes → check again → delete: the second evaluation is what authorises the
+deletion, because it sees what arrived while the panes were coming down, and the first
+exists so a refusal costs only its message rather than somebody's panes. An unresolvable
+path is a refusal and never a fallback to the repo root.
+
+Almost all of the command is the refusing, and refusing is the ordinary outcome rather than
+the exception. It refuses any unfinished agent row whose cwd sits under the checkout —
+component-wise, never as a string prefix, since sibling checkout names nest as strings —
+minus the caller's own row; any process actually sitting in the directory, ours or not,
+minus the caller's own process tree; work git can see, outright, because that is work a
+person can commit or stash and ask again (ignored content is classified against
+switchboard's own symlinks instead, and only *unrecognised* ignored content demands `--yes`,
+quoting a count and a sample); the repository's primary checkout, by an explicit rule
+rather than by letting git object at the last step, when the inventory has already listed
+the human's `.env` and the panes are already closed; and a workspace already being taken
+apart. The one people find surprising is that it also refuses when it **cannot tell** what
+is running: herdr's `agent list` has no failure branch, so a restarted herdr answers an
+empty success that reads identically to an empty workspace — unknown is not empty, and a
+scan that cannot be made is a mandatory refusal. The retiring mark is claimed before
+anything is destroyed and released by every refusal after it, so only a crash can leave one
+behind; a mark that is set discloses its owner, when it was claimed and whether that owner
+is *confirmed* gone, and only then does the refusal name `--resume`, which re-runs the whole
+command from the start rather than inheriting a dead invocation's findings. Cannot-tell
+reads as live there too.
+
+Two things it deliberately never does, both settled decisions approved by the human rather
+than unfinished edges. An unmerged branch is never force-deleted — `git branch -d` and
+never `-D` — so it simply stays, forever, until a person decides otherwise; the command
+says so out loud, because somebody who does not know that is somebody who thinks the
+cleanup finished. And old agent records are never reclaimed: retiring a workspace closes
+panes and clears the recorded path, and every row, summary, message and transcript survives.
+- Entry point: `cli.py:878-884` → `Broker.workspace_close` (`broker.py:1093-1142`) →
+  `_close_bare`/`_close_gone`/`_close_checkout`, rendered by `cli._workspace_closed`
+- Depends on: `Broker._gate`/`_records_gate`/`_inventory_gate`/`_live_under` and
+  `live.processes_in`, `Broker._stop_panes` (herdr `release_agent`/`close_pane`, plus the
+  agent's **`sb board`** pane), `store.checkout_verdict`/`claim_retiring`/
+  `release_retiring`/`retire_workspace`, `git worktree remove <path>` and `git branch -d`
+- Status: working. Its "is this owner really gone" question is asked of the same trust
+  layer `sb cleanup` uses rather than re-derived, and herdr keeps its veto in the one
+  direction it can be trusted in: a name it lists right now is running, whatever the row
+  says. `tests/test_workspace_close.py`
+
 ### `sb restore <name>`
 Brings a closed agent back with full context via herdr `--resume`, into a fresh tab in
 its recorded workspace, on the model tier it was originally spawned with.
