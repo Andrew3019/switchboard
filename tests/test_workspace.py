@@ -150,8 +150,9 @@ class FakeHerdr:
     def close_pane(self, pane):
         self.closed.append(pane)
 
-    def split_pane(self, pane, *, direction="right", ratio=0.38, cwd=None, focus=False):
-        """`sb start` splits the orchestrator's pane to put the board beside it."""
+    def split_pane(self, pane, *, direction="right", ratio=0.66, cwd=None, focus=False):
+        """Every spawn splits the agent's pane to put the board beside it. `ratio` is
+        the share kept by the pane being split — see `Herdr.split_pane`."""
         with self.lock:
             self._n += 1
             new = f"{pane}s{self._n}"
@@ -682,9 +683,9 @@ class WorkspaceTest(unittest.TestCase):
 
     # -- the board -------------------------------------------------------
     #
-    # `sb start` opened one and `sb workspace new` did not, for no reason anybody chose.
-    # The gate is the decided model: a board is the human's window onto agents somebody is
-    # running, so it belongs to an orchestrator lead and to nobody else.
+    # `sb start` opened one and nothing else did. The decided model now is that EVERY
+    # spawned agent opens with one, orchestrator or worker — which is affordable because
+    # the board is the small pane, not half the screen. `--no-board` still declines it.
 
     def test_a_new_workspace_opens_a_board_beside_its_lead(self):
         self.b.workspace_new("api", me=HUMAN)
@@ -701,13 +702,44 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.h.split_cwds, [r["path"]])
         self.assertNotEqual(r["path"], str(self.repo))
 
-    def test_a_worker_lead_gets_no_board(self):
-        """A plain worker forked into its own worktree runs nobody; a panel there is half
-        a screen of empty view."""
+    def test_a_worker_lead_gets_a_board_too(self):
+        """Role no longer gates it: every spawned agent opens with the tree beside it."""
         self.b.workspace_new("api", role="worker", me=HUMAN)
-        self.assertIn("api-lead", self.h.live)              # the lead still spawned
-        self.assertEqual(self.h.splits, [])
-        self.assertEqual(self.h.pane_prompts, [])
+        self.assertIn("api-lead", self.h.live)
+        self.assertEqual(len(self.h.splits), 1)
+        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+
+    def test_a_delegated_child_opens_a_board_beside_itself(self):
+        """`sb delegate` used to hand out a bare tab. Every spawn goes through
+        `delegate`, so this is where the board is opened for all of them."""
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        pane = store.get_agent(self.db, kid)["pane_id"]
+        self.assertIn((pane, "right"), [(p, d) for p, d, _r in self.h.splits])
+        self.assertTrue(any("switchboard.board" in t for _p, t in self.h.pane_prompts))
+
+    def test_the_board_is_the_small_pane(self):
+        """herdr's ratio is the share kept by the pane being SPLIT, so the agent's own
+        session keeps the majority and the board gets what is left."""
+        self.b.delegate("t", role="worker", me=HUMAN)
+        _pane, _dir, ratio = self.h.splits[0]
+        self.assertGreater(ratio, 0.5, "the agent's session must be the larger pane")
+        self.assertLess(ratio, 0.8)                         # and the board still readable
+
+    def test_one_board_per_child_not_one_per_spawn(self):
+        """Two children, two boards — and neither stacks a second onto the other."""
+        self.b.delegate("t", role="worker", me=HUMAN)
+        self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertEqual(len(self.h.splits), 2)
+
+    def test_a_delegated_child_still_spawns_when_the_split_fails(self):
+        """The board is a view; a spawn must not fail because one would not open."""
+        def boom(*a, **kw):
+            raise HerdrError("split_failed", "no panes left")
+        self.h.split_pane = boom
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn(kid, self.h.live)
+        self.assertTrue(any(e["kind"] == "board_open_failed"
+                            for e in store.recent_events(self.db)))
 
     def test_no_board_declines_the_split(self):
         self.b.workspace_new("api", board=False, me=HUMAN)

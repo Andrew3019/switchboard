@@ -19,6 +19,8 @@ which is where they started and where the flags that qualify them live.
 ### `sb delegate <task> [--role] [--as] [--with] [--name] [--workspace] [--model] [--keep|--ephemeral]`
 Spawns a child agent in its own pane to do a task independently; the caller does not
 wait for it — it ends its turn and is woken (doorbell) when the child calls `sb done`.
+The child's pane is split once and **`sb board`** opened in the smaller half, so every
+agent lands with the tree beside it (see **`sb board`**).
 - Entry point: `cli.py:663-681` → `Broker.delegate` (`broker.py:1193-1316`)
 - Depends on: `roles.get` (role → tier and prompt), `presets.for_role`/`resolve`
   (`--with`), `models.Tiers.resolve` (`--model`), `store.claim_agent` (race-safe name
@@ -287,11 +289,14 @@ whatever `status.py` this long-lived process imported at startup.
 - Status: **working and reachable — not dead code.** It was flagged as a suspect (POC
   wired into `broker.start()`, "nobody could tell you what it does"). Verified reachable
   two ways: (1) `sb board` is a real subcommand — `cli.py:634-647` dispatches it, gated
-  to refuse any caller `whoami()` resolves as an agent; (2) `Broker._top`
-  (`broker.py:449,473`), which is `sb start`'s code path, calls `_open_board` →
-  `board.open_beside` automatically, unless `--no-board` is passed. `board.py`'s own
-  docstring confirms `open_beside()` was briefly dead code before `_top` started calling
-  it. It is deliberately absent from `--help` and from `defaults/protocol.md` — hidden
+  to refuse any caller `whoami()` resolves as an agent; (2) `Broker.delegate` calls
+  `_open_board` → `board.open_beside` on every spawn, so each agent — orchestrator,
+  workspace lead or delegated child — opens with a board beside it, unless `--no-board`
+  is passed to `sb start`/`sb workspace new`. `_top` and `workspace_new` ask a second
+  time, which is a no-op when the board is already up and is what covers a restored
+  agent. The board is the SMALL pane (`board.BOARD_SHARE`, a third of the width): what a
+  human reads is the agent's own session. Note herdr's `--ratio` is the share kept by the
+  pane being split, so `open_beside` passes `1 - share`. It is deliberately absent from `--help` and from `defaults/protocol.md` — hidden
   from agents on purpose, not orphaned. `tests/test_board.py` exercises it, and
   `scripts/05-mouse.py`/`scripts/06-board.py` are kept as the proof-of-concept record the
   maintained version was built from.
