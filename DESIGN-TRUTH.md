@@ -81,7 +81,8 @@ Interrupt is pressing escape on the chat window, which interrupts the model, and
 the message goes in directly without waiting. — confirmed 2026-08-09
 
 **Every sb message is prefixed so it is clearly an sb message**, and the prefix can
-carry more — the sender agent's name and the like. — confirmed 2026-08-09
+carry more — the sender agent's name and the like. The channel is the same as Andrew
+typing; the prefix is what tells them apart. — confirmed 2026-08-09
 
 **switchboard is personal, for now.** — confirmed 2026-08-09
 
@@ -159,7 +160,9 @@ auditing it comes later. — confirmed 2026-08-09
 **The click is not working sometimes.** Andrew believes this is because of the side
 panel. — confirmed 2026-08-09
 
-**`sb start` focuses the pane and nothing else ever does.** — confirmed 2026-08-09
+**`sb start` focuses the pane. Nothing else ever focuses on spawn.** Clicking a name on
+the board is navigation, not a spawn, and does bring that agent into focus. — confirmed
+2026-08-09
 
 **When something needs me, the board shows it, and `sb block`.** (To be explained
 later.) — confirmed 2026-08-09
@@ -175,7 +178,10 @@ probably literally every agent that is done. Cleaning up an orchestrator always 
 its children. — confirmed 2026-08-09
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
-orchestrator, which then decides whether to close it. — confirmed 2026-08-09
+orchestrator, which then decides whether to close it. It always uses the **when idle**
+delivery mode — which is also how an idle top learns a child finished: the held doorbell
+fires the moment the top is idle, so it is woken rather than monitoring. — confirmed
+2026-08-09
 
 **Cleanup closes the agents, closes the tab, and closes the entire space and deletes the
 worktree if everything else is closed too.** — confirmed 2026-08-09
@@ -226,8 +232,9 @@ all sessions. — confirmed 2026-08-09
 
 **`sb models` is fine as it is.** — confirmed 2026-08-09
 
-**Andrew will never call these commands himself other than `sb start`.** — confirmed
-2026-08-09
+**Andrew will never call the spawn and lifecycle commands himself, other than
+`sb start`.** The surfaces that are his are the board, the session he types into, and
+`sb inspect` for reading a blocked agent. — confirmed 2026-08-09
 
 ---
 
@@ -251,8 +258,8 @@ orchestrator's, and it always takes the children. — confirmed 2026-08-09
 
 **`--no-board`.** Every sb-made view is split with the board. — confirmed 2026-08-09
 
-**Focus as a flag.** Only `sb start` focuses, and nothing can ask for it. — confirmed
-2026-08-09
+**Focus as a flag.** Only `sb start` focuses on spawn, and nothing can ask for it. —
+confirmed 2026-08-09
 
 ---
 
