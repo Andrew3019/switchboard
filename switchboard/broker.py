@@ -1406,13 +1406,19 @@ class Broker:
     # -- the gate ---------------------------------------------------------------------
 
     def _gate(self, name: str, checkout: str, *, me: str, settle: float = 0.0) -> None:
-        """Is anything still in that directory? Asked of our records AND of the machine.
+        """Is anything still in that directory, or still filed under that name? Asked of
+        our records AND of the machine.
 
         Two halves, because each is blind to what the other sees.
 
         The records half misses a human with an editor open, who has no `agents` row to be
         finished — and the ignored-content inventory and this observation are the two
         places where a person who never appears in the store gets to say no.
+
+        That half is asked twice, of two different sets of rows, because this command acts
+        on two different scopes and every step has to be authorised by a check with the
+        same reach as the step: the deletion is scoped to the directory and `_records_gate`
+        covers it, the pane-closing is scoped to the name and `_filed_gate` covers that.
 
         The live half is the only signal that can be right about a herdr that has
         RESTARTED. `agent list` has no failure branch at all, so a restarted herdr answers
@@ -1438,6 +1444,7 @@ class Broker:
         demonstrably still in it, which is the one thing this whole gate is for.
         """
         self._records_gate(name, checkout, me=me)
+        self._filed_gate(name, me=me)
         found = self._live_under(checkout)
         if found and settle:
             deadline = time.monotonic() + settle
@@ -1465,6 +1472,36 @@ class Broker:
                 f"cannot close {name!r}: {_names(busy)} still recorded as working under "
                 f"{checkout} — close {'it' if len(busy) == 1 else 'them'} first "
                 f"(`sb cleanup <name>`)"
+            )
+
+    def _filed_gate(self, name: str, *, me: str) -> None:
+        """The rows the STOP step will act on: this workspace's own, by name.
+
+        `_records_gate` is scoped to the checkout because the deletion is, and that is
+        right — but `_stop_panes` is scoped to the name, and the two sets are not the same
+        set. A row filed under the workspace whose `cwd` is somewhere else is invisible to
+        a gate that only looks under the checkout, and `delegate` makes exactly that row:
+        a delegate into a named workspace whose recorded path comes back empty is filed
+        under the name with its `cwd` in the primary clone. Unchecked, a live agent's pane
+        was taken by step 2, no refusal ever saw it, and the row was left reading `working`
+        with no pane — drift no sweep reaches, in the destructive window.
+
+        Widened rather than narrowing the stop step, because the alternative leaves that
+        agent its pane and still deletes the checkout out from under a row that claims to
+        belong to the workspace. This command's posture everywhere else is to refuse and
+        say what it found; and the argument that scopes the gate to the path is that one
+        `workspace_id` cannot enumerate who is in a directory — a reason for the gate to
+        cover MORE than the record's own rows, never less. `_close_bare`, which closes the
+        same panes and deletes nothing, has gated on exactly this set all along.
+        """
+        busy = [r["name"] for r in self._unfinished_in(name, exclude=me)]
+        if busy:
+            raise ValueError(
+                f"cannot close {name!r}: {_names(busy)} still recorded as working in "
+                f"{name!r} — close {'it' if len(busy) == 1 else 'them'} first "
+                f"(`sb cleanup <name>`), and note that closing this workspace would take "
+                f"{'its' if len(busy) == 1 else 'their'} pane wherever "
+                f"{'it is' if len(busy) == 1 else 'they are'} working"
             )
 
     def _inventory_gate(self, name: str, checkout: str, *, confirm: bool) -> None:
@@ -1522,10 +1559,12 @@ class Broker:
         ).fetchall() if r["name"] != exclude and live.is_under(r["cwd"], path)]
 
     def _unfinished_in(self, name: str, *, exclude: Optional[str] = None) -> list:
-        """The bare path's whole gate: this workspace's OWN rows, by name.
+        """This workspace's OWN rows, by name: the bare path's whole gate, and the half of
+        the general one that covers the panes.
 
         Deliberately not `_unfinished_under` — see `_close_bare` for why a bare workspace
-        must never be gated on the directory it was laid over.
+        must never be gated on the directory it was laid over, and `_filed_gate` for why
+        the general path needs both and not either.
         """
         return [r for r in self.db.execute(
             f"SELECT * FROM agents WHERE workspace=? AND state NOT IN {FINISHED}",
@@ -1746,7 +1785,9 @@ class Broker:
         """Close the panes of this workspace's agents, and confirm they are stopped.
 
         Step 2, and the reason step 3 exists: closing the panes is what the re-confirmation
-        is checking the effect of. Every row here is finished — the gate said so — so this
+        is checking the effect of. Every row here is finished — `_filed_gate` is scoped to
+        exactly this set of rows and said so, and `_close_bare` asks the same thing of the
+        same set before it closes the same panes — so this
         takes away a pane nobody is working in, which costs only the pane: session,
         summary, messages and transcript all survive, and `sb restore` brings the agent
         back.

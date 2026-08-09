@@ -381,11 +381,16 @@ def _reconcile(db: sqlite3.Connection, cwd: Optional[Path] = None) -> None:
     of this machine, so every statement here is idempotent and the loser's "already exists"
     is caught rather than let out of `connect()`.
 
-    The stamp is last, and it is deliberately gated on every table backfill having been
-    *recorded*: `CREATE TABLE` autocommits, so a second process sees the new table the
-    instant it exists and none of the backfilled rows until commit. Stamping on the shape
-    alone would let that process declare the store current over an empty table, and the
-    one-time backfill would then never run again for anyone.
+    The stamp is last, and it is last for a reason rather than for tidiness: every table
+    backfill has been *recorded* by the time it is written. `CREATE TABLE` autocommits, so
+    a second process sees the new table the instant it exists and none of the backfilled
+    rows until commit; stamping on the shape alone would let that process declare the store
+    current over an empty table, and the one-time backfill would then never run again for
+    anyone. There is no conditional here doing that work — `_fill_table` runs for every
+    declared table and either performs the fill and records it or finds it already
+    recorded, so reaching the stamp at all IS every backfill being accounted for. Which is
+    what makes moving the stamp earlier a bug the tests would have to catch rather than one
+    a reader can see.
     """
     tables, columns, blocking = _deficit(db)
     if not blocking:

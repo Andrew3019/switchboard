@@ -120,6 +120,28 @@ class GateTest(CloseHarness, unittest.TestCase):
             self.b.workspace_close("api", me=HUMAN)
         self.assertIn("stranger", str(e.exception))
 
+    def test_a_live_row_filed_under_the_name_but_working_elsewhere_refuses(self):
+        """The two halves of this command have to be scoped to the same set of rows.
+
+        The stop step closes panes by workspace NAME, so a row filed under the name has
+        its pane taken whatever its `cwd` — while a gate that only ever looked under the
+        checkout never saw it. `delegate` makes exactly that row: a delegate into a named
+        workspace whose recorded path comes back empty is filed under the name with its
+        `cwd` in the primary clone. Closed by the stop step, invisible to the gate, and
+        left recorded as `working` with no pane.
+        """
+        path = self.space()
+        self.agent("stray", workspace="api", cwd=str(self.repo), pane="w9:p7",
+                   state="working")
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("stray", str(e.exception))
+        self.assertIn(path, self.registered())                  # nothing was deleted
+        self.assertEqual(self.h.closed, [])                     # and no pane was taken
+        row = store.get_agent(self.db, "stray")
+        self.assertEqual(row["state"], "working")
+        self.assertEqual(row["pane_id"], "w9:p7")
+
     def test_the_callers_own_row_does_not_count_against_it(self):
         """An agent told to close the workspace it works in is recorded under that
         checkout and is not finished, because it is running this command."""

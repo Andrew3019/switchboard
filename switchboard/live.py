@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Collection, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from . import config
 
@@ -136,19 +136,20 @@ def is_under(path: str, root: str) -> bool:
     return p.parts[:len(r.parts)] == r.parts
 
 
-def processes_in(root: str, *, exclude: Collection[int] = ()) -> Optional[list[Proc]]:
+def processes_in(root: str) -> Optional[list[Proc]]:
     """What is live under `root`, or **None** when the machine could not be asked.
 
     An empty list is a real answer — nothing **of ours** is in that directory, which is
     the whole of what this can be asked (see `scan`) — and None is not a quieter version
     of it. A caller about to destroy something treats None as a refusal.
 
-    `exclude` is pids to leave out, which is how the caller's own process tree stops
-    counting against a gate it is itself running: an agent told to close the workspace it
-    works in is sitting under that checkout by definition. It is done here, on parsed
-    output, rather than by narrowing the scan — see `CWD_SCAN`.
+    Containment is the whole of what this does, and no pid is left out of it. Excluding
+    the caller's own tree is a gate's business rather than this one's — `_live_under` has
+    to read the process table to know which pids those are, and it does that exclusion on
+    the answer it gets back. An `exclude` here was an abstraction for a caller that never
+    existed; what it must not become is a narrowing of the scan itself, see `CWD_SCAN`.
     """
     seen = scan()
     if seen is None:
         return None
-    return [p for p in seen if p.pid not in exclude and is_under(p.cwd, root)]
+    return [p for p in seen if is_under(p.cwd, root)]

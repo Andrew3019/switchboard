@@ -123,13 +123,13 @@ class Filtering(unittest.TestCase):
         live.scan = lambda *a, **kw: None
         self.assertIsNone(live.processes_in("/wt/api"))
 
-    def test_the_callers_own_pids_can_be_left_out(self):
-        """Exclusion is by pid in the parser, never by narrowing the scan: `-p` on a list
-        that matches nothing exits 1 with empty output, which is the one shape this must
-        never produce."""
+    def test_every_pid_in_the_directory_is_reported_and_none_is_left_out(self):
+        """Containment is the whole of what this does. Leaving the caller's own tree out is
+        the gate's business, on the answer this gives back — `_live_under` reads the process
+        table to know which pids those are, and this cannot."""
         live.scan = lambda *a, **kw: [live.Proc(11, "sb", "/wt/api"),
                                       live.Proc(12, "vim", "/wt/api")]
-        self.assertEqual([p.pid for p in live.processes_in("/wt/api", exclude={11})], [12])
+        self.assertEqual([p.pid for p in live.processes_in("/wt/api")], [11, 12])
 
 
 if __name__ == "__main__":

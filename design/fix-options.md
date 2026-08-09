@@ -232,6 +232,24 @@ landed in w1, the OTHER workspace over that same checkout" — so enumerating
 one id's rows and finding them all finished says nothing about who else is in
 the directory. The destruction is scoped by a directory; so is the gate.
 
+**And the gate also asks after the rows filed under the NAME, because step 2 acts
+on those.** An amendment, from a cold read of the built change. The two scopes are
+not alternatives to each other: the deletion is scoped by directory and the
+pane-closing is scoped by name, and each step has to be authorised by a check with
+the same reach as the step. Scoped to the path alone, a row filed under the
+workspace whose `cwd` is somewhere else was invisible to the gate and still closed
+by step 2 — and `delegate` makes exactly that row, since a delegate into a named
+workspace whose recorded path comes back empty is filed under the name with its
+`cwd` in the primary clone. Reproduced against the built command: the checkout and
+branch went, a live agent's pane was taken, and its row was left reading `working`
+with no `pane_id`, which no sweep reaches. So the general path gates on name *and*
+path, which is what the bare path has done all along for the same panes; widened
+rather than narrowing step 2, because narrowing leaves that agent its pane and
+still deletes the checkout out from under a row that claims the workspace, where
+widening produces a refusal that says what it found. Nothing here weakens the
+argument above — that argument is a reason for the gate to cover more than one
+`workspace_id`'s rows, never a reason to cover less.
+
 **The first thing the gate asks is whether the resolved path is the repository's
 primary checkout, and if it is, the command refuses there.** This document
 already argues that the primary clone must never be the target — it is the whole
@@ -2695,11 +2713,14 @@ one. Everything here is a known hole, not a discovered one.
   Closed.** It has now been run on this machine — invocation, output shape,
   cost over 328 processes, deleted-directory behaviour, both failure shapes and
   the sibling-nesting case — and the results are written into the gate's
-  specification in section A rather than left here. What is still not exercised,
-  and is a smaller hole than the one it replaces: a genuine `lsof` hang, truly
-  truncated output, and TCC/Full-Disk-Access behaviour on a macOS configured
-  differently from this one. The parser refuses on all three by shape, so the
-  gap is in the evidence, not in the rule. What running it also established is a
+  specification in section A rather than left here. The three shapes that were
+  still unexercised have since been pinned as *rules* — `tests/test_live.py`
+  refuses a truncated group, an unrecognised shape, a missing binary, a non-zero
+  exit and a timeout, and the timeout is never retried — so what remains is a
+  smaller hole again: those are faked subprocesses, and a genuine `lsof` hang and
+  TCC/Full-Disk-Access behaviour on a macOS configured differently from this one
+  have still never been met in the wild. The gap is in the evidence, not in the
+  rule. What running it also established is a
   hole in the *rule*, and it stays open by choice rather than by omission: the
   scan sees only the caller's own processes, so a root-owned process in a checkout
   is invisible to the gate. It is stated in section A and in `live.py` instead of
@@ -2718,12 +2739,19 @@ one. Everything here is a known hole, not a discovered one.
   agent process restored into a new herdr generation is seen correctly by both
   signals together — neither can change the answer, since the unconditional
   success is structural, but a builder leaning on both signals may want them.
-- **Wave 2.5's migration is proven only in the negative.** The wipe was
-  reproduced against a copy of the real store and the brick was reproduced in both
-  statement orders. The *corrected* version — schema-derived drops, idempotent
-  DDL, a separately recorded backfill completion — has never been built, never
-  been run, and never been tested against anything. Wave 2.5 is currently a
-  specification whose only demonstrated property is that its absence is fatal.
+- **~~Wave 2.5's migration is proven only in the negative.~~ Built, and now
+  proven in the positive too.** The wipe was reproduced against a copy of the real
+  store and the brick was reproduced in both statement orders; the *corrected*
+  version — schema-derived drops, idempotent DDL, a separately recorded backfill
+  completion — is in the tree and each of its named requirements has a test.
+  `tests/test_store.py`'s `AddingATableTest` and `WorkspacesTableTest` both run
+  against a store the shape and size of the real one, stamped by another checkout,
+  met by code declaring a table it does not have — including the fixture this
+  document demands, the two names whose rows disagree about `branch`. What is
+  claimed rather than filed is the run against a *copy of the real database*:
+  `BUGS.md` records its result (117 agents, 284 messages, 13324 events preserved
+  where the old code took them to zero) and no artifact for it was checked into
+  `notes/` the way the lsof probe and the destructive review were. Run, not filed.
 - **The backfill's only input is `agents.cwd`, and it is not durable.** It runs
   exactly once, its source is a column this document spends Wave 1 fixing the
   writers of, and anything that empties or resets the store between the migration
@@ -2751,19 +2779,26 @@ one. Everything here is a known hole, not a discovered one.
   mark was left behind, and it is a manual one by choice: nothing steals a live
   mark and nothing reclaims a stale one on a timer. What has not been exercised is
   the confirmed-live answer that decides whether the refusal offers the flag at
-  all — that answer is Wave 2's to make trustworthy, and this is the first place
-  anything destructive depends on it being right. Its *unavailable* case has now
-  been exercised, the hard way: a review reproduced a permanently unreachable name
-  under the earlier rule that read unknown as live.
+  all against a real fleet — that answer is Wave 2's to make trustworthy, and this
+  is the first place anything destructive depends on it being right. All three of
+  its answers now have tests (`CrashedMarkTest`, `tests/test_workspace_close.py`):
+  a live owner refuses with no way round it, a confirmed-gone one names `--resume`,
+  and an owner nobody can adjudicate — the case a human always lands in — offers
+  the flag rather than bricking the name. That last one was exercised the hard way
+  first: a review reproduced a permanently unreachable name under the earlier rule
+  that read unknown as live.
 
-Carried forward from earlier rounds and still true: there is no test strategy;
-the Group B/C/D picks have never been examined on their own merits by any lens;
-and whether `git worktree remove` leaves a herdr space behind when the directory
+Carried forward from earlier rounds and still true: the Group B/C/D picks have never
+been examined on their own merits by any lens; and whether `git worktree remove`
+leaves a herdr space behind when the directory
 goes *without* its panes being closed first is untested — the design closes panes
 first, so the tested path holds, but the out-of-order case does not. No longer
-true and struck from this list: "herdr's own source is unread." It has been read
-where this design depends on it — `agent list`'s unconditional success, and
-`branch_to_path_slug`'s flat checkout layout — though only there.
+true and struck from this list: "herdr's own source is unread" — it has been read
+where this design depends on it, `agent list`'s unconditional success and
+`branch_to_path_slug`'s flat checkout layout, though only there; and "there is no
+test strategy" — Group A's waves ship with one, against real git worktrees and a
+real `ps`, faking the process scan alone (`tests/test_workspace_close.py`,
+`tests/test_workspace_list.py`, `tests/test_live.py`, `tests/test_store.py`).
 
 ---
 
