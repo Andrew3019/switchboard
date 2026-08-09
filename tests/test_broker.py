@@ -1641,11 +1641,11 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
 
     def test_an_unreachable_herdr_does_not_resume_a_live_orchestrator(self):
-        """One call stack, one posture.
+        """Doubt about a named orchestrator resolves the reversible way.
 
-        `_running_tops` fails OPEN and hands this very name to `_top`, which asked the
-        same question again with the opposite posture and resumed the agent it had just
-        refused to give up on — a second pane on a live session, which nothing undoes.
+        `sb start --name` asks `_alive_or_unknown`, which fails OPEN. `_alive` fails
+        CLOSED, and `_top` asking it instead resumed a live agent on nothing more than an
+        unreachable herdr — a second pane on a live session, which nothing undoes.
         """
         self.h.focus = lambda n: None
         store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1",

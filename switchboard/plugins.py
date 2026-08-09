@@ -603,9 +603,13 @@ def state_root(scope: str, worktree: Optional[Path] = None) -> Path:
 def state_dir(p: Loaded, worktree: Optional[Path] = None, *, create: bool = True) -> Path:
     """Where this plugin's data lives. sb creates the path and **never reads inside it**.
 
-    Nothing goes in `state.db`. A plugin's table is the one shape of schema change that
-    cannot be migrated in place, and the store's answer to it is to drop `agents`,
-    `messages` and `events`. A todo list must not be able to do that to the agent tree.
+    Nothing goes in `state.db`. A plugin's table arrives with the plugin and leaves with
+    it, so every store that predates it is one the store has to migrate. Since `be8f3a1`
+    it often can — a missing table whose columns are all nullable is created and filled
+    like a column, rather than counted as blocking. The limit is one NOT NULL column with
+    no default: that is still blocking, and blocking rebuilds, which now drops every table
+    `SCHEMA` declares rather than three. A todo list must not be able to do that to the
+    agent tree.
     """
     d = state_root(p.scope, worktree) / p.name
     if create:

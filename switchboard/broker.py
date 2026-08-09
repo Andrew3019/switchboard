@@ -1101,16 +1101,16 @@ class Broker:
     def _alive_or_unknown(self, name: str) -> bool:
         """`_alive`, except an unreachable herdr answers "still going".
 
-        One call stack, one posture. `_running_tops` fails OPEN and hands the name it
-        chose straight to `_top` (`:405`), which then asks the same question again — and
-        `_alive` fails CLOSED, throwing away the posture picked one line earlier. What
-        `_top` does with a "dead" answer is `restore`, which spawns: precisely the second
-        orchestrator on top of a live one that `_running_tops` fails open to avoid.
+        Asked on one path only: `sb start --name <existing>`, where `_top` found a row
+        carrying a session id and is choosing between re-focusing that orchestrator and
+        restoring it. A bare `sb start` never arrives here — it always spawns, under a name
+        `_next_top_name` proves was never used, so there is no row to ask about.
 
-        So take the reversible branch, which is what `design-c.md` asks of an unknown.
-        Guessing alive costs an `sb start` that only re-focuses, and the human types it
-        again. Guessing dead resumes a live agent's session in a second pane, and no
-        command undoes that.
+        On that path the two mistakes cost very different things, so take the reversible
+        one, which is what `design-c.md` asks of an unknown. Guessing alive costs an
+        `sb start --name` that only re-focuses, and the human types it again. Guessing dead
+        means `restore`, which spawns: a live agent's session resumed in a second pane, and
+        no command undoes that.
 
         No pane is not an unknown — that is our own row, not herdr's answer.
 
@@ -2171,8 +2171,9 @@ class Broker:
         one caller that acts on the row irreversibly.
 
         Fails CLOSED, and this is the one place in the file that does. `_agent_states()`
-        returns None for "cannot tell", and `_busy`/`_running_tops` read that as "carry
-        on" because the cost of their doubt is a doorbell or a duplicate root. Here the
+        returns None for "cannot tell", and `_busy`/`running_tops` read that as "carry
+        on" because the cost of their doubt is a doorbell or a name in a list that has
+        already finished — both a line of noise, and neither irreversible. Here the
         costs are reversed: a wrong close takes a live agent's pane, and for a row that
         never reached a session id it takes the work with it — `restore` needs a session
         id, so there is nothing to come back to. A wrong SKIP costs one `--force <name>`.
