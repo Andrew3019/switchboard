@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -331,7 +332,7 @@ class StoreTest(unittest.TestCase):
         d = store.connect(path=p)
         store.create_agent(d, name="w", role="worker")
         d.execute("ALTER TABLE agents ADD COLUMN added_by_newer_sb TEXT")
-        self.assertEqual(store._deficit(d), ([], []))         # nothing missing: no reset
+        self.assertEqual(store._deficit(d), ([], [], []))     # nothing missing: no reset
         self.assertIsNotNone(store.get_agent(d, "w"))         # and the fleet survives
         d.close()
 
@@ -392,12 +393,15 @@ class StoreTest(unittest.TestCase):
             self.assertIn("checkout", {r[1] for r in d3.execute("PRAGMA table_info(agents)")})
             d3.close()
 
-    def test_a_missing_table_is_blocking_not_addable(self):
+    def test_a_missing_table_whose_rows_cannot_be_invented_is_still_blocking(self):
+        """`events` declares NOT NULL columns, so a store without it is missing rows this
+        code cannot write for it — the same test `_deficit` applies to a column, one level
+        up. An all-nullable table is a different answer; see `AddingATableTest`."""
         p = Path(self.tmp.name) / "notable.db"
         d = store.connect(path=p)
         d.execute("DROP TABLE events")
-        addable, blocking = store._deficit(d)
-        self.assertEqual(addable, [])
+        tables, columns, blocking = store._deficit(d)
+        self.assertEqual((tables, columns), ([], []))
         self.assertTrue(any("events" in b for b in blocking))
         d.close()
 
@@ -512,6 +516,293 @@ class StoreTest(unittest.TestCase):
     def test_transcript_path_needs_session_and_cwd(self):
         store.create_agent(self.db, name="w", role="worker")
         self.assertIsNone(store.transcript_path(store.get_agent(self.db, "w")))
+
+
+class AddingATableTest(unittest.TestCase):
+    """The one schema change that used to cost everybody their store.
+
+    A missing table was `blocking`, `_reconcile` answers `blocking` with `_reset`, and
+    `_reset` dropped `agents`, `messages` and `events`. Against a copy of the real store
+    with the fleet drained — the ordinary state of this machine between sessions — appending
+    one table took 101 agents, 254 messages and 11752 events to zero. The live-agent guard
+    postponed that; it never prevented it.
+
+    So these tests are run against a store shaped like the real one, and what they assert is
+    that the rows are all still there afterwards.
+    """
+
+    # A fourth table, deliberately NOT the one Wave 3 wants. The capability has to hold for
+    # a table nothing else in the tree has heard of, which is also what makes this a test
+    # and not a rehearsal of one particular migration.
+    _FOURTH = """
+CREATE TABLE notes (
+    subject       TEXT PRIMARY KEY,
+    body          TEXT,
+    created_at    INTEGER
+);
+CREATE INDEX idx_notes_subject ON notes(subject, created_at);
+"""
+
+    # The same table with one column that cannot be given to rows that already exist.
+    _FOURTH_NOT_NULL = _FOURTH.replace("    body          TEXT,",
+                                       "    body          TEXT NOT NULL,")
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    # -- the fixture -----------------------------------------------------
+
+    def _populated_store(self) -> Path:
+        """A store the size and shape of the real one, then stamped as another checkout's.
+
+        The stamp is what arms `_reconcile`: a store whose hash matches is never looked at.
+        Row counts are the real machine's, because the failure this guards against is
+        measured in rows and a fixture of three of them would not show it.
+        """
+        self._made = getattr(self, "_made", 0) + 1
+        p = Path(self.tmp.name) / f"real-ish-{self._made}.db"
+        db = store.connect(path=p)
+        db.executemany(
+            "INSERT INTO agents (name, role, state, cwd, workspace, cleanup, created_at) "
+            "VALUES (?, 'worker', ?, ?, ?, 'close', 1)",
+            [(f"a{i}", "working" if i % 5 else "done", f"/wt/ws{i % 21}", f"ws{i % 21}")
+             for i in range(101)],
+        )
+        db.executemany(
+            "INSERT INTO messages (from_agent, to_agent, kind, body, created_at) "
+            "VALUES ('a1', 'a2', 'tell', ?, 1)", [(f"m{i}",) for i in range(254)],
+        )
+        db.executemany(
+            "INSERT INTO events (agent, kind, created_at) VALUES ('a1', 'tick', 1)",
+            [() for _ in range(11752)],
+        )
+        db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', 'older')")
+        db.commit()
+        db.close()
+        return p
+
+    def _counts(self, db) -> tuple:
+        return tuple(db.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                     for t in ("agents", "messages", "events"))
+
+    @contextlib.contextmanager
+    def _fourth(self, *, schema: str = "", first: bool = False, backfill: bool = True):
+        """Run the body as if this code shipped a fourth table.
+
+        `first=True` declares it ahead of `agents`, which is the half of `_reset`'s old bug
+        that bricked the store rather than merely emptying it. Which half you land in was
+        decided by declaration order, so both orders are tested.
+        """
+        text = schema or self._FOURTH
+        original, original_hash = store.SCHEMA, store._SCHEMA_HASH
+        store.SCHEMA = text + original if first else original + text
+        store._SCHEMA_HASH = hashlib.sha256(store.SCHEMA.encode()).hexdigest()[:16]
+        if backfill:
+            store._TABLE_BACKFILLS["notes"] = self._fill_notes
+        self.addCleanup(store._TABLE_BACKFILLS.pop, "notes", None)
+        try:
+            yield
+        finally:
+            store.SCHEMA, store._SCHEMA_HASH = original, original_hash
+            store._TABLE_BACKFILLS.pop("notes", None)
+
+    @staticmethod
+    def _fill_notes(db, cwd) -> None:
+        """A `workspaces`-shaped fill: one row per thing the existing rows already imply."""
+        db.executemany(
+            "INSERT OR IGNORE INTO notes(subject, created_at) VALUES(?, 1)",
+            [(r[0],) for r in db.execute(
+                "SELECT DISTINCT workspace FROM agents WHERE workspace IS NOT NULL")],
+        )
+
+    # -- the reproduction, run in reverse --------------------------------
+
+    def test_adding_a_table_keeps_every_row(self):
+        """The proof. Fleet drained, so nothing postpones the rebuild — and no rebuild
+        happens, because a table of nullable columns is now something to add."""
+        p = self._populated_store()
+        with mock.patch.object(store, "_herdr_alive", lambda: set()):
+            before = self._counts(store.connect(path=p))       # armed, but not yet migrated
+            with self._fourth():
+                db = store.connect(path=p)
+                self.assertEqual(self._counts(db), before)
+                self.assertEqual(before, (101, 254, 11752))
+                self.assertEqual(store.schema_deficit(db), [])
+                self.assertEqual(db.execute("SELECT count(*) FROM notes").fetchone()[0], 21)
+                db.close()
+
+    def test_it_holds_whichever_side_of_the_schema_the_table_is_declared_on(self):
+        for first in (False, True):
+            with self.subTest(declared_first=first):
+                p = self._populated_store()
+                with mock.patch.object(store, "_herdr_alive", lambda: set()):
+                    with self._fourth(first=first):
+                        db = store.connect(path=p)
+                        self.assertEqual(self._counts(db), (101, 254, 11752))
+                        db.close()
+
+    # -- the classification ----------------------------------------------
+
+    def test_a_table_of_nullable_columns_is_addable_not_blocking(self):
+        db = store.connect(path=Path(self.tmp.name) / "d.db")
+        with self._fourth():
+            self.assertEqual(store._deficit(db), (["notes"], [], []))
+        db.close()
+
+    def test_a_table_this_code_could_not_fill_stays_blocking(self):
+        """The nullable rule is what keeps this honest: a NOT NULL column with no default is
+        a value the migration would have to invent for every row it writes."""
+        db = store.connect(path=Path(self.tmp.name) / "nn.db")
+        with self._fourth(schema=self._FOURTH_NOT_NULL):
+            tables, columns, blocking = store._deficit(db)
+            self.assertEqual((tables, columns), ([], []))
+            self.assertEqual(blocking, ["table notes is missing"])
+        db.close()
+
+    def test_the_indexes_come_with_the_table(self):
+        p = Path(self.tmp.name) / "idx.db"
+        store.connect(path=p).close()
+        with self._fourth():
+            db = store.connect(path=p)
+            names = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+            self.assertIn("idx_notes_subject", names)
+            db.close()
+
+    # -- `_reset` derives what it drops ----------------------------------
+
+    def test_reset_drops_every_table_the_schema_declares(self):
+        """`_reset` re-runs the WHOLE schema, so a table it did not drop is one `_create`
+        then trips over. Declared after the three that used to be hardcoded, the store came
+        back empty and the error escaped `connect()`; declared before them, the three were
+        dropped and never recreated and every `sb` command on the machine failed until
+        somebody deleted the store by hand."""
+        for first in (False, True):
+            with self.subTest(declared_first=first):
+                p = self._populated_store()
+                with self._fourth(first=first):
+                    db = store.connect(path=p)                 # migrates, keeps the rows
+                    store._reset(db, force=True)               # and now: on purpose
+                    self.assertEqual(self._counts(db), (0, 0, 0))
+                    self.assertEqual(
+                        db.execute("SELECT count(*) FROM notes").fetchone()[0], 0)
+                    self.assertEqual(store.schema_deficit(db), [])
+                    db.close()
+
+    def test_a_rebuilt_store_still_opens(self):
+        """The brick, stated as the thing it broke: every later `connect()`."""
+        p = self._populated_store()
+        with self._fourth(first=True):
+            db = store.connect(path=p)
+            store._reset(db, force=True)
+            db.close()
+            again = store.connect(path=p)                      # this used to raise, forever
+            self.assertEqual(store.schema_deficit(again), [])
+            again.close()
+
+    # -- two processes at once -------------------------------------------
+
+    def test_the_loser_of_a_concurrent_create_does_not_escape_connect(self):
+        """Both processes computed the deficit before either acted, which is the ordinary
+        state of a machine where every `sb` command opens the store. `connect()` is what
+        `sb done` calls, so nothing here may raise."""
+        p = self._populated_store()
+        with self._fourth():
+            other = sqlite3.connect(str(p))
+            store._create_table(other, "notes")                # the winner, already done
+            other.commit()
+            other.close()
+            db = store.connect(path=p)                         # the loser, acting on a
+            self.assertEqual(self._counts(db), (101, 254, 11752))   # stale deficit
+            self.assertEqual(store.schema_deficit(db), [])
+            db.close()
+
+    def test_the_ddl_is_idempotent_before_anything_is_caught(self):
+        """Belt and braces, and both halves are wanted: the statements themselves say IF
+        NOT EXISTS, and the loser's error is caught on top of that. A caught exception is
+        the last line of defence, not the design."""
+        with self._fourth():
+            stmts = store._table_ddl("notes")
+            self.assertEqual(len(stmts), 2)                    # the table and its index
+            for stmt in stmts:
+                self.assertIn("IF NOT EXISTS", stmt)
+
+    def test_an_already_exists_is_caught_even_so(self):
+        """The other half, on its own: whatever reaches sqlite, "it is already there" is
+        the loser finding nothing to do, and `connect()` may not raise over it."""
+        db = store.connect(path=Path(self.tmp.name) / "caught.db")
+        with mock.patch.object(store, "_table_ddl",
+                               lambda t: [f"CREATE TABLE {t} (x TEXT)"]):
+            store._create_table(db, "agents")                  # no IF NOT EXISTS anywhere
+        self.assertIn("name", store._columns(db, "agents"))    # and it changed nothing
+        db.close()
+
+    def test_the_loser_of_a_concurrent_alter_does_not_escape_connect(self):
+        p = self._populated_store()
+        stale = (["notes"], [("agents", "later_column", "INTEGER")], [])
+        with self._fourth():
+            db = store.connect(path=p)
+            db.execute("ALTER TABLE agents ADD COLUMN later_column INTEGER")   # the winner
+            with mock.patch.object(store, "_deficit", lambda _db: stale):
+                store._reconcile(db)                    # the loser, on a stale plan: both
+            self.assertEqual(self._counts(db), (101, 254, 11752))   # statements already ran
+            db.close()
+
+    def test_a_racing_hash_stamp_cannot_suppress_the_one_time_fill(self):
+        """`CREATE TABLE` autocommits, so the table exists for everybody the instant it is
+        made and the filled rows do not exist for anybody until they commit. A process that
+        read the shape and stamped the hash on it would short-circuit `_reconcile` for every
+        later process, and the one-time fill would never run again — for anyone, ever. So
+        the fill records that it happened, and the stamp waits for that record."""
+        p = self._populated_store()
+        with self._fourth():
+            # A: creates the table, starts filling it, and is killed.
+            a = sqlite3.connect(str(p))
+            store._create_table(a, "notes")
+            a.execute("INSERT INTO notes(subject, created_at) VALUES('half-done', 1)")
+            a.close()                                          # rolled back: notes is empty
+
+            # B: finds nothing missing. It must not call the store current on that alone.
+            b = store.connect(path=p)
+            self.assertTrue(store._backfill_recorded(b, "notes"))
+            self.assertEqual(b.execute("SELECT count(*) FROM notes").fetchone()[0], 21)
+            b.close()
+
+            # C: arrives later, hash current, nothing left to do — and the rows are there.
+            c = store.connect(path=p)
+            self.assertEqual(c.execute("SELECT count(*) FROM notes").fetchone()[0], 21)
+            c.close()
+
+    def test_a_fill_that_never_committed_is_run_again(self):
+        """The other half of the same rule: the table being there is not evidence that
+        anybody finished filling it."""
+        p = self._populated_store()
+        with self._fourth():
+            store._create_table(sqlite3.connect(str(p)), "notes")
+            db = store.connect(path=p)
+            self.assertEqual(db.execute("SELECT count(*) FROM notes").fetchone()[0], 21)
+            db.close()
+
+    def test_a_fill_is_not_run_twice(self):
+        p = self._populated_store()
+        with self._fourth():
+            db = store.connect(path=p)
+            db.execute("DELETE FROM notes")                     # somebody cleared it since
+            db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', 'x')")
+            db.commit()
+            store._reconcile(db)                                # recorded: leave it alone
+            self.assertEqual(db.execute("SELECT count(*) FROM notes").fetchone()[0], 0)
+            db.close()
+
+    def test_a_store_built_from_scratch_has_nothing_to_fill(self):
+        """No history to derive anything from, so its fills are done by definition — and
+        recorded as such, rather than left looking half-migrated forever."""
+        with self._fourth():
+            db = store.connect(path=Path(self.tmp.name) / "fresh.db")
+            self.assertTrue(store._backfill_recorded(db, "notes"))
+            self.assertEqual(store.schema_deficit(db), [])
+            db.close()
 
 
 if __name__ == "__main__":

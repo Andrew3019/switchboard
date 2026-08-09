@@ -264,14 +264,14 @@ def connect(
 def _connect_readonly(p: Path) -> sqlite3.Connection:
     """A connection that CANNOT change the store, and never reconciles its schema.
 
-    `connect()` is not a reader. It stamps `meta`, it ALTERs tables and backfills every
-    agent row, and — when a table is missing outright — it drops `agents`, `messages` and
-    `events` (`_reconcile` -> `_reset`). All three are correct for a short-lived `sb`
-    running current code, and all three are wrong for something that merely wants to look:
-    a process that connects every two seconds for hours is the likeliest migrator in the
-    tree, running whatever `SCHEMA` string it happened to import at startup. Two checkouts
-    on different branches sharing one store is the normal case here, and the SCHEMA text
-    differing between them — a comment edit is enough — is what arms all of it.
+    `connect()` is not a reader. It stamps `meta`, it CREATEs and ALTERs tables and
+    backfills every agent row, and — when something missing can be given to no existing row
+    — it rebuilds the store (`_reconcile` -> `_reset`). All three are correct for a
+    short-lived `sb` running current code, and all three are wrong for something that merely
+    wants to look: a process that connects every two seconds for hours is the likeliest
+    migrator in the tree, running whatever `SCHEMA` string it happened to import at startup.
+    Two checkouts on different branches sharing one store is the normal case here, and the
+    SCHEMA text differing between them — a comment edit is enough — is what arms all of it.
 
     So a reader gets `mode=ro`, where sqlite itself is the guarantee rather than our
     discipline: every write, DDL included, raises `sqlite3.OperationalError: attempt to
@@ -330,12 +330,36 @@ def _reconcile(db: sqlite3.Connection, cwd: Optional[Path] = None) -> None:
 
     A column that means something for the rows that predate it gets its `_BACKFILLS` entry
     run right after its own ALTER — inside the same "nothing is blocking" branch, so a
-    deferred rebuild never half-fills anything.
+    deferred rebuild never half-fills anything. A whole missing table is the same shape one
+    level up: create it, then run its `_TABLE_BACKFILLS` entry.
+
+    Two processes that both computed the deficit before either acted is the ordinary state
+    of this machine, so every statement here is idempotent and the loser's "already exists"
+    is caught rather than let out of `connect()`.
+
+    The stamp is last, and it is deliberately gated on every table backfill having been
+    *recorded*: `CREATE TABLE` autocommits, so a second process sees the new table the
+    instant it exists and none of the backfilled rows until commit. Stamping on the shape
+    alone would let that process declare the store current over an empty table, and the
+    one-time backfill would then never run again for anyone.
     """
-    addable, blocking = _deficit(db)
+    tables, columns, blocking = _deficit(db)
     if not blocking:
-        for table, name, decl in addable:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        for table in tables:
+            _create_table(db, table)
+        # Every declared table, not only the ones we just created: finding the table
+        # already there says nothing about whether anybody finished filling it.
+        for table in _TABLE_BACKFILLS:
+            _fill_table(db, table, cwd)
+        for table, name, decl in columns:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+                # Another process added it between our deficit and our ALTER. Its backfill
+                # still runs: ours may be the one that gets there first, and they are
+                # written to be safe to run twice.
             fill = _BACKFILLS.get((table, name))
             if fill:
                 fill(db, cwd)
@@ -363,7 +387,7 @@ def schema_deficit(db: sqlite3.Connection) -> list[str]:
     row = db.execute("SELECT value FROM meta WHERE key='schema_hash'").fetchone()
     if row is not None and row["value"] == _SCHEMA_HASH:
         return []
-    return _deficit(db)[1]
+    return _deficit(db)[2]
 
 
 def _columns(db: sqlite3.Connection, table: str) -> set:
@@ -426,14 +450,95 @@ def _backfill_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
 # (table, column), run once, right after the ALTER that added them — see `_reconcile`.
 _BACKFILLS = {("agents", "branch"): _backfill_branch}
 
+# The same thing for a whole table that arrives after the store did: keyed by table name,
+# handed the store the moment the table exists. Empty until something needs one — the
+# capability is what `_reconcile` needs in order to add a table at all, and a table whose
+# rows are derived from the ones already here is the reason it exists.
+#
+# These are held to a stricter rule than the column fills above, because a table's create
+# and its fill are two transactions (see `_fill_table`): they must be safe to run twice,
+# and they must be safe to run against a table somebody else created.
+_TABLE_BACKFILLS: dict = {}
 
-def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
-    """What this code needs that the store lacks: `(addable, blocking)`.
 
-    `addable` is a plan of `(table, column, decl)` triples that ALTER TABLE can apply in
-    place. `blocking` is a list of human-readable gaps that it cannot — a table that does
-    not exist at all, or a NOT NULL column with no literal default, which SQLite refuses to
-    add to existing rows. Only a non-empty `blocking` can ever cost anyone their store.
+def _backfill_recorded(db: sqlite3.Connection, table: str) -> bool:
+    """Has this table's one-time fill been recorded as done? A fact, never an inference.
+
+    The tempting inference — "the schema hash is current, so everything ran" — is exactly
+    the bug. `CREATE TABLE` autocommits, so the table exists for every other connection
+    before a single backfilled row does; a process that read the shape and stamped the hash
+    would suppress the fill permanently for the whole machine.
+    """
+    key = f"backfill:{table}"
+    return db.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone() is not None
+
+
+def _record_backfill(db: sqlite3.Connection, table: str) -> None:
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+               (f"backfill:{table}", str(now())))
+
+
+def _fill_table(db: sqlite3.Connection, table: str, cwd: Optional[Path]) -> None:
+    """Run a table's one-time fill, unless it is already recorded as done.
+
+    The rows and the record of having written them commit together, so the only two states
+    anybody else can observe are "not done, run it" and "done". A process killed mid-fill
+    rolls both back and the next `sb` picks it up, which is the failure this shape exists
+    for: the alternative loses the fill silently and forever.
+    """
+    fill = _TABLE_BACKFILLS.get(table)
+    if fill is None or _backfill_recorded(db, table):
+        return
+    fill(db, cwd)
+    _record_backfill(db, table)
+    db.commit()
+
+
+def _table_ddl(table: str) -> list[str]:
+    """Every statement SCHEMA declares for one table — its CREATE TABLE and its indexes.
+
+    Taken from the SCHEMA text verbatim rather than rebuilt from `_wanted`'s parse, so the
+    table a migration creates is the same one `_create` would have. `IF NOT EXISTS` is
+    added on the way past: the loser of a concurrent create must find nothing to do, not a
+    reason to raise inside `connect()`.
+    """
+    out = []
+    m = re.search(rf"CREATE TABLE {table} \(.*?\n\);", SCHEMA, re.S)
+    if m:
+        out.append(m.group(0).replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
+    for i in re.finditer(rf"CREATE INDEX \w+\s+ON {table}\(.*?\);", SCHEMA):
+        out.append(i.group(0).replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+    return out
+
+
+def _create_table(db: sqlite3.Connection, table: str) -> None:
+    """Add one table to a store that predates it. Never destructive, never fatal."""
+    for stmt in _table_ddl(table):
+        try:
+            db.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "already exists" not in str(e).lower():
+                raise
+
+
+def _addable_column(decl: str) -> bool:
+    """Can this column be given to rows that already exist? NOT NULL with no default cannot."""
+    return not ("NOT NULL" in decl.upper() and "DEFAULT" not in decl.upper())
+
+
+def _deficit(db: sqlite3.Connection) -> tuple[list, list, list]:
+    """What this code needs that the store lacks: `(tables, columns, blocking)`.
+
+    `tables` names whole tables to create; `columns` is a plan of `(table, column, decl)`
+    triples that ALTER TABLE can apply in place. `blocking` is a list of human-readable gaps
+    that neither can cover, and only a non-empty `blocking` can ever cost anyone their
+    store.
+
+    A missing table is addable when every column it declares is addable — the same test,
+    applied one level up, for the same reason. A table this code would create with a NOT
+    NULL column is a table whose existing-world rows it cannot invent, and inventing them is
+    precisely what adding a table to a store full of history means. Two rules would be two
+    chances to get it wrong; there is one rule, and `_addable_column` is it.
 
     Nothing here compares the store to the schema for *equality*. It asks the narrower and
     much safer question — is everything this code reads and writes present? — because the
@@ -442,10 +547,13 @@ def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
     """
     wanted = _wanted()
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    plan, blocking = [], []
+    missing, plan, blocking = [], [], []
     for table, cols in wanted.items():
         if table not in tables:
-            blocking.append(f"table {table} is missing")
+            if all(_addable_column(d) for d in cols.values()):
+                missing.append(table)
+            else:
+                blocking.append(f"table {table} is missing")
             continue                           # its columns are the table's problem
         have = _columns(db, table)
         # Columns in the store that this code does not know about are LEFT ALONE. They are
@@ -459,15 +567,20 @@ def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
         for name, decl in cols.items():
             if name in have:
                 continue
-            if "NOT NULL" in decl.upper() and "DEFAULT" not in decl.upper():
+            if not _addable_column(decl):
                 blocking.append(f"{table}.{name} cannot be added to existing rows")
             else:
                 plan.append((table, name, decl))
-    return plan, blocking
+    return missing, plan, blocking
 
 
 def _create(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    # A store built from scratch has no history for a one-time fill to derive anything
+    # from, so its fills are done by definition. Recording that keeps the rule simple —
+    # unrecorded means run it — rather than leaving a fresh store looking half-migrated.
+    for table in _TABLE_BACKFILLS:
+        _record_backfill(db, table)
     db.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', ?)", (_SCHEMA_HASH,)
     )
@@ -526,7 +639,13 @@ def _reset(db: sqlite3.Connection, *, force: bool = False) -> None:
               "\nthe last one finishes. To rebuild NOW and lose their state:"
               "\n  sb doctor --reset-store --force"
         )
-    for t in ("agents", "messages", "events"):
+    # Derived from SCHEMA, never a hardcoded list. `_create` re-runs the WHOLE schema, so a
+    # table this misses is a table `CREATE TABLE` then trips over — and where that lands is
+    # decided by declaration order: a table declared after `agents` leaves the three
+    # recreated and empty with the error escaping `connect()`, one declared before it leaves
+    # the store holding nothing but that table and every later `sb` failing identically.
+    # Nobody adding a table should have to notice which half of that they are in.
+    for t in _wanted():
         db.execute(f"DROP TABLE IF EXISTS {t}")
     _create(db)
 
