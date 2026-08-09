@@ -483,11 +483,14 @@ class Broker:
 
         self.delegate(task or self._say("spawn.start_task"), role=MAIN, name=name,
                       cleanup="keep", me=HUMAN, pane=pane,
-                      workspace=name, workspace_id=wsid, cwd=str(self.repo))
+                      workspace=name, workspace_id=wsid, cwd=str(self.repo),
+                      board=board)
         store.log_event(self.db, kind="start", agent=name, created=True, workspace=wsid)
         if board:
-            # Read the pane back: when create_workspace failed, `pane` here is None
-            # and `delegate` fell back to a tab, whose pane only the row knows.
+            # `delegate` has opened it already; this is the second, idempotent ask that
+            # covers a spawn whose split failed there. Read the pane back: when
+            # create_workspace failed, `pane` here is None and `delegate` fell back to
+            # a tab, whose pane only the row knows.
             row = store.get_agent(self.db, name)
             self._open_board(name, row["pane_id"] if row else pane)
         self._focus(name, focus)
@@ -523,18 +526,27 @@ class Broker:
 
     def _open_board(self, name: str, pane: Optional[str], *,
                     cwd: Optional[str] = None) -> None:
-        """Open the human's board beside this orchestrator, unless one is up already.
+        """Open the board beside this agent, unless one is up already.
+
+        Every agent, not only an orchestrator: `delegate` calls this, and every spawn
+        goes through `delegate`. Called a second time by `_top` and `workspace_new`,
+        which is safe by design — the recorded pane makes it a no-op when the board is
+        already up, and the retry is what covers the paths that never reach `delegate`
+        (a restore) or whose split failed inside it.
 
         The pane id is remembered so re-running `sb start` returns you to a
         workspace with one board rather than stacking a new one every time. If we
         cannot ask herdr what is open we do nothing: a missing board is a minor
-        annoyance, two boards is a mess someone has to close by hand.
+        annoyance, two boards is a mess someone has to close by hand. It is also what
+        `_close_board` closes when the agent is closed — a pane opened here is a pane
+        this file has to take away again.
 
         `cwd` is where the board's shell lands: the main checkout for `sb start`, and the
-        workspace's own checkout for `sb workspace new`. A board that reads the wrong
-        checkout's `.switchboard` is worse than no board, because it looks right.
+        workspace's own checkout for a workspace lead or a forked child. A board that
+        reads the wrong checkout's `.switchboard` is worse than no board, because it
+        looks right.
 
-        Never raises. `sb start` must not fail because a view would not open.
+        Never raises. A spawn must not fail because a view would not open.
         """
         if not pane:
             return
@@ -566,6 +578,79 @@ class Broker:
                             (key, new))
             self.db.commit()
             store.log_event(self.db, kind="board_open", agent=name, pane=new)
+        else:
+            # `open_beside` answers a herdr refusal with None so the spawn survives it.
+            # Surviving quietly is a different thing: now that every agent asks for a
+            # split, a terminal that starts refusing them is a fact somebody has to be
+            # able to find, so it goes in the log rather than nowhere.
+            store.log_event(self.db, kind="board_open_failed", agent=name,
+                            error="herdr would not split the pane")
+
+    def _close_board(self, name: str) -> None:
+        """Close the board pane opened beside `name`, and forget it.
+
+        The other half of `_open_board`, and it has to exist for the same reason that
+        one records the pane at all: the board is a pane switchboard opened, so it is a
+        pane switchboard has to take away. Now that EVERY agent opens with one, a close
+        that took only the agent's own pane left an empty tab behind once per agent, and
+        a session slowly filled with them.
+
+        Only ever the pane recorded under this agent's own name, and never one another
+        live agent is reading: two rows pointing at one pane is not a shape anything
+        creates today, but a pane id outliving the pane that had it is, and closing a
+        board somebody is still using is not undoable by the person watching it vanish.
+
+        Tolerates a board that is already gone — closed by hand, crashed, never opened —
+        because all three are ordinary. The meta row is dropped either way: it is a
+        record of a pane we no longer own, and leaving it would make the next
+        `_open_board` for this name believe a board is up.
+
+        Never raises. A close that half-happened is worse than a board left behind.
+        """
+        key = f"board_pane:{name}"
+        try:
+            row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        except Exception:
+            return
+        pane = row["value"] if row else None
+        if not pane:
+            return
+        if not self._board_is_only_for(name, pane):
+            self._forget_board(key)
+            return
+        try:
+            self.h.close_pane(pane)
+        except Exception as e:
+            # Including a pane herdr no longer has: "already closed" and "would not
+            # close" arrive the same way, and neither is worth failing a cleanup over.
+            store.log_event(self.db, kind="board_close_failed", agent=name,
+                            pane=pane, error=str(e))
+        else:
+            store.log_event(self.db, kind="board_close", agent=name, pane=pane)
+        self._forget_board(key)
+
+    def _board_is_only_for(self, name: str, pane: str) -> bool:
+        """Is `pane` this agent's board alone, or is a still-live agent also on it?"""
+        try:
+            rows = self.db.execute(
+                "SELECT key FROM meta WHERE key LIKE 'board_pane:%' AND value=?",
+                (pane,)).fetchall()
+        except Exception:
+            return False        # cannot prove it is ours; leaving a pane is the safe way
+        others = [r["key"].split(":", 1)[1] for r in rows
+                  if r["key"] != f"board_pane:{name}"]
+        return not any(self._is_live(o) for o in others)
+
+    def _is_live(self, name: str) -> bool:
+        a = store.get_agent(self.db, name)
+        return bool(a and a["state"] in store.LIVE_STATES and not a["ended_at"])
+
+    def _forget_board(self, key: str) -> None:
+        try:
+            self.db.execute("DELETE FROM meta WHERE key=?", (key,))
+            self.db.commit()
+        except Exception:
+            pass
 
     def _focus(self, name: str, focus: bool) -> None:
         if not focus:
@@ -601,10 +686,10 @@ class Broker:
         you already are, which is how you get a visual boundary around a line of work
         without moving anywhere.
 
-        A board opens beside the lead only when the lead is an orchestrator. The board is
-        the human's window onto agents somebody is running; a worker forked into its own
-        worktree runs nobody, so a panel there would be an empty view taking half the
-        screen. `board=False` declines it either way, as `sb start --no-board` does.
+        A board opens beside the lead whatever its role — every spawned agent gets one
+        now, and it is the small pane rather than half the screen, so a worker that runs
+        nobody pays a third of its width for a view of the tree it is part of.
+        `board=False` declines it, as `sb start --no-board` does.
         """
         me = me or self.whoami()
         name = name or self._here()
@@ -633,10 +718,15 @@ class Broker:
             self._focus(lead, focus)
             return self._result(ws, lead, created=False)
 
-        created = self._spawn_lead(lead, ws, role=role, task=task, me=me, prior=row)
+        created = self._spawn_lead(lead, ws, role=role, task=task, me=me, prior=row,
+                                   board=board)
         store.log_event(self.db, kind="workspace_open", agent=lead,
                         workspace=name, created=created)
-        if board and role == MAIN:
+        if board:
+            # A fresh lead already has its board from `delegate`; this idempotent second
+            # ask is what covers the leads that never reach it — one restored from a
+            # session, or one whose split failed there.
+            #
             # Read the pane back rather than trusting `ws["pane_id"]`: `_spawn_lead` uses
             # the workspace's root pane only when it is fresh, and opens a tab otherwise —
             # so which pane the lead ended up in is a fact only the row has.
@@ -886,7 +976,7 @@ class Broker:
         }
 
     def _spawn_lead(self, lead: str, ws: dict, *, role: str, task: Optional[str],
-                    me: str, prior) -> bool:
+                    me: str, prior, board: bool = True) -> bool:
         """Put a lead agent in the workspace. Returns whether we actually made one.
 
         Three shapes of `prior`, and they mean different things:
@@ -916,7 +1006,7 @@ class Broker:
                           name=lead, cleanup="keep", me=me,
                           workspace=ws["workspace"], branch=ws.get("branch"),
                           workspace_id=ws["workspace_id"],
-                          cwd=ws["path"] or None, pane=pane)
+                          cwd=ws["path"] or None, pane=pane, board=board)
         except (AgentNameTaken, HerdrError) as e:
             # Two openers, one instant: the other won the name. Same name means the same
             # lead, so join theirs instead of erroring or suffixing — and take the empty
@@ -1274,6 +1364,7 @@ class Broker:
         workspace_id: str = "",
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
+        board: bool = True,
     ) -> str:
         me = me or self.whoami()
         r = roles_mod.get(self.roles, role)
@@ -1380,6 +1471,16 @@ class Broker:
         store.mark_spawned(self.db, name)
         store.log_event(self.db, kind="delegate", agent=name, parent=me, role=role,
                         workspace=ws)
+        if board:
+            # EVERY agent opens with the tree beside it, not just the top-level
+            # orchestrator `sb start` makes: `delegate` is the one place every spawn
+            # passes through, so this is the one place the board can be opened without
+            # a second path to drift from the first. Split before the task is delivered,
+            # so the agent's first draw is already at its final width.
+            #
+            # The pane herdr actually put the agent in, not the one we asked for — the
+            # same value the row above was updated with.
+            self._open_board(name, agent.pane_id or pane, cwd=str(where))
         self.h.prompt(name, task)
         return name
 
@@ -1740,6 +1841,10 @@ class Broker:
                 store.log_event(self.db, kind="cleanup_failed", agent=a["name"], error=str(e))
                 if not force:
                     continue
+            # The board went up beside this agent, so it comes down with it — otherwise
+            # closing an agent leaves an empty tab behind, once per agent. After the
+            # skip above, so a close we abandoned leaves the board with its live pane.
+            self._close_board(a["name"])
             store.set_state(self.db, a["name"], "done")
             # The pane is gone, so the row must stop claiming one: the "already gone"
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a

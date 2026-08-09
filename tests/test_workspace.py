@@ -148,10 +148,14 @@ class FakeHerdr:
         return pane
 
     def close_pane(self, pane):
+        # A closed pane stops existing. Recording the call and leaving it in `panes`
+        # would let a test claim a pane was closed while every reader still saw it.
         self.closed.append(pane)
+        self.panes.discard(pane)
 
-    def split_pane(self, pane, *, direction="right", ratio=0.38, cwd=None, focus=False):
-        """`sb start` splits the orchestrator's pane to put the board beside it."""
+    def split_pane(self, pane, *, direction="right", ratio=0.66, cwd=None, focus=False):
+        """Every spawn splits the agent's pane to put the board beside it. `ratio` is
+        the share kept by the pane being split — see `Herdr.split_pane`."""
         with self.lock:
             self._n += 1
             new = f"{pane}s{self._n}"
@@ -682,9 +686,9 @@ class WorkspaceTest(unittest.TestCase):
 
     # -- the board -------------------------------------------------------
     #
-    # `sb start` opened one and `sb workspace new` did not, for no reason anybody chose.
-    # The gate is the decided model: a board is the human's window onto agents somebody is
-    # running, so it belongs to an orchestrator lead and to nobody else.
+    # `sb start` opened one and nothing else did. The decided model now is that EVERY
+    # spawned agent opens with one, orchestrator or worker — which is affordable because
+    # the board is the small pane, not half the screen. `--no-board` still declines it.
 
     def test_a_new_workspace_opens_a_board_beside_its_lead(self):
         self.b.workspace_new("api", me=HUMAN)
@@ -701,13 +705,44 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.h.split_cwds, [r["path"]])
         self.assertNotEqual(r["path"], str(self.repo))
 
-    def test_a_worker_lead_gets_no_board(self):
-        """A plain worker forked into its own worktree runs nobody; a panel there is half
-        a screen of empty view."""
+    def test_a_worker_lead_gets_a_board_too(self):
+        """Role no longer gates it: every spawned agent opens with the tree beside it."""
         self.b.workspace_new("api", role="worker", me=HUMAN)
-        self.assertIn("api-lead", self.h.live)              # the lead still spawned
-        self.assertEqual(self.h.splits, [])
-        self.assertEqual(self.h.pane_prompts, [])
+        self.assertIn("api-lead", self.h.live)
+        self.assertEqual(len(self.h.splits), 1)
+        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+
+    def test_a_delegated_child_opens_a_board_beside_itself(self):
+        """`sb delegate` used to hand out a bare tab. Every spawn goes through
+        `delegate`, so this is where the board is opened for all of them."""
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        pane = store.get_agent(self.db, kid)["pane_id"]
+        self.assertIn((pane, "right"), [(p, d) for p, d, _r in self.h.splits])
+        self.assertTrue(any("switchboard.board" in t for _p, t in self.h.pane_prompts))
+
+    def test_the_board_is_the_small_pane(self):
+        """herdr's ratio is the share kept by the pane being SPLIT, so the agent's own
+        session keeps the majority and the board gets what is left."""
+        self.b.delegate("t", role="worker", me=HUMAN)
+        _pane, _dir, ratio = self.h.splits[0]
+        self.assertGreater(ratio, 0.5, "the agent's session must be the larger pane")
+        self.assertLess(ratio, 0.8)                         # and the board still readable
+
+    def test_one_board_per_child_not_one_per_spawn(self):
+        """Two children, two boards — and neither stacks a second onto the other."""
+        self.b.delegate("t", role="worker", me=HUMAN)
+        self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertEqual(len(self.h.splits), 2)
+
+    def test_a_delegated_child_still_spawns_when_the_split_fails(self):
+        """The board is a view; a spawn must not fail because one would not open."""
+        def boom(*a, **kw):
+            raise HerdrError("split_failed", "no panes left")
+        self.h.split_pane = boom
+        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn(kid, self.h.live)
+        self.assertTrue(any(e["kind"] == "board_open_failed"
+                            for e in store.recent_events(self.db)))
 
     def test_no_board_declines_the_split(self):
         self.b.workspace_new("api", board=False, me=HUMAN)
@@ -801,6 +836,110 @@ class StartWorkspaceTest(WorkspaceTest):
         self.h.split_pane = missing
         name = self.b.start(focus=False)
         self.assertIsNotNone(store.get_agent(self.db, name))
+
+
+class ClosingTakesTheBoardWithItTest(WorkspaceTest):
+    """A board opened beside an agent is closed when that agent is.
+
+    Every spawn opens one now, so a close that took only the agent's own pane left an
+    empty tab behind once per agent — observed, and closed by hand.
+    """
+
+    def _finished_kid(self) -> tuple[str, str, str]:
+        """A closable child. -> (name, its board's pane, its own pane)"""
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        store.set_state(self.db, kid, "done")
+        agent_pane = store.get_agent(self.db, kid)["pane_id"]
+        return kid, self._board_pane(kid), agent_pane
+
+    def _board_pane(self, name):
+        row = self.db.execute("SELECT value FROM meta WHERE key=?",
+                              (f"board_pane:{name}",)).fetchone()
+        return row["value"] if row else None
+
+    def test_closing_an_agent_closes_its_board(self):
+        kid, board, agent_pane = self._finished_kid()
+        self.assertIsNotNone(board)
+        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
+        self.assertIn(board, self.h.closed)
+        self.assertIn(agent_pane, self.h.closed)
+
+    def test_no_empty_pane_is_left_behind(self):
+        """The bug as a human sees it: the agent goes, the tab it was in does not."""
+        kid, board, agent_pane = self._finished_kid()
+        self.b.cleanup([kid], me="api-lead", include_kept=True)
+        self.assertNotIn(board, self.h.pane_ids())
+        self.assertNotIn(agent_pane, self.h.pane_ids())
+
+    def test_the_closed_board_is_forgotten(self):
+        """A remembered pane is what makes `_open_board` a no-op, so a stale one would
+        mean a restored agent never gets a board again."""
+        kid, _board, _pane = self._finished_kid()
+        self.b.cleanup([kid], me="api-lead", include_kept=True)
+        self.assertIsNone(self._board_pane(kid))
+
+    def test_a_board_already_gone_is_tolerated(self):
+        """Closed by hand, crashed, or never opened — all ordinary, none an error."""
+        kid, board, _pane = self._finished_kid()
+        self.h.panes.discard(board)                         # the human closed it
+        real = self.h.close_pane
+        def gone(pane):
+            if pane == board:
+                raise HerdrError("pane_not_found", f"no pane {pane}")
+            real(pane)
+        self.h.close_pane = gone
+        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
+        self.assertIsNone(self._board_pane(kid))
+
+    def test_an_agent_with_no_board_closes_normally(self):
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead", board=False)
+        store.set_state(self.db, kid, "done")
+        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
+
+    def test_a_live_agents_board_is_left_alone(self):
+        """Closing one agent is not closing another's view."""
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        sib = self.b.delegate("t", role="worker", me="api-lead")
+        store.set_state(self.db, kid, "done")
+        self.b.cleanup([kid], me="api-lead", include_kept=True)
+        sibs_board = self._board_pane(sib)
+        self.assertNotIn(sibs_board, self.h.closed)
+        self.assertIn(sibs_board, self.h.pane_ids())
+
+    def test_a_board_two_agents_share_survives_the_first_close(self):
+        """Not a shape anything creates today; a pane id outliving its pane is. Closing
+        a board somebody is still reading is not undoable by the person watching it go."""
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        sib = self.b.delegate("t", role="worker", me="api-lead")
+        shared = self._board_pane(sib)
+        self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                        (f"board_pane:{kid}", shared))
+        self.db.commit()
+        store.set_state(self.db, kid, "done")
+        self.b.cleanup([kid], me="api-lead", include_kept=True)
+        self.assertNotIn(shared, self.h.closed)
+        self.assertIsNone(self._board_pane(kid))            # but no longer ours to close
+
+    def test_a_pane_that_would_not_close_keeps_its_board(self):
+        """The agent is still in that pane, so the board beside it is still its view."""
+        kid, board, _pane = self._finished_kid()
+        def refuse(pane):
+            raise HerdrError("close_failed", "no")
+        self.h.close_pane = refuse
+        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [])
+        self.assertEqual(self._board_pane(kid), board)
+
+    def test_a_skipped_agent_keeps_its_board(self):
+        """A sweep that closes nothing closes no boards either."""
+        self.b.workspace_new("api", me=HUMAN)
+        kid = self.b.delegate("t", role="worker", me="api-lead")
+        board = self._board_pane(kid)
+        self.assertEqual(self.b.cleanup(me="api-lead"), [])   # still working
+        self.assertNotIn(board, self.h.closed)
 
 
 class WorktreeIsAFactTest(WorkspaceTest):

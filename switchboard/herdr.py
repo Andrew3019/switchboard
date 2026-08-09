@@ -293,16 +293,21 @@ class Herdr:
         return self._call(*args)
 
     def split_pane(self, pane_id: str, *, direction: str = "right",
-                   ratio: float = 0.38, cwd: Optional[str] = None,
+                   ratio: float = 0.66, cwd: Optional[str] = None,
                    focus: bool = False) -> str:
         """Split a pane and return the new pane's id.
 
-        Called by `board.open_beside`, which `_top` calls on every `sb start` —
-        this is not spare machinery.
+        `ratio` is the share kept by the pane BEING SPLIT, not the share given to
+        the new one — measured, not assumed: splitting a 43-row pane at 0.25 left
+        the original with 10 rows and the new pane with 33. So a caller that wants
+        the new pane small passes a ratio above a half.
+
+        Called by `board.open_beside`, which every spawn reaches — this is not
+        spare machinery.
 
         The ~4-split ceiling that stops `create_tab` using splits for fan-out does
-        not bite here: one split, once, in a workspace that never asks for another.
-        Anything that fans out still gets a tab.
+        not bite here: one split per tab, once, and a fan-out is still tabs — each
+        child gets its own tab and splits that tab's root pane a single time.
         """
         args = ["pane", "split", pane_id, "--direction", direction,
                 "--ratio", str(ratio), "--focus" if focus else "--no-focus"]
