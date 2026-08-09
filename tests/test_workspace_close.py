@@ -20,6 +20,7 @@ put a process in a temporary directory and be sure of it.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -285,6 +286,31 @@ class OrderingTest(CloseHarness, unittest.TestCase):
             self.b.workspace_close("api", me=HUMAN)
         self.assertIsNone(self.mark("api"))
 
+    def crash_in_the_window(self, boom: BaseException):
+        """Close a workspace whose deregistration dies the way a crash dies."""
+        path = self.space()
+
+        def crash(_):
+            raise boom
+        self.b._deregister = crash
+        with self.assertRaises(type(boom)):
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn(path, self.registered())              # and nothing was deleted
+
+    def test_a_hung_git_clears_the_mark_though_it_is_no_refusal(self):
+        """The regression. Releasing on `ValueError` alone was a rule about the SHAPE of
+        the exception, and a hung `git worktree remove` does not have that shape: the
+        timeout came out of `_deregister`, the mark stayed set, and the name was left
+        needing a resume that the rule below would then never offer it."""
+        self.crash_in_the_window(subprocess.TimeoutExpired("git", 5))
+        self.assertIsNone(self.mark("api"))
+
+    def test_ctrl_c_while_the_checkout_comes_down_clears_the_mark(self):
+        """A `BaseException`, and the likeliest crash of all: a person watching a
+        destructive command take too long."""
+        self.crash_in_the_window(KeyboardInterrupt())
+        self.assertIsNone(self.mark("api"))
+
     def test_a_pane_that_will_not_close_refuses_before_anything_is_deleted(self):
         path = self.space()
         self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
@@ -432,14 +458,18 @@ class CrashedMarkTest(CloseHarness, unittest.TestCase):
         self.assertIn("confirmed gone", str(e.exception))
         self.assertIn("--resume", str(e.exception))
 
-    def test_an_owner_we_cannot_confirm_gone_reads_as_live(self):
-        """Refusing to offer the flag is always the safe direction."""
+    def test_an_owner_we_cannot_confirm_either_way_still_refuses_but_offers_the_flag(self):
+        """Not confirmed gone is not confirmed live, and only the second closes the flag
+        off. Walling the name up is not the safe direction — see the human-owned mark
+        below for where that road ends."""
         path = self.space()
         store.claim_retiring(self.db, "api", "vanished-agent")   # no row to ask about
         with self.assertRaises(ValueError) as e:
             self.b.workspace_close("api", me=HUMAN)
-        self.assertNotIn("--resume", str(e.exception))
-        self.assertIn(path, self.registered())
+        self.assertIn("vanished-agent", str(e.exception))
+        self.assertIn("cannot be confirmed either way", str(e.exception))
+        self.assertIn("--resume", str(e.exception))
+        self.assertIn(path, self.registered())                   # and refused all the same
 
     def test_resume_takes_over_a_dead_owners_mark_and_runs_the_whole_command(self):
         path = self.held(state="failed")
@@ -464,12 +494,115 @@ class CrashedMarkTest(CloseHarness, unittest.TestCase):
         self.assertIn("other-agent", str(e.exception))
         self.assertEqual(self.mark("api"), "other-agent")
 
+    def test_a_mark_a_human_left_behind_is_reachable(self):
+        """The regression, and the brick it comes from. A person has no `agents` row, so
+        `_owner_gone` can only ever answer "cannot tell" about one — and under the old
+        rule that read as a live owner, which offered no flag. Crash a teardown the human
+        was running and the mark was set forever, with `workspace_new` and `--workspace`
+        refusing the name too: no verb reached the row again and the way back was editing
+        the store by hand."""
+        path = self.space()
+        store.claim_retiring(self.db, "api", HUMAN)
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("--resume", str(e.exception))             # a door, not a wall
+        self.assertIn(path, self.registered())
+        self.b.workspace_close("api", me=HUMAN, resume=True)
+        self.assertNotIn(path, self.registered())
+
+    def test_the_refusal_always_says_who_holds_the_mark_and_since_when(self):
+        """Whether to wait, to retry or to go and look is the reader's decision, and those
+        two facts are what it turns on — so they are in every one of these messages, not
+        only the ones that end in a flag."""
+        self.held()                                             # a live owner: no flag
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("other-agent", str(e.exception))
+        self.assertIn("ago", str(e.exception))
+
     def test_two_invocations_arriving_together_resolve_rather_than_both_proceeding(self):
         """`claim_retiring`'s `rowcount` is the arbiter, and the claim IS the write: there
         is no separate read for a second invocation to race against."""
         self.space()
         self.assertTrue(store.claim_retiring(self.db, "api", "first"))
         self.assertFalse(store.claim_retiring(self.db, "api", "second"))
+
+
+class PathIdentityTest(CloseHarness, unittest.TestCase):
+    """"The same directory" is one question, and it used to have two answers."""
+
+    def alias(self, name: str = "api") -> tuple[str, str]:
+        """The recorded path and git's own, for one checkout reached two ways.
+
+        A symlinked parent, which is not a contrivance: `/tmp` and `/var` are exactly
+        this on macOS, so anything recorded under `$TMPDIR` has the shape already.
+        """
+        real = self.worktree(name)
+        (self.root / "link").symlink_to(self.root / "wt")
+        alias = str(self.root / "link" / name)
+        store.record_workspace(self.db, name, alias)
+        return alias, real
+
+    def test_a_differently_spelled_path_is_the_same_checkout_and_is_really_removed(self):
+        """The regression. Re-validation resolved both sides and said CHECKOUT_OK, so the
+        whole destructive route ran; the deregistration compared strings, matched nothing,
+        called that "already unregistered" — success — and returned having removed
+        nothing, with the branch deleted and the row retired over a checkout still on
+        disk and still registered."""
+        alias, real = self.alias()
+        self.assertEqual(store.checkout_verdict(alias, cwd=self.repo), store.CHECKOUT_OK)
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(r["worktree"], "removed")
+        self.assertFalse(Path(real).is_dir())
+        self.assertNotIn(real, self.registered())
+
+    def test_a_sibling_reached_through_the_alias_is_still_not_this_checkout(self):
+        """Resolving both sides is not loosening the comparison: `api-2` reached through
+        the same symlink is a different directory and stays registered."""
+        self.alias("api")
+        sibling = self.worktree("api-2")
+        self.b.workspace_close("api", me=HUMAN)
+        self.assertIn(sibling, self.registered())
+
+
+class OrphanTest(CloseHarness, unittest.TestCase):
+    """A checkout only git knows about — listed by `sb workspace list`, and until now
+    listed and nothing else."""
+
+    def test_a_checkout_with_no_row_anywhere_can_still_be_closed_by_name(self):
+        """The regression. The `workspaces` table is backfilled from `agents`, so a
+        checkout nobody was ever recorded in never got a row, and the close refused on the
+        strength of that — on exactly the workspaces the listing's three-source union
+        exists to surface, and exactly the ones with nothing in them to lose."""
+        path = self.worktree("orphan")
+        self.assertIsNone(store.get_workspace(self.db, "orphan"))
+        r = self.b.workspace_close("orphan", me=HUMAN)
+        self.assertEqual(r["kind"], "worktree")
+        self.assertNotIn(path, self.registered())
+        self.assertFalse(Path(path).is_dir())
+
+    def test_it_goes_through_the_same_gate_as_anything_else(self):
+        """Recording the path gets the name to the front door and no further: nothing
+        about an orphan makes it cheaper to destroy than a workspace with rows."""
+        path = self.worktree("orphan")
+        self.machine(live.Proc(4242, "vim", f"{path}/switchboard"))
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("orphan", me=HUMAN)
+        self.assertIn("vim", str(e.exception))
+        self.assertIn(path, self.registered())
+
+    def test_the_primary_checkout_is_no_more_adoptable_than_it_is_closable(self):
+        """`main` is a worktree git reports, so it is adoptable by name — and then it
+        meets the rule it was always going to meet."""
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("main", me=HUMAN)
+        self.assertIn("primary working tree", str(e.exception))
+        self.assertIn(str(self.repo), self.registered())
+
+    def test_a_name_git_does_not_know_either_still_refuses(self):
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("nothing-like-this", me=HUMAN)
+        self.assertIn("nothing here to close", str(e.exception))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,20 @@ Two rules come out of that and neither is optional:
   siblings in one directory and their names nest as strings on this machine right now:
   `.../worktrees/switchboard/fix-options-2/anything` passes a `startswith` test against
   `.../worktrees/switchboard/fix-options`.
+
+**The scope of the answer, stated because the strictness above reads as though it were
+total: unprivileged `lsof` sees only the CALLER'S OWN processes, and it exits 0 while
+omitting the rest.** Measured on this machine at one moment: `ps -Ao pid=` reported 561
+processes and this scan reported 356, all 353 of mine among them and every one of the 205
+missing owned by another user — 116 of them `root`. So "nothing is running in that
+directory" means "nothing **of mine**", and a root-owned daemon or a `sudo`-run editor
+sitting in a checkout is invisible to a gate that is about to delete it. For this tool's
+purpose that scope is usually the right one — agents run as the caller — but it is a
+narrower guarantee than "asked the machine", and the omission has no shape for the parser
+to catch: it is not a failure, it is a smaller world reported successfully. This is not
+widened with elevated privileges. A destructive command that asks for root in order to
+answer a question more completely has bought the answer at a price nobody agreed to, and
+an honest narrow guarantee is worth more than a broad one that is false.
 """
 
 from __future__ import annotations
@@ -56,7 +70,11 @@ class Proc(NamedTuple):
 
 
 def scan(timeout: float = SUBPROCESS_TIMEOUT) -> Optional[list[Proc]]:
-    """Every process on this machine and its cwd, or **None** when we could not tell.
+    """Every process of OURS on this machine and its cwd, or **None** when we could not tell.
+
+    Ours, not every process: unprivileged `lsof` omits what the caller does not own and
+    still exits 0 — see the module docstring for the measurement and for why this is left
+    narrow rather than widened.
 
     None covers all four ways of not getting an answer, and they are one answer here: the
     binary is missing, the exit is non-zero, it hung, or the output is not the shape this
@@ -116,8 +134,9 @@ def is_under(path: str, root: str) -> bool:
 def processes_in(root: str, *, exclude: Collection[int] = ()) -> Optional[list[Proc]]:
     """What is live under `root`, or **None** when the machine could not be asked.
 
-    An empty list is a real answer — nothing is in that directory — and None is not a
-    quieter version of it. A caller about to destroy something treats None as a refusal.
+    An empty list is a real answer — nothing **of ours** is in that directory, which is
+    the whole of what this can be asked (see `scan`) — and None is not a quieter version
+    of it. A caller about to destroy something treats None as a refusal.
 
     `exclude` is pids to leave out, which is how the caller's own process tree stops
     counting against a gate it is itself running: an agent told to close the workspace it

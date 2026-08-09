@@ -279,8 +279,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "checkout (git does not track them and will not miss them)")
     wc.add_argument("--resume", action="store_true",
                     help="take over a retiring mark left behind by a teardown that died, "
-                         "and run the whole command again — only ever for an owner "
-                         "confirmed gone")
+                         "and run the whole command again — never for an owner confirmed "
+                         "still going")
 
     r = cmd("restore", help="bring a closed agent back with its context")
     r.add_argument("name")

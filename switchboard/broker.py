@@ -232,6 +232,26 @@ def _names(found: Sequence[str]) -> str:
     return f"{', '.join(sorted(found))} {'is' if len(found) == 1 else 'are'}"
 
 
+def _resolved(path: str) -> Optional[Path]:
+    """One directory's identity — its resolved path — or None when it will not resolve.
+
+    The single notion of "the same directory" this command has, and it has to be single.
+    It was not: re-validation matched a recorded checkout by resolving it while the
+    deregistration matched it as a string, so a path that was equivalent but spelled
+    differently — a symlinked parent, which is what `/tmp` and `/var` are on macOS —
+    passed the gate as a good worktree, took the whole destructive route, deregistered
+    nothing, and still reported success and deleted the branch. Two notions of identity in
+    one command is one of them being wrong somewhere.
+
+    `store.checkout_verdict` answers by resolving both sides too, which is what makes the
+    two ends of that route agree about which directory is being talked about.
+    """
+    try:
+        return Path(path).resolve()
+    except OSError:                            # unreadable, or a symlink loop
+        return None
+
+
 def _same_dir(a: str, b: str) -> bool:
     """One directory, compared as resolved path components rather than as strings.
 
@@ -239,10 +259,8 @@ def _same_dir(a: str, b: str) -> bool:
     "is this the one directory I must never touch" and the answer to that question is never
     allowed to be a guess.
     """
-    try:
-        return Path(a).resolve() == Path(b).resolve()
-    except OSError:                            # unreadable, or a symlink loop
-        return True
+    ra, rb = _resolved(a), _resolved(b)
+    return ra is None or rb is None or ra == rb
 
 
 def _ancestry(pid: int, parents: dict) -> set:
@@ -1114,6 +1132,9 @@ class Broker:
         The first two are separate paths rather than the third with steps skipped, and
         that is not tidiness — see each of them for the bug the shared version had.
 
+        A name with no row but a checkout git knows about is recorded first
+        (`_adopt_orphan`) and then takes whichever of the three routes its path earns.
+
         An unresolvable path is a refusal and never a fallback: there is no `or self.repo`
         anywhere in this command, because that fallback aims a removal at the human's own
         clone whenever a path is unrecorded.
@@ -1123,6 +1144,8 @@ class Broker:
         if gap:
             raise ValueError(f"cannot close {name!r}: {gap}")
         row = store.get_workspace(self.db, name)
+        if row is None:
+            row = self._adopt_orphan(name)
         if row is None:
             raise ValueError(
                 f"no workspace called {name!r} is recorded, so there is nothing here to "
@@ -1147,6 +1170,34 @@ class Broker:
                 f"and nothing is deleted."
             )
         return self._close_checkout(name, checkout, me=me, confirm=confirm)
+
+    def _adopt_orphan(self, name: str):
+        """Record a checkout only git knows about, so it can be closed like any other.
+
+        The `workspaces` table is backfilled from `agents` alone, so a registered checkout
+        that never had an agent row in it never gets a row — and that is precisely the
+        case `sb workspace list`'s three-source union was built to surface. Listed and
+        unclosable is half a feature: the orphan and the already-gone are the cheapest
+        real wins in this whole change, and they are cheap because there is nothing in
+        them to lose.
+
+        Nothing is trusted that was not checked. Recording the path only gets the name as
+        far as the front door; the route is still chosen by re-validating that path, and
+        the gate, the inventory and the confirmation all run exactly as they would for a
+        workspace that had a row all along — including the primary-checkout refusal, which
+        is how `sb workspace close main` typed in the clone still gets nowhere.
+
+        Matched by the same rule the listing files it under: a worktree's workspace name IS
+        its branch name, and a detached one has only its directory to be known by.
+        """
+        found = next((wt for wt in self._worktrees()
+                      if (wt["branch"] or Path(wt["path"]).name) == name), None)
+        if found is None:
+            return None
+        store.record_workspace(self.db, name, found["path"])
+        store.log_event(self.db, kind="workspace_adopted", workspace=name,
+                        checkout=found["path"])
+        return store.get_workspace(self.db, name)
 
     # -- the three routes -------------------------------------------------------------
 
@@ -1181,7 +1232,7 @@ class Broker:
         self._claim(name, me)
         try:
             closed = self._stop_panes(name, me=me)
-        except ValueError:
+        except BaseException:
             store.release_retiring(self.db, name, me)
             raise
         store.retire_workspace(self.db, name)
@@ -1211,7 +1262,7 @@ class Broker:
         self._claim(name, me)
         try:
             removed = self._deregister(checkout)
-        except ValueError:
+        except BaseException:
             store.release_retiring(self.db, name, me)
             raise
         return self._finish(name, checkout, removed, kind="gone")
@@ -1233,9 +1284,15 @@ class Broker:
         irreversible has happened.
 
         The retiring mark is claimed before any of the destruction and released by any
-        refusal after it, because only a crash may leave a mark behind: a refusal that
-        left one would lock a live workspace's name out of itself over a command that did
-        nothing.
+        failure after it, because a mark left behind locks a live workspace's name out of
+        itself over a command that did nothing. `except BaseException` and not
+        `except ValueError`: a review left a permanent mark through this window three
+        ways, none of them a refusal — Ctrl-C while the panes come down, a
+        `subprocess.TimeoutExpired` out of `_deregister`, and a `RuntimeError` out of
+        `Path.resolve` on a symlink loop. "Only our own refusals release it" was a rule
+        about the shape of the exception, and the mark does not care what shape the
+        failure had. The release is still owner-conditional and still only clears; it
+        never restores an earlier value, so a loser cannot take a winner's mark off it.
         """
         primary = self._primary_checkout()
         if primary is None:
@@ -1261,7 +1318,7 @@ class Broker:
             # the directory as it is about to be destroyed rather than as it was.
             self._gate(name, checkout, me=me)
             removed = self._deregister(checkout)
-        except ValueError:
+        except BaseException:
             store.release_retiring(self.db, name, me)
             raise
         return self._finish(name, checkout, removed, kind="worktree", closed=closed)
@@ -1533,19 +1590,30 @@ class Broker:
         """What to do about a retiring mark that is already set. Refuse, or take it over.
 
         A mark is never stolen and never expires. Only a crash may leave one behind, and
-        the way back from a crash is a person: the refusal says who holds the mark, when
-        they claimed it and whether they are confirmed gone, and only a confirmed-gone
-        owner makes `--resume` available. That flag is permission to take over from a
-        corpse, not permission to overrule a live winner, and it repairs nothing — it
-        re-runs the whole command from the beginning, because a crashed invocation's own
-        findings are exactly what nobody should inherit.
+        the way back from a crash is a person: the refusal says who holds the mark and
+        when they claimed it, and it offers `--resume` unless the owner is confirmed
+        LIVE. That flag repairs nothing — it re-runs the whole command from the beginning,
+        because a crashed invocation's own findings are exactly what nobody should
+        inherit.
 
-        Without it the three rules that are each right on their own — only a crash leaves
-        a mark, `close` refuses a marked workspace, only the owner may clear one — compose
-        into a name no verb can ever reach again.
+        Not confirmed live, rather than confirmed gone, and the difference is the whole
+        bug: an owner nobody can adjudicate is the ordinary case, not the exotic one. A
+        human holds no `agents` row, so `_owner_gone` can only ever answer None for one —
+        and a human is the likeliest caller of a destructive command. Under
+        "unknown reads as live" a mark a human left behind was reachable by no flag, no
+        caller and no amount of waiting, with `workspace_new`, `start --name` and
+        `--workspace` all refusing the name as well: a review reproduced that permanent
+        brick. What must never happen is a live mark being taken AUTOMATICALLY, and
+        `--resume` is the opposite of automatic — it is a person who can see the machine
+        saying they know what they are doing. So an unadjudicable owner offers the flag
+        and a live one still refuses it.
+
+        Without a way back the three rules that are each right on their own — only a crash
+        leaves a mark, `close` refuses a marked workspace, only the owner may clear one —
+        compose into a name no verb can ever reach again.
         """
         gone = self._owner_gone(row["retiring"])
-        if resume and gone:
+        if resume and gone is not False:
             store.release_retiring(self.db, name, row["retiring"])
             store.log_event(self.db, kind="workspace_resumed", workspace=name, agent=me,
                             previous=row["retiring"])
@@ -1556,23 +1624,26 @@ class Broker:
                           resume: bool = False) -> str:
         """The refusal, which says what it found rather than only that it found something.
 
-        A live owner and a dead one are different situations for the person reading it, so
-        they read differently, and "cannot tell" reads as live: refusing to offer the flag
-        is always the safe direction.
+        Always the owner and always when they claimed it: whether to wait, to retry or to
+        go and look is the reader's decision and those are what it turns on. What differs
+        is the third fact and what follows from it — a live owner is the one case with no
+        way round it, and both a dead owner and an owner nobody can adjudicate name
+        `--resume`, worded so the reader knows which of the two they are being told.
         """
         who, when = held["retiring"], held["retiring_at"]
         since = f"{fmt_age(store.now() - when)} ago" if when else "at some point"
-        if gone:
-            return (f"{name!r} is marked as being closed by {who}, claimed {since}, and "
-                    f"{who} is confirmed gone — that teardown died partway through. "
-                    f"`sb workspace close {name} --resume` takes the mark over and runs "
-                    f"the whole command again from the start.")
-        held_by = (f"{who} is still going" if gone is False else
-                   f"{who} cannot be confirmed gone, which reads here as still going")
-        flag = (" `--resume` takes a mark over from an owner confirmed gone, and never "
-                "from a live one." if resume else "")
-        return (f"{name!r} is already being closed by {who}, claimed {since}, and "
-                f"{held_by} — one teardown at a time.{flag}")
+        if gone is False:
+            flag = (" `--resume` takes a mark over from an owner who is not confirmed "
+                    "live, and never from one who is." if resume else "")
+            return (f"{name!r} is already being closed by {who}, claimed {since}, and "
+                    f"{who} is still going — one teardown at a time.{flag}")
+        state = (f"{who} is confirmed gone — that teardown died partway through" if gone
+                 else f"whether {who} is still going cannot be confirmed either way — a "
+                      f"human holds no row to be asked about, so a mark a person left "
+                      f"behind always lands here")
+        return (f"{name!r} is marked as being closed by {who}, claimed {since}, and "
+                f"{state}. `sb workspace close {name} --resume` takes the mark over and "
+                f"runs the whole command again from the start.")
 
     def _owner_gone(self, owner: str) -> Optional[bool]:
         """Is the agent holding a retiring mark confirmed gone? **None** is "cannot tell".
@@ -1585,8 +1656,10 @@ class Broker:
 
         Herdr still gets a veto in the one direction it can be trusted in: a name it lists
         right now is running, whatever our row says. It gets no vote the other way, and a
-        herdr that cannot be asked leaves the answer unknown, which prints as a live owner
-        and offers no way to take the mark over.
+        herdr that cannot be asked leaves the answer unknown — which is a real third
+        answer here rather than a quieter "still going". Only `False`, an owner positively
+        confirmed live, closes off `--resume`; see `_take_over` for why treating unknown
+        as live bricked the name instead.
         """
         if owner == HUMAN:
             return None                        # a person has no row and no verdict here
@@ -1645,11 +1718,22 @@ class Broker:
         Already absent from the registry is success, not an error: a command that died
         halfway through must be resumable, and a directory that is already gone is a
         resumable state.
+
+        The registry is matched by `_resolved`, never by string equality, and git is then
+        handed back its OWN string for the entry rather than the recorded path. A recorded
+        path that resolves to a registered worktree without being git's spelling of it
+        used to match nothing here, which read as "already deregistered" — success — for a
+        checkout still on disk and still registered. A path that will not resolve at all
+        matches nothing rather than everything: the first entry `git worktree list` gives
+        is the primary checkout.
         """
-        if not any(wt["path"] == checkout for wt in self._worktrees()):
+        mine = _resolved(checkout)
+        found = None if mine is None else next(
+            (wt for wt in self._worktrees() if _resolved(wt["path"]) == mine), None)
+        if found is None:
             return "unregistered"
         out = subprocess.run(
-            ["git", "worktree", "remove", checkout],
+            ["git", "worktree", "remove", found["path"]],
             cwd=str(self.repo), capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
         )
         if out.returncode != 0:

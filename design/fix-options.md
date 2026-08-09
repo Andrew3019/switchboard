@@ -383,9 +383,10 @@ rather than being named in passing:
 
 - **How it enumerates.** Processes whose cwd is under the checkout path, found
   with `lsof -a -d cwd -F pcn` — this is macOS, there is no `/proc` to walk. The
-  candidate set is every process, not only ones switchboard knows about; a
-  human's editor has no `agents` row and is exactly who this half exists to
-  protect. The scan is unfiltered and whole-machine, and the caller's own tree is
+  candidate set is every process the caller owns rather than only ones
+  switchboard knows about — the human's own editor has no `agents` row and is
+  exactly who this half exists to protect, and the ownership limit on "every" is
+  the last bullet below. The scan is unfiltered and whole-machine, and the caller's own tree is
   excluded **in the parser, by pid, never by `-p`**: a `-p` list that matches
   nothing exits 1 with empty output, which is indistinguishable from a real
   failure, and this is the one gate that must not have an ambiguous shape in it.
@@ -411,6 +412,24 @@ rather than being named in passing:
   corroborate it.** A successful herdr answer never licenses skipping the cwd
   observation — see above: an empty success is what a restarted herdr gives, and
   it carries no information at all.
+- **What it can see at all: the caller's own processes, and nothing else.**
+  Unprivileged `lsof` omits every process belonging to another user and exits 0
+  while doing it, so this check's real guarantee is "nothing **of mine** is
+  running in that directory", not "nothing is". Measured on this machine at one
+  moment: `ps -Ao pid=` reported 561 processes and the scan reported 356 — all 353
+  of mine present, and every one of the 205 missing owned by another user, 116 of
+  them `root`. A root-owned indexer or a `sudo`-run editor sitting in a checkout
+  is therefore invisible to the gate that is about to delete it, and this is the
+  one hole in the command through which something that should have been kept can
+  be destroyed. For this tool's purpose the scope is usually right — agents run as
+  the caller — but the strictness specified above is about the *shape* of the
+  answer and cannot see an omission, which arrives as a smaller world reported
+  successfully. Two things follow and neither is a fix. The check is **not**
+  widened by asking for elevated privileges: a destructive command that escalates
+  in order to answer a question more completely has bought the answer at a price
+  nobody agreed to. And the refusal is not weakened either — an honest narrow
+  guarantee is worth more than a broad one that is false, so what changes is that
+  the code and this document now say which one it is.
 
 This is settled on this machine rather than assumed. The invocation was run for
 real: three consecutive whole-machine scans over 328 processes cost 0.23s, 0.07s
@@ -572,15 +591,34 @@ command is that irreversible things wait for a person. Instead:
   question the trust layer exists to make trustworthy, and this is the first place
   the destructive command spends it. A live owner and a dead one produce different
   messages, because they are different situations for the person reading them.
-- **When the owner is confirmed gone, the message names `sb workspace close W
-  --resume`**, and that flag — and only that flag — proceeds: it takes the mark
+- **When the owner is not confirmed *live*, the message names `sb workspace close
+  W --resume`**, and that flag — and only that flag — proceeds: it takes the mark
   over, recording the new owner, and runs the command from the beginning. It is
   not a repair verb and it does not skip anything; the gate, the cleanliness
   check and the inventory all run again from scratch, because a crashed
   invocation's own findings are exactly what nobody should inherit.
-- `--resume` against a mark whose owner is *not* confirmed gone refuses like any
-  other close. The flag is permission to take over from a corpse, not permission
-  to overrule a live winner. Never automatic stealing of a live mark.
+- `--resume` against a mark whose owner *is* confirmed live refuses like any
+  other close. The flag is permission to take over from an owner nobody can find,
+  not permission to overrule a live winner. Never automatic stealing of a live
+  mark — and `--resume` is the opposite of automatic, since it is a person who can
+  go and look saying they know what they are doing.
+
+**Not confirmed gone, but not confirmed live — and this rule is an amendment to a
+rule this document argued for and got wrong.** What it said, two paragraphs on,
+was that an unavailable verdict "prints as a live owner and offers no `--resume`",
+on the ground that refusing to offer the flag is always the safe direction. An
+adversarial review of the built command reproduced what that costs: `_owner_gone`
+returns "cannot tell" for a HUMAN owner by construction, because a person has no
+`agents` row to be adjudicated — and the human is the likeliest caller of a
+destructive command. Crash a teardown a human is running and the mark is set, no
+verdict about its owner is possible ever, `--resume` is never offered, and
+`workspace_new`, `start --name` and `--workspace` all refuse the name as well.
+That is the permanent brick this whole section exists to prevent, arrived at down
+a different road: the name is unreachable by any verb, and recovery is hand-editing
+the store. So the rule now turns on **confirmed live** rather than confirmed gone.
+The thing that must never happen is a live mark taken *automatically*; a flag a
+person types is not that, and the safe direction for a verdict nobody can obtain
+is to leave a door a human has to walk through, not to wall the name up.
 - `workspace_new` and `--workspace` are unchanged: they refuse a retiring
   workspace whether or not its owner is alive. The way out of a stuck mark is the
   destructive command that set it, told explicitly to resume — not a second verb
@@ -591,8 +629,10 @@ it was claimed** as well as who claimed it, because the refusal message has to s
 how long this has been sitting there — and for no other purpose: nothing expires
 on that timestamp, since expiry is the automatic reclaim this decision refuses.
 And "confirmed gone" is asked of the trust layer, not re-derived here; if Wave 2's
-verdict is not available the answer is "cannot tell", which prints as a live owner
-and offers no `--resume`. Refusing to offer the flag is always the safe direction.
+verdict is not available the answer is "cannot tell", which is a third answer
+rather than a quieter "still going" — it reads its own way in the refusal and it
+offers `--resume`, for the reason argued above. Only a positively confirmed live
+owner closes the flag off.
 
 A directory that is already gone stays a resumable state, as before — the
 already-gone verdict above is how a resumed command finds it. What `--resume`
@@ -710,10 +750,11 @@ three parts:
 - **`sb workspace close` itself refuses a workspace already marked retiring.**
   The design specified that refusal for `workspace_new` and `--workspace` and
   never for the command that sets the mark, which is the one place two invocations
-  actually collide. The refusal is not silent: it names the owner and says whether
-  that owner is confirmed gone, and only a confirmed-gone owner makes `--resume`
-  available — which is what keeps a crashed invocation from bricking the name
-  without ever letting a losing one take a live mark away.
+  actually collide. The refusal is not silent: it names the owner, says when the
+  mark was claimed and says what is known about whether that owner is still going,
+  and every owner but a confirmed-live one makes `--resume` available — which is
+  what keeps a crashed invocation from bricking the name without ever letting a
+  losing one take a live mark away.
 
 **This is not a reversal of round 1's refusal of a lock primitive.** No lock file
 is added, no lock verb, no exclusive resource for the rest of the codebase to
@@ -2579,7 +2620,12 @@ one. Everything here is a known hole, not a discovered one.
   and is a smaller hole than the one it replaces: a genuine `lsof` hang, truly
   truncated output, and TCC/Full-Disk-Access behaviour on a macOS configured
   differently from this one. The parser refuses on all three by shape, so the
-  gap is in the evidence, not in the rule.
+  gap is in the evidence, not in the rule. What running it also established is a
+  hole in the *rule*, and it stays open by choice rather than by omission: the
+  scan sees only the caller's own processes, so a root-owned process in a checkout
+  is invisible to the gate. It is stated in section A and in `live.py` instead of
+  being closed, because the only ways to close it are elevated privileges or a
+  weaker refusal and both cost more than the risk.
 - **~~herdr's behaviour across a restart is inferred, not read.~~ Closed, and
   the answer is worse than the question assumed.** The source was read and the
   restart was run against a throwaway instance. `agent list` has no error path at
@@ -2623,11 +2669,13 @@ one. Everything here is a known hole, not a discovered one.
   what changed this time is the argument under the key, not the key.
 - **A crashed teardown needs a person, and that is a deliberate cost rather than
   a gap.** The `--resume` rule above is the only path back for a workspace whose
-  mark was left by a dead owner, and it is a manual one by choice: nothing steals
-  a live mark and nothing reclaims a stale one on a timer. What has not been
-  exercised is the confirmed-gone answer that decides which message the refusal
-  prints — that answer is Wave 2's to make trustworthy, and this is the first
-  place anything destructive depends on it being right.
+  mark was left behind, and it is a manual one by choice: nothing steals a live
+  mark and nothing reclaims a stale one on a timer. What has not been exercised is
+  the confirmed-live answer that decides whether the refusal offers the flag at
+  all — that answer is Wave 2's to make trustworthy, and this is the first place
+  anything destructive depends on it being right. Its *unavailable* case has now
+  been exercised, the hard way: a review reproduced a permanently unreachable name
+  under the earlier rule that read unknown as live.
 
 Carried forward from earlier rounds and still true: there is no test strategy;
 the Group B/C/D picks have never been examined on their own merits by any lens;
