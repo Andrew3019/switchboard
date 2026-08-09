@@ -65,12 +65,15 @@ spawns worktrees and stuff — it is above that. — confirmed 2026-08-09
 **Top orchestrators never cross into another top orchestrator's tree.** Multiple top
 orchestrators, and anything they spawn, are completely separate. — confirmed 2026-08-09
 
-**Anything spawned by one orchestrator is completely separate from things spawned by
-another orchestrator.** Within one orchestrator, obviously, they are the same scope. —
-confirmed 2026-08-09
+**The invisibility rule is: siblings are not invisible to each other; any other top
+orchestrator's entire tree is invisible.** Separating two subtrees inside one top
+orchestrator's tree is not something we have to do. — confirmed 2026-08-09
 
 **Across that boundary agents cannot `sb tell` or anything else — they are invisible to
 other groups.** The board is shared. — confirmed 2026-08-09
+
+**Only agents have the scope constraints.** From the shared board Andrew crosses freely
+into any tree. — confirmed 2026-08-09
 
 **Agents the top orchestrator spawns directly can only talk to their parent, which is
 the top orchestrator, and it owns them — no other agent does.** They may or may not
