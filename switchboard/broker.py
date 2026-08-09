@@ -1432,7 +1432,7 @@ class Broker:
         table, and that shell's cwd is under the checkout — it is nobody's descendant of
         ours, so no exclusion covers it, and the re-confirmation runs AFTER the panes are
         down, which makes a refusal on it the one refusal that costs the person something.
-        Measured rather than assumed (`notes/review-destructive-workspace-close.md`, F4):
+        Measured rather than assumed (`design/close-review.md`, F4):
         an idle shell and a shell with an ordinary child are already gone when the scan
         lands, so the ordinary success path never hit this; a process that catches the
         hangup and takes half a second to wind down is still there at the first look every

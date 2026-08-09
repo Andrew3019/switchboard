@@ -389,7 +389,7 @@ class OrderingTest(CloseHarness, unittest.TestCase):
 class SettleTest(CloseHarness, unittest.TestCase):
     """The re-confirmation waits for the panes it just closed, and waits for nothing else.
 
-    Measured before it was written (`notes/review-destructive-workspace-close.md`, F4):
+    Measured before it was written (`design/close-review.md`, F4):
     `close_pane` returning is not the pane's shell having left the process table, that
     shell's cwd is under the checkout, and it is nobody's descendant of ours so no
     exclusion covers it. An idle shell and a shell with an ordinary child are gone before

@@ -3,7 +3,7 @@
 Every other liveness question in switchboard is answered by the store or by herdr, and
 both are wrong in the same direction here. A herdr that has restarted answers
 *successfully* with a smaller world — `agent list` has no failure branch at all, verified
-against a throwaway server (`notes/probe-lsof-herdr-findings.md`) — so an empty answer is
+against a throwaway server (`design/probe-findings.md`) — so an empty answer is
 not evidence of an empty workspace, it is no evidence either way. And a human with an
 editor open has no `agents` row to be finished. This module is the only signal that can
 be right about either, which is why it is a module rather than a helper buried in the

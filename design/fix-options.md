@@ -2751,7 +2751,7 @@ one. Everything here is a known hole, not a discovered one.
   claimed rather than filed is the run against a *copy of the real database*:
   `BUGS.md` records its result (117 agents, 284 messages, 13324 events preserved
   where the old code took them to zero) and no artifact for it was checked into
-  `notes/` the way the lsof probe and the destructive review were. Run, not filed.
+  `design/` the way the lsof probe and the destructive review were. Run, not filed.
 - **The backfill's only input is `agents.cwd`, and it is not durable.** It runs
   exactly once, its source is a column this document spends Wave 1 fixing the
   writers of, and anything that empties or resets the store between the migration

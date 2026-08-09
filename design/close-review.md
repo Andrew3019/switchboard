@@ -40,7 +40,9 @@ is the most likely caller of a destructive command. `_owner_gone` (broker.py:155
 gone, which reads here as still going", and `--resume` is offered *only* for `gone is True`.
 
 Reproduced with `_deregister` raising `TimeoutExpired`, against the repo's own test harness
-(script: `notes/review-destructive-repro2.py`):
+(by a throwaway script, since replaced by the regression test
+`OrderingTest.test_a_hung_git_clears_the_mark_though_it_is_no_refusal` in
+`tests/test_workspace_close.py`):
 
 ```
 mark after the crash: human
@@ -76,8 +78,9 @@ are each right on their own … compose into a name no verb can ever reach again
 So a recorded path that resolves to the worktree but is not git's own string for it passes
 the verdict as `CHECKOUT_OK`, takes the full destructive route, and then quietly deletes
 nothing. `_finish` still deletes the branch and still stamps the workspace retired with its
-path cleared. Repro (`notes/review-destructive-repro1.py`, recorded path via a symlinked parent — the shape
-`/tmp → /private/tmp` and `/var → /private/var` give you on macOS):
+path cleared. Reproduced with a recorded path via a symlinked parent — the shape
+`/tmp → /private/tmp` and `/var → /private/var` give you on macOS; the throwaway script is
+now `PathIdentityTest` in `tests/test_workspace_close.py`:
 
 ```
 RESULT: {'kind': 'worktree', 'worktree': 'unregistered', 'branch_deleted': False, ...}
@@ -86,7 +89,7 @@ still registered: ['.../repo', '.../wt/api']
 row: {'checkout': None, 'retired_at': 1786280467, ...}
 ```
 
-And the state it lands in is a dead end (`notes/review-destructive-repro3.py`): the next close returns
+And the state it lands in is a dead end: the next close returns
 `{'already': True, 'kind': 'retired', 'worktree': 'gone'}` while the directory is still
 there. `sb workspace list` also renders it `retired` with no checkout, so the listing stops
 showing the thing that survived. There is an escape — `sb workspace new <name>` re-attaches
