@@ -54,9 +54,11 @@ summarize, and `sb block`. (More to come as part of a general process CUJ.) — 
 
 ### General
 
-**Everything an agent needs arrives at spawn, for now.** Anything an agent might need,
-put it at spawn. We can always clean up and prune later — we want to get things working
-right now first. — confirmed 2026-08-09
+**Everything an agent might need to know about arrives at spawn** — that the thing
+exists, and when to use it. The agent can then go in and poke it. Agents cannot be
+trusted to take the initiative and work out what is available. Put anything an agent
+might need at spawn for now; we can clean up and prune later, but we want to get things
+working first. — confirmed 2026-08-09
 
 ### Orchestrators
 
