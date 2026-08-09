@@ -81,6 +81,25 @@ the message goes in directly without waiting. — confirmed 2026-08-09
 **Every sb message is prefixed so it is clearly an sb message**, and the prefix can
 carry more — the sender agent's name and the like. — confirmed 2026-08-09
 
+**switchboard is personal, for now.** — confirmed 2026-08-09
+
+**The role list is lightly audited and fine as it is** — as long as it is known that
+there are roles, and what roles there are. — confirmed 2026-08-09
+
+**Which model an agent gets is set in config, and does not really matter.** — confirmed
+2026-08-09
+
+**We should detect failures, and can start with just telling the parent that it has
+failed.** — confirmed 2026-08-09
+
+**How many spaces and agents are alive at once is fine as it is right now.** — confirmed
+2026-08-09
+
+**Agents should avoid blocking unless it is really needed** — a genuine, big,
+behaviour-changing design question; being blocked on running some command; being
+explicitly told to block; or going back and forth with the agent itself. — confirmed
+2026-08-09
+
 ### Orchestrators
 
 **The top orchestrator is everything: its scope is the whole of its own tree, and its
@@ -120,8 +139,7 @@ the top orchestrator, and it owns them — no other agent does.** — confirmed 
 ### Interface
 
 **Every single view I see that is made by sb — `sb start`, orchestrators, agents, etc.
-— needs to be a split pane with `sb board`.** There is no `--no-board`. — confirmed
-2026-08-09
+— needs to be a split pane with `sb board`.** — confirmed 2026-08-09
 
 **`sb board` stays as it is right now.** It shows the full tree with its nest structure;
 an archived agent shows collapsed, which it already does. Clicking an agent's name in
@@ -132,8 +150,7 @@ auditing it comes later. — confirmed 2026-08-09
 **The click is not working sometimes.** Andrew believes this is because of the side
 panel. — confirmed 2026-08-09
 
-**`sb start` focuses the pane and nothing else ever does.** Focus is not a flag; nothing
-can ask for it. — confirmed 2026-08-09
+**`sb start` focuses the pane and nothing else ever does.** — confirmed 2026-08-09
 
 **When something needs me, the board shows it, and `sb block`.** (To be explained
 later.) — confirmed 2026-08-09
@@ -144,10 +161,9 @@ later.) — confirmed 2026-08-09
 it.** The top can spawn a space with either an orchestrator or a single worker. —
 confirmed 2026-08-09
 
-**The `--keep` / `--ephemeral` flags are removed.** The orchestrator handles cleanup
-itself, and it should do this aggressively — probably literally every agent that is
-done. `--include-kept` and `--leave-children` go with them: cleaning up an orchestrator
-always cleans its children. — confirmed 2026-08-09
+**The orchestrator handles cleanup itself, and it should do this aggressively** —
+probably literally every agent that is done. Cleaning up an orchestrator always cleans
+its children. — confirmed 2026-08-09
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 orchestrator, which then decides whether to close it. — confirmed 2026-08-09
@@ -157,13 +173,11 @@ worktree if everything else is closed too.** — confirmed 2026-08-09
 
 **`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
 
-**`sb ask` is removed — there is `tell` only, and nothing an agent does blocks.** Its
-one useful part becomes `tell --needs-reply`, which inserts a static prompt saying you
-must reply to that agent at some point, since it is waiting for a reply. — confirmed
-2026-08-09
+**There is `tell` only, and nothing an agent does blocks.** `tell --needs-reply`
+inserts a static prompt saying you must reply to that agent at some point, since it is
+waiting for a reply. — confirmed 2026-08-09
 
-**`sb tell` has three delivery modes, and the `sb interrupt` verb is deleted — that is
-now one of them.** — confirmed 2026-08-09
+**`sb tell` has three delivery modes.** — confirmed 2026-08-09
 
 - **next turn** (the default). The doorbell is sent instantly; the agent's own system
   queues it and delivers it at its next turn boundary — the same as sending a message to
@@ -176,7 +190,7 @@ now one of them.** — confirmed 2026-08-09
 
 **`sb tell` is for agents only, both ways round.** Andrew does not use it — he types
 directly into the session — and it cannot address a human. Anything needing a human is
-`sb block`. There is no human inbox. — confirmed 2026-08-09
+`sb block`. — confirmed 2026-08-09
 
 **An agent blocking writes the full message in the chat first — "need human input: ..."
 at full length — and then calls `sb block`.** Andrew will not see the `why`; it is just
@@ -194,8 +208,6 @@ be brought up again.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
-**`sb wait` has no reason to exist.** — confirmed 2026-08-09
-
 **`sb log` is not for Andrew either, but it stays — it could be useful.** — confirmed
 2026-08-09
 
@@ -212,8 +224,26 @@ all sessions. — confirmed 2026-08-09
 
 ## Explicitly rejected
 
-*Empty until Andrew confirms entries. Things ruled out belong here, so they stay ruled
-out.*
+*Ruled out, so they stay ruled out. The decision each one came from is in Product
+decisions; this is the list of what no longer exists.*
+
+**The human inbox — 100% removed.** It is confusing, and Andrew cannot see the messages.
+— confirmed 2026-08-09
+
+**`sb ask`.** Nothing an agent does blocks. — confirmed 2026-08-09
+
+**`sb wait`.** It has no reason to exist. — confirmed 2026-08-09
+
+**`sb interrupt` as a verb.** Interrupting is a delivery mode of `tell`. — confirmed
+2026-08-09
+
+**`--keep`, `--ephemeral`, `--include-kept`, `--leave-children`.** Cleanup is the
+orchestrator's, and it always takes the children. — confirmed 2026-08-09
+
+**`--no-board`.** Every sb-made view is split with the board. — confirmed 2026-08-09
+
+**Focus as a flag.** Only `sb start` focuses, and nothing can ask for it. — confirmed
+2026-08-09
 
 ---
 
