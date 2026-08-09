@@ -113,6 +113,9 @@ itself, and it should do this aggressively — probably literally every agent th
 done. `--include-kept` and `--leave-children` go with them: cleaning up an orchestrator
 always cleans its children. — confirmed 2026-08-09
 
+**`sb done` keeps the agent open.** It is just a status update and a message for the
+orchestrator, which then decides whether to close it. — confirmed 2026-08-09
+
 **Cleanup closes the agents, closes the tab, and closes the entire space and deletes the
 worktree if everything else is closed too.** — confirmed 2026-08-09
 
