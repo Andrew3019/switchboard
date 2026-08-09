@@ -110,7 +110,16 @@ confirmed 2026-08-09
 
 **The `--keep` / `--ephemeral` flags are removed.** The orchestrator handles cleanup
 itself, and it should do this aggressively — probably literally every agent that is
-done. — confirmed 2026-08-09
+done. `--include-kept` and `--leave-children` go with them: cleaning up an orchestrator
+always cleans its children. — confirmed 2026-08-09
+
+**Cleanup closes the agents, closes the tab, and closes the entire space and deletes the
+worktree if everything else is closed too.** — confirmed 2026-08-09
+
+**`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
+
+**`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
+more tail — like 100 lines.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
