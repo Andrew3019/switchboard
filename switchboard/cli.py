@@ -256,6 +256,32 @@ def build_parser() -> argparse.ArgumentParser:
     wn.add_argument("--no-board", dest="board", action="store_false",
                     help="do not open the clickable board beside the lead")
 
+    wsub.add_parser(
+        "list", parents=[common],
+        help="every workspace: where it is, what is live in it, what is left behind",
+        description="The cross-reference that otherwise has to be done by hand. Built "
+                    "from the union of `git worktree list`, the workspaces table and the "
+                    "agent rows, because each one knows something the other two cannot — "
+                    "an orphan checkout with no rows, a retired workspace with no "
+                    "checkout, a workspace that escaped the table.")
+    wc = wsub.add_parser(
+        "close", parents=[common],
+        help="retire a workspace, and remove its checkout if it still has one",
+        description="Checks what is still in the checkout — our own rows AND every "
+                    "process actually sitting in the directory — closes the workspace's "
+                    "panes, checks again, then deregisters the one named worktree (never "
+                    "a repo-global prune) and deletes its branch with the safe delete "
+                    "that refuses an unmerged one. A workspace with no checkout of its "
+                    "own is simply retired: there is nothing there to lose.")
+    wc.add_argument("name")
+    wc.add_argument("--yes", dest="confirm", action="store_true",
+                    help="delete the ignored files the refusal listed along with the "
+                         "checkout (git does not track them and will not miss them)")
+    wc.add_argument("--resume", action="store_true",
+                    help="take over a retiring mark left behind by a teardown that died, "
+                         "and run the whole command again — never for an owner confirmed "
+                         "still going")
+
     r = cmd("restore", help="bring a closed agent back with its context")
     r.add_argument("name")
 
@@ -358,14 +384,17 @@ def _validate(args) -> None:
         args.why = validate.line(args.why, "reason")
 
     elif cmd == "workspace":
-        if args.name is not None:
+        # `list` takes no arguments at all and `close` takes only a name, so each one is
+        # checked for what it actually carries rather than for `new`'s whole set.
+        if getattr(args, "name", None) is not None:
             args.name = validate.ref_name(args.name)
-        args.base = validate.ref_name(args.base, "--base")
-        args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
-        if args.agent is not None:
-            args.agent = validate.agent_name(args.agent, "--agent")
-        if args.task is not None:
-            args.task = validate.line(args.task, "--task")
+        if args.wcmd == "new":
+            args.base = validate.ref_name(args.base, "--base")
+            args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
+            if args.agent is not None:
+                args.agent = validate.agent_name(args.agent, "--agent")
+            if args.task is not None:
+                args.task = validate.line(args.task, "--task")
 
     elif cmd == "restore":
         args.name = validate.agent_name(args.name)
@@ -841,6 +870,19 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         _emit(args, f"{verb}: {', '.join(names) or '(nothing)'}", {"closed": names})
         return 0
 
+    if cmd == "workspace" and args.wcmd == "list":
+        d = b.workspace_list()
+        _emit(args, _workspace_listing(d), d)
+        return 0
+
+    if cmd == "workspace" and args.wcmd == "close":
+        r = b.workspace_close(args.name, me=me, resume=args.resume, confirm=args.confirm)
+        if r["already"]:
+            _emit(args, f"{r['workspace']} was retired already — nothing left to do", r)
+            return 0
+        _emit(args, _workspace_closed(r), r)
+        return 0
+
     if cmd == "workspace":
         r = b.workspace_new(args.name, task=args.task, role=args.role, agent=args.agent,
                             base=args.base, focus=args.focus, board=args.board, me=me)
@@ -880,6 +922,73 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     return 2
+
+
+def _workspace_closed(r: dict) -> str:
+    """What `sb workspace close` actually did, named rather than implied.
+
+    Which of the three routes the workspace took is the first thing to say, because "bare"
+    doing nothing to a directory and "worktree" deleting one are the same word otherwise.
+    A branch left behind is said out loud with the reason: it stays forever, and a person
+    who does not know that is a person who thinks the cleanup finished. Two reasons it can
+    be left, and they are not the same news — git refusing an unmerged branch is one, and
+    nothing being able to NAME the branch is the other, which leaves a person looking for
+    a branch this command never identified.
+    """
+    lines = []
+    if r["closed"]:
+        lines.append(f"closed {len(r['closed'])} pane(s): {', '.join(r['closed'])}")
+    if r["kind"] == "bare":
+        lines.append(f"retired {r['workspace']} — no checkout of its own, so nothing was "
+                     f"deleted")
+    else:
+        lines.append(f"retired {r['workspace']}: worktree {r['worktree']}")
+        if not r["branch"]:
+            lines.append(f"  no branch deleted — nothing recorded one for "
+                         f"{r['workspace']} and git named none for its checkout, and a "
+                         f"branch is not guessed at from a workspace name")
+        elif not r["branch_deleted"]:
+            lines.append(f"  branch {r['branch']} kept — git will not delete an unmerged "
+                         f"branch, and it stays until somebody decides otherwise")
+    return "\n".join(lines)
+
+
+def _workspace_listing(d: dict) -> str:
+    """`sb workspace list` as text: one line per workspace, and the path under it.
+
+    The columns are the questions somebody tidying up actually has: is the checkout still
+    there, is anything running in it, what is in it that git does not track, and what will
+    be left behind if it goes. `unknown` in the live column is not `clear` — a scan that
+    could not be made is not the answer "nobody is in there", and printing them the same
+    way is how a person comes to believe the wrong one.
+    """
+    lines = []
+    if d["gap"]:
+        lines += ["  the workspace records are incomplete, so this listing is not the "
+                  "whole story:", f"  {d['gap']}", ""]
+    lines.append(f"  {'workspace':<20}{'checkout':<10}{'rows':<12}{'live':<10}"
+                 f"{'ignored':<9}left behind")
+    for w in d["workspaces"]:
+        rows = f"{w['rows']['total']}"
+        if w["rows"]["unfinished"]:
+            rows += f" ({w['rows']['unfinished']} busy)"
+        live = {"clear": "-", "unknown": "UNKNOWN", "skipped": ""}.get(
+            w["live_verdict"], f"{len(w['live'])} here")
+        ign = "" if w["ignored"] is None else (
+            "?" if w["ignored"]["unknown"] is None else str(w["ignored"]["unknown"]))
+        left = []
+        if w["branch"]:
+            left.append("branch UNMERGED" if w["unmerged"] else "branch")
+        if w["prunable"]:
+            left.append("worktree registered but gone")
+        if w["retiring"]:
+            left.append(f"being closed by {w['retiring']}")
+        left.append("+".join(w["sources"]))
+        lines.append(f"  {w['name']:<20}{w['verdict']:<10}{rows:<12}{live:<10}"
+                     f"{ign:<9}{', '.join(left)}")
+        if w["checkout"]:
+            lines.append(f"    {w['checkout']}")
+    return "\n".join(lines)
 
 
 def _plugin_list(args, b: Broker) -> int:

@@ -15,6 +15,13 @@ whole point of this file. We deliberately do NOT repair it: marking it done here
 fabricate a summary its parent never received, and the parent is still waiting on that
 message (see broker.done). Surfacing beats guessing (C9).
 
+One exception, and it is about what the label MEANS rather than what to do about it: an
+agent that has never been given anything beyond its spawn placeholder — a workspace lead,
+or a top-level orchestrator from a bare `sb start` — is idle because nobody has asked it
+for anything. STALLED there is false, and a warning that is routinely false is a warning
+nobody reads. So the flag is not computed for those rows at all until the first thing
+arrives for them (`agents.awaiting_task`); nothing about what gets swept changes.
+
 Two other joins fall out of the same table:
 
     store: working        herdr: not listed  →  GONE     (pane closed under it)
@@ -50,7 +57,9 @@ and counting an undelivered message never delivers it. With one exception, and i
 knowing about — GONE is written back (`_record_gone`), because this is the only place that
 ever learns it. That write ends an agent's turn, so it belongs only to a process that lives
 for one command: a caller that outlives the code it started with passes `reap=False` and
-gets the same flags with none of the writes.
+gets the same flags with none of the writes. It also takes more than one reading: an
+absence is remembered (`agents.absent_since`) and has to last (`_confirmed_gone`), because
+one short `agent list` is a hiccup and used to be enough to end a live agent.
 
 Three commands live here because all three are the same join, at three widths:
 
@@ -134,6 +143,39 @@ _SPAWN_WORST_CASE = (
 # whereas erring short kills real agents during their own spawn.
 SPAWN_SLACK = 5
 SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
+
+# The one relationship between this window and `ask`'s. `ask()` writes a target off once it
+# has stayed unlisted for `timeouts.gone_grace` (broker.GONE_GRACE), and a row that is
+# merely still spawning is not listed by herdr for the whole of SPAWN_GRACE — so an ask
+# grace shorter than this window abandons a target that has done nothing but start slowly.
+# The two stay separate constants, tuned separately, because they answer different
+# questions; this is the only thing keeping them from crossing. It held nowhere when it was
+# written — 60 s of ask grace against a 287 s spawn — which is the bug it exists to make
+# impossible. Read through `config` rather than imported: broker imports status, not the
+# other way round.
+assert config.setting("timeouts.gone_grace") >= SPAWN_GRACE, (
+    f"timeouts.gone_grace must be at least SPAWN_GRACE ({SPAWN_GRACE:.0f}s), or `sb ask` "
+    f"gives up on agents that are still spawning"
+)
+
+# How long a row has to stay CONTINUOUSLY absent from herdr before that absence is written
+# down as a death (see `_record_gone`).
+#
+# A different question from SPAWN_GRACE, and deliberately a different constant: that one
+# asks how long a session-less row still looks like a spawn in progress, this one asks how
+# many readings an absence has to survive before we believe it. One `agent list` that comes
+# back short — a herdr hiccup, a restart mid-answer, a machine under load — used to be
+# enough to end a live agent's turn, and the store's own history has three agents marked
+# failed during one night's startups because of it.
+#
+# Wall-clock rather than a count of readings: `collect` has no loop of its own, so "three
+# polls" means "three separate `sb` invocations", which could be three seconds or three
+# hours apart and therefore means nothing.
+#
+# Erring long is the cheap direction here too — a genuinely dead agent reads `working` for
+# one window longer, which the next reaping command fixes, whereas erring short reproduces
+# the bug this exists for.
+GONE_CONFIRM_GRACE = config.setting("timeouts.gone_confirm_grace")
 
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
@@ -365,6 +407,12 @@ def collect(
     summaries = _last_summaries(db)
 
     ordered = _tree(rows)
+    # Whether this store can remember an absence at all. A store an older `sb` last stamped
+    # has no `absent_since`, and a reader cannot add it (see `store.connect`); the debounce
+    # then degrades to what this file did before it existed, which is documented at
+    # `_record_gone`.
+    tracks_absence = bool(rows) and "absent_since" in rows[0].keys()
+    absent_since: dict[str, Optional[int]] = {}
     agents = []
     for row, depth in ordered:
         name = row["name"]
@@ -387,6 +435,23 @@ def collect(
         # an agent herdr had. Should `agent start` ever start returning a session id, this
         # becomes a live hole and the condition has to go.
         spawning = row["session_id"] is None and (now - row["created_at"]) < SPAWN_GRACE
+        # An agent nobody has asked for anything yet is idle for the only reason it could
+        # be, and calling that STALLED says something false about it — a workspace lead or
+        # a top-level orchestrator waiting for its first instruction has finished exactly
+        # the work it was given. It is the label that changes here and nothing else: the
+        # row is still `working`, still swept by the same rules, still shown. See
+        # `agents.awaiting_task`, which `broker` sets at spawn and the first message clears.
+        #
+        # Read defensively because the readers that reach this first — the board, the
+        # collector — hold a READ-ONLY connection and cannot migrate the store (see
+        # `store.connect`). Missing the column reads as 0, which is the label the row
+        # already had; the alternative is every tick raising until a writer runs.
+        awaiting = "awaiting_task" in row.keys() and bool(row["awaiting_task"])
+        # Read defensively for the same reason, and remembered per row rather than
+        # re-queried: the write that uses it is in the reap path (`_record_gone`), which is
+        # the only place that both can write and is running current code.
+        if tracks_absence:
+            absent_since[name] = row["absent_since"]
         last = max(row["created_at"], activity.get(name, 0))
         agents.append(AgentStatus(
             name=name,
@@ -398,7 +463,7 @@ def collect(
             alive=alive,
             # The join this file exists for. Both halves must be known: an unreachable
             # herdr proves nothing, and neither does herdr's `unknown`.
-            stalled=bool(running and alive and hstate in IDLE_LIKE),
+            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting),
             gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),
@@ -416,13 +481,64 @@ def collect(
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.
+    #
+    # Both writes live inside this one gate, and that is the point rather than tidiness:
+    # the process that remembers an absence and the process that acts on it have to be the
+    # same one, or the debounce has a writer with no reader. A `reap=False` caller — the
+    # board, the collector — holds a read-only connection and cannot write either half.
     if consulted and reap:
-        _record_gone(db, [a.name for a in agents if a.gone])
+        absent = [a.name for a in agents if a.gone]
+        if tracks_absence:
+            absent = _confirmed_gone(db, absent, absent_since, now)
+        _record_gone(db, absent)
 
     kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine)
     hidden = len(agents) - len(kept)
 
     return Snapshot(now=now, agents=kept, herdr_error=herdr_error, hidden=hidden)
+
+
+def _confirmed_gone(db: sqlite3.Connection, absent: list[str],
+                    since: dict[str, Optional[int]], now: int) -> list[str]:
+    """Of the rows herdr did not list, the ones that have been absent long enough to mean it.
+
+    The debounce, and the whole of it. An absence is remembered in the store (`absent_since`)
+    rather than in this process, because the process is gone a moment later: two readings a
+    minute apart are two `sb` commands, and a column is the only thing they share.
+
+    Three moves, and the third is the one worth being careful about:
+
+    - absent, nothing remembered → remember it, write nothing. This is the reading that used
+      to end an agent's turn on its own.
+    - absent, remembered, and continuously so past GONE_CONFIRM_GRACE → hand it back to be
+      recorded.
+    - present again → FORGET the earlier absence. Continuously is the word that matters: an
+      agent seen once in between has not been dying for a minute, it has been up and down,
+      and accumulating those gaps would confirm a death that never happened.
+
+    A confirmed row is cleared too. Its verdict is about to be written and the row is
+    finished after that, so a stamp left behind would only say an absence is still being
+    counted for an agent nothing will look at again.
+
+    Every stamp is written and committed here rather than left for `_record_gone`, so a
+    command that dies between the two still leaves the absence remembered. Callers MUST be
+    in the reap path — this writes.
+    """
+    absent_set = set(absent)
+    confirmed = [n for n in absent
+                 if since.get(n) is not None and now - since[n] >= GONE_CONFIRM_GRACE]
+    fresh = [n for n in absent if since.get(n) is None]
+    back = [n for n, first in since.items()
+            if first is not None and n not in absent_set] + confirmed
+    if fresh:
+        db.executemany("UPDATE agents SET absent_since=? WHERE name=?",
+                       [(now, n) for n in fresh])
+    if back:
+        db.executemany("UPDATE agents SET absent_since=NULL WHERE name=?",
+                       [(n,) for n in back])
+    if fresh or back:
+        db.commit()
+    return confirmed
 
 
 def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
@@ -440,6 +556,13 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     and it never reported success" is what we actually observed. `sb restore`, and
     `Broker._revive` for an agent that simply calls `sb` again, both bring it back — this
     ends a turn, not an existence.
+
+    It is not written off ONE absent reading any more: `_confirmed_gone` is what decides
+    which names get here, and only a row that has been continuously absent past
+    GONE_CONFIRM_GRACE does. The exception is a store too old to have `absent_since`, where
+    there is nowhere to remember an absence and this falls back to recording it on sight —
+    the behaviour that shipped before the column, and the reason it is that way round is
+    that a row nothing can ever record as gone is a row `sb cleanup` can never reach.
 
     Callers MUST have consulted herdr. See `collect`.
     """
@@ -1001,9 +1124,11 @@ def _attention(snap: Snapshot) -> list[str]:
         w = max(len(a.name) for a in drift)
         out.append("")
         out.append("DRIFT — the store called these 'working'; their panes disagree, so the")
-        out.append("STATE column above is a guess. A GONE one is recorded as failed on")
-        out.append(f"sight ({GONE_STATE} from the next readout on) — its pane is gone, so")
-        out.append("nothing will ever move that row again. A STALLED one is left alone:")
+        out.append("STATE column above is a guess. A GONE one is recorded as failed once it")
+        out.append(f"has stayed gone ({GONE_STATE} after {fmt_age(int(GONE_CONFIRM_GRACE))} "
+                   f"of it, so a herdr hiccup")
+        out.append("does not end a live agent) — its pane is gone, so nothing will ever")
+        out.append("move that row again. A STALLED one is left alone:")
         out.append("its pane is still there, and marking it done here would invent a")
         out.append("summary its parent never received.")
         for a in drift:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import importlib
 import inspect
 import io
 import json
@@ -55,6 +56,18 @@ class StatusTest(unittest.TestCase):
 
     def by_name(self, snap):
         return {a.name: a for a in snap.agents}
+
+    def confirm_gone(self, h=None, *, at=None):
+        """Collect twice, a confirmation window apart — what it now takes to record a death.
+
+        One absent reading only remembers the absence (see `status._confirmed_gone`), so a
+        test about what gets WRITTEN has to look twice, with the clock moved on in between.
+        Anything asserting on the flag rather than on the row wants one plain `collect`.
+        """
+        h = FakeHerdr([]) if h is None else h
+        at = store.now() if at is None else at
+        status.collect(self.db, h, now=at)
+        return status.collect(self.db, h, now=at + int(status.GONE_CONFIRM_GRACE) + 1)
 
     # -- drift: the reason this module exists ----------------------------
 
@@ -149,6 +162,56 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr([alive("w1", "unknown")]))
         self.assertFalse(self.by_name(snap)["w1"].stalled)
 
+    # -- idle because nobody has asked for anything -----------------------
+    #
+    # A lead or a top-level orchestrator is spawned before there is work for it, and sits
+    # idle on purpose until somebody speaks. STALLED means "this needed to be doing
+    # something and is not", which is false there, and a warning that is routinely false
+    # is one the reader learns to skip past on the day it is true.
+
+    def test_an_agent_nobody_has_asked_for_anything_is_not_stalled(self):
+        store.create_agent(self.db, name="lead", role="lead", awaiting_task=True)
+        snap = status.collect(self.db, FakeHerdr([alive("lead", "idle")]))
+        a = self.by_name(snap)["lead"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.state, "working")      # only the label changes; the row is as it was
+
+    def test_idling_for_a_week_never_makes_it_stalled(self):
+        """It is not a grace period. Nothing has been asked of this agent, so no amount of
+        elapsed time turns its silence into drift."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           awaiting_task=True)
+        later = store.now() + 7 * 24 * 3600
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")]),
+                                        now=later))["lead"]
+        self.assertFalse(a.stalled)
+
+    def test_the_same_agent_is_stalled_once_it_has_been_given_work(self):
+        """The whole point of keeping the flag: told something and then quiet IS drift."""
+        store.create_agent(self.db, name="lead", role="lead", awaiting_task=True)
+        store.put_message(self.db, from_agent="human", to_agent="lead",
+                          kind="tell", body="do the thing")
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")])))["lead"]
+        self.assertTrue(a.stalled)
+
+    def test_an_ordinary_agent_is_stalled_from_the_start(self):
+        """A delegated worker is given its work AT spawn, so it is stalled-eligible with
+        no message ever arriving for it. The default has to be this way round: the failure
+        that costs something is a stuck agent nobody is warned about."""
+        store.create_agent(self.db, name="w1", role="worker", task="fix the parser")
+        self.assertTrue(self.by_name(
+            status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"].stalled)
+
+    def test_a_store_without_the_column_still_reads(self):
+        """The board and the collector hold a READ-ONLY connection and cannot migrate, so
+        they meet a store an older `sb` last stamped. Missing reads as the label the row
+        already had, rather than raising on every tick until a writer runs."""
+        store.create_agent(self.db, name="w1", role="worker")
+        self.db.execute("ALTER TABLE agents DROP COLUMN awaiting_task")
+        self.db.commit()
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertTrue(a.stalled)
+
     def test_working_but_absent_from_herdr_is_gone(self):
         # `session_id` is what says this one got past its spawn: a session-less row this
         # young is a claim, and claims are held off (see the spawn-grace tests below).
@@ -169,7 +232,7 @@ class StatusTest(unittest.TestCase):
         own, and `sb cleanup` only touches rows that are already finished — so without
         this the row claims `working` for good and no sweep can reach it."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        snap = status.collect(self.db, FakeHerdr([]))
+        snap = self.confirm_gone()
         self.assertTrue(self.by_name(snap)["w1"].gone)   # still reported as observed
 
         a = self.row("w1")
@@ -196,7 +259,7 @@ class StatusTest(unittest.TestCase):
         end up reachable by `sb cleanup`."""
         store.create_agent(self.db, name="w1", role="worker", pane_id="w1:p1")
         later = store.now() + int(status.SPAWN_GRACE) + 1
-        a = self.by_name(status.collect(self.db, FakeHerdr([]), now=later))["w1"]
+        a = self.by_name(self.confirm_gone(at=later))["w1"]
         self.assertTrue(a.gone)
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
 
@@ -246,6 +309,30 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(len(bounds), herdr_mod.SPAWN_ATTEMPTS)
         self.assertGreaterEqual(status.SPAWN_GRACE, worst)
 
+    def test_the_ask_grace_covers_the_spawn_window(self):
+        """The shipped defaults, checked against each other. `ask` gives up on a target
+        that has stayed unlisted for `gone_grace`, and a spawning row is unlisted for the
+        whole of SPAWN_GRACE — the two are tuned separately and nothing but the load-time
+        assertion keeps the ask grace above the window."""
+        self.assertGreaterEqual(config.setting("timeouts.gone_grace"), status.SPAWN_GRACE)
+
+    def test_a_gone_grace_under_the_spawn_window_will_not_load(self):
+        """And it is enforced at import, not left to whoever reads the comment. Loudly:
+        a config that makes `sb ask` abandon spawning agents takes every command down
+        rather than shipping the bug quietly."""
+        real = config.setting
+
+        def shorter(dotted, *a, **kw):
+            if dotted == "timeouts.gone_grace":
+                return status.SPAWN_GRACE - 1
+            return real(dotted, *a, **kw)
+
+        self.addCleanup(importlib.reload, status)
+        with mock.patch.object(config, "setting", shorter):
+            with self.assertRaises(AssertionError) as e:
+                importlib.reload(status)
+        self.assertIn("gone_grace", str(e.exception))
+
     def test_an_unreachable_herdr_never_reaps_anything(self):
         """The guard. Absent herdr's side every row looks gone, and a hiccup would end
         every agent on the machine."""
@@ -253,6 +340,86 @@ class StatusTest(unittest.TestCase):
         status.collect(self.db, FakeHerdr(error=HerdrError("down", "no server")))
         self.assertEqual(self.row("w1")["state"], "working")
         self.assertIsNone(self.row("w1")["ended_at"])
+
+    # -- the confirmation grace: one absent reading is a hiccup, not a death ----
+    #
+    # `agent list` coming back short is not proof of anything on its own — herdr restarts,
+    # answers under load, and the store's own history has three agents marked failed during
+    # one night's startups off exactly that. So an absence is remembered and has to last.
+
+    def test_one_absent_reading_records_nothing(self):
+        """The bug this exists for: a single short `agent list` used to end a live agent."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+        self.assertTrue(a.gone)                   # observed, and said so on screen
+        self.assertEqual(self.row("w1")["state"], "working")     # but not written down
+        self.assertIsNone(self.row("w1")["ended_at"])
+        self.assertEqual(store.recent_events(self.db, agent="w1"), [])
+        self.assertIsNotNone(self.row("w1")["absent_since"])     # only remembered
+
+    def test_absence_inside_the_window_still_records_nothing(self):
+        """A window, not a second look: two readings a moment apart are the same hiccup."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        now = store.now()
+        status.collect(self.db, FakeHerdr([]), now=now)
+        status.collect(self.db, FakeHerdr([]),
+                       now=now + int(status.GONE_CONFIRM_GRACE) - 1)
+        self.assertEqual(self.row("w1")["state"], "working")
+
+    def test_absence_past_the_window_is_recorded(self):
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.confirm_gone()
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+        self.assertIsNone(self.row("w1")["absent_since"])   # the count is over, not running
+
+    def test_an_absence_that_is_interrupted_starts_again(self):
+        """CONTINUOUSLY is the whole word. An agent herdr listed again in between has not
+        been dying for a minute — it was there — and adding the two gaps together would
+        confirm a death that never happened."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        now = store.now()
+        half = int(status.GONE_CONFIRM_GRACE / 2) + 1
+        status.collect(self.db, FakeHerdr([]), now=now)
+        status.collect(self.db, FakeHerdr([alive("w1")]), now=now + half)
+        self.assertIsNone(self.row("w1")["absent_since"])   # forgotten, not paused
+
+        status.collect(self.db, FakeHerdr([]), now=now + 2 * half)
+        # Past the window counting from the FIRST absence, inside it counting from the
+        # second — which is the reading that decides.
+        self.assertEqual(self.row("w1")["state"], "working")
+        status.collect(self.db, FakeHerdr([]),
+                       now=now + 2 * half + int(status.GONE_CONFIRM_GRACE) + 1)
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
+    def test_a_reader_never_stamps_an_absence(self):
+        """`reap=False` writes NOTHING, including the half of the debounce that only
+        remembers. The board holds a read-only connection (see `store.connect`), so a stamp
+        from there is not a policy choice — it is an exception on every tick."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        status.collect(self.db, FakeHerdr([]), reap=False)
+        self.assertIsNone(self.row("w1")["absent_since"])
+
+    def test_an_unreachable_herdr_forgets_nothing_and_remembers_nothing(self):
+        """A herdr that cannot be reached is not a herdr that says the agent is gone: the
+        absence already counted must neither advance nor be cleared by it."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        now = store.now()
+        status.collect(self.db, FakeHerdr([]), now=now)
+        stamped = self.row("w1")["absent_since"]
+        status.collect(self.db, FakeHerdr(error=HerdrError("down", "no server")),
+                       now=now + int(status.GONE_CONFIRM_GRACE) + 1)
+        self.assertEqual(self.row("w1")["absent_since"], stamped)
+        self.assertEqual(self.row("w1")["state"], "working")
+
+    def test_a_store_without_the_column_still_reaps(self):
+        """A store an older `sb` last stamped has nowhere to remember an absence. Recording
+        on sight is what shipped before the column and is the right fallback: a row nothing
+        can ever record as gone is a row `sb cleanup` can never reach."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.db.execute("ALTER TABLE agents DROP COLUMN absent_since")
+        self.db.commit()
+        status.collect(self.db, FakeHerdr([]))
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
 
     # -- reap=False: a reader that outlives its own code ------------------
 
@@ -274,7 +441,7 @@ class StatusTest(unittest.TestCase):
         short-lived process on current code — still closes a genuinely dead row."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         status.collect(self.db, FakeHerdr([]), reap=False)
-        status.collect(self.db, FakeHerdr([]))
+        self.confirm_gone()
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
 
     def test_no_herdr_at_all_never_reaps_anything(self):
@@ -300,7 +467,7 @@ class StatusTest(unittest.TestCase):
 
     def test_a_reaped_agent_reads_as_ended_on_the_next_look(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        status.collect(self.db, FakeHerdr([]))
+        self.confirm_gone()
         a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
         self.assertEqual(a.state, status.GONE_STATE)
         self.assertFalse(a.gone)                  # no longer drift: the store agrees now

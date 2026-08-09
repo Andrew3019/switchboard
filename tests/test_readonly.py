@@ -1,10 +1,11 @@
 """A reader must not be able to migrate the store.
 
 `store.connect()` is not a reader. On a store whose SCHEMA text was written by a different
-checkout it re-stamps `meta`, ALTERs tables and backfills every agent row, and — when a
-table is missing — DROPS `agents`, `messages` and `events`. Three worktrees on three
-branches share one store here, so "the SCHEMA text differs" is the normal case, and a
-board reconnecting every two seconds is the process most likely to reach all three paths.
+checkout it re-stamps `meta`, CREATEs and ALTERs tables and backfills every agent row,
+and — when something missing can be given to no existing row — REBUILDS the store,
+dropping every table `SCHEMA` declares. Three worktrees on three branches share one store
+here, so "the SCHEMA text differs" is the normal case, and a board reconnecting every two
+seconds is the process most likely to reach every one of those paths.
 
 These tests do not check that a flag exists. Each one arranges the exact store shape that
 made a reader destructive and asserts the destruction did not happen: the stamp, the
@@ -110,9 +111,11 @@ class ReadonlyConnection(unittest.TestCase):
                          FOREIGN)
 
     def test_C_a_reader_cannot_drop_the_store(self):
-        """The unrecoverable one: a missing table is `blocking`, `_reconcile` calls
-        `_reset`, and `_reset` drops `agents`, `messages` and `events`. In the probe on the
-        live store this cost 53 agent rows and 162 messages."""
+        """The unrecoverable one. `events` declares NOT NULL columns with no default, so a
+        store without it is missing rows this code cannot invent for it: still `blocking`,
+        where an all-nullable missing table is created and filled instead. `_reconcile`
+        answers `blocking` with `_reset`, and `_reset` drops every table `SCHEMA` declares.
+        In the probe on the live store this cost 53 agent rows and 162 messages."""
         self._stamp_foreign(
             "UPDATE agents SET state='done', ended_at=1;"      # nothing live to guard them
             "DROP TABLE events;"

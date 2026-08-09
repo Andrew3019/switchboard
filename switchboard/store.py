@@ -3,7 +3,7 @@
 The single source of truth. Every other module is a view over this; modules never call
 each other, they meet here (C7).
 
-Three tables, all *operational* state. The only durable data (learnings) lives in JSON
+Four tables, all *operational* state. The only durable data (learnings) lives in JSON
 files, so this database is disposable by construction — see `connect()` for what that
 buys us.
 """
@@ -163,6 +163,24 @@ CREATE TABLE agents (
     pane_id       TEXT,               -- NOT stable across pane move; debugging only
     seq           INTEGER NOT NULL DEFAULT 0,  -- our monotonic --seq for herdr writes
     cleanup       TEXT NOT NULL DEFAULT 'close',
+    awaiting_task INTEGER NOT NULL DEFAULT 0,   -- 1 = spawned with a placeholder task and
+                                      -- given nothing since. Such an agent is idle because
+                                      -- nobody has asked it for anything, which is not the
+                                      -- same fact as STALLED, so the join in `status` does
+                                      -- not compute that flag for it. Cleared by the first
+                                      -- message it receives (`put_message`). The default is
+                                      -- 0, which is also what rows predating the column
+                                      -- read as: an ordinary agent, stalled-eligible.
+    absent_since  INTEGER,            -- epoch of the FIRST reading that found herdr no
+                                      -- longer listing this agent, cleared the moment it
+                                      -- is listed again. One absent reading is a hiccup;
+                                      -- staying absent is a death, and this is the only
+                                      -- place that memory can live between two short-lived
+                                      -- `sb` processes (see `status._record_gone`). NULL
+                                      -- means "present, as far as anyone has looked",
+                                      -- which is also what rows predating the column read
+                                      -- as — their absence simply starts being counted the
+                                      -- first time a reaping command looks at them.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );
@@ -192,6 +210,32 @@ CREATE TABLE events (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX idx_events_agent ON events(agent, id);
+
+CREATE TABLE workspaces (
+    name          TEXT PRIMARY KEY,   -- the workspace NAME, and identity is nothing else.
+                                      -- Not `workspace_id`: one id spans two checkouts on
+                                      -- this machine and a live workspace can have none.
+                                      -- Not the checkout path: every bare workspace over
+                                      -- one clone shares it, so four live orchestrators
+                                      -- would be one row and retiring any of them would
+                                      -- retire the rest.
+    checkout      TEXT,               -- where this workspace's own checkout is, or NULL.
+                                      -- NULL is not "unknown": it is exactly how a BARE
+                                      -- workspace — one with no checkout of its own — is
+                                      -- represented, the same fact `agents.branch` says
+                                      -- by being NULL. A recorded path is never trusted
+                                      -- as a live one; see `checkout_verdict`.
+    retired_at    INTEGER,            -- epoch the workspace was retired. Not a tombstone
+                                      -- on the name: reopening one clears this.
+    retiring      TEXT,               -- who holds the retiring mark — an agent name, not a
+                                      -- boolean. Claimed by conditional write (see
+                                      -- `claim_retiring`), so a losing invocation cannot
+                                      -- release a mark it never held. Not a lock, and no
+                                      -- lock primitive enters the tree for it.
+    retiring_at   INTEGER,            -- epoch the mark was claimed, so a refusal can say
+                                      -- how long a crashed one has been sitting there.
+    created_at    INTEGER
+);
 """
 
 # A cache key, NOT a version. It covers the SCHEMA string verbatim, so editing a comment
@@ -264,14 +308,14 @@ def connect(
 def _connect_readonly(p: Path) -> sqlite3.Connection:
     """A connection that CANNOT change the store, and never reconciles its schema.
 
-    `connect()` is not a reader. It stamps `meta`, it ALTERs tables and backfills every
-    agent row, and — when a table is missing outright — it drops `agents`, `messages` and
-    `events` (`_reconcile` -> `_reset`). All three are correct for a short-lived `sb`
-    running current code, and all three are wrong for something that merely wants to look:
-    a process that connects every two seconds for hours is the likeliest migrator in the
-    tree, running whatever `SCHEMA` string it happened to import at startup. Two checkouts
-    on different branches sharing one store is the normal case here, and the SCHEMA text
-    differing between them — a comment edit is enough — is what arms all of it.
+    `connect()` is not a reader. It stamps `meta`, it CREATEs and ALTERs tables and
+    backfills every agent row, and — when something missing can be given to no existing row
+    — it rebuilds the store (`_reconcile` -> `_reset`). All three are correct for a
+    short-lived `sb` running current code, and all three are wrong for something that merely
+    wants to look: a process that connects every two seconds for hours is the likeliest
+    migrator in the tree, running whatever `SCHEMA` string it happened to import at startup.
+    Two checkouts on different branches sharing one store is the normal case here, and the
+    SCHEMA text differing between them — a comment edit is enough — is what arms all of it.
 
     So a reader gets `mode=ro`, where sqlite itself is the guarantee rather than our
     discipline: every write, DDL included, raises `sqlite3.OperationalError: attempt to
@@ -330,12 +374,41 @@ def _reconcile(db: sqlite3.Connection, cwd: Optional[Path] = None) -> None:
 
     A column that means something for the rows that predate it gets its `_BACKFILLS` entry
     run right after its own ALTER — inside the same "nothing is blocking" branch, so a
-    deferred rebuild never half-fills anything.
+    deferred rebuild never half-fills anything. A whole missing table is the same shape one
+    level up: create it, then run its `_TABLE_BACKFILLS` entry.
+
+    Two processes that both computed the deficit before either acted is the ordinary state
+    of this machine, so every statement here is idempotent and the loser's "already exists"
+    is caught rather than let out of `connect()`.
+
+    The stamp is last, and it is last for a reason rather than for tidiness: every table
+    backfill has been *recorded* by the time it is written. `CREATE TABLE` autocommits, so
+    a second process sees the new table the instant it exists and none of the backfilled
+    rows until commit; stamping on the shape alone would let that process declare the store
+    current over an empty table, and the one-time backfill would then never run again for
+    anyone. There is no conditional here doing that work — `_fill_table` runs for every
+    declared table and either performs the fill and records it or finds it already
+    recorded, so reaching the stamp at all IS every backfill being accounted for. Which is
+    what makes moving the stamp earlier a bug the tests would have to catch rather than one
+    a reader can see.
     """
-    addable, blocking = _deficit(db)
+    tables, columns, blocking = _deficit(db)
     if not blocking:
-        for table, name, decl in addable:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        for table in tables:
+            _create_table(db, table)
+        # Every declared table, not only the ones we just created: finding the table
+        # already there says nothing about whether anybody finished filling it.
+        for table in _TABLE_BACKFILLS:
+            _fill_table(db, table, cwd)
+        for table, name, decl in columns:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+                # Another process added it between our deficit and our ALTER. Its backfill
+                # still runs: ours may be the one that gets there first, and they are
+                # written to be safe to run twice.
             fill = _BACKFILLS.get((table, name))
             if fill:
                 fill(db, cwd)
@@ -363,7 +436,7 @@ def schema_deficit(db: sqlite3.Connection) -> list[str]:
     row = db.execute("SELECT value FROM meta WHERE key='schema_hash'").fetchone()
     if row is not None and row["value"] == _SCHEMA_HASH:
         return []
-    return _deficit(db)[1]
+    return _deficit(db)[2]
 
 
 def _columns(db: sqlite3.Connection, table: str) -> set:
@@ -426,14 +499,140 @@ def _backfill_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
 # (table, column), run once, right after the ALTER that added them — see `_reconcile`.
 _BACKFILLS = {("agents", "branch"): _backfill_branch}
 
+# The bare-versus-worktree selector, written down once. A row means a worktree workspace
+# and that `cwd` is its checkout; no row means bare and the path is NULL — the rule reads
+# the PRESENCE of a branch rather than the absence of one, and the difference is not
+# academic. Two names on the reference machine have rows that disagree about `branch`
+# (fourteen with and three without; eleven and one), which is the shape `delegate` writes
+# when `branch is None` and the workspace was named rather than inherited. Read as "any
+# NULL-branch row means bare", both are permanently recorded as having no checkout — which
+# destroys nothing today and routes them to the bare teardown path forever: no gate, no
+# live observation, worktree and branch left standing with nothing that can ever remove
+# them. The fill runs once, so the wrong answer is the permanent one.
+_WORKSPACE_CHECKOUT = """SELECT cwd FROM agents
+ WHERE workspace = ? AND cwd IS NOT NULL AND branch IS NOT NULL
+ ORDER BY created_at LIMIT 1"""
 
-def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
-    """What this code needs that the store lacks: `(addable, blocking)`.
 
-    `addable` is a plan of `(table, column, decl)` triples that ALTER TABLE can apply in
-    place. `blocking` is a list of human-readable gaps that it cannot — a table that does
-    not exist at all, or a NOT NULL column with no literal default, which SQLite refuses to
-    add to existing rows. Only a non-empty `blocking` can ever cost anyone their store.
+def _backfill_workspaces(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
+    """Give the workspaces that predate the table the rows they have always deserved.
+
+    One row per workspace NAME, so the four bare orchestrators over the primary clone
+    become four rows rather than one — which is the whole reason the key is the name.
+    The checkout comes from the agent rows under that name, by the selector above, and
+    NULL is a real answer rather than a missing one.
+
+    This is deliberately the same lookup this design forbids for deciding *membership*:
+    asking at every call which rows belong to a workspace by matching a name is an
+    invitation to the failure mode `agents.branch` exists to end, whereas populating a
+    column once, at a known moment, from the only evidence there is, is an ordinary
+    migration. What makes it safe is the other half of the rule: a filled-in path is never
+    trusted as a live fact — `checkout_verdict` re-validates it at every use.
+
+    Safe to run twice and against a table somebody else created, as every table fill must
+    be: it adds the rows that are missing and touches no row that is already there.
+    """
+    for r in db.execute(
+        "SELECT workspace, MIN(created_at) AS first_seen FROM agents "
+        "WHERE workspace IS NOT NULL GROUP BY workspace"
+    ).fetchall():
+        name = r["workspace"]
+        found = db.execute(_WORKSPACE_CHECKOUT, (name,)).fetchone()
+        db.execute(
+            "INSERT OR IGNORE INTO workspaces(name, checkout, created_at) VALUES(?,?,?)",
+            (name, found["cwd"] if found else None, r["first_seen"]),
+        )
+
+
+# The same thing for a whole table that arrives after the store did: keyed by table name,
+# handed the store the moment the table exists. The capability is what `_reconcile` needs
+# in order to add a table at all, and a table whose rows are derived from the ones already
+# here is the reason it exists — `workspaces` is exactly that table.
+#
+# These are held to a stricter rule than the column fills above, because a table's create
+# and its fill are two transactions (see `_fill_table`): they must be safe to run twice,
+# and they must be safe to run against a table somebody else created.
+_TABLE_BACKFILLS: dict = {"workspaces": _backfill_workspaces}
+
+
+def _backfill_recorded(db: sqlite3.Connection, table: str) -> bool:
+    """Has this table's one-time fill been recorded as done? A fact, never an inference.
+
+    The tempting inference — "the schema hash is current, so everything ran" — is exactly
+    the bug. `CREATE TABLE` autocommits, so the table exists for every other connection
+    before a single backfilled row does; a process that read the shape and stamped the hash
+    would suppress the fill permanently for the whole machine.
+    """
+    key = f"backfill:{table}"
+    return db.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone() is not None
+
+
+def _record_backfill(db: sqlite3.Connection, table: str) -> None:
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+               (f"backfill:{table}", str(now())))
+
+
+def _fill_table(db: sqlite3.Connection, table: str, cwd: Optional[Path]) -> None:
+    """Run a table's one-time fill, unless it is already recorded as done.
+
+    The rows and the record of having written them commit together, so the only two states
+    anybody else can observe are "not done, run it" and "done". A process killed mid-fill
+    rolls both back and the next `sb` picks it up, which is the failure this shape exists
+    for: the alternative loses the fill silently and forever.
+    """
+    fill = _TABLE_BACKFILLS.get(table)
+    if fill is None or _backfill_recorded(db, table):
+        return
+    fill(db, cwd)
+    _record_backfill(db, table)
+    db.commit()
+
+
+def _table_ddl(table: str) -> list[str]:
+    """Every statement SCHEMA declares for one table — its CREATE TABLE and its indexes.
+
+    Taken from the SCHEMA text verbatim rather than rebuilt from `_wanted`'s parse, so the
+    table a migration creates is the same one `_create` would have. `IF NOT EXISTS` is
+    added on the way past: the loser of a concurrent create must find nothing to do, not a
+    reason to raise inside `connect()`.
+    """
+    out = []
+    m = re.search(rf"CREATE TABLE {table} \(.*?\n\);", SCHEMA, re.S)
+    if m:
+        out.append(m.group(0).replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
+    for i in re.finditer(rf"CREATE INDEX \w+\s+ON {table}\(.*?\);", SCHEMA):
+        out.append(i.group(0).replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+    return out
+
+
+def _create_table(db: sqlite3.Connection, table: str) -> None:
+    """Add one table to a store that predates it. Never destructive, never fatal."""
+    for stmt in _table_ddl(table):
+        try:
+            db.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "already exists" not in str(e).lower():
+                raise
+
+
+def _addable_column(decl: str) -> bool:
+    """Can this column be given to rows that already exist? NOT NULL with no default cannot."""
+    return not ("NOT NULL" in decl.upper() and "DEFAULT" not in decl.upper())
+
+
+def _deficit(db: sqlite3.Connection) -> tuple[list, list, list]:
+    """What this code needs that the store lacks: `(tables, columns, blocking)`.
+
+    `tables` names whole tables to create; `columns` is a plan of `(table, column, decl)`
+    triples that ALTER TABLE can apply in place. `blocking` is a list of human-readable gaps
+    that neither can cover, and only a non-empty `blocking` can ever cost anyone their
+    store.
+
+    A missing table is addable when every column it declares is addable — the same test,
+    applied one level up, for the same reason. A table this code would create with a NOT
+    NULL column is a table whose existing-world rows it cannot invent, and inventing them is
+    precisely what adding a table to a store full of history means. Two rules would be two
+    chances to get it wrong; there is one rule, and `_addable_column` is it.
 
     Nothing here compares the store to the schema for *equality*. It asks the narrower and
     much safer question — is everything this code reads and writes present? — because the
@@ -442,10 +641,13 @@ def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
     """
     wanted = _wanted()
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    plan, blocking = [], []
+    missing, plan, blocking = [], [], []
     for table, cols in wanted.items():
         if table not in tables:
-            blocking.append(f"table {table} is missing")
+            if all(_addable_column(d) for d in cols.values()):
+                missing.append(table)
+            else:
+                blocking.append(f"table {table} is missing")
             continue                           # its columns are the table's problem
         have = _columns(db, table)
         # Columns in the store that this code does not know about are LEFT ALONE. They are
@@ -459,15 +661,20 @@ def _deficit(db: sqlite3.Connection) -> tuple[list, list]:
         for name, decl in cols.items():
             if name in have:
                 continue
-            if "NOT NULL" in decl.upper() and "DEFAULT" not in decl.upper():
+            if not _addable_column(decl):
                 blocking.append(f"{table}.{name} cannot be added to existing rows")
             else:
                 plan.append((table, name, decl))
-    return plan, blocking
+    return missing, plan, blocking
 
 
 def _create(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    # A store built from scratch has no history for a one-time fill to derive anything
+    # from, so its fills are done by definition. Recording that keeps the rule simple —
+    # unrecorded means run it — rather than leaving a fresh store looking half-migrated.
+    for table in _TABLE_BACKFILLS:
+        _record_backfill(db, table)
     db.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', ?)", (_SCHEMA_HASH,)
     )
@@ -526,7 +733,13 @@ def _reset(db: sqlite3.Connection, *, force: bool = False) -> None:
               "\nthe last one finishes. To rebuild NOW and lose their state:"
               "\n  sb doctor --reset-store --force"
         )
-    for t in ("agents", "messages", "events"):
+    # Derived from SCHEMA, never a hardcoded list. `_create` re-runs the WHOLE schema, so a
+    # table this misses is a table `CREATE TABLE` then trips over — and where that lands is
+    # decided by declaration order: a table declared after `agents` leaves the three
+    # recreated and empty with the error escaping `connect()`, one declared before it leaves
+    # the store holding nothing but that table and every later `sb` failing identically.
+    # Nobody adding a table should have to notice which half of that they are in.
+    for t in _wanted():
         db.execute(f"DROP TABLE IF EXISTS {t}")
     _create(db)
 
@@ -577,16 +790,16 @@ def now() -> int:
 
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
        (name, parent, role, task, state, session_id, cwd, workspace, branch,
-        workspace_id, terminal_id, pane_id, cleanup, created_at)
-       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?)"""
+        workspace_id, terminal_id, pane_id, cleanup, awaiting_task, created_at)
+       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
     name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
-    terminal_id, pane_id, cleanup,
+    terminal_id, pane_id, cleanup, awaiting_task,
 ) -> tuple:
     return (name, parent, role, task, session_id, cwd, workspace, branch, workspace_id,
-            terminal_id, pane_id, cleanup, now())
+            terminal_id, pane_id, cleanup, int(awaiting_task), now())
 
 
 def create_agent(
@@ -604,6 +817,7 @@ def create_agent(
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
     cleanup: str = "close",
+    awaiting_task: bool = False,
 ) -> sqlite3.Row:
     """Insert an agent row. Raises `sqlite3.IntegrityError` if the name is taken.
 
@@ -613,7 +827,7 @@ def create_agent(
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, cleanup),
+                      workspace_id, terminal_id, pane_id, cleanup, awaiting_task),
     )
     db.commit()
     return get_agent(db, name)
@@ -634,6 +848,7 @@ def claim_agent(
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
     cleanup: str = "close",
+    awaiting_task: bool = False,
 ) -> bool:
     """Take the name, or find out somebody else already has it. -> did we get it?
 
@@ -649,7 +864,7 @@ def claim_agent(
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, cleanup),
+                      workspace_id, terminal_id, pane_id, cleanup, awaiting_task),
     )
     db.commit()
     return cur.rowcount == 1
@@ -742,7 +957,7 @@ def live_roots(db: sqlite3.Connection, role: str) -> list[sqlite3.Row]:
 
     Still only the store's word. A row leaves `working` when the agent itself reports it,
     so a crashed one reads as live here forever; the caller is the one who has to ask
-    herdr (see `Broker._running_tops`).
+    herdr (see `Broker.running_tops`).
     """
     return db.execute(
         f"SELECT * FROM agents WHERE parent IS NULL AND role=? "
@@ -812,6 +1027,218 @@ def next_seq(db: sqlite3.Connection, name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+#
+# The first first-class workspace entity in the store. Everything before it derived "the
+# workspace" by grouping `agents` rows (`workspace_branch`, `known_workspace`), which
+# cannot represent a workspace with no rows — a retired one, or a worktree nobody ever
+# worked in — and has nowhere to put a fact about the workspace itself.
+
+
+def get_workspace(db: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
+    return db.execute("SELECT * FROM workspaces WHERE name=?", (name,)).fetchone()
+
+
+def all_workspaces(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every workspace the table knows about, retired ones included.
+
+    One of the three sources a workspace enumeration has to hold, and the only one that
+    knows about a workspace with no worktree and no agent rows. Git knows the orphan
+    worktree nobody was ever recorded in; `agents` knows the workspace that escaped this
+    table. None of the three is a superset of the others.
+    """
+    return db.execute("SELECT * FROM workspaces ORDER BY name").fetchall()
+
+
+def record_workspace(
+    db: sqlite3.Connection, name: str, checkout: Optional[str] = None
+) -> None:
+    """Write down where a workspace's checkout is — on creation, and on every attach.
+
+    A record of where the checkout *is*, not of where it once was, which is why attaching
+    re-writes it rather than leaving the first answer standing. NULL is a value here like
+    any other: passing it says "this workspace has no checkout of its own", which is what
+    bare means.
+    """
+    db.execute(
+        "INSERT INTO workspaces(name, checkout, created_at) VALUES(?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout",
+        (name, checkout, now()),
+    )
+    db.commit()
+
+
+def retire_workspace(db: sqlite3.Connection, name: str) -> None:
+    """Stamp a workspace retired, clear its path, and drop the retiring mark.
+
+    The path goes because it is a record of where the checkout is, and after a retirement
+    there is no checkout: leaving the old one behind would hand the next reader a path
+    that re-validates as absent and reads as something still to clean up.
+    """
+    db.execute(
+        "UPDATE workspaces SET retired_at=?, checkout=NULL, retiring=NULL, "
+        "retiring_at=NULL WHERE name=?",
+        (now(), name),
+    )
+    db.commit()
+
+
+def reopen_workspace(
+    db: sqlite3.Connection, name: str, checkout: Optional[str] = None
+) -> None:
+    """Make a retired workspace live again, at wherever its checkout is now.
+
+    Retirement is not a tombstone on the name — the name is identity, and a person who
+    types it again means the workspace they are naming.
+    """
+    db.execute(
+        "INSERT INTO workspaces(name, checkout, created_at) VALUES(?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout, retired_at=NULL",
+        (name, checkout, now()),
+    )
+    db.commit()
+
+
+def claim_retiring(db: sqlite3.Connection, name: str, owner: str) -> bool:
+    """Take the retiring mark, or find out somebody else already holds it. -> did we?
+
+    The same shape as `claim_agent`, for the same reason: a `get_workspace(...) is None`
+    check followed by an `UPDATE` is two statements with a race between them, and this one
+    guards a destructive command. The claim IS the write — `WHERE retiring IS NULL` — and
+    `rowcount` is the arbiter, so of two invocations arriving together exactly one gets 1.
+
+    The mark records its OWNER rather than being a flag, so a losing invocation cannot
+    release a mark it never held (see `release_retiring`). It is still not a lock and no
+    lock verb enters the tree for it: `workspace_new`'s docstring advertises
+    non-exclusivity as deliberate policy, and one path is no reason to teach the rest of
+    the codebase a rule it does not otherwise follow.
+
+    False for a workspace with no row at all, which is a caller that skipped
+    `record_workspace` — nothing here invents a row for a workspace nobody has recorded.
+    """
+    cur = db.execute(
+        "UPDATE workspaces SET retiring=?, retiring_at=? WHERE name=? AND retiring IS NULL",
+        (owner, now(), name),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
+def release_retiring(db: sqlite3.Connection, name: str, owner: str) -> bool:
+    """Clear a retiring mark we hold. -> was it ours to clear?
+
+    Only ever clears, and never restores an earlier value: there is one mark, its rollback
+    is the owner's, and a mark held by somebody else is left exactly where it is.
+    """
+    cur = db.execute(
+        "UPDATE workspaces SET retiring=NULL, retiring_at=NULL WHERE name=? AND retiring=?",
+        (name, owner),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
+# What re-validating a recorded checkout can conclude. Three answers, not a boolean: a
+# path that is simply GONE is a resolved answer — nothing is there, so nothing can be lost
+# — while a path that resolves to something unintelligible is not an answer at all. One
+# boolean collapses those, and collapsing them makes the cheapest safe path refuse on
+# precisely the workspaces it was written for: every path in the store is a filled-in one,
+# and six of them point at directories that no longer exist.
+CHECKOUT_OK = "ok"
+CHECKOUT_ABSENT = "absent"
+CHECKOUT_UNUSABLE = "unusable"
+
+
+def checkout_verdict(path: Optional[str], cwd: Optional[Path] = None) -> str:
+    """Re-validate a recorded checkout path against git. The record proposes; git decides.
+
+    A path on a workspace row was derived once, at migration time, from rows that had no
+    idea they were describing a checkout — so it is a candidate and never a live fact.
+    This is what every use of it goes through first:
+
+    - `CHECKOUT_OK` — the directory is there and `git worktree list` reports it as a
+      worktree of this repo.
+    - `CHECKOUT_ABSENT` — nothing is at that path. A *resolved* answer: the workspace's
+      checkout is already gone, which is a route (deregister the worktree, delete the
+      branch) rather than a refusal.
+    - `CHECKOUT_UNUSABLE` — anything else. A path that is not a worktree of this repo, a
+      directory that cannot be read, a path that is not a directory, no path at all on a
+      workspace that is not bare, or a git that would not answer. This is where "unknown
+      is not empty" keeps its full force, and a caller that cannot tell refuses.
+
+    "A git that would not answer" includes one that never answers: this call is bounded
+    like every other subprocess in this command, because the alternative to a refusal here
+    is not a wrong verdict but no verdict at all — a hung git hanging the whole command,
+    which for the destructive caller means hanging it before it has decided anything.
+
+    `cwd` is where git is asked from, and it is deliberately not the path being validated:
+    a directory that turns out to be a checkout of some OTHER repo would happily report
+    itself as a worktree of itself.
+
+    A bare workspace never reaches here. Its NULL path is read off the row as the fact it
+    is, before any of this; a NULL arriving here is a workspace with nothing recorded,
+    which is the third verdict.
+    """
+    if not path:
+        return CHECKOUT_UNUSABLE
+    p = Path(path)
+    if not p.exists():
+        return CHECKOUT_ABSENT
+    if not p.is_dir():
+        return CHECKOUT_UNUSABLE
+    try:
+        resolved = p.resolve()
+    except (OSError, RuntimeError):            # unreadable, or a symlink loop
+        return CHECKOUT_UNUSABLE
+    try:
+        out = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return CHECKOUT_UNUSABLE               # unrunnable or hung is not the answer "no"
+    if out.returncode != 0:
+        return CHECKOUT_UNUSABLE               # no answer is not the answer "no"
+    for line in out.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        try:
+            if Path(line[len("worktree "):]).resolve() == resolved:
+                return CHECKOUT_OK
+        except (OSError, RuntimeError):
+            continue
+    return CHECKOUT_UNUSABLE
+
+
+def workspace_fill_gap(db: sqlite3.Connection) -> Optional[str]:
+    """Why this store cannot be asked about workspaces yet, or None when it can.
+
+    The `workspaces` table is filled exactly once, from `agents.cwd`, and that input is
+    not durable: anything that empties or rebuilds the store between this code shipping
+    and the first `sb` that runs the fill leaves the fill permanently unperformed, and
+    every workspace that predates the table unrecorded forever. Nothing recovers that
+    except running it again by hand.
+
+    What makes it *legible* is that the fill records its own completion. Without asking,
+    an unfilled store and a store with genuinely no workspaces are the same empty query —
+    so a destructive command that inferred "unrecorded" from an empty table would refuse
+    every real workspace while reporting nothing wrong. Anything about to act on the
+    absence of a workspace row asks this first and refuses with what it says.
+    """
+    if _backfill_recorded(db, "workspaces"):
+        return None
+    return (
+        "the workspaces table has never been filled in from the agent rows, so this store"
+        "\ncannot say which workspaces predate it — and an empty answer here is not the"
+        "\nsame as no workspaces. Run any `sb` command that opens the store for writing"
+        "\n(`sb status` will do) to fill it, and if that does not, the agent rows it"
+        "\nderives from are gone and the workspaces have to be re-recorded by hand."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Messages
 # ---------------------------------------------------------------------------
 
@@ -832,6 +1259,11 @@ def put_message(
            VALUES (?,?,?,?,?,?)""",
         (from_agent, to_agent, kind, body, reply_to, now()),
     )
+    # Somebody has now given this agent something, which is the whole of what
+    # `agents.awaiting_task` records. Cleared HERE rather than in `Broker.tell`, because
+    # `ask` and `interrupt` write their rows themselves and would each have to remember;
+    # a bit three call sites clear by hand is a bit that goes stale at the fourth.
+    db.execute("UPDATE agents SET awaiting_task=0 WHERE name=?", (to_agent,))
     db.commit()
     return int(cur.lastrowid)
 

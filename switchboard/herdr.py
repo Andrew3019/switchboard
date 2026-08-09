@@ -293,16 +293,21 @@ class Herdr:
         return self._call(*args)
 
     def split_pane(self, pane_id: str, *, direction: str = "right",
-                   ratio: float = 0.38, cwd: Optional[str] = None,
+                   ratio: float = 0.66, cwd: Optional[str] = None,
                    focus: bool = False) -> str:
         """Split a pane and return the new pane's id.
 
-        Called by `board.open_beside`, which `_top` calls on every `sb start` —
-        this is not spare machinery.
+        `ratio` is the share kept by the pane BEING SPLIT, not the share given to
+        the new one — measured, not assumed: splitting a 43-row pane at 0.25 left
+        the original with 10 rows and the new pane with 33. So a caller that wants
+        the new pane small passes a ratio above a half.
+
+        Called by `board.open_beside`, which every spawn reaches — this is not
+        spare machinery.
 
         The ~4-split ceiling that stops `create_tab` using splits for fan-out does
-        not bite here: one split, once, in a workspace that never asks for another.
-        Anything that fans out still gets a tab.
+        not bite here: one split per tab, once, and a fan-out is still tabs — each
+        child gets its own tab and splits that tab's root pane a single time.
         """
         args = ["pane", "split", pane_id, "--direction", direction,
                 "--ratio", str(ratio), "--focus" if focus else "--no-focus"]
@@ -583,7 +588,21 @@ class Herdr:
             # focusing the pane flips it back to idle). Reporting `idle` and reading back
             # `done` is success, not a dropped write.
             equivalent = {state, "done"} if state == IDLE else {state}
-            if got is not None and got.state not in equivalent:
+            if got is None:
+                # Gone by the time we read back. After an `idle` report that is the
+                # ordinary end of a life — `idle` is what an agent sends moments before
+                # it disappears, which is why the line above special-cases it — so a
+                # vanish there says nothing and raising on it would fire on every exit.
+                # After `working`/`blocked` it is the corruption signal this exception
+                # exists for: nothing reaches gone from those without an intervening
+                # idle/done, so the write we just made landed nowhere.
+                if state != IDLE:
+                    raise StateWriteDropped(
+                        f"{name}: reported {state!r} (seq={seq}) and herdr no longer "
+                        f"knows the agent. The write landed nowhere — the agent went "
+                        f"away mid-turn, or an agent integration owns this pane's session."
+                    )
+            elif got.state not in equivalent:
                 raise StateWriteDropped(
                     f"{name}: reported {state!r} (seq={seq}) but herdr still says "
                     f"{got.state!r}. Causes: stale/reused seq, or an agent integration "

@@ -54,8 +54,10 @@ supposed to arbitrate.
 
 - `store.claim_agent` is `INSERT OR IGNORE` returning whether this process got the row. The
   PRIMARY KEY on `agents.name` is the arbiter, which is what a PRIMARY KEY is for.
-- `Broker.delegate` claims the name **before** `agent start`, and `store.drop_agent`s it if
-  the spawn fails, so a failed spawn cannot hold a name hostage.
+- `Broker.delegate` claims the name **before** `agent start`. A spawn that then fails
+  leaves the row behind as a husk (`failed`, no pane, no session) plus a `spawn_failed`
+  event, rather than deleting it and throwing away the only evidence the attempt happened;
+  the claim carves that shape out, so a failed spawn still cannot hold a name hostage.
 - `_adopt` claims instead of inserting and re-reads on a loss.
 - `_spawn_lead` now distinguishes **three** shapes of prior row rather than two: a session
   id means restore; a pane and no session means another opener is mid-spawn into this name,
@@ -295,14 +297,21 @@ because the old form could not be called successfully.
 
 ## Still open
 
-- **A non-additive schema change while agents are live** is still a hard stop. The escape
-  hatch now exists and is named in the error, but the "operational state is disposable"
-  assumption does not survive contact with long-lived agents.
+- **A schema change that cannot be applied in place still rebuilds the store**, and that
+  is now the only shape left: nullable columns and whole nullable tables are added and
+  backfilled, so only a gap no existing row can be given (a `NOT NULL` column with no
+  literal default) gets there. It is no longer a hard stop — under a live fleet the
+  rebuild is deferred and the old store keeps serving — but the "operational state is
+  disposable" assumption still does not survive contact with long-lived agents, because
+  when the rebuild does run it drops everything.
 - **Nothing enforces `sb done`** (C6, PLAN D2). Detection covers for it; a `Stop` hook is
   still the right answer and is still unbuilt.
-- **A child that dies without recording anything** is invisible to a blocked `ask`, which
-  will wait its full timeout. `sb status` names that case as GONE; `ask` has no cheap way to
-  be sure, so it waits.
+- **A child that dies without recording anything** records nothing for a blocked `ask` to
+  read. `ask` no longer sits out the whole timeout for it: it counts *consecutive*
+  absences from `herdr agent list` and gives up after `timeouts.gone_grace`. That grace is
+  300 s and is floored at `status.SPAWN_GRACE` by an assertion, because anything shorter
+  writes off children that have done nothing but start slowly. `sb status` still names the
+  case as GONE, and it is still a wait rather than a signal.
 - **BUGS 5** — see above. Not reproducible, not closed.
 - **`herdr` is a real dependency of two tests' environment** only in the sense that
   `sb doctor` shells out; the suite itself runs with no herdr and spawns nothing.

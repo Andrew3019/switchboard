@@ -461,6 +461,8 @@ class NothingLeftInPythonTest(unittest.TestCase):
             (broker.ASK_TIMEOUT, "timeouts.ask"),
             (broker.ASK_POLL, "timeouts.ask_poll"),
             (broker.INTERRUPT_SETTLE, "timeouts.interrupt_settle"),
+            (broker.TEARDOWN_SETTLE, "timeouts.teardown_settle"),
+            (broker.TEARDOWN_SETTLE_POLL, "timeouts.teardown_settle_poll"),
             (status.WAIT_SLICE_MS, "timeouts.wait_slice_ms"),
             (status.WAIT_TIMEOUT, "timeouts.wait"),
             (status.DEFAULT_EVENTS, "display.events"),
