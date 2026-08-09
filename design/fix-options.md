@@ -99,13 +99,21 @@ was right that destruction must be scoped by a directory; round 2 was right that
 the record's identity had to be the same key as the gate's scope. It does not.
 Identity is about a workspace — the thing the person names and retires. Scope is
 about a directory — the thing that gets destroyed. The full argument, and why
-this supersedes round 2's "keyed on the checkout path", is in Group A.
+this supersedes round 2's "keyed on the checkout path", is in Group A — including
+the correction that the name is unique only once the code makes it so, since two
+places currently mint names into one namespace without consulting each other.
 
 **Where the path comes from.** The `workspaces` table carries the checkout path
-as a recorded fact, written when the workspace is created, and the destructive
-command must refuse — loudly, by name — when it cannot resolve one. (A NULL path
-is not an unresolvable path: NULL is how a bare workspace is represented, and the
-bare path below never reaches this rule.) The existing idiom must not be copied.
+as a recorded fact — written when the workspace is created, re-written every time
+the workspace is attached, and cleared when it is retired, so it is a record of
+where the checkout *is* rather than of where it once was — and the destructive
+command must refuse, loudly and by name, when it cannot resolve one. Two things
+are not unresolvable and must not be routed into that refusal. **A NULL path**
+is how a bare workspace is represented, and the bare path below never reaches
+this rule. **A path that resolves to a directory that is no longer there** is a
+resolved answer, not an unresolved one, and it routes to the already-gone path;
+the full three-verdict rule is stated with the backfill below, because it is the
+backfill's re-validation that raised it. The existing idiom must not be copied.
 `_recorded_path` (`broker.py:1008`) reads a `cwd` off an agent row keyed on the
 workspace *name*, which is tier 4, the exact lookup this document forbids Group A
 from using for membership; and its one caller does
@@ -130,9 +138,48 @@ conservative, it is absent. The table therefore arrives with a one-time
 backfill, run once at migration time, that derives a checkout path per workspace
 name from the `cwd` of its agent rows — one table row per name, so the four bare
 orchestrators over the primary clone backfill as four distinct rows rather than
-collapsing into one. A workspace whose rows carry a NULL `branch` backfills with
-a NULL path, because that is what bare means: no checkout of its own. This is
-deliberately the same lookup shape
+collapsing into one.
+
+**The bare-versus-worktree selector is stated here in SQL, because the English
+version was ambiguous and the ambiguity is reachable on this machine.** This
+document previously said only that "a workspace whose rows carry a NULL `branch`
+backfills with a NULL path, because that is what bare means." That presumes every
+row under a name agrees about `branch`, and two of the twenty-three names here do
+not: `plugins-redesign` has fourteen rows with a branch and three without, and
+`workspace-model` eleven and one — in each case one `cwd`, one `workspace_id`, one
+genuinely worktree-backed workspace with some rows whose `branch` was never
+written, which is the shape `delegate` produces when `branch is None` and the
+workspace was named rather than inherited. Read as "any NULL-branch row means
+bare" the derivation returns six NULL paths instead of four — the four `main*`
+names plus these two, not to be confused with the six absent directories below —
+and those two real
+worktree workspaces are permanently recorded as having no checkout — which is not
+destruction but is worse than it sounds, because it silently routes them to the
+bare path forever: no gate, no live observation, panes closed, `retired_at`
+written, worktree and branch left standing with nothing left that can ever remove
+them. The backfill runs once, so the wrong answer is permanent. Reproduced
+against a copy of the real store: the three plausible readings split 4 / 6 / 4,
+and the two disagreements are exactly those names.
+
+So the rule is the one that reads the *presence* of evidence rather than the
+absence of it — a workspace is bare **iff no row under its name carries a
+branch** — and it is written down as the query it is:
+
+```sql
+SELECT cwd FROM agents
+ WHERE workspace = ? AND cwd IS NOT NULL AND branch IS NOT NULL
+ ORDER BY created_at LIMIT 1
+```
+
+A row means a worktree workspace and that `cwd` is its path; no row means bare and
+the path is NULL. That is `_recorded_path`'s own query verbatim — which is not an
+accident and not a contradiction of the rule below, because what this document
+objects to in `_recorded_path` is its *caller's* `or self.repo`, not the select.
+The two names above are the regression fixture: whatever the backfill is tested
+with must contain a name whose rows disagree about `branch`, and must assert it
+comes out with a path.
+
+This is deliberately the same lookup shape
 this document forbids Group A from using for *membership*, and the distinction
 is the point: deciding at every call which rows belong to a workspace by
 matching a name is a standing invitation to tier-4's failure mode, whereas
@@ -141,10 +188,38 @@ is an ordinary migration. `store._backfill_branch` (`store.py:415-427`) is the
 precedent — it reconstructs `branch` for pre-column rows from `cwd` and takes
 the same `cwd` argument `_reconcile` already threads through. What makes the
 distinction safe is the second half of the rule: **a backfilled path is never
-trusted as a live fact.** At every use it is re-validated — the directory must
-still exist and must still be a worktree of this repo — and a path that fails
-re-validation is treated exactly like an unrecorded one. The backfill supplies a
-candidate; git supplies the truth.
+trusted as a live fact.** At every use it is re-validated — the backfill supplies
+a candidate; git supplies the truth.
+
+**Re-validation has three verdicts, not two, and the two-verdict version cancels
+the already-gone path for the whole existing population.** This document
+previously said a path that fails re-validation "is treated exactly like an
+unrecorded one," and an unrecorded path is a refusal. Every path on this machine
+is a backfilled path, and six of them — `plugins-redesign`, `prompts`,
+`spawn-prompts`, `split-fix`, `status-board`, `workspace-model` — point at
+directories that no longer exist, cross-checked against six orphan branches all
+merged into `main` with no worktree registered. (Other passages say five, and
+twenty-one workspaces; the census has moved, and the re-count is recorded once in
+round 4's section rather than chased through every figure.) Those six *are* the
+already-gone path's entire reason for existing, billed below as the single
+cheapest real win available. Read literally, the rule protecting the backfill
+from being trusted was the rule making the cheap path refuse on precisely the
+rows it was written for. One boolean cannot carry the distinction, because
+"absent" is a resolved answer and "unintelligible" is not:
+
+- **The directory exists and `git worktree list` reports it as a worktree of this
+  repo** → the recorded path is good; the general path proceeds against it.
+- **The directory is absent** → a *resolved* answer, not an unresolvable one.
+  Nothing is there, so nothing can be lost: this routes to the already-gone path
+  below, which is where those six go.
+- **Anything else** — a path that resolves to something that is not a worktree of
+  this repo, a directory that exists and cannot be read, or no path at all on a
+  workspace that is not bare → **refuse**. This is where "unknown is not empty"
+  keeps its full force.
+
+The second verdict is a route, not an exemption: the already-gone path has its own
+gate (no non-finished row records a `cwd` under the path) and its own two actions,
+and it is reached only because the answer was resolved.
 
 **What the gate is scoped to.** The gate is scoped to the *checkout path*, not
 to `workspace_id`. It refuses if any non-finished row anywhere has a `cwd`
@@ -156,6 +231,39 @@ can sit over one checkout — `_parent_workspace_id`'s docstring
 landed in w1, the OTHER workspace over that same checkout" — so enumerating
 one id's rows and finding them all finished says nothing about who else is in
 the directory. The destruction is scoped by a directory; so is the gate.
+
+**The first thing the gate asks is whether the resolved path is the repository's
+primary checkout, and if it is, the command refuses there.** This document
+already argues that the primary clone must never be the target — it is the whole
+objection to `_recorded_path`'s `or self.repo` fallback — but it left the
+protection to git refusing at the last step, and that is not the same thing. A
+record can legitimately point at the primary clone without any fallback being
+involved: `_checkout_of`'s docstring states it as intended behaviour (*"`git
+worktree list` reports the PRIMARY checkout alongside the linked ones, which is
+what makes `sb workspace new main` attach to the repo you are standing in"*), and
+a bare `sb workspace new` typed in the primary clone is enough to produce it,
+because `workspace_new` with no name takes `self._here()` — the current branch,
+which here is `main`. `_workspace_facts` then writes `branch = wt["branch"] or
+name`, so the rows are non-NULL-branch with `cwd` the primary clone, the backfill
+selector above hands them that path, and re-validation *passes*, because the
+primary checkout genuinely is a worktree of this repo. Everything up to the last
+step then runs against the human's main clone.
+
+Git does stop the deletion — verified in a throwaway repo: `git worktree remove`
+answers `fatal: '/tmp/kr-git' is a main working tree`, and `git branch -d main`
+answers `cannot delete branch 'main' used by worktree at ...`. What git does not
+stop is everything before it. The two-tier cleanliness check runs
+`git status --porcelain --ignored` in the human's own clone and inventories their
+`.env` and their `.claude/` as material about to be destroyed; step 2 closes that
+workspace's panes; and the refusal arrives at step 4 with a retiring mark already
+set, whose clearing rule is written for a refusal from the *gate*, not for a git
+command failing inside the destructive phase. So the refusal is a stated rule of
+the gate, evaluated first, before the cleanliness check and before anything is
+closed: resolve the primary working tree — the first entry of
+`git worktree list --porcelain`, or `git rev-parse --path-format=absolute
+--git-common-dir`'s parent — compare it component-wise against the resolved
+recorded path, and refuse by name if they are the same directory. An emergent
+property of git is not a gate; this is.
 
 **"Under that path" means path components, not a string prefix, and the caller
 is excluded.** Round 4 found both halves of this unspecified, and both fail on
@@ -174,6 +282,39 @@ essentially always another orchestrator: the one that typed the command"), which
 the bare path solves by not running the gate at all. Here it is solved by
 exclusion: the caller's own `agents` row and the caller's own process tree do not
 count against the gate. Nothing else is excluded.
+
+**A worry about nested checkouts, raised and dismissed on the layout rule
+itself.** `WORKSPACE_NAME` (`broker.py:76`) is `^[^\s/-][^\s]*$`, which permits
+`/` after the first character — `workspace_new`'s own error message says only
+that a name "may not start with `-` or `/`" — so `foo` and `foo/bar` are both
+legal names, and if worktrees were laid out by name under the worktree root then
+`foo/bar`'s checkout would sit *inside* `foo`'s. Component-wise containment,
+being the correct rule, would then correctly report `foo/bar` as under `foo`, and
+closing `foo` would delete `foo/bar`'s checkout while `foo/bar`'s record survived
+pointing at a directory that is gone. That does not happen, and the reason is in
+herdr rather than here: the checkout directory is
+`<root>/<repo>/branch_to_path_slug(branch)`, and `branch_to_path_slug`
+(`worktree.rs:34-55`) collapses every run of non-alphanumeric characters to a
+single `-`, so the layout is flat by construction — `foo/bar` becomes
+`.../switchboard/foo-bar`, a sibling of `foo`, never a child. Herdr's own tests
+pin it (`branch_to_path_slug("worktree/brave-river") == "worktree-brave-river"`).
+No rule is needed and none is added; this is read from herdr's source rather than
+established by creating a workspace, which would have meant minting a real branch
+and a real checkout to answer a layout question.
+
+What the same reading does establish is a smaller rule, in the opposite
+direction: **the slug is lossy, so a path is not a function of a name that can be
+inverted, and nothing may derive one from the other.** `foo/bar`, `foo-bar` and
+`foo.bar` are all legal names and all slug to `foo-bar`, so distinct workspace
+names can name
+one directory. The design is already right here and it is worth saying why it is
+load-bearing rather than incidental: the path on the record is the one herdr
+returned (`_workspace_facts` raises `workspace_no_path` rather than guess), and
+the gate compares recorded paths, so two names over one directory are two
+records that both see each other's processes and refuse — which is the correct
+outcome — and after one of them is closed the other re-validates as absent and
+routes to the already-gone path. A path reconstructed from a name would instead
+have quietly aimed one workspace's removal at another's checkout.
 
 **And a gate made only of records is not enough.** Add one live observation:
 a herdr pane still open in that workspace, or a process whose cwd is under the
@@ -201,27 +342,91 @@ gate then passes, and nothing was ever "unknown", so refuse-on-unknown never
 fires. `status.py:337-339`'s three-agents-failed-during-startup comment is the
 same shape at smaller scale.
 
-The consequence is a change of role, and it has to be stated as one: **under that
-interleaving the live cwd observation stops being a second opinion and becomes
-the half that decides.** It therefore gets the same specification as the rest of
-the gate rather than being named in passing:
+**That was written as an inference from a docstring, and it has now been read and
+run — the true answer is stronger than the inference, and it removes the last
+hope that refuse-on-unknown covers this.** The hope was that a restarted herdr
+might answer *partially*, or flag something a caller could check first, in which
+case "cannot get a live answer" would still fire. It cannot. `herdr agent list`
+reaches `handle_agent_list` (`src/app/api/agents.rs:15-22`), which calls
+`collect_agent_infos` (`src/app/agents.rs:21-35`) over `self.state.workspaces` —
+pure in-memory state, no persistence consulted — and passes the result to
+`encode_success` unconditionally. There is no failure branch and no partial
+shape: **`agent list` cannot return an error, by construction.** Confirmed live
+against a throwaway herdr instance on isolated XDG dirs, never the production
+socket: an agent was reported into a pane and listed; the server was `kill -9`'d;
+a fresh server was started over the same state dirs; `agent list` immediately
+returned `{"agents":[]}` with exit 0, no warning field, nothing to separate it
+from a workspace that has zero agents and always did. `workspace list` in the
+same moment still showed the workspace, restored from the on-disk snapshot — and
+handed it back **the same `workspace_id`, `w1`**, which is worse than the
+staleness `_tab_for`'s docstring warns about: the id is not merely dead, it is
+reused, and bookkeeping keyed on it can collide rather than merely miss. Nothing
+else herdr exposes helps: `status server` carries no uptime, pid or start time,
+and `api snapshot` carries no timestamp, so there is no call a caller could make
+first to learn that the world it is about to be told about is a fresh one.
+
+The consequence is not a change of emphasis but a change of kind, and this
+document must stop hedging it: **the live cwd observation is not a corroborator
+of herdr's answer for this case, it is the only signal that can be right about
+it.** A previous version of the bullets below still called the herdr half a
+corroborator "precisely because a successful answer is what a restarted herdr
+gives" — true, and too gentle. An empty success from `agent list` is not weak
+evidence of an empty workspace; it is *no* evidence either way, and an
+implementation that reads it as "herdr is up and this workspace is genuinely
+empty" is wrong every time, not occasionally. Only two things can be trusted
+here, and they answer different questions: a herdr call that fails or is refused
+says herdr is down; the cwd observation says whether anything is actually in the
+directory. Nothing says herdr forgot.
+
+So the live observation gets the same specification as the rest of the gate
+rather than being named in passing:
 
 - **How it enumerates.** Processes whose cwd is under the checkout path, found
-  with `lsof` — this is macOS, there is no `/proc` to walk. The candidate set is
-  every process, not only ones switchboard knows about; a human's editor has no
-  `agents` row and is exactly who this half exists to protect.
+  with `lsof -a -d cwd -F pcn` — this is macOS, there is no `/proc` to walk. The
+  candidate set is every process, not only ones switchboard knows about; a
+  human's editor has no `agents` row and is exactly who this half exists to
+  protect. The scan is unfiltered and whole-machine, and the caller's own tree is
+  excluded **in the parser, by pid, never by `-p`**: a `-p` list that matches
+  nothing exits 1 with empty output, which is indistinguishable from a real
+  failure, and this is the one gate that must not have an ambiguous shape in it.
 - **What it does when it cannot enumerate** — `lsof` missing, non-zero, timing
   out, or returning output the parser does not understand — is **refuse**, and
   that refusal is mandatory rather than best-effort. This is the branch that
   decides the outcome when herdr has forgotten, so a silent fall-through to
   "nothing live" is the one failure that turns a confidently wrong record into a
-  deletion.
-- **The herdr half is a corroborator, not a substitute.** A successful herdr
-  answer never licenses skipping the cwd observation, precisely because a
-  successful answer is what a restarted herdr gives.
+  deletion. Note the shape a missing binary actually takes: with an argv list and
+  no shell, Python raises `FileNotFoundError` rather than returning a non-zero
+  `CompletedProcess`, so a refusal path that only inspects `returncode` crashes
+  instead of refusing.
+- **The parser is strict, and that is what keeps "nothing here" apart from "I
+  could not tell."** `-F pcn` output is repeating four-line groups —
+  `p<pid>`, `c<command>`, `fcwd`, `n<absolute path>` — and anything that is not
+  exactly that is a failure, not a line to skip. A lenient parser that
+  best-effort scrapes `n` lines reintroduces the ambiguity the refuse-on-failure
+  rule depends on not existing. Given strictness the two answers are structurally
+  disjoint: "nothing under this path" is a clean exit-0 parse with no matching
+  cwd; "I could not tell" is a non-zero exit, a missing binary, a timeout, or
+  output that fails the shape check.
+- **The herdr half cannot substitute for it, and for the restart case cannot even
+  corroborate it.** A successful herdr answer never licenses skipping the cwd
+  observation — see above: an empty success is what a restarted herdr gives, and
+  it carries no information at all.
 
-Nobody has run this on macOS yet; that is recorded in the open-questions section
-at the end rather than assumed away.
+This is settled on this machine rather than assumed. The invocation was run for
+real: three consecutive whole-machine scans over 328 processes cost 0.23s, 0.07s
+and 0.06s, unprivileged, clean exit, empty stderr — cheap enough to run twice per
+invocation, which the check/re-confirm ordering below requires. Output structure
+held over all 328 processes with no exceptions. A process whose cwd directory has
+been deleted underneath it still reports the original path string, with no
+`(deleted)` marker (unlike Linux `/proc`), which is the safe direction: the
+component-wise comparison still catches it and the gate still refuses. And the
+sibling-nesting hazard the containment rule exists for was confirmed on today's
+`git worktree list`, not constructed:
+`.../worktrees/switchboard/fix-options-2/anything` passes a `startswith` test
+against `.../worktrees/switchboard/fix-options`. What was *not* exercised: a
+genuine `lsof` hang (a timeout must be treated exactly as a non-zero exit,
+never a retry loop), truly truncated output, and TCC/Full-Disk-Access behaviour
+on a differently configured macOS.
 
 **What counts as clean.** Not `git status --porcelain`. Plain porcelain does
 not list gitignored files, and `git worktree remove` deletes them anyway —
@@ -335,14 +540,74 @@ whose directory is already gone. Both are ordinary lost updates. The rollback is
 a conditional clear of the row this process claimed, not a restore of remembered
 state.
 
+**And those two rules, plus the refusal to close a workspace already marked
+retiring, do not compose: as written, a teardown that crashes partway leaves the
+name permanently unusable.** Each of the three is deliberate and each is right on
+its own. Only a crash may leave the mark set. `sb workspace close` refuses a
+workspace already marked retiring. Rollback is owner-conditional, so only the
+owner may clear it. Now let the command die between claiming the mark and
+finishing — which is precisely the case the two-phase write exists for. The mark
+is set, its owner is dead, `workspace_new` refuses to join the name, `close`
+refuses to act on it, and nothing but the owner may clear it. There is no verb
+left that reaches the row, and because the **name is the identity** there is no
+lower-level handle to reach it by either — an id or a path would at least have
+given a second way in. The document's own re-entrancy promise, "a command that
+dies midway must be resumable," is unreachable through the interface the document
+specifies. The `claim_agent` analogy is what obscured it: `claim_agent`'s callers
+each carry an explicit husk rule for a claim whose owner died — `_top` and
+`_spawn_lead` both drop a row with no pane and no session — and the retiring mark
+was given the claim's shape without the husk rule that makes the shape survivable.
+
+**The decision, and it is disclosure plus an explicit human action rather than
+either automatic alternative.** A mark whose owner is confirmed gone is *not*
+silently stolen, and it is not left to age out of a window either: a timeout that
+reclaims a mark on its own is the automatic path, and the whole posture of this
+command is that irreversible things wait for a person. Instead:
+
+- `sb workspace close W` on a workspace already marked retiring still refuses, as
+  before. That rule does not weaken.
+- **When it refuses, it says what it found**, by name: that the mark is held, who
+  holds it, when it was claimed, and — this is the part Wave 2 pays for — whether
+  that owner is confirmed gone. "Is this agent really finished" is exactly the
+  question the trust layer exists to make trustworthy, and this is the first place
+  the destructive command spends it. A live owner and a dead one produce different
+  messages, because they are different situations for the person reading them.
+- **When the owner is confirmed gone, the message names `sb workspace close W
+  --resume`**, and that flag — and only that flag — proceeds: it takes the mark
+  over, recording the new owner, and runs the command from the beginning. It is
+  not a repair verb and it does not skip anything; the gate, the cleanliness
+  check and the inventory all run again from scratch, because a crashed
+  invocation's own findings are exactly what nobody should inherit.
+- `--resume` against a mark whose owner is *not* confirmed gone refuses like any
+  other close. The flag is permission to take over from a corpse, not permission
+  to overrule a live winner. Never automatic stealing of a live mark.
+- `workspace_new` and `--workspace` are unchanged: they refuse a retiring
+  workspace whether or not its owner is alive. The way out of a stuck mark is the
+  destructive command that set it, told explicitly to resume — not a second verb
+  that quietly clears the mark by joining the name.
+
+Two consequences for the schema, small but not implicit. The mark records **when
+it was claimed** as well as who claimed it, because the refusal message has to say
+how long this has been sitting there — and for no other purpose: nothing expires
+on that timestamp, since expiry is the automatic reclaim this decision refuses.
+And "confirmed gone" is asked of the trust layer, not re-derived here; if Wave 2's
+verdict is not available the answer is "cannot tell", which prints as a live owner
+and offers no `--resume`. Refusing to offer the flag is always the safe direction.
+
+A directory that is already gone stays a resumable state, as before — the
+already-gone verdict above is how a resumed command finds it. What `--resume`
+adds is a way to reach the row at all.
+
 **A worktree whose directory is already gone is the safest case, not an unknown
 one.** The cleanliness check runs `git status --porcelain --ignored` in the
 checkout path, and in a directory that no longer exists git exits fatal. Read
 through the refuse-on-unknown rule that is a permanent refusal — which would
 make the single largest and most obviously safe category of mess on this machine
-the one category the command can never touch: five removed worktrees accounting
-for 55 of the 101 agent rows, with five orphan branches still pointing at them.
-Nothing can be lost there, because nothing is there. So it is its own small
+the one category the command can never touch: at the last count six removed
+worktrees accounting for 75 agent rows, with six orphan branches still pointing
+at them, and growing. That is exactly what the second of re-validation's three
+verdicts is for — *absent* is a resolved answer, and this is the path it
+resolves to. Nothing can be lost there, because nothing is there. So it is its own small
 path, not a degenerate case of the main one: confirm no non-finished row records
 a `cwd` under the path, then deregister *that worktree by name* and
 `git branch -d`, which refuses an unmerged branch on its own. No inventory, no
@@ -396,6 +661,11 @@ run, then it is marked retired. A command that dies midway must be resumable —
 a directory that is already gone is a resumable state, not an error and not a
 permanent refusal. The alternative is a workspace whose directory is gone,
 whose rows still read live, and which the intended verb can never close again.
+Resumable is not automatic, and the mechanism is the one specified above: the
+mark a crash leaves behind is disclosed with its dead owner named, and
+`--resume` is what a person types to take it over. Without that flag this
+paragraph's promise is unreachable — the crash leaves a mark that every verb,
+including this one, refuses.
 
 **Concurrency, without a lock.** Between the check and the removal, another
 agent can legitimately run `sb workspace new W` or `sb delegate --workspace W`
@@ -440,7 +710,10 @@ three parts:
 - **`sb workspace close` itself refuses a workspace already marked retiring.**
   The design specified that refusal for `workspace_new` and `--workspace` and
   never for the command that sets the mark, which is the one place two invocations
-  actually collide.
+  actually collide. The refusal is not silent: it names the owner and says whether
+  that owner is confirmed gone, and only a confirmed-gone owner makes `--resume`
+  available — which is what keeps a crashed invocation from bricking the name
+  without ever letting a losing one take a live mark away.
 
 **This is not a reversal of round 1's refusal of a lock primitive.** No lock file
 is added, no lock verb, no exclusive resource for the rest of the codebase to
@@ -477,7 +750,15 @@ spends the one moment of attention this command gets.
 **On success:** `git worktree remove`, then `git branch -d` and never `-D` (an
 unmerged branch simply stays, which is a far cheaper failure than losing
 commits — and cheaper still than assumed, since a deleted branch's tip
-survives in the reflog), then the retired mark.
+survives in the reflog), then the retired mark — **and the retired mark clears
+the recorded path.** The command has just deleted that directory; leaving the
+row pointing at it means every later question about the workspace starts from a
+path the command itself knows is gone. The path attribute answers "where is this
+workspace's checkout," and after a successful close the honest answer is "there
+isn't one." Retired-with-a-stale-path is the state that makes re-validation's
+three verdicts ambiguous for no reason: the row would re-validate as *absent* and
+route a reopened workspace to the already-gone path when nothing is gone that
+matters.
 
 **Reopening a retired workspace clears the mark.** `workspace_new` given the name
 of a *retired* workspace reopens it: the `retired_at` fact is cleared and the
@@ -488,6 +769,32 @@ is the answer to the question this document previously left unanswered. The
 *retiring* mark is the opposite and stays the opposite: `workspace_new` refuses
 to join it, because retiring means a destructive command is mid-flight. Retired
 is a past tense; retiring is a lock.
+
+**And reopening re-writes the recorded path from the workspace actually
+attached.** The document said the path is "written when the workspace is created"
+and then said nothing about a reopen, which is not a creation — so the row would
+keep whatever path it had, and both directions of that are wrong. A bare
+workspace reopened by name has a NULL path; `_attach_workspace` finds no recorded
+path and no existing checkout of that branch, so it *creates* a real worktree —
+and under silence the row stays NULL, meaning bare-forever: the workspace now has
+a checkout that the command can never remove, on a path nothing recorded. In the
+other direction a closed worktree workspace whose path was left standing would
+have `_attach_workspace` try `open` against a deleted directory before falling
+through to `create`, since its step order is chosen by
+`_recorded_path(name) or _checkout_of(branch)` and a builder wiring that lookup
+to the new table is the natural reading of "the path is a recorded fact on the
+record." Both disappear under one rule: **the path attribute is written from
+`_attach_workspace`'s returned facts every time a workspace is attached, not only
+the first time.** It is a record of where the checkout is, kept current, rather
+than a memory of where it once was.
+
+That this is reachable at all depends on names being reusable, and they are —
+including for bare workspaces, despite "retire, never delete." Agent rows *are*
+deleted in two places: `_top`'s husk replacement and `_spawn_lead`'s, both
+dropping a row with no pane and no session, plus the spawn-failure delete Wave 2
+is fixing. A dropped husk frees the name for the auto-minter to hand out again,
+while the `workspaces` row it belongs to is never deleted. The name comes back;
+the record it lands on is the old one.
 
 **The human has no vote unless the design gives them one.** "Every agent
 recorded against this `workspace_id` is finished" counts agents, and humans
@@ -540,8 +847,9 @@ decide by hand which ones are safe to force-delete. The command does not delete
 them; it just stops them being invisible.
 
 **What the person gets before Wave 4, on the state actually here.** The
-already-gone prune clears five orphan branches and 55 of the 101 agent rows. The
-bare path retires four of the eight herdr spaces open right now. Between them,
+already-gone prune clears every orphan branch and the rows behind it — six
+branches and 75 of the 117 agent rows at the last count, and more by the time it
+ships. The bare path retires four of the eight herdr spaces open right now. Between them,
 Waves 1–3 clear most of the visible accumulation on this machine without any of
 Wave 4's machinery. That is the honest measure of shipping the non-destructive
 waves first — not "the diagnosis only."
@@ -740,7 +1048,12 @@ unrecorded runs it.
 they have. So it does not ship on unit tests alone — it must be proven against a
 copy of the real database, and the reproduction above is precisely that test,
 run in reverse: the same script, on the same store copy, with the fleet drained,
-must end at 101/254/11752 rather than 0/0/0.
+must end at the counts that copy went in holding rather than at 0/0/0. Take the
+three counts from the copy at the moment it is made and assert against those, not
+against the triple written here — the store is live and its population moves.
+When this was first written it was 101/254/11752; it has since passed
+117/280/13275, and a builder who hardcodes either number is testing the wrong
+thing.
 
 It is also worth more than this design. `plugins.py:606-608` documents the same
 limitation as the reason a plugin may not keep anything in `state.db`; the
@@ -750,10 +1063,17 @@ sequence rather than being buried inside Wave 3.
 ### Wave 3 — the workspace end-of-life representation
 
 A real `workspaces` table **keyed on the workspace name**, carrying a nullable
-checkout path, `retired_at` and a retiring mark that records its owner (round 4:
-the mark is claimed by conditional write and a rollback checks the owner, so
-"who holds it" is part of the schema, not an implementation detail), plus
-`sb workspace list` to find orphans. There is no first-class workspace entity today — `workspace_branch` and
+checkout path, `retired_at` and a retiring mark that records its owner and when
+it was claimed (round 4: the mark is claimed by conditional write and a rollback
+checks the owner, so "who holds it" is part of the schema, not an implementation
+detail; "when" comes with it, so a refusal can say how long a crashed mark has
+been sitting there), plus
+`sb workspace list` to find orphans. The name is only a workable key once the
+name namespace is single — the two mints that currently share it without
+consulting each other are Group A's business and the guard is specified there,
+but it is a *part of this wave*, not a follow-up: a table keyed on a name that
+two code paths can independently hand to two different workspaces is a table with
+a collision built into its primary key. There is no first-class workspace entity today — `workspace_branch` and
 `known_workspace` (`store.py:698-721`) both derive "the workspace" by
 grouping `agents` rows. A retired workspace and a fresh one are the same row
 shape.
@@ -806,9 +1126,12 @@ the unmerged ones `-d` will refuse to delete.
 whose directory no longer exists and deleting its branch is specified in section A
 as its own small path, and it needs none of Wave 4's machinery — no inventory, no
 confirmation, no destruction of anything that exists. It is the cheapest real
-win available on this machine (55 rows, five branches) and it should not wait
-behind the full destructive command. It carries one hard constraint from section
-A that survives into this wave because this is where the code lands: the
+win available on this machine (75 rows and six branches at the last count) and it
+should not wait behind the full destructive command. It carries two hard
+constraints from section A that survive into this wave because this is where the
+code lands. The second of re-validation's three verdicts is what routes a
+workspace here — *absent* is a resolved answer, not a refusal — and without that
+split this path is unreachable for every workspace it was written for. And the
 deregistration names the one path, and a bare repo-global `git worktree prune`
 never appears in it.
 
@@ -856,6 +1179,20 @@ component-wise path containment; and `git worktree remove` by name rather than a
 repo-global prune. None of that is optional and none of it is small. Wave 4 is now
 comfortably the largest single item in this document, and the case for shipping
 waves 1–3 without it is correspondingly stronger.
+
+**And a fifth pass, on the identity key and on the two things nobody had run,
+added four more — three of them cheap and one of them a new flag.** An explicit
+refusal when the resolved path is the repository's primary checkout, rather than
+letting git catch it after the panes are already closed; re-validation split into
+three verdicts, without which the already-gone path refuses on the whole
+population it exists for; the recorded path refreshed on attach and cleared on
+retire; and `sb workspace close --resume`, which is the only way back for a
+workspace whose retiring mark was left behind by a crash. Wave 3 picks up a share
+of this: the backfill's selector is now stated in SQL, and the name namespace has
+to become single there, because the table's key is a name two code paths can
+currently mint independently. Two of the document's open questions closed in the
+same pass — the `lsof` observation and herdr's behaviour across a restart are
+both now run rather than assumed, and the second came back worse than assumed.
 
 **The second review round moved weight the other way, into Wave 3.** What was
 described as the cheap, obviously-safe wave — "just a small table" — turned out
@@ -1000,19 +1337,65 @@ while the *same revision* introduced the case.
 **The fix is to stop conflating two things.** Identity and gate scope are not the
 same key and never had to be:
 
-- **Identity: the workspace name.** It is what the person types. It is unique by
-  construction — the same name always means the same workspace. Four bare
-  orchestrators are four names. And an id that is not a function of a checkout
-  never enters into it.
+- **Identity: the workspace name.** It is what the person types, and it is the
+  one candidate that is a function of the workspace rather than of a directory or
+  of a herdr run. Four bare orchestrators are four names. And an id that is not a
+  function of a checkout never enters into it.
 - **Gate scope: unchanged — the checkout path, plus a live observation.**
   Destruction is about a directory; identity is about a workspace. Round 1 and
   round 2 were each right about their own half and wrong only in assuming one key
   had to serve both.
 
+**The load-bearing sentence under that first bullet was wrong, and it is
+withdrawn.** It read "it is unique by construction — the same name always means
+the same workspace." The second clause is false in this codebase today, and the
+codebase says so itself. Two places mint into one name namespace and never
+consult each other. `Broker._next_top_name` picks `main`, then `main-2`,
+`main-3`, and its freeness test is `store.get_agent(self.db, f"{MAIN_NAME}-{n}")`
+— it asks the **agents** table whether an *agent* of that name exists, never
+whether a *workspace* of that name does. Meanwhile `workspace_new(name)` accepts
+any human-typed name matching `WORKSPACE_NAME` and derives its lead's name as
+`_slug(name) + LEAD_SUFFIX`, so a worktree workspace called `main-3` installs an
+agent called `main-3-lead` — which is not the string `_next_top_name` tests. The
+two mints are blind to each other in both directions: a worktree workspace named
+`main-3` leaves the auto-minter free to hand out a bare workspace called `main-3`,
+and a bare `main-3` does nothing to stop a person typing `sb workspace new
+main-3`. Under a name-keyed table those are **one row describing two workspaces
+in two different directories** — which is the exact failure that disqualified
+keying on the path, arriving from the other side. And this is not a new
+observation, only an unheeded one: `delegate`'s own comment already warns that
+reading a branch off a name "would hand a bare space the checkout of a worktree
+space **that shares its name** — which is the confusion `agents.branch` exists to
+end." The design adopted the name as identity without carrying that warning
+across.
+
+The key survives; the justification changes, and it changes from an assertion
+about what names are into a rule about what the code must enforce. **The
+namespace becomes single, and a name is one kind of workspace or the other and
+never both.** Three parts, all cheap, none of them new machinery:
+
+- `_next_top_name`'s freeness test asks about *workspace* occupancy —
+  `store.known_workspace`, and the `workspaces` table once it exists — not about
+  an agent row that happens to share the string.
+- `workspace_new` refuses a name already recorded as a bare workspace.
+- `_top` / `sb start --name` refuses a name already recorded as a worktree
+  workspace.
+
+Uniqueness is then true because one table decides it, which is the only sense in
+which a name ever could have been unique. Note what this is not: it is not a new
+exclusion primitive and not a lock. It is the same instinct as the rest of the
+design — one record, asked once, rather than two code paths each reasoning
+locally about a shared namespace. Note also what it costs, because it is a real
+cost: `sb workspace new main` and a bare `sb start` in the primary clone are
+currently allowed to produce the same name, and this rule makes the second of
+them refuse rather than collide. That is the intended outcome, and the refusal
+message has to say which kind of workspace already holds the name, or it reads
+as an arbitrary block on a name the person can see is theirs.
+
 **Candidate A — a `workspaces` table keyed on the workspace name**, carrying the
-retiring mark *and its owner*, `retired_at`, and the checkout path as a nullable
-recorded attribute, delivered through the new store capability of Wave 2.5 and populated
-by a one-time backfill. **NULL path is exactly how a bare workspace is
+retiring mark *with its owner and its claim time*, `retired_at`, and the checkout
+path as a nullable recorded attribute, delivered through the new store capability
+of Wave 2.5 and populated by a one-time backfill. **NULL path is exactly how a bare workspace is
 represented**, which is not a workaround but the honest model: a bare workspace
 genuinely has no checkout of its own, and the schema already says so by leaving
 `branch` NULL. The thing being retired is identified by name; the thing being
@@ -1694,6 +2077,15 @@ of the records — it is the only half still correct. Which is the same conclusi
 from the other side: the reason `done` may not be treated as confirmed-gone is
 that the live observation, not the record, is what has to carry the decision.
 
+That was reasoning; it has since been run, and it comes out stronger than round 4
+put it. `agent list` has no failure branch in herdr's source and returns an
+unconditional empty success after a restart, so there is no herdr answer at all —
+not a partial one, not a flagged one — that distinguishes a forgotten world from
+an empty one. The rule to carry into Wave 4 is therefore flatter than "the
+observation decides in this case": **no reading of `agent list` may ever be
+treated as evidence that a workspace is genuinely empty.** Section A's gate
+paragraphs are where this is specified.
+
 **2. Teardown purging rows versus mail routing and spawn-failure evidence.**
 Group A's command must **retire** a workspace's rows, not purge them. Group
 C's D1 guard resolves a `done` agent's identity by reading its row; deleting
@@ -1737,6 +2129,15 @@ answer different questions, and the path is a bad identity for the same reason
 workspaces share one. The record is keyed on the **name**; the gate stays scoped
 to the **path**; the path lives on the record as a nullable attribute, and its
 being NULL is what marks a workspace as having nothing to destroy.
+
+A fifth pass then corrected the *reason* rather than the conclusion. The name was
+adopted on the grounds that it is unique by construction; it is not — two mints
+share the namespace blindly, so a bare and a worktree workspace can hold one name
+and collapse into one row, which is the same collision that disqualified the path.
+The name is still the right key, because it is the only candidate that is a
+function of the workspace rather than of a directory or a herdr run, but it is
+unique only once the code makes it so. The guard is in Group A: one namespace, and
+a name is one kind of workspace or the other and never both.
 
 Two further overlaps are consistent rather than colliding, but should not be
 built twice: Group D's `state_dropped` (which will now fire for a dying
@@ -1854,7 +2255,12 @@ this revision was written.
   path backfill cures it. The reviewer's distinction is accepted as drawn: a
   name-keyed `_recorded_path` lookup is forbidden for *membership* and
   acceptable for a *one-time* path backfill — provided the backfilled path is
-  re-validated at every use and never trusted as a live fact.
+  re-validated at every use and never trusted as a live fact. Two things about
+  that backfill have since been corrected in section A rather than left to the
+  implementer: which rows decide bare-versus-worktree (stated in SQL, because the
+  English form was ambiguous for two real names here), and what re-validation
+  answers (three verdicts, because one boolean made "the directory is gone" a
+  refusal on exactly the six workspaces the cheap path exists for).
 - **Bare workspaces**, which the design had no word for and four of which exist
   here (round 2 counted three; `main-4` has since been minted, which is the
   point). A bare workspace has no teardown at all, only a retired mark. Round 3
@@ -1952,7 +2358,11 @@ one path with a NULL branch.
   human can decide by hand.
 - **What `workspace_new` does with a *retired* name**, which the document never
   answered: it reopens it and clears the mark. Retirement is a record of
-  end-of-life, not a tombstone that blocks the name.
+  end-of-life, not a tombstone that blocks the name. What round 3 did not say,
+  and section A now does, is what happens to the *path* on either transition: a
+  reopen re-writes it from the workspace actually attached, and retiring clears
+  it. Silence there left a record pointing at a directory the command itself had
+  just deleted.
 
 **Refused: re-adding herdr `close_workspace` / `close_tab` wrappers**, which the
 audit's finding #1 asked for and which this round noted the design had never
@@ -2053,7 +2463,11 @@ removing two prunable worktrees at once.
   every row reads `failed`, `failed` is `FINISHED`, and nothing was ever unknown.
   The live cwd observation therefore stops being a second opinion and becomes the
   half that decides, so it is now specified as such — `lsof`, not `/proc`, and
-  refusal is mandatory when the enumeration cannot be made.
+  refusal is mandatory when the enumeration cannot be made. Round 4 reasoned this
+  from a docstring; it has since been read in herdr's source and reproduced
+  against a restarted instance, and the finding was if anything understated —
+  `agent list` cannot fail at all, so there is no herdr answer that catches the
+  case and the cwd observation is the sole signal, not the deciding one of two.
 - **F7 — the gate refused on the caller.** The caller's own row and process tree
   are excluded, and containment is decided on resolved path components, since
   sibling worktree names nest as strings.
@@ -2102,6 +2516,20 @@ fallback and in "an unresolvable path is a refusal" — and here it cost a revie
 one section. A person can make that mistake and lose an argument; a destructive
 command makes it and aims `git worktree remove` at the wrong directory.
 
+**And the figures have moved again since, which is worth saying once here rather
+than restating everywhere.** Re-counted against a read-only copy of the store
+`repo_root()` resolves to: 117 agent rows, 280 messages, 13275 events, 23
+workspace names, and **six** names whose recorded checkout no longer exists —
+`plugins-redesign`, `prompts`, `spawn-prompts`, `split-fix`, `status-board`,
+`workspace-model` — accounting for 75 rows, with six merged orphan branches to
+match. Every "101 rows / 21 workspaces / 55 rows under removed worktrees / five
+orphan branches" in this document is that same census taken earlier; the
+population figures are directional evidence for an argument, not constants, and
+each one is larger now than when it was written. Nothing here changes a
+conclusion — the already-gone path gets cheaper the longer it waits, which is the
+argument it was making anyway — but a builder should re-count rather than assert
+any of these numbers in a test.
+
 What survives from that observation, restated correctly: the Wave 3 backfill's
 only input is `agents.cwd`, it runs exactly once, and its input is not durable —
 which is a real dependency on nothing having wiped the store between the migration
@@ -2117,20 +2545,28 @@ Four rounds of review have closed a lot. This section records what they have not
 because the document is now long enough that an unstated gap reads as a settled
 one. Everything here is a known hole, not a discovered one.
 
-- **The live cwd observation is load-bearing and untested on this platform.**
-  F6 made it the half of the gate that decides when herdr is up and has
-  forgotten. Nobody has run `lsof` for this purpose on this machine, checked what
-  it costs, checked what it prints for a process whose cwd is a deleted
-  directory, or written the parser that the refuse-on-failure rule depends on
-  recognising as broken. The most safety-critical component in Wave 4 is the one
-  with the least evidence behind it.
-- **herdr's behaviour across a restart is inferred, not read.** F6's whole
-  scenario rests on `broker.py:1135-1139`'s comment about ids not outliving a
-  herdr run. Nobody has read herdr's source or watched what `agent list`
-  returns immediately after a restart — whether it is an empty success, a partial
-  one, or an error. The difference decides whether refuse-on-unknown catches this
-  after all. `status.py:337-339`'s three-agents-failed-at-startup comment is the
-  only evidence, and it is indirect.
+- **~~The live cwd observation is load-bearing and untested on this platform.~~
+  Closed.** It has now been run on this machine — invocation, output shape,
+  cost over 328 processes, deleted-directory behaviour, both failure shapes and
+  the sibling-nesting case — and the results are written into the gate's
+  specification in section A rather than left here. What is still not exercised,
+  and is a smaller hole than the one it replaces: a genuine `lsof` hang, truly
+  truncated output, and TCC/Full-Disk-Access behaviour on a macOS configured
+  differently from this one. The parser refuses on all three by shape, so the
+  gap is in the evidence, not in the rule.
+- **~~herdr's behaviour across a restart is inferred, not read.~~ Closed, and
+  the answer is worse than the question assumed.** The source was read and the
+  restart was run against a throwaway instance. `agent list` has no error path at
+  all — `handle_agent_list` calls `encode_success` unconditionally over in-memory
+  state — so after a restart it returns an empty success that nothing can tell
+  from a genuinely empty world, and no other call (`status server`,
+  `api snapshot`) carries a signal a caller could check first. Refuse-on-unknown
+  does *not* catch this case, and the live cwd observation is the only thing that
+  does. Section A now says so plainly. What was not tested: the graceful
+  `herdr server stop` path (only `kill -9`), and whether a genuinely still-alive
+  agent process restored into a new herdr generation is seen correctly by both
+  signals together — neither can change the answer, since the unconditional
+  success is structural, but a builder leaning on both signals may want them.
 - **Wave 2.5's migration is proven only in the negative.** The wipe was
   reproduced against a copy of the real store and the brick was reproduced in both
   statement orders. The *corrected* version — schema-derived drops, idempotent
@@ -2144,21 +2580,37 @@ one. Everything here is a known hole, not a discovered one.
   unperformed — after which `sb workspace close` refuses every pre-existing
   workspace forever. F4's recorded-completion fact makes that detectable; nothing
   makes it recoverable except re-running the backfill by hand.
-- **Group A's key has changed three times in three rounds, and no reviewer has
-  seen the current one.** `workspace_id` (v1) → checkout path (round 2) → name
-  with the path as a nullable attribute (round 3). Round 4's lens was concurrency
-  and it did not re-examine the key. Each previous version looked settled to the
-  round that produced it, and each was overturned by the next round on a case it
-  had not considered — bare workspaces, in the most recent instance. The current
-  key is the one this document argues hardest for and the one with the least
-  adversarial scrutiny.
+- **~~Group A's key has changed three times in three rounds, and no reviewer has
+  seen the current one.~~ Reviewed, and it survives — with the amendments now
+  argued above.** A fifth pass took the identity lens against the real store and
+  the real code, and its verdict was sound-with-amendments rather than another
+  replacement: the name stays the key, and neither `workspace_id` nor the
+  checkout path is resurrected — the store agrees with both refusals, since one
+  id still spans two checkouts, one live workspace still has none, and the four
+  `main*` names still share one path. What it found instead was that the *name
+  namespace* was unguarded and that three of the path-attribute rules were
+  underspecified in ways reachable on this machine today: uniqueness is now a
+  rule the code enforces rather than a property claimed for it; the backfill
+  selector is stated in SQL; re-validation has three verdicts; and reopening
+  refreshes the path while retiring clears it. The pattern of "each version
+  looked settled to the round that produced it" is worth keeping in view, but
+  what changed this time is the argument under the key, not the key.
+- **A crashed teardown needs a person, and that is a deliberate cost rather than
+  a gap.** The `--resume` rule above is the only path back for a workspace whose
+  mark was left by a dead owner, and it is a manual one by choice: nothing steals
+  a live mark and nothing reclaims a stale one on a timer. What has not been
+  exercised is the confirmed-gone answer that decides which message the refusal
+  prints — that answer is Wave 2's to make trustworthy, and this is the first
+  place anything destructive depends on it being right.
 
-Carried forward from earlier rounds and still true: herdr's own source is unread;
-there is no test strategy; the Group B/C/D picks have never been examined on their
-own merits by any lens; and whether `git worktree remove` leaves a herdr space
-behind when the directory goes *without* its panes being closed first is untested
-— the design closes panes first, so the tested path holds, but the out-of-order
-case does not.
+Carried forward from earlier rounds and still true: there is no test strategy;
+the Group B/C/D picks have never been examined on their own merits by any lens;
+and whether `git worktree remove` leaves a herdr space behind when the directory
+goes *without* its panes being closed first is untested — the design closes panes
+first, so the tested path holds, but the out-of-order case does not. No longer
+true and struck from this list: "herdr's own source is unread." It has been read
+where this design depends on it — `agent list`'s unconditional success, and
+`branch_to_path_slug`'s flat checkout layout — though only there.
 
 ---
 
