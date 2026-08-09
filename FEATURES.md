@@ -152,6 +152,9 @@ explicit name; and **no agent is closed while a descendant is still `working` or
 `--force` does NOT lift the last one, because it is a fact about agents the caller did not
 name; `--leave-children` does, and says what it costs. The other way out is to close the
 subtree from the leaves up.
+Closing an agent also closes the **`sb board`** pane opened beside it
+(`Broker._close_board`), so no empty tab is left behind — never a board another live
+agent is on, and a board already closed by hand is not an error.
 - Entry point: `cli.py:801-806` → `Broker.cleanup` (`broker.py:1554-1626`)
 - Depends on: the store's per-agent `cleanup` column, written at spawn
 - Status: working. The disposition is a **run-time** decision, not a role's property: no
@@ -296,7 +299,10 @@ whatever `status.py` this long-lived process imported at startup.
   time, which is a no-op when the board is already up and is what covers a restored
   agent. The board is the SMALL pane (`board.BOARD_SHARE`, a third of the width): what a
   human reads is the agent's own session. Note herdr's `--ratio` is the share kept by the
-  pane being split, so `open_beside` passes `1 - share`. It is deliberately absent from `--help` and from `defaults/protocol.md` — hidden
+  pane being split, so `open_beside` passes `1 - share`. The pane switchboard opened is a
+  pane switchboard takes away: `sb cleanup` closes it with the agent
+  (`Broker._close_board`), which is what keeps a session from filling with empty tabs now
+  that every agent has one. It is deliberately absent from `--help` and from `defaults/protocol.md` — hidden
   from agents on purpose, not orphaned. `tests/test_board.py` exercises it, and
   `scripts/05-mouse.py`/`scripts/06-board.py` are kept as the proof-of-concept record the
   maintained version was built from.

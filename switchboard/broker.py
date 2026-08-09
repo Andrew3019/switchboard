@@ -537,7 +537,9 @@ class Broker:
         The pane id is remembered so re-running `sb start` returns you to a
         workspace with one board rather than stacking a new one every time. If we
         cannot ask herdr what is open we do nothing: a missing board is a minor
-        annoyance, two boards is a mess someone has to close by hand.
+        annoyance, two boards is a mess someone has to close by hand. It is also what
+        `_close_board` closes when the agent is closed — a pane opened here is a pane
+        this file has to take away again.
 
         `cwd` is where the board's shell lands: the main checkout for `sb start`, and the
         workspace's own checkout for a workspace lead or a forked child. A board that
@@ -583,6 +585,72 @@ class Broker:
             # able to find, so it goes in the log rather than nowhere.
             store.log_event(self.db, kind="board_open_failed", agent=name,
                             error="herdr would not split the pane")
+
+    def _close_board(self, name: str) -> None:
+        """Close the board pane opened beside `name`, and forget it.
+
+        The other half of `_open_board`, and it has to exist for the same reason that
+        one records the pane at all: the board is a pane switchboard opened, so it is a
+        pane switchboard has to take away. Now that EVERY agent opens with one, a close
+        that took only the agent's own pane left an empty tab behind once per agent, and
+        a session slowly filled with them.
+
+        Only ever the pane recorded under this agent's own name, and never one another
+        live agent is reading: two rows pointing at one pane is not a shape anything
+        creates today, but a pane id outliving the pane that had it is, and closing a
+        board somebody is still using is not undoable by the person watching it vanish.
+
+        Tolerates a board that is already gone — closed by hand, crashed, never opened —
+        because all three are ordinary. The meta row is dropped either way: it is a
+        record of a pane we no longer own, and leaving it would make the next
+        `_open_board` for this name believe a board is up.
+
+        Never raises. A close that half-happened is worse than a board left behind.
+        """
+        key = f"board_pane:{name}"
+        try:
+            row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        except Exception:
+            return
+        pane = row["value"] if row else None
+        if not pane:
+            return
+        if not self._board_is_only_for(name, pane):
+            self._forget_board(key)
+            return
+        try:
+            self.h.close_pane(pane)
+        except Exception as e:
+            # Including a pane herdr no longer has: "already closed" and "would not
+            # close" arrive the same way, and neither is worth failing a cleanup over.
+            store.log_event(self.db, kind="board_close_failed", agent=name,
+                            pane=pane, error=str(e))
+        else:
+            store.log_event(self.db, kind="board_close", agent=name, pane=pane)
+        self._forget_board(key)
+
+    def _board_is_only_for(self, name: str, pane: str) -> bool:
+        """Is `pane` this agent's board alone, or is a still-live agent also on it?"""
+        try:
+            rows = self.db.execute(
+                "SELECT key FROM meta WHERE key LIKE 'board_pane:%' AND value=?",
+                (pane,)).fetchall()
+        except Exception:
+            return False        # cannot prove it is ours; leaving a pane is the safe way
+        others = [r["key"].split(":", 1)[1] for r in rows
+                  if r["key"] != f"board_pane:{name}"]
+        return not any(self._is_live(o) for o in others)
+
+    def _is_live(self, name: str) -> bool:
+        a = store.get_agent(self.db, name)
+        return bool(a and a["state"] in store.LIVE_STATES and not a["ended_at"])
+
+    def _forget_board(self, key: str) -> None:
+        try:
+            self.db.execute("DELETE FROM meta WHERE key=?", (key,))
+            self.db.commit()
+        except Exception:
+            pass
 
     def _focus(self, name: str, focus: bool) -> None:
         if not focus:
@@ -1773,6 +1841,10 @@ class Broker:
                 store.log_event(self.db, kind="cleanup_failed", agent=a["name"], error=str(e))
                 if not force:
                     continue
+            # The board went up beside this agent, so it comes down with it — otherwise
+            # closing an agent leaves an empty tab behind, once per agent. After the
+            # skip above, so a close we abandoned leaves the board with its live pane.
+            self._close_board(a["name"])
             store.set_state(self.db, a["name"], "done")
             # The pane is gone, so the row must stop claiming one: the "already gone"
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a
