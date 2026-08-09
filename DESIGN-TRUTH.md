@@ -59,6 +59,27 @@ whatever, to improve its decisions and actions.** — confirmed 2026-08-09
 **Top and workspace orchestrators must be clearly differentiated, and some mechanism
 other than the prompt must make that true as well.** — confirmed 2026-08-09
 
+**The top orchestrator is everything: its scope is the whole of its own tree.** It
+spawns worktrees and stuff — it is above that. — confirmed 2026-08-09
+
+**Top orchestrators never cross into another top orchestrator's tree.** Multiple top
+orchestrators, and anything they spawn, are completely separate. — confirmed 2026-08-09
+
+**Anything spawned by one orchestrator is completely separate from things spawned by
+another orchestrator.** Within one orchestrator, obviously, they are the same scope. —
+confirmed 2026-08-09
+
+**Across that boundary agents cannot `sb tell` or anything else — they are invisible to
+other groups.** The board is shared. — confirmed 2026-08-09
+
+**Agents the top orchestrator spawns directly can only talk to their parent, which is
+the top orchestrator, and it owns them — no other agent does.** They may or may not
+have separate worktrees, but by intent they should usually have separate worktrees. —
+confirmed 2026-08-09
+
+**A small task that a single agent can do end to end without interruption goes to a
+bare agent. Otherwise, an orchestrator.** — confirmed 2026-08-09
+
 **Every single view I see that is made by sb — `sb start`, orchestrators, agents, etc.
 — needs to be a split pane with `sb board`.** — confirmed 2026-08-09
 
