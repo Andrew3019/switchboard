@@ -38,6 +38,10 @@ bare agent = new worktree/space and agent, and that agent cannot spawn other age
 Top spawns an orchestrator = same thing. An orchestrator spawning anything = new tab in
 the same exact space. (This has not been the case.) — confirmed 2026-08-09
 
+**Only the top orchestrator ever creates a space.** A sub-orchestrator a lead spawns is
+a tab in the lead's space, and its whole subtree stays in that one space. — confirmed
+2026-08-09
+
 **When a workspace lead finishes.** It should clean up, push the PR if relevant,
 summarize, and `sb block`. (More to come as part of a general process CUJ.) — confirmed
 2026-08-09
