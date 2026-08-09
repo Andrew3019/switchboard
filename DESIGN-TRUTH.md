@@ -95,6 +95,13 @@ failed.** — confirmed 2026-08-09
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
 
+**Human-facing output is concise, skimmable and well formatted.** That covers anything
+an agent puts in front of Andrew, including what it writes before `sb block`. Prefer
+bullet points, lists, nested lists and diagrams — things that can be visually skimmed.
+Break into sections where it helps, but do not overdo the spacing. Say what you did,
+what the result is, then any questions, numbered, each with a recommended answer. —
+confirmed 2026-08-09
+
 **Agents should avoid blocking unless it is really needed** — a genuine, big,
 behaviour-changing design question; being blocked on running some command; being
 explicitly told to block; or going back and forth with the agent itself. — confirmed
@@ -173,7 +180,7 @@ worktree if everything else is closed too.** — confirmed 2026-08-09
 
 **`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
 
-**There is `tell` only, and nothing an agent does blocks.** `tell --needs-reply`
+**There is `tell` only. No agent ever waits on another agent.** `tell --needs-reply`
 inserts a static prompt saying you must reply to that agent at some point, since it is
 waiting for a reply. — confirmed 2026-08-09
 
@@ -230,7 +237,7 @@ decisions; this is the list of what no longer exists.*
 **The human inbox — 100% removed.** It is confusing, and Andrew cannot see the messages.
 — confirmed 2026-08-09
 
-**`sb ask`.** Nothing an agent does blocks. — confirmed 2026-08-09
+**`sb ask`.** No agent waits on another agent. — confirmed 2026-08-09
 
 **`sb wait`.** It has no reason to exist. — confirmed 2026-08-09
 
