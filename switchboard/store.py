@@ -171,6 +171,16 @@ CREATE TABLE agents (
                                       -- message it receives (`put_message`). The default is
                                       -- 0, which is also what rows predating the column
                                       -- read as: an ordinary agent, stalled-eligible.
+    absent_since  INTEGER,            -- epoch of the FIRST reading that found herdr no
+                                      -- longer listing this agent, cleared the moment it
+                                      -- is listed again. One absent reading is a hiccup;
+                                      -- staying absent is a death, and this is the only
+                                      -- place that memory can live between two short-lived
+                                      -- `sb` processes (see `status._record_gone`). NULL
+                                      -- means "present, as far as anyone has looked",
+                                      -- which is also what rows predating the column read
+                                      -- as — their absence simply starts being counted the
+                                      -- first time a reaping command looks at them.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );

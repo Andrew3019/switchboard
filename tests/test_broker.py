@@ -76,6 +76,18 @@ class FakeHerdrAPI:
     def close_pane(self, pane): self.closed.append(pane)
 
 
+def reap_gone(db, h):
+    """Get an absent agent recorded as `failed` — two readings, a grace window apart.
+
+    One `agent list` that comes back short only remembers the absence now; it takes a
+    second look past `GONE_CONFIRM_GRACE` to write the verdict (`status._confirmed_gone`).
+    Every test here that wants a reaped row wants both, and none of them care about the
+    debounce itself — that is `test_status`'s subject.
+    """
+    status.collect(db, h)
+    status.collect(db, h, now=store.now() + int(status.GONE_CONFIRM_GRACE) + 1)
+
+
 class BrokerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -653,7 +665,7 @@ class BrokerTest(unittest.TestCase):
                            pane_id="w1:p1", cleanup="close", session_id="s-kid")
         self.h.states_by_name = {}                     # herdr has never heard of it
         self.assertEqual(self.b.cleanup(me="orch"), [])          # still reads 'working'
-        status.collect(self.db, self.h)
+        reap_gone(self.db, self.h)
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
 
     def test_cleanup_closes_a_finished_agent_herdr_still_has(self):
@@ -669,14 +681,15 @@ class BrokerTest(unittest.TestCase):
 
     def test_cleanup_never_closes_a_reaped_agent_herdr_still_has(self):
         """The one that already destroyed two live agents. `failed` is not a report — it
-        is `status._record_gone`'s inference from one `agent list`, and a readout taken
-        during a slow spawn writes it about an agent that is very much alive. herdr still
-        listing the name refutes the row, so a bare sweep must leave it alone."""
+        is `status._record_gone`'s inference from herdr's silence, and a spawn slow enough
+        to outlast the confirmation grace has it written about an agent that is very much
+        alive. herdr still listing the name refutes the row, so a bare sweep must leave it
+        alone."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", cleanup="close", session_id="s-kid")
         self.h.states_by_name = {}                     # a readout mid-spawn sees nothing
-        status.collect(self.db, self.h)
+        reap_gone(self.db, self.h)
         self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
 
         self.h.states_by_name = {"kid": "working"}     # the spawn landed after all
@@ -692,7 +705,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", cleanup="close", session_id="s-kid")
         self.h.states_by_name = {}
-        status.collect(self.db, self.h)                # reaped while herdr was answering
+        reap_gone(self.db, self.h)                     # reaped while herdr was answering
 
         self.h.list_error = HerdrError("down", "no server")
         self.assertEqual(self.restart_sb().cleanup(me="orch"), [])

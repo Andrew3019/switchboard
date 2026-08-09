@@ -221,6 +221,12 @@ ask_poll = 2.0
 # missing reading is indistinguishable from a hiccup; a minute of them is a death.
 gone_grace = 60.0
 
+# How long a `working` row must stay CONTINUOUSLY absent from herdr before that absence is
+# recorded as a death (`status.GONE_CONFIRM_GRACE`). Same reasoning as `gone_grace` and the
+# same order of magnitude, but a separate question — one is `ask` giving up on a target,
+# the other is the store writing a verdict nothing else will ever revise.
+gone_confirm_grace = 60.0
+
 # `sb wait`, which is for humans and shell scripts.
 wait = 900
 
