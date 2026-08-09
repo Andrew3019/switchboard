@@ -33,6 +33,11 @@ space on main. This is a top orchestrator. — confirmed 2026-08-09
 **Anything that might need code changes.** It gets a workspace/worktree, and an
 orchestrator. That agent can be called `<name>-lead`. — confirmed 2026-08-09
 
+**Where each spawn lands.** `sb start` = new bare space + orchestrator. Top spawns a
+bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
+Top spawns an orchestrator = same thing. An orchestrator spawning anything = new tab in
+the same exact space. (This has not been the case.) — confirmed 2026-08-09
+
 **When a workspace lead finishes.** It should clean up, push the PR if relevant,
 summarize, and `sb block`. (More to come as part of a general process CUJ.) — confirmed
 2026-08-09
