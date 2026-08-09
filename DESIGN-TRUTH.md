@@ -27,13 +27,33 @@ Entry format: one short claim, plus the date it was confirmed.
 
 ## Critical user journeys (CUJs)
 
-*Empty until Andrew confirms entries.*
+**Starting work.** On some terminal in a repo, I call `sb start`. It makes a new bare
+space on main. This is a top orchestrator. — confirmed 2026-08-09
+
+**Anything that might need code changes.** It gets a workspace/worktree, and an
+orchestrator. That agent can be called `<name>-lead`. — confirmed 2026-08-09
 
 ---
 
 ## Product decisions
 
-*Empty until Andrew confirms entries.*
+**The top orchestrator's job is to orchestrate the creation of worktrees and new
+orchestrators and workspaces.** — confirmed 2026-08-09
+
+**The top orchestrator can also spawn well-directed bare agents, if the task is clear
+and unambiguous enough** — e.g. small changes. This skips extra layers that are not
+needed. — confirmed 2026-08-09
+
+**Like any orchestrator, it can spawn discovery or scout or research agents or
+whatever, to improve its decisions and actions.** — confirmed 2026-08-09
+
+**A workspace orchestrator's job is to orchestrate other agents and stuff.** — confirmed
+2026-08-09
+
+**The orchestrator prompt is mostly good already.** — confirmed 2026-08-09
+
+**Top and workspace orchestrators must be clearly differentiated, and some mechanism
+other than the prompt must make that true as well.** — confirmed 2026-08-09
 
 ---
 
@@ -46,5 +66,8 @@ out.*
 
 ## Open / undecided
 
-*Empty until Andrew confirms entries. Questions Andrew has named as open — listed here
-so they are visibly undecided rather than quietly assumed.*
+*Questions Andrew has named as open — listed here so they are visibly undecided rather
+than quietly assumed.*
+
+**What the mechanism is that makes the top/workspace orchestrator difference true,
+beyond the prompt saying so.** — raised 2026-08-09
