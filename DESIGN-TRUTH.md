@@ -112,6 +112,8 @@ confirmed 2026-08-09
 itself, and it should do this aggressively — probably literally every agent that is
 done. — confirmed 2026-08-09
 
+**A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
+
 **Andrew will never call these commands himself other than `sb start`.** — confirmed
 2026-08-09
 
