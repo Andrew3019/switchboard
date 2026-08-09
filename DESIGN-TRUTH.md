@@ -33,6 +33,10 @@ space on main. This is a top orchestrator. — confirmed 2026-08-09
 **Anything that might need code changes.** It gets a workspace/worktree, and an
 orchestrator. That agent can be called `<name>-lead`. — confirmed 2026-08-09
 
+**When a workspace lead finishes.** It should clean up, push the PR if relevant,
+summarize, and `sb block`. (More to come as part of a general process CUJ.) — confirmed
+2026-08-09
+
 ---
 
 ## Product decisions
@@ -70,4 +74,6 @@ out.*
 than quietly assumed.*
 
 **What the mechanism is that makes the top/workspace orchestrator difference true,
-beyond the prompt saying so.** — raised 2026-08-09
+beyond the prompt saying so.** We need to find it. It can be different prompts with
+conditional routing, or a reminder, preset, etc. Not to be found now. — raised
+2026-08-09
