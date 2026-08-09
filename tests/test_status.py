@@ -149,6 +149,56 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr([alive("w1", "unknown")]))
         self.assertFalse(self.by_name(snap)["w1"].stalled)
 
+    # -- idle because nobody has asked for anything -----------------------
+    #
+    # A lead or a top-level orchestrator is spawned before there is work for it, and sits
+    # idle on purpose until somebody speaks. STALLED means "this needed to be doing
+    # something and is not", which is false there, and a warning that is routinely false
+    # is one the reader learns to skip past on the day it is true.
+
+    def test_an_agent_nobody_has_asked_for_anything_is_not_stalled(self):
+        store.create_agent(self.db, name="lead", role="lead", awaiting_task=True)
+        snap = status.collect(self.db, FakeHerdr([alive("lead", "idle")]))
+        a = self.by_name(snap)["lead"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.state, "working")      # only the label changes; the row is as it was
+
+    def test_idling_for_a_week_never_makes_it_stalled(self):
+        """It is not a grace period. Nothing has been asked of this agent, so no amount of
+        elapsed time turns its silence into drift."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           awaiting_task=True)
+        later = store.now() + 7 * 24 * 3600
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")]),
+                                        now=later))["lead"]
+        self.assertFalse(a.stalled)
+
+    def test_the_same_agent_is_stalled_once_it_has_been_given_work(self):
+        """The whole point of keeping the flag: told something and then quiet IS drift."""
+        store.create_agent(self.db, name="lead", role="lead", awaiting_task=True)
+        store.put_message(self.db, from_agent="human", to_agent="lead",
+                          kind="tell", body="do the thing")
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")])))["lead"]
+        self.assertTrue(a.stalled)
+
+    def test_an_ordinary_agent_is_stalled_from_the_start(self):
+        """A delegated worker is given its work AT spawn, so it is stalled-eligible with
+        no message ever arriving for it. The default has to be this way round: the failure
+        that costs something is a stuck agent nobody is warned about."""
+        store.create_agent(self.db, name="w1", role="worker", task="fix the parser")
+        self.assertTrue(self.by_name(
+            status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"].stalled)
+
+    def test_a_store_without_the_column_still_reads(self):
+        """The board and the collector hold a READ-ONLY connection and cannot migrate, so
+        they meet a store an older `sb` last stamped. Missing reads as the label the row
+        already had, rather than raising on every tick until a writer runs."""
+        store.create_agent(self.db, name="w1", role="worker")
+        self.db.execute("ALTER TABLE agents DROP COLUMN awaiting_task")
+        self.db.commit()
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertTrue(a.stalled)
+
     def test_working_but_absent_from_herdr_is_gone(self):
         # `session_id` is what says this one got past its spawn: a session-less row this
         # young is a claim, and claims are held off (see the spawn-grace tests below).

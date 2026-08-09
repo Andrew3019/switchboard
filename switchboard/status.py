@@ -15,6 +15,13 @@ whole point of this file. We deliberately do NOT repair it: marking it done here
 fabricate a summary its parent never received, and the parent is still waiting on that
 message (see broker.done). Surfacing beats guessing (C9).
 
+One exception, and it is about what the label MEANS rather than what to do about it: an
+agent that has never been given anything beyond its spawn placeholder — a workspace lead,
+or a top-level orchestrator from a bare `sb start` — is idle because nobody has asked it
+for anything. STALLED there is false, and a warning that is routinely false is a warning
+nobody reads. So the flag is not computed for those rows at all until the first thing
+arrives for them (`agents.awaiting_task`); nothing about what gets swept changes.
+
 Two other joins fall out of the same table:
 
     store: working        herdr: not listed  →  GONE     (pane closed under it)
@@ -387,6 +394,18 @@ def collect(
         # an agent herdr had. Should `agent start` ever start returning a session id, this
         # becomes a live hole and the condition has to go.
         spawning = row["session_id"] is None and (now - row["created_at"]) < SPAWN_GRACE
+        # An agent nobody has asked for anything yet is idle for the only reason it could
+        # be, and calling that STALLED says something false about it — a workspace lead or
+        # a top-level orchestrator waiting for its first instruction has finished exactly
+        # the work it was given. It is the label that changes here and nothing else: the
+        # row is still `working`, still swept by the same rules, still shown. See
+        # `agents.awaiting_task`, which `broker` sets at spawn and the first message clears.
+        #
+        # Read defensively because the readers that reach this first — the board, the
+        # collector — hold a READ-ONLY connection and cannot migrate the store (see
+        # `store.connect`). Missing the column reads as 0, which is the label the row
+        # already had; the alternative is every tick raising until a writer runs.
+        awaiting = "awaiting_task" in row.keys() and bool(row["awaiting_task"])
         last = max(row["created_at"], activity.get(name, 0))
         agents.append(AgentStatus(
             name=name,
@@ -398,7 +417,7 @@ def collect(
             alive=alive,
             # The join this file exists for. Both halves must be known: an unreachable
             # herdr proves nothing, and neither does herdr's `unknown`.
-            stalled=bool(running and alive and hstate in IDLE_LIKE),
+            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting),
             gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),

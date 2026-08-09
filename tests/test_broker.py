@@ -1246,6 +1246,69 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(store.unread_for(self.db, MAIN_NAME), [])
         self.assertEqual(store.get_agent(self.db, second)["task"], "merge PR 41")
 
+    # -- "nobody has asked this one for anything yet" ---------------------
+    #
+    # A bare `sb start` mints an orchestrator whose only instruction is to wait, and every
+    # bare start does it. The row says so, so the readouts can stop calling it STALLED.
+
+    def test_a_bare_start_records_that_nothing_has_been_asked_of_it(self):
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        name = self.b.start()
+        self.assertEqual(store.get_agent(self.db, name)["awaiting_task"], 1)
+
+    def test_a_start_with_a_task_records_nothing_of_the_kind(self):
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        name = self.b.start(task="merge PR 41")
+        self.assertEqual(store.get_agent(self.db, name)["awaiting_task"], 0)
+
+    def test_the_first_message_clears_it(self):
+        """The human types the real instruction into a waiting orchestrator: from that
+        moment it is an ordinary agent, and going quiet is drift again."""
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        name = self.b.start()
+        self.b.tell([name], "merge PR 41", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, name)["awaiting_task"], 0)
+
+    def test_a_delegated_worker_is_never_marked_as_waiting(self):
+        """`delegate` always carries real work, so the default must be the ordinary one —
+        a stuck worker nobody is warned about is what this flag must not be able to cause."""
+        self.b.delegate("fix the parser", role="worker", name="w9", me="orch")
+        self.assertEqual(store.get_agent(self.db, "w9")["awaiting_task"], 0)
+
+    def test_rewording_the_placeholder_prompt_does_not_strand_the_flag(self):
+        """Nothing compares the placeholder's TEXT — the flag comes from whether a task
+        was passed at all. A copy of the string, or a comparison against it, would go
+        stale the moment a repo reworded the prompt, and go stale silently: the
+        orchestrator would read STALLED for the rest of its life and nothing would say why.
+        """
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "prompts.toml").write_text(
+            '[spawn]\nstart_task = "Hold on, I am still typing."\n')
+        b = Broker(self.db, self.h, repo=self.repo)
+        b.focus = lambda *a, **k: None
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        name = b.start()
+        row = store.get_agent(self.db, name)
+        self.assertEqual(row["task"], "Hold on, I am still typing.")   # the repo's words
+        self.assertEqual(row["awaiting_task"], 1)                      # and the flag holds
+
+    def test_a_waiting_orchestrator_is_not_stalled_but_a_told_one_is(self):
+        """End to end, through the readout that was getting it wrong."""
+        from switchboard import status
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        name = self.b.start()
+        idle = FakeHerdrAPI()
+        idle.states_by_name = {name: "idle"}
+        by_name = lambda: {a.name: a for a in status.collect(self.db, idle).agents}
+        self.assertFalse(by_name()[name].stalled)
+        self.b.tell([name], "merge PR 41", me=HUMAN)
+        self.assertTrue(by_name()[name].stalled)
+
     def test_explicit_name_creates_a_distinct_orchestrator(self):
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []

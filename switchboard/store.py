@@ -163,6 +163,14 @@ CREATE TABLE agents (
     pane_id       TEXT,               -- NOT stable across pane move; debugging only
     seq           INTEGER NOT NULL DEFAULT 0,  -- our monotonic --seq for herdr writes
     cleanup       TEXT NOT NULL DEFAULT 'close',
+    awaiting_task INTEGER NOT NULL DEFAULT 0,   -- 1 = spawned with a placeholder task and
+                                      -- given nothing since. Such an agent is idle because
+                                      -- nobody has asked it for anything, which is not the
+                                      -- same fact as STALLED, so the join in `status` does
+                                      -- not compute that flag for it. Cleared by the first
+                                      -- message it receives (`put_message`). The default is
+                                      -- 0, which is also what rows predating the column
+                                      -- read as: an ordinary agent, stalled-eligible.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );
@@ -696,16 +704,16 @@ def now() -> int:
 
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
        (name, parent, role, task, state, session_id, cwd, workspace, branch,
-        workspace_id, terminal_id, pane_id, cleanup, created_at)
-       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?)"""
+        workspace_id, terminal_id, pane_id, cleanup, awaiting_task, created_at)
+       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
     name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
-    terminal_id, pane_id, cleanup,
+    terminal_id, pane_id, cleanup, awaiting_task,
 ) -> tuple:
     return (name, parent, role, task, session_id, cwd, workspace, branch, workspace_id,
-            terminal_id, pane_id, cleanup, now())
+            terminal_id, pane_id, cleanup, int(awaiting_task), now())
 
 
 def create_agent(
@@ -723,6 +731,7 @@ def create_agent(
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
     cleanup: str = "close",
+    awaiting_task: bool = False,
 ) -> sqlite3.Row:
     """Insert an agent row. Raises `sqlite3.IntegrityError` if the name is taken.
 
@@ -732,7 +741,7 @@ def create_agent(
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, cleanup),
+                      workspace_id, terminal_id, pane_id, cleanup, awaiting_task),
     )
     db.commit()
     return get_agent(db, name)
@@ -753,6 +762,7 @@ def claim_agent(
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
     cleanup: str = "close",
+    awaiting_task: bool = False,
 ) -> bool:
     """Take the name, or find out somebody else already has it. -> did we get it?
 
@@ -768,7 +778,7 @@ def claim_agent(
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, cleanup),
+                      workspace_id, terminal_id, pane_id, cleanup, awaiting_task),
     )
     db.commit()
     return cur.rowcount == 1
@@ -951,6 +961,11 @@ def put_message(
            VALUES (?,?,?,?,?,?)""",
         (from_agent, to_agent, kind, body, reply_to, now()),
     )
+    # Somebody has now given this agent something, which is the whole of what
+    # `agents.awaiting_task` records. Cleared HERE rather than in `Broker.tell`, because
+    # `ask` and `interrupt` write their rows themselves and would each have to remember;
+    # a bit three call sites clear by hand is a bit that goes stale at the fourth.
+    db.execute("UPDATE agents SET awaiting_task=0 WHERE name=?", (to_agent,))
     db.commit()
     return int(cur.lastrowid)
 

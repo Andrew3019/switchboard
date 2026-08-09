@@ -323,6 +323,22 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(store.agent_branch(d2, "lead"))      # unguessed, not guessed
         d2.close()
 
+    def test_rows_that_predate_awaiting_task_read_as_ordinary_agents(self):
+        """The column arrives by ALTER, and its default is the direction that costs
+        nothing: a row written before it existed is stalled-eligible exactly as it was.
+        Defaulting the other way would silence the warning for every agent on the
+        machine, which is the one failure this flag must not be able to cause."""
+        p = Path(self.tmp.name) / "preflag.db"
+        d = store.connect(path=p)
+        store.create_agent(d, name="w", role="worker")
+        d.execute("ALTER TABLE agents DROP COLUMN awaiting_task")
+        d.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', 'old')")
+        d.commit(); d.close()
+
+        d2 = store.connect(path=p)
+        self.assertEqual(store.get_agent(d2, "w")["awaiting_task"], 0)
+        d2.close()
+
     def test_an_unknown_column_does_not_force_a_reset(self):
         """A newer `sb`, run from another checkout against the same store, adds a column
         this code has never heard of. Older code must keep working: two checkouts share

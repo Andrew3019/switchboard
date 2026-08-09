@@ -330,6 +330,44 @@ class WorkspaceTest(unittest.TestCase):
         self.b.workspace_new("api", task="port the client", me=HUMAN)
         self.assertIn(("api-lead", "port the client"), self.h.prompts)
 
+    def test_a_lead_opened_with_no_task_records_that_nobody_has_asked_it_anything(self):
+        """It is waiting on purpose, and the readouts must not call that STALLED."""
+        self.b.workspace_new("api", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, "api-lead")["awaiting_task"], 1)
+
+    def test_a_lead_opened_with_a_task_is_an_ordinary_agent(self):
+        self.b.workspace_new("api", task="port the client", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, "api-lead")["awaiting_task"], 0)
+
+    def test_the_first_task_to_reach_a_waiting_lead_clears_it(self):
+        self.b.workspace_new("api", me=HUMAN)
+        self.b.workspace_new("api", task="port the client", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, "api-lead")["awaiting_task"], 0)
+
+    def test_a_waiting_lead_is_not_stalled_and_a_working_one_still_is(self):
+        """End to end, through the readout that was getting it wrong. The negative half
+        is the one that matters: this must not become a way to hide a stuck lead."""
+        from switchboard import status
+        self.b.workspace_new("api", me=HUMAN)
+        self.h.live["api-lead"] = Agent(name="api-lead", pane_id="w1:p1", state="idle")
+        by_name = lambda: {a.name: a for a in status.collect(self.db, self.h).agents}
+        self.assertFalse(by_name()["api-lead"].stalled)
+        self.b.workspace_new("api", task="port the client", me=HUMAN)
+        self.assertTrue(by_name()["api-lead"].stalled)
+
+    def test_rewording_the_placeholder_prompt_does_not_strand_the_flag(self):
+        """Nothing compares the placeholder's TEXT — the flag comes from whether a task
+        was passed at all. A copy of the string, or a comparison against it, would go
+        stale the moment a repo reworded the prompt, and silently: the lead would read
+        STALLED for the rest of its life with nothing to say why."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "prompts.toml").write_text(
+            '[spawn]\nworkspace_task = "Sit tight."\n')
+        Broker(self.db, self.h, repo=self.repo).workspace_new("api", me=HUMAN)
+        row = store.get_agent(self.db, "api-lead")
+        self.assertEqual(row["task"], "Sit tight.")        # the repo's words reached it
+        self.assertEqual(row["awaiting_task"], 1)          # and the flag still holds
+
     def test_the_opener_becomes_the_parent(self):
         store.create_agent(self.db, name="main", role="main")
         self.b.workspace_new("api", me="main")

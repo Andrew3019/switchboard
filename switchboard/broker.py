@@ -253,6 +253,23 @@ class Broker:
         """
         return config.prompt(key, repo=self.repo, **fields)
 
+    def _first_task(self, key: str, task: Optional[str]) -> tuple[str, bool]:
+        """What a new agent is told to do, and whether that is anything at all.
+
+        Some agents are spawned before anyone has work for them — a workspace lead, a
+        top-level orchestrator from a bare `sb start` — and are handed a placeholder that
+        says to wait. The second half of the answer is the bit `agents.awaiting_task`
+        holds, and `status` reads it to keep those rows out of STALLED.
+
+        Derived from whether a caller supplied a task at all, never by comparing the text
+        back against the placeholder. The placeholder lives in `prompts.toml` and a repo
+        may override it; a copy of the string here, or a comparison against it, would go
+        stale the moment a prompt was edited — and go stale SILENTLY, which is the
+        failure worth designing out: the agent would read STALLED for the rest of its
+        life with nothing to say why.
+        """
+        return (task, False) if task else (self._say(key), True)
+
     # -- identity --------------------------------------------------------
 
     def whoami(self) -> str:
@@ -481,10 +498,11 @@ class Broker:
             store.log_event(self.db, kind="workspace_create_failed", agent=name,
                             error=str(e))
 
-        self.delegate(task or self._say("spawn.start_task"), role=MAIN, name=name,
+        first, awaiting = self._first_task("spawn.start_task", task)
+        self.delegate(first, role=MAIN, name=name,
                       cleanup="keep", me=HUMAN, pane=pane,
                       workspace=name, workspace_id=wsid, cwd=str(self.repo),
-                      board=board)
+                      board=board, awaiting_task=awaiting)
         store.log_event(self.db, kind="start", agent=name, created=True, workspace=wsid)
         if board:
             # `delegate` has opened it already; this is the second, idempotent ask that
@@ -1005,12 +1023,14 @@ class Broker:
             # `wsid` comes back corrected: if herdr has forgotten this workspace, the tab
             # call says so and the lead is recorded with no id rather than the dead one.
             pane, wsid = self._tab_for(wsid, ws["path"] or self.repo)
+        first, awaiting = self._first_task("spawn.workspace_task", task)
         try:
-            self.delegate(task or self._say("spawn.workspace_task"), role=role,
+            self.delegate(first, role=role,
                           name=lead, cleanup="keep", me=me,
                           workspace=ws["workspace"], branch=ws.get("branch"),
                           workspace_id=wsid,
-                          cwd=ws["path"] or None, pane=pane, board=board)
+                          cwd=ws["path"] or None, pane=pane, board=board,
+                          awaiting_task=awaiting)
         except (AgentNameTaken, HerdrError) as e:
             # Two openers, one instant: the other won the name. Same name means the same
             # lead, so join theirs instead of erroring or suffixing — and take the empty
@@ -1389,6 +1409,7 @@ class Broker:
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
         board: bool = True,
+        awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
     ) -> str:
         me = me or self.whoami()
         r = roles_mod.get(self.roles, role)
@@ -1480,7 +1501,7 @@ class Broker:
             # which is exactly why only a confirmed one goes down. A guess written here
             # is indistinguishable from a fact by every reader after it.
             workspace_id=(wsid if confirmed else None) or None,
-            pane_id=pane, cleanup=cleanup or r.cleanup,
+            pane_id=pane, cleanup=cleanup or r.cleanup, awaiting_task=awaiting_task,
         ):
             raise AgentNameTaken(name)
 
