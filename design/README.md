@@ -9,6 +9,9 @@ own internals.
 |---|---|
 | `PLUGIN-REDESIGN.md` | The design of record for the preset/plugin split. Shipped in `06232d9`. |
 | `verification.md` | The read-only fact-check of that document against the codebase. |
+| `fix-options.md` | The design of record for workspace teardown — what `sb workspace close` is allowed to destroy, and on what evidence. |
+| `probe-findings.md` | The measured answers behind that design's two open questions: what the macOS process check can see, and what herdr forgets across a restart. |
+| `close-review.md` | The adversarial review of the destructive command as built, and the fixes it demanded. |
 | `history/` | Superseded inputs to the above. Historical — do not treat as current. |
 
 ## Reading `PLUGIN-REDESIGN.md`
