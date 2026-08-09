@@ -59,6 +59,15 @@ whatever, to improve its decisions and actions.** — confirmed 2026-08-09
 **Top and workspace orchestrators must be clearly differentiated, and some mechanism
 other than the prompt must make that true as well.** — confirmed 2026-08-09
 
+**Every single view I see that is made by sb — `sb start`, orchestrators, agents, etc.
+— needs to be a split pane with `sb board`.** — confirmed 2026-08-09
+
+**`sb board` is navigation: I can click on an agent and it jumps to that pane.** It is
+like a fake UI I can use to move around quickly. — confirmed 2026-08-09
+
+**`sb start` should focus the pane. Anything else should never focus on spawn.** —
+confirmed 2026-08-09
+
 ---
 
 ## Explicitly rejected
