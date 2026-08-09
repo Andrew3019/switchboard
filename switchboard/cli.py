@@ -266,12 +266,21 @@ def build_parser() -> argparse.ArgumentParser:
                     "checkout, a workspace that escaped the table.")
     wc = wsub.add_parser(
         "close", parents=[common],
-        help="close a workspace whose checkout is already gone",
-        description="Deregisters the one named worktree (never a repo-global prune) and "
-                    "deletes its branch with the safe delete that refuses an unmerged "
-                    "one. Only for a checkout that is ALREADY GONE — nothing there can be "
-                    "lost. A checkout that still exists is removed by hand.")
+        help="retire a workspace, and remove its checkout if it still has one",
+        description="Checks what is still in the checkout — our own rows AND every "
+                    "process actually sitting in the directory — closes the workspace's "
+                    "panes, checks again, then deregisters the one named worktree (never "
+                    "a repo-global prune) and deletes its branch with the safe delete "
+                    "that refuses an unmerged one. A workspace with no checkout of its "
+                    "own is simply retired: there is nothing there to lose.")
     wc.add_argument("name")
+    wc.add_argument("--yes", dest="confirm", action="store_true",
+                    help="delete the ignored files the refusal listed along with the "
+                         "checkout (git does not track them and will not miss them)")
+    wc.add_argument("--resume", action="store_true",
+                    help="take over a retiring mark left behind by a teardown that died, "
+                         "and run the whole command again — only ever for an owner "
+                         "confirmed gone")
 
     r = cmd("restore", help="bring a closed agent back with its context")
     r.add_argument("name")
@@ -867,13 +876,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "workspace" and args.wcmd == "close":
-        r = b.workspace_close(args.name, me=me)
+        r = b.workspace_close(args.name, me=me, resume=args.resume, confirm=args.confirm)
         if r["already"]:
             _emit(args, f"{r['workspace']} was retired already — nothing left to do", r)
             return 0
-        kept = "" if r["branch_deleted"] else \
-            f"; branch {r['branch']} kept (git will not delete an unmerged branch)"
-        _emit(args, f"closed {r['workspace']}: worktree {r['worktree']}{kept}", r)
+        _emit(args, _workspace_closed(r), r)
         return 0
 
     if cmd == "workspace":
@@ -915,6 +922,28 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     return 2
+
+
+def _workspace_closed(r: dict) -> str:
+    """What `sb workspace close` actually did, named rather than implied.
+
+    Which of the three routes the workspace took is the first thing to say, because "bare"
+    doing nothing to a directory and "worktree" deleting one are the same word otherwise.
+    A branch left behind is said out loud with the reason: it stays forever, and a person
+    who does not know that is a person who thinks the cleanup finished.
+    """
+    lines = []
+    if r["closed"]:
+        lines.append(f"closed {len(r['closed'])} pane(s): {', '.join(r['closed'])}")
+    if r["kind"] == "bare":
+        lines.append(f"retired {r['workspace']} — no checkout of its own, so nothing was "
+                     f"deleted")
+    else:
+        lines.append(f"retired {r['workspace']}: worktree {r['worktree']}")
+        if not r["branch_deleted"]:
+            lines.append(f"  branch {r['branch']} kept — git will not delete an unmerged "
+                         f"branch, and it stays until somebody decides otherwise")
+    return "\n".join(lines)
 
 
 def _workspace_listing(d: dict) -> str:

@@ -6,11 +6,12 @@ side of that cross-reference. Its load-bearing property is the union: three sour
 knowing something the other two cannot, and a listing built on any one of them is a
 listing that lies. One test per source.
 
-The close here is only the already-gone path — a checkout that is no longer there, which
-is the cheapest safe win and needs none of a destructive command's machinery. What it does
-need is that it names the one path (a bare `git worktree prune` is repo-global and takes
-every prunable checkout in the repository with it) and that `git branch -d` is left to
-refuse an unmerged branch on its own.
+The close here is the already-gone path — a checkout that is no longer there, which is the
+cheapest safe win and needs none of a destructive command's machinery. What it does need is
+that it names the one path (a bare `git worktree prune` is repo-global and takes every
+prunable checkout in the repository with it) and that `git branch -d` is left to refuse an
+unmerged branch on its own. The other two routes a close can take — a checkout that still
+exists, and a bare workspace — are tested in tests/test_workspace_close.py.
 
 Real git here, not a fake: what git actually reports about worktrees and merged branches
 is most of what is being tested.
@@ -240,13 +241,13 @@ class AlreadyGoneTest(Harness, unittest.TestCase):
         self.assertNotIn(gone, self.registered())
         self.assertTrue(store.get_workspace(self.db, "own-work")["retired_at"])
 
-    def test_a_checkout_that_is_still_there_is_refused(self):
+    def test_a_checkout_that_is_still_there_takes_the_destructive_route_instead(self):
+        """Which is a route and not this one: everything that guards a directory with
+        something in it lives there. See tests/test_workspace_close.py."""
         path = self.worktree("api")
         store.record_workspace(self.db, "api", path)
-        with self.assertRaises(ValueError) as e:
-            self.b.workspace_close("api", me=HUMAN)
-        self.assertIn("still there", str(e.exception))
-        self.assertIn(path, self.registered())
+        self.assertEqual(self.b.workspace_close("api", me=HUMAN)["kind"], "worktree")
+        self.assertNotIn(path, self.registered())
 
     def test_an_unintelligible_path_is_refused_because_unknown_is_not_empty(self):
         store.record_workspace(self.db, "odd", str(self.root / "not-a-worktree"))
@@ -255,11 +256,13 @@ class AlreadyGoneTest(Harness, unittest.TestCase):
             self.b.workspace_close("odd", me=HUMAN)
         self.assertIn("cannot tell", str(e.exception))
 
-    def test_a_bare_workspace_is_refused_by_name_rather_than_torn_down(self):
+    def test_a_bare_workspace_takes_its_own_route_and_loses_nothing(self):
+        """No checkout of its own, so nothing to deregister and nothing to delete —
+        retiring is the whole operation. See tests/test_workspace_close.py."""
         store.record_workspace(self.db, "main", None)
-        with self.assertRaises(ValueError) as e:
-            self.b.workspace_close("main", me=HUMAN)
-        self.assertIn("no checkout of its own", str(e.exception))
+        r = self.b.workspace_close("main", me=HUMAN)
+        self.assertEqual(r["kind"], "bare")
+        self.assertTrue(store.get_workspace(self.db, "main")["retired_at"])
 
     def test_an_unfinished_row_under_the_path_refuses(self):
         gone = self.gone("stale")

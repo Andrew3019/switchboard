@@ -227,6 +227,38 @@ def _column(row, name: str) -> str:
         return ""
 
 
+def _names(found: Sequence[str]) -> str:
+    """A list of agent names as a phrase, with the verb that goes with it."""
+    return f"{', '.join(sorted(found))} {'is' if len(found) == 1 else 'are'}"
+
+
+def _same_dir(a: str, b: str) -> bool:
+    """One directory, compared as resolved path components rather than as strings.
+
+    Two paths we cannot resolve are treated as the SAME, because the only caller is asking
+    "is this the one directory I must never touch" and the answer to that question is never
+    allowed to be a guess.
+    """
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:                            # unreadable, or a symlink loop
+        return True
+
+
+def _ancestry(pid: int, parents: dict) -> set:
+    """A pid, its parent, its parent's parent, up to the top of the tree.
+
+    Cycle-safe rather than trusting the process table to be a tree: this decides which
+    processes do not count against a destructive gate, and a loop in it would hang the
+    command instead of refusing.
+    """
+    chain: set = set()
+    while pid and pid not in chain:
+        chain.add(pid)
+        pid = parents.get(pid, 0)
+    return chain
+
+
 class Broker:
     def __init__(self, db, herdr: Herdr, repo: Optional[Path] = None):
         self.db = db
@@ -1058,30 +1090,27 @@ class Broker:
         return {"dirty": dirty, "mine": mine, "unknown": len(unknown),
                 "sample": unknown[:3]}
 
-    def workspace_close(self, name: str, *, me: Optional[str] = None) -> dict:
-        """Close a workspace whose checkout is already gone: deregister it, drop its branch.
+    def workspace_close(self, name: str, *, me: Optional[str] = None,
+                        resume: bool = False, confirm: bool = False) -> dict:
+        """End a workspace's life, and destroy its checkout when it has one.
 
-        The cheapest real win available, and the safest case rather than an unknown one:
-        nothing is at that path, so nothing there can be lost. That is what the second of
-        `checkout_verdict`'s three answers is for — *absent* is a resolved answer, and this
-        is the path it resolves to. A boolean "is the recorded path still good" would have
-        made this refuse on precisely the workspaces it was written for.
+        The design goal is not "delete the workspace once the records say it is empty" but
+        "make sure a person has seen everything that is about to stop existing", and how
+        much guarding that takes depends entirely on how much there is to lose. Three
+        routes, chosen by what the recorded path resolves to rather than by a flag:
 
-        It needs none of the machinery a live checkout needs: no cleanliness check, no
-        inventory of what would be destroyed, no confirmation. It keeps the two rules that
-        do apply. The gate is that no unfinished agent row sits under the path — compared
-        component-wise, never as a string prefix, because sibling checkout names nest as
-        strings here. And the deregistration NAMES the one path: `git worktree prune` is
-        repo-global, and one bare prune deregisters every prunable checkout in the
-        repository, including ones other agents are relying on.
+        - **bare** (`_close_bare`) — no checkout of its own, so nothing to destroy;
+        - **already gone** (`_close_gone`) — the checkout is not there any more, so nothing
+          there can be lost;
+        - **a checkout that is still there** (`_close_checkout`) — the destructive one,
+          and the only one that carries the gate, the inventory and the ordering.
 
-        The branch goes with `git branch -d`, which refuses an unmerged one on its own and
-        is never `-D`: an unmerged branch simply stays, which is a far cheaper failure than
-        losing commits.
+        The first two are separate paths rather than the third with steps skipped, and
+        that is not tidiness — see each of them for the bug the shared version had.
 
-        Every other verdict refuses. A checkout that is still there is the destructive
-        command's business and it is not built yet; anything unintelligible is where
-        "unknown is not empty" keeps its full force.
+        An unresolvable path is a refusal and never a fallback: there is no `or self.repo`
+        anywhere in this command, because that fallback aims a removal at the human's own
+        clone whenever a path is unrecorded.
         """
         me = me or self.whoami()
         gap = store.workspace_fill_gap(self.db)
@@ -1094,67 +1123,481 @@ class Broker:
                 f"close — `sb workspace list` shows every one this repo knows about"
             )
         if row["retired_at"] and not row["checkout"]:
-            return {"workspace": name, "checkout": None, "already": True,
-                    "worktree": "gone", "branch": None, "branch_deleted": False}
-        checkout = row["checkout"]
-        verdict = "bare" if checkout is None else store.checkout_verdict(
-            checkout, cwd=self.repo)
-        if verdict != store.CHECKOUT_ABSENT:
-            raise ValueError(self._close_refusal(name, checkout, verdict))
+            return self._closed(name, None, already=True, kind="retired",
+                                worktree="gone")
+        if row["retiring"]:
+            self._take_over(name, row, me=me, resume=resume)
 
-        busy = [r["name"] for r in self._unfinished_under(checkout)]
+        checkout = row["checkout"]
+        if checkout is None:
+            return self._close_bare(name, me=me)
+        verdict = store.checkout_verdict(checkout, cwd=self.repo)
+        if verdict == store.CHECKOUT_ABSENT:
+            return self._close_gone(name, checkout, me=me)
+        if verdict != store.CHECKOUT_OK:
+            raise ValueError(
+                f"cannot tell what {name!r}'s recorded checkout is: {checkout} is not a "
+                f"worktree of this repo. Unknown is not empty, so nothing is deregistered "
+                f"and nothing is deleted."
+            )
+        return self._close_checkout(name, checkout, me=me, confirm=confirm)
+
+    # -- the three routes -------------------------------------------------------------
+
+    def _close_bare(self, name: str, *, me: str) -> dict:
+        """Retire a workspace with no checkout of its own: its own rows, its own panes.
+
+        A separate path, and sharing the general one's gate was a real bug rather than an
+        untidiness. That gate is scoped to a checkout path, and a bare workspace's path is
+        the primary clone — where the human sits, where every other bare orchestrator
+        sits, and where the agent running the command usually sits. Shared, it would
+        refuse `main-2` because `main-3` is live in a directory nobody is deleting, and
+        refuse forever: there is essentially always another orchestrator, namely the one
+        that typed the command. A guard protecting a directory from deletion, applied to
+        an operation that deletes nothing, refuses the only operation available.
+
+        So the gate here is the one the first draft had, scoped to the case it was right
+        for: this workspace's own agent rows, finished. Nothing else. No path gate, no
+        live observation, no ignored-content inventory, no confirmation, and no git at
+        all — run in the primary checkout that inventory would print the human's own
+        `.claude/` as material about to be destroyed, for an operation that could not
+        destroy it if it tried.
+
+        Retiring is the entire operation, and it is still worth having: "this orchestrator
+        is finished" is a fact worth recording whether or not a directory goes with it.
+        """
+        busy = [r["name"] for r in self._unfinished_in(name, exclude=me)]
         if busy:
             raise ValueError(
-                f"cannot close {name!r}: {', '.join(sorted(busy))} "
-                f"{'is' if len(busy) == 1 else 'are'} still recorded as working under "
-                f"{checkout} — close them first (`sb cleanup <name>`)"
+                f"cannot close {name!r}: {_names(busy)} still working in it — close "
+                f"{'it' if len(busy) == 1 else 'them'} first (`sb cleanup <name>`)"
             )
-        if not store.claim_retiring(self.db, name, me):
-            held = store.get_workspace(self.db, name)
-            since = (f"{fmt_age(store.now() - held['retiring_at'])} ago"
-                     if held["retiring_at"] else "at some point")
-            raise ValueError(
-                f"{name!r} is already being closed by {held['retiring']}, claimed {since} "
-                f"— one teardown at a time"
-            )
+        self._claim(name, me)
+        try:
+            closed = self._stop_panes(name, me=me)
+        except ValueError:
+            store.release_retiring(self.db, name, me)
+            raise
+        store.retire_workspace(self.db, name)
+        store.log_event(self.db, kind="workspace_retired", workspace=name, bare=True,
+                        closed=",".join(closed) or None)
+        return self._closed(name, None, kind="bare", worktree="none", closed=closed)
 
+    def _close_gone(self, name: str, checkout: str, *, me: str) -> dict:
+        """Close a workspace whose checkout is already gone: deregister it, drop its branch.
+
+        The cheapest real win available, and the safest case rather than an unknown one:
+        nothing is at that path, so nothing there can be lost. That is what the second of
+        `checkout_verdict`'s three answers is for — *absent* is a resolved answer, and this
+        is the path it resolves to. A boolean "is the recorded path still good" would have
+        made this refuse on precisely the workspaces it was written for.
+
+        It needs none of the machinery a live checkout needs: no cleanliness check, no
+        inventory of what would be destroyed, no confirmation, and no live observation
+        either — a directory that is not there has nothing in it. It keeps the two rules
+        that do apply. The gate is that no unfinished agent row sits under the path —
+        compared component-wise, never as a string prefix, because sibling checkout names
+        nest as strings here. And the deregistration NAMES the one path: `git worktree
+        prune` is repo-global, and one bare prune deregisters every prunable checkout in
+        the repository, including ones other agents are relying on.
+        """
+        self._records_gate(name, checkout, me=me)
+        self._claim(name, me)
         try:
             removed = self._deregister(checkout)
         except ValueError:
             store.release_retiring(self.db, name, me)
             raise
+        return self._finish(name, checkout, removed, kind="gone")
+
+    def _close_checkout(self, name: str, checkout: str, *, me: str,
+                        confirm: bool) -> dict:
+        """The destructive one: check, then stop, then re-confirm, then delete.
+
+        The ordering is a rule, not an implementation detail. An earlier design read
+        "stop, then check", and that closed the workspace's panes BEFORE evaluating the
+        gate — so a refusal left the panes closed, the command reporting failure and
+        nothing retired: the person loses their panes and gets nothing for them. The gate
+        is cheap and read-only, so it goes first and a refusal costs only the message.
+
+        The second evaluation is what actually authorises the destruction. It catches
+        whatever arrived while the panes were coming down, and deleting a directory around
+        a process still running in it is not an exotic state here. The first evaluation
+        does not make it redundant; it makes the cheap answer available before anything
+        irreversible has happened.
+
+        The retiring mark is claimed before any of the destruction and released by any
+        refusal after it, because only a crash may leave a mark behind: a refusal that
+        left one would lock a live workspace's name out of itself over a command that did
+        nothing.
+        """
+        primary = self._primary_checkout()
+        if primary is None:
+            raise ValueError(
+                f"cannot close {name!r}: git would not say where this repository's own "
+                f"checkout is, and the one directory this must never be aimed at is that "
+                f"one — nothing is deleted"
+            )
+        if _same_dir(checkout, primary):
+            raise ValueError(
+                f"cannot close {name!r}: its recorded checkout {checkout} IS this "
+                f"repository's primary working tree, which this command never removes. A "
+                f"record can legitimately point there — `sb workspace new` typed in the "
+                f"main clone records exactly that — so this is a rule of the gate rather "
+                f"than something git is left to catch after the panes are closed."
+            )
+        self._gate(name, checkout, me=me)
+        self._inventory_gate(name, checkout, confirm=confirm)
+        self._claim(name, me)
+        try:
+            closed = self._stop_panes(name, me=me)
+            # What authorises the deletion: the panes are down, so this is the answer for
+            # the directory as it is about to be destroyed rather than as it was.
+            self._gate(name, checkout, me=me)
+            removed = self._deregister(checkout)
+        except ValueError:
+            store.release_retiring(self.db, name, me)
+            raise
+        return self._finish(name, checkout, removed, kind="worktree", closed=closed)
+
+    def _finish(self, name: str, checkout: str, removed: str, *, kind: str,
+                closed: Sequence[str] = ()) -> dict:
+        """The last two steps, shared by both routes that delete something.
+
+        `git branch -d` and never `-D`: an unmerged branch simply stays, which is a far
+        cheaper failure than losing commits — and cheaper still than it sounds, since a
+        deleted branch's tip survives in the reflog. Then the retired mark, which clears
+        the recorded path with it: the command has just deleted that directory, and a row
+        left pointing at it starts every later question from a path we know is gone.
+        """
         branch = store.workspace_branch(self.db, name) or name
         deleted = self._git("branch", "-d", branch, check=True)
         store.retire_workspace(self.db, name)
         store.log_event(self.db, kind="workspace_retired", workspace=name,
                         checkout=checkout, branch=branch if deleted else None,
-                        worktree=removed)
-        return {"workspace": name, "checkout": checkout, "already": False,
-                "worktree": removed, "branch": branch, "branch_deleted": deleted}
+                        worktree=removed, closed=",".join(closed) or None)
+        return self._closed(name, checkout, kind=kind, worktree=removed, branch=branch,
+                            branch_deleted=deleted, closed=closed)
 
-    def _close_refusal(self, name: str, checkout: Optional[str], verdict: str) -> str:
-        if verdict == "bare":
-            return (f"{name!r} is a bare workspace — a place to work with no checkout of "
-                    f"its own — so there is no worktree to deregister and no branch to "
-                    f"delete. Close its agents with `sb cleanup <name>`.")
-        if verdict == store.CHECKOUT_OK:
-            return (f"the checkout at {checkout} is still there, and removing a checkout "
-                    f"that exists is not what this does: it clears the workspaces whose "
-                    f"directory is already gone. Remove it by hand if you mean to.")
-        return (f"cannot tell what {name!r}'s recorded checkout is: {checkout or '(none)'} "
-                f"is not a worktree of this repo. Unknown is not empty, so nothing is "
-                f"deregistered and nothing is deleted.")
+    @staticmethod
+    def _closed(name: str, checkout: Optional[str], *, kind: str, worktree: str,
+                already: bool = False, branch: Optional[str] = None,
+                branch_deleted: bool = False, closed: Sequence[str] = ()) -> dict:
+        """What the caller gets. `kind` is which of the three routes this workspace took."""
+        return {"workspace": name, "checkout": checkout, "already": already, "kind": kind,
+                "worktree": worktree, "branch": branch, "branch_deleted": branch_deleted,
+                "closed": list(closed)}
 
-    def _unfinished_under(self, path: str) -> list:
+    # -- the gate ---------------------------------------------------------------------
+
+    def _gate(self, name: str, checkout: str, *, me: str) -> None:
+        """Is anything still in that directory? Asked of our records AND of the machine.
+
+        Two halves, because each is blind to what the other sees.
+
+        The records half misses a human with an editor open, who has no `agents` row to be
+        finished — and the ignored-content inventory and this observation are the two
+        places where a person who never appears in the store gets to say no.
+
+        The live half is the only signal that can be right about a herdr that has
+        RESTARTED. `agent list` has no failure branch at all, so a restarted herdr answers
+        *successfully* with a smaller world: every row in the workspace reads `failed`,
+        which is finished, and nothing was ever "unknown". An empty success there is not
+        weak evidence of an empty workspace, it is no evidence either way — which is why a
+        scan that cannot be MADE is a refusal rather than a shrug. Unknown is not empty.
+        """
+        self._records_gate(name, checkout, me=me)
+        found = self._live_under(checkout)
+        if found is None:
+            raise ValueError(
+                f"cannot close {name!r}: this machine could not be asked what is running "
+                f"in {checkout}, and unknown is not empty — nothing is closed and nothing "
+                f"is deleted"
+            )
+        if found:
+            who = ", ".join(sorted({f"{p.command} ({p.pid})" for p in found})[:5])
+            raise ValueError(
+                f"cannot close {name!r}: {who} {'is' if len(found) == 1 else 'are'} "
+                f"still running in {checkout} — close them first, and note that nothing "
+                f"here has to be an agent of ours to count"
+            )
+
+    def _records_gate(self, name: str, checkout: str, *, me: str) -> None:
+        busy = [r["name"] for r in self._unfinished_under(checkout, exclude=me)]
+        if busy:
+            raise ValueError(
+                f"cannot close {name!r}: {_names(busy)} still recorded as working under "
+                f"{checkout} — close {'it' if len(busy) == 1 else 'them'} first "
+                f"(`sb cleanup <name>`)"
+            )
+
+    def _inventory_gate(self, name: str, checkout: str, *, confirm: bool) -> None:
+        """What is in that directory that git will not miss, and who gets to say goodbye.
+
+        Two tiers, because "refuse if dirty" is a rule nobody keeps in a repo where most
+        worktrees are ignored-dirty always. Work git can see — tracked modifications,
+        untracked files — is a plain refusal: a person can commit or stash it and ask
+        again. Ignored content is classified instead, and it can be because switchboard
+        planted its own furniture: unlinking one of its symlinks leaves the target
+        standing in the main checkout. Anything else ignored is somebody's belongings, and
+        it is shown and confirmed rather than listed every time — a prompt that fires when
+        there is nothing to lose is a prompt people learn to answer without reading, which
+        spends the one moment of attention this command gets.
+
+        The confirmation echoes what the command line does not already contain. Typing the
+        branch name back would not: workspace name IS branch name here, so that asks the
+        human to retype the string they typed one argument earlier.
+        """
+        weight = self._ignored_weight(checkout)
+        if weight["dirty"] is None:
+            raise ValueError(
+                f"cannot close {name!r}: git would not say what is in {checkout}, so "
+                f"nothing here can be told from anything else — nothing is deleted"
+            )
+        if weight["dirty"]:
+            raise ValueError(
+                f"cannot close {name!r}: {weight['dirty']} file(s) in {checkout} are "
+                f"modified or untracked. That is work git can see, so commit or stash it "
+                f"and ask again."
+            )
+        if weight["unknown"] and not confirm:
+            more = "" if weight["unknown"] <= len(weight["sample"]) else ", ..."
+            raise ValueError(
+                f"{checkout} holds {weight['unknown']} ignored file(s) that git will not "
+                f"miss and the removal WILL delete: {', '.join(weight['sample'])}{more}. "
+                f"Nothing has been touched. `sb workspace close {name} --yes` deletes "
+                f"them with the checkout."
+            )
+
+    def _unfinished_under(self, path: str, *, exclude: Optional[str] = None) -> list:
         """Agent rows that are not finished and whose cwd sits under `path`.
 
         Whatever their `workspace_id` — the column is not consulted, because two workspace
         ids can sit over one checkout and enumerating one of them says nothing about who
         else is in the directory.
+
+        `exclude` is the caller's own row, and leaving it in would refuse the most obvious
+        way anyone invokes this: an agent told to close the workspace it works in is
+        recorded under that checkout and is not finished, because it is running this
+        command. Nothing else is excluded.
         """
         return [r for r in self.db.execute(
             f"SELECT * FROM agents WHERE cwd IS NOT NULL AND state NOT IN {FINISHED}"
-        ).fetchall() if live.is_under(r["cwd"], path)]
+        ).fetchall() if r["name"] != exclude and live.is_under(r["cwd"], path)]
+
+    def _unfinished_in(self, name: str, *, exclude: Optional[str] = None) -> list:
+        """The bare path's whole gate: this workspace's OWN rows, by name.
+
+        Deliberately not `_unfinished_under` — see `_close_bare` for why a bare workspace
+        must never be gated on the directory it was laid over.
+        """
+        return [r for r in self.db.execute(
+            f"SELECT * FROM agents WHERE workspace=? AND state NOT IN {FINISHED}",
+            (name,),
+        ).fetchall() if r["name"] != exclude]
+
+    def _live_under(self, checkout: str) -> Optional[list]:
+        """What is running in that directory that is not us. **None** is "could not tell".
+
+        The caller is excluded and has to be: an agent told to close the workspace it
+        works in runs the command from a shell whose cwd is under the checkout, so both
+        halves of the gate would otherwise see it and refuse.
+
+        Exclusion is by pid on the parsed output rather than by narrowing the scan — a
+        `-p` list that matches nothing exits 1 with empty output, which is
+        indistinguishable from a real failure, and this is the one gate that must not have
+        an ambiguous shape in it (see `live.CWD_SCAN`).
+
+        "Us" is this process, everything above it and everything below it, and the process
+        table is read AFTER the scan for the sake of the last of those: `lsof` is our own
+        child and reports ITSELF, sitting in our cwd, so a caller standing in the checkout
+        would find one live process every time and refuse forever. A pid the process table
+        no longer knows has exited, and a process that has exited is not in the directory.
+        """
+        found = live.processes_in(checkout)
+        if not found:
+            return found                       # None, or an empty answer nobody is in
+        mine = os.getpid()
+        parents = self._parents()
+        if parents is None:
+            # `ps` would not answer, so the only pids we can prove are ours are the two
+            # the kernel hands us directly. Costs a refusal, which is the safe direction.
+            return [p for p in found if p.pid not in (mine, os.getppid())]
+        ours = _ancestry(mine, parents)
+        return [p for p in found if p.pid in parents and p.pid not in ours
+                and mine not in _ancestry(p.pid, parents)]
+
+    def _parents(self) -> Optional[dict]:
+        """Every process on this machine and its parent, or None if `ps` would not say.
+
+        Strict about the shape for the same reason `live._parse` is: this is half of how
+        the caller's own tree stops counting against the gate, and a line it did not
+        understand is not a line to skip.
+        """
+        try:
+            out = subprocess.run(["ps", "-Ao", "pid=,ppid="], capture_output=True,
+                                 text=True, timeout=SUBPROCESS_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode != 0:
+            return None
+        found = {}
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                return None
+            try:
+                found[int(parts[0])] = int(parts[1])
+            except ValueError:
+                return None
+        return found or None
+
+    def _primary_checkout(self) -> Optional[str]:
+        """This repository's own working tree — the first entry `git worktree list` gives.
+
+        The one directory this command may never be aimed at, and refusing it is a rule of
+        the gate rather than something git happens to catch at the end. A record can point
+        here without any fallback being involved: `git worktree list` reports the primary
+        checkout alongside the linked ones, which is what makes `sb workspace new main`
+        attach to the repo you are standing in, and those rows re-validate as a perfectly
+        good worktree of this repo. Git does refuse the removal — at the very last step,
+        by which time the inventory has listed the human's own `.env` as material about to
+        be destroyed and the workspace's panes are closed.
+        """
+        found = self._worktrees()
+        return found[0]["path"] if found else None
+
+    # -- the retiring mark ------------------------------------------------------------
+
+    def _claim(self, name: str, me: str) -> None:
+        """Take the retiring mark, or refuse and say who has it.
+
+        Claimed before any destructive step so a command that dies midway is resumable,
+        and claimed by conditional write so two invocations arriving together resolve —
+        `claim_retiring`'s `rowcount` is the arbiter, and there is no separate read to
+        race against.
+        """
+        if store.claim_retiring(self.db, name, me):
+            return
+        held = store.get_workspace(self.db, name)
+        if held is None or not held["retiring"]:
+            raise ValueError(
+                f"{name!r} changed underneath this command before it could claim it — "
+                f"nothing was closed and nothing was deleted. Look again with "
+                f"`sb workspace list`."
+            )
+        raise ValueError(
+            self._retiring_refusal(name, held, self._owner_gone(held["retiring"])))
+
+    def _take_over(self, name: str, row, *, me: str, resume: bool) -> None:
+        """What to do about a retiring mark that is already set. Refuse, or take it over.
+
+        A mark is never stolen and never expires. Only a crash may leave one behind, and
+        the way back from a crash is a person: the refusal says who holds the mark, when
+        they claimed it and whether they are confirmed gone, and only a confirmed-gone
+        owner makes `--resume` available. That flag is permission to take over from a
+        corpse, not permission to overrule a live winner, and it repairs nothing — it
+        re-runs the whole command from the beginning, because a crashed invocation's own
+        findings are exactly what nobody should inherit.
+
+        Without it the three rules that are each right on their own — only a crash leaves
+        a mark, `close` refuses a marked workspace, only the owner may clear one — compose
+        into a name no verb can ever reach again.
+        """
+        gone = self._owner_gone(row["retiring"])
+        if resume and gone:
+            store.release_retiring(self.db, name, row["retiring"])
+            store.log_event(self.db, kind="workspace_resumed", workspace=name, agent=me,
+                            previous=row["retiring"])
+            return
+        raise ValueError(self._retiring_refusal(name, row, gone, resume=resume))
+
+    def _retiring_refusal(self, name: str, held, gone: Optional[bool], *,
+                          resume: bool = False) -> str:
+        """The refusal, which says what it found rather than only that it found something.
+
+        A live owner and a dead one are different situations for the person reading it, so
+        they read differently, and "cannot tell" reads as live: refusing to offer the flag
+        is always the safe direction.
+        """
+        who, when = held["retiring"], held["retiring_at"]
+        since = f"{fmt_age(store.now() - when)} ago" if when else "at some point"
+        if gone:
+            return (f"{name!r} is marked as being closed by {who}, claimed {since}, and "
+                    f"{who} is confirmed gone — that teardown died partway through. "
+                    f"`sb workspace close {name} --resume` takes the mark over and runs "
+                    f"the whole command again from the start.")
+        held_by = (f"{who} is still going" if gone is False else
+                   f"{who} cannot be confirmed gone, which reads here as still going")
+        flag = (" `--resume` takes a mark over from an owner confirmed gone, and never "
+                "from a live one." if resume else "")
+        return (f"{name!r} is already being closed by {who}, claimed {since}, and "
+                f"{held_by} — one teardown at a time.{flag}")
+
+    def _owner_gone(self, owner: str) -> Optional[bool]:
+        """Is the agent holding a retiring mark confirmed gone? **None** is "cannot tell".
+
+        Asked of the trust layer rather than re-derived here: "is this agent really
+        finished" is the question that layer exists to make trustworthy, and this is the
+        first place the destructive command spends it. A `failed` row is not one absent
+        reading any more — it is an absence that lasted — and a `done` row is the agent's
+        own word for its end.
+
+        Herdr still gets a veto in the one direction it can be trusted in: a name it lists
+        right now is running, whatever our row says. It gets no vote the other way, and a
+        herdr that cannot be asked leaves the answer unknown, which prints as a live owner
+        and offers no way to take the mark over.
+        """
+        if owner == HUMAN:
+            return None                        # a person has no row and no verdict here
+        row = store.get_agent(self.db, owner)
+        if row is None or row["state"] not in FINISHED:
+            return False if row is not None else None
+        known = self._agent_states()           # None is "cannot tell", as ever
+        return None if known is None else owner not in known
+
+    def _stop_panes(self, name: str, *, me: str) -> list[str]:
+        """Close the panes of this workspace's agents, and confirm they are stopped.
+
+        Step 2, and the reason step 3 exists: closing the panes is what the re-confirmation
+        is checking the effect of. Every row here is finished — the gate said so — so this
+        takes away a pane nobody is working in, which costs only the pane: session,
+        summary, messages and transcript all survive, and `sb restore` brings the agent
+        back.
+
+        A pane herdr no longer has is this close having HAPPENED, not having failed. A
+        pane herdr will not close is neither, and it is a refusal: an unconfirmed pane in
+        a directory about to be deleted is the whole reason "confirm them stopped" is a
+        step rather than a hope. The caller's own pane is never closed, here as in
+        `cleanup`.
+        """
+        closed = []
+        for a in self.db.execute(
+            "SELECT * FROM agents WHERE workspace=? AND pane_id IS NOT NULL", (name,)
+        ).fetchall():
+            if a["name"] == me:
+                continue
+            try:
+                self.h.release_agent(a["pane_id"], a["name"],
+                                     store.next_seq(self.db, a["name"]))
+                self.h.close_pane(a["pane_id"])
+            except HerdrError as e:
+                if e.code != "pane_not_found":
+                    store.log_event(self.db, kind="cleanup_failed", agent=a["name"],
+                                    error=str(e))
+                    raise ValueError(
+                        f"cannot close {name!r}: {a['name']}'s pane would not close "
+                        f"({e}), so nothing here is confirmed stopped — nothing is "
+                        f"deleted"
+                    ) from None
+                store.log_event(self.db, kind="cleanup_pane_gone", agent=a["name"])
+            self._close_board(a["name"])
+            # The pane is gone, so the row must stop claiming one — a stale id has every
+            # later sweep retrying release/close against a pane that is not there.
+            store.update_agent(self.db, a["name"], pane_id=None)
+            store.log_event(self.db, kind="cleanup", agent=a["name"], forced=False)
+            closed.append(a["name"])
+        return closed
 
     def _deregister(self, checkout: str) -> str:
         """Take one gone checkout out of git's registry, by name. Never a bare prune.
