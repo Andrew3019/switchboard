@@ -1781,9 +1781,12 @@ class Broker:
 
         Five gates, and which of them a caller may lift is the whole design:
 
-        - **finished, and no unread mail.** A sweep never lifts these. Closing an agent
-          mid-turn would strand whatever it was doing, and discarding unread mail loses a
-          message somebody is blocked on.
+        - **finished, and no unread mail it could still read.** A sweep never lifts these.
+          Closing an agent mid-turn would strand whatever it was doing, and taking away
+          the pane while a message sits unread loses somebody the answer they are blocked
+          on. Mail for an agent that has finished AND lost its name binding is the one
+          exception, because it is not mail anybody is going to read either way — see the
+          gate itself.
         - **an end nobody reported is re-checked against herdr.** `done` is the agent's
           own word; `failed` is `status._record_gone`'s inference from one `agent list`,
           and that call can be taken mid-spawn or against a herdr that hiccupped. So for
@@ -1859,8 +1862,16 @@ class Broker:
                     continue                  # only finished agents; --all-idle too
                 if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
                     continue                  # nobody reported this end, and herdr disagrees
-                if store.unread_for(self.db, a["name"], mark=False):
-                    continue                  # unread mail would be lost
+                if (store.unread_for(self.db, a["name"], mark=False)
+                        and not self._finished_and_unreachable(a["name"])):
+                    # Unread mail it could still read holds the row, as it always has.
+                    # Mail for an agent whose turn ended and whose name no longer binds is
+                    # a different thing: nothing announces it, nothing reads it, and
+                    # holding the row open does not make it any more readable — it only
+                    # jams that row forever, closable by neither a sweep nor `--force`
+                    # having been meant. Closing loses nothing; the message survives, and
+                    # `sb restore` brings back an inbox that still holds it.
+                    continue
                 # Naming an agent is itself the instruction to close it, so an explicit
                 # name lifts the role's disposition exactly as `include_kept` does.
                 if a["cleanup"] != "close" and not (include_kept or names):
@@ -1872,9 +1883,17 @@ class Broker:
                     self.h.release_agent(a["pane_id"], a["name"], store.next_seq(self.db, a["name"]))
                     self.h.close_pane(a["pane_id"])
             except HerdrError as e:
-                store.log_event(self.db, kind="cleanup_failed", agent=a["name"], error=str(e))
-                if not force:
-                    continue
+                if e.code == "pane_not_found":
+                    # The pane is already gone — a human closed it by hand, or herdr lost
+                    # it. That is this close having happened, not having failed, and
+                    # treating it as a failure left `pane_id` set on the row so every
+                    # later sweep repeated the same doomed call, forever.
+                    store.log_event(self.db, kind="cleanup_pane_gone", agent=a["name"])
+                else:
+                    store.log_event(self.db, kind="cleanup_failed", agent=a["name"],
+                                    error=str(e))
+                    if not force:
+                        continue
             # The board went up beside this agent, so it comes down with it — otherwise
             # closing an agent leaves an empty tab behind, once per agent. After the
             # skip above, so a close we abandoned leaves the board with its live pane.
@@ -2011,6 +2030,17 @@ class Broker:
         `Undeliverable` tells the caller so.
         """
         me = me or self.whoami()
+        if self._finished_and_unreachable(name):
+            # Refused outright, before the `esc` and before the row is written. There is no
+            # turn here to change course: the agent reported done and its name no longer
+            # binds. Saying so plainly beats the `Undeliverable` this used to raise, which
+            # dressed an ordinary "it already finished" up as a herdr failure — and it
+            # leaves no half-sent interrupt behind for `sb inspect` to show.
+            raise ValueError(
+                f"{name} has already finished — there is no turn to interrupt. "
+                f"Use `sb tell {name} \"...\"` to leave it a message, or "
+                f"`sb restore {name}` to bring it back first."
+            )
         # Always lands now — deferring an interrupt would defeat it entirely.
         if stop:
             try:
@@ -2065,6 +2095,33 @@ class Broker:
         states = self._agent_states()
         return states is not None and name not in states
 
+    def _finished_and_unreachable(self, who: str) -> bool:
+        """Has this agent ended its turn for good, with no pane left to ring?
+
+        `sb done` ends a turn, and a real Claude Code process stops answering to its name
+        the moment that turn ends — herdr says `agent_not_found` from then on. The row,
+        though, keeps its `pane_id` and stays a perfectly good target, so every doorbell
+        aimed at it fails, and `flush_pending` re-aims it on every `sb` command anybody
+        runs, forever. This is the predicate that stops that.
+
+        Two ways to be sure, and both are needed. A row with no `pane_id` has nothing to
+        ring by construction — `cleanup` cleared it, or it never got one. A row that still
+        holds a pane id is only unreachable if herdr, asked and answering, does not list
+        the name: unknown is NOT gone (`_agent_states` returns None for "cannot tell"), and
+        reading a herdr outage as death would silence the doorbell for a whole live fleet.
+
+        That positive answer is also what makes this safe against `_revive`. An agent that
+        reports done and then runs `sb` again is mid-turn while it does so, so herdr knows
+        the name, and the guard does not fire on the one row that is about to come back.
+        """
+        a = store.get_agent(self.db, who)
+        if a is None or a["state"] not in FINISHED:
+            return False
+        if not a["pane_id"]:
+            return True
+        states = self._agent_states()
+        return states is not None and who not in states
+
     def _busy(self, who: str) -> bool:
         """Is this agent mid-turn right now, per herdr?
 
@@ -2096,6 +2153,12 @@ class Broker:
 
         This is the stand-in for an events daemon. When one exists it replaces this
         trigger, not the model: deferred-then-delivered stays exactly the same.
+
+        It is also where the backlog for agents that will never read again gets cleared —
+        see `_clear_unreadable_mail`. Those rows are already in this work list, so the
+        sweep is this loop rather than a migration: it costs nothing when there is none,
+        and it happens once per message rather than on every command like the ring it
+        replaces.
         """
         # The human is excluded because they are not an agent and have no doorbell. Nothing
         # is addressed to them any more, but a store written before the human mailbox was
@@ -2108,11 +2171,46 @@ class Broker:
             self._alive_unknown = False
         rung = []
         for who in dict.fromkeys(m["to_agent"] for m in pending):
+            if self._finished_and_unreachable(who):
+                self._clear_unreadable_mail(who, [m for m in pending if m["to_agent"] == who])
+                continue
             if self._busy(who):
                 continue
             if self._ring(who, self._say("notify.mail")):
                 rung.append(who)
         return rung
+
+    def _clear_unreadable_mail(self, who: str, messages: Sequence) -> None:
+        """Stop chasing mail for an agent that has finished and has no pane.
+
+        The doorbell is never going to ring for these (`_ring` guards it), and left alone
+        they are worse than merely undelivered: `store.unread_for` keeps reporting them, so
+        `cleanup`'s "unread mail would be lost" gate refuses to close the row — for mail
+        nobody can ever read. That row is then closable by neither a sweep nor
+        `cleanup`'s `pane_not_found` branch, which it never reaches: the unread gate
+        `continue`s before any close is attempted. Marking the mail here, and lifting that
+        gate for exactly these rows, is what lets them sweep normally again.
+
+        Nothing is destroyed. The message keeps its body, its sender and its place in the
+        log, so `sb inspect` and `sb log` still show it, and the event written here says
+        plainly that it was cleared rather than read. What it loses is its claim on an
+        inbox that is not going to be opened — and the narrow cost of that is an agent
+        brought back later by `sb restore` finding those messages already read.
+
+        Only for a row whose pane is GONE. A finished agent that still holds a pane is a
+        different animal: a person can put a turn back into that pane, and `done` is
+        explicit that a done parent with live children stays reachable and still collects
+        their summaries. It loses the doorbell here (see `_ring`) and nothing else. Its
+        mail is cleared once `cleanup` closes it, which is now something `cleanup` can
+        actually do — see the unread gate there.
+        """
+        a = store.get_agent(self.db, who)
+        if a and a["pane_id"]:
+            return
+        for m in messages:
+            store.mark_collected(self.db, m["id"])
+            store.log_event(self.db, kind="mail_cleared", agent=who,
+                            sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
     def _ring(self, who: str, text: str, *, force: bool = False) -> bool:
         """The doorbell. Carries no payload — the message is in the store.
@@ -2136,6 +2234,23 @@ class Broker:
         that one raises instead of quietly returning False.
         """
         if who == HUMAN:
+            return False
+        if self._finished_and_unreachable(who):
+            # Nobody is there to hear it: the turn ended and the name no longer binds, so
+            # the call can only fail. The guard lives HERE and not at `tell`/`interrupt`
+            # because `flush_pending` reaches this method through neither — it re-derives
+            # its own work list — and a write-time guard would leave every message already
+            # on disk being re-attempted on every `sb` command anyone runs, forever.
+            #
+            # The message itself is untouched: written, queued, and still there to be
+            # found. This skips the announcement, not the mail.
+            store.log_event(self.db, kind="ring_skipped", agent=who, reason="finished")
+            if force:
+                # `interrupt` refuses this in plainer words before it gets here, so this
+                # is the backstop for any future forced ring: force must never quietly
+                # return False, because "later" is exactly what it was refusing.
+                raise Undeliverable(who, HerdrError(
+                    "agent_finished", "it reported done and holds no live pane"))
             return False
         if not force and self._busy(who):
             store.log_event(self.db, kind="ring_deferred", agent=who)
