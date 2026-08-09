@@ -118,6 +118,10 @@ worktree if everything else is closed too.** — confirmed 2026-08-09
 
 **`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
 
+**`sb tell` is for agents only, both ways round.** Andrew does not use it — he types
+directly into the session — and it cannot address a human. Anything needing a human is
+`sb block`. There is no human inbox. — confirmed 2026-08-09
+
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
 
