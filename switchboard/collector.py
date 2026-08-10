@@ -60,6 +60,7 @@ the last panel retires the collector within a minute; opening one starts another
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import shutil
 import signal
@@ -190,10 +191,37 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     return True
 
 
+def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
+    """Where to run `sb` — a WORK TREE, and not the `.git` the store lives in.
+
+    `db_path` is `<git-common-dir>/agentflow/state.db`, so its grandparent is `.git`
+    itself. `cli.main` calls `store.worktree_root()` for every verb and
+    `git rev-parse --show-toplevel` fails inside a `.git` directory, so every doorbell
+    since the mechanism was written died there before it did anything — one directory,
+    on every machine, whatever was on PATH (`audit/phase1-acceptance-2.md` §3.3).
+
+    The checkout is `.git`'s parent, except under `--separate-git-dir` or a relocated
+    `.git`, where it is whatever `sb init` recorded — the same rule `store.main_checkout`
+    follows, read from the file here rather than asked of `store` so that this half stays
+    importless and cannot be the thing that makes the collector write (module note).
+    """
+    if db_path is None:
+        return None
+    store_dir = db_path.parent
+    recorded = None
+    try:
+        recorded = json.loads((store_dir / "config.json").read_text()).get("main_checkout")
+    except Exception:                          # no config yet, or unreadable — infer
+        pass
+    if recorded and Path(recorded).is_dir():
+        return str(recorded)
+    return str(store_dir.parent.parent)
+
+
 def _run_doorbell(sb: str, db_path: Optional[Path], state: State) -> None:
     """The spawned half. Swallows everything: a doorbell that fails is a line in the
     counters, never a collector that dies."""
-    cwd = str(db_path.parent.parent) if db_path is not None else None
+    cwd = _doorbell_cwd(db_path)
     try:
         p = subprocess.run([sb, "flush"], cwd=cwd, capture_output=True, text=True,
                            timeout=DOORBELL_TIMEOUT)
