@@ -47,6 +47,11 @@ is the only thing that outlives it.
 
 # Phase 1 — fleet reliability
 
+**Start with 1.2, before any building at all.** If spawns really are dropping every
+system prompt but the last, then agents are running without the protocol, their role and
+their presets — which changes what the rest of this plan even means, and would make much
+of phase 6 unverifiable. Confirm or refute it first, and say which in your first report.
+
 Nothing else is worth doing first: every later phase is built by agents, and agents are
 currently unreliable to spawn, to wake, and to close. Fixing this phase makes every
 subsequent phase cheaper.

@@ -195,8 +195,10 @@ the tree brings that agent into focus automatically — it is like a fake UI to 
 around quickly. That is all it needs for now; the rest of what it has works fine and
 auditing it comes later. — confirmed 2026-08-09
 
-**The click is not working sometimes.** Andrew believes this is because of the side
-panel. — confirmed 2026-08-09
+**The click is not working sometimes.** Andrew first suspected the side panel; the
+evidenced cause is that board rows are measured in characters rather than terminal
+columns, so one wide character (an emoji, CJK) wraps a row and every row below it is off
+by one — the narrow default pane is why it looked like the panel. — confirmed 2026-08-09
 
 **`sb start` focuses the pane. Nothing else ever focuses on spawn.** Clicking a name on
 the board is navigation, not a spawn, and does bring that agent into focus. — confirmed
