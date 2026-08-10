@@ -552,10 +552,11 @@ class Herdr:
         """Run a command in a pane. For FIXED commands only — `text` reaches a shell.
 
         Named `prompt_pane` because it was once used as a delivery path of last resort:
-        herdr can lose an agent's name binding permanently (once it has seen the agent
-        leave the foreground, which `sb` running in that pane causes, `agent prompt` and
-        even a pane-targeted `agent prompt` answer agent_not_found / agent_not_ready, and
-        no later report re-registers it), and pane input does not go through that registry.
+        herdr can lose an agent's name binding permanently (a `pane report-agent` on the
+        pane evicts it — see `report_state`, which is the whole cause; not, as this note
+        used to say, `sb` running in the pane and taking the foreground), after which
+        `agent prompt` and even a pane-targeted `agent prompt` answer agent_not_found /
+        agent_not_ready, and pane input does not go through that registry.
         That use is gone: `pane run` types into whatever shell is sitting in the pane, so a
         backtick or a `$(` in agent-authored text executed there. `Broker._ring` fails
         instead. The one remaining caller passes a literal `exec` line (`board.open_beside`).
@@ -661,6 +662,24 @@ class Herdr:
         verify: bool = True,
     ) -> None:
         """Push authoritative state IN. Never read state out and trust it.
+
+        **This costs the agent its name, permanently. Call it only on an agent nobody
+        needs to reach again.** `pane report-agent` does not annotate the pane's agent, it
+        replaces it: the named agent registered by `agent start` is evicted and a
+        source-reported record put in its place, and a reported record is not a target —
+        `agent get`/`agent prompt <name>` answer agent_not_found, and a pane-targeted
+        prompt answers agent_not_ready ("<pane> is not an active named agent"). Nothing
+        undoes it: `release_agent` deletes the record instead of handing detection back
+        (the pane then drops out of `agent list` altogether), and `agent start` on the
+        live pane refuses agent_pane_busy.
+
+        The state VALUE has nothing to do with it — `idle` evicts exactly as `blocked`
+        does; making the call is what evicts. Measured on herdr 0.8.0 against a throwaway
+        pane: `agent start` → resolvable, `report_session` → still resolvable, one
+        `report_state(..., IDLE)` → agent_not_found for good. This is the mechanism behind
+        the "lost name binding" the rest of this file talks about, and it is why `block`
+        and `_unblock_if_needed` report nothing at all; `Broker.done` is the only caller
+        left, on an agent that has just said it is finished.
 
         Two ways to lose a write, both returning success: reusing a seq, or omitting it.
         `seq` therefore comes from the store's strictly-increasing per-agent counter.

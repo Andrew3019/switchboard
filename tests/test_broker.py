@@ -116,6 +116,24 @@ class FakeHerdrAPI:
     def close_pane(self, pane): self.closed.append(pane)
 
 
+class EvictingHerdr(FakeHerdrAPI):
+    """A herdr that charges the real price for reporting state.
+
+    `pane report-agent` replaces the pane's named agent with a source-reported record, and
+    a reported record is not a target — `agent prompt <name>` answers agent_not_found from
+    then on, permanently (`Herdr.report_state` carries the measurement). The pane stays in
+    `agent list`, which is why `_binding_lost` can tell this apart from a dead agent, so
+    `states_by_name` is left alone.
+
+    Only the tests that are about that price use this. Everywhere else the plain fake keeps
+    reporting free, which is what makes those tests about their own subject.
+    """
+
+    def report_state(self, pane, name, state, seq, **kw):
+        super().report_state(pane, name, state, seq, **kw)
+        self.unreachable.add(name)
+
+
 def reap_gone(db, h):
     """Get an absent agent recorded as `failed` — two readings, a grace window apart.
 
@@ -541,14 +559,42 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("herdr_check_failed",
                       [e["kind"] for e in store.recent_events(self.db)])
 
-    def test_block_does_not_push_herdrs_blocked_state(self):
-        """herdr's `blocked` makes an agent permanently un-targetable — the name drops
-        out and never comes back, so the human could never answer the block."""
+    def test_block_reports_no_state_to_herdr_at_all(self):
+        """The one thing that makes a block answerable.
+
+        ANY `pane report-agent` evicts the pane's named agent for good — `idle` as surely
+        as `blocked` (`Herdr.report_state` records the measurement). Blocking used to push
+        `idle` to stay "reachable"; it was the call, not the value, that made blocking a
+        one-way door. So the assertion is that no state is pushed, not that a safe one is.
+        """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.b.block("need a decision", me="w")
         self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")  # our truth
-        self.assertEqual(self.h.states[-1][1], "idle")                       # reachable
+        self.assertEqual(self.h.states, [])                                  # still named
         self.assertTrue(self.h.notifications)                                # you hear it
+
+    def test_the_humans_answer_reaches_a_blocked_agent_on_an_evicting_herdr(self):
+        """The whole point, against a herdr that behaves the way the real one does.
+
+        `EvictingHerdr` models the one fact this fix turns on: a `pane report-agent` on a
+        pane costs the agent its name, for good. Under it, the old code lost the block's
+        answer twice over — `block` evicted the name on the way in, `_unblock_if_needed`
+        evicted it again one line before the doorbell — and the observed result was the
+        block clearing while the answer sat undelivered. Neither call is made now, so the
+        round trip completes.
+        """
+        self.h = EvictingHerdr()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}
+        self.b.block("which branch?", me="w")
+
+        self.b.tell(["w"], "use main", me=HUMAN)
+
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])   # the doorbell rang
+        self.assertEqual(store.undelivered(self.db), [])          # the answer arrived
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
+        self.assertIsNone(self.b.unreachable("w"))                # and it never went lost
 
     def test_block_goes_to_the_human_not_the_parent(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
@@ -857,23 +903,28 @@ class BrokerTest(unittest.TestCase):
             "SELECT count(*) FROM messages WHERE to_agent='w'").fetchone()[0], 0)
 
     def test_messaging_a_blocked_agent_unblocks_it_first(self):
-        """herdr makes a blocked agent un-targetable, so the doorbell would silently fail.
+        """Answering a blocked agent is what unblocking means, so the transition is
+        correct rather than a workaround — and it happens in our store only.
 
-        Answering a blocked agent is what unblocking means, so the transition is correct
-        rather than a workaround.
+        Unblocking used to push herdr `working` here, one line before the doorbell, in the
+        belief that a report re-registers the name. It evicts it (`Herdr.report_state`), so
+        that push destroyed the binding in the same breath as the ring that needed it: the
+        block cleared, `agent prompt` answered agent_not_found, and the human's answer was
+        never delivered. Nothing may be reported on this path.
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         store.set_state(self.db, "w", "blocked")
         self.b.tell(["w"], "here is your answer", me=HUMAN)
-        self.assertEqual(self.h.states[-1][1], "working")     # re-registered before poking
+        self.assertEqual(self.h.states, [])                   # the name still binds
         self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
 
     def test_a_siblings_mail_does_not_cancel_a_block(self):
         """The answer Andrew eventually gives would arrive buried under it.
 
-        Blocking pushes herdr `idle` (the agent IS idle, waiting), so nothing downstream
-        can tell a blocked agent from an available one — the store is the only record. A
+        Blocking tells herdr nothing at all (a report would cost the name), so nothing
+        downstream can tell a blocked agent from an idle one — the store is the only
+        record. A
         ring used to unblock unconditionally before every delivery, so any sibling's
         ordinary `tell` put the agent back to `working` and dropped it off the one readout
         that shows a person somebody needs them.
@@ -1627,6 +1678,25 @@ class BrokerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.b.restore("w")
         self.assertEqual(self.h.tabs, [])
+
+    def test_restore_is_not_a_way_back_from_a_lost_name_binding(self):
+        """Written down because it is the obvious hope and it is false.
+
+        An agent whose name herdr has stopped answering to is still IN `agent list` — that
+        pairing is the whole signature `_binding_lost` reads — so `_alive` says it is
+        running and `restore` refuses, pointing at `sb tell`, which is the one thing that
+        cannot reach it. Nothing else recovers it either: herdr's own `pane release-agent`
+        deletes the record rather than handing detection back, and `agent start` on the
+        live pane refuses agent_pane_busy (both measured against 0.8.0). Prevention is the
+        only fix there is, which is why `block` reports no state at all.
+        """
+        store.create_agent(self.db, name="w", role="worker", session_id="s",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}   # herdr still lists the pane...
+        self.h.unreachable.add("w")             # ...and refuses to prompt the name
+        with self.assertRaises(ValueError) as e:
+            self.b.restore("w")
+        self.assertIn("already running", str(e.exception))
 
     def test_a_failed_restore_takes_its_tab_back_out(self):
         store.create_agent(self.db, name="w", role="worker", session_id="s",
