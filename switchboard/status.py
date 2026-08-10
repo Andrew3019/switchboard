@@ -254,8 +254,18 @@ class AgentStatus:
 
     @property
     def needs_human(self) -> bool:
+        """Something is owed to this agent, and only a person can pay it.
+
+        `stalled` belongs here for the same reason the other three do, even though the
+        agent is not asking: its turn ended without `sb done` or `sb block`, so the store
+        will say `working` about it forever, no doorbell will ever ring it again, and
+        `sb cleanup` will not touch a row that is not finished. Nothing in the fleet moves
+        it. Left out of this predicate it appeared only in the DRIFT block at the bottom
+        of a full readout and in `--json`, so `sb status --needs-me` — the filter for
+        "what wants me" — was the one view that dropped it.
+        """
         return (self.blocked or self.at_prompt or self.unread > 0
-                or self.waiting_to_be_rung)
+                or self.waiting_to_be_rung or self.stalled)
 
     @property
     def archived(self) -> bool:
@@ -363,8 +373,8 @@ def collect(
 
     `live_only` drops finished agents, but keeps any that still hold unread mail (mail on
     a finished agent is mail nobody will ever read unless it is visible).
-    `needs_me` keeps only agents that are blocked, sitting at a prompt, or holding unread
-    mail — the ones an action is owed to.
+    `needs_me` keeps only agents that are blocked, sitting at a prompt, holding unread
+    mail, or stalled — the ones an action is owed to.
     `mine` scopes to one agent's own subtree (pass `human` for the roots and everything
     under them, which for a human is the whole tree).
 
@@ -1099,6 +1109,14 @@ def _attention(snap: Snapshot) -> list[str]:
                 out.append(f"  {a.name:<{w}}  {a.undelivered} never announced to it, "
                            f"oldest {fmt_age(a.undelivered_age)}{extra}"
                            f"  →  sb inspect {a.name}")
+            elif a.stalled:
+                # After the mail branches, which are the more actionable read of the same
+                # agent: mail nobody announced is fixed by ringing it, and this is not.
+                # Before the unread one, because a stalled agent has already been rung and
+                # did not move — reporting it as "not picked up" blames it for being stuck.
+                out.append(f"  {a.name:<{w}}  stalled {fmt_age(a.idle)} — its turn ended "
+                           f"without sb done  →  sb tell {a.name} "
+                           f"\"wrap up and run sb done\"")
             else:
                 out.append(f"  {a.name:<{w}}  {a.unread} unread, not picked up"
                            f"  →  sb inspect {a.name}")
