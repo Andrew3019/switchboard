@@ -2095,10 +2095,12 @@ class Broker:
     def _fork_base(self, base: str) -> tuple[str, Optional[str]]:
         """Bring `base` up to date, and say what we ended up forking from.
 
-        The base is a REMOTE-tracking ref (`origin/main`), because the local branch of the
-        same name is however stale the human's last pull left it. Fetching it on the spot
-        is the difference between a fork that starts at today's main and one that starts
-        wherever this checkout happened to be.
+        When the base is a REMOTE-tracking ref (`origin/main`) it is fetched, because the
+        local branch of the same name is however stale the human's last pull left it.
+        Fetching it on the spot is the difference between a fork that starts at today's
+        main and one that starts wherever this checkout happened to be. A local branch —
+        what `_inherited_base` returns for a parent working on one — has no remote to be
+        stale against and is used as it stands, which is the point of inheriting it.
 
         Nothing here is fatal, and that is deliberate: a spawn that dies because a laptop
         is on a train is a worse failure than a fork from a base an hour old. Two
@@ -2113,6 +2115,14 @@ class Broker:
         path, and is carried into the event log and the workspace result so a stale fork
         is something the caller can see rather than something they discover in a merge.
         """
+        # A LOCAL branch wins the read, and is asked first because the name alone cannot
+        # be told apart from `remote/ref`: `fix/fork-branch` is one branch, not `ref` in a
+        # remote called `fix`. Splitting first sent such a name to a remote that does not
+        # exist and forked from `fork-branch` — the wrong branch when it exists, and a
+        # silent "no_remote" fallback when it does not. This is the ordinary case now that
+        # a child inherits its parent's branch (`_inherited_base`).
+        if self._git("show-ref", "--verify", "--quiet", f"refs/heads/{base}", check=True):
+            return base, None
         remote, _, ref = base.partition("/")
         if not ref:
             return base, None                    # a plain local branch: nothing to fetch
@@ -2653,6 +2663,9 @@ class Broker:
 
         An existing branch of that name is REFUSED, not attached to — see `BranchTaken`.
 
+        What it forks FROM is the parent's own branch — see `_inherited_base`, and the
+        note the parent gets when that branch has uncommitted work the fork leaves behind.
+
         EVERY other failure refuses the spawn too, and this used to be the opposite: a
         herdr with no `worktree create`, a repo that is not a repo, a disk that is full
         all returned None, and the child spawned in its parent's space with only a
@@ -2665,8 +2678,14 @@ class Broker:
         """
         if self._branch_exists(name):
             raise BranchTaken(name)
+        base = self._inherited_base()
+        inherited = base != BASE_BRANCH
+        # Asked BEFORE the fork, because that is when it is still true, and only when the
+        # answer means something: a fork from `origin/main` was never going to carry this
+        # checkout's edits and nobody thought it would.
+        dirty = self._uncommitted() if inherited else 0
         try:
-            ws = self._attach_workspace(name)
+            ws = self._attach_workspace(name, base=base)
         except HerdrError as e:
             store.log_event(self.db, kind="fork_failed", agent=name, parent=parent,
                             error=str(e))
@@ -2674,8 +2693,64 @@ class Broker:
         store.log_event(self.db, kind="fork", agent=name, parent=parent,
                         workspace=ws["workspace"], branch=ws.get("branch"),
                         path=ws["path"], base=ws.get("base"),
-                        base_fallback=ws.get("base_fallback"))
+                        base_fallback=ws.get("base_fallback"),
+                        inherited=inherited, dirty=dirty)
+        if inherited:
+            # The parent is the only one who can act on this, and it is reading stderr
+            # right now — the same channel a skipped fragment uses. Silence here is how a
+            # parent comes to believe a child can see work the child has never had.
+            print(f"sb: {name} forked from {base!r} — your branch, not {BASE_BRANCH}",
+                  file=sys.stderr)
+            if dirty:
+                print(f"sb: {dirty} uncommitted file(s) in your checkout did NOT go with "
+                      f"it — a fork carries commits, not a working tree. Commit and "
+                      f"respawn if {name} needs them", file=sys.stderr)
         return ws                # `delegate` links this worktree's config on its way past
+
+    def _inherited_base(self) -> str:
+        """What a delegated child forks FROM: the branch this checkout is on.
+
+        A fork used to start at `origin/main` unconditionally, so an orchestrator working
+        on a branch got children that had never seen that branch — which made a change to
+        fleet behaviour untestable by the fleet doing it, since every agent it spawned ran
+        the old code. A child now starts from its parent's work.
+
+        The parent's branch is read from the CHECKOUT (`_here`), not from a row: this runs
+        in the parent's cwd, and the fork only happens at all when the parent has no
+        worktree of its own — so the branch it is standing on is the only record of what
+        it is working on. There is nothing to pass and nothing to remember (C6).
+
+        Two cases fall back to `BASE_BRANCH`, and neither is an exception to the rule:
+
+          - the checkout is on `main` already, where inheriting means `origin/main` —
+            except we take the REMOTE one, freshly fetched, rather than however stale the
+            local `main` is. A top orchestrator starting fresh work therefore forks from
+            today's main exactly as it always has, which is what DESIGN-TRUTH's "a
+            workspace forks from `origin/main` by default" describes.
+          - a detached HEAD, which has no branch to inherit and nothing to name.
+
+        `sb start --base` and `sb workspace new --base` are untouched: a caller who says
+        which base they want still gets it.
+        """
+        here = self._here()
+        if here is None:                          # detached: no branch to inherit
+            return BASE_BRANCH
+        local_base = BASE_BRANCH.partition("/")[2] or BASE_BRANCH
+        return BASE_BRANCH if here in (BASE_BRANCH, local_base) else here
+
+    def _uncommitted(self) -> int:
+        """Tracked files in THIS checkout with changes a fork cannot carry.
+
+        Inheriting a branch is not inheriting a working tree: `git worktree add` starts at
+        a COMMIT, so anything merely saved here stays here. Counting rather than listing,
+        because the number is the whole decision — commit first, or spawn anyway.
+
+        Tracked files only. Untracked ones do not travel either, but a checkout with stray
+        scratch files in it is the normal state of a checkout, and a warning that fires on
+        every spawn is a warning nobody reads (C6 again, from the other side).
+        """
+        out = self._git("status", "--porcelain", "--untracked-files=no")
+        return len([ln for ln in (out or "").splitlines() if ln.strip()])
 
     def _branch_exists(self, branch: str) -> bool:
         """Is there already a branch of this name?
