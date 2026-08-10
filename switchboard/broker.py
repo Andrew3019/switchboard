@@ -158,6 +158,34 @@ class BranchTaken(ValueError):
         )
 
 
+class ForkFailed(HerdrError):
+    """A child was owed a worktree of its own and could not be given one.
+
+    The spawn is REFUSED rather than degraded. It used to fall through to the parent's own
+    cwd with nothing but a `fork_failed` row to say so — and for a top-level orchestrator
+    that cwd is the human's main checkout, so a child that was supposed to write on a
+    branch of its own wrote in the one place everybody else's uncommitted work lives.
+    Sharing a checkout is not a smaller version of forking one; it is a different and
+    unrecoverable outcome, and nobody asked for it. See DESIGN-TRUTH: "A fork that fails
+    refuses the spawn and tells the parent. It never falls back to Andrew's own checkout."
+
+    A HerdrError so the parent is TOLD — `sb delegate` prints it and exits 1, in the same
+    shape as every other spawn failure — rather than reading a name and believing the
+    child is off working somewhere safe.
+    """
+
+    def __init__(self, name: str, where: Path, cause: HerdrError):
+        self.name, self.where, self.cause = name, where, cause
+        super().__init__(
+            "fork_failed",
+            f"{name} could not be given a worktree of its own, so it was not spawned — "
+            f"{cause.message}. It is not being put in {where} instead: that checkout is "
+            f"somebody else's working copy. Fix the fork, or place the child deliberately "
+            f"with `sb delegate --workspace <name>`",
+            [name],
+        )
+
+
 class TaskUndelivered(HerdrError):
     """An agent started, and its first task could not be got into it.
 
@@ -512,10 +540,41 @@ class Broker:
         told otherwise. That is a different intent and now has a different spelling: name
         the one you want, `sb start --name main`, which still reuses, restores and hands
         it a task. Unnamed, `sb start` is only ever the start of something.
+
+        Refused from inside a worktree — see `_refuse_outside_main_checkout`.
         """
+        self._refuse_outside_main_checkout()
         if name:
             return self._top(name, task, focus, board)
         return self._top(self._next_top_name(), task, focus, board)
+
+    def _refuse_outside_main_checkout(self) -> None:
+        """`sb start` belongs in the main checkout, and nowhere else.
+
+        A top-level orchestrator's space is laid over the checkout `sb` was run in
+        (`_top` passes `self.repo` as the cwd), and `self.repo` is THIS worktree. Typed
+        inside somebody's worktree, `sb start` therefore quietly puts a new top — and,
+        through the fork rule, everything it delegates that cannot fork — over an agent's
+        working copy, on that agent's branch. Nothing about the command says so.
+
+        The check is skipped, never guessed, when the main checkout cannot be established:
+        a repo that `sb init` has not pinned and whose layout defeats the inference is a
+        reason not to answer, not a reason to refuse. See DESIGN-TRUTH: "`sb start` run
+        inside a worktree is refused too, naming the main checkout to run it from."
+        """
+        try:
+            main = Path(store.main_checkout(self.repo)).resolve()
+        except Exception:                       # noqa: BLE001 — not a repo, no config
+            return
+        if self.repo.resolve() == main:
+            return
+        raise ValueError(
+            f"`sb start` starts a top-level orchestrator over the checkout it is run in, "
+            f"and this is a worktree ({self.repo}) — starting one here would lay it over "
+            f"somebody's working copy and their branch. Run it from the main checkout "
+            f"instead: cd {main} && sb start. To get an agent working in THIS tree, "
+            f"delegate to one from the orchestrator that owns it."
+        )
 
     def running_tops(self) -> list[str]:
         """Top-level orchestrators that could still be going, oldest first.
@@ -2455,7 +2514,7 @@ class Broker:
                       f"without it", file=sys.stderr)
         return note
 
-    def _fork_for(self, name: str, *, parent: str) -> Optional[dict]:
+    def _fork_for(self, name: str, *, parent: str) -> dict:
         """Give this child a worktree of its own. The branch is the agent's NAME.
 
         No prefix and no suffix: the name is already unique (`agents.name` is the primary
@@ -2465,13 +2524,15 @@ class Broker:
 
         An existing branch of that name is REFUSED, not attached to — see `BranchTaken`.
 
-        Everything else that can go wrong is not fatal. A herdr with no `worktree create`,
-        a repo that is not a repo, a disk that is full: the child still spawns, in its
-        parent's space, and the event log says a fork was wanted and did not happen.
-        Refusing to spawn at all would take the whole delegation down with it, and the
-        collision refusal above is deliberately the ONE case worth that — because there
-        the failure is somebody's existing branch, and reusing it is unrecoverable in a
-        way that sharing a checkout is not.
+        EVERY other failure refuses the spawn too, and this used to be the opposite: a
+        herdr with no `worktree create`, a repo that is not a repo, a disk that is full
+        all returned None, and the child spawned in its parent's space with only a
+        `fork_failed` row to say a fork had been wanted. For a child of a top-level
+        orchestrator that space is the human's own checkout, so the degraded outcome was
+        an agent writing where somebody else's uncommitted work lives — which is not a
+        smaller version of what was asked for, and is exactly as unrecoverable as reusing
+        a branch. The caller is told instead; see `ForkFailed`, and DESIGN-TRUTH's "A fork
+        that fails refuses the spawn and tells the parent."
         """
         if self._branch_exists(name):
             raise BranchTaken(name)
@@ -2480,7 +2541,7 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="fork_failed", agent=name, parent=parent,
                             error=str(e))
-            return None
+            raise ForkFailed(name, self.repo, e) from None
         store.log_event(self.db, kind="fork", agent=name, parent=parent,
                         workspace=ws["workspace"], branch=ws.get("branch"),
                         path=ws["path"], base=ws.get("base"),
@@ -2552,10 +2613,11 @@ class Broker:
         # Only on the INHERITED path. A caller that named a workspace — `sb start`, a
         # workspace lead, `sb delegate --workspace <name>` — has already said where this
         # agent goes, and forking over that would ignore the instruction.
-        forked = None
+        #
+        # A fork that fails RAISES (`ForkFailed`) rather than returning nothing, so there
+        # is no path from here to "spawned in the parent's checkout after all".
         if inherited and not self.has_worktree(me):
             forked = self._fork_for(name, parent=me)
-        if forked:
             ws, branch = forked["workspace"], forked["branch"]
             workspace_id = workspace_id or forked["workspace_id"]
             cwd = cwd or forked["path"]
