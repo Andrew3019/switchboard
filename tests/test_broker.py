@@ -1677,6 +1677,84 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("refused kid", out)
         self.assertIn("blocked", out)
 
+    def test_a_sweep_that_closes_something_still_accounts_for_what_it_kept(self):
+        """The silence item 1.4 was written about, wearing a different hat.
+
+        `closed: five names` reads as "all done", and acceptance run 4 twice watched a
+        sweep leave behind exactly the row a human needed with no word of it. A row that
+        was already closed, and an agent that is merely still working, are the sweep doing
+        its job and stay out of the readout; a blocked agent is stopped, waiting on a
+        person, and is precisely what that person must not walk away from.
+        """
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        for n in ("done1", "blocked1", "busy1", "gone1"):
+            store.create_agent(self.db, name=n, role="worker", parent="orch",
+                               pane_id=f"w1:{n}", cleanup="close", session_id=f"s-{n}")
+        store.set_state(self.db, "done1", "done")
+        self.b.block("which branch?", me="blocked1")
+        store.set_state(self.db, "gone1", "done")          # closed before this sweep ran
+        store.update_agent(self.db, "gone1", pane_id=None)
+        self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
+
+        r = self.b.cleanup(me="orch")
+        self.assertEqual(list(r), ["done1"])
+        self.assertEqual(sorted(n for n, _ in r.refused), ["blocked1", "busy1", "gone1"])
+        # Only the one a human might have meant survives the cut.
+        self.assertEqual([n for n, _ in r.notable], ["blocked1"])
+        self.assertIn("blocked", r.notable[0][1])
+        self.assertEqual(r.expected, {"busy1", "gone1"})
+
+    def test_a_sweep_prints_the_row_it_left_behind(self):
+        """The cut is only worth anything if it reaches the person who typed the command.
+        `--json` is unchanged and still carries every refusal of either kind."""
+        import argparse
+        from switchboard import cli
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        for n in ("done1", "blocked1", "busy1"):
+            store.create_agent(self.db, name=n, role="worker", parent="orch",
+                               pane_id=f"w1:{n}", cleanup="close", session_id=f"s-{n}")
+        store.set_state(self.db, "done1", "done")
+        self.b.block("which branch?", me="blocked1")
+        self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
+
+        def run(as_json):
+            args = argparse.Namespace(cmd="cleanup", name=[], include_kept=False,
+                                      force=False, dry_run=False, leave_children=False,
+                                      json=as_json)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+            return buf.getvalue()
+
+        out = run(False)
+        self.assertIn("closed: done1", out)
+        self.assertIn("refused blocked1", out)
+        self.assertIn("blocked", out)
+        # A working agent is not news in itself. It still appears where it IS news —
+        # as one of the live children holding its parent's row open.
+        self.assertNotIn("refused busy1", out)
+        self.assertIn("refused orch: still working underneath", out)
+        d = json.loads(run(True))                   # the second sweep closes nothing new
+        self.assertEqual(sorted(x["name"] for x in d["refused"]),
+                         ["blocked1", "busy1", "done1", "orch"])
+        self.assertEqual(sorted(d["expected"]), ["busy1", "done1"])
+
+    def test_a_long_sweep_of_refusals_ends_in_a_line_and_not_a_listing(self):
+        """Past a handful the lines stop being a report and start being a listing."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="done1", role="worker", parent="orch",
+                           pane_id="w1:done1", cleanup="close", session_id="s-done1")
+        store.set_state(self.db, "done1", "done")
+        for i in range(8):
+            store.create_agent(self.db, name=f"b{i}", role="worker", parent="orch",
+                               pane_id=f"w1:b{i}", cleanup="close", session_id=f"s-b{i}")
+            self.b.block("which branch?", me=f"b{i}")
+        from switchboard import cli
+        r = self.b.cleanup(me="orch")
+        text = cli._sweep_refusals(r.notable)
+        self.assertEqual(len(text.splitlines()), cli._SWEEP_REFUSALS_SHOWN + 1)
+        self.assertIn("and 3 more refused", text)
+
     def test_forcing_a_live_agent_says_so(self):
         """`--force` skips the finished gate, so an agent mid-turn is closed exactly like
         a wedged one and the only trace was `cleanup(forced=True)`, which cannot tell the

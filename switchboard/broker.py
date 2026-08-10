@@ -353,12 +353,29 @@ class CleanupResult(list):
     outright and got a blank line back had no way at all to learn which of five rules had
     fired — and `--force`, the documented way through, is exactly the wrong thing to reach
     for before you know that.
+
+    `expected` splits those refusals into the two kinds a *sweep* has, which is the whole
+    reason a sweep can say something short instead of nothing. A sweep is FOR skipping
+    rows that are already closed and agents that are simply still working: naming those
+    is a list of the fleet, it grows with the fleet, and nobody reading it learns
+    anything. Every other gate held back a row a human might have meant — blocked,
+    `failed` with a pane herdr still has, mail it has not read, live children underneath,
+    a kept role — and those are news whatever else the sweep did. `refused` keeps every
+    one of them and `--json` reports every one of them; `expected` only says which are
+    not worth a line on their own.
     """
 
     def __init__(self, closed: Sequence[str] = (),
-                 refused: Optional[list[tuple[str, str]]] = None):
+                 refused: Optional[list[tuple[str, str]]] = None,
+                 expected: Optional[set[str]] = None):
         super().__init__(closed)
         self.refused: list[tuple[str, str]] = [] if refused is None else refused
+        self.expected: set[str] = set() if expected is None else expected
+
+    @property
+    def notable(self) -> list[tuple[str, str]]:
+        """The refusals a sweep must not swallow. See `expected`."""
+        return [(n, why) for n, why in self.refused if n not in self.expected]
 
 
 def _resolved(path: str) -> Optional[Path]:
@@ -3334,15 +3351,21 @@ class Broker:
 
         closed = CleanupResult()
 
-        def refuse(a, reason: str, *, log: bool = True) -> None:
+        def refuse(a, reason: str, *, log: bool = True, expected: bool = False) -> None:
             """Say why this candidate stays. The one exit every gate now takes.
 
             A dry run reads and never writes, so it records the reason and logs nothing —
             the same rule the live-descendants gate already followed. That gate keeps its
             own `cleanup_held` event rather than logging twice; only its reason comes
             through here.
+
+            `expected` is a claim about a SWEEP's readout and nothing else: it says this
+            refusal is the sweep doing its job rather than a row held back. Every refusal
+            is recorded and reported either way — see `CleanupResult.expected`.
             """
             closed.refused.append((a["name"], reason))
+            if expected:
+                closed.expected.add(a["name"])
             if log and not dry_run:
                 store.log_event(self.db, kind="cleanup_refused", agent=a["name"],
                                 reason=reason[:EVENT_CLIP])
@@ -3353,7 +3376,8 @@ class Broker:
                 refuse(a, "that is you — an agent cannot close its own pane")
                 continue
             if a["ended_at"] and not a["pane_id"]:
-                refuse(a, "already closed")
+                # Nothing was held back — this row was closed before the sweep started.
+                refuse(a, "already closed", expected=True)
                 continue
             if a["name"] in held:
                 if not dry_run:               # a dry run reads; it never writes
@@ -3365,7 +3389,14 @@ class Broker:
             if not force:
                 if a["state"] not in FINISHED:
                     # only finished agents; --all-idle too
-                    refuse(a, f"{a['state']}, not finished — it has not reported an end")
+                    #
+                    # Blocked is the one state in here a sweep must still say out loud.
+                    # An agent that is working will finish on its own and the next sweep
+                    # takes it; an agent that is BLOCKED is stopped, waiting on a person,
+                    # and the person most likely to see that line is the one who just ran
+                    # `sb cleanup` and is about to walk away believing the fleet is idle.
+                    refuse(a, f"{a['state']}, not finished — it has not reported an end",
+                           expected=a["state"] != "blocked")
                     continue
                 if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
                     refuse(a, f"recorded {GONE_STATE}, but herdr still has its pane — "
