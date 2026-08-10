@@ -622,6 +622,61 @@ class BrokerTest(unittest.TestCase):
         # Still undelivered, so the next `sb` command rings it again.
         self.assertEqual([m["to_agent"] for m in store.undelivered(self.db)], ["w"])
 
+    def test_a_lost_name_binding_is_recorded_as_its_own_failure(self):
+        """herdr answering `agent_not_found` for an agent it is STILL listing as alive is
+        the signature of a lost name binding (`2026-08-09-004626`) — not a dead agent.
+
+        Nothing can fix it from here: the binding lives in herdr. What matters is that it
+        stops being indistinguishable from an ordinary hiccup, because the mail queued
+        behind it will never be announced by anything.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}        # herdr still lists it, and idle
+        self.h.unreachable.add("w")                  # ...but will not answer to the name
+
+        self.b.tell(["w"], "you have mail", me=HUMAN)
+
+        [ev] = [r for r in store.recent_events(self.db, agent="w")
+                if r["kind"] == "ring_failed"]
+        self.assertIn("name_binding_lost", ev["payload"])
+        self.assertIn("agent_not_found", self.b.unreachable("w"))
+        self.assertEqual([m["to_agent"] for m in store.undelivered(self.db)], ["w"])
+
+    def test_an_agent_herdr_has_dropped_is_not_called_a_lost_binding(self):
+        """It is the pair that means something: refused BY NAME while still listed. An
+        agent herdr no longer lists is simply gone, and saying "go look at its pane" about
+        a pane that closed under it would send a person to an empty screen."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {}                   # herdr has dropped it entirely
+        self.h.unreachable.add("w")
+
+        self.b.tell(["w"], "you have mail", me=HUMAN)
+
+        [ev] = [r for r in store.recent_events(self.db, agent="w")
+                if r["kind"] == "ring_failed"]
+        self.assertNotIn("name_binding_lost", ev["payload"])
+        self.assertIsNone(self.b.unreachable("w"))
+
+    def test_a_ring_that_lands_later_clears_the_unreachable_reading(self):
+        """It is an observation, not a state: the next ring that works disproves it."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}
+        self.h.unreachable.add("w")
+        self.b.tell(["w"], "first", me=HUMAN)
+        self.assertIsNotNone(self.b.unreachable("w"))
+
+        self.h.unreachable.discard("w")              # herdr found the name again
+        self.b.tell(["w"], "second", me=HUMAN)
+        self.assertIsNone(self.b.unreachable("w"))
+
+    def test_a_deferred_doorbell_is_not_an_unreachable_agent(self):
+        """Mid-turn is the ordinary case and it rings itself out; promising delivery there
+        is honest, which is exactly what makes the unreachable warning worth reading."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "later", me=HUMAN)
+        self.assertIsNone(self.b.unreachable("w"))
+
     def test_an_undeliverable_interrupt_fails_loudly_instead_of_being_marked_read(self):
         """`mark_collected` used to fire before delivery was attempted, so an interrupt
         that never arrived was recorded as one the agent had already read."""

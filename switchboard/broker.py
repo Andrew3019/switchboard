@@ -27,6 +27,7 @@ so they are written down where the code is rather than argued about again:
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -115,6 +116,9 @@ SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # How much of a summary or a reason reaches the event log and a desktop notification.
 EVENT_CLIP = config.setting("limits.event_clip")
 NOTIFY_CLIP = config.setting("limits.notify_clip")
+# How far back `unreachable` reads an agent's events to find the last doorbell. Only the
+# newest ring matters, and rings are rare next to the herdr call logged on every command.
+EVENT_SCAN = 200
 
 class AgentNameTaken(ValueError):
     """Somebody else holds this agent name.
@@ -3456,12 +3460,75 @@ class Broker:
         try:
             self.h.prompt(who, text)
         except HerdrError as e:
-            store.log_event(self.db, kind="ring_failed", agent=who, error=str(e))
+            store.log_event(self.db, kind="ring_failed", agent=who, error=str(e),
+                            reason=("name_binding_lost" if self._binding_lost(who, e)
+                                    else None))
             if force:
                 raise Undeliverable(who, e) from e
             return False
         store.mark_delivered(self.db, who)
         return True
+
+    def _binding_lost(self, who: str, e: HerdrError) -> bool:
+        """Did that ring fail because herdr has lost the agent's NAME, not the agent?
+
+        The distinct failure this exists to name: herdr can stop answering to a live
+        agent's name — `agent prompt` says `agent_not_found`, a pane-targeted one says
+        `agent_not_ready` — while the agent itself is still sitting in its pane with real
+        work in it, and no later report re-registers the name. Filed as
+        `2026-08-09-004626`. Nothing can ring it again, so its mail queues forever.
+
+        Told apart from an agent that has simply died by asking herdr twice, in two
+        different ways: `agent prompt` refuses the name, and `agent list` — asked fresh,
+        after the failure, not from the cache this process may have filled minutes of
+        subprocess time ago — still HAS the name. Both at once is the signature, and it is
+        the one the bug report recorded (`sb status still shows the row as alive/idle`).
+        An agent whose process really has gone drops out of the list, and one herdr cannot
+        be asked about at all (`None`) is not evidence of anything.
+
+        This only names it. It cannot fix it: the binding lives in herdr, which is a
+        separate binary. What it buys is that a sender is told the doorbell will never
+        ring rather than "mid-turn, will be rung when free" — see `unreachable`.
+        """
+        if e.code not in ("agent_not_found", "agent_not_ready"):
+            return False
+        a = store.get_agent(self.db, who)
+        if a is None or a["state"] in FINISHED:
+            return False
+        self._alive_cache = None            # ask again, now: the failure is the news
+        self._alive_unknown = False
+        states = self._agent_states()
+        return states is not None and who in states
+
+    def unreachable(self, who: str) -> Optional[str]:
+        """The doorbell's last word on this agent, if it was "this will never ring".
+
+        Read from the event log rather than a column on the row, because it is an
+        observation and not a state — and disproved by a later DELIVERY rather than by an
+        event of its own. A successful ring deliberately writes nothing to the log: those
+        rows are `status._last_activity`'s idea of an agent having done something, and a
+        doorbell is somebody else acting, so logging one would reset the idle clock on
+        exactly the silent agent a person is trying to spot.
+
+        `sb tell` uses it to stop promising delivery it cannot make.
+        """
+        failed = None
+        for row in store.recent_events(self.db, agent=who, limit=EVENT_SCAN):
+            if row["kind"] != "ring_failed":
+                continue
+            payload = json.loads(row["payload"]) if row["payload"] else {}
+            if payload.get("reason") != "name_binding_lost":
+                return None                        # the newest failure was something else
+            failed = (row["created_at"], payload)
+            break
+        if failed is None:
+            return None
+        landed = self.db.execute(
+            "SELECT MAX(delivered_at) t FROM messages WHERE to_agent=?", (who,)
+        ).fetchone()["t"]
+        if landed is not None and landed >= failed[0]:
+            return None                            # a later ring got through after all
+        return failed[1].get("error") or "herdr no longer answers to its name"
 
     def _is_blocked(self, who: str) -> bool:
         """Is this agent stopped waiting on a person, per our own store?

@@ -755,9 +755,23 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the ordinary reason, not a failure. The report says who has not been told YET.
         waiting = sorted({m["to_agent"] for m in store.undelivered(db, exclude=(HUMAN,))
                           if m["id"] in set(ids)})
-        note = f" ({', '.join(waiting)} mid-turn — will be rung when free)" if waiting else ""
+        # "will be rung when free" is a promise, and for one of these it is a false one:
+        # herdr can lose a live agent's name binding, and then no `sb` command anybody
+        # runs will ever ring it again. Saying so is the whole recovery path — a person
+        # goes and types in that pane.
+        lost = [n for n in waiting if b.unreachable(n)]
+        waiting = [n for n in waiting if n not in lost]
+        notes = []
+        if waiting:
+            notes.append(f"{', '.join(waiting)} mid-turn or blocked — will be rung "
+                         f"when free")
+        if lost:
+            notes.append(f"{', '.join(lost)} UNREACHABLE — herdr has lost its name and "
+                         f"the doorbell will not ring again; the message is stored, but "
+                         f"somebody has to go to its pane")
+        note = f" ({'; '.join(notes)})" if notes else ""
         _emit(args, f"sent to {', '.join(args.who)}{note}",
-              {"ids": ids, "undelivered": waiting})
+              {"ids": ids, "undelivered": waiting, "unreachable": lost})
         return 0
 
     if cmd == "inbox":
