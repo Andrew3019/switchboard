@@ -725,6 +725,78 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
 
+    def test_a_siblings_mail_does_not_cancel_a_block(self):
+        """The answer Andrew eventually gives would arrive buried under it.
+
+        Blocking pushes herdr `idle` (the agent IS idle, waiting), so nothing downstream
+        can tell a blocked agent from an available one — the store is the only record. A
+        ring used to unblock unconditionally before every delivery, so any sibling's
+        ordinary `tell` put the agent back to `working` and dropped it off the one readout
+        that shows a person somebody needs them.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        self.b.block("which branch?", me="w")
+        self.h.prompts.clear()
+
+        self.b.tell(["w"], "fyi, I renamed the fixture", me="sib")
+
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        self.assertEqual(self.h.prompts, [])                       # not announced either
+        [needs] = status.collect(self.db, self.h, needs_me=True).agents
+        self.assertEqual((needs.name, needs.blocked_why), ("w", "which branch?"))
+        # Held, not lost: it is still queued for once the block is answered.
+        self.assertEqual(len(store.undelivered(self.db)), 1)
+
+    def test_a_childs_done_does_not_cancel_its_parents_block(self):
+        """`done` rings the parent like anything else, and a blocked parent is not idle."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.b.block("which branch?", me="lead")
+        self.h.prompts.clear()
+
+        self.b.done("shipped it", me="kid")
+
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual([a.name for a in
+                          status.collect(self.db, self.h, needs_me=True).agents], ["lead"])
+
+    def test_held_mail_is_rung_once_the_human_answers_the_block(self):
+        """Held, never dropped: the sibling's mail lands with the answer that released it."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        self.b.block("which branch?", me="w")
+        self.b.tell(["w"], "fyi", me="sib")
+        self.h.prompts.clear()
+
+        self.b.tell(["w"], "use main", me=HUMAN)
+
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
+        self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["fyi", "use main"])
+
+    def test_a_flush_does_not_cancel_a_block_for_a_siblings_mail(self):
+        """`flush_pending` runs at the start of every `sb` command, so this fires on any
+        traffic anywhere in the fleet — the fastest way to lose a block."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "fyi", me="sib")                        # queued, mid-turn
+        self.b.block("which branch?", me="w")
+        self.h.prompts.clear()
+        self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
+        self.b._alive_cache = None
+
+        self.assertEqual(self.b.flush_pending(), [])
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        self.assertEqual(self.h.prompts, [])
+
+        # ...and the human's answer, arriving through the same flush, does clear it.
+        self.b.tell(["w"], "use main", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
+
     def test_messaging_a_working_agent_does_not_touch_state(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.b.tell(["w"], "fyi", me=HUMAN)

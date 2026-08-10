@@ -2707,7 +2707,9 @@ class Broker:
                 # shows it; the alternative is paying a turn on every answer forever.
                 store.mark_collected(self.db, mid)
             else:
-                self._ring(t, self._say("notify.mail"))
+                # Only the human answers a block, so only the human's `tell` clears one.
+                # Anyone else's mail is held until they have (see `_ring`).
+                self._ring(t, self._say("notify.mail"), answer=(me == HUMAN))
         return ids
 
     def ask(
@@ -3312,9 +3314,10 @@ class Broker:
         `store.unseen`, NOT `store.undelivered`: the doorbell exists to tell an agent
         something it does not already know, and an agent that read its inbox proactively
         already knows. Ringing on un-announced alone burns that agent a turn to find an
-        empty inbox, and — because `_ring` unblocks first — silently cancels a `block`,
-        putting an agent that stopped to ask a person back to `working` with its question
-        never surfaced. `status._undelivered_counts` reads the same pair, so what the
+        empty inbox — and it used to be worse than a wasted turn: `_ring` unblocked before
+        every delivery, so a stale doorbell put an agent that had stopped to ask a person
+        back to `working` with its question never surfaced. Only the human's answer clears
+        a block now. `status._undelivered_counts` reads the same pair, so what the
         board calls outstanding and what this chases can never drift apart.
 
         `refresh` discards the per-process view of who is busy. `sb` invocations are short
@@ -3342,12 +3345,19 @@ class Broker:
             self._alive_unknown = False
         rung = []
         for who in dict.fromkeys(m["to_agent"] for m in pending):
+            mine = [m for m in pending if m["to_agent"] == who]
             if self._finished_and_unreachable(who):
-                self._clear_unreadable_mail(who, [m for m in pending if m["to_agent"] == who])
+                self._clear_unreadable_mail(who, mine)
                 continue
             if self._busy(who):
                 continue
-            if self._ring(who, self._say("notify.mail")):
+            # A blocked agent is not idle. Its mail waits, exactly as a busy agent's does,
+            # unless the human's answer is among it — that one both clears the block and
+            # is the news worth announcing.
+            answer = any(m["from_agent"] == HUMAN for m in mine)
+            if not answer and self._is_blocked(who):
+                continue
+            if self._ring(who, self._say("notify.mail"), answer=answer):
                 rung.append(who)
         return rung
 
@@ -3383,13 +3393,23 @@ class Broker:
             store.log_event(self.db, kind="mail_cleared", agent=who,
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
-    def _ring(self, who: str, text: str, *, force: bool = False) -> bool:
+    def _ring(self, who: str, text: str, *, force: bool = False,
+              answer: bool = False) -> bool:
         """The doorbell. Carries no payload — the message is in the store.
 
         Held back while the target is mid-turn: `agent prompt` INTERLEAVES, injecting into
         the current turn rather than queueing after it, so ringing a working agent
         interrupts whatever it was doing. `force` is for interrupt, whose whole purpose is
         to land now.
+
+        Held back while the target is BLOCKED, too, and for the same reason turned inside
+        out: a blocked agent is not idle, it is waiting on a person. This used to unblock
+        unconditionally before every delivery, so a sibling's unrelated `tell` — or a
+        child's `done` — put the agent back to `working`, dropped it out of `sb status
+        --needs-me`, and buried the human's eventual answer under mail it never asked for.
+        `answer=True` is the one ring that is the human's reply, and it is the only thing
+        that clears a block. Everything else waits its turn: the message stays queued and
+        `flush_pending` rings it once the block is answered.
 
         There is no fallback when `agent prompt` fails. There used to be one — type the
         text into the agent's pane with `pane run` — and it was a shell: any backtick or
@@ -3423,10 +3443,16 @@ class Broker:
                 raise Undeliverable(who, HerdrError(
                     "agent_finished", "it reported done and holds no live pane"))
             return False
+        if not force and not answer and self._is_blocked(who):
+            # Not idle — waiting on a person. Announcing anything else would cancel the
+            # block (see `_unblock_if_needed`) and bury the answer it is waiting for.
+            store.log_event(self.db, kind="ring_held", agent=who, reason="blocked")
+            return False
         if not force and self._busy(who):
             store.log_event(self.db, kind="ring_deferred", agent=who)
             return False
-        self._unblock_if_needed(who)
+        if answer:
+            self._unblock_if_needed(who)
         try:
             self.h.prompt(who, text)
         except HerdrError as e:
@@ -3437,8 +3463,21 @@ class Broker:
         store.mark_delivered(self.db, who)
         return True
 
+    def _is_blocked(self, who: str) -> bool:
+        """Is this agent stopped waiting on a person, per our own store?
+
+        Our store and not herdr, because we never report `blocked` to herdr — `block`
+        pushes `idle` on purpose (see there), so herdr cannot tell a blocked agent from an
+        idle one and this is the only place the difference is recorded.
+        """
+        a = store.get_agent(self.db, who)
+        return bool(a and a["state"] == "blocked")
+
     def _unblock_if_needed(self, who: str) -> None:
-        """A blocked agent is un-targetable in herdr, by herdr's design.
+        """Clear a block, because the human has answered it. Only that.
+
+        Called from `_ring` for an `answer=True` ring and nowhere else. It used to run
+        before EVERY delivery, which is what let a sibling's ordinary mail cancel a block.
 
         Reporting `blocked` drops the name binding: `agent get`/`agent prompt` answer
         `agent_not_found`, and a pane-targeted prompt answers `agent_not_ready`. Sensible
