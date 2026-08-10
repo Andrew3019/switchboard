@@ -298,6 +298,19 @@ agent_wait_ms = 300000
 deliver_ms = 20000
 deliver_poll = 0.5
 
+# How much LONGER the proof is waited for when, at the end of `deliver_ms`, herdr reports
+# the agent is running a turn. Granted once per send, and only then.
+#
+# The proof of delivery is the agent's own transcript, and Claude Code does not flush that
+# file when the text is submitted — it flushes when it gets round to it. Measured under a
+# six-way fan-out: a task taken at 05:01:59 reached the transcript at 05:02:34, a 35 s lag
+# against a 20 s window, and the spawn declared a working agent's task lost. A turn running
+# is not proof the text arrived (a startup dialog can move an agent without it), so it does
+# not confirm anything — it only buys the proof time to show up, which is exactly what was
+# missing. An agent that never starts a turn is never granted it, so a genuinely lost task
+# still fails in `deliver_ms` per send as before.
+deliver_working_ms = 60000
+
 # Pinning a spawning pane's `sb` to the checkout that pane is standing in, and confirming
 # it took. One shell command and one `pane wait-output`, both against a shell that is
 # already at a prompt — so this is short by design. It is paid BEFORE the agent's row is

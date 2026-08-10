@@ -754,8 +754,18 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                           model=args.model, with_=args.with_,
                           cleanup=cleanup, me=me, **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
-        _emit(args, f"delegated to {name}{where}",
-              {"name": name, "workspace": join.get("workspace")})
+        # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
+        # agent is plainly running (this note), or raised. The middle one is a name plus a
+        # caveat and it must arrive WITH the name — a caller that reads "delegated to w3"
+        # and nothing else has been told the delivery was proved, and the note is the
+        # difference between that and "something is running; go and look".
+        #
+        # Exit 0, and deliberately: an agent is up, it has been sent the task three times,
+        # and the actions this would otherwise provoke — respawn, force-close — are the
+        # expensive ones. See `Broker._took_a_turn`.
+        note = b.delivery_note
+        _emit(args, f"delegated to {name}{where}" + (f" — {note}" if note else ""),
+              {"name": name, "workspace": join.get("workspace"), "unconfirmed": note})
         return 0
 
     if cmd == "ask":

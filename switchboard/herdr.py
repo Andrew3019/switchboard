@@ -59,6 +59,9 @@ SPAWN_BACKOFF = config.setting("retries.spawn_backoff")
 DELIVER_TIMEOUT_MS = config.setting("timeouts.deliver_ms")
 DELIVER_POLL = config.setting("timeouts.deliver_poll")
 DELIVER_ATTEMPTS = config.setting("retries.deliver_attempts")
+# The extra window a send is given when the agent turns out to be running a turn — see
+# `_took_prompt`, and the setting, which is where the measurement is written down.
+DELIVER_WORKING_MS = config.setting("timeouts.deliver_working_ms")
 
 # The adapter's own ceiling on `agent wait`, and how long it pauses before re-issuing one
 # that came straight back without the agent having moved. `agent wait` returns instantly
@@ -497,6 +500,7 @@ class Herdr:
         *,
         attempts: int = DELIVER_ATTEMPTS,
         timeout_ms: int = DELIVER_TIMEOUT_MS,
+        working_ms: int = DELIVER_WORKING_MS,
         proof: Optional[Callable[[float], bool]] = None,
     ) -> None:
         """`prompt`, confirmed — the agent really took the text, or this raises.
@@ -529,6 +533,13 @@ class Herdr:
         false positive observed was a transition to `blocked`, `done` or `idle`, and none
         of those is a turn starting.
 
+        WHAT A FAILURE HERE MEANS. Not "the agent has no task": only that no send could be
+        confirmed. The proof is a file the agent flushes on its own schedule, and it has
+        been seen 35 s late under load, so a running agent's task was reported lost —
+        which is why `_took_prompt` stretches its window for an agent herdr says is
+        working, and why the exception below is worded as a failure to confirm rather than
+        as a verdict on the agent. `Broker._spawn` decides what it means.
+
         The baseline is re-read before EVERY attempt. It used to be snapshotted once,
         before the first, so by a third attempt any unrelated change in the intervening
         minute counted as confirmation of a prompt sent seconds ago.
@@ -541,7 +552,7 @@ class Herdr:
         routinely pays a full `timeout_ms` before the send that works. That is the price
         of the guarantee, and it is the right way round.
         """
-        last = "herdr never reported the agent taking it"
+        last = "nothing in the agent's own record ever held the text"
         for attempt in range(attempts):
             before = self._peek(name)
             sent = time.time()
@@ -550,15 +561,22 @@ class Herdr:
             except HerdrError as e:
                 last = str(e)
             else:
-                if self._took_prompt(name, before, timeout_ms, sent=sent, proof=proof):
+                if self._took_prompt(name, before, timeout_ms, sent=sent, proof=proof,
+                                     working_ms=working_ms):
                     return
             if attempt + 1 < attempts:
                 self._sleep(SPAWN_BACKOFF)
+        # WHAT THIS DOES AND DOES NOT SAY. Only that no send could be confirmed — which is
+        # not the same as the agent having nothing, and this used to claim the second.
+        # A proof that has not appeared can also be a transcript that has not been flushed,
+        # and the caller (`Broker._spawn`) is the one that can go and look at what the
+        # agent has done since. Wording it as a verdict is how a working agent came to be
+        # recorded `failed` with an instruction to force-close it.
         raise HerdrError(
             "not_delivered",
-            f"{name}: the text was sent {attempts} times and the agent never took it — "
-            f"{last}. Its pane may hold the text unsubmitted, be sitting on a dialog that "
-            f"ate it, or hold nothing at all",
+            f"{name}: the text was sent {attempts} times and none of them could be "
+            f"confirmed to have arrived — {last}. Its pane may hold the text unsubmitted, "
+            f"be sitting on a dialog that ate it, or hold nothing at all",
             [name],
         )
 
@@ -581,28 +599,55 @@ class Herdr:
         *,
         sent: float,
         proof: Optional[Callable[[float], bool]] = None,
+        working_ms: int = DELIVER_WORKING_MS,
     ) -> bool:
         """Did the agent TAKE the prompt? Polled until `timeout_ms` runs out.
 
         Took it, not merely moved: see `deliver` for what moving turned out to prove.
-        `proof` is asked first and is the only thing believed when it is available; the
-        status read behind it is a fallback for an agent whose own record cannot be
-        found, and it insists on `working` rather than on any change at all.
+        `proof` is the only thing that ever answers yes here when it is available; the
+        status read is a fallback for an agent whose own record cannot be found, and it
+        insists on `working` rather than on any change at all.
+
+        WHY THE WINDOW STRETCHES. The proof is a file the agent writes, and Claude Code
+        does not flush its transcript when the text is submitted — under a six-way
+        fan-out one was measured 35 s late, against a 20 s window. So "no proof yet" and
+        "no task" were the same answer, and a fan-out reported two working agents' tasks
+        as lost. Herdr's status cannot confirm the text arrived, but a turn running does
+        rule out the case this window is short for: an agent that took nothing does
+        nothing. So when the window runs out on an agent herdr says is `working`, it is
+        extended ONCE by `working_ms` — not to accept anything weaker, but to give the
+        proof time to appear. It usually does, and then this returns for the right reason.
+
+        Herdr is asked only when the window expires, never on the poll: this loop runs
+        twice a second and every status read is a subprocess.
         """
         deadline = time.time() + timeout_ms / 1000
         seq = before.change_seq if before else 0
         was_working = before is not None and before.state == WORKING
+        stretched = False
         while True:
             if proof is not None:
                 if proof(sent):
                     return True
-            else:
-                a = self._peek(name)
-                if a is not None and a.state == WORKING:
-                    if a.change_seq > seq or not was_working:
-                        return True
+            elif self._running_turn(name, seq, was_working):
+                return True
             if not self._nap(DELIVER_POLL, deadline):
-                return False
+                if (proof is None or stretched or working_ms <= 0
+                        or not self._running_turn(name, seq, was_working)):
+                    return False
+                stretched = True
+                deadline = time.time() + working_ms / 1000
+
+    def _running_turn(self, name: str, seq: int, was_working: bool) -> bool:
+        """Is herdr reporting a turn that started after we prompted?
+
+        `working`, and either newly so or freshly moved. Not "the status changed": every
+        false confirmation this path ever produced was a transition to `blocked`, `done`
+        or `idle` — a startup dialog being dismissed — and none of those is a turn.
+        """
+        a = self._peek(name)
+        return (a is not None and a.state == WORKING
+                and (a.change_seq > seq or not was_working))
 
     def prompt_pane(self, pane_id: str, text: str) -> None:
         """Run a command in a pane. For FIXED commands only — `text` reaches a shell.
