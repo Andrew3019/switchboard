@@ -47,10 +47,17 @@ is the only thing that outlives it.
 
 # Phase 1 — fleet reliability
 
-**Start with 1.2, before any building at all.** If spawns really are dropping every
-system prompt but the last, then agents are running without the protocol, their role and
-their presets — which changes what the rest of this plan even means, and would make much
-of phase 6 unverifiable. Confirm or refute it first, and say which in your first report.
+**1.2 is answered: REFUTED, and no longer gates anything.** It was verified empirically on
+2026-08-09 — three spawns with different stacking prompt sources each received every
+fragment, one of them six. The bug was real when its evidence was taken and was fixed
+4 minutes later by `146240a` on 2026-08-08; this plan recorded it from a snapshot already
+out of date. See `audit/phase1-prompt-drop.md`. The rest of phase 1 stands.
+
+One consequence worth carrying forward: every symptom attributed to agents ignoring the
+protocol — not calling `sb done`, not committing first, using their own question tool
+instead of `sb block`, not orchestrating — was observed on pre-`146240a` spawns that
+genuinely never received it. Re-check those against a current spawn before treating any of
+them as a live bug.
 
 Nothing else is worth doing first: every later phase is built by agents, and agents are
 currently unreliable to spawn, to wake, and to close. Fixing this phase makes every
@@ -59,7 +66,7 @@ subsequent phase cheaper.
 | # | what | evidence |
 |---|---|---|
 | 1.1 | Spawn delivery: the task must arrive and be submitted, or the spawn must fail loudly. Never report success for an agent that has not started. | `2026-08-08-023237`, `2026-08-09-151916`, `2026-08-09-161323`; ~8 agents lost in one session |
-| 1.2 | **Every spawn silently drops all system prompts but the last one.** Verify first — if still true, agents are running without protocol, role and presets, and much of phase 6 is invisible until it is fixed. | `2026-08-08-031337` |
+| 1.2 | ~~Every spawn silently drops all system prompts but the last one.~~ **REFUTED — already fixed, nothing to do.** The evidence `2026-08-08-031337` was taken 4m28s before `146240a` fixed it (`herdr.py`, one joined `--append-system-prompt`); covered by `tests/test_herdr.py::test_every_prompt_is_delivered_in_ONE_flag`. Re-verified empirically. | `audit/phase1-prompt-drop.md`; `146240a` |
 | 1.3 | Doorbell: mail to an idle agent must be announced; a parent must be woken when a child reports. `flush_pending` has only two callers. | `2026-08-09-004538`, `2026-08-09-035933`, `broker.py` `flush_pending` |
 | 1.4 | `sb cleanup` must never silently do nothing — say what it refused and why. | `2026-08-09-010647`, `2026-08-09-071134` |
 | 1.5 | An interrupted turn leaves an agent recorded working forever, so nothing ever rings it again. | `2026-08-09-045325` |
