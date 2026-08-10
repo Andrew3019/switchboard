@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 from unittest import mock
 
@@ -40,6 +42,7 @@ class FakeHerdrAPI:
         self.pane_prompts: list[tuple] = []
         self.unreachable: set = set()
         self.undeliverable: set = set()   # started, but never takes a task
+        self.proofs: list[tuple] = []     # (name, the delivery proof it was given)
         self.states_by_name: dict = {}
         self.list_error: Optional[HerdrError] = None   # herdr itself cannot be asked
         self.workspaces: list = []
@@ -72,9 +75,12 @@ class FakeHerdrAPI:
             raise HerdrError("agent_not_found", f"agent target {name} not found")
         self.prompts.append((name, text))
 
-    def deliver(self, name, text, **kw):
+    def deliver(self, name, text, *, proof=None, **kw):
         """The confirmed prompt. The confirming itself is `Herdr.deliver`'s own test —
-        here it is a prompt that either lands or raises, which is all `delegate` sees."""
+        here it is a prompt that either lands or raises, which is all `delegate` sees.
+        `proof` is kept so the one thing only the broker can get right — which agent's
+        transcript is consulted — can be checked."""
+        self.proofs.append((name, proof))
         if name in self.undeliverable:
             from switchboard.herdr import HerdrError
             raise HerdrError("not_delivered", f"{name}: never started a turn")
@@ -300,6 +306,32 @@ class BrokerTest(unittest.TestCase):
         self.assertTrue(a["session_id"])
         kinds = [e["kind"] for e in store.recent_events(self.db, limit=50)]
         self.assertIn("task_undelivered", kinds)
+
+    def test_delivery_is_confirmed_against_the_childs_own_transcript(self):
+        """The wiring only the broker can get right: WHOSE record proves the delivery.
+
+        `deliver` is handed a callable, and the callable has to look in the child's own
+        checkout — the transcript bucket is keyed by cwd, so a proof pointed anywhere
+        else would answer for some other agent, or for nobody.
+        """
+        name = self.b.delegate("do the thing", role="worker", me="orch")
+        who, proof = self.h.proofs[-1]
+        self.assertEqual(who, name)
+        self.assertIsNotNone(proof)
+
+        cwd = store.get_agent(self.db, name)["cwd"]
+        home = Path(self.tmp.name) / "fakehome"
+        now = time.time()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertFalse(proof(now))       # nothing submitted anywhere yet
+            d = home / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+            d.mkdir(parents=True)
+            (d / "sess.jsonl").write_text(json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": "do the thing"},
+                "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            }) + "\n")
+            self.assertTrue(proof(now - 1))
 
     def test_a_delivered_task_leaves_an_ordinary_working_agent(self):
         name = self.b.delegate("compute 2+2", role="worker", me="orch")

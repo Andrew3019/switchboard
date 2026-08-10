@@ -32,6 +32,7 @@ import json
 import sqlite3
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -52,6 +53,13 @@ _RECORD_OVERSCAN = config.setting("display.record_overscan")
 
 # How much of the fallback explanation reaches the event log.
 _EVENT_CLIP = config.setting("limits.event_clip")
+
+# `task_arrived`, which reads the end of a transcript to answer whether a task landed.
+# The record it is looking for was written seconds ago, so the tail is the whole search
+# space; the slack is for the two clocks involved (ours, and the timestamp Claude Code
+# stamps its own records with) not agreeing to the second.
+_ARRIVAL_RECORDS = 50
+_CLOCK_SLOP = 5.0
 
 
 @dataclass
@@ -125,6 +133,61 @@ def read_output(
                                 path=str(path)), lines)
     return _done(db, Output(agent=name, source=TRANSCRIPT, text=text, detail=why,
                             path=str(path)), lines)
+
+
+def task_arrived(cwd: Optional[str], text: str, *, since: float) -> bool:
+    """Has `text` actually been submitted to an agent working in `cwd`?
+
+    The one honest answer to "did the task arrive", and the reason this module is read
+    from the spawn path at all. Everything herdr can tell us about a freshly started
+    agent is a reading of its terminal — and a Claude Code that is showing its workspace
+    trust dialog swallows the prompt whole while its herdr status changes anyway, which
+    is precisely how a spawn came to report a name for an agent that never ran
+    (`Herdr.deliver`). Claude Code's own transcript is not a reading of anything: the
+    submitted text is appended to it, verbatim, about a second after it goes in, and a
+    prompt eaten by a dialog leaves no record because it never happened.
+
+    Matched by CONTENT, not by session id, because at delivery time there may be no
+    session — a spawn that never took its prompt never started one, and the whole
+    directory is empty. `since` keeps a re-send from being confirmed by some older turn
+    that happened to carry the same words; files untouched since then are skipped
+    unread, which is what keeps this cheap enough to poll.
+    """
+    d = store.transcript_dir(cwd)
+    if d is None or not d.is_dir():
+        return False
+    needle = text.strip()
+    if not needle:
+        return False
+    floor = since - _CLOCK_SLOP
+    for f in sorted(d.glob("*.jsonl")):
+        try:
+            if f.stat().st_mtime < floor:
+                continue
+        except OSError:
+            continue
+        # The tail only: text submitted seconds ago is at the END of the file, and this
+        # is polled twice a second against a session that may be hours long.
+        for rec in _tail_records(f, _ARRIVAL_RECORDS):
+            if rec.get("type") != "user" or _record_time(rec) < floor:
+                continue
+            content = (rec.get("message") or {}).get("content")
+            if not isinstance(content, str):
+                content = json.dumps(content)
+            if needle in content:
+                return True
+    return False
+
+
+def _record_time(rec: dict) -> float:
+    """A transcript record's own timestamp, or 0 — which reads as "too old to trust"."""
+    ts = rec.get("timestamp")
+    if not isinstance(ts, str):
+        return 0.0
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def read_transcript(path: Path, *, lines: int = DEFAULT_LINES) -> str:

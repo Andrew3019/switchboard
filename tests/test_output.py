@@ -15,7 +15,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -278,6 +280,79 @@ class ReadPaneFailureTest(unittest.TestCase):
         h.read_pane("w1:p9")
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0]["kind"], "herdr")
+
+
+class TaskArrivedTest(OutputTestBase):
+    """`task_arrived` — the only proof a spawned agent really got its task.
+
+    Everything herdr can say about a just-started agent is a reading of its terminal,
+    and a Claude Code showing its workspace trust dialog eats the prompt while its status
+    changes anyway. The transcript is the agent's own record: the submitted text is
+    appended to it verbatim, and a prompt a dialog swallowed leaves nothing behind.
+    """
+
+    def user_line(self, text: str, *, at: float) -> str:
+        return json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "timestamp": datetime.fromtimestamp(at, tz=timezone.utc).isoformat(),
+        })
+
+    def arrived(self, text, *, since, cwd=None):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            return output.task_arrived(str(cwd if cwd is not None else self.cwd),
+                                       text, since=since)
+
+    def test_a_task_never_submitted_leaves_no_record(self):
+        """The lost spawn: no session was ever started, so the bucket is not even there."""
+        self.assertFalse(self.arrived("do the thing", since=time.time()))
+
+    def test_a_submitted_task_is_found_by_its_text(self):
+        now = time.time()
+        self.write_transcript("s1", self.user_line("do the thing", at=now))
+        self.assertTrue(self.arrived("do the thing", since=now - 1))
+
+    def test_a_long_task_is_recorded_verbatim_and_matches(self):
+        """Verified live at 1682 characters: no truncation, no paste placeholder."""
+        now = time.time()
+        task = "probe " + " ".join(f"word{i:03d}" for i in range(200)) + " END"
+        self.write_transcript("s1", self.user_line(task, at=now))
+        self.assertTrue(self.arrived(task, since=now - 1))
+
+    def test_the_same_words_in_an_older_turn_are_not_this_delivery(self):
+        """A re-send must not be confirmed by a turn that happened before it."""
+        now = time.time()
+        self.write_transcript("s1", self.user_line("do the thing", at=now - 600))
+        self.assertFalse(self.arrived("do the thing", since=now))
+
+    def test_a_transcript_untouched_since_the_send_is_not_read_at_all(self):
+        now = time.time()
+        p = self.write_transcript("s1", self.user_line("do the thing", at=now))
+        os.utime(p, (now - 600, now - 600))
+        self.assertFalse(self.arrived("do the thing", since=now))
+
+    def test_the_agent_repeating_the_task_back_is_not_proof(self):
+        """Only what the agent was GIVEN counts — not what it then said."""
+        now = time.time()
+        self.write_transcript("s1", entry("assistant", text_part("do the thing")))
+        self.assertFalse(self.arrived("do the thing", since=now - 1))
+
+    def test_block_shaped_content_is_searched_too(self):
+        now = time.time()
+        self.write_transcript("s1", json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "do the thing"}]},
+            "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        }))
+        self.assertTrue(self.arrived("do the thing", since=now - 1))
+
+    def test_an_empty_task_proves_nothing(self):
+        now = time.time()
+        self.write_transcript("s1", self.user_line("do the thing", at=now))
+        self.assertFalse(self.arrived("   ", since=now - 1))
+
+    def test_no_cwd_is_an_answer_not_a_crash(self):
+        self.assertFalse(self.arrived("do the thing", since=time.time(), cwd=""))
 
 
 if __name__ == "__main__":

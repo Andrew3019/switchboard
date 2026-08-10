@@ -202,13 +202,17 @@ class DeliverTest(unittest.TestCase):
     agent that never ran. See BUILD-PLAN item 1.1.
     """
 
-    def herdr(self, *, takes_on=1, prompt_errors=()):
+    def herdr(self, *, takes_on=1, prompt_errors=(), moves_to="working"):
         """An agent that takes the text on its `takes_on`-th send, and never before.
 
         `takes_on=0` is the agent that never takes it at all. State is a property of how
         many sends have landed rather than of how many times it has been read, so the poll
         loop can turn over as often as it likes without that being the thing under test.
         `prompt_errors` is consumed one per `agent prompt`; a falsy entry succeeds.
+
+        `moves_to` is what the agent's status becomes when it moves. `working` is a turn
+        starting. The other values are the ones a startup dialog produces while eating
+        the prompt — a move that is not a turn, and must not read as delivery.
         """
         state = {"sends": 0, "errs": list(prompt_errors)}
         calls: list[list[str]] = []
@@ -222,7 +226,9 @@ class DeliverTest(unittest.TestCase):
                 state["sends"] += 1
                 return ok({})
             took = bool(takes_on) and state["sends"] >= takes_on
-            return ok({"agents": [dict(AGENT_JSON, state_change_seq=88 + int(took))]})
+            return ok({"agents": [dict(AGENT_JSON,
+                                       state_change_seq=88 + int(took),
+                                       agent_status=moves_to if took else "idle")]})
 
         return Herdr("herdr", runner=runner, sleep=lambda _: None), calls
 
@@ -271,6 +277,102 @@ class DeliverTest(unittest.TestCase):
         with self.assertRaises(HerdrError) as cm:
             h.deliver("w1", "task", attempts=2, timeout_ms=1)
         self.assertEqual(cm.exception.code, "not_delivered")
+
+    def test_a_status_change_that_is_not_a_turn_is_not_a_delivery(self):
+        """THE BUG THIS WHOLE PATH EXISTS FOR, in its second form.
+
+        Measured live: `agent start` returns with the pane `interactive_ready` while
+        Claude Code is still showing its workspace trust dialog. The prompt types into
+        the modal, the text is thrown away, the Enter answers the dialog — and the agent
+        flips to `blocked` or `done` within a second. Under the old rule ("the seq
+        moved") that was confirmation, and three of four spawns in one cold fan-out were
+        reported as delivered having never run.
+        """
+        for state in ("blocked", "done", "idle"):
+            with self.subTest(state=state):
+                h, calls = self.herdr(takes_on=1, moves_to=state)
+                with self.assertRaises(HerdrError) as cm:
+                    h.deliver("w1", "task", attempts=2, timeout_ms=1)
+                self.assertEqual(cm.exception.code, "not_delivered")
+                self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_the_baseline_is_re_read_before_every_send(self):
+        """A stale baseline confirms a new prompt with an old change.
+
+        `before` used to be snapshotted once, ahead of the first attempt. By the third,
+        anything that had moved the agent in the intervening minute — including the
+        answer to the dialog that ate attempt one — satisfied it.
+        """
+        h, calls = self.herdr(takes_on=99)
+        with self.assertRaises(HerdrError):
+            h.deliver("w1", "task", attempts=3, timeout_ms=1)
+        lists = [c for c in calls if c[1:3] == ["agent", "list"]]
+        sends = [i for i, c in enumerate(calls) if c[1:3] == ["agent", "prompt"]]
+        self.assertEqual(len(sends), 3)
+        for i in sends:                          # every send is preceded by a fresh read
+            self.assertEqual(calls[i - 1][1:3], ["agent", "list"])
+        self.assertGreaterEqual(len(lists), 3)
+
+
+class DeliverProofTest(unittest.TestCase):
+    """`proof` — the agent's own record of the text, which herdr cannot fake.
+
+    See `output.task_arrived`. When one is supplied it is the ONLY thing believed: the
+    status read it replaces is a reading of the terminal, and the terminal lies during
+    startup.
+    """
+
+    def herdr(self, arrives_on, *, status="working"):
+        """herdr always says the agent moved; the proof only agrees on send `arrives_on`.
+
+        `arrives_on=0` never arrives — the false-success case, with herdr insisting all
+        the way through that the agent is working.
+        """
+        state = {"sends": 0}
+        calls: list[list[str]] = []
+
+        def runner(argv, *, timeout=None):
+            calls.append(list(argv))
+            if argv[1:3] == ["agent", "prompt"]:
+                state["sends"] += 1
+                return ok({})
+            return ok({"agents": [dict(AGENT_JSON, state_change_seq=88 + state["sends"],
+                                       agent_status=status)]})
+
+        def proof(since):
+            return bool(arrives_on) and state["sends"] >= arrives_on
+
+        return Herdr("herdr", runner=runner, sleep=lambda _: None), calls, proof
+
+    def sends(self, calls):
+        return [c for c in calls if c[1:3] == ["agent", "prompt"]]
+
+    def test_a_task_the_transcript_never_shows_is_not_a_delivery(self):
+        h, calls, proof = self.herdr(0)
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=3, timeout_ms=1, proof=proof)
+        self.assertEqual(cm.exception.code, "not_delivered")
+        self.assertEqual(len(self.sends(calls)), 3)
+
+    def test_a_task_the_transcript_shows_is_delivered_once(self):
+        h, calls, proof = self.herdr(1)
+        h.deliver("w1", "task", timeout_ms=1, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 1)
+
+    def test_a_re_send_is_what_makes_a_swallowed_first_prompt_land(self):
+        h, calls, proof = self.herdr(2)
+        h.deliver("w1", "task", timeout_ms=1, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_proof_needs_no_state_change_at_all(self):
+        """A task can be taken, finished and forgotten between two polls.
+
+        The status read has to allow for that and cannot; the transcript simply has the
+        text in it either way.
+        """
+        h, calls, proof = self.herdr(1, status="idle")
+        h.deliver("w1", "task", timeout_ms=1, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 1)
 
 
 class TopologyTest(unittest.TestCase):
