@@ -546,6 +546,26 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
+    def test_a_parent_that_was_mid_turn_is_woken_by_the_next_flush(self):
+        """The report that goes missing: a parent in a long turn when its last child
+        finishes. `done` rings it, the ring is held back because it is working, and until
+        the collector ran this on a timer the only thing that re-rang it was the next `sb`
+        command a person happened to type (`2026-08-09-035933`).
+        """
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.h.states_by_name = {"lead": "working", "kid": "working"}
+        self.b.done("shipped it", me="kid")
+        self.assertEqual(self.h.prompts, [])                       # held: mid-turn
+
+        self.h.states_by_name = {"lead": "idle"}                   # the turn ends
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), ["lead"])
+        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
+        self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
+                         ["[done] shipped it"])
+
     def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
         """A ring says "you have mail" — to an agent that has already got it, that is a
         whole turn spent discovering an empty inbox (C0).
@@ -621,6 +641,61 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.prompts, [])
         # Still undelivered, so the next `sb` command rings it again.
         self.assertEqual([m["to_agent"] for m in store.undelivered(self.db)], ["w"])
+
+    def test_a_lost_name_binding_is_recorded_as_its_own_failure(self):
+        """herdr answering `agent_not_found` for an agent it is STILL listing as alive is
+        the signature of a lost name binding (`2026-08-09-004626`) — not a dead agent.
+
+        Nothing can fix it from here: the binding lives in herdr. What matters is that it
+        stops being indistinguishable from an ordinary hiccup, because the mail queued
+        behind it will never be announced by anything.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}        # herdr still lists it, and idle
+        self.h.unreachable.add("w")                  # ...but will not answer to the name
+
+        self.b.tell(["w"], "you have mail", me=HUMAN)
+
+        [ev] = [r for r in store.recent_events(self.db, agent="w")
+                if r["kind"] == "ring_failed"]
+        self.assertIn("name_binding_lost", ev["payload"])
+        self.assertIn("agent_not_found", self.b.unreachable("w"))
+        self.assertEqual([m["to_agent"] for m in store.undelivered(self.db)], ["w"])
+
+    def test_an_agent_herdr_has_dropped_is_not_called_a_lost_binding(self):
+        """It is the pair that means something: refused BY NAME while still listed. An
+        agent herdr no longer lists is simply gone, and saying "go look at its pane" about
+        a pane that closed under it would send a person to an empty screen."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {}                   # herdr has dropped it entirely
+        self.h.unreachable.add("w")
+
+        self.b.tell(["w"], "you have mail", me=HUMAN)
+
+        [ev] = [r for r in store.recent_events(self.db, agent="w")
+                if r["kind"] == "ring_failed"]
+        self.assertNotIn("name_binding_lost", ev["payload"])
+        self.assertIsNone(self.b.unreachable("w"))
+
+    def test_a_ring_that_lands_later_clears_the_unreachable_reading(self):
+        """It is an observation, not a state: the next ring that works disproves it."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}
+        self.h.unreachable.add("w")
+        self.b.tell(["w"], "first", me=HUMAN)
+        self.assertIsNotNone(self.b.unreachable("w"))
+
+        self.h.unreachable.discard("w")              # herdr found the name again
+        self.b.tell(["w"], "second", me=HUMAN)
+        self.assertIsNone(self.b.unreachable("w"))
+
+    def test_a_deferred_doorbell_is_not_an_unreachable_agent(self):
+        """Mid-turn is the ordinary case and it rings itself out; promising delivery there
+        is honest, which is exactly what makes the unreachable warning worth reading."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "later", me=HUMAN)
+        self.assertIsNone(self.b.unreachable("w"))
 
     def test_an_undeliverable_interrupt_fails_loudly_instead_of_being_marked_read(self):
         """`mark_collected` used to fire before delivery was attempted, so an interrupt
@@ -724,6 +799,78 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.states[-1][1], "working")     # re-registered before poking
         self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
+
+    def test_a_siblings_mail_does_not_cancel_a_block(self):
+        """The answer Andrew eventually gives would arrive buried under it.
+
+        Blocking pushes herdr `idle` (the agent IS idle, waiting), so nothing downstream
+        can tell a blocked agent from an available one — the store is the only record. A
+        ring used to unblock unconditionally before every delivery, so any sibling's
+        ordinary `tell` put the agent back to `working` and dropped it off the one readout
+        that shows a person somebody needs them.
+        """
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        self.b.block("which branch?", me="w")
+        self.h.prompts.clear()
+
+        self.b.tell(["w"], "fyi, I renamed the fixture", me="sib")
+
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        self.assertEqual(self.h.prompts, [])                       # not announced either
+        [needs] = status.collect(self.db, self.h, needs_me=True).agents
+        self.assertEqual((needs.name, needs.blocked_why), ("w", "which branch?"))
+        # Held, not lost: it is still queued for once the block is answered.
+        self.assertEqual(len(store.undelivered(self.db)), 1)
+
+    def test_a_childs_done_does_not_cancel_its_parents_block(self):
+        """`done` rings the parent like anything else, and a blocked parent is not idle."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.b.block("which branch?", me="lead")
+        self.h.prompts.clear()
+
+        self.b.done("shipped it", me="kid")
+
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual([a.name for a in
+                          status.collect(self.db, self.h, needs_me=True).agents], ["lead"])
+
+    def test_held_mail_is_rung_once_the_human_answers_the_block(self):
+        """Held, never dropped: the sibling's mail lands with the answer that released it."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        self.b.block("which branch?", me="w")
+        self.b.tell(["w"], "fyi", me="sib")
+        self.h.prompts.clear()
+
+        self.b.tell(["w"], "use main", me=HUMAN)
+
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
+        self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["fyi", "use main"])
+
+    def test_a_flush_does_not_cancel_a_block_for_a_siblings_mail(self):
+        """`flush_pending` runs at the start of every `sb` command, so this fires on any
+        traffic anywhere in the fleet — the fastest way to lose a block."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "fyi", me="sib")                        # queued, mid-turn
+        self.b.block("which branch?", me="w")
+        self.h.prompts.clear()
+        self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
+        self.b._alive_cache = None
+
+        self.assertEqual(self.b.flush_pending(), [])
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
+        self.assertEqual(self.h.prompts, [])
+
+        # ...and the human's answer, arriving through the same flush, does clear it.
+        self.b.tell(["w"], "use main", me=HUMAN)
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
 
     def test_messaging_a_working_agent_does_not_touch_state(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")

@@ -605,6 +605,85 @@ class CollectorLoop(PanelTest):
         self.assertEqual(panel.read(self.paths).collector["polls"], 3)
 
 
+class TheDoorbellTrigger(PanelTest):
+    """The one loop in the fleet that ticks on its own is what rings the doorbell.
+
+    A message held back because its target was mid-turn used to wait for the next `sb`
+    command somebody happened to run — so a parent whose last child reported while it was
+    busy was never woken at all. This is the minimal trigger for that and nothing else: it
+    runs `sb`, which flushes at startup like every `sb` command, and every decision about
+    who may be rung stays in `Broker.flush_pending`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ran: list[list[str]] = []
+        # The thread runs its target here and now, so a test never races the doorbell.
+        self.enterContext(mock.patch.object(
+            collector.threading, "Thread",
+            lambda target, args=(), **kw: mock.Mock(start=lambda: target(*args))))
+        self.enterContext(mock.patch.object(collector.shutil, "which", lambda n: "/bin/sb"))
+        self.enterContext(mock.patch.object(
+            collector.subprocess, "run",
+            lambda argv, **kw: self.ran.append(argv) or mock.Mock(returncode=0)))
+
+    def _snap(self, undelivered):
+        snap = a_snapshot("w1")
+        snap.agents[0].undelivered = undelivered
+        return snap
+
+    def test_mail_nobody_has_been_told_about_runs_sb(self):
+        state = collector.State(pid=1, started_at=0.0)
+        self.assertTrue(collector.ring_doorbell(self._snap(1), state, Path("/r/.sb/s.db")))
+        self.assertEqual(self.ran, [["/bin/sb", "flush"]])
+        self.assertEqual(state.doorbells, 1)
+        self.assertIsNone(state.doorbell_error)
+
+    def test_an_idle_fleet_costs_nothing(self):
+        state = collector.State(pid=1, started_at=0.0)
+        self.assertFalse(collector.ring_doorbell(self._snap(0), state, None))
+        self.assertEqual((self.ran, state.doorbells), ([], 0))
+
+    def test_a_target_that_stays_busy_does_not_cost_a_process_a_tick(self):
+        """Mail held back stays pending, tick after tick. Without the floor this would
+        spawn one `sb` every two seconds for as long as that agent keeps working."""
+        state = collector.State(pid=1, started_at=0.0)
+        collector.ring_doorbell(self._snap(1), state, None)
+        self.assertFalse(collector.ring_doorbell(self._snap(1), state, None))
+        self.assertEqual(len(self.ran), 1)
+
+        state.last_doorbell -= collector.DOORBELL_GAP + 1      # ...and again once it lapses
+        self.assertTrue(collector.ring_doorbell(self._snap(1), state, None))
+        self.assertEqual(len(self.ran), 2)
+
+    def test_a_failing_sb_is_a_counter_and_not_a_stale_snapshot(self):
+        """`last_error` is what every panel reads as "this data is old". A doorbell that
+        will not run is a different complaint about perfectly good data."""
+        state = collector.State(pid=1, started_at=0.0)
+        with mock.patch.object(collector.subprocess, "run",
+                               lambda *a, **k: mock.Mock(returncode=2, stderr="boom",
+                                                         stdout="")):
+            collector.ring_doorbell(self._snap(1), state, None)
+        self.assertEqual(state.doorbell_error, "boom")
+        self.assertIsNone(state.last_error)
+
+    def test_with_no_sb_on_path_it_says_so_rather_than_writing_itself(self):
+        """Falling back to this process's own code would put the write back in the one
+        process that is read-only and version-stale on purpose."""
+        state = collector.State(pid=1, started_at=0.0)
+        with mock.patch.object(collector.shutil, "which", lambda n: None):
+            self.assertFalse(collector.ring_doorbell(self._snap(1), state, None))
+        self.assertEqual((self.ran, state.doorbells), ([], 0))
+        self.assertIn("no `sb` on PATH", state.doorbell_error)
+
+    def test_the_verb_it_runs_exists(self):
+        """The collector spawns `sb flush` by name. If that verb is ever renamed, the
+        trigger fails silently in a thread nobody is watching."""
+        from switchboard import cli
+        args = cli.build_parser().parse_args(["flush"])
+        self.assertEqual(args.cmd, "flush")
+
+
 class GitIsPaidOncePerCollector(PanelTest):
     """`store.connect()` reaches `git rev-parse --git-common-dir`, 12.3 ms of a 23.4 ms
     tick. One collector pays it instead of forty boards — but only if it pays it once."""

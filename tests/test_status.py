@@ -1067,7 +1067,7 @@ class StatusCliTest(unittest.TestCase):
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             "cleanup": [], "workspace": ["new"], "restore": ["w1"],
             "interrupt": ["w1", "stop"], "inspect": ["w1"], "wait": ["w1"], "log": [],
-            "board": [],
+            "board": [], "flush": [],
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
             # so it can print that instead of an argparse usage dump.
             "plugins": [],

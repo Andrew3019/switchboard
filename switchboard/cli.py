@@ -120,6 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
     # the equivalent, unhidden way in.
     cmd("board", hidden=True)
 
+    # Hidden for the same reason: it is machinery, not vocabulary. Every `sb` command
+    # already flushes the doorbell before it dispatches (see main), so this one is that
+    # and nothing else — the verb the collector's loop runs so that a message held back
+    # while its target was mid-turn is announced without waiting for a person to type
+    # something. An agent has no use for it and is not taught it.
+    cmd("flush", hidden=True)
+
     d = cmd("delegate", help="spawn a child agent to do a task")
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
@@ -578,13 +585,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Every `sb` invocation is also a tick of the doorbell. A message to an agent that was
     # mid-turn is held back rather than injected into its turn (see Broker._ring), and
-    # something has to ring it once it is free — until an events daemon exists, that
-    # something is the next command anyone runs, which in a live session is constantly.
+    # something has to ring it once it is free. That was ONLY the next command anyone
+    # happened to run, which left a parent whose last child reported mid-turn waiting for
+    # traffic that may never come; `sb flush` is the same tick with nothing after it, and
+    # the collector's loop runs it on a timer so the fleet no longer depends on a person.
     # Never fatal: a doorbell that cannot ring must not take down `sb status`.
+    rung: list[str] = []
     try:
-        b.flush_pending()
+        rung = b.flush_pending()
     except Exception as e:                       # noqa: BLE001 — best effort, always
         store.log_event(db, kind="flush_failed", error=str(e))
+
+    if args.cmd == "flush":
+        _emit(args, f"rang {', '.join(rung)}" if rung else "rang nobody", {"rung": rung})
+        return 0
 
     try:
         return _dispatch(args, b, db, h)
@@ -755,9 +769,23 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the ordinary reason, not a failure. The report says who has not been told YET.
         waiting = sorted({m["to_agent"] for m in store.undelivered(db, exclude=(HUMAN,))
                           if m["id"] in set(ids)})
-        note = f" ({', '.join(waiting)} mid-turn — will be rung when free)" if waiting else ""
+        # "will be rung when free" is a promise, and for one of these it is a false one:
+        # herdr can lose a live agent's name binding, and then no `sb` command anybody
+        # runs will ever ring it again. Saying so is the whole recovery path — a person
+        # goes and types in that pane.
+        lost = [n for n in waiting if b.unreachable(n)]
+        waiting = [n for n in waiting if n not in lost]
+        notes = []
+        if waiting:
+            notes.append(f"{', '.join(waiting)} mid-turn or blocked — will be rung "
+                         f"when free")
+        if lost:
+            notes.append(f"{', '.join(lost)} UNREACHABLE — herdr has lost its name and "
+                         f"the doorbell will not ring again; the message is stored, but "
+                         f"somebody has to go to its pane")
+        note = f" ({'; '.join(notes)})" if notes else ""
         _emit(args, f"sent to {', '.join(args.who)}{note}",
-              {"ids": ids, "undelivered": waiting})
+              {"ids": ids, "undelivered": waiting, "unreachable": lost})
         return 0
 
     if cmd == "inbox":

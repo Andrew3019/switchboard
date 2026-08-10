@@ -1127,6 +1127,8 @@ class IsolationTest(Sandbox):
         "tell": ["w1", "hi"], "inbox": [], "block": ["why"], "log": [], "cleanup": [],
         "inspect": ["w1"], "wait": ["w1", "--timeout", "1"], "init": [],
         "restore": ["w1"], "interrupt": ["w1", "stop"], "board": [], "models": [],
+        # The collector's doorbell trigger: a flush with nothing after it.
+        "flush": [],
     }
 
     def test_1_every_level_0_verb_runs_to_completion(self):
