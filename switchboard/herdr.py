@@ -107,12 +107,25 @@ class Agent:
     workspace_id: str = ""       # where the pane actually IS, straight from herdr
     state: str = UNKNOWN
     change_seq: int = 0          # herdr's global counter. Guards READS, unlike our --seq.
+    # Whether `name` came from herdr's NAME BINDING or from the fallback below. They are
+    # not the same fact and one caller depends on the difference: a bound row is
+    # `{"agent": "claude", "name": "w2"}` and herdr answers `agent get w2`; an agent whose
+    # binding has been evicted lists as `{"agent": "w2"}` with no name at all, and herdr
+    # answers `agent_not_found` for it. Both yield `name="w2"` here, so a predicate asking
+    # "does herdr still know this name?" off `name` alone reads the fallback as proof of
+    # the very binding it is trying to detect the loss of (`Broker._finished_and_unreachable`).
+    #
+    # True by default because an Agent built by hand rather than parsed — every one of them
+    # is constructed FROM a name — is bound by construction. Only `from_json` can find out
+    # otherwise, and it is the only thing in the package that builds these from herdr.
+    bound: bool = True
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_json(cls, d: dict) -> "Agent":
         return cls(
             name=d.get("name") or d.get("agent") or "",
+            bound=bool(d.get("name")),
             pane_id=d.get("pane_id", ""),
             terminal_id=d.get("terminal_id", ""),
             session_id=(d.get("agent_session") or {}).get("value", ""),

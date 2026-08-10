@@ -41,6 +41,10 @@ class FakeHerdrAPI:
         self.unreachable: set = set()
         self.undeliverable: set = set()   # started, but never takes a task
         self.states_by_name: dict = {}
+        # Names herdr LISTS but no longer answers to — what `sb done` leaves behind. The
+        # row comes back as `{"agent": "<name>"}` with no name binding, which is a
+        # different fact from being absent and the one `Agent.bound` carries.
+        self.evicted: set = set()
         self.list_error: Optional[HerdrError] = None   # herdr itself cannot be asked
         self.workspaces: list = []
         self.tabs: list = []
@@ -86,7 +90,8 @@ class FakeHerdrAPI:
         from switchboard.herdr import Agent as _A
         if self.list_error:
             raise self.list_error
-        return [_A(name=n, pane_id="w1:p0", state=st) for n, st in self.states_by_name.items()]
+        return [_A(name=n, pane_id="w1:p0", state=st, bound=n not in self.evicted)
+                for n, st in self.states_by_name.items()]
 
     def create_worktree(self, branch, *, base="main", cwd=None, label=None):
         """A herdr that CAN fork.
@@ -895,6 +900,103 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), [])
         self.assertEqual([m["body"] for m in store.unread_for(self.db, "w", mark=False)], ["hi"])
 
+    # -- the endless ring loop: a done agent herdr still LISTS but no longer answers to --
+
+    def _evicted(self, name="w"):
+        """The ordinary state of a done agent: pane open, turn ended, name binding gone.
+
+        herdr lists the pane as `{"agent": "<name>"}` with no `name` field, which is how it
+        stays visible to `agent list` while `agent get` answers agent_not_found.
+        """
+        store.create_agent(self.db, name=name, role="worker", pane_id="w1:p1")
+        store.set_state(self.db, name, "done")
+        self.h.states_by_name = {name: "idle"}
+        self.h.evicted.add(name)
+        self.h.unreachable.add(name)          # and the ring would fail if it were tried
+
+    def test_a_listed_pane_is_not_a_name_herdr_answers_to(self):
+        """The defect itself, in one assertion. `Agent.from_json` fills a missing `name`
+        from `agent`, so the evicted row still yields the agent's own name — and the guard
+        that asked `agent list` for membership read that fallback as proof of the very
+        binding it exists to detect the loss of."""
+        self._evicted()
+        self.assertIn("w", self.b._agent_states())        # still listed...
+        self.assertFalse(self.b._name_bound("w"))         # ...and still unreachable
+        self.assertTrue(self.b._finished_and_unreachable("w"))
+
+    def test_mail_to_a_done_agent_is_not_retried_every_ten_seconds(self):
+        """Measured at 21 failed rings in 71 seconds and rising, one doorbell tick each,
+        for a message that can never land (`audit/phase1-acceptance-3.md` §6.1). It stops
+        being un-announced, so neither `flush_pending` nor the collector's doorbell — both
+        of which chase exactly `unseen` — has anything left to chase."""
+        self._evicted()
+        self.b.tell(["w"], "are you there?", me=HUMAN)
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(store.unseen(self.db), [])
+
+        for _ in range(3):                                 # three more `sb` commands
+            self.restart_sb()
+            self.assertEqual(self.b.flush_pending(), [])
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="w")
+                          if e["kind"] == "ring_failed"], [])
+
+    def test_but_the_message_is_still_there_to_be_read(self):
+        """The pane is open, so a person can put a turn back into it and that agent's own
+        `sb inbox` finds the mail waiting. Only the announcement is written off."""
+        self._evicted()
+        self.b.tell(["w"], "are you there?", me=HUMAN)
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "w", mark=False)],
+                         ["are you there?"])
+        [e] = [e for e in store.recent_events(self.db, agent="w")
+               if e["kind"] == "mail_unannounced"]
+        self.assertIn("are you there?", e["payload"])
+
+    def test_that_mail_no_longer_pins_the_row_open(self):
+        """`cleanup` refused the row with "unread mail it could still read" on every sweep
+        — for mail nobody could ever read — and it took `--force` to close it."""
+        self._evicted()
+        self.b.tell(["w"], "are you there?", me=HUMAN)
+        self.restart_sb()
+        r = self.b.cleanup(me=HUMAN)
+        self.assertEqual(list(r), ["w"])
+        self.assertEqual(r.refused, [])
+        self.assertIn("w1:p1", self.h.closed)
+
+    def test_the_sender_is_told_it_will_never_be_announced(self):
+        """"will be rung when free" is the promise this replaces: the agent is neither
+        mid-turn nor coming back, and nothing will ever ring it."""
+        self._evicted()
+        self.b.tell(["w"], "are you there?", me=HUMAN)
+        self.assertIn("no longer answers to its name", self.b.unreachable("w"))
+
+    def test_and_sb_tell_says_so_on_the_spot(self):
+        """The note is read off every target and not off the un-announced ones, because
+        these rows are stamped as they are written — so reading it the old way printed the
+        same bare "sent to w" a real delivery gets."""
+        import argparse, contextlib, io
+        from switchboard import cli
+        self._evicted()
+        args = argparse.Namespace(cmd="tell", who=["w"], message="are you there?",
+                                  reply_to=None, json=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+        self.assertIn("UNREACHABLE", buf.getvalue())
+        self.assertNotIn("will be rung when free", buf.getvalue())
+
+    def test_a_done_agent_whose_name_still_binds_keeps_its_mail_and_its_doorbell(self):
+        """The other side of the same fact, and the reason this is a name question and not
+        a state one: `done` does not always cost the binding, and a done parent still
+        collecting its children's summaries must stay reachable."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.set_state(self.db, "w", "done")
+        self.h.states_by_name = {"w": "idle"}              # bound, not evicted
+        self.b.tell(["w"], "one more thing", me=HUMAN)
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
+        self.assertIsNone(self.b.unreachable("w"))
+
     def test_interrupting_an_agent_that_has_finished_is_refused_plainly(self):
         """There is no turn to change course. Saying so beats dressing it up as a herdr
         failure, and nothing is written — a refused interrupt leaves no half-sent row."""
@@ -1320,13 +1422,17 @@ class BrokerTest(unittest.TestCase):
         self.h.unreachable.add("lead")                  # the binding went with the pane
 
         self.b.done("my part is finished", me="worker")
-        stranded = store.undelivered(self.db)
-        self.assertEqual([(m["to_agent"], m["kind"]) for m in stranded], [("lead", "done")])
+        stranded = self.db.execute(
+            "SELECT * FROM messages WHERE to_agent='lead' AND kind='done'").fetchall()
+        self.assertEqual([m["body"] for m in stranded], ["[done] my part is finished"])
         # Recorded as skipped rather than failed: the ring is not attempted at all for a
         # finished agent with no pane. The summary is stranded either way — that is the
-        # harm this test names — but it is no longer re-attempted on every `sb` command.
-        self.assertIn("ring_skipped",
-                      [e["kind"] for e in store.recent_events(self.db, agent="lead")])
+        # harm this test names — but nothing re-attempts it, and it does not sit in the
+        # undelivered set that `flush_pending` and the collector's doorbell both chase.
+        kinds = [e["kind"] for e in store.recent_events(self.db, agent="lead")]
+        self.assertIn("ring_skipped", kinds)
+        self.assertIn("mail_cleared", kinds)
+        self.assertEqual(store.undelivered(self.db), [])
 
     def test_a_refused_close_keeps_the_childs_summary_deliverable(self):
         """The same story with the gate doing its job: the pane is still there, so the

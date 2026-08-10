@@ -416,6 +416,9 @@ class Broker:
         self.repo = repo or Path.cwd()
         self.roles = roles_mod.load(self.repo)
         self._alive_cache: Optional[dict] = None
+        # The subset of the above whose names herdr is actually BOUND to, filled by the
+        # same `agent list` — see `Agent.bound` and `_finished_and_unreachable`.
+        self._bound_cache: set[str] = set()
         # Set once herdr has been asked and refused to answer. Distinct from an empty
         # cache, which means herdr answered and is running nothing — see `_agent_states`.
         self._alive_unknown = False
@@ -3108,7 +3111,7 @@ class Broker:
     def _is_registered(self, who: str) -> bool:
         """Does herdr still know this agent? Refreshed each poll, unlike `_busy`."""
         try:
-            self._alive_cache = {a.name: a.state for a in self.h.list_agents()}
+            self._fill_agent_caches(self.h.list_agents())
         except HerdrError:
             return True                       # cannot tell: assume alive, never kill on doubt
         return who in self._alive_cache
@@ -3630,10 +3633,33 @@ class Broker:
         """
         if self._alive_cache is None and not self._alive_unknown:
             try:
-                self._alive_cache = {a.name: a.state for a in self.h.list_agents()}
+                self._fill_agent_caches(self.h.list_agents())
             except HerdrError:
                 self._alive_unknown = True
         return self._alive_cache
+
+    def _fill_agent_caches(self, listed) -> None:
+        """Both views of one `agent list`: who is there, and whose NAME herdr will answer to.
+
+        One call fills both because they are one answer read two ways, and asking twice
+        would spend a subprocess to get a version of the same list that could disagree
+        with itself.
+        """
+        self._alive_cache = {a.name: a.state for a in listed}
+        self._bound_cache = {a.name for a in listed if a.bound}
+
+    def _name_bound(self, who: str) -> Optional[bool]:
+        """Does herdr still ANSWER TO this name? None if herdr could not be asked.
+
+        Not the same question as "is this agent in `agent list`", and the difference is
+        the whole of `audit/phase1-acceptance-3.md` §6.1: `sb done` evicts the name binding, and the pane is
+        then listed under a row with no `name` field at all, which
+        `Agent.from_json` fills in from `agent` — so membership in `_agent_states()` is
+        true for exactly the agents whose names have been lost.
+        """
+        if self._agent_states() is None:
+            return None
+        return who in self._bound_cache
 
     def _end_still_holds(self, name: str) -> bool:
         """Does herdr STILL agree that this agent's turn ended?
@@ -3668,21 +3694,30 @@ class Broker:
 
         Two ways to be sure, and both are needed. A row with no `pane_id` has nothing to
         ring by construction — `cleanup` cleared it, or it never got one. A row that still
-        holds a pane id is only unreachable if herdr, asked and answering, does not list
-        the name: unknown is NOT gone (`_agent_states` returns None for "cannot tell"), and
-        reading a herdr outage as death would silence the doorbell for a whole live fleet.
+        holds a pane id is only unreachable if herdr, asked and answering, no longer
+        answers to the name: unknown is NOT gone (`_name_bound` returns None for "cannot
+        tell"), and reading a herdr outage as death would silence the doorbell for a whole
+        live fleet.
 
         That positive answer is also what makes this safe against `_revive`. An agent that
         reports done and then runs `sb` again is mid-turn while it does so, so herdr knows
         the name, and the guard does not fire on the one row that is about to come back.
+
+        THE NAME AND NOT THE LIST, and this is what the first version got wrong. It asked
+        `_agent_states()` for membership, and the evicted pane is still listed — as
+        `{"agent": "<name>"}`, which `Agent.from_json` turns back into that same name. So
+        the guard written to stop the loop read the fallback as proof the binding was
+        intact, never fired once, and the loop it names in its own first paragraph ran
+        every ten seconds for as long as the row existed, measured at
+        `audit/phase1-acceptance-3.md` §6.1. `_name_bound` asks the question this
+        paragraph asks.
         """
         a = store.get_agent(self.db, who)
         if a is None or a["state"] not in FINISHED:
             return False
         if not a["pane_id"]:
             return True
-        states = self._agent_states()
-        return states is not None and who not in states
+        return self._name_bound(who) is False
 
     def _busy(self, who: str) -> bool:
         """Is this agent mid-turn right now, per herdr?
@@ -3731,6 +3766,7 @@ class Broker:
             return []
         if refresh:
             self._alive_cache = None
+            self._bound_cache = set()
             self._alive_unknown = False
         rung = []
         for who in dict.fromkeys(m["to_agent"] for m in pending):
@@ -3750,8 +3786,8 @@ class Broker:
                 rung.append(who)
         return rung
 
-    def _clear_unreadable_mail(self, who: str, messages: Sequence) -> None:
-        """Stop chasing mail for an agent that has finished and has no pane.
+    def _clear_unreadable_mail(self, who: str, messages: Optional[Sequence] = None) -> None:
+        """Stop chasing mail for an agent that has finished and cannot be rung again.
 
         The doorbell is never going to ring for these (`_ring` guards it), and left alone
         they are worse than merely undelivered: `store.unread_for` keeps reporting them, so
@@ -3767,15 +3803,32 @@ class Broker:
         inbox that is not going to be opened — and the narrow cost of that is an agent
         brought back later by `sb restore` finding those messages already read.
 
-        Only for a row whose pane is GONE. A finished agent that still holds a pane is a
-        different animal: a person can put a turn back into that pane, and `done` is
-        explicit that a done parent with live children stays reachable and still collects
-        their summaries. It loses the doorbell here (see `_ring`) and nothing else. Its
-        mail is cleared once `cleanup` closes it, which is now something `cleanup` can
-        actually do — see the unread gate there.
+        A row that still holds a PANE is treated more gently, and the difference is only
+        `read_at`. A person can put a turn back into that pane, and `done` is explicit that
+        a done parent with live children stays reachable and still collects their
+        summaries — so its own `sb inbox` remains a real way for that mail to be read, and
+        marking it read would be the one thing that ends it. What it does lose is the
+        pretence that it is still waiting to be announced: `mark_unannounceable` stamps
+        `delivered_at`, which is what takes it out of `unseen()` and so out of both
+        triggers. Without that the ring is skipped and nothing else changes — the rows stay
+        un-announced forever, `flush_pending` re-derives them on every `sb` command, and
+        the collector's doorbell spawns an `sb flush` every ten seconds for the life of the
+        row (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71
+        seconds). Skipping a ring stops the herdr call; only this stops the retry.
+
+        `messages` may be omitted, and then it is exactly this agent's share of `unseen`.
+        `flush_pending` passes the slice it already has; `_ring` has no list to pass.
         """
+        if messages is None:
+            messages = [m for m in store.unseen(self.db) if m["to_agent"] == who]
+        if not messages:
+            return
         a = store.get_agent(self.db, who)
         if a and a["pane_id"]:
+            for m in messages:
+                store.mark_unannounceable(self.db, m["id"])
+                store.log_event(self.db, kind="mail_unannounced", agent=who,
+                                sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
             return
         for m in messages:
             store.mark_collected(self.db, m["id"])
@@ -3822,9 +3875,15 @@ class Broker:
             # its own work list — and a write-time guard would leave every message already
             # on disk being re-attempted on every `sb` command anyone runs, forever.
             #
-            # The message itself is untouched: written, queued, and still there to be
-            # found. This skips the announcement, not the mail.
+            # The message itself survives — body, sender, its place in the log, and, while
+            # the pane is still there, its place in that agent's inbox. What it gives up is
+            # its claim on an announcement that can never be made: left un-announced it is
+            # re-derived by `flush_pending` on every `sb` command and by the collector's
+            # doorbell every ten seconds, forever. Skipping the ring alone was the shape of
+            # the loop, not the fix for it.
             store.log_event(self.db, kind="ring_skipped", agent=who, reason="finished")
+            if not force:
+                self._clear_unreadable_mail(who)
             if force:
                 # `interrupt` refuses this in plainer words before it gets here, so this
                 # is the backstop for any future forced ring: force must never quietly
@@ -3888,6 +3947,7 @@ class Broker:
         if a is None or a["state"] in FINISHED:
             return False
         self._alive_cache = None            # ask again, now: the failure is the news
+        self._bound_cache = set()
         self._alive_unknown = False
         states = self._agent_states()
         return states is not None and who in states
@@ -3903,7 +3963,16 @@ class Broker:
         exactly the silent agent a person is trying to spot.
 
         `sb tell` uses it to stop promising delivery it cannot make.
+
+        The FINISHED case is answered first and from the row, not the log, because there is
+        no failure to read: nothing is attempted at all for an agent whose turn has ended
+        and whose name no longer binds (`_ring` skips it, and `sb tell` is usually the
+        first thing to reach that row, so the log is empty). Without this the sender is
+        told "will be rung when free" about an agent that is neither busy nor ever coming
+        back — the promise this method exists to stop making.
         """
+        if self._finished_and_unreachable(who):
+            return "it reported done and herdr no longer answers to its name"
         failed = None
         for row in store.recent_events(self.db, agent=who, limit=EVENT_SCAN):
             if row["kind"] != "ring_failed":
