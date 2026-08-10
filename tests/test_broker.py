@@ -5,6 +5,9 @@ A fake herdr records what would have been called, so these run fast and spawn no
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import shlex
 import subprocess
@@ -41,6 +44,7 @@ class FakeHerdrAPI:
         self.list_error: Optional[HerdrError] = None   # herdr itself cannot be asked
         self.workspaces: list = []
         self.tabs: list = []
+        self.bases: list[tuple[str, str]] = []   # (branch forked, what it was forked FROM)
         self.checks = 0
         self._wt = tempfile.TemporaryDirectory()   # where forked checkouts land
         self.check_error: Optional[HerdrError] = None   # a conflicting integration
@@ -96,6 +100,7 @@ class FakeHerdrAPI:
         `test_workspace`'s FakeHerdr. This one only needs to hand back the shape.
         """
         self._n += 1
+        self.bases.append((branch, base))
         path = Path(self._wt.name) / branch
         path.mkdir(parents=True, exist_ok=True)     # a checkout anything can chdir into
         return {"workspace": {"workspace_id": f"wt{self._n}", "label": branch,
@@ -2684,6 +2689,118 @@ class SbPinTest(unittest.TestCase):
         with self.assertRaises(SbUnpinned):
             self.b.restore("w")
         self.assertEqual(len(self.h.closed), 1)          # no empty shell left behind
+
+
+class ForkBaseTest(unittest.TestCase):
+    """What a delegated child is forked FROM.
+
+    It used to be `origin/main`, always, whatever branch the parent was working on — so
+    an orchestrator on a branch spawned children that had never seen that branch. The
+    consequence was not cosmetic: no branch could be acceptance-tested by the agents its
+    own orchestrator spawned, because every one of them ran the code from main.
+
+    A real git repo, because the answer is read out of the checkout: a fake would only
+    prove that whatever `_here` returns is passed along.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = (Path(self.tmp.name) / "checkout")
+        self.repo.mkdir()
+        self.repo = self.repo.resolve()
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        (self.repo / "f.txt").write_text("one\n")
+        self._git("add", "f.txt")
+        self._git("commit", "-qm", "one")
+        # A real `origin`, so the `main` case exercises the fetch rather than
+        # `_fork_base`'s no-remote fallback. Bare and local: no network, still a remote.
+        origin = Path(self.tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+                       check=True, capture_output=True)
+        self._git("remote", "add", "origin", str(origin))
+        self._git("push", "-q", "origin", "main")
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = FakeHerdrAPI()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _git(self, *argv):
+        subprocess.run(["git", *argv], cwd=self.repo, check=True, capture_output=True)
+
+    def _fork(self):
+        """Delegate as a parent with no worktree — the one case that forks."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            name = self.b.delegate("t", role="worker", me="orch")
+        return name, err.getvalue()
+
+    def test_a_child_forks_from_the_branch_its_parent_is_working_on(self):
+        """The whole point: work in flight is testable by the fleet doing it."""
+        self._git("checkout", "-q", "-b", "fix-thing")
+        self._fork()
+        self.assertEqual(self.h.bases[-1][1], "fix-thing")
+
+    def test_a_parent_on_main_still_forks_from_origin_main(self):
+        """A top orchestrator starting fresh work is a checkout standing on `main`, and
+        inheriting `main` means the REMOTE one, fetched — not however stale this
+        checkout's local copy is. DESIGN-TRUTH: a workspace forks from `origin/main` by
+        default, and that is this case."""
+        self._fork()
+        self.assertEqual(self.h.bases[-1][1], "origin/main")
+
+    def test_a_detached_head_has_no_branch_to_inherit(self):
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo,
+                              capture_output=True, text=True).stdout.strip()
+        self._git("checkout", "-q", head)
+        self._fork()
+        self.assertEqual(self.h.bases[-1][1], "origin/main")
+
+    def test_a_branch_with_a_slash_in_it_is_not_read_as_a_remote(self):
+        """`fix/thing` is one branch, not `thing` in a remote called `fix`. Splitting on
+        the slash forked from the wrong ref — or from nothing — and said nothing."""
+        self._git("checkout", "-q", "-b", "fix/thing")
+        self._fork()
+        self.assertEqual(self.h.bases[-1][1], "fix/thing")
+
+    def test_uncommitted_work_does_not_travel_and_the_parent_is_told(self):
+        """Inheriting a branch is not inheriting a working tree: a fork starts at a
+        commit. The spawn still happens — a dirty checkout is the normal state of one —
+        but a parent that believes its child can see those edits is a parent debugging
+        the wrong thing."""
+        self._git("checkout", "-q", "-b", "fix-thing")
+        (self.repo / "f.txt").write_text("two\n")
+        name, err = self._fork()
+        self.assertIn("did NOT go with it", err)
+        self.assertIsNotNone(store.get_agent(self.db, name))       # spawned anyway
+        row = self.db.execute(
+            "SELECT payload FROM events WHERE kind='fork' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(json.loads(row["payload"])["dirty"], 1)
+
+    def test_a_clean_checkout_says_nothing_about_uncommitted_work(self):
+        self._git("checkout", "-q", "-b", "fix-thing")
+        _, err = self._fork()
+        self.assertIn("forked from 'fix-thing'", err)     # the inheritance is still said
+        self.assertNotIn("did NOT go with it", err)
+
+    def test_forking_from_main_is_quiet(self):
+        """Nothing changed for it, so there is nothing to report — and a note on every
+        spawn is a note nobody reads."""
+        (self.repo / "f.txt").write_text("two\n")            # dirty, and still quiet
+        _, err = self._fork()
+        self.assertEqual(err, "")
+
+    def test_an_explicit_base_still_wins(self):
+        """`--base` is a caller saying which base they want; inheritance is the default
+        underneath it, not a replacement for it."""
+        self._git("checkout", "-q", "-b", "fix-thing")
+        self._git("branch", "release")
+        self.b.workspace_new("ws", base="release", me=HUMAN)
+        self.assertEqual(self.h.bases[-1][1], "release")
 
 
 class PinningHerdr(FakeHerdrAPI):
