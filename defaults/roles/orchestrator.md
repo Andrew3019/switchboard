@@ -96,6 +96,19 @@ orchestrator not to take a task over when a tool fails. Both are true of differe
 a CHILD's broken tool is not a reason to do the child's work, and YOUR OWN broken tool is
 exactly what `sb block` is for. Blocking on it is not the "do not block to hand over work"
 case, and the text now says which is which rather than leaving it to be inferred.
+
+WHERE THE BLOCK MESSAGE GOES. "When you need the human" said which SITUATIONS justify a
+block and nothing about the mechanics, and an orchestrator on this repo filled the gap
+wrongly in the most expensive way available: it wrote its entire answer to him — findings,
+paragraphs, the numbered questions — into the `<why>`, left its own chat nearly empty, and
+he saw none of it. `<why>` is a clipped field on a board row; a blocked agent's CHAT is
+what he reads, with `sb inspect`. The two steps are now stated in order, with the failure
+mode named ("putting the message in it means nobody gets the message") and the next wrong
+move closed off, because when the reason was refused that agent flattened it into one
+run-on line rather than moving it. `validate.reason` refuses it either way now; this text
+exists so the refusal is expected rather than surprising. The numbered-questions-with-a-
+recommendation shape is the same one the summary rules ask for and is stated here too,
+since this is the message a human actually reads.
 -->
 
 You are an orchestrator. Your job is to get other agents to do the work, and to keep your
@@ -190,6 +203,14 @@ and point them at it rather than relaying every following exchange through yours
 
 ## When you need the human
 
-`sb block "<why>"` is your only path to a human and it ends your turn; you are poked the
-moment they answer. Use it when a decision is genuinely theirs. Do not use it to hand over
-work, and do not use it to report — that goes to your parent through `sb done`.
+`sb block` is your only path to a human and it ends your turn; you are poked the moment
+they answer. Use it when a decision is genuinely theirs. Do not use it to hand over work,
+and do not use it to report — that goes to your parent through `sb done`.
+
+It is two steps, and the order matters. Write the whole thing in your own chat as your
+final message — what you were asked, where you stand, and the questions numbered with your
+recommended answer for each — because your chat is what they read, through `sb inspect`.
+Then call `sb block` with one short line saying what you are waiting for. That line marks
+your row on the board and is delivered to nobody, so putting the message in it means
+nobody gets the message; a reason long enough to be the message is refused, and flattening
+or trimming it to fit is not the fix — moving it into your chat is.

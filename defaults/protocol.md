@@ -53,6 +53,26 @@ watching. Two facts fix it, and both are universal enough to belong here: the pa
 you (stated at `done`), and a human sees you only when you `block` — one message, the
 final turn, no scrolling, no files opened (stated at `block`).
 
+WHERE that one message goes, and why `block` is now two steps. It used to read "they read
+that one message and open no files, so say in it what you were asked and where you are" —
+"in it" being the `<why>`, which is the one place a human never looks. He reads a blocked
+agent's own chat, through `sb inspect`; the reason is a clipped field on a board row. An
+orchestrator followed that sentence exactly: it wrote several paragraphs of findings and
+questions into a `why`, left its chat empty, was refused for the newline, flattened the
+whole thing onto one line to get through, and then filed a bug against the refusal. So the
+order is stated explicitly (chat first, then one line), the `<why>` is named as
+bookkeeping, and "shortening it is not the fix" is there because that is the move the
+model reaches for next. `validate.reason` refuses an over-long reason with the same two
+steps in the error, which is what makes this paragraph enforcement rather than advice
+(C6) — the words here only stop the refusal being a surprise.
+
+The opening sentence had to be amended for it. "Your pane is not a channel — nobody reads
+it" was true of agents and false of the one case that matters, and a reader who believes
+it cannot be asked to put anything in the chat. It now says no agent reads it and a human
+reads it only when you block. The rest of the sentence is untouched: asking through your
+own interface's question prompt still reaches nobody, because that affordance is not the
+chat and nothing surfaces it.
+
 `sb cleanup` is named here only so the verb exists; the POLICY of who cleans up, and how
 aggressively, belongs to the orchestrator role. What every agent needs is that closing is
 cheap and reversible, because an agent that thinks closing destroys work will never do it.
@@ -85,8 +105,9 @@ and using either instead of `sb` is indistinguishable from having done nothing.
 # The switchboard protocol
 
 SWITCHBOARD PROTOCOL. You are an agent in a switchboard workflow. Everything you say
-to anyone leaves through the `sb` command. Your pane is not a channel — nobody reads
-it — and a question you ask in your own interface reaches nobody, however much it
+to anyone leaves through the `sb` command. Your pane is not a channel — no agent
+reads it, and a human reads it only when you block, as stated at `sb block` — and a
+question you ask in your own interface reaches nobody, however much it
 looks like it is asking someone. Writing your answer in the pane instead of calling
 `sb done` is the same as not answering, and asking in your own prompt instead of
 calling `sb block` is the same as not asking. Never contact another agent any other
@@ -117,6 +138,10 @@ transcript survive, and `sb restore` brings an agent back.
 Stop and get a human if a tool fails twice, if an instruction is ambiguous, or if you
 are about to do work you were told to delegate. Never work around a broken tool.
 `sb block "<why>"` is the ONLY way to reach a human — they have no inbox, and you
-never wait on one. It ends your turn, puts you in front of them, and you are poked
-the moment they answer. They read that one message and open no files, so say in it
-what you were asked and where you are.
+never wait on one. Two steps, in this order: write the whole thing as the last
+message in your own chat — what you were asked, where you are, and the numbered
+questions with a recommended answer — because THAT is what they read, and then call
+`sb block` with ONE short line naming what you are waiting for. The `<why>` is
+bookkeeping for the board and is not delivered to anyone; a reason long enough to be
+the message is refused, and shortening it is not the fix. Blocking ends your turn and
+you are poked the moment they answer.

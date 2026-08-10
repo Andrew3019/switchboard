@@ -34,6 +34,13 @@ inherits, so an ad-hoc `--role archaeologist` runs on this text, and anything as
 behaviours point at `[vocabulary] default_role` / `fallback_role` in settings.toml rather
 than at the string "worker" anywhere in Python.
 
+The block rule is two steps here for the same reason it is two steps in the protocol: the
+human reads a blocked agent's CHAT (`sb inspect`), never the `<why>`, and an orchestrator
+that believed otherwise put its whole answer in the `why` and delivered it to nobody. The
+opening paragraph's "nobody is reading your pane" is now "no parent is reading your pane",
+because the unqualified version is the belief that makes the two steps impossible to
+follow. `validate.reason` enforces the short line; this only says it before the refusal.
+
 No `cleanup` field: what stays open is a run-time decision, set per spawn by
 `sb delegate --keep` / `--ephemeral` and swept by an orchestrator, never a property of a
 kind of agent.
@@ -43,12 +50,14 @@ You are given one task: carry it to done and do nothing beyond it. If you notice
 else wrong on the way, report it rather than fixing it — another agent may own that file,
 and a change nobody asked for is a change nobody reviews.
 
-However your task is worded, it is not a conversation. Nobody is reading your pane and
+However your task is worded, it is not a conversation. No parent is reading your pane and
 nobody will see an answer you leave there. You finish by calling `sb done "<summary>"`, and
 your summary is the entire thing your parent ever receives — so it carries the answer
 itself, in plain language, not a note saying you found one.
 
-If you need a decision that was not yours to make, `sb block "<why>"` is the only thing
-that reaches a person; a question you ask any other way is a question nobody hears. If the
+If you need a decision that was not yours to make, `sb block` is the only thing that
+reaches a person; a question you ask any other way is a question nobody hears. Write the
+question in full in your own chat first — that is the part they read — and then block with
+one short line saying what you are waiting for. If the
 task turns out to be bigger than one agent, say so to your parent rather than taking it on
 or spawning agents of your own.

@@ -166,7 +166,12 @@ def build_parser() -> argparse.ArgumentParser:
     dn.add_argument("summary")
 
     bl = cmd("block", help="stop and surface to the human (they answer with `sb tell`)")
-    bl.add_argument("why")
+    # The help string is where a caller looks before its first block, so it states the
+    # split rather than just naming the field: the full text goes in the chat, one line
+    # comes here. Enforced in validate.reason — this only stops the enforcement being a
+    # surprise.
+    bl.add_argument("why", help="ONE short line for the board; write the full question in "
+                                "your own chat, which is what the human reads")
 
     ss = cmd("status", help="the agent tree, with drift and what needs you")
     # `--live` is the older spelling of the same want and stays forever: it is in scripts,
@@ -388,7 +393,10 @@ def _validate(args) -> None:
         args.summary = validate.line(args.summary, "summary")
 
     elif cmd == "block":
-        args.why = validate.line(args.why, "reason")
+        # Not `line`: the reason has its own rule and its own error, because the human
+        # never reads this field and a caller told only "one line" flattens a report into
+        # it. See validate.reason.
+        args.why = validate.reason(args.why)
 
     elif cmd == "workspace":
         # `list` takes no arguments at all and `close` takes only a name, so each one is
@@ -821,8 +829,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "block":
         b.block(args.why, me=me)
-        _emit(args, "blocked — surfaced to the human, who will see it in "
-                    "`sb status --needs-me` until they answer", {"agent": me})
+        # Says WHAT they read, not just that they were told. The old note ("they will see
+        # it") let a caller believe the reason was the delivered message, which is the
+        # misuse validate.reason now refuses.
+        _emit(args, "blocked — your reason marks the row in `sb status --needs-me` until "
+                    "they answer; what they actually read is your own chat, so the full "
+                    "question belongs there", {"agent": me})
         return 0
 
     if cmd == "status":

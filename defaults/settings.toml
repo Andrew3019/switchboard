@@ -167,6 +167,18 @@ agent_name = 32
 # and this number is now only the runaway guard behind it.
 text = 40000
 
+# `sb block "<why>"`. NOT a runaway guard and not style advice — the only cap here that is
+# load-bearing, because the reason is the one field whose SIZE tells the agent it is using
+# the verb wrong. The human never reads it (he reads the agent's own chat, via
+# `sb inspect`); it is bookkeeping on a board row. An orchestrator wrote its entire answer
+# to him into a `why` — several paragraphs, findings and questions — left its own chat
+# empty, and when the newline check refused it, flattened the whole thing into one run-on
+# line and got through. 200 characters is roomy for the one line this is meant to be and
+# has no room at all for a report, which is the only way to make the flattening trick fail
+# too. Raising it re-opens that hole; the capability it appears to take away is not lost —
+# long text goes in the chat, which is where he actually reads it.
+block_reason = 200
+
 # Authored prompt text (`--as`, and preset files after flattening). Config rather than
 # traffic: a preset is allowed to be a substantial briefing, and the orchestrator role is
 # already ~4.7k on its own. Kept strictly ABOVE `text` — authored config should never be
