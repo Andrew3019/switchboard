@@ -867,7 +867,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         names = b.cleanup(args.name, include_kept=args.include_kept, force=args.force,
                           dry_run=args.dry_run, leave_children=args.leave_children, me=me)
         verb = "would close" if args.dry_run else "closed"
-        _emit(args, f"{verb}: {', '.join(names) or '(nothing)'}", {"closed": names})
+        text = f"{verb}: {', '.join(names) or '(nothing)'}"
+        # Named agents always get their reason, because naming one is asking about it in
+        # particular. A sweep is expected to skip most of the fleet and listing all of
+        # that would bury the line that matters — but a sweep that closed NOTHING is the
+        # silence this fix exists to end, so then it says why too.
+        if names.refused and (args.name or not names):
+            text += "\n" + "\n".join(f"  refused {n}: {why}" for n, why in names.refused)
+        _emit(args, text,
+              {"closed": list(names),
+               "refused": [{"name": n, "reason": why} for n, why in names.refused]})
         return 0
 
     if cmd == "workspace" and args.wcmd == "list":

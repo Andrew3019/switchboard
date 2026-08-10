@@ -236,6 +236,27 @@ def _names(found: Sequence[str]) -> str:
     return f"{', '.join(sorted(found))} {'is' if len(found) == 1 else 'are'}"
 
 
+class CleanupResult(list):
+    """The names `cleanup` closed, and — the point of it — why it closed nothing else.
+
+    A `list` of the closed names, because that is what every caller has always read out
+    of `cleanup` and the refusals are the new half, not the replacement. `refused` carries
+    one `(name, reason)` per candidate that a gate held back, in the order the candidates
+    were considered.
+
+    It exists because `closed: (nothing)` is not a report. Every gate in `cleanup` used to
+    `continue` in silence except the live-descendants one, so an agent that named an agent
+    outright and got a blank line back had no way at all to learn which of five rules had
+    fired — and `--force`, the documented way through, is exactly the wrong thing to reach
+    for before you know that.
+    """
+
+    def __init__(self, closed: Sequence[str] = (),
+                 refused: Optional[list[tuple[str, str]]] = None):
+        super().__init__(closed)
+        self.refused: list[tuple[str, str]] = [] if refused is None else refused
+
+
 def _resolved(path: str) -> Optional[Path]:
     """One directory's identity — its resolved path — or None when it will not resolve.
 
@@ -2914,7 +2935,7 @@ class Broker:
     def cleanup(self, names: Sequence[str] = (), *, include_kept: bool = False,
                 force: bool = False, dry_run: bool = False,
                 leave_children: bool = False,
-                me: Optional[str] = None) -> list[str]:
+                me: Optional[str] = None) -> "CleanupResult":
         """Close agents. With no names, every finished one in the caller's scope.
 
         Safe to be aggressive: closing costs only the pane. Session, summary, messages
@@ -2952,6 +2973,11 @@ class Broker:
           asked for this agent by name, so silence would be a lie. A sweep skips it the
           way it skips every other gate, and logs `cleanup_held` so the log can answer
           "why is that one still here".
+
+        Every gate that holds a candidate back records its reason on the returned
+        `CleanupResult.refused`, and logs `cleanup_refused`. A gate firing in silence is
+        the bug this closes: `closed: (nothing)` told you the outcome and never the rule,
+        and the only remaining move was `--force`, which lifts all five at once.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -2987,22 +3013,45 @@ class Broker:
                   "--leave-children to close the parent and leave them running."
             )
 
-        closed = []
+        closed = CleanupResult()
+
+        def refuse(a, reason: str, *, log: bool = True) -> None:
+            """Say why this candidate stays. The one exit every gate now takes.
+
+            A dry run reads and never writes, so it records the reason and logs nothing —
+            the same rule the live-descendants gate already followed. That gate keeps its
+            own `cleanup_held` event rather than logging twice; only its reason comes
+            through here.
+            """
+            closed.refused.append((a["name"], reason))
+            if log and not dry_run:
+                store.log_event(self.db, kind="cleanup_refused", agent=a["name"],
+                                reason=reason[:EVENT_CLIP])
+
         for a in candidates:
             if a["name"] == me:
-                continue                      # never close the caller
+                # Named, this is somebody asking to close the pane they are typing in.
+                refuse(a, "that is you — an agent cannot close its own pane")
+                continue
             if a["ended_at"] and not a["pane_id"]:
-                continue                      # already gone
+                refuse(a, "already closed")
+                continue
             if a["name"] in held:
                 if not dry_run:               # a dry run reads; it never writes
                     store.log_event(self.db, kind="cleanup_held", agent=a["name"],
                                     live_children=",".join(held[a["name"]]))
+                refuse(a, "still working underneath: " + ", ".join(held[a["name"]]),
+                       log=False)
                 continue                      # the invariant; see the docstring
             if not force:
                 if a["state"] not in FINISHED:
-                    continue                  # only finished agents; --all-idle too
+                    # only finished agents; --all-idle too
+                    refuse(a, f"{a['state']}, not finished — it has not reported an end")
+                    continue
                 if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
-                    continue                  # nobody reported this end, and herdr disagrees
+                    refuse(a, f"recorded {GONE_STATE}, but herdr still has its pane — "
+                              f"nobody reported this end")
+                    continue
                 if (store.unread_for(self.db, a["name"], mark=False)
                         and not self._finished_and_unreachable(a["name"])):
                     # Unread mail it could still read holds the row, as it always has.
@@ -3012,10 +3061,12 @@ class Broker:
                     # jams that row forever, closable by neither a sweep nor `--force`
                     # having been meant. Closing loses nothing; the message survives, and
                     # `sb restore` brings back an inbox that still holds it.
+                    refuse(a, "unread mail it could still read")
                     continue
                 # Naming an agent is itself the instruction to close it, so an explicit
                 # name lifts the role's disposition exactly as `include_kept` does.
                 if a["cleanup"] != "close" and not (include_kept or names):
+                    refuse(a, f"role {a['role']} is kept, not closed (--include-kept)")
                     continue
             if dry_run:
                 closed.append(a["name"]); continue
@@ -3043,6 +3094,7 @@ class Broker:
                     store.log_event(self.db, kind="cleanup_failed", agent=a["name"],
                                     error=str(e))
                     if not force:
+                        refuse(a, f"herdr could not close its pane: {e}", log=False)
                         continue
                     # Under force we fall straight on into the bookkeeping below and mark
                     # this row `done` with no pane, having just failed to close its pane.

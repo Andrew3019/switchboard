@@ -1192,6 +1192,81 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.cleanup(["stuck"], me="orch", force=True), ["stuck"])
         self.assertIn("w1:p1", self.h.closed)
 
+    # -- cleanup explains itself (1.4) -----------------------------------
+
+    def test_cleanup_says_which_gate_refused_a_named_agent(self):
+        """`closed: (nothing)` is an outcome, never a reason. Naming an agent and getting
+        a blank line back left `--force` — which lifts all five gates at once — as the
+        only move, with no way to learn which one had fired."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close")
+        self.b.block("which branch?", me="kid")
+        r = self.b.cleanup(["kid"], me="orch")
+        self.assertEqual(r, [])
+        self.assertEqual([n for n, _ in r.refused], ["kid"])
+        self.assertIn("blocked", r.refused[0][1])
+
+    def test_cleanup_names_the_unread_mail_that_holds_a_row(self):
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")
+        self.h.states_by_name = {"kid": "idle"}      # still reachable, so the mail holds
+        store.put_message(self.db, from_agent="orch", to_agent="kid",
+                          kind="tell", body="one more thing")
+        r = self.b.cleanup(["kid"], me="orch")
+        self.assertEqual(r, [])
+        self.assertIn("unread mail", r.refused[0][1])
+
+    def test_cleanup_names_the_role_that_keeps_its_agents(self):
+        """A sweep, where the reason is the role rather than anything about this run."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="lead", parent="orch",
+                           pane_id="w1:p1", cleanup="keep")
+        store.set_state(self.db, "kid", "done")
+        r = self.b.cleanup(me="orch")
+        self.assertEqual(r, [])
+        self.assertIn("--include-kept", r.refused[0][1])
+
+    def test_every_refusal_reaches_the_event_log(self):
+        """The log already answered "why is that one still here" for live descendants and
+        for nothing else."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close")
+        self.b.cleanup(["kid"], me="orch")           # born working, so the finished gate
+        self.assertIn("cleanup_refused",
+                      [e["kind"] for e in store.recent_events(self.db, agent="kid")])
+
+    def test_a_dry_run_gives_its_reasons_without_writing_one(self):
+        """A dry run reads; it never writes. The reasons are the whole point of asking."""
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", cleanup="close")
+        r = self.b.cleanup(["kid"], me="orch", dry_run=True)
+        self.assertEqual([n for n, _ in r.refused], ["kid"])
+        self.assertNotIn("cleanup_refused",
+                         [e["kind"] for e in store.recent_events(self.db, agent="kid")])
+
+    def test_cleanup_prints_the_refusals_it_collected(self):
+        """The reason has to reach the person who typed the command, not just the log."""
+        import argparse, contextlib, io
+        from switchboard import cli
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1",
+                           cleanup="close")
+        self.b.block("which branch?", me="kid")
+        args = argparse.Namespace(cmd="cleanup", name=["kid"], include_kept=False,
+                                  force=False, dry_run=False, leave_children=False,
+                                  json=False)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+        out = buf.getvalue()
+        self.assertIn("closed: (nothing)", out)
+        self.assertIn("refused kid", out)
+        self.assertIn("blocked", out)
+
     def test_forcing_a_live_agent_says_so(self):
         """`--force` skips the finished gate, so an agent mid-turn is closed exactly like
         a wedged one and the only trace was `cleanup(forced=True)`, which cannot tell the
