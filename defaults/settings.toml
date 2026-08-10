@@ -298,6 +298,12 @@ agent_wait_ms = 300000
 deliver_ms = 20000
 deliver_poll = 0.5
 
+# Pinning a spawning pane's `sb` to the checkout that pane is standing in, and confirming
+# it took. One shell command and one `pane wait-output`, both against a shell that is
+# already at a prompt — so this is short by design. It is paid BEFORE the agent's row is
+# claimed, which is why it does not enter `status.SPAWN_GRACE`.
+pin_ms = 5000
+
 # How long the adapter pauses before re-issuing an `agent wait` that came straight back
 # without the agent having moved. herdr returns instantly when the agent is ALREADY in the
 # state asked for, so the stale-seq guard would otherwise re-ask as fast as two subprocesses
@@ -321,6 +327,12 @@ spawn_backoff = 2
 # retry — this is the other half of the same flakiness, and a second knob for it would only
 # be a second thing to keep in step.
 deliver_attempts = 3
+
+# How many times the `sb` pin is typed into a spawning pane before the spawn is refused.
+# Two, not three: the only failure it recovers from is a shell that had not quite reached
+# its prompt, and if a second try a backoff later still finds nothing then the pane is not
+# a shell we can pin — which is a refusal, not something to keep paying for.
+pin_attempts = 2
 
 
 [display]

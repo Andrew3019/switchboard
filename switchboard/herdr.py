@@ -566,6 +566,28 @@ class Herdr:
         self._call("pane", "run", pane_id, text)
         self._call("pane", "send-keys", pane_id, "enter")
 
+    def wait_output(self, pane_id: str, match: str, *, timeout_ms: int) -> bool:
+        """Did `match` appear in this pane's output within the deadline?
+
+        The read half of `prompt_pane`: a fixed command is typed into a pane, and this is
+        how the caller learns whether it did what it was supposed to. Without it a `pane
+        run` is a write into the dark — herdr accepts the text whether or not the shell
+        was at a prompt to receive it.
+
+        `recent-unwrapped` rather than the default, because the thing being matched is
+        usually a path and a wrapped line splits one in half at the terminal's width.
+
+        Never raises. A miss is an answer, not a failure — herdr reports the deadline
+        expiring as an error, and every caller here wants a yes/no.
+        """
+        try:
+            self._call("pane", "wait-output", pane_id, "--match", match,
+                       "--source", "recent-unwrapped", "--timeout", str(timeout_ms),
+                       timeout=_grace(timeout_ms))
+        except HerdrError:
+            return False
+        return True
+
     def send_keys(self, name: str, *keys: str) -> None:
         """Send raw keys to an agent. `esc` is the canonical spelling for escape.
 
