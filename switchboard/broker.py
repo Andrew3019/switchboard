@@ -3126,19 +3126,32 @@ class Broker:
         me = me or self.whoami()
         if me == HUMAN:
             raise ValueError("`sb block` is for agents")
-        a = store.get_agent(self.db, me)
         store.set_state(self.db, me, "blocked")
-        # NOT herdr's `blocked`. Reporting it makes the agent permanently un-targetable:
-        # the name drops out of `agent list`, `agent get`/`agent prompt` answer
-        # agent_not_found, and a pane-targeted prompt answers agent_not_ready. The binding
-        # does not come back — herdr has recorded the agent leaving the foreground (`sb`
-        # itself ran there), so no later report re-registers it.
+        # NOTHING is reported to herdr here, and that silence is the whole of what makes a
+        # block answerable (see `_binding_lost` for what it costs when it is not).
         #
-        # That badge would cost us the only way back in to the one verb whose entire
-        # purpose is "stop and get a human". `idle` is honest — the agent IS idle, waiting
-        # — and keeps it reachable. Blocked-ness lives in our store, which is the truth
-        # anyway (C5), and reaches you through the notification below.
-        self._push_state(a, IDLE, why)
+        # `pane report-agent` does not annotate a pane's agent, it REPLACES it. The named
+        # agent `agent start` registered is evicted and a source-reported record put in its
+        # place, and a reported record is not a target: `agent get`/`agent prompt <name>`
+        # answer agent_not_found, and a pane-targeted prompt answers agent_not_ready
+        # ("<pane> is not an active named agent"). It is one-way — `pane release-agent`
+        # deletes the record rather than handing detection back (the pane then drops out of
+        # `agent list` entirely), and `agent start` on the still-live pane refuses
+        # agent_pane_busy. So the doorbell can never ring that agent again, on the one verb
+        # whose entire purpose is "stop and get a human".
+        #
+        # This used to push `idle`, on the reading that herdr's `blocked` badge is what
+        # costs the binding. That reading was half right and the wrong half was load-
+        # bearing: `blocked` does cost it, and so does `idle`, and so does every other
+        # value. The state is not what evicts the name — making the call is. Measured on
+        # herdr 0.8.0 against a throwaway pane: `agent start` → bound; `pane
+        # report-agent-session` → still bound; one `pane report-agent --state idle` →
+        # agent_not_found, and nothing brings it back.
+        #
+        # Nothing is lost by staying quiet. Blocked-ness has always lived in our store
+        # (`_is_blocked`), which is what `sb status --needs-me` and the board read (C5), and
+        # herdr's own detector reads a waiting agent as idle unprompted — the very value we
+        # were paying the binding to tell it. The notification below is what reaches you.
         self._surface(me, why)
         store.log_event(self.db, kind="blocked", agent=me, why=why[:EVENT_CLIP])
 
@@ -3715,9 +3728,9 @@ class Broker:
         There is no fallback when `agent prompt` fails. There used to be one — type the
         text into the agent's pane with `pane run` — and it was a shell: any backtick or
         `$(` in an agent-authored interrupt ran as a command in that pane (confirmed live).
-        It was never a recovery path either, only a lookalike: herdr loses a name binding
-        when it sees the agent leave the foreground, and an agent whose TUI is not there to
-        read a prompt is not there to read typed-in text either.
+        It was never a recovery path either, only a lookalike: a lost name binding is a
+        `pane report-agent` we made (`Herdr.report_state`), and an agent whose TUI is not
+        there to read a prompt is not there to read typed-in text either.
 
         So a failed ring is a failed ring. For the doorbell that costs nothing — the
         message is already durable with `delivered_at` NULL, and `flush_pending` re-rings
@@ -3772,8 +3785,15 @@ class Broker:
         The distinct failure this exists to name: herdr can stop answering to a live
         agent's name — `agent prompt` says `agent_not_found`, a pane-targeted one says
         `agent_not_ready` — while the agent itself is still sitting in its pane with real
-        work in it, and no later report re-registers the name. Filed as
-        `2026-08-09-004626`. Nothing can ring it again, so its mail queues forever.
+        work in it, and nothing re-registers the name. Filed as `2026-08-09-004626`.
+        Nothing can ring it again, so its mail queues forever.
+
+        The cause is ours and is now known: a `pane report-agent` on the pane evicts the
+        named agent (`Herdr.report_state` measures it). `block` and `_unblock_if_needed`
+        used to make that call, which is what made blocking a one-way door; they no longer
+        report anything. `Broker.done` still does, so this remains reachable — for an agent
+        that has just said it is finished, which is the case `_finished_and_unreachable`
+        already covers.
 
         Told apart from an agent that has simply died by asking herdr twice, in two
         different ways: `agent prompt` refuses the name, and `agent list` — asked fresh,
@@ -3830,9 +3850,9 @@ class Broker:
     def _is_blocked(self, who: str) -> bool:
         """Is this agent stopped waiting on a person, per our own store?
 
-        Our store and not herdr, because we never report `blocked` to herdr — `block`
-        pushes `idle` on purpose (see there), so herdr cannot tell a blocked agent from an
-        idle one and this is the only place the difference is recorded.
+        Our store and not herdr, because `block` reports nothing to herdr at all (see
+        there — a report would cost the agent its name), so herdr cannot tell a blocked
+        agent from an idle one and this is the only place the difference is recorded.
         """
         a = store.get_agent(self.db, who)
         return bool(a and a["state"] == "blocked")
@@ -3843,26 +3863,24 @@ class Broker:
         Called from `_ring` for an `answer=True` ring and nowhere else. It used to run
         before EVERY delivery, which is what let a sibling's ordinary mail cancel a block.
 
-        Reporting `blocked` drops the name binding: `agent get`/`agent prompt` answer
-        `agent_not_found`, and a pane-targeted prompt answers `agent_not_ready`. Sensible
-        from herdr's side — a blocked agent is waiting on a human, so nothing should poke
-        it programmatically. But it would leave the one verb whose purpose is "stop and
-        get a human" with no way back in.
+        Store-only, and deliberately: this runs one line before the doorbell, on an agent
+        whose name MUST still bind. It used to push herdr `working` here, on the reading
+        that a report re-registers the name — it does the opposite, and this was the second
+        of the two calls that made blocking a one-way door. Any `pane report-agent` evicts
+        the pane's named agent for good; see `block` for the measurement. Pushed here it
+        evicted the name in the same breath as the ring that needed it, so the human's
+        answer failed with `agent_not_found` on the line below while the block cleared
+        anyway — the block row went away and the answer never arrived.
 
-        Pushing `working` re-registers the name, and it is what is actually happening:
-        answering a blocked agent IS unblocking it.
+        Nothing needs the report. herdr's detector marks the pane working of its own accord
+        the moment the prompt lands, and our store is where "no longer blocked" is read
+        from (`_is_blocked`, `sb status --needs-me`).
         """
         a = store.get_agent(self.db, who)
         if not a or a["state"] != "blocked" or not a["pane_id"]:
             return
-        self._check_integration()   # the other place a state write is attempted
-        try:
-            self.h.report_state(a["pane_id"], who, WORKING,
-                                store.next_seq(self.db, who), verify=False)
-            store.set_state(self.db, who, "working")
-            store.log_event(self.db, kind="unblocked", agent=who)
-        except HerdrError as e:
-            store.log_event(self.db, kind="unblock_failed", agent=who, error=str(e))
+        store.set_state(self.db, who, "working")
+        store.log_event(self.db, kind="unblocked", agent=who)
 
     def _surface(self, who: str, text: str) -> None:
         try:
@@ -3878,9 +3896,9 @@ class Broker:
         in every session look successful and be dropped, for as long as it is installed.
 
         Asked HERE rather than in `main()`, and logged rather than raised. The blast
-        radius is the two `report_state` call sites, so a process that never writes state
-        — `sb status`, `sb log` — should neither pay for a subprocess nor be hard-failed
-        by a fault that cannot reach it. Once per process, the way `_alive_cache` and
+        radius is `_push_state`, the one place a state write is made, so a process that
+        never writes state — `sb status`, `sb log` — should neither pay for a subprocess
+        nor be hard-failed by a fault that cannot reach it. Once per process, the way `_alive_cache` and
         `_ws_ids` are once per process, and the flag is set before the call so a herdr
         that is slow or broken costs that price exactly once either way.
 
