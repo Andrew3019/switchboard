@@ -53,6 +53,13 @@ SPAWN_TIMEOUT_MS = config.setting("timeouts.spawn_ms")
 SPAWN_ATTEMPTS = config.setting("retries.spawn_attempts")
 SPAWN_BACKOFF = config.setting("retries.spawn_backoff")
 
+# Delivering an agent's first task. `agent prompt` can paste without submitting, or never
+# reach the pane at all, and says nothing either way — so the delivery is confirmed by
+# reading the agent back, and re-sent if it was not taken. `[timeouts]` and `[retries]`.
+DELIVER_TIMEOUT_MS = config.setting("timeouts.deliver_ms")
+DELIVER_POLL = config.setting("timeouts.deliver_poll")
+DELIVER_ATTEMPTS = config.setting("retries.deliver_attempts")
+
 # The adapter's own ceiling on `agent wait`, and how long it pauses before re-issuing one
 # that came straight back without the agent having moved. `agent wait` returns instantly
 # when the agent is already in the state asked for, so without the pause the stale-seq
@@ -469,6 +476,77 @@ class Herdr:
         started" from it.
         """
         self._call("agent", "prompt", name, text)
+
+    def deliver(
+        self,
+        name: str,
+        text: str,
+        *,
+        attempts: int = DELIVER_ATTEMPTS,
+        timeout_ms: int = DELIVER_TIMEOUT_MS,
+    ) -> None:
+        """`prompt`, confirmed — the agent really took the text, or this raises.
+
+        `agent prompt` returns nothing worth reading (see `prompt`), and it has two
+        observed silent failure modes: the text is pasted into the prompt box and never
+        submitted, or it never arrives at all. Both leave the caller holding a success it
+        did not get, which is how a spawn reports a name for an agent that never ran.
+
+        Confirmation is a read-after-write, the same shape `report_state` needs for the
+        same reason: snapshot herdr's `state_change_seq` before prompting, then poll until
+        the agent has actually moved. A submitted prompt starts a turn, and a turn is a
+        state change; a paste that was never submitted is not. `state_change_seq` rather
+        than `state == working` alone, because a short task can be finished and back to
+        idle before the first poll lands.
+
+        A prompt that was not taken is RE-SENT, which is the documented recovery for the
+        paste-without-submit mode: the second prompt types and presses enter, carrying the
+        stuck text in with it. The cost when the first prompt did land but herdr never
+        reported the move is the task arriving twice — a duplicate is recoverable and a
+        silence is not.
+        """
+        before = self._peek(name)
+        last = "herdr never reported the agent taking it"
+        for attempt in range(attempts):
+            try:
+                self.prompt(name, text)
+            except HerdrError as e:
+                last = str(e)
+            else:
+                if self._took_prompt(name, before, timeout_ms):
+                    return
+            if attempt + 1 < attempts:
+                self._sleep(SPAWN_BACKOFF)
+        raise HerdrError(
+            "not_delivered",
+            f"{name}: the text was sent {attempts} times and the agent never started a "
+            f"turn — {last}. Its pane may hold the text unsubmitted, or nothing at all",
+            [name],
+        )
+
+    def _peek(self, name: str) -> Optional[Agent]:
+        """The agent as herdr has it right now, or None if it cannot be asked.
+
+        Never raises: this only ever informs a comparison, and a herdr that cannot answer
+        must not turn a delivery that may well have landed into an exception of its own.
+        """
+        try:
+            return self.get_agent(name)
+        except HerdrError:
+            return None
+
+    def _took_prompt(self, name: str, before: Optional[Agent], timeout_ms: int) -> bool:
+        """Did the agent move after being prompted? Polled until `timeout_ms` runs out."""
+        deadline = time.time() + timeout_ms / 1000
+        seq = before.change_seq if before else 0
+        was_working = before is not None and before.state == WORKING
+        while True:
+            a = self._peek(name)
+            if a is not None:
+                if a.change_seq > seq or (a.state == WORKING and not was_working):
+                    return True
+            if not self._nap(DELIVER_POLL, deadline):
+                return False
 
     def prompt_pane(self, pane_id: str, text: str) -> None:
         """Run a command in a pane. For FIXED commands only — `text` reaches a shell.

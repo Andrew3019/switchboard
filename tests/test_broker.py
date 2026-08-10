@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
-from switchboard.broker import HUMAN, MAIN, MAIN_NAME, Broker, Undeliverable  # noqa: E402
+from switchboard.broker import (  # noqa: E402
+    HUMAN, MAIN, MAIN_NAME, Broker, TaskUndelivered, Undeliverable,
+)
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
 
@@ -32,11 +34,13 @@ class FakeHerdrAPI:
         self.keys: list[tuple] = []
         self.pane_prompts: list[tuple] = []
         self.unreachable: set = set()
+        self.undeliverable: set = set()   # started, but never takes a task
         self.states_by_name: dict = {}
         self.list_error: Optional[HerdrError] = None   # herdr itself cannot be asked
         self.workspaces: list = []
         self.tabs: list = []
         self.checks = 0
+        self._wt = tempfile.TemporaryDirectory()   # where forked checkouts land
         self.check_error: Optional[HerdrError] = None   # a conflicting integration
         self._n = 0
 
@@ -62,6 +66,14 @@ class FakeHerdrAPI:
             raise HerdrError("agent_not_found", f"agent target {name} not found")
         self.prompts.append((name, text))
 
+    def deliver(self, name, text, **kw):
+        """The confirmed prompt. The confirming itself is `Herdr.deliver`'s own test —
+        here it is a prompt that either lands or raises, which is all `delegate` sees."""
+        if name in self.undeliverable:
+            from switchboard.herdr import HerdrError
+            raise HerdrError("not_delivered", f"{name}: never started a turn")
+        self.prompt(name, text)
+
     def prompt_pane(self, pane, text): self.pane_prompts.append((pane, text))
 
     def list_agents(self):
@@ -69,6 +81,25 @@ class FakeHerdrAPI:
         if self.list_error:
             raise self.list_error
         return [_A(name=n, pane_id="w1:p0", state=st) for n, st in self.states_by_name.items()]
+
+    def create_worktree(self, branch, *, base="main", cwd=None, label=None):
+        """A herdr that CAN fork.
+
+        It has to be able to: the fork rule sends every child of a parent without a
+        worktree to `_fork_for`, and a fork that fails now refuses the spawn rather than
+        quietly putting the child in its parent's checkout (`ForkFailed`). A fake that
+        cannot fork would make most of this file a test of that refusal.
+
+        Real workspace identity — one workspace per branch, a second create refused — is
+        `test_workspace`'s FakeHerdr. This one only needs to hand back the shape.
+        """
+        self._n += 1
+        path = Path(self._wt.name) / branch
+        path.mkdir(parents=True, exist_ok=True)     # a checkout anything can chdir into
+        return {"workspace": {"workspace_id": f"wt{self._n}", "label": branch,
+                              "worktree": {"checkout_path": str(path)}},
+                "worktree": {"path": str(path), "branch": branch},
+                "root_pane": {"pane_id": f"wt{self._n}:p1"}}
 
     def create_workspace(self, label, *, cwd=None, focus=False):
         self._ws = getattr(self, "_ws", 100) + 1
@@ -163,10 +194,17 @@ class BrokerTest(unittest.TestCase):
 
     def test_delegate_lands_in_the_callers_own_workspace(self):
         """An empty workspace id means "wherever herdr is focused" — which is whatever
-        was focused last, so a child would land in a stranger's workspace."""
+        was focused last, so a child would land in a stranger's workspace.
+
+        Delegated by a parent that HAS a worktree, because that is the case with a tab in
+        it: a parent without one forks, and a forked child gets the fresh workspace's own
+        root pane rather than a tab anywhere.
+        """
         self.h.tabs = []
+        store.create_agent(self.db, name="lead", role="orchestrator", workspace="api",
+                           branch="api", cwd=str(self.repo))
         with mock.patch.dict(os.environ, {"HERDR_WORKSPACE_ID": "w1"}, clear=False):
-            self.b.delegate("t", role="worker", me=HUMAN)
+            self.b.delegate("t", role="worker", me="lead")
         self.assertEqual(self.h.tabs[-1], "w1")
 
     def test_delegate_records_parent_and_pokes_with_the_task(self):
@@ -212,6 +250,35 @@ class BrokerTest(unittest.TestCase):
         """Vocabulary is data — an undefined role inherits defaults, it does not error."""
         name = self.b.delegate("t", role="wizard", me="orch")
         self.assertEqual(store.get_agent(self.db, name)["role"], "wizard")
+
+    # -- a spawn is not a success until the task is in ----------------------
+
+    def test_a_task_that_never_arrives_fails_the_spawn_loudly(self):
+        """The bug that quietly lost agents: `delegate` returned a name for an agent whose
+        task was never delivered, so the caller believed it had delegated and the work was
+        done by nobody. See BUILD-PLAN item 1.1."""
+        self.h.undeliverable.add("ghost")
+        with self.assertRaises(TaskUndelivered) as cm:
+            self.b.delegate("do the thing", role="worker", name="ghost", me="orch")
+        self.assertEqual(cm.exception.name, "ghost")
+        self.assertIn("ghost", str(cm.exception))
+
+    def test_an_agent_with_no_task_is_not_recorded_as_working(self):
+        """It started, so it is not a husk — but it is not doing the work either, and a
+        row saying `working` is the lie the whole fix exists to stop telling."""
+        self.h.undeliverable.add("ghost")
+        with self.assertRaises(TaskUndelivered):
+            self.b.delegate("t", role="worker", name="ghost", me="orch")
+        a = store.get_agent(self.db, "ghost")
+        self.assertEqual(a["state"], "failed")
+        self.assertTrue(a["pane_id"])          # something IS in that pane; keep the handle
+        self.assertTrue(a["session_id"])
+        kinds = [e["kind"] for e in store.recent_events(self.db, limit=50)]
+        self.assertIn("task_undelivered", kinds)
+
+    def test_a_delivered_task_leaves_an_ordinary_working_agent(self):
+        name = self.b.delegate("compute 2+2", role="worker", me="orch")
+        self.assertEqual(store.get_agent(self.db, name)["state"], "working")
 
     def test_as_prompt_overrides_the_role_prompt(self):
         self.b.delegate("t", role="worker", as_prompt="You are a haiku critic.", me="orch")
@@ -1525,6 +1592,35 @@ class BrokerTest(unittest.TestCase):
 
     # -- start (the one command) ------------------------------------------
 
+    def test_start_inside_a_worktree_is_refused_and_names_the_main_checkout(self):
+        """A top's space is laid over the checkout `sb start` was run in, so run inside a
+        worktree it puts a new orchestrator — and everything it delegates that cannot fork
+        — over an agent's working copy and its branch. DESIGN-TRUTH refuses it."""
+        main = self.repo / "checkout"
+        with mock.patch.object(store, "main_checkout", lambda cwd=None: main):
+            with self.assertRaises(ValueError) as cm:
+                self.b.start()
+        self.assertIn(str(main), str(cm.exception))       # where to run it instead
+        self.assertIn(str(self.repo), str(cm.exception))  # and where they actually are
+        self.assertEqual(self.h.started, [])
+
+    def test_start_from_the_main_checkout_is_the_ordinary_case(self):
+        self.h.list_agents = lambda: []
+        self.h.focus = lambda n: None
+        with mock.patch.object(store, "main_checkout", lambda cwd=None: self.repo):
+            self.assertEqual(self.b.start(), MAIN_NAME)
+
+    def test_an_unanswerable_main_checkout_does_not_refuse(self):
+        """A repo `sb init` never pinned, whose layout defeats the inference, is a reason
+        not to answer — not a reason to refuse the one command worth remembering."""
+        def unknowable(cwd=None):
+            raise RuntimeError("not inside a git repo")
+
+        self.h.list_agents = lambda: []
+        self.h.focus = lambda n: None
+        with mock.patch.object(store, "main_checkout", unknowable):
+            self.assertEqual(self.b.start(), MAIN_NAME)
+
     def test_start_creates_the_top_orchestrator_as_a_root(self):
         self.h.list_agents = lambda: []
         self.h.focus = lambda n: None
@@ -2041,6 +2137,11 @@ class WorkspacePlacementTest(unittest.TestCase):
         return "w-derived"
 
     def _parent(self, **kw):
+        # With a worktree of its own (`branch`), so the fork rule leaves the child in the
+        # parent's space and placement — this class's whole subject — is what decides
+        # where it lands. A parent without one forks, and a fork that cannot happen now
+        # refuses the spawn outright (`ForkFailed`), which is `test_workspace`'s subject.
+        kw.setdefault("branch", "main")
         store.create_agent(self.db, name="parent", role="main", workspace="main",
                            cwd=str(self.repo), pane_id="p-parent", **kw)
 
