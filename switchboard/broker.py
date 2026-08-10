@@ -29,6 +29,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -113,6 +114,10 @@ TEARDOWN_SETTLE_POLL = config.setting("timeouts.teardown_settle_poll")
 # Every git we shell out to. A fork waits on `git fetch`, which is a network call and the
 # one command here that can hang for as long as a bad connection wants it to.
 SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+# Pointing a spawning pane's `sb` at its own checkout, and confirming it took. See `_pin_sb`.
+PIN_MS = config.setting("timeouts.pin_ms")
+PIN_ATTEMPTS = config.setting("retries.pin_attempts")
+PIN_BACKOFF = config.setting("retries.spawn_backoff")
 # How much of a summary or a reason reaches the event log and a desktop notification.
 EVENT_CLIP = config.setting("limits.event_clip")
 NOTIFY_CLIP = config.setting("limits.notify_clip")
@@ -240,6 +245,47 @@ class Undeliverable(HerdrError):
             f"will reach {who} on its next `sb inbox`; if it has to land now, that needs "
             f"a human in that pane.",
         )
+
+
+class SbUnpinned(HerdrError):
+    """A pane's `sb` could not be pointed at the checkout the agent is about to work in.
+
+    Refuses the spawn rather than starting the agent anyway, and the reason is the whole
+    point of the check: an agent that falls back to the installed `sb` runs the MAIN
+    checkout's code no matter which branch its own worktree is on. That is not a
+    degradation anybody notices — every command still works, it is simply the wrong build
+    — so a whole phase of fixes was acceptance-tested against code that was never running.
+    Silence is what made that possible; this is the noise instead.
+    """
+
+    def __init__(self, name: str, pane_id: str, bin_dir: str):
+        super().__init__(
+            "sb_unpinned",
+            f"{name}: the pane never confirmed `sb` resolving to {bin_dir}/sb, so it "
+            f"would have run whichever build is on PATH — usually the main checkout's, "
+            f"not this checkout's. Refused rather than spawned against the wrong code. "
+            f"The pane is {pane_id}; `herdr pane read {pane_id}` shows what it did with "
+            f"the command.",
+            [name, pane_id],
+        )
+
+
+def _own_sb_bin(cwd) -> Optional[Path]:
+    """The `bin/` of the checkout at `cwd`, if that checkout ships an `sb` of its own.
+
+    Every worktree and every clone of this repo has a real `bin/sb` — only the installed
+    entrypoint is a symlink — and `bin/sb` puts its OWN parent's parent on `sys.path`. So
+    naming this directory is the whole of "run the code you are standing in".
+
+    None for anything that is not a checkout of a repo shipping `sb`: an agent sent into
+    some other project keeps the installed build, which is the only one it could mean.
+    """
+    try:
+        root = store.worktree_root(Path(cwd))
+    except (RuntimeError, OSError):
+        return None
+    sb = root / "bin" / "sb"
+    return sb.parent if os.access(sb, os.X_OK) else None
 
 
 def _slug(name: str) -> str:
@@ -2487,6 +2533,64 @@ class Broker:
                 workspace_id = ""
         return self.h.create_tab(cwd=str(cwd)), workspace_id
 
+    def _pin_sb(self, name: str, pane: str, cwd) -> None:
+        """Make `sb` in this pane mean the checkout this agent is standing in.
+
+        THE PROBLEM. `sb` on PATH is one symlink per machine, pointing into the main
+        checkout, and `bin/sb` resolves its own real path to decide what to import. So
+        every agent in every worktree ran the main checkout's code, whatever branch it had
+        checked out — an agent could not exercise its own work, and a branch's fixes were
+        acceptance-tested against a build that did not contain them. Measured, not feared:
+        a phase of merged fixes was found to be entirely out of force for this reason.
+
+        THE SHAPE OF THE FIX. Nothing is installed and nothing outside this pane moves.
+        The pane's shell is handed its own checkout's `bin/` at the front of PATH, once,
+        before `agent start` runs the provider CLI in that same shell — so the agent, and
+        every shell it spawns, inherits it. C6: the agent is not told to type `./bin/sb`,
+        because an agent told that will type `sb`.
+
+        WHY IT IS CONFIRMED. `pane run` is a write into the dark — herdr accepts the text
+        whether or not the shell was at a prompt to take it — and the failure it hides is
+        exactly the silent one above. So the command prints where `sb` actually resolved
+        and the answer is read back; a pane that will not say costs the spawn (`SbUnpinned`)
+        rather than producing an agent quietly running the wrong build.
+
+        The marker cannot be matched off the echoed command line: what is typed contains
+        the bin directory, and what comes back is `sb=<bin>/sb`, which the typed line does
+        not contain.
+
+        WHERE IT SITS. Before the name is claimed, so the seconds it can cost stay out of
+        the window `status.SPAWN_GRACE` covers, and a refusal leaves no row behind.
+
+        A checkout with no `bin/sb` — any other project — is left alone entirely: no
+        herdr calls, PATH untouched, exactly as before.
+        """
+        bin_dir = _own_sb_bin(cwd)
+        if bin_dir is None:
+            return
+        quoted = shlex.quote(str(bin_dir))
+        # `command -v`, not `which`: it is the shell's own resolution, which is the thing
+        # being asserted. `"$PATH"` quoted, so a PATH with a space in it survives.
+        command = f'export PATH={quoted}:"$PATH"; echo "sb=$(command -v sb)"'
+        marker = f"sb={bin_dir}/sb"
+        for attempt in range(PIN_ATTEMPTS):
+            try:
+                self.h.prompt_pane(pane, command)
+                if self.h.wait_output(pane, marker, timeout_ms=PIN_MS):
+                    store.log_event(self.db, kind="sb_pinned", agent=name,
+                                    pane_id=pane, path=str(bin_dir))
+                    return
+            except HerdrError as e:
+                store.log_event(self.db, kind="sb_pin_error", agent=name,
+                                pane_id=pane, error=str(e))
+            if attempt + 1 < PIN_ATTEMPTS:
+                # The one failure worth retrying is a shell that had not reached its
+                # prompt when the text arrived, and waiting is the whole of that fix.
+                time.sleep(PIN_BACKOFF)
+        store.log_event(self.db, kind="sb_unpinned", agent=name, pane_id=pane,
+                        path=str(bin_dir))
+        raise SbUnpinned(name, pane, str(bin_dir))
+
     # -- spawning --------------------------------------------------------
 
     def _resolve_bindings(self, role: str, extra: Sequence[str] = ()) -> list[str]:
@@ -2679,6 +2783,10 @@ class Broker:
             wsid, confirmed = workspace_id, True
         if not pane:
             pane, wsid = self._tab_for(wsid, where)
+
+        # Before the claim, so a pane that cannot be pinned costs no row and no name, and
+        # so the wait stays outside the window `status.SPAWN_GRACE` covers.
+        self._pin_sb(name, pane, where)
 
         # Claim the name BEFORE herdr is asked to start anything. `agents.name` is a
         # PRIMARY KEY, and that index is the only arbiter two concurrent spawners share —
@@ -3337,6 +3445,18 @@ class Broker:
         # The corrected id is deliberately dropped: restore rewrites pane and state, never
         # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
         pane, _ = self._tab_for(wsid, where)
+        # A restored agent gets the same pinning a fresh one does — it comes back into the
+        # same checkout and would otherwise come back on the installed build. The tab is
+        # ours, so a refusal closes it rather than leaving an empty shell behind, exactly
+        # as a failed `agent start` does below.
+        try:
+            self._pin_sb(name, pane, where)
+        except SbUnpinned:
+            try:
+                self.h.close_pane(pane)
+            except HerdrError as e:
+                store.log_event(self.db, kind="orphan_pane", agent=name, error=str(e))
+            raise
         # Same tier it was spawned on. The role is what we recorded, and the tier table is
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with

@@ -476,6 +476,36 @@ class ReadTest(unittest.TestCase):
         self.assertIn("--source recent", fake.argv())
 
 
+class WaitOutputTest(unittest.TestCase):
+    """The read half of `pane run` — how a caller learns a typed command did anything."""
+
+    def test_a_match_is_yes(self):
+        fake = FakeHerdr(ok({"matched": True}))
+        self.assertTrue(
+            Herdr("herdr", runner=fake).wait_output("w1:p9", "sb=/repo/bin/sb",
+                                                    timeout_ms=5000))
+        argv = fake.argv()
+        self.assertIn("pane wait-output w1:p9", argv)
+        self.assertIn("--match sb=/repo/bin/sb", argv)
+        # A path is the usual thing matched, and a wrapped line splits one in half.
+        self.assertIn("--source recent-unwrapped", argv)
+        self.assertIn("--timeout 5000", argv)
+
+    def test_the_deadline_expiring_is_no_not_an_exception(self):
+        """herdr reports a miss as an error envelope. Every caller wants a yes/no —
+        raising would make "the pane did not answer" indistinguishable from "herdr is
+        down", and the caller has to act differently on those."""
+        h = Herdr("herdr", runner=FakeHerdr(err("timeout", "no match within 5000ms")))
+        self.assertFalse(h.wait_output("w1:p9", "sb=/repo/bin/sb", timeout_ms=5000))
+
+    def test_our_ceiling_leaves_room_for_herdrs_own(self):
+        """A call that is *supposed* to block for its timeout must not be killed at ten
+        seconds — the same allowance `agent start` and `agent wait` get."""
+        fake = FakeHerdr(ok({}))
+        Herdr("herdr", runner=fake).wait_output("w1:p9", "x", timeout_ms=5000)
+        self.assertGreater(fake.timeouts[0], 5.0)
+
+
 class SubprocessTimeoutTest(unittest.TestCase):
     """A stuck `herdr` binary must fail, loudly, rather than hang `sb` forever.
 

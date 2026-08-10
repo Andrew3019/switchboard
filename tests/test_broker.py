@@ -6,6 +6,8 @@ A fake herdr records what would have been called, so these run fast and spawn no
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -19,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import (  # noqa: E402
-    HUMAN, MAIN, MAIN_NAME, Broker, TaskUndelivered, Undeliverable,
+    HUMAN, MAIN, MAIN_NAME, Broker, SbUnpinned, TaskUndelivered, Undeliverable,
 )
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
@@ -2456,3 +2458,185 @@ class WorkspacePlacementTest(unittest.TestCase):
         self.h.get_agent = lambda n: None
         _, child = self._spawn(env="w-env")
         self.assertEqual(store.get_agent(self.db, child)["workspace_id"], "w-env")
+
+
+class SbPinTest(unittest.TestCase):
+    """A spawned agent must run the `sb` in its OWN checkout.
+
+    `sb` on PATH is one symlink per machine into the main checkout, and `bin/sb` decides
+    what to import from its own real path — so before this, every agent in every worktree
+    ran the main checkout's code whatever branch it had out. A whole phase of merged fixes
+    was acceptance-tested against a build that did not contain them, and nothing said so,
+    because the wrong build still answers every command.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "checkout"
+        self.repo.mkdir()
+        # Resolved, because that is what the pin names: `worktree_root` asks git, which
+        # answers with the real path (`/private/var/...` on macOS, not `/var/...`).
+        self.repo = self.repo.resolve()
+        for argv in (["init", "-q"], ["config", "user.email", "t@t"],
+                     ["config", "user.name", "t"]):
+            subprocess.run(["git", *argv], cwd=self.repo, check=True,
+                           capture_output=True)
+        self.bin = self.repo / "bin"
+        self.bin.mkdir()
+        sb = self.bin / "sb"
+        sb.write_text("#!/bin/sh\n")
+        sb.chmod(0o755)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = PinningHerdr()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _spawn(self, **kw):
+        # `board=False`: the board pane is opened with the same `pane run` the pin uses,
+        # and this class is reading what that call was for.
+        return self.b.delegate("t", role="worker", me=HUMAN, cwd=str(self.repo),
+                               workspace="ws", board=False, **kw)
+
+    # -- the pin ---------------------------------------------------------
+
+    def test_the_pane_gets_its_own_checkouts_bin_at_the_front_of_path(self):
+        self._spawn()
+        pane, text = self.h.pane_prompts[0]
+        self.assertIn(f'export PATH={self.bin}:"$PATH"', text)
+
+    def test_it_is_pinned_before_the_agent_starts(self):
+        """`agent start` runs the provider CLI in that same shell, so the export has to be
+        in it already — afterwards is a shell the agent never sees."""
+        self._spawn()
+        self.assertEqual(self.h.order, ["pin", "start"])
+
+    def test_the_pin_is_confirmed_not_assumed(self):
+        """`pane run` is accepted whether or not a shell was there to take it, and the
+        failure it hides is exactly the silent wrong-build one."""
+        self._spawn()
+        pane, marker, _ = self.h.waits[0]
+        self.assertEqual(marker, f"sb={self.bin}/sb")
+
+    def test_the_marker_cannot_be_matched_off_the_echoed_command(self):
+        """The typed line is echoed into the same pane, so a marker that appears in it
+        would confirm itself. It names the resolved binary; the command does not."""
+        self._spawn()
+        _, text = self.h.pane_prompts[0]
+        self.assertNotIn(f"sb={self.bin}/sb", text)
+
+    # -- refusing --------------------------------------------------------
+
+    def test_a_pane_that_never_confirms_costs_the_spawn(self):
+        """Starting anyway is what the whole fix exists to stop: the agent comes up, works
+        perfectly, and is running somebody else's code."""
+        self.h.confirms = False
+        with self.assertRaises(SbUnpinned):
+            self._spawn()
+        self.assertEqual(self.h.started, [])
+
+    def test_a_refusal_leaves_no_row_and_no_held_name(self):
+        """Pinned before the claim, so a refusal costs nothing a later attempt has to
+        step over — and the wait stays outside the window SPAWN_GRACE covers."""
+        self.h.confirms = False
+        with self.assertRaises(SbUnpinned):
+            self._spawn()
+        self.assertIsNone(store.get_agent(self.db, "worker-1"))
+
+    def test_it_is_retried_before_it_is_refused(self):
+        """The one failure worth retrying is a shell that had not reached its prompt."""
+        self.h.confirms_after = 1
+        with mock.patch("switchboard.broker.time.sleep"):
+            name = self._spawn()
+        self.assertEqual(len(self.h.waits), 2)
+        self.assertEqual(self.h.started[0]["name"], name)
+
+    def test_the_refusal_names_the_build_that_was_wanted(self):
+        self.h.confirms = False
+        with self.assertRaises(SbUnpinned) as cm:
+            self._spawn()
+        self.assertIn(str(self.bin), cm.exception.message)
+
+    # -- leaving everything else alone -----------------------------------
+
+    def test_a_checkout_without_its_own_sb_is_left_on_the_installed_build(self):
+        """An agent sent into some other project has only one `sb` it could mean, and
+        touching PATH there would be a claim about a repo we know nothing about."""
+        (self.bin / "sb").unlink()
+        self._spawn()
+        self.assertEqual(self.h.pane_prompts, [])
+        self.assertEqual(self.h.waits, [])
+
+    def test_somewhere_that_is_not_a_checkout_at_all_is_left_alone(self):
+        outside = Path(self.tmp.name) / "elsewhere"
+        outside.mkdir()
+        self.b.delegate("t", role="worker", me=HUMAN, cwd=str(outside), workspace="ws",
+                        board=False)
+        self.assertEqual(self.h.pane_prompts, [])
+
+    def test_the_main_checkout_is_pinned_to_itself(self):
+        """The normal case is unchanged in effect, not exempted: prepending the main
+        checkout's own `bin/` resolves `sb` to the very file the installed symlink points
+        at. One rule, no branch for 'am I the main one'."""
+        name = self._spawn()
+        self.assertEqual(self.h.started[0]["name"], name)
+        self.assertIn(str(self.bin), self.h.pane_prompts[0][1])
+
+    def test_a_path_with_a_space_survives(self):
+        space = (Path(self.tmp.name) / "two words")
+        (space / "bin").mkdir(parents=True)
+        space = space.resolve()
+        subprocess.run(["git", "init", "-q"], cwd=space, check=True, capture_output=True)
+        (space / "bin" / "sb").write_text("#!/bin/sh\n")
+        (space / "bin" / "sb").chmod(0o755)
+        self.b.delegate("t", role="worker", me=HUMAN, cwd=str(space), workspace="ws",
+                        board=False)
+        _, text = self.h.pane_prompts[0]
+        self.assertIn(shlex.quote(str(space / "bin")), text)
+
+    # -- restore ---------------------------------------------------------
+
+    def test_a_restored_agent_is_pinned_too(self):
+        """It comes back into the same checkout, so it would otherwise come back on the
+        installed build — a restore is a spawn for every purpose this cares about."""
+        store.create_agent(self.db, name="w", role="worker", cwd=str(self.repo),
+                           session_id="sess-w", pane_id="old")
+        store.set_state(self.db, "w", "done")
+        self.b.restore("w")
+        self.assertEqual(self.h.order, ["pin", "start"])
+
+    def test_a_restore_that_cannot_be_pinned_closes_its_own_tab(self):
+        store.create_agent(self.db, name="w", role="worker", cwd=str(self.repo),
+                           session_id="sess-w", pane_id="old")
+        store.set_state(self.db, "w", "done")
+        self.h.confirms = False
+        with self.assertRaises(SbUnpinned):
+            self.b.restore("w")
+        self.assertEqual(len(self.h.closed), 1)          # no empty shell left behind
+
+
+class PinningHerdr(FakeHerdrAPI):
+    """A herdr that can be asked what a pane printed, and records the order it was used
+    in — which is the half of the pin that matters."""
+
+    def __init__(self):
+        super().__init__()
+        self.waits: list[tuple] = []
+        self.order: list[str] = []
+        self.confirms = True
+        self.confirms_after = 0        # misses this many times first
+
+    def prompt_pane(self, pane, text):
+        self.order.append("pin")
+        super().prompt_pane(pane, text)
+
+    def wait_output(self, pane_id, match, *, timeout_ms):
+        self.waits.append((pane_id, match, timeout_ms))
+        if not self.confirms:
+            return False
+        return len(self.waits) > self.confirms_after
+
+    def start_agent(self, *a, **kw):
+        self.order.append("start")
+        return super().start_agent(*a, **kw)
