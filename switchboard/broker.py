@@ -158,6 +158,31 @@ class BranchTaken(ValueError):
         )
 
 
+class TaskUndelivered(HerdrError):
+    """An agent started, and its first task could not be got into it.
+
+    A HerdrError so `sb` reports it as a failed herdr call rather than a traceback, on the
+    same path every other spawn failure takes. It is raised in place of returning the
+    agent's name, because a name printed for an agent that never received its task is the
+    failure this whole spawn path exists to prevent: the caller believes it delegated, and
+    the work is never done by anyone.
+
+    The agent it names is recorded `failed` but still has its pane — it is up, it just has
+    nothing to do. `sb inspect <name>` shows what is in it and `sb cleanup <name> --force`
+    closes it.
+    """
+
+    def __init__(self, name: str, cause: HerdrError):
+        self.name, self.cause = name, cause
+        super().__init__(
+            "task_undelivered",
+            f"{name} started but never took its task, so nothing was delegated — "
+            f"{cause.message}. Nothing is running that work; respawn it. The pane is "
+            f"still open: `sb inspect {name}`, then `sb cleanup {name} --force`",
+            [name],
+        )
+
+
 class Undeliverable(HerdrError):
     """A ring that had to land in the target's current turn could not be delivered.
 
@@ -2643,7 +2668,24 @@ class Broker:
             # The pane herdr actually put the agent in, not the one we asked for — the
             # same value the row above was updated with.
             self._open_board(name, agent.pane_id or pane, cwd=str(where))
-        self.h.prompt(name, task)
+        # THE SPAWN IS NOT DONE UNTIL THE TASK IS IN. `agent start` retries and raises
+        # loudly, but the first task used to go down as a bare `agent prompt` — one
+        # unverified call that can paste without submitting or never arrive, after which
+        # `delegate` returned the name as if all of it had worked. That is how a fan-out
+        # reports six agents and starts two, and it cost this project roughly eight agents
+        # in one session. `deliver` re-sends until herdr says the agent took it.
+        try:
+            self.h.deliver(name, task)
+        except HerdrError as e:
+            # A started agent with no task is not a success, so it is not recorded as one.
+            # `failed` and NOT a husk — the pane and the session stay on the row, because
+            # something is genuinely sitting in that pane and whoever reads this needs to
+            # be able to look at it, close it, or restore it. The husk carve-out above
+            # tests for neither being present, so this row is never silently replaced.
+            store.set_state(self.db, name, GONE_STATE)
+            store.log_event(self.db, kind="task_undelivered", agent=name, parent=me,
+                            role=role, pane_id=agent.pane_id or pane, error=str(e))
+            raise TaskUndelivered(name, e) from None
         return name
 
     def _spawn_husk(self, name: str) -> bool:

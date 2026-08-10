@@ -194,6 +194,85 @@ class SpawnTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "spawn_failed")
 
 
+class DeliverTest(unittest.TestCase):
+    """`deliver` — a prompt that is confirmed to have been taken, or raises.
+
+    The bug it exists for: `agent prompt` reports nothing about whether the text was
+    submitted, pasted-and-left-sitting, or lost, so a spawn could hand back a name for an
+    agent that never ran. See BUILD-PLAN item 1.1.
+    """
+
+    def herdr(self, *, takes_on=1, prompt_errors=()):
+        """An agent that takes the text on its `takes_on`-th send, and never before.
+
+        `takes_on=0` is the agent that never takes it at all. State is a property of how
+        many sends have landed rather than of how many times it has been read, so the poll
+        loop can turn over as often as it likes without that being the thing under test.
+        `prompt_errors` is consumed one per `agent prompt`; a falsy entry succeeds.
+        """
+        state = {"sends": 0, "errs": list(prompt_errors)}
+        calls: list[list[str]] = []
+
+        def runner(argv, *, timeout=None):
+            calls.append(list(argv))
+            if argv[1:3] == ["agent", "prompt"]:
+                e = state["errs"].pop(0) if state["errs"] else None
+                if e:
+                    return err(e)
+                state["sends"] += 1
+                return ok({})
+            took = bool(takes_on) and state["sends"] >= takes_on
+            return ok({"agents": [dict(AGENT_JSON, state_change_seq=88 + int(took))]})
+
+        return Herdr("herdr", runner=runner, sleep=lambda _: None), calls
+
+    def sends(self, calls):
+        return [c for c in calls if c[1:3] == ["agent", "prompt"]]
+
+    def test_a_prompt_the_agent_took_is_sent_once(self):
+        """The agent moved: seq 88 before, 89 after. Nothing is re-sent."""
+        h, calls = self.herdr(takes_on=1)
+        h.deliver("w1", "do the thing")
+        self.assertEqual(len(self.sends(calls)), 1)
+        self.assertIn("do the thing", self.sends(calls)[0])
+
+    def test_a_prompt_that_never_started_a_turn_is_re_sent(self):
+        """Pasted without submitting: herdr took the call and the agent never moved.
+
+        This is the mode that loses agents — `agent prompt` returns success either way,
+        so only reading the agent back afterwards can tell them apart.
+        """
+        h, calls = self.herdr(takes_on=2)
+        h.deliver("w1", "task", timeout_ms=1)
+        self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_a_task_that_never_lands_raises_instead_of_reporting_success(self):
+        h, calls = self.herdr(takes_on=0)
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=3, timeout_ms=1)
+        self.assertEqual(cm.exception.code, "not_delivered")
+        self.assertIn("w1", cm.exception.message)
+        self.assertEqual(len(self.sends(calls)), 3)
+
+    def test_a_refused_prompt_is_retried_and_then_confirmed(self):
+        """The other failure mode: the call itself fails, e.g. agent_not_ready."""
+        h, calls = self.herdr(takes_on=1, prompt_errors=["agent_not_ready", None])
+        h.deliver("w1", "task", timeout_ms=1)
+        self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_an_unaskable_herdr_is_not_mistaken_for_a_delivery(self):
+        """`agent list` failing proves nothing, so it must not read as confirmation."""
+        def runner(argv, *, timeout=None):
+            if argv[1:3] == ["agent", "prompt"]:
+                return ok({})
+            return err("herdr_unavailable")
+
+        h = Herdr("herdr", runner=runner, sleep=lambda _: None)
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=2, timeout_ms=1)
+        self.assertEqual(cm.exception.code, "not_delivered")
+
+
 class TopologyTest(unittest.TestCase):
     def test_uses_tab_not_pane_split(self):
         # verified live shape: the pane id lives under root_pane, not tab
