@@ -1357,6 +1357,26 @@ def mark_collected(db: sqlite3.Connection, mid: int) -> None:
     db.commit()
 
 
+def mark_unannounceable(db: sqlite3.Connection, mid: int) -> None:
+    """Announced-as-far-as-anyone-ever-will-be, but still unread — and still readable.
+
+    The half-way state `mark_collected` is too strong for. A finished agent whose name
+    herdr has evicted can never be rung again (`Broker._finished_and_unreachable`), so
+    every trigger that chases un-announced mail — `flush_pending` on every `sb` command,
+    and the collector's doorbell every ten seconds — is chasing a ring that cannot happen.
+    Stamping `delivered_at` is what takes those rows out of `unseen()` and out of
+    `status._undelivered_counts`, which is the whole of "stop retrying".
+
+    `read_at` is deliberately left alone. The pane is still open, so a person can put a
+    turn back into it and that agent's own `sb inbox` still finds the mail waiting —
+    reading it is the one thing that never stopped working. Marking it read here would
+    destroy the only remaining way it gets read.
+    """
+    db.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at, ?) WHERE id=?",
+               (now(), mid))
+    db.commit()
+
+
 def mark_delivered(db: sqlite3.Connection, to_agent: str) -> int:
     cur = db.execute(
         "UPDATE messages SET delivered_at=? WHERE to_agent=? AND delivered_at IS NULL",

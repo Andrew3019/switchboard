@@ -634,6 +634,11 @@ class TheDoorbellTrigger(PanelTest):
 
         self.enterContext(mock.patch.object(collector.shutil, "which", lambda n: "/bin/sb"))
         self.enterContext(mock.patch.object(collector.subprocess, "run", record))
+        # Which `sb` gets picked is `WhichSbTheDoorbellRuns`'s subject, and it answers with
+        # this checkout's real `bin/sb` — a path these tests would then have to know. They
+        # are about WHEN it runs, so they take the PATH answer.
+        self.enterContext(mock.patch.object(
+            collector, "doorbell_sb", lambda: collector.shutil.which("sb")))
 
     def _snap(self, undelivered):
         snap = a_snapshot("w1")
@@ -675,14 +680,14 @@ class TheDoorbellTrigger(PanelTest):
         self.assertEqual(state.doorbell_error, "boom")
         self.assertIsNone(state.last_error)
 
-    def test_with_no_sb_on_path_it_says_so_rather_than_writing_itself(self):
+    def test_with_no_sb_to_run_it_says_so_rather_than_writing_itself(self):
         """Falling back to this process's own code would put the write back in the one
         process that is read-only and version-stale on purpose."""
         state = collector.State(pid=1, started_at=0.0)
-        with mock.patch.object(collector.shutil, "which", lambda n: None):
+        with mock.patch.object(collector, "doorbell_sb", lambda: None):
             self.assertFalse(collector.ring_doorbell(self._snap(1), state, None))
         self.assertEqual((self.ran, state.doorbells), ([], 0))
-        self.assertIn("no `sb` on PATH", state.doorbell_error)
+        self.assertIn("nothing can ring the doorbell", state.doorbell_error)
 
     def test_sb_is_run_from_the_checkout_and_never_from_dot_git(self):
         """The store sits INSIDE `.git`, which is not a work tree. Running `sb` there
@@ -699,6 +704,62 @@ class TheDoorbellTrigger(PanelTest):
         from switchboard import cli
         args = cli.build_parser().parse_args(["flush"])
         self.assertEqual(args.cmd, "flush")
+
+
+class WhichSbTheDoorbellRuns(PanelTest):
+    """WHICH `sb` binary the doorbell spawns — the last environment fact it depended on.
+
+    `shutil.which("sb")` asks the board pane's PATH, and that resolves the one machine-wide
+    symlink into the main checkout. A collector running a branch's code therefore rang the
+    doorbell by running a DIFFERENT build, and when the verb it needs is newer than the
+    installed one every ring dies in argparse: 55 doorbells in 5.5 minutes, all failed,
+    five reports left undelivered, until the collector was restarted by hand with the right
+    `bin` in front (`audit/phase1-acceptance-3.md` §3.2-3.3). Nothing pins a board pane —
+    `_pin_sb` covers spawned agents only — so the fix is for the doorbell to name its own
+    build rather than to arrange anybody's PATH.
+    """
+
+    def test_it_runs_the_sb_of_the_checkout_it_is_running_from(self):
+        """The collector is launched with its checkout on PYTHONPATH, so its own
+        `__file__` names that checkout, and that checkout's `bin/sb` is the same file
+        `_pin_sb` puts in front of an agent's PATH."""
+        own = Path(collector.__file__).resolve().parent.parent / "bin" / "sb"
+        self.assertTrue(os.access(own, os.X_OK))          # the premise, asserted
+        self.assertEqual(collector.doorbell_sb(), str(own))
+
+    def test_an_unrelated_sb_on_path_cannot_win(self):
+        """The whole point: a correct doorbell must not be defeated by whatever binary
+        happens to be installed. Nothing here arranges PATH, and PATH is not consulted."""
+        with mock.patch.object(collector.shutil, "which", lambda n: "/usr/local/bin/sb"):
+            self.assertNotEqual(collector.doorbell_sb(), "/usr/local/bin/sb")
+
+    def test_and_it_is_the_binary_that_actually_gets_spawned(self):
+        """`ring_doorbell` asks the same question — the resolution is not left where only
+        a unit test can see it."""
+        ran = []
+        with mock.patch.object(collector.threading, "Thread",
+                               lambda target, args=(), **kw: mock.Mock(
+                                   start=lambda: target(*args))), \
+             mock.patch.object(collector.subprocess, "run",
+                               lambda argv, **kw: ran.append(argv) or mock.Mock(
+                                   returncode=0)), \
+             mock.patch.object(collector, "doorbell_sb", lambda: "/checkout/bin/sb"):
+            snap = a_snapshot("w1")
+            snap.agents[0].undelivered = 1
+            collector.ring_doorbell(snap, collector.State(pid=1, started_at=0.0), None)
+        self.assertEqual(ran, [["/checkout/bin/sb", "flush"]])
+
+    def test_a_switchboard_with_no_bin_beside_it_falls_back_to_path(self):
+        """Installed as a package, or vendored: there is no build of its own to run, and
+        the installed `sb` is then the only one it could have meant."""
+        with mock.patch.object(collector.os, "access", lambda p, m: False), \
+             mock.patch.object(collector.shutil, "which", lambda n: "/usr/local/bin/sb"):
+            self.assertEqual(collector.doorbell_sb(), "/usr/local/bin/sb")
+
+    def test_with_neither_it_answers_none(self):
+        with mock.patch.object(collector.os, "access", lambda p, m: False), \
+             mock.patch.object(collector.shutil, "which", lambda n: None):
+            self.assertIsNone(collector.doorbell_sb())
 
 
 class TheDoorbellsWorkingDirectory(PanelTest):

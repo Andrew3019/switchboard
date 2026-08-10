@@ -775,25 +775,46 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # Still exit 0, and deliberately: the message is durable, and the next `sb`
         # command anyone runs re-rings it (see Broker.flush_pending). Being mid-turn is
         # the ordinary reason, not a failure. The report says who has not been told YET.
-        waiting = sorted({m["to_agent"] for m in store.undelivered(db, exclude=(HUMAN,))
-                          if m["id"] in set(ids)})
+        mine = [m for m in (store.get_message(db, i) for i in ids) if m is not None]
+        undelivered = sorted({m["to_agent"] for m in mine if m["delivered_at"] is None})
         # "will be rung when free" is a promise, and for one of these it is a false one:
         # herdr can lose a live agent's name binding, and then no `sb` command anybody
         # runs will ever ring it again. Saying so is the whole recovery path — a person
         # goes and types in that pane.
-        lost = [n for n in waiting if b.unreachable(n)]
-        waiting = [n for n in waiting if n not in lost]
+        #
+        # Asked of every target and not only of the ones still un-announced, because an
+        # agent that has finished no longer leaves its mail un-announced: it is stamped on
+        # the spot precisely so nothing retries it (`_clear_unreadable_mail`). Reading the
+        # note off the undelivered set alone would have printed nothing at all — plain
+        # "sent to w2", the same words a delivery gets.
+        lost = [n for n in sorted({m["to_agent"] for m in mine}) if b.unreachable(n)]
+        waiting = [n for n in undelivered if n not in lost]
+
+        def _has_pane(n: str) -> bool:
+            a = store.get_agent(db, n)
+            return bool(a and a["pane_id"])
+
+        # The two unreachable populations differ only in what a person can do about it, and
+        # that is the whole content of the note: a pane that is still open can be typed in.
+        closed = [n for n in lost if not _has_pane(n)]
+        lost = [n for n in lost if n not in closed]
         notes = []
         if waiting:
             notes.append(f"{', '.join(waiting)} mid-turn or blocked — will be rung "
                          f"when free")
         if lost:
-            notes.append(f"{', '.join(lost)} UNREACHABLE — herdr has lost its name and "
-                         f"the doorbell will not ring again; the message is stored, but "
-                         f"somebody has to go to its pane")
+            notes.append(f"{', '.join(lost)} UNREACHABLE — herdr no longer answers to its "
+                         f"name and the doorbell will not ring again; the message is "
+                         f"stored and still in its inbox, but somebody has to go to its "
+                         f"pane")
+        if closed:
+            notes.append(f"{', '.join(closed)} has finished and its pane is closed — the "
+                         f"message is stored (`sb inspect {closed[0]}`) but nobody will "
+                         f"read it")
         note = f" ({'; '.join(notes)})" if notes else ""
         _emit(args, f"sent to {', '.join(args.who)}{note}",
-              {"ids": ids, "undelivered": waiting, "unreachable": lost})
+              {"ids": ids, "undelivered": waiting, "unreachable": lost + closed,
+               "closed": closed})
         return 0
 
     if cmd == "inbox":

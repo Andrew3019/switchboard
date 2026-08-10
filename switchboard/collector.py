@@ -46,11 +46,13 @@ it is where that trigger belongs.
 
 It does NOT call `flush_pending` itself, and that is the whole design of it: this process
 is read-only and version-stale on purpose (see above), and both properties would be lost
-the moment it wrote. It runs `sb` from PATH instead — a short-lived process of whatever
-version is installed, which flushes at startup like every other `sb` command — so the
-write is made by current code and this file keeps its two invariants. Nothing is imported
-to do it and no state is kept: the snapshot it already has says whether anything is
-waiting, and `DOORBELL_GAP` keeps a target that stays busy from costing a process a tick.
+the moment it wrote. It spawns `sb` instead — a short-lived process that flushes at
+startup like every other `sb` command — so the write is made by code running now and this
+file keeps its two invariants. The `sb` it spawns is THIS checkout's `bin/sb` and not
+whatever the pane's PATH resolves (`doorbell_sb`), so the doorbell cannot be defeated by
+an unrelated build being installed. Nothing is imported to do it and no state is kept: the
+snapshot it already has says whether anything is waiting, and `DOORBELL_GAP` keeps a
+target that stays busy from costing a process a tick.
 
 **It cannot become a daemon nobody owns.** Renderers stamp `panel/demand` as they draw,
 and this exits once nothing has looked for `panel.collector_idle_exit` seconds. Closing
@@ -175,11 +177,12 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
         return False
     if not any(a.undelivered for a in snap.agents):
         return False
-    sb = shutil.which("sb")
+    sb = doorbell_sb()
     if sb is None:
         # Nothing to fall back to: running this module's own code would put the write back
         # in this process, which is the one thing the arrangement above exists to prevent.
-        state.doorbell_error = "no `sb` on PATH — nothing can ring the doorbell"
+        state.doorbell_error = ("no `sb` in this checkout's `bin/` and none on PATH — "
+                                "nothing can ring the doorbell")
         return False
     state.last_doorbell = now
     state.doorbells += 1
@@ -189,6 +192,35 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     threading.Thread(target=_run_doorbell, args=(sb, db_path, state),
                      daemon=True).start()
     return True
+
+
+def doorbell_sb() -> Optional[str]:
+    """Which `sb` the doorbell runs — THIS build's, not whatever is installed.
+
+    THE PROBLEM, measured. `shutil.which("sb")` asks the board pane's PATH, and that PATH
+    is one machine-wide symlink into the main checkout. So a collector running a branch's
+    code rang the branch's doorbell by spawning a *different* build — and when the verb it
+    needs is newer than the installed one, every ring dies in argparse. 55 doorbells in
+    5.5 minutes, all failed, five reports left undelivered, until the collector was
+    restarted by hand with the right `bin` on its PATH, after which everything landed in
+    one tick (`audit/phase1-acceptance-3.md` §3.2-3.3).
+
+    `_pin_sb` already solves this shape for a spawned agent's pane, but a board pane is
+    nobody's agent and nothing pins it. The fix does not need a pin at all: this process
+    IS the build, launched with the checkout on `PYTHONPATH` by `panel.ensure_collector`,
+    so its own `__file__` names the checkout, and that checkout's `bin/sb` is the same
+    file `_pin_sb` puts at the front of an agent's PATH. Naming it here removes the
+    environment from the question entirely: no PATH, no symlink, no ordering, and a
+    correct doorbell can no longer be defeated by an unrelated binary.
+
+    PATH remains the fallback, and only that: a `switchboard` imported from somewhere with
+    no `bin/sb` beside it (installed as a package, vendored) has nothing of its own to run,
+    and the installed build is then the only `sb` it could have meant.
+    """
+    own = Path(__file__).resolve().parent.parent / "bin" / "sb"
+    if os.access(own, os.X_OK):
+        return str(own)
+    return shutil.which("sb")
 
 
 def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
