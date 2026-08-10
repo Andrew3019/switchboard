@@ -3203,9 +3203,30 @@ class Broker:
         # workspaces, so deriving it would bring the agent back somewhere else.
         wsid = (ws.get("workspace_id") or _column(a, "workspace_id")
                 or self._workspace_id(a["workspace"]))
+        where = ws.get("path") or a["cwd"] or str(self.repo)
+        # A worktree that has been deleted is the end of this agent, and saying so is the
+        # whole of the fix: herdr silently substitutes `$HOME` for a `--cwd` that does not
+        # exist, so restoring into a removed checkout reported `restored <name>` and put a
+        # live agent in Andrew's home directory with none of its context and every
+        # intention of writing there. DESIGN-TRUTH is explicit that restore is gone once
+        # the worktree is — the push is the recovery path for the work — so this refuses
+        # and names the branch the work is still on.
+        #
+        # Checked here rather than in `_tab_for`, which `delegate` and the workspace spawn
+        # also call: this is the one caller whose directory was recorded long ago and can
+        # have been removed since.
+        if not Path(where).is_dir():
+            branch = store.agent_branch(self.db, name)
+            raise ValueError(
+                f"{name} cannot be restored: its checkout is gone ({where}). "
+                + (f"Its work is on branch {branch} — that branch is the recovery path, "
+                   f"not restore."
+                   if branch else
+                   "No branch was recorded for it, so there is nothing to bring back.")
+            )
         # The corrected id is deliberately dropped: restore rewrites pane and state, never
         # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
-        pane, _ = self._tab_for(wsid, ws.get("path") or a["cwd"] or str(self.repo))
+        pane, _ = self._tab_for(wsid, where)
         # Same tier it was spawned on. The role is what we recorded, and the tier table is
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with

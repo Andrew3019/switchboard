@@ -1451,6 +1451,25 @@ class BrokerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.b.restore("kid")
 
+    def test_restore_refuses_when_the_checkout_is_gone(self):
+        """herdr substitutes `$HOME` for a `--cwd` that does not exist, so this used to
+        print `restored kid` and leave a live agent in Andrew's home directory with none
+        of its context. DESIGN-TRUTH: restore is gone once the worktree is."""
+        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
+                           cwd=str(self.repo / "deleted-worktree"), branch="feature-x")
+        store.set_state(self.db, "kid", "done")        # closed, as a restore candidate is
+        with self.assertRaises(ValueError) as e:
+            self.b.restore("kid")
+        self.assertIn("feature-x", str(e.exception))   # where the work still is
+        self.assertEqual(self.h.tabs, [])              # and no pane was made anywhere
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
+
+    def test_a_branchless_agent_whose_checkout_is_gone_is_refused_too(self):
+        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
+                           cwd=str(self.repo / "deleted-worktree"), pane_id="w1:p1")
+        with self.assertRaises(ValueError):
+            self.b.restore("kid")
+
     # -- start (the one command) ------------------------------------------
 
     def test_start_creates_the_top_orchestrator_as_a_root(self):
