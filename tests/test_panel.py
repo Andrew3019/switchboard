@@ -54,6 +54,16 @@ def a_snapshot(*names, herdr_error=None, hidden=0, now=1000):
             blocked_why=None, summary=None) for n in names])
 
 
+def a_git_repo(root: Path) -> Path:
+    """A real checkout, so path code is exercised against `git` and not against a mock."""
+    root.mkdir(parents=True, exist_ok=True)
+    for cmd in (["init", "-q", "-b", "main"],
+                ["-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", *cmd], cwd=str(root), check=True, capture_output=True)
+    return root
+
+
 def published(paths, snap, **counters):
     """Put a snapshot on disk the way the collector would."""
     meta = {"pid": 1, "started_at": 0.0, "polls": 1, "errors": 0,
@@ -145,14 +155,7 @@ class PathsWithoutGit(unittest.TestCase):
     def _repo(self) -> Path:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name) / "repo"
-        root.mkdir()
-        for cmd in (["init", "-q", "-b", "main"],
-                    ["-c", "user.email=t@t", "-c", "user.name=t",
-                     "commit", "-q", "--allow-empty", "-m", "x"]):
-            subprocess.run(["git", *cmd], cwd=str(root), check=True,
-                           capture_output=True)
-        return root
+        return a_git_repo(Path(tmp.name) / "repo")
 
     def test_it_agrees_with_store_in_a_plain_checkout(self):
         root = self._repo()
@@ -622,10 +625,15 @@ class TheDoorbellTrigger(PanelTest):
         self.enterContext(mock.patch.object(
             collector.threading, "Thread",
             lambda target, args=(), **kw: mock.Mock(start=lambda: target(*args))))
+        self.ran_cwd: list = []                # the directory each one was run FROM
+
+        def record(argv, **kw):
+            self.ran.append(argv)
+            self.ran_cwd.append(kw.get("cwd"))
+            return mock.Mock(returncode=0)
+
         self.enterContext(mock.patch.object(collector.shutil, "which", lambda n: "/bin/sb"))
-        self.enterContext(mock.patch.object(
-            collector.subprocess, "run",
-            lambda argv, **kw: self.ran.append(argv) or mock.Mock(returncode=0)))
+        self.enterContext(mock.patch.object(collector.subprocess, "run", record))
 
     def _snap(self, undelivered):
         snap = a_snapshot("w1")
@@ -676,12 +684,73 @@ class TheDoorbellTrigger(PanelTest):
         self.assertEqual((self.ran, state.doorbells), ([], 0))
         self.assertIn("no `sb` on PATH", state.doorbell_error)
 
+    def test_sb_is_run_from_the_checkout_and_never_from_dot_git(self):
+        """The store sits INSIDE `.git`, which is not a work tree. Running `sb` there
+        made every doorbell die in `store.worktree_root()` before it did anything —
+        one directory, on every machine, whatever was on PATH."""
+        state = collector.State(pid=1, started_at=0.0)
+        collector.ring_doorbell(self._snap(1), state,
+                                Path("/r/.git/agentflow/state.db"))
+        self.assertEqual(self.ran_cwd, ["/r"])
+
     def test_the_verb_it_runs_exists(self):
         """The collector spawns `sb flush` by name. If that verb is ever renamed, the
         trigger fails silently in a thread nobody is watching."""
         from switchboard import cli
         args = cli.build_parser().parse_args(["flush"])
         self.assertEqual(args.cmd, "flush")
+
+
+class TheDoorbellsWorkingDirectory(PanelTest):
+    """Which directory the spawned `sb` is run FROM, which decides whether it runs at all.
+
+    The store lives inside `.git`, and the first version of this handed `sb` the store's
+    grandparent — the `.git` directory itself. `cli.main` resolves `store.worktree_root()`
+    for every verb and `git rev-parse --show-toplevel` fails inside `.git`, so every
+    doorbell ever rung died there before it delivered anything, on every machine, whatever
+    was on PATH (`audit/phase1-acceptance-2.md` §3.3). Real repositories here rather than
+    mocked paths, because the thing that was wrong was a real path.
+    """
+
+    def test_the_directory_it_picks_is_one_sb_can_actually_run_in(self):
+        """The assertion the counter could not make: `sb` calls `store.worktree_root()`
+        for every verb, so the doorbell's cwd has to satisfy `--show-toplevel`."""
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        cwd = collector._doorbell_cwd(store.db_path(root))
+        self.assertEqual(store.worktree_root(Path(cwd)), root.resolve())
+
+    def test_a_collector_started_in_a_worktree_rings_from_the_main_checkout(self):
+        """The normal case here: agents live in worktrees, and every worktree shares the
+        one `.git`. Its parent is the main checkout, a work tree like any other, so the
+        flush lands on the right store from a directory `sb` accepts."""
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        wt = Path(self.tmp.name) / "wt"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "side", str(wt)],
+                       cwd=str(root), check=True, capture_output=True)
+        self.assertEqual(store.db_path(wt), store.db_path(root))     # one store, shared
+        cwd = collector._doorbell_cwd(store.db_path(wt))
+        self.assertEqual(store.worktree_root(Path(cwd)), root.resolve())
+
+    def test_a_relocated_git_dir_uses_the_checkout_sb_init_recorded(self):
+        """`.git`'s parent is only the checkout in an ordinary layout. `sb init` writes
+        the answer down for the rest; this reads the same file `store.main_checkout` does
+        rather than importing it, so the doorbell half stays importless."""
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        store.write_config({"main_checkout": str(elsewhere)}, cwd=root)
+        self.assertEqual(collector._doorbell_cwd(store.db_path(root)), str(elsewhere))
+
+    def test_a_recorded_checkout_that_is_gone_falls_back_to_the_inference(self):
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        store.write_config({"main_checkout": str(Path(self.tmp.name) / "deleted")},
+                           cwd=root)
+        cwd = collector._doorbell_cwd(store.db_path(root))
+        self.assertEqual(store.worktree_root(Path(cwd)), root.resolve())
+
+    def test_with_no_store_at_all_it_inherits_the_collectors_own_directory(self):
+        self.assertEqual(collector._doorbell_cwd(Path("/r/.git/agentflow/state.db")), "/r")
+        self.assertIsNone(collector._doorbell_cwd(None))
 
 
 class GitIsPaidOncePerCollector(PanelTest):
