@@ -39,6 +39,17 @@ a workspace does. This is a top orchestrator. — confirmed 2026-08-09
 small and clear enough for one agent end to end, it gets an orchestrator with it, and
 that agent can be called `<name>-lead`. — confirmed 2026-08-09
 
+**Only `sb start` ever creates a top orchestrator — that is the only path.** Being a top
+is stamped at that moment, and `sb delegate` branches on the stamp: a top's spawn gets a
+new space and worktree, anyone else's gets a tab in the caller's space. A bare agent's
+delegate is refused outright. That stamp, not the prompt, is what makes top and workspace
+orchestrators different; a top-only prompt fragment explains behaviour the code already
+guarantees. — confirmed 2026-08-09
+
+**A fork that fails refuses the spawn and tells the parent.** It never falls back to
+Andrew's own checkout. `sb start` run inside a worktree is refused too, naming the main
+checkout to run it from. — confirmed 2026-08-09
+
 **Where each spawn lands.** `sb start` = new bare space + orchestrator. Top spawns a
 bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
 Top spawns an orchestrator = same thing. An orchestrator spawning anything = new tab in
@@ -88,13 +99,15 @@ Interrupt is pressing escape on the chat window, which interrupts the model, and
 the message goes in directly without waiting. — confirmed 2026-08-09
 
 **Every sb message is prefixed so it is clearly an sb message**, and the prefix can
-carry more — the sender agent's name and the like. The channel is the same as Andrew
-typing; the prefix is what tells them apart. — confirmed 2026-08-09
+carry more — the sender agent's name and the like: `[sb: from <name>]`. The channel is
+the same as Andrew typing; the prefix is what tells them apart. — confirmed 2026-08-09
 
 **switchboard is personal, for now.** — confirmed 2026-08-09
 
 **The role list is lightly audited and fine as it is** — as long as it is known that
-there are roles, and what roles there are. — confirmed 2026-08-09
+there are roles, and what roles there are. Every agent is told at spawn what roles exist,
+and that text is generated from the roles themselves, never hardcoded. — confirmed
+2026-08-09
 
 **Which model an agent gets is set in config, and does not really matter.** — confirmed
 2026-08-09
@@ -107,6 +120,11 @@ and nobody owns them. — confirmed 2026-08-09
 
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
+
+**There should not be too many hard guidelines and rules.** The reconciler catching the
+general case is worth more than a rule for each one — e.g. a reply that was asked for and
+never came surfaces through the idle state, and pinging either agent or a parent is
+enough for them to notice and chase it. — confirmed 2026-08-09
 
 **A reconciler runs on a loop — maybe the same loop `sb board` runs on.** If an agent is
 idle and neither blocked nor done, it pings that agent to say it should probably report
@@ -234,13 +252,17 @@ directly into the session — and it cannot address a human. Anything needing a 
 at full length — and then calls `sb block`.** Andrew will not see the `why`; it is just
 for bookkeeping. This must be made clear. — confirmed 2026-08-09
 
-**After Andrew answers a block, the agent just continues.** — confirmed 2026-08-09
+**After Andrew answers a block, the agent just continues.** It clears its own block on
+receiving his reply, so answering by typing into the pane is what works. — confirmed
+2026-08-09
 
 **A parent is not told that its child blocked.** It is not needed: that is more layers
 and more out-of-sync problems, and the board already shows it. — confirmed 2026-08-09
 
 **A lead may only clean up a blocked child if it reads the block as stale** — already
-resolved elsewhere, or the status simply has not updated. — confirmed 2026-08-09
+resolved elsewhere, or the status simply has not updated. Not a hard rule for now: an
+agent clearing its own block covers most of it, and we will see how it plays out. —
+confirmed 2026-08-09
 
 **`sb inspect` is how Andrew reads a blocked agent's full message, and it should show
 more tail — like 100 lines.** — confirmed 2026-08-09
@@ -254,15 +276,21 @@ be brought up again.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
-**Who merges depends, but merging needs explicit approval from Andrew.** — confirmed
+**Who merges depends, but merging needs explicit approval from Andrew.** A prompt rule
+for now: do not merge without asking first. The default shape of shipping work is branch
+named for the workspace, push, open the PR, and put its URL in the summary. — confirmed
 2026-08-09
+
+**`sb workspace new` is deleted, provided the other commands cover it fully and it is
+clear how to use them.** — confirmed 2026-08-09
 
 **`sb log` is not for Andrew either, but it stays — it could be useful.** — confirmed
 2026-08-09
 
 **`sb presets` needs a parameter to list, and one to apply the prompt to the current
-chat or just read it.** Picking a preset should inject a prompt. This must be known to
-all sessions. — confirmed 2026-08-09
+chat or just read it.** Picking a preset should inject a prompt: sb pastes it in, the
+same path as any other message. This must be known to all sessions. — confirmed
+2026-08-09
 
 **`sb models` is fine as it is.** — confirmed 2026-08-09
 
@@ -302,7 +330,6 @@ confirmed 2026-08-09
 *Questions Andrew has named as open — listed here so they are visibly undecided rather
 than quietly assumed.*
 
-**What the mechanism is that makes the top/workspace orchestrator difference true,
-beyond the prompt saying so.** We need to find it. It can be different prompts with
-conditional routing, or a reminder, preset, etc. Not to be found now. — raised
-2026-08-09
+*Nothing open. The one item here — the mechanism distinguishing top from workspace
+orchestrators — was answered on 2026-08-09 and moved to Product decisions: `sb start` is
+the only path that creates a top, and `sb delegate` branches on that stamp.*
