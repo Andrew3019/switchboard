@@ -929,15 +929,27 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                           dry_run=args.dry_run, leave_children=args.leave_children, me=me)
         verb = "would close" if args.dry_run else "closed"
         text = f"{verb}: {', '.join(names) or '(nothing)'}"
-        # Named agents always get their reason, because naming one is asking about it in
-        # particular. A sweep is expected to skip most of the fleet and listing all of
-        # that would bury the line that matters — but a sweep that closed NOTHING is the
-        # silence this fix exists to end, so then it says why too.
+        # Named agents always get every reason, because naming one is asking about it in
+        # particular — and so does a sweep that closed NOTHING, where the refusals are
+        # the entire outcome.
+        #
+        # A sweep that closed SOMETHING used to print no refusals at all, and that was
+        # the same silence in a better disguise: `closed: five names` reads as "all
+        # done", and twice in acceptance run 4 the row it left out was the one the human
+        # needed (`audit/phase1-acceptance-4.md` §5). The whole fleet is not the answer
+        # either — a sweep skips most of it by design, so listing every skip grows with
+        # the fleet and buries the line that matters. So it reports `refused.notable`:
+        # rows already closed and agents merely working are the sweep working as intended
+        # and stay quiet, everything else gets its name and its reason. `--json` is
+        # unchanged and still carries every refusal of either kind.
         if names.refused and (args.name or not names):
             text += "\n" + "\n".join(f"  refused {n}: {why}" for n, why in names.refused)
+        elif names.notable:
+            text += "\n" + _sweep_refusals(names.notable)
         _emit(args, text,
               {"closed": list(names),
-               "refused": [{"name": n, "reason": why} for n, why in names.refused]})
+               "refused": [{"name": n, "reason": why} for n, why in names.refused],
+               "expected": sorted(names.expected)})
         return 0
 
     if cmd == "workspace" and args.wcmd == "list":
@@ -992,6 +1004,30 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     return 2
+
+
+_SWEEP_REFUSALS_SHOWN = 5
+
+
+def _sweep_refusals(notable: list[tuple[str, str]]) -> str:
+    """What a sweep that closed something still has to say about what it did not.
+
+    Named and reasoned, like every other refusal, because "one row was left behind" that
+    does not say WHICH row sends the human back to `sb status` to find it. Bounded,
+    because a sweep is the one shape of this command whose refusal list scales with the
+    fleet: past a handful the lines stop being a report and start being a listing, and
+    the tail is one line saying so rather than a hundred saying it individually.
+
+    The cut is `CleanupResult.notable`, made in the broker where the gates are — so this
+    is only formatting, and the decision about what counts as news lives next to the code
+    that knows why a row was held.
+    """
+    shown = notable[:_SWEEP_REFUSALS_SHOWN]
+    lines = [f"  refused {n}: {why}" for n, why in shown]
+    rest = len(notable) - len(shown)
+    if rest:
+        lines.append(f"  … and {rest} more refused — `sb cleanup --json` lists them all")
+    return "\n".join(lines)
 
 
 def _workspace_closed(r: dict) -> str:

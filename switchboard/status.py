@@ -221,6 +221,8 @@ class AgentStatus:
     # Mail neither announced nor read — see `undelivered_age` and the module note.
     undelivered: int = 0
     undelivered_age: int = 0        # seconds since the OLDEST one was written; 0 = none
+    # Whether any of that mail came from the human — the one thing that lifts a block.
+    undelivered_answer: bool = False
 
     @property
     def blocked(self) -> bool:
@@ -251,6 +253,35 @@ class AgentStatus:
         forever with nothing to say so.
         """
         return self.undelivered > 0
+
+    @property
+    def ringable(self) -> bool:
+        """Mail here that a doorbell could actually announce, right now.
+
+        `waiting_to_be_rung` says mail is stuck; this says a ring would move it. The two
+        differ in exactly one case and it is the expensive one: an agent that is BLOCKED
+        is not idle, it is stopped waiting on a person, and `broker._ring` holds its mail
+        back for as long as that lasts (`ring_held {"reason":"blocked"}`). Nothing about
+        that changes on its own — the only thing that lifts a block is the human's answer,
+        and that answer arrives as an `sb tell`, which flushes the doorbell in its own
+        process before the collector's next tick could. So there is nothing here for a
+        tick to discover, and a trigger that keeps looking pays a spawned process every
+        ten seconds for as long as the person takes to answer: 85 of them for one block
+        held thirteen minutes (`audit/phase1-acceptance-4.md` §4). Idle costs nothing —
+        `PRINCIPLES.md` C10.
+
+        The held mail itself is untouched and still `undelivered`: the board still says
+        `<< UNDELIVERED 2, 13m`, `--needs-me` still lists the agent, `flush_pending` still
+        re-derives it on every `sb` command, and it is delivered the moment the block is
+        answered. What stops is only the rediscovering.
+
+        A blocked agent whose backlog contains the human's own reply is ringable again,
+        because that ring is the one `_ring` lets through — and if the agent happens to be
+        mid-turn when it arrives, this is what keeps the doorbell chasing it afterwards.
+        """
+        if not self.undelivered:
+            return False
+        return self.undelivered_answer or not self.blocked
 
     @property
     def needs_human(self) -> bool:
@@ -303,13 +334,14 @@ class AgentStatus:
             "name", "role", "parent", "depth", "state", "herdr_state", "alive",
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
-            "undelivered", "undelivered_age",
+            "undelivered", "undelivered_age", "undelivered_answer",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
         d.update(blocked=self.blocked, at_prompt=self.at_prompt,
                  finished=self.finished, needs_human=self.needs_human,
                  waiting_to_be_rung=self.waiting_to_be_rung,
+                 ringable=self.ringable,
                  archived=self.archived)
         return d
 
@@ -483,10 +515,11 @@ def collect(
             task=row["task"],
             blocked_why=why.get(name) if row["state"] == "blocked" else None,
             summary=summaries.get(name),
-            undelivered=pending.get(name, (0, 0))[0],
+            undelivered=pending.get(name, (0, 0, False))[0],
             # Age of the OLDEST, not the newest: the question is how long this has been
             # sitting, and a fresh message arriving behind a stuck one must not reset it.
             undelivered_age=(max(0, now - pending[name][1]) if name in pending else 0),
+            undelivered_answer=pending.get(name, (0, 0, False))[2],
         ))
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
@@ -602,8 +635,9 @@ def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
     )}
 
 
-def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int]]:
-    """Per agent: how much mail it cannot know about, and when the oldest of it arrived.
+def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int, bool]]:
+    """Per agent: how much mail it cannot know about, when the oldest arrived, and
+    whether any of it is the human's.
 
     Aggregated for the same reason as `_unread_counts` — one pass, and strictly read-only.
     `store.unseen()` is the per-message reader and takes exactly this view; this is the
@@ -619,11 +653,19 @@ def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int]]:
     addressed to them any more, but a store written before the human mailbox was removed
     still holds such rows, and reporting them as undelivered would put a permanent warning
     on a board about mail that was never going to be announced to anybody.
+
+    The third field is there for one caller and one decision: `broker._ring` holds a
+    blocked agent's mail back unless the human's answer is among it, so "is any of this
+    from the human" is exactly what separates mail a doorbell can announce now from mail
+    that cannot move until a person acts. `AgentStatus.ringable` is where that is read,
+    and the collector's doorbell is why it has to be in the snapshot rather than a second
+    query — see `collector.ring_doorbell`.
     """
-    return {r["to_agent"]: (r["n"], r["oldest"]) for r in db.execute(
-        "SELECT to_agent, COUNT(*) n, MIN(created_at) oldest FROM messages "
+    return {r["to_agent"]: (r["n"], r["oldest"], bool(r["answer"])) for r in db.execute(
+        "SELECT to_agent, COUNT(*) n, MIN(created_at) oldest, "
+        "       MAX(from_agent = ?) answer FROM messages "
         "WHERE delivered_at IS NULL AND read_at IS NULL AND to_agent <> ? "
-        "GROUP BY to_agent", (HUMAN,)
+        "GROUP BY to_agent", (HUMAN, HUMAN)
     )}
 
 

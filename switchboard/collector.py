@@ -84,6 +84,11 @@ INTERVAL = config.setting("display.board_refresh")
 # stays pending tick after tick, so without a floor this would spawn a process every
 # `INTERVAL` for as long as that agent works — and the latency being bought is "somebody
 # is woken within seconds instead of never", which ten does as well as two.
+#
+# It is a floor and not a bound: it divides the cost of a stuck target, it does not end
+# it. A target that stays stuck for hours — a blocked agent waiting on a person — costs a
+# process every ten seconds for all of them, which is why that case is kept out of the
+# trigger's work list entirely rather than merely rate-limited (`ring_doorbell`).
 DOORBELL_GAP = 10.0
 # How long the spawned `sb` is given before it is given up on. It is one flush and a
 # handful of herdr calls; anything past this is a herdr that is not answering, and waiting
@@ -171,11 +176,23 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     `undelivered` and not `unread`: an agent that read its own inbox needs no doorbell,
     and the snapshot's `undelivered` is derived from the same pair `flush_pending` chases
     (`status._undelivered_counts`), so this cannot ask for a ring that will not happen.
+
+    `ringable` and not `undelivered`, for the one case where that is not enough. Mail for
+    a BLOCKED agent is undelivered and must stay that way — the agent is waiting on a
+    person, not idle — so `flush_pending` looks at it, holds it, and changes nothing,
+    every ten seconds, for as long as the human takes. Measured: 85 spawned processes for
+    one block held thirteen minutes, bounded by nothing but the person
+    (`audit/phase1-acceptance-4.md` §4). Nothing about the mail changes here — it stays
+    held, still counted, still on the board — and nothing needs this trigger to deliver
+    it, because the only thing that lifts a block is an `sb tell` from the human, which
+    flushes in its own process. `AgentStatus.ringable` is the predicate and it lives in
+    `status.py` beside the count it refines, so this and `flush_pending` cannot come to
+    disagree about which mail a ring would move.
     """
     now = panel.now()
     if state.last_doorbell is not None and now - state.last_doorbell < DOORBELL_GAP:
         return False
-    if not any(a.undelivered for a in snap.agents):
+    if not any(a.ringable for a in snap.agents):
         return False
     sb = doorbell_sb()
     if sb is None:
