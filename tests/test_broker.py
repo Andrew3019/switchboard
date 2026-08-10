@@ -99,6 +99,12 @@ class FakeHerdrAPI:
         return [_A(name=n, pane_id="w1:p0", state=st, bound=n not in self.evicted)
                 for n, st in self.states_by_name.items()]
 
+    def get_agent(self, name):
+        """One name out of `list_agents`, which is exactly what the real one is
+        (`Herdr.get_agent` — the same reading, narrowed). Not a capability of its own:
+        `states_by_name` is still the only place a state comes from here."""
+        return next((a for a in self.list_agents() if a.name == name), None)
+
     def create_worktree(self, branch, *, base="main", cwd=None, label=None):
         """A herdr that CAN fork.
 
@@ -311,6 +317,59 @@ class BrokerTest(unittest.TestCase):
         self.assertTrue(a["session_id"])
         kinds = [e["kind"] for e in store.recent_events(self.db, limit=50)]
         self.assertIn("task_undelivered", kinds)
+
+    def test_an_unconfirmed_delivery_to_a_working_agent_is_not_a_failed_spawn(self):
+        """The false failure: `sb delegate` exited 1 for an agent that was doing the work.
+
+        The confirmation is the child's own transcript and the child flushes it when it
+        feels like it — 35 s late, measured, under a six-way fan-out. Twice in a 42-agent
+        acceptance run the spawn called that a lost task, recorded the agent `failed`, and
+        told the caller to respawn the work and `sb cleanup --force` the pane. Both agents
+        were running. An agent herdr has in a turn is not the dead pane that error
+        describes, so it is returned with the caveat instead of raised over.
+        """
+        self.h.undeliverable.add("ghost")
+        self.h.states_by_name["ghost"] = "working"
+        name = self.b.delegate("do the thing", role="worker", name="ghost", me="orch")
+        self.assertEqual(name, "ghost")
+        a = store.get_agent(self.db, "ghost")
+        self.assertEqual(a["state"], "working")        # never stamped over
+        self.assertIsNone(a["ended_at"])
+        note = self.b.delivery_note
+        self.assertIn("not confirmed", note)           # and the caller is told so
+        self.assertNotIn("--force", note)              # but not told to kill it
+        kinds = [e["kind"] for e in store.recent_events(self.db, limit=50)]
+        self.assertIn("task_unconfirmed", kinds)
+        self.assertNotIn("task_undelivered", kinds)
+
+    def test_an_agent_that_reported_done_is_never_recorded_failed(self):
+        """The sharpest case in the acceptance run, to the second.
+
+        `a4f5` wrote `done` with its summary at 05:02:32 and the spawn overwrote the row
+        with `failed` at 05:02:33 — after which `sb status` printed the contradiction on
+        two lines of one row and `sb cleanup` refused the row because "nobody reported
+        this end". A row that says `done` was written BY the agent, through `sb`; it
+        cannot have reported an end it never ran to.
+        """
+        class ReportsWhileWeWait(FakeHerdrAPI):
+            """The child, not herdr: it finishes and reports mid-delivery, which is
+            exactly the one-second race that was measured."""
+
+            def __init__(self, db):
+                super().__init__()
+                self.db = db
+
+            def deliver(self, name, text, *, proof=None, **kw):
+                store.set_state(self.db, name, "done")
+                super().deliver(name, text, proof=proof, **kw)
+
+        self.h = ReportsWhileWeWait(self.db)
+        self.h.undeliverable.add("ghost")
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        name = self.b.delegate("do the thing", role="worker", name="ghost", me="orch")
+        self.assertEqual(name, "ghost")
+        self.assertEqual(store.get_agent(self.db, "ghost")["state"], "done")
+        self.assertIn("reported done", self.b.delivery_note)
 
     def test_delivery_is_confirmed_against_the_childs_own_transcript(self):
         """The wiring only the broker can get right: WHOSE record proves the delivery.

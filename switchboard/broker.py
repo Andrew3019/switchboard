@@ -197,7 +197,7 @@ class ForkFailed(HerdrError):
 
 
 class TaskUndelivered(HerdrError):
-    """An agent started, and its first task could not be got into it.
+    """An agent started, its first task could not be got into it, AND it is not running.
 
     A HerdrError so `sb` reports it as a failed herdr call rather than a traceback, on the
     same path every other spawn failure takes. It is raised in place of returning the
@@ -205,18 +205,31 @@ class TaskUndelivered(HerdrError):
     failure this whole spawn path exists to prevent: the caller believes it delegated, and
     the work is never done by anyone.
 
-    The agent it names is recorded `failed` but still has its pane — it is up, it just has
-    nothing to do. `sb inspect <name>` shows what is in it and `sb cleanup <name> --force`
-    closes it.
+    BOTH HALVES ARE REQUIRED, and the second one was not always checked. "The delivery
+    could not be confirmed" alone is not this: the confirmation is a file the agent flushes
+    on its own schedule, and under a six-way fan-out it has been seen tens of seconds late,
+    so a spawn twice told its caller a working agent had never taken its task — once for an
+    agent that had already reported `done`. Following the advice this used to print
+    (respawn, then `sb cleanup --force`) duplicates the work and closes a live pane
+    mid-turn. `Broker._spawn` therefore raises this only for an agent that is neither
+    running a turn nor has reported anything, and says so in the words below.
+
+    Even then the caller is asked to look before it acts: the one thing that is certain
+    here is that we could not confirm the task, and a remedy that closes a pane deserves a
+    second pair of eyes.
     """
 
     def __init__(self, name: str, cause: HerdrError):
         self.name, self.cause = name, cause
         super().__init__(
             "task_undelivered",
-            f"{name} started but never took its task, so nothing was delegated — "
-            f"{cause.message}. Nothing is running that work; respawn it. The pane is "
-            f"still open: `sb inspect {name}`, then `sb cleanup {name} --force`",
+            f"{name} started, and its task could not be got into it — {cause.message}. "
+            f"herdr reports it is not running a turn and it has reported nothing, so as "
+            f"far as anything here can tell nobody is doing that work. Look before you "
+            f"act on that: `sb inspect {name}` shows what is in its pane and `sb status` "
+            f"whether it has moved since. If it is idle with the task nowhere in it, "
+            f"delegate the work again — and close this one with "
+            f"`sb cleanup {name} --force` only once you have seen that it is idle",
             [name],
         )
 
@@ -431,6 +444,14 @@ class Broker:
         # Only if this repo wrote one. Absent — the normal case — leaves the module-level
         # PROTOCOL_LINE in charge, which is also what makes it patchable in a test.
         self._protocol_override = config.protocol_override(self.repo)
+        # What the last spawn's delivery could not promise, if anything. A spawn either
+        # confirms the task (returns the name), or cannot confirm it for an agent that is
+        # plainly doing something (returns the name AND leaves this), or fails loudly
+        # (raises). The middle case exists because the confirmation is a file the child
+        # flushes on its own schedule; it is a caveat and it has to reach the caller, and a
+        # `delegate` that returned a name plus a warning object would change three call
+        # sites and every test that spawns. Read by `cli` immediately after the call.
+        self.delivery_note: Optional[str] = None
 
     def _protocol(self) -> str:
         return config.flatten(self._protocol_override) if self._protocol_override \
@@ -2792,6 +2813,7 @@ class Broker:
         me = me or self.whoami()
         r = roles_mod.get(self.roles, role)
         name = name or self._unique_name(role)
+        self.delivery_note = None       # this spawn's caveat, not the last one's
 
         # A child inherits its parent's workspace unless told otherwise, so a whole
         # delegation subtree stays inside one worktree without anyone passing it down.
@@ -2960,7 +2982,34 @@ class Broker:
                 proof=lambda since: output.task_arrived(str(where), task, since=since),
             )
         except HerdrError as e:
-            # A started agent with no task is not a success, so it is not recorded as one.
+            # UNCONFIRMED IS NOT FAILED. The proof is the child's own transcript and the
+            # child flushes it when it feels like it — 35 s late, measured, under the load
+            # a six-way fan-out makes. So this exception says one thing only: no send could
+            # be confirmed. It does not say the agent has nothing, and treating the two as
+            # the same is how a spawn came to stamp `failed` over a row one second after
+            # the agent wrote `done` into it, and to tell its caller to respawn the work
+            # and force-close the pane.
+            #
+            # So ask the two questions that CAN separate them, both cheap and both about
+            # what the agent has actually done: has it reported anything, and is it running
+            # a turn. Either one is an agent that took something — a spawn's pane has
+            # nothing else to be doing — and neither is proof the TEXT arrived, which is
+            # why this is a caveat on a returned name and not a success.
+            alive = self._took_a_turn(name)
+            if alive:
+                store.log_event(self.db, kind="task_unconfirmed", agent=name, parent=me,
+                                role=role, pane_id=agent.pane_id or pane, alive=alive,
+                                error=str(e))
+                self.delivery_note = (
+                    f"{name}'s delivery was not confirmed — {e.message}. But {alive}, so "
+                    f"it most likely took the task and nothing has been closed or "
+                    f"respawned. Check with `sb inspect {name}` before you act as though "
+                    f"it did or did not: a second agent on the same work costs as much as "
+                    f"none"
+                )
+                return name
+            # Nothing to show for it: not running, nothing reported. A started agent with
+            # no task is not a success, so it is not recorded as one.
             # `failed` and NOT a husk — the pane and the session stay on the row, because
             # something is genuinely sitting in that pane and whoever reads this needs to
             # be able to look at it, close it, or restore it. The husk carve-out above
@@ -2970,6 +3019,38 @@ class Broker:
                             role=role, pane_id=agent.pane_id or pane, error=str(e))
             raise TaskUndelivered(name, e) from None
         return name
+
+    def _took_a_turn(self, name: str) -> Optional[str]:
+        """Has this freshly spawned agent done anything at all? -> why we think so.
+
+        The question that separates a lost task from an unflushed transcript, and it is
+        asked of the agent's own actions rather than of any clock. A spawn's pane has one
+        thing in it and nothing to do but the task it was sent, so:
+
+        - a row that says `done` or `blocked` was written BY THE AGENT, through `sb` — it
+          cannot have reported an end it never ran to. This is the case that mattered
+          most: the row that was overwritten with `failed` had a `done` on it, one second
+          old, with a summary of the work.
+        - herdr reporting `working` is a turn in flight. It does not prove the text
+          arrived (a startup dialog can move an agent without it), which is exactly why
+          the caller keeps this as a caveat rather than a confirmation.
+
+        `failed` is deliberately NOT in the first list: `status._record_gone` writes it
+        for an agent that vanished, so it is a verdict about the agent, not a report from
+        it. None means neither holds — nobody is doing that work as far as we can tell.
+        """
+        a = store.get_agent(self.db, name)
+        if a is not None and a["state"] in ("done", "blocked"):
+            return f"it has since reported {a['state']} itself"
+        # Asked of herdr directly and not through `_agent_states`, whose one-probe-per-
+        # process cache may have been filled before this agent existed.
+        try:
+            live = self.h.get_agent(name)
+        except HerdrError:
+            live = None                  # a herdr that cannot answer proves nothing
+        if live is not None and live.state == WORKING:
+            return "herdr reports it is running a turn"
+        return None
 
     def _spawn_husk(self, name: str) -> bool:
         """Is the row under this name the leftovers of a spawn that failed?

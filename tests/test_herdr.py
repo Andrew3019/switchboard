@@ -320,6 +320,10 @@ class DeliverProofTest(unittest.TestCase):
     See `output.task_arrived`. When one is supplied it is the ONLY thing believed: the
     status read it replaces is a reading of the terminal, and the terminal lies during
     startup.
+
+    `working_ms=1` alongside `timeout_ms=1` throughout, for the same reason: these are
+    about how many times the text is sent, not about how long anything waits, and the
+    stretch these numbers switch off has its own test below.
     """
 
     def herdr(self, arrives_on, *, status="working"):
@@ -350,18 +354,18 @@ class DeliverProofTest(unittest.TestCase):
     def test_a_task_the_transcript_never_shows_is_not_a_delivery(self):
         h, calls, proof = self.herdr(0)
         with self.assertRaises(HerdrError) as cm:
-            h.deliver("w1", "task", attempts=3, timeout_ms=1, proof=proof)
+            h.deliver("w1", "task", attempts=3, timeout_ms=1, working_ms=1, proof=proof)
         self.assertEqual(cm.exception.code, "not_delivered")
         self.assertEqual(len(self.sends(calls)), 3)
 
     def test_a_task_the_transcript_shows_is_delivered_once(self):
         h, calls, proof = self.herdr(1)
-        h.deliver("w1", "task", timeout_ms=1, proof=proof)
+        h.deliver("w1", "task", timeout_ms=1, working_ms=1, proof=proof)
         self.assertEqual(len(self.sends(calls)), 1)
 
     def test_a_re_send_is_what_makes_a_swallowed_first_prompt_land(self):
         h, calls, proof = self.herdr(2)
-        h.deliver("w1", "task", timeout_ms=1, proof=proof)
+        h.deliver("w1", "task", timeout_ms=1, working_ms=1, proof=proof)
         self.assertEqual(len(self.sends(calls)), 2)
 
     def test_proof_needs_no_state_change_at_all(self):
@@ -371,8 +375,64 @@ class DeliverProofTest(unittest.TestCase):
         text in it either way.
         """
         h, calls, proof = self.herdr(1, status="idle")
-        h.deliver("w1", "task", timeout_ms=1, proof=proof)
+        h.deliver("w1", "task", timeout_ms=1, working_ms=1, proof=proof)
         self.assertEqual(len(self.sends(calls)), 1)
+
+    def late(self, *, status):
+        """A proof that only shows up after the send's window has already run out.
+
+        The real thing: Claude Code flushes its transcript when it gets round to it, and
+        under a six-way fan-out one was measured 35 s after the task was taken, against a
+        20 s window. Nothing about the agent is wrong in that case — only the file is
+        late.
+
+        "After the window" is counted in status reads rather than in polls or seconds,
+        which is what makes it exact: with a proof in hand herdr is asked exactly twice
+        per send — once for the baseline before it, once when the window expires — so a
+        proof that waits for the second read is a proof that arrives one moment too late,
+        every time this runs.
+        """
+        state = {"sends": 0, "reads": 0}
+        calls: list[list[str]] = []
+
+        def runner(argv, *, timeout=None):
+            calls.append(list(argv))
+            if argv[1:3] == ["agent", "prompt"]:
+                state["sends"] += 1
+                return ok({})
+            state["reads"] += 1
+            return ok({"agents": [dict(AGENT_JSON, state_change_seq=88 + state["sends"],
+                                       agent_status=status)]})
+
+        def proof(since):
+            return state["reads"] >= 2
+
+        return Herdr("herdr", runner=runner, sleep=lambda _: None), calls, proof
+
+    def test_a_running_turn_buys_a_late_proof_time_to_arrive(self):
+        """The false failure this fix is for, in one send.
+
+        The window ran out, the transcript had not been written yet, and the spawn
+        reported that a working agent had never taken its task — twice in a 42-agent
+        acceptance run, once for an agent that had already reported `done`. herdr saying
+        `working` cannot confirm the text arrived, so it does not: it extends the window,
+        and the proof itself still has to turn up.
+        """
+        h, calls, proof = self.late(status="working")
+        h.deliver("w1", "task", attempts=1, timeout_ms=1, working_ms=5000, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 1)     # no re-send, and no exception
+
+    def test_an_agent_that_is_not_running_gets_no_extra_time(self):
+        """The other half, and the one that keeps the guarantee.
+
+        An idle agent with no proof is the case the loud failure exists for: a prompt a
+        dialog ate leaves an idle pane and an empty transcript. It waits exactly as long
+        as it always did, so a genuinely lost task still fails as fast as it used to.
+        """
+        h, calls, proof = self.late(status="idle")
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=1, timeout_ms=1, working_ms=5000, proof=proof)
+        self.assertEqual(cm.exception.code, "not_delivered")
 
 
 class TopologyTest(unittest.TestCase):
