@@ -120,6 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
     # the equivalent, unhidden way in.
     cmd("board", hidden=True)
 
+    # Hidden for the same reason: it is machinery, not vocabulary. Every `sb` command
+    # already flushes the doorbell before it dispatches (see main), so this one is that
+    # and nothing else — the verb the collector's loop runs so that a message held back
+    # while its target was mid-turn is announced without waiting for a person to type
+    # something. An agent has no use for it and is not taught it.
+    cmd("flush", hidden=True)
+
     d = cmd("delegate", help="spawn a child agent to do a task")
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
@@ -578,13 +585,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Every `sb` invocation is also a tick of the doorbell. A message to an agent that was
     # mid-turn is held back rather than injected into its turn (see Broker._ring), and
-    # something has to ring it once it is free — until an events daemon exists, that
-    # something is the next command anyone runs, which in a live session is constantly.
+    # something has to ring it once it is free. That was ONLY the next command anyone
+    # happened to run, which left a parent whose last child reported mid-turn waiting for
+    # traffic that may never come; `sb flush` is the same tick with nothing after it, and
+    # the collector's loop runs it on a timer so the fleet no longer depends on a person.
     # Never fatal: a doorbell that cannot ring must not take down `sb status`.
+    rung: list[str] = []
     try:
-        b.flush_pending()
+        rung = b.flush_pending()
     except Exception as e:                       # noqa: BLE001 — best effort, always
         store.log_event(db, kind="flush_failed", error=str(e))
+
+    if args.cmd == "flush":
+        _emit(args, f"rang {', '.join(rung)}" if rung else "rang nobody", {"rung": rung})
+        return 0
 
     try:
         return _dispatch(args, b, db, h)

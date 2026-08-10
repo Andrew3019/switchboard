@@ -546,6 +546,26 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
+    def test_a_parent_that_was_mid_turn_is_woken_by_the_next_flush(self):
+        """The report that goes missing: a parent in a long turn when its last child
+        finishes. `done` rings it, the ring is held back because it is working, and until
+        the collector ran this on a timer the only thing that re-rang it was the next `sb`
+        command a person happened to type (`2026-08-09-035933`).
+        """
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.h.states_by_name = {"lead": "working", "kid": "working"}
+        self.b.done("shipped it", me="kid")
+        self.assertEqual(self.h.prompts, [])                       # held: mid-turn
+
+        self.h.states_by_name = {"lead": "idle"}                   # the turn ends
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), ["lead"])
+        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
+        self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
+                         ["[done] shipped it"])
+
     def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
         """A ring says "you have mail" — to an agent that has already got it, that is a
         whole turn spent discovering an empty inbox (C0).
