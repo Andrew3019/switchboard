@@ -169,7 +169,10 @@ def task_arrived(cwd: Optional[str], text: str, *, since: float) -> bool:
         # The tail only: text submitted seconds ago is at the END of the file, and this
         # is polled twice a second against a session that may be hours long.
         for rec in _tail_records(f, _ARRIVAL_RECORDS):
-            if rec.get("type") != "user" or _record_time(rec) < floor:
+            if rec.get("type") != "user":
+                continue
+            when = _record_time(rec)
+            if when is not None and when < floor:
                 continue
             content = (rec.get("message") or {}).get("content")
             if not isinstance(content, str):
@@ -179,15 +182,21 @@ def task_arrived(cwd: Optional[str], text: str, *, since: float) -> bool:
     return False
 
 
-def _record_time(rec: dict) -> float:
-    """A transcript record's own timestamp, or 0 — which reads as "too old to trust"."""
+def _record_time(rec: dict) -> Optional[float]:
+    """When a transcript record was written, or None if it does not say.
+
+    None is deliberately NOT "too old": the file it came from has already been shown to
+    have been written since the text went in, and a record shape that stopped carrying a
+    timestamp would otherwise turn every delivery into a failed spawn. Wrong in the
+    direction of a duplicate task rather than a lost agent.
+    """
     ts = rec.get("timestamp")
     if not isinstance(ts, str):
-        return 0.0
+        return None
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     except ValueError:
-        return 0.0
+        return None
 
 
 def read_transcript(path: Path, *, lines: int = DEFAULT_LINES) -> str:

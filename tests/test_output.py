@@ -346,6 +346,16 @@ class TaskArrivedTest(OutputTestBase):
         }))
         self.assertTrue(self.arrived("do the thing", since=now - 1))
 
+    def test_a_record_with_no_timestamp_still_counts_in_a_fresh_file(self):
+        """Erring towards a duplicate task rather than towards a lost agent.
+
+        The file has already been shown to have been written since the send; a record
+        shape that stopped carrying a timestamp must not turn every spawn into a failure.
+        """
+        self.write_transcript("s1", json.dumps({
+            "type": "user", "message": {"role": "user", "content": "do the thing"}}))
+        self.assertTrue(self.arrived("do the thing", since=time.time() - 1))
+
     def test_an_empty_task_proves_nothing(self):
         now = time.time()
         self.write_transcript("s1", self.user_line("do the thing", at=now))
