@@ -116,6 +116,59 @@ class LineTest(unittest.TestCase):
             validate.line("clear\x1b[2Jscreen", "task")
 
 
+class ReasonTest(unittest.TestCase):
+    """`sb block "<why>"`. The one rule here that is ours: the human never reads this
+    field, so a reason big enough to BE the message is an answer sent nowhere — and the
+    agent cannot tell, because the block succeeded."""
+
+    def test_a_one_line_reason_passes(self):
+        self.assertEqual(validate.reason("need a decision on the auth split"),
+                         "need a decision on the auth split")
+
+    def test_the_cap_is_far_below_ordinary_text(self):
+        """Sized off the caps, not literals: a report must not fit, and a real reason
+        must never be near the edge."""
+        self.assertLess(validate.MAX_BLOCK_REASON, validate.MAX_TEXT)
+        self.assertEqual(len(validate.reason("x" * validate.MAX_BLOCK_REASON)),
+                         validate.MAX_BLOCK_REASON)
+        with self.assertRaises(validate.Invalid):
+            validate.reason("x" * (validate.MAX_BLOCK_REASON + 1))
+
+    def test_a_report_flattened_onto_one_line_is_still_refused(self):
+        """The actual misuse, and its second act. A multi-paragraph answer was refused for
+        its newlines, so it was flattened into one run-on line and got through. Both
+        shapes must fail, or the newline check only teaches the workaround."""
+        report = ("Findings: the spawn path drops every system prompt but the last. "
+                  "Questions: 1. do we fix spawn first? I recommend yes. "
+                  "2. do we ship the prompts anyway? I recommend no. ") * 3
+        for shape in (report, report.replace(". ", ".\n\n", 4)):
+            with self.assertRaises(validate.Invalid, msg=shape[:40]):
+                validate.reason(shape)
+
+    def test_both_refusals_name_the_chat_and_forbid_shortening(self):
+        """The error is the only teaching moment that cannot be forgotten, so it carries
+        the fix. It must NOT blame herdr's newline rule: that reads as a formatting
+        complaint, and the answer to a formatting complaint is to flatten and resend."""
+        for bad in ("stuck\nbadly", "x" * (validate.MAX_BLOCK_REASON + 1)):
+            with self.assertRaises(validate.Invalid) as e:
+                validate.reason(bad)
+            msg = str(e.exception)
+            self.assertIn("chat", msg)
+            self.assertIn("sb block", msg)          # the shape of the right call
+            self.assertNotIn("invalid_agent_argument", msg)
+            self.assertNotIn("herdr", msg)
+
+    def test_empty_and_control_characters_are_still_refused(self):
+        for bad in ("", "   ", "\t", "need a\x00decision"):
+            with self.assertRaises(validate.Invalid, msg=repr(bad)):
+                validate.reason(bad)
+
+    def test_none_is_reported_as_missing(self):
+        with self.assertRaises(validate.Invalid) as e:
+            validate.reason(None)
+        self.assertIn("required", str(e.exception))
+
+
 class TextTest(unittest.TestCase):
     """Message bodies never become a herdr argument, so they may wrap."""
 
@@ -215,6 +268,18 @@ class CliBoundaryTest(unittest.TestCase):
         # Both reach herdr as `report-agent --message`.
         self.bad(["done", "fixed it\nand tested it"])
         self.bad(["block", "stuck\nbadly"])
+
+    def test_block_at_the_boundary_refuses_a_reason_shaped_like_a_report(self):
+        """A summary of any length is legal; a block reason of any length is not. The verb
+        is where the misuse is visible, so this must fail before anything is written."""
+        long = "the whole answer, " * 40
+        self.bad(["block", long])
+        args = parse(["done", long])
+        _validate(args)                              # `done` is a report and may be long
+        self.assertEqual(args.summary, long.strip())
+        args = parse(["block", "  need a decision on the auth split  "])
+        _validate(args)
+        self.assertEqual(args.why, "need a decision on the auth split")
 
     def test_a_message_body_may_wrap_but_a_task_may_not(self):
         args = parse(["tell", "worker-1", "line one\nline two"])
