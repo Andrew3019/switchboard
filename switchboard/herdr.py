@@ -497,6 +497,7 @@ class Herdr:
         *,
         attempts: int = DELIVER_ATTEMPTS,
         timeout_ms: int = DELIVER_TIMEOUT_MS,
+        proof: Optional[Callable[[float], bool]] = None,
     ) -> None:
         """`prompt`, confirmed — the agent really took the text, or this raises.
 
@@ -505,35 +506,59 @@ class Herdr:
         submitted, or it never arrives at all. Both leave the caller holding a success it
         did not get, which is how a spawn reports a name for an agent that never ran.
 
-        Confirmation is a read-after-write, the same shape `report_state` needs for the
-        same reason: snapshot herdr's `state_change_seq` before prompting, then poll until
-        the agent has actually moved. A submitted prompt starts a turn, and a turn is a
-        state change; a paste that was never submitted is not. `state_change_seq` rather
-        than `state == working` alone, because a short task can be finished and back to
-        idle before the first poll lands.
+        WHAT CONFIRMATION MAY BE. This used to be "herdr's `state_change_seq` for this
+        agent moved after we prompted", and that is not a fact about the text: it is a
+        fact about herdr's status record, which anything at all can move. Measured, in a
+        fresh checkout: `agent start` returns with the pane already `interactive_ready`
+        while Claude Code is still showing its *workspace trust* dialog. The prompt then
+        types into a modal — the text is thrown away and the Enter answers the dialog —
+        and dismissing it flips the agent to `blocked` or `done`, i.e. the seq moves, in
+        under a second. Three of four spawns in one cold fan-out confirmed exactly that
+        way and never ran, with `sb delegate` reporting success for all four. So the old
+        test could not tell a delivered task from a swallowed one, and the failure it was
+        written to end is the failure it passed on.
+
+        `proof` is what replaces it: a callable given the moment the text was sent, which
+        answers whether the AGENT'S OWN record now holds it (see
+        `output.task_arrived` — Claude Code appends the submitted text to its session
+        transcript about a second after it is entered, and writes nothing at all for a
+        prompt eaten by a dialog). Nothing herdr says can fake that.
+
+        With no proof available the fallback demands `state == working`: a turn, not a
+        movement. It is weaker — herdr infers `working` from the terminal — but every
+        false positive observed was a transition to `blocked`, `done` or `idle`, and none
+        of those is a turn starting.
+
+        The baseline is re-read before EVERY attempt. It used to be snapshotted once,
+        before the first, so by a third attempt any unrelated change in the intervening
+        minute counted as confirmation of a prompt sent seconds ago.
 
         A prompt that was not taken is RE-SENT, which is the documented recovery for the
         paste-without-submit mode: the second prompt types and presses enter, carrying the
-        stuck text in with it. The cost when the first prompt did land but herdr never
-        reported the move is the task arriving twice — a duplicate is recoverable and a
-        silence is not.
+        stuck text in with it. The cost when the first prompt did land but we could not
+        see it is the task arriving twice — a duplicate is recoverable and a silence is
+        not. On a cold checkout the first send is lost far more often than not, so a spawn
+        routinely pays a full `timeout_ms` before the send that works. That is the price
+        of the guarantee, and it is the right way round.
         """
-        before = self._peek(name)
         last = "herdr never reported the agent taking it"
         for attempt in range(attempts):
+            before = self._peek(name)
+            sent = time.time()
             try:
                 self.prompt(name, text)
             except HerdrError as e:
                 last = str(e)
             else:
-                if self._took_prompt(name, before, timeout_ms):
+                if self._took_prompt(name, before, timeout_ms, sent=sent, proof=proof):
                     return
             if attempt + 1 < attempts:
                 self._sleep(SPAWN_BACKOFF)
         raise HerdrError(
             "not_delivered",
-            f"{name}: the text was sent {attempts} times and the agent never started a "
-            f"turn — {last}. Its pane may hold the text unsubmitted, or nothing at all",
+            f"{name}: the text was sent {attempts} times and the agent never took it — "
+            f"{last}. Its pane may hold the text unsubmitted, be sitting on a dialog that "
+            f"ate it, or hold nothing at all",
             [name],
         )
 
@@ -548,16 +573,34 @@ class Herdr:
         except HerdrError:
             return None
 
-    def _took_prompt(self, name: str, before: Optional[Agent], timeout_ms: int) -> bool:
-        """Did the agent move after being prompted? Polled until `timeout_ms` runs out."""
+    def _took_prompt(
+        self,
+        name: str,
+        before: Optional[Agent],
+        timeout_ms: int,
+        *,
+        sent: float,
+        proof: Optional[Callable[[float], bool]] = None,
+    ) -> bool:
+        """Did the agent TAKE the prompt? Polled until `timeout_ms` runs out.
+
+        Took it, not merely moved: see `deliver` for what moving turned out to prove.
+        `proof` is asked first and is the only thing believed when it is available; the
+        status read behind it is a fallback for an agent whose own record cannot be
+        found, and it insists on `working` rather than on any change at all.
+        """
         deadline = time.time() + timeout_ms / 1000
         seq = before.change_seq if before else 0
         was_working = before is not None and before.state == WORKING
         while True:
-            a = self._peek(name)
-            if a is not None:
-                if a.change_seq > seq or (a.state == WORKING and not was_working):
+            if proof is not None:
+                if proof(sent):
                     return True
+            else:
+                a = self._peek(name)
+                if a is not None and a.state == WORKING:
+                    if a.change_seq > seq or not was_working:
+                        return True
             if not self._nap(DELIVER_POLL, deadline):
                 return False
 

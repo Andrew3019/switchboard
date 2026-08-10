@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from . import config
+from . import output
 from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
@@ -2946,9 +2947,18 @@ class Broker:
         # unverified call that can paste without submitting or never arrive, after which
         # `delegate` returned the name as if all of it had worked. That is how a fan-out
         # reports six agents and starts two, and it cost this project roughly eight agents
-        # in one session. `deliver` re-sends until herdr says the agent took it.
+        # in one session. `deliver` re-sends until the task is confirmed to have landed.
+        #
+        # And the proof it is confirmed BY is the child's own transcript, not anything
+        # herdr says about it: a Claude Code still showing its workspace trust dialog eats
+        # the prompt and changes state anyway, which passed the previous confirmation for
+        # three of four agents in one cold fan-out. `where`, not the row's cwd — the row
+        # has only just been written and this is the same value that went into it.
         try:
-            self.h.deliver(name, task)
+            self.h.deliver(
+                name, task,
+                proof=lambda since: output.task_arrived(str(where), task, since=since),
+            )
         except HerdrError as e:
             # A started agent with no task is not a success, so it is not recorded as one.
             # `failed` and NOT a husk — the pane and the session stay on the row, because
