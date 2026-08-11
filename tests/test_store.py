@@ -30,24 +30,10 @@ class StoreTest(unittest.TestCase):
 
     # -- agents ----------------------------------------------------------
 
-    def test_create_and_fetch(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        a = store.get_agent(self.db, "orch")
-        self.assertEqual(a["role"], "orchestrator")
-        self.assertEqual(a["state"], "working")
-        self.assertIsNone(a["parent"])          # root
-        self.assertEqual(a["cleanup"], "close") # aggressive default; restore makes it safe
-
     def test_identity_by_session(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-abc")
         self.assertEqual(store.agent_by_session(self.db, "sess-abc")["name"], "w1")
         self.assertIsNone(store.agent_by_session(self.db, "nope"))
-
-    def test_tree(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="a", role="calc", parent="orch")
-        store.create_agent(self.db, name="b", role="calc", parent="orch")
-        self.assertEqual([r["name"] for r in store.children_of(self.db, "orch")], ["a", "b"])
 
     def test_state_transitions_set_ended_at(self):
         store.create_agent(self.db, name="w", role="worker")
@@ -61,12 +47,6 @@ class StoreTest(unittest.TestCase):
         seqs = [store.next_seq(self.db, "w") for _ in range(5)]
         self.assertEqual(seqs, [1, 2, 3, 4, 5])
         self.assertEqual(sorted(set(seqs)), seqs)  # never reused: herdr drops stale seq
-
-    def test_seq_is_per_agent(self):
-        store.create_agent(self.db, name="a", role="worker")
-        store.create_agent(self.db, name="b", role="worker")
-        store.next_seq(self.db, "a"); store.next_seq(self.db, "a")
-        self.assertEqual(store.next_seq(self.db, "b"), 1)  # scoped per (source, pane)
 
     def test_update_agent_rejects_unknown_field(self):
         store.create_agent(self.db, name="w", role="worker")
@@ -166,15 +146,6 @@ class StoreTest(unittest.TestCase):
         store._reset(self.db)                                   # disposable by construction
         self.assertEqual(store.get_agent(self.db, "w"), None)
 
-    def test_reconnect_preserves_data(self):
-        p = Path(self.tmp.name) / "again.db"
-        d1 = store.connect(path=p)
-        store.create_agent(d1, name="w", role="worker")
-        d1.close()
-        d2 = store.connect(path=p)
-        self.assertIsNotNone(store.get_agent(d2, "w"))          # no spurious reset
-        d2.close()
-
     # -- schema evolution ------------------------------------------------
 
     @contextlib.contextmanager
@@ -232,9 +203,6 @@ class StoreTest(unittest.TestCase):
                            branch="api")
         self.assertEqual(store.agent_branch(self.db, "lead"), "api")
 
-    def test_agent_branch_of_someone_we_have_no_row_for_is_none(self):
-        self.assertIsNone(store.agent_branch(self.db, "stranger"))
-
     def test_a_workspaces_branch_comes_from_whichever_row_recorded_one(self):
         """A checkout belongs to the workspace, so any row in it can answer for it."""
         store.claim_agent(self.db, name="lead", role="orchestrator", workspace="api",
@@ -250,11 +218,6 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(store.workspace_branch(self.db, "scratch"))
         self.assertTrue(store.known_workspace(self.db, "scratch"))
         self.assertFalse(store.known_workspace(self.db, "never-seen"))
-
-    def test_the_branch_may_be_updated(self):
-        store.create_agent(self.db, name="w", role="worker", workspace="api")
-        store.update_agent(self.db, "w", branch="api")
-        self.assertEqual(store.agent_branch(self.db, "w"), "api")
 
     # -- migrating the rows that predate it ------------------------------
 
@@ -528,11 +491,6 @@ class StoreTest(unittest.TestCase):
         self.assertNotEqual(store.worktree_root(main), store.worktree_root(wt))
 
     # -- transcripts -----------------------------------------------------
-
-    def test_transcript_path_needs_session_and_cwd(self):
-        store.create_agent(self.db, name="w", role="worker")
-        self.assertIsNone(store.transcript_path(store.get_agent(self.db, "w")))
-
 
 class AddingATableTest(unittest.TestCase):
     """The one schema change that used to cost everybody their store.

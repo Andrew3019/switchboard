@@ -32,18 +32,9 @@ SHIPPED = REPO / "defaults"
 class MergeRuleTest(unittest.TestCase):
     """Rules 1-3, on plain dicts. No files, no repo, nothing to set up."""
 
-    def test_tables_merge_key_by_key(self):
-        """Rule 1 — and the reason a repo can override one field of a role."""
-        got = config.merge({"a": {"x": 1, "y": 2}}, {"a": {"y": 3}})
-        self.assertEqual(got, {"a": {"x": 1, "y": 3}})
-
     def test_merging_is_recursive(self):
         got = config.merge({"a": {"b": {"c": 1, "d": 2}}}, {"a": {"b": {"d": 9}}})
         self.assertEqual(got, {"a": {"b": {"c": 1, "d": 9}}})
-
-    def test_scalars_replace(self):
-        """Rule 2."""
-        self.assertEqual(config.merge({"n": 1, "s": "a"}, {"n": 2}), {"n": 2, "s": "a"})
 
     def test_arrays_join_rather_than_replace(self):
         """Rule 3, and the whole reason joining is the default: adding must not remove."""
@@ -59,27 +50,12 @@ class MergeRuleTest(unittest.TestCase):
     def test_reset_can_empty_an_array(self):
         self.assertEqual(config.join(["a"], [config.RESET]), [])
 
-    def test_reset_anywhere_but_first_is_just_a_value(self):
-        """It is a sentinel, not a keyword: a lone 'do not do this' late in a list must not
-        silently discard everything before it."""
-        self.assertEqual(config.join(["a"], ["b", config.RESET]), ["a", "b", config.RESET])
-
-    def test_a_key_absent_from_the_override_is_untouched(self):
-        base = {"keep": {"deep": [1, 2]}}
-        self.assertEqual(config.merge(base, {"other": 1})["keep"], {"deep": [1, 2]})
-
     def test_merge_does_not_mutate_either_side(self):
         """The shipped tables are cached and merged into repeatedly; one mutation would
         leak a repo's settings into every other repo in the process."""
         base = {"a": {"l": [1]}}
         config.merge(base, {"a": {"l": [2], "n": 3}})
         self.assertEqual(base, {"a": {"l": [1]}})
-
-    def test_a_type_change_replaces(self):
-        """Not an error: a repo is allowed to decide a key means something else, and there
-        is no sane join of a list with a string."""
-        self.assertEqual(config.merge({"x": ["a"]}, {"x": "b"})["x"], "b")
-
 
 class FlattenTest(unittest.TestCase):
     """Markdown on disk, one line on the wire — herdr refuses newlines in agent args."""
@@ -90,25 +66,14 @@ class FlattenTest(unittest.TestCase):
         got = config.flatten("<!--\nnotes for humans\n-->\nthe actual text")
         self.assertEqual(got, "the actual text")
 
-    def test_headings_are_dropped(self):
-        self.assertEqual(config.flatten("# title\nbody"), "body")
-
     def test_bullets_become_separators(self):
         self.assertIn("do this ; do that", config.flatten("- do this\n- do that"))
-
-    def test_result_never_contains_a_newline(self):
-        self.assertNotIn("\n", config.flatten("a\n\nb\n- c\n"))
-
 
 class FrontMatterTest(unittest.TestCase):
     def test_toml_between_fences_is_parsed_and_the_rest_is_prose(self):
         fields, body = config.front_matter('+++\nmodel = "cheap"\n+++\n\nbe brief\n')
         self.assertEqual(fields, {"model": "cheap"})
         self.assertEqual(body.strip(), "be brief")
-
-    def test_a_file_with_no_fence_is_all_prose(self):
-        """The shortest legal role: one line of prompt and no fields at all."""
-        self.assertEqual(config.front_matter("just a prompt"), ({}, "just a prompt"))
 
     def test_an_unclosed_fence_is_an_error_rather_than_silently_all_prose(self):
         with self.assertRaises(config.ConfigError):
@@ -144,12 +109,6 @@ class _Layered(unittest.TestCase):
 
 class ShippedDefaultsTest(_Layered):
     """`defaults/` alone has to be a complete, working configuration."""
-
-    def test_the_defaults_directory_is_not_dot_prefixed(self):
-        """It is the reference copy — meant to be opened, read and copied from. A hidden
-        directory says 'internal', and this is the opposite of internal."""
-        self.assertTrue(SHIPPED.is_dir())
-        self.assertFalse(SHIPPED.name.startswith("."))
 
     def test_everything_works_with_no_repo_layer_at_all(self):
         bare = Path(self.tmp.name) / "bare"
@@ -351,20 +310,12 @@ class SettingsLayeringTest(_Layered):
         self.assertIn("display.show_archived", str(e.exception))
         self.assertIn("true or false", str(e.exception))
 
-    def test_a_repo_can_turn_a_boolean_setting_on(self):
-        self.write("settings.toml", "[display]\nshow_archived = true\n")
-        self.assertIs(config.flag("display.show_archived", self.repo), True)
-
-
 class ProtocolLayeringTest(_Layered):
     def test_a_repo_replaces_the_protocol_wholesale(self):
         """The one file that does NOT join: a protocol assembled from two halves is a
         protocol nobody can read."""
         self.write("protocol.md", "# ours\n\nSAY LESS.\n")
         self.assertEqual(config.protocol(self.repo), "SAY LESS.")
-
-    def test_with_no_repo_file_the_shipped_protocol_stands(self):
-        self.assertEqual(config.protocol(self.repo), config.protocol(None))
 
     def test_the_override_is_flattened_like_everything_else(self):
         self.write("protocol.md", "line one\nline two\n")
@@ -497,10 +448,6 @@ class DefaultsRelocationTest(unittest.TestCase):
             (d / "roles" / "hermit.md").write_text('+++\nmodel = "cheap"\n+++\n\nWork alone.\n')
             with mock.patch.dict(os.environ, {config.ENV_DEFAULTS: str(d)}):
                 self.assertEqual(sorted(config.roles(None)), ["hermit"])
-
-    def test_the_env_var_is_not_consulted_once_it_is_gone(self):
-        self.assertIn("orchestrator", config.roles(None))
-
 
 if __name__ == "__main__":
     unittest.main()

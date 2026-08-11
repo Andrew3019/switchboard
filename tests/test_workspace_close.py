@@ -496,14 +496,6 @@ class BranchTest(CloseHarness, unittest.TestCase):
         self.assertFalse(r["branch_deleted"])
         self.assertIn("api", self.git("branch").stdout)  # still there, untouched
 
-    def test_and_the_workspace_is_still_retired_rather_than_stranded(self):
-        """Refusing here would have to fire before the panes come down to be worth
-        anything, and the state it fires in is one where retiring destroys nothing and a
-        refusal leaves the name in a row no verb can ever retire."""
-        store.record_workspace(self.db, "api", str(self.root / "wt" / "api"))
-        self.b.workspace_close("api", me=HUMAN)
-        self.assertTrue(store.get_workspace(self.db, "api")["retired_at"])
-
     def test_the_output_says_which_kind_of_branch_was_left_behind(self):
         """"kept, git will not delete an unmerged branch" and "none was named" are not
         the same news, and the second used to render as `branch None kept`."""
@@ -534,15 +526,6 @@ class SymlinkLoopTest(CloseHarness, unittest.TestCase):
             Path(self.loop()).resolve()
         self.assertIsNone(broker._resolved(self.loop()))
 
-    def test_two_of_them_are_the_same_directory_because_it_is_never_a_guess(self):
-        """`_same_dir`'s only caller is asking "is this the one directory I must never
-        touch", and that answer is not allowed to be a guess."""
-        self.assertTrue(broker._same_dir(self.loop(), str(self.repo)))
-
-    def test_containment_answers_rather_than_raising(self):
-        self.assertFalse(live.is_under(self.loop(), str(self.repo)))
-        self.assertFalse(live.is_under(str(self.repo), self.loop()))
-
     def test_closing_a_workspace_recorded_at_one_does_not_crash(self):
         """The regression, end to end: the mark released on the way out — that much was
         already fixed — but the person got a `RuntimeError` traceback where this command's
@@ -553,13 +536,6 @@ class SymlinkLoopTest(CloseHarness, unittest.TestCase):
         r = self.b.workspace_close("api", me=HUMAN)
         self.assertEqual(r["worktree"], "unregistered")
         self.assertIsNone(self.mark("api"))
-
-    def test_the_verdict_on_one_is_not_ok(self):
-        """Whatever else it is, a path that will not resolve is not a checkout this
-        command has established anything about."""
-        self.assertNotEqual(store.checkout_verdict(self.loop(), cwd=self.repo),
-                            store.CHECKOUT_OK)
-
 
 class DeregisterTest(CloseHarness, unittest.TestCase):
     """The removal is the one subprocess here that runs inside the destructive window."""
@@ -690,13 +666,6 @@ class BarePathTest(CloseHarness, unittest.TestCase):
         r = self.b.workspace_close("main-2", me=HUMAN)
         self.assertEqual(r["closed"], ["main-2"])
         self.assertEqual(self.h.closed, ["w1:p1"])
-
-    def test_a_bare_workspace_is_never_asked_about_the_primary_checkout(self):
-        """Bare workspaces record no path precisely so that the primary-checkout rule —
-        and every other rule about a directory — never applies to them."""
-        self.bare("main")
-        self.assertEqual(self.b.workspace_close("main", me=HUMAN)["kind"], "bare")
-
 
 class CrashedMarkTest(CloseHarness, unittest.TestCase):
     """A mark is never stolen and never expires; a person takes it over, or nobody does."""

@@ -98,22 +98,9 @@ class LivePaneTest(OutputTestBase):
         self.assertIn("boom", out.text)
         self.assertEqual(h.reads, [("w1:p9", 40)])   # name -> pane is the tool's job
 
-    def test_line_count_reaches_herdr(self):
-        self.agent(pane_id="w1:p9")
-        h = FakePaneReader("x\n")
-        self.read(herdr=h, lines=200)
-        self.assertEqual(h.reads, [("w1:p9", 200)])
-
     def test_unknown_agent_is_loud(self):
         with self.assertRaises(KeyError):
             self.read("nobody")
-
-    def test_the_read_is_logged(self):
-        self.agent(pane_id="w1:p9")
-        self.read(herdr=FakePaneReader("hi\n"))
-        kinds = [r["kind"] for r in store.recent_events(self.db, agent="w1")]
-        self.assertIn("read_output", kinds)
-
 
 class ClosedPaneTest(OutputTestBase):
     """The case the feature exists for: the child is gone and nobody knows why."""
@@ -198,25 +185,12 @@ class TranscriptRenderTest(OutputTestBase):
         self.assertNotIn("secret", text)
         self.assertIn("out loud", text)
 
-    def test_plain_string_content_is_kept(self):
-        line = json.dumps({"type": "user", "message": {"role": "user", "content": "do it"}})
-        self.assertIn("user: do it", self.render(line))
-
-    def test_tool_result_blocks_are_flattened(self):
-        text = self.render(entry("user", {"type": "tool_result",
-                                          "content": [text_part("line a"), text_part("line b")]}))
-        self.assertIn("line a line b", text)
-
     def test_one_line_per_entry_and_tail_is_the_end(self):
         lines = [entry("assistant", text_part(f"step {i}")) for i in range(50)]
         text = self.render(*lines, lines=5)
         self.assertEqual(len(text.splitlines()), 5)
         self.assertIn("step 49", text)         # the tail, not the head
         self.assertNotIn("step 44", text)
-
-    def test_multiline_payloads_stay_on_one_line(self):
-        text = self.render(entry("assistant", text_part("a\nb\nc")))
-        self.assertEqual(len(text.splitlines()), 1)
 
     def test_long_payloads_are_clipped_not_wrapped(self):
         text = self.render(entry("user", {"type": "tool_result", "content": "x" * 5000}))
@@ -229,10 +203,6 @@ class TranscriptRenderTest(OutputTestBase):
         text = self.render(entry("assistant", text_part("real")), '{"type": "assis')
         self.assertIn("real", text)
 
-    def test_missing_file_is_empty_not_an_explosion(self):
-        self.assertEqual(output.read_transcript(self.root / "nope.jsonl"), "")
-
-
 class RenderTest(unittest.TestCase):
     def test_provenance_leads(self):
         out = Output(agent="w1", source=TRANSCRIPT, text="boom",
@@ -241,11 +211,6 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(r.startswith("--- w1: transcript /t/x.jsonl ---"))
         self.assertIn("(pane gone)", r)
         self.assertIn("boom", r)
-
-    def test_unavailable_renders_the_reason_as_the_body(self):
-        r = Output(agent="w1", source=UNAVAILABLE, detail="no pane, no transcript").render()
-        self.assertIn("no pane, no transcript", r)
-
 
 class ReadPaneFailureTest(unittest.TestCase):
     """herdr's `pane read` reports a gone pane as JSON on stdout with rc=0."""

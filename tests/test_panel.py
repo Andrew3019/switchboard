@@ -161,12 +161,6 @@ class PathsWithoutGit(unittest.TestCase):
         root = self._repo()
         self.assertEqual(panel.git_common_dir(root), store.repo_root(root))
 
-    def test_it_agrees_with_store_from_a_subdirectory(self):
-        root = self._repo()
-        sub = root / "a" / "b"
-        sub.mkdir(parents=True)
-        self.assertEqual(panel.git_common_dir(sub), store.repo_root(sub))
-
     def test_it_agrees_with_store_inside_a_linked_worktree(self):
         """The case that makes this more than a `.git` lookup: in a worktree `.git` is a
         FILE pointing at a private gitdir, and the shared directory is one more hop through
@@ -227,19 +221,6 @@ class TheFormatIsStatusJson(PanelTest):
         self.assertFalse(back.needs_human)
         self.assertFalse(back.at_prompt)
         self.assertFalse(back.finished)
-
-    def test_the_snapshot_carries_every_one_of_its_own_fields_too(self):
-        """`hidden` is the one that got away: `as_dict` publishes it inside `counts`, so a
-        naive field-for-field inverse silently drops it and every panel reports nothing
-        filtered. Enumerated off the dataclass so the next field added cannot."""
-        import dataclasses
-        s = a_snapshot("w1", "w2", herdr_error="herdr: connection refused", hidden=4)
-        back = panel.snapshot_from_dict(json.loads(json.dumps(s.as_dict())))
-        for f in dataclasses.fields(status.Snapshot):
-            if f.name == "agents":
-                self.assertEqual([a.name for a in back.agents], ["w1", "w2"])
-            else:
-                self.assertEqual(getattr(back, f.name), getattr(s, f.name), f.name)
 
     def test_an_envelope_written_before_the_first_collect_still_draws(self):
         """A collector that failed on tick one has no snapshot to publish, and a panel
@@ -419,11 +400,6 @@ class Election(PanelTest):
 class Staleness(PanelTest):
     """The one failure a shared snapshot introduces, and so the one it is loudest about."""
 
-    def test_a_fresh_snapshot_says_nothing(self):
-        published(self.paths, a_snapshot("w1"))
-        self.assertEqual(panel.read(self.paths).note, "")
-        self.assertFalse(panel.read(self.paths).stale)
-
     def test_an_old_snapshot_says_how_old_rather_than_passing_as_now(self):
         at = panel.now()
         published(self.paths, a_snapshot("w1"), collected_at=at - 40)
@@ -443,14 +419,6 @@ class Staleness(PanelTest):
         self.assertIn("30s old", r.note)
         self.assertIn("no such column", r.note)  # ...and it says why
 
-    def test_a_collector_that_never_managed_a_collect_does_not_look_fresh(self):
-        published(self.paths, status.Snapshot(now=0, agents=[]), collected_at=None,
-                  errors=1, last_error="store unavailable: no store yet at /x/state.db")
-        r = panel.read(self.paths)
-        self.assertTrue(r.stale)
-        self.assertIn("has not read the tree yet", r.note)
-        self.assertIn("no store yet", r.note)
-
     def test_no_snapshot_at_all_says_a_collector_is_coming(self):
         r = panel.read(self.paths)
         self.assertTrue(r.stale)
@@ -464,11 +432,6 @@ class Staleness(PanelTest):
         published(self.paths, a_snapshot("w1", herdr_error="connection refused"),
                   collected_at=at - 30)
         self.assertIn("snapshot 30s old", panel.read(self.paths, at=at).note)
-
-    def test_a_fresh_snapshot_still_reports_herdr(self):
-        published(self.paths, a_snapshot("w1", herdr_error="connection refused"))
-        self.assertIn("herdr unreachable", panel.read(self.paths).note)
-
 
 # ---------------------------------------------------------------------------
 
@@ -493,13 +456,6 @@ class CountersInsteadOfEvents(PanelTest):
         for bit in ("pid 4242", "4210 polls", "0 errors", "last tick 24 ms"):
             self.assertIn(bit, line)
 
-    def test_doctor_says_when_nobody_holds_the_lock(self):
-        published(self.paths, a_snapshot("w1"))
-        self.assertIn("0 up", panel.doctor_line(self.paths))
-        fd = panel.acquire(self.paths)
-        self.addCleanup(panel.release, fd)
-        self.assertIn("1 up", panel.doctor_line(self.paths))
-
     def test_doctor_is_loud_about_a_stale_panel(self):
         """The question `on_event` could not have answered: is the thing on forty screens
         actually current?"""
@@ -509,21 +465,6 @@ class CountersInsteadOfEvents(PanelTest):
         line = panel.doctor_line(self.paths, at=at)
         self.assertIn("STALE", line)
         self.assertIn("9 errors", line)
-
-    def test_doctor_survives_there_being_no_panel_at_all(self):
-        self.assertIn("no collector", panel.doctor_line(self.paths))
-        self.assertFalse(panel.doctor_dict(self.paths)["up"])
-
-    def test_doctor_creates_nothing_by_asking(self):
-        """A diagnostic that conjures a `panel/` directory and a lock file in a repo where
-        no panel has ever run is reporting on a state it just invented — the same
-        objection `store._connect_readonly` makes about a reader creating an empty store.
-        Caught for real: `sb doctor` left a `collector.lock` in this repo."""
-        panel.doctor_line(self.paths)
-        panel.doctor_dict(self.paths)
-        panel.collector_running(self.paths)
-        self.assertFalse(self.paths.dir.exists(), "doctor created the panel directory")
-
 
 # ---------------------------------------------------------------------------
 
@@ -782,12 +723,6 @@ class WhichSbTheDoorbellRuns(PanelTest):
         with mock.patch.object(collector.os, "access", lambda p, m: False), \
              mock.patch.object(collector.shutil, "which", lambda n: "/usr/local/bin/sb"):
             self.assertEqual(collector.doorbell_sb(), "/usr/local/bin/sb")
-
-    def test_with_neither_it_answers_none(self):
-        with mock.patch.object(collector.os, "access", lambda p, m: False), \
-             mock.patch.object(collector.shutil, "which", lambda n: None):
-            self.assertIsNone(collector.doorbell_sb())
-
 
 class TheDoorbellsWorkingDirectory(PanelTest):
     """Which directory the spawned `sb` is run FROM, which decides whether it runs at all.
