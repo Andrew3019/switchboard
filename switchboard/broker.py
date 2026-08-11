@@ -26,6 +26,8 @@ so they are written down where the code is rather than argued about again:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import inspect
 import json
 import os
@@ -115,6 +117,9 @@ TEARDOWN_SETTLE_POLL = config.setting("timeouts.teardown_settle_poll")
 # Every git we shell out to. A fork waits on `git fetch`, which is a network call and the
 # one command here that can hang for as long as a bad connection wants it to.
 SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+# How long a spawn queues for its turn at creating a worktree. See `Broker._fork_lock`.
+FORK_LOCK_WAIT = config.setting("timeouts.fork_lock")
+FORK_LOCK_POLL = 0.05
 # Pointing a spawning pane's `sb` at its own checkout, and confirming it took. See `_pin_sb`.
 PIN_MS = config.setting("timeouts.pin_ms")
 PIN_ATTEMPTS = config.setting("retries.pin_attempts")
@@ -2113,8 +2118,14 @@ class Broker:
                     # --cwd names WHICH REPO. Without it herdr uses the focused
                     # workspace's repo, so a worktree asked for from a pane sitting in
                     # another project silently targets that one.
-                    r = self._call_adapter("create_worktree", branch, base=forked_from,
-                                           cwd=str(self.repo))
+                    #
+                    # The lock is taken HERE and not around `_fork_base`: the fetch is a
+                    # network call, it is the slowest thing in a fork, and it does not
+                    # race (thirty concurrent fetches, no failures). Six spawns therefore
+                    # still fetch at the same time and only queue for the git write.
+                    with self._fork_lock():
+                        r = self._call_adapter("create_worktree", branch, base=forked_from,
+                                               cwd=str(self.repo))
                 else:
                     r = self._open_worktree(name, path=known, branch=branch)
                     forked_from, fallback = None, None
@@ -2133,6 +2144,69 @@ class Broker:
             "workspace_unavailable",
             f"could not open or create workspace {name!r} (branch {branch}): {first}",
         )
+
+    @contextlib.contextmanager
+    def _fork_lock(self):
+        """One `worktree create` per repo at a time. The rest of a spawn stays concurrent.
+
+        What races: `git worktree add -b <name> origin/main` creates a branch whose
+        upstream it then records in `.git/config`, and that write takes `.git/config.lock`.
+        Two spawns issued at the same moment therefore collide on a file created with
+        `O_EXCL`, and the loser does not wait — git has no lock timeout for the config file
+        (it has `core.filesRefLockTimeout` for refs and `reftable.lockTimeout`, and nothing
+        for this), so it fails immediately with `could not lock config file .git/config:
+        File exists`, and herdr reports a fork that did not happen. Measured on a clone of
+        this repo: 18 six-way rounds, losers every round. It bites at two.
+
+        The loser is not left half-forked — git makes no checkout — but it DOES leave the
+        branch behind, which is why the fix is a queue rather than a retry: a second
+        attempt at the same name meets a branch that now exists, and `_fork_for` refuses
+        exactly that (`BranchTaken`). Waiting for a turn has no such debris.
+
+        Scope is deliberately one call. Everything a spawn does around it — the fetch, the
+        tab, `agent start`, delivering the task — is untouched, so a six-way fan-out still
+        overlaps everywhere except the fraction of a second git is writing.
+
+        `flock` on a file under the shared `.git`, so it is per-repo, is seen from every
+        worktree, and is released by the kernel if the holder is killed. The wait is
+        bounded (`timeouts.fork_lock`) and expiring is NOT a failure: a spawn that cannot
+        get its turn proceeds anyway and takes its chances with git, because the thing this
+        exists to prevent is a spawn that dies, and a process blocked for ever on a lock
+        whose holder wedged is a worse version of that.
+        """
+        try:
+            d = store.store_dir(self.repo)
+            d.mkdir(parents=True, exist_ok=True)
+            fd = os.open(d / "fork.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        except (OSError, RuntimeError):
+            # Nowhere to put a lock means no repo to fork in either: let the create run
+            # and fail with git's own reason rather than with ours.
+            yield
+            return
+        try:
+            t0 = time.time()
+            deadline = t0 + FORK_LOCK_WAIT
+            queued = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        store.log_event(self.db, kind="fork_lock_timeout",
+                                        waited=int(FORK_LOCK_WAIT),
+                                        note="forking anyway rather than waiting longer")
+                        break
+                    queued = True
+                    time.sleep(FORK_LOCK_POLL)
+            # Only when it actually waited: this is how a fan-out's queueing cost is read
+            # back afterwards, and a row per spawn saying "waited 0 ms" would bury it.
+            if queued:
+                store.log_event(self.db, kind="fork_queued",
+                                waited_ms=int((time.time() - t0) * 1000))
+            yield
+        finally:
+            os.close(fd)                # closing releases the lock
 
     def _fork_base(self, base: str) -> tuple[str, Optional[str]]:
         """Bring `base` up to date, and say what we ended up forking from.
