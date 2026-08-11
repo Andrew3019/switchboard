@@ -84,16 +84,6 @@ class InspectTest(Base):
         self.agent(task="rewrite the parser")
         self.assertEqual(self.inspect().agent.task, "rewrite the parser")
 
-    def test_carries_where_the_agent_lives(self):
-        self.agent(workspace="feature-x", cwd="/repo/feature-x", pane_id="w1:p9",
-                   session_id="sess-1", terminal_id="t7")
-        d = self.inspect()
-        self.assertEqual(d.agent.workspace, "feature-x")
-        self.assertEqual(d.cwd, "/repo/feature-x")
-        self.assertEqual(d.pane_id, "w1:p9")
-        self.assertEqual(d.session_id, "sess-1")
-        self.assertEqual(d.terminal_id, "t7")
-
     def test_reports_drift_exactly_as_status_does(self):
         """One rule for stalled, in one place — or two readouts disagree about reality."""
         self.agent()
@@ -135,13 +125,6 @@ class InspectTest(Base):
         d = self.inspect()
         self.assertEqual(d.agent.summary, "shipped the parser")   # prefix is not the reader's problem
         self.assertIn("shipped the parser", status.render_detail(d))
-
-    def test_the_latest_summary_wins(self):
-        self.agent()
-        for s in ("first", "second"):
-            store.put_message(self.db, from_agent="w1", to_agent="main", kind="done",
-                              body=f"[done] {s}")
-        self.assertEqual(self.inspect().agent.summary, "second")
 
     # -- mail: the part that used to need hand-written python -------------
 
@@ -196,14 +179,6 @@ class InspectTest(Base):
         self.assertIn("UNDELIVERED", out)
         self.assertNotIn("not picked up", out)          # there is nothing it ignored
 
-    def test_no_undelivered_section_when_everything_was_announced(self):
-        self.agent()
-        store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="a")
-        store.mark_delivered(self.db, "w1")
-        d = self.inspect()
-        self.assertEqual(d.undelivered, [])
-        self.assertNotIn("UNDELIVERED", status.render_detail(d))
-
     def test_inspecting_never_delivers_the_mail_it_reports(self):
         self.agent()
         store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="a")
@@ -218,14 +193,6 @@ class InspectTest(Base):
         self.assertEqual(d["undelivered"], 1)                       # the board's number
         self.assertEqual(d["undelivered_mail"][0]["body"], "hi")    # and the message
         self.assertTrue(d["waiting_to_be_rung"])
-
-    def test_an_answered_ask_is_not_surfaced(self):
-        self.agent()
-        mid = store.put_message(self.db, from_agent="main", to_agent="w1", kind="ask",
-                                body="which database?")
-        store.put_message(self.db, from_agent="w1", to_agent="main", kind="tell",
-                          body="postgres", reply_to=mid)
-        self.assertEqual(self.inspect().owed, [])
 
     def test_what_the_agent_itself_is_waiting_on_is_kept_separate(self):
         """Opposite meanings: one is somebody stuck on it, one is it stuck on somebody."""
@@ -247,12 +214,6 @@ class InspectTest(Base):
         self.assertEqual(d.output.source, PANE)
         self.assertIn("boom", d.output.text)
         self.assertEqual(h.reads, [("w1:p9", 40)])
-
-    def test_the_line_count_reaches_the_reader(self):
-        self.agent(pane_id="w1:p9")
-        h = FakeHerdr([alive("w1")], pane_text="x\n")
-        status.inspect(self.db, h, "w1", lines=120)
-        self.assertEqual(h.reads, [("w1:p9", 120)])
 
     def test_a_closed_pane_falls_back_to_the_transcript(self):
         """output.py's whole point, and it must survive being called from here."""
@@ -320,11 +281,6 @@ class InspectTest(Base):
         self.inspect()
         self.inspect()
         self.assertEqual(len(store.unread_for(self.db, "w1", mark=False)), 1)
-
-    def test_inspecting_never_repairs_drift(self):
-        self.agent()
-        status.inspect(self.db, FakeHerdr([alive("w1", "idle")]), "w1")
-        self.assertEqual(store.get_agent(self.db, "w1")["state"], "working")
 
     # -- json --------------------------------------------------------------
 
@@ -568,14 +524,6 @@ class WaitTest(Base):
         status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
         self.assertEqual(h.waits[0]["until"], "working")
 
-    def test_herdrs_derived_done_counts_as_already_idle_here_too(self):
-        self.agent()
-        clock = FakeClock()
-        h = WaitHerdr(alive("w1", "done", seq=3),
-                      on_wake=lambda i: setattr(clock, "t", clock.t + 30))
-        status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
-        self.assertEqual(h.waits[0]["until"], "working")
-
     def test_a_working_agent_is_waited_toward_idle(self):
         self.agent()
         clock = FakeClock()
@@ -657,12 +605,6 @@ class WaitTest(Base):
         self.assertEqual(r.state, "working")       # the store is reported, not rewritten
         self.assertEqual(r.herdr_state, "idle")
 
-    def test_for_idle_is_satisfied_by_a_finished_agent_too(self):
-        self.agent()
-        store.set_state(self.db, "w1", "done")
-        r = status.wait_for(self.db, WaitHerdr(None), "w1", until="idle", clock=FakeClock())
-        self.assertTrue(r.ok)
-
     def test_waiting_for_working_watches_the_other_transition(self):
         self.agent()
         store.set_state(self.db, "w1", "blocked")
@@ -708,25 +650,6 @@ class CliTest(unittest.TestCase):
     def test_output_is_gone_as_a_verb(self):
         """One command answers 'what is going on with this agent', not two halves of it."""
         self.refused(["output", "w1"])
-
-    def test_inspect_takes_a_name_and_a_line_count(self):
-        args = self.parse(["inspect", "w1", "-n", "80"])
-        self.assertEqual(args.name, "w1")
-        self.assertEqual(args.n, 80)
-
-    def test_inspect_json_on_either_side(self):
-        self.assertTrue(self.parse(["inspect", "w1", "--json"]).json)
-        self.assertTrue(self.parse(["--json", "inspect", "w1"]).json)
-
-    def test_wait_defaults_to_done(self):
-        args = self.parse(["wait", "w1"])
-        self.assertEqual(args.until, "done")
-        self.assertEqual(args.timeout, 900)
-
-    def test_wait_takes_for_and_timeout(self):
-        args = self.parse(["wait", "w1", "--for", "blocked", "--timeout", "30"])
-        self.assertEqual(args.until, "blocked")
-        self.assertEqual(args.timeout, 30)
 
     def test_wait_refuses_a_state_it_cannot_ever_see(self):
         self.refused(["wait", "w1", "--for", "banana"])

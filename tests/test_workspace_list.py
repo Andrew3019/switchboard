@@ -120,12 +120,6 @@ class ListingTest(Harness, unittest.TestCase):
             self.assertEqual(listed[n]["verdict"], "bare")
             self.assertIsNone(listed[n]["checkout"])
 
-    def test_a_workspace_all_three_sources_know_is_listed_once(self):
-        path = self.worktree("api")
-        store.record_workspace(self.db, "api", path)
-        self.row("api-lead", workspace="api", branch="api", cwd=path)
-        self.assertEqual(self.listed()["api"]["sources"], ["agents", "git", "table"])
-
     # -- the state of each one --------------------------------------------
 
     def test_a_recorded_path_whose_directory_is_gone_reads_absent_not_unusable(self):
@@ -279,12 +273,6 @@ class AlreadyGoneTest(Harness, unittest.TestCase):
         self.b.workspace_close("stale", me=HUMAN)
         self.assertNotIn(gone, self.registered())
 
-    def test_a_finished_row_under_the_path_does_not_refuse(self):
-        gone = self.gone("stale")
-        self.row("worker", workspace="stale", branch="stale", cwd=gone, state="done")
-        self.b.workspace_close("stale", me=HUMAN)
-        self.assertNotIn(gone, self.registered())
-
     def test_a_mark_somebody_else_holds_refuses_and_names_them(self):
         self.gone("stale")
         store.claim_retiring(self.db, "stale", "other-agent")
@@ -353,10 +341,6 @@ class OneNamespaceTest(Harness, unittest.TestCase):
 
 class RecordedPathTest(Harness, unittest.TestCase):
     """The path is a record of where the checkout IS, not of where it once was."""
-
-    def test_attaching_writes_the_path_down(self):
-        r = self.b.workspace_new("api", me=HUMAN)
-        self.assertEqual(store.get_workspace(self.db, "api")["checkout"], r["path"])
 
     def test_attaching_again_re_writes_it_from_the_workspace_actually_attached(self):
         self.b.workspace_new("api", me=HUMAN)

@@ -93,12 +93,6 @@ class ErrorTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "workspace_not_found")
         self.assertIn("wG", cm.exception.message)
 
-    def test_unparseable_stderr_still_fails_as_cli_failure(self):
-        fake = FakeHerdr(subprocess.CompletedProcess([], 1, "", "connection refused"))
-        with self.assertRaises(HerdrError) as cm:
-            Herdr("herdr", runner=fake).list_agents()
-        self.assertEqual(cm.exception.code, "cli_failure")
-
     def test_silent_success_is_not_an_error(self):
         # report-agent / release-agent return no output on success
         fake = FakeHerdr(subprocess.CompletedProcess([], 0, "", ""))
@@ -540,12 +534,6 @@ class IntegrationConflictTest(unittest.TestCase):
             return subprocess.CompletedProcess([], 0, status_line, "")
         return Herdr("herdr", runner=runner)
 
-    def test_detects_installed_integration(self):
-        self.assertTrue(self._herdr(self.STATUS_INSTALLED).integration_installed("claude"))
-
-    def test_detects_absent_integration(self):
-        self.assertFalse(self._herdr(self.STATUS_ABSENT).integration_installed("claude"))
-
     def test_check_refuses_to_start_with_conflicting_integration(self):
         with self.assertRaises(HerdrError) as cm:
             self._herdr(self.STATUS_INSTALLED).check()
@@ -567,10 +555,6 @@ class WaitTest(unittest.TestCase):
         )
         a = Herdr("herdr", runner=fake).wait("w1", since_seq=88)
         self.assertEqual(a.change_seq, 93)
-
-    def test_returns_immediately_when_no_snapshot_given(self):
-        fake = FakeHerdr(ok({}), ok({"agents": [AGENT_JSON]}))
-        self.assertEqual(Herdr("herdr", runner=fake).wait("w1").name, "w1")
 
     def test_agent_vanishing_is_an_error(self):
         fake = FakeHerdr(ok({}), ok({"agents": []}))

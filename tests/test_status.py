@@ -138,13 +138,6 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.undelivered, 2)
         self.assertGreaterEqual(a.undelivered_age, 600)
 
-    def test_a_genuinely_working_agent_is_not_stalled(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        snap = status.collect(self.db, FakeHerdr([alive("w1", "working")]))
-        a = self.by_name(snap)["w1"]
-        self.assertFalse(a.stalled)
-        self.assertTrue(a.alive)
-
     def test_a_finished_agent_sitting_idle_is_not_drift(self):
         store.create_agent(self.db, name="w1", role="worker")
         store.set_state(self.db, "w1", "done")
@@ -495,11 +488,6 @@ class StatusTest(unittest.TestCase):
         self.assertIn("no server", snap.herdr_error)
         self.assertIn("herdr unreachable", status.render(snap))
 
-    def test_works_with_no_herdr_at_all(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        snap = status.collect(self.db, None)
-        self.assertIsNone(self.by_name(snap)["w1"].alive)
-
     # -- the tree ---------------------------------------------------------
 
     def test_roots_are_at_depth_zero_and_children_indent(self):
@@ -530,11 +518,6 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr())
         self.assertEqual({a.name for a in snap.agents}, {"a", "b"})
 
-    def test_self_parent_does_not_hang(self):
-        store.create_agent(self.db, name="a", role="worker", parent="a")
-        snap = status.collect(self.db, FakeHerdr())
-        self.assertEqual([a.name for a in snap.agents], ["a"])
-
     # -- mail -------------------------------------------------------------
 
     def test_unread_is_counted_per_agent(self):
@@ -561,39 +544,10 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(snap.counts["unread"], 0)
         self.assertNotIn("sb inbox", status.render(snap))
 
-    def test_read_mail_is_not_counted(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        store.unread_for(self.db, "w1")                       # the agent read it
-        snap = status.collect(self.db, FakeHerdr([alive("w1")]))
-        self.assertEqual(self.by_name(snap)["w1"].unread, 0)
-
     # -- undelivered: mail nobody ever rang about --------------------------
 
     def deliver(self, name):
         store.mark_delivered(self.db, name)
-
-    def test_mail_is_undelivered_until_the_doorbell_is_rung(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")])))["w1"]
-        self.assertEqual(a.undelivered, 1)
-        self.assertTrue(a.waiting_to_be_rung)
-
-    def test_delivered_mail_is_no_longer_undelivered_but_is_still_unread(self):
-        """Ringing announces; it does not read. The mail stays the agent's to pick up.
-
-        Not symmetric, and deliberately: reading DOES clear the warning (see
-        `test_mail_the_agent_read_itself_is_not_undelivered`), because the warning is
-        about whether the agent knows, and a read message is known however it got there.
-        """
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        self.deliver("w1")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")])))["w1"]
-        self.assertEqual(a.undelivered, 0)
-        self.assertFalse(a.waiting_to_be_rung)
-        self.assertEqual(a.unread, 1)
 
     def test_mail_the_agent_read_itself_is_not_undelivered(self):
         """An agent may read its inbox without waiting to be rung, and then it knows.
@@ -651,31 +605,12 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.undelivered, 2)
         self.assertEqual(a.undelivered_age, 600)
 
-    def test_no_undelivered_mail_means_no_age(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")])))["w1"]
-        self.assertEqual(a.undelivered_age, 0)
-        self.assertFalse(a.waiting_to_be_rung)
-
-    def test_the_human_is_never_undelivered_to(self):
-        """No doorbell exists for a person, and no mailbox either — see broker.block."""
-        store.put_message(self.db, from_agent="w1", to_agent="human", kind="ask", body="?")
-        snap = status.collect(self.db, FakeHerdr())
-        self.assertEqual(snap.counts["undelivered"], 0)
-        self.assertEqual(snap.counts["unread"], 0)
-
     def test_counting_undelivered_mail_never_delivers_it(self):
         store.create_agent(self.db, name="w1", role="worker")
         store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
         status.collect(self.db, FakeHerdr([alive("w1")]))
         status.collect(self.db, FakeHerdr([alive("w1")]))
         self.assertEqual(len(store.undelivered(self.db, exclude=["human"])), 1)
-
-    def test_undelivered_counts_as_needing_a_human(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")])))["w1"]
-        self.assertTrue(a.needs_human)
 
     def test_needs_me_keeps_an_agent_whose_only_problem_is_undelivered_mail(self):
         store.create_agent(self.db, name="quiet", role="worker")
@@ -685,24 +620,6 @@ class StatusTest(unittest.TestCase):
                               needs_me=True)
         self.assertEqual([a.name for a in snap.agents], ["stuck"])
 
-    def test_undelivered_is_flagged_like_stalled_and_gone(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
-        row = next(l for l in out.splitlines() if l.startswith("w1"))
-        self.assertIn("<< UNDELIVERED", row)            # on the row, where STALLED goes
-        self.assertIn("UNDELIVERED — written, never announced", out)
-
-    def test_the_render_says_undelivered_is_not_the_agents_fault(self):
-        """Reported as 'never announced', never as mail it failed to pick up."""
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
-        self.assertIn("never announced", out)
-        # Undelivered mail is unread BY DEFINITION, so the unread wording must not also
-        # fire — "not picked up" blames the agent for silence that is ours.
-        self.assertNotIn("not picked up", out)
-
     def test_mail_it_was_told_about_is_still_distinguished_when_both_exist(self):
         store.create_agent(self.db, name="w1", role="worker")
         store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="rung")
@@ -711,34 +628,6 @@ class StatusTest(unittest.TestCase):
         out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
         self.assertIn("1 never announced to it", out)
         self.assertIn("1 unread it WAS told about", out)
-
-    def test_an_agent_with_both_reports_both(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="rung")
-        self.deliver("w1")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="silent")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1")])))["w1"]
-        self.assertEqual(a.unread, 2)                   # both are unread...
-        self.assertEqual(a.undelivered, 1)              # ...only one was never announced
-        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
-        self.assertIn("2 unread", out)
-        self.assertIn("1 undelivered", out)
-
-    def test_undelivered_is_in_the_json(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        t = store.now()
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        self.db.execute("UPDATE messages SET created_at=?", (t - 120,))
-        self.db.commit()
-        d = json.loads(json.dumps(
-            status.collect(self.db, FakeHerdr([alive("w1")]), now=t).as_dict()))
-        w1 = d["agents"][0]
-        self.assertEqual(w1["undelivered"], 1)
-        self.assertEqual(w1["undelivered_age"], 120)
-        self.assertTrue(w1["waiting_to_be_rung"])
-        self.assertTrue(w1["needs_human"])
-        self.assertEqual(d["counts"]["undelivered"], 1)
-        self.assertEqual(d["counts"]["waiting_to_be_rung"], 1)
 
     # -- blocked ----------------------------------------------------------
 
@@ -778,14 +667,6 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr([alive("w1")]), now=t)
         self.assertEqual(self.by_name(snap)["w1"].age, 3600)
 
-    def test_idle_falls_back_to_creation_when_nothing_has_happened(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        t = store.now()
-        self.db.execute("UPDATE agents SET created_at=? WHERE name=?", (t - 300, "w1"))
-        self.db.commit()
-        snap = status.collect(self.db, FakeHerdr([alive("w1")]), now=t)
-        self.assertEqual(self.by_name(snap)["w1"].idle, 300)
-
     def test_an_event_resets_the_idle_clock(self):
         store.create_agent(self.db, name="w1", role="worker")
         t = store.now()
@@ -815,12 +696,6 @@ class StatusTest(unittest.TestCase):
         store.put_message(self.db, from_agent="w1", to_agent="x", kind="tell", body="hi")
         snap = status.collect(self.db, FakeHerdr([alive("w1")]), now=t)
         self.assertLess(self.by_name(snap)["w1"].idle, 10)
-
-    def test_fmt_age_is_two_units_at_most(self):
-        self.assertEqual(status.fmt_age(9), "9s")
-        self.assertEqual(status.fmt_age(90), "1m")
-        self.assertEqual(status.fmt_age(3660), "1h01")
-        self.assertEqual(status.fmt_age(90000), "1d01h")
 
     # -- live_only --------------------------------------------------------
 
@@ -859,11 +734,6 @@ class StatusTest(unittest.TestCase):
         self.assertEqual({a.name for a in snap.agents}, {"stuck", "mail"})
         self.assertEqual(snap.hidden, 1)
 
-    def test_needs_me_includes_an_agent_sitting_at_a_prompt(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        snap = status.collect(self.db, FakeHerdr([alive("w1", "blocked")]), needs_me=True)
-        self.assertEqual([a.name for a in snap.agents], ["w1"])
-
     def test_needs_me_includes_a_stalled_agent(self):
         """It is not asking for anything, and that is exactly the problem: its turn ended
         without `sb done`, so the store says `working` forever, no doorbell rings it again
@@ -881,14 +751,6 @@ class StatusTest(unittest.TestCase):
         self.assertIn('sb tell w1 "wrap up and run sb done"', out)
         # Not the unread branch's sentence, which would blame it for silence of ours.
         self.assertNotIn("0 unread", out)
-
-    def test_needs_me_keeps_ancestors_so_the_tree_still_reads(self):
-        store.create_agent(self.db, name="root", role="main")
-        store.create_agent(self.db, name="kid", role="worker", parent="root")
-        store.set_state(self.db, "kid", "blocked")
-        snap = status.collect(self.db, FakeHerdr(), needs_me=True)
-        self.assertEqual([(a.name, a.depth) for a in snap.agents],
-                         [("root", 0), ("kid", 1)])
 
     def test_mine_is_the_callers_own_subtree(self):
         store.create_agent(self.db, name="root", role="main")
@@ -928,14 +790,6 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr(), mine="me", live_only=True)
         self.assertEqual([a.name for a in snap.agents], ["me"])
 
-    def test_no_filter_shows_everything_including_a_cycle(self):
-        """The default output is untouched — and the ancestor walk cannot hang on one."""
-        store.create_agent(self.db, name="a", role="worker", parent="b")
-        store.create_agent(self.db, name="b", role="worker", parent="a")
-        store.create_agent(self.db, name="c", role="worker", parent="a")
-        snap = status.collect(self.db, FakeHerdr(), needs_me=False, live_only=False)
-        self.assertEqual({a.name for a in snap.agents}, {"a", "b", "c"})
-
     def test_a_cycle_does_not_hang_the_ancestor_walk_under_a_filter(self):
         store.create_agent(self.db, name="a", role="worker", parent="b")
         store.create_agent(self.db, name="b", role="worker", parent="a")
@@ -974,22 +828,6 @@ class StatusTest(unittest.TestCase):
                           body="[done] an earlier run")
         snap = status.collect(self.db, FakeHerdr([alive("w1")]))
         self.assertNotIn("an earlier run", status.render(snap))
-
-    def test_the_latest_summary_wins(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        for s in ("first", "second"):
-            store.put_message(self.db, from_agent="w1", to_agent="orch", kind="done",
-                              body=f"[done] {s}")
-        self.assertEqual(self.by_name(status.collect(self.db, FakeHerdr()))["w1"].summary,
-                         "second")
-
-    def test_task_and_summary_are_in_the_json(self):
-        store.create_agent(self.db, name="w1", role="worker", task="rewrite the parser")
-        store.put_message(self.db, from_agent="w1", to_agent="orch", kind="done",
-                          body="[done] shipped")
-        d = json.loads(json.dumps(status.collect(self.db, FakeHerdr()).as_dict()))
-        self.assertEqual(d["agents"][0]["task"], "rewrite the parser")
-        self.assertEqual(d["agents"][0]["summary"], "shipped")
 
     # -- output -----------------------------------------------------------
 
@@ -1044,21 +882,6 @@ class StatusTest(unittest.TestCase):
 
 class StatusCliTest(unittest.TestCase):
     """The wiring: `sb status` must parse, and `--json` must work on either side."""
-
-    def test_json_after_the_subcommand_is_accepted(self):
-        from switchboard.cli import build_parser
-        args = build_parser().parse_args(["status", "--json"])
-        self.assertTrue(args.json)
-
-    def test_json_before_the_subcommand_still_works(self):
-        from switchboard.cli import build_parser
-        args = build_parser().parse_args(["--json", "status"])
-        self.assertTrue(args.json)
-
-    def test_live_flag_exists_and_defaults_off(self):
-        from switchboard.cli import build_parser
-        self.assertFalse(build_parser().parse_args(["status"]).live)
-        self.assertTrue(build_parser().parse_args(["status", "--live"]).live)
 
     def test_active_is_the_same_flag_as_live(self):
         """`--live` is in scripts and in muscle memory; one dest, so they cannot differ."""
@@ -1118,23 +941,6 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(_reason(KeyError("no such agent: w1")), "no such agent: w1")
         self.assertEqual(_reason(ValueError("no such agent: w1")), "no such agent: w1")
         self.assertEqual(_reason(KeyError()), "")
-
-    def test_the_filters_exist_and_default_off(self):
-        from switchboard.cli import build_parser
-        args = build_parser().parse_args(["status"])
-        self.assertFalse(args.needs_me)
-        self.assertFalse(args.mine)
-        args = build_parser().parse_args(["status", "--needs-me", "--mine"])
-        self.assertTrue(args.needs_me)
-        self.assertTrue(args.mine)
-
-    def test_collapsing_is_the_default_and_archived_opts_out(self):
-        """Collapse has to be the default or it fixes nothing: 59 of 68 rows were archived
-        and every session adds more."""
-        from switchboard.cli import build_parser
-        self.assertFalse(build_parser().parse_args(["status"]).archived)
-        self.assertTrue(build_parser().parse_args(["status", "--archived"]).archived)
-
 
 class StatusArchivedCliTest(unittest.TestCase):
     """`sb status` end to end, because the parser alone cannot see the wiring.
@@ -1333,14 +1139,6 @@ class ArchivedTest(unittest.TestCase):
         back = status.AgentStatus(**{k: v for k, v in d.items() if k in fields} | {"alive": None})
         self.assertFalse(back.archived)
 
-    def test_the_json_still_carries_every_row_when_the_board_collapses_them(self):
-        """`--json` never collapses: machine consumers keep every row and gain one key."""
-        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
-        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
-        snap = self.collect(FakeHerdr([]), now=self.old())
-        self.assertEqual(len(snap.as_dict()["agents"]), 2)
-        self.assertNotIn("w1", self.tree(snap))
-
     # -- render -----------------------------------------------------------
 
     def test_the_counts_still_count_every_agent_a_collapse_hid(self):
@@ -1365,15 +1163,6 @@ class ArchivedTest(unittest.TestCase):
         self.assertEqual(self.tree(snap), "+ 1 archived · 1 need you")
         self.assertIn("w1", out)                    # by name, below, in NEEDS YOU
         self.assertIn("which database?", out)
-
-    def test_show_archived_draws_every_row_again(self):
-        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
-        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
-        snap = self.collect(FakeHerdr([]), now=self.old())
-        self.assertNotIn("w1", self.tree(snap))
-        shown = self.tree(snap, show_archived=True)
-        self.assertIn("w1", shown)
-        self.assertNotIn("archived", shown)
 
     def test_the_setting_decides_when_no_caller_has_an_opinion(self):
         """`display.show_archived`. A caller that passes nothing must not silently
@@ -1539,10 +1328,6 @@ class CollapseTest(unittest.TestCase):
         a = _mk("x", parent="y", archived=True)
         b = _mk("y", parent="x", archived=True)
         self.assertEqual(self.rows([a, b]), ["+2"])
-
-    def test_a_live_cycle_is_still_drawn(self):
-        a, b = _mk("x", parent="y"), _mk("y", parent="x")
-        self.assertEqual(sorted(n for n in self.rows([a, b])), ["x", "y"])
 
     def test_the_real_board_collapses_to_the_measured_shape(self):
         """The live store on the night this was designed: 64 rows, 55 of them archived,

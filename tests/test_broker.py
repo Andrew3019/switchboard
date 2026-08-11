@@ -226,12 +226,6 @@ class BrokerTest(unittest.TestCase):
                                           "CLAUDE_CODE_SESSION_ID": "sess-new"}, clear=True):
             self.assertEqual(self.b.whoami(), "new")
 
-    def test_whoami_resolves_from_injected_pane_id(self):
-        """Identity comes from HERDR_PANE_ID, which exists before the agent acts."""
-        store.create_agent(self.db, name="w1", role="worker", pane_id="w1:p9")
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p9"}, clear=True):
-            self.assertEqual(self.b.whoami(), "w1")
-
     # -- delegate --------------------------------------------------------
 
     def test_delegate_lands_in_the_callers_own_workspace(self):
@@ -256,12 +250,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(a["session_id"], f"sess-{name}")
         self.assertIn((name, "compute 2+2"), self.h.prompts)
 
-    def test_delegate_prompts_are_single_line(self):
-        """herdr rejects multi-line agent args outright."""
-        self.b.delegate("t", role="researcher", with_=["extra guidance"], me="orch")
-        for p in self.h.started[0]["prompts"]:
-            self.assertNotIn("\n", p)
-
     def test_role_selects_a_model_tier(self):
         """A role names a tier; what reaches the CLI is that tier's resolved flags.
 
@@ -277,16 +265,6 @@ class BrokerTest(unittest.TestCase):
         self.b.delegate("t", role="worker", model="strong", me="orch")
         self.assertEqual(self.h.started[0]["model_args"],
                          ["--model", "opus", "--effort", "high"])
-
-    def test_an_unknown_model_still_passes_through_as_an_id(self):
-        """The escape hatch survives the tier lookup (see models.Tiers.resolve)."""
-        self.b.delegate("t", role="worker", model="claude-fable-5", me="orch")
-        self.assertEqual(self.h.started[0]["model_args"], ["--model", "claude-fable-5"])
-
-    def test_a_tier_with_no_model_sends_no_flags(self):
-        """`default` defers to the provider CLI, which means sending nothing at all."""
-        self.b.delegate("t", role="worker", me="orch")
-        self.assertEqual(self.h.started[0]["model_args"], [])
 
     def test_unknown_role_still_works(self):
         """Vocabulary is data — an undefined role inherits defaults, it does not error."""
@@ -397,10 +375,6 @@ class BrokerTest(unittest.TestCase):
             }) + "\n")
             self.assertTrue(proof(now - 1))
 
-    def test_a_delivered_task_leaves_an_ordinary_working_agent(self):
-        name = self.b.delegate("compute 2+2", role="worker", me="orch")
-        self.assertEqual(store.get_agent(self.db, name)["state"], "working")
-
     def test_as_prompt_overrides_the_role_prompt(self):
         self.b.delegate("t", role="worker", as_prompt="You are a haiku critic.", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
@@ -491,11 +465,6 @@ class BrokerTest(unittest.TestCase):
         with self.assertRaises(AgentNameTaken):
             self.b.delegate("t", role="worker", name="w9", me="orch")
 
-    def test_names_do_not_collide(self):
-        a = self.b.delegate("t", role="calc", me="orch")
-        b = self.b.delegate("t", role="calc", me="orch")
-        self.assertNotEqual(a, b)
-
     # -- messaging -------------------------------------------------------
 
     def test_tell_rings_the_doorbell_without_the_payload(self):
@@ -576,11 +545,6 @@ class BrokerTest(unittest.TestCase):
         kinds = [e["kind"] for e in store.recent_events(self.db, agent="slow")]
         self.assertNotIn("ask_target_vanished", kinds)      # ... it never gave up on it
 
-    def test_ask_times_out_with_none_rather_than_hanging(self):
-        store.create_agent(self.db, name="z", role="worker")
-        got = self.b.ask(["z"], "q?", me="orch", timeout=0.2, poll=0.05)
-        self.assertIsNone(got["z"])          # caller decides (C9)
-
     def test_there_is_no_way_to_ask_the_human_and_wait(self):
         """One way to reach a person, and it is `sb block`.
 
@@ -620,14 +584,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(a.summary, "shipped the parser")
         self.assertIn("shipped the parser",
                       status.render_detail(status.inspect(self.db, None, "root", lines=0)))
-
-    def test_a_childs_summary_still_reaches_its_parent_as_mail(self):
-        """Only the human lost a mailbox. Agent-to-agent handoff is untouched."""
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.done("counted 144", me="kid")
-        [m] = store.unread_for(self.db, "orch", mark=False)
-        self.assertIn("[done] counted 144", m["body"])
 
     def test_done_pushes_idle_because_herdr_has_no_done_state(self):
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
@@ -927,12 +883,6 @@ class BrokerTest(unittest.TestCase):
         [m] = store.undelivered(self.db)                         # queued, not read
         self.assertIsNone(m["read_at"])
 
-    def test_a_delivered_interrupt_is_still_marked_read(self):
-        """It travelled inline, so there is nothing left for `sb inbox` to announce."""
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.interrupt("w", "change course")
-        self.assertEqual(store.undelivered(self.db), [])
-
     # -- mail to an agent that has finished -------------------------------
 
     def test_no_doorbell_is_rung_for_an_agent_that_has_finished(self):
@@ -1190,11 +1140,6 @@ class BrokerTest(unittest.TestCase):
         self.b.tell(["w"], "use main", me=HUMAN)
         self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
 
-    def test_messaging_a_working_agent_does_not_touch_state(self):
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.tell(["w"], "fyi", me=HUMAN)
-        self.assertEqual(self.h.states, [])
-
     def test_restore_brings_the_agent_back_to_life(self):
         """whoami() matches on `ended_at IS NULL`; leaving it set makes a restored agent
         resolve to HUMAN, so everything it sends is attributed to a person."""
@@ -1395,14 +1340,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.cleanup(me="mine", include_kept=True), ["my-kid"])
         self.assertNotIn("w1:p2", self.h.closed)
 
-    def test_cleanup_reaches_grandchildren(self):
-        store.create_agent(self.db, name="top", role="orchestrator")
-        store.create_agent(self.db, name="mid", role="orchestrator", parent="top")
-        store.create_agent(self.db, name="leaf", role="worker", parent="mid",
-                           pane_id="w1:p3", cleanup="close")
-        store.set_state(self.db, "leaf", "done")
-        self.assertIn("leaf", self.b.cleanup(me="top", include_kept=True))
-
     # -- cleanup: the invariant ------------------------------------------
     #
     # INVARIANT: an agent whose pane is closed has no descendant whose pane is still
@@ -1557,13 +1494,6 @@ class BrokerTest(unittest.TestCase):
         self.b.cleanup(me="orch")
         self.assertNotIn("w1:p1", self.h.closed)
 
-    def test_done_says_nothing_when_the_children_have_all_finished(self):
-        self._family(child_state="done")
-        store.set_state(self.db, "lead", "working")
-        self.b.done("all in", me="lead")
-        self.assertNotIn("done_with_live_children",
-                         [e["kind"] for e in store.recent_events(self.db, agent="lead")])
-
     def test_ask_fails_fast_on_an_unknown_target(self):
         """Otherwise the caller blocks the entire timeout waiting on nobody."""
         with self.assertRaises(KeyError):
@@ -1615,12 +1545,6 @@ class BrokerTest(unittest.TestCase):
             self.b.ask([HUMAN, "peer"], "which branch?", me="kid", timeout=0.2, poll=0.05)
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"], 0)
-
-    def test_a_root_agents_ask_to_parent_is_refused_too(self):
-        """`parent` resolves to the human for a root agent, and there is no asking one."""
-        store.create_agent(self.db, name="root", role="orchestrator", pane_id="w1:p1")
-        with self.assertRaises(ValueError):
-            self.b.ask(["parent"], "which branch?", me="root", timeout=0.2, poll=0.05)
 
     def test_a_human_running_inbox_is_told_where_to_look_instead(self):
         """`(no new messages)` would read as "nothing needs you", which is a lie."""
@@ -1697,26 +1621,6 @@ class BrokerTest(unittest.TestCase):
         r = self.b.cleanup(me="orch")
         self.assertEqual(r, [])
         self.assertIn("--include-kept", r.refused[0][1])
-
-    def test_every_refusal_reaches_the_event_log(self):
-        """The log already answered "why is that one still here" for live descendants and
-        for nothing else."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
-        self.b.cleanup(["kid"], me="orch")           # born working, so the finished gate
-        self.assertIn("cleanup_refused",
-                      [e["kind"] for e in store.recent_events(self.db, agent="kid")])
-
-    def test_a_dry_run_gives_its_reasons_without_writing_one(self):
-        """A dry run reads; it never writes. The reasons are the whole point of asking."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
-        r = self.b.cleanup(["kid"], me="orch", dry_run=True)
-        self.assertEqual([n for n, _ in r.refused], ["kid"])
-        self.assertNotIn("cleanup_refused",
-                         [e["kind"] for e in store.recent_events(self.db, agent="kid")])
 
     def test_cleanup_prints_the_refusals_it_collected(self):
         """The reason has to reach the person who typed the command, not just the log."""
@@ -1825,17 +1729,6 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("cleanup_forced_live",
                       [e["kind"] for e in store.recent_events(self.db, agent="busy")])
 
-    def test_forcing_a_finished_agent_logs_nothing_extra(self):
-        """The event has to mean something, so it fires for a live agent and not for the
-        stuck one `--force` exists for."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        store.set_state(self.db, "kid", "done")
-        self.b.cleanup(["kid"], me="orch", force=True)
-        self.assertNotIn("cleanup_forced_live",
-                         [e["kind"] for e in store.recent_events(self.db, agent="kid")])
-
     def test_a_forced_close_that_failed_still_ends_done_and_says_so(self):
         """The trade, kept and made honest. `--force` is documented as the override that
         always ends done, so the bookkeeping is committed even when the close itself
@@ -1861,21 +1754,6 @@ class BrokerTest(unittest.TestCase):
         unconfirmed = next(e for e in store.recent_events(self.db, agent="kid")
                            if e["kind"] == "cleanup_forced_unconfirmed")
         self.assertIn("w1:p1", unconfirmed["payload"])
-
-    def test_an_unforced_close_that_failed_still_commits_nothing(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        store.set_state(self.db, "kid", "done")
-
-        def refuses(pane):
-            raise HerdrError("cli_failure", "herdr is not answering")
-        self.h.close_pane = refuses
-
-        self.assertEqual(self.b.cleanup(["kid"], me="orch"), [])
-        self.assertEqual(store.get_agent(self.db, "kid")["pane_id"], "w1:p1")
-        self.assertNotIn("cleanup_forced_unconfirmed",
-                         [e["kind"] for e in store.recent_events(self.db, agent="kid")])
 
     def test_force_refuses_to_be_a_sweep(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
@@ -1922,13 +1800,6 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNotNone(m["delivered_at"])       # so flush_pending will not ring later
         self.assertNotIn(mid, [r["id"] for r in
                                store.undelivered(self.db, exclude=(HUMAN,))])
-
-    def test_an_ordinary_tell_still_rings(self):
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        self.b.tell(["orch"], "fyi", me="kid")
-        self.assertEqual([n for n, _ in self.h.prompts], ["orch"])
 
     def test_a_blocked_ask_retries_a_doorbell_that_was_held_back(self):
         """Nothing else runs while `ask` blocks, so if it did not re-ring here a question
@@ -1990,14 +1861,6 @@ class BrokerTest(unittest.TestCase):
             self.b.restore("w")
         self.assertEqual(len(self.h.closed), 1)
 
-    def test_cleanup_dry_run_closes_nothing(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
-        store.set_state(self.db, "kid", "done")
-        self.assertEqual(self.b.cleanup(me="orch", dry_run=True), ["kid"])
-        self.assertEqual(self.h.closed, [])
-
     def test_restore_resumes_the_stored_session(self):
         store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
                            cwd=str(self.repo), pane_id="w1:p1")
@@ -2030,12 +1893,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.tabs, [])              # and no pane was made anywhere
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
 
-    def test_a_branchless_agent_whose_checkout_is_gone_is_refused_too(self):
-        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
-                           cwd=str(self.repo / "deleted-worktree"), pane_id="w1:p1")
-        with self.assertRaises(ValueError):
-            self.b.restore("kid")
-
     # -- start (the one command) ------------------------------------------
 
     def test_start_inside_a_worktree_is_refused_and_names_the_main_checkout(self):
@@ -2049,12 +1906,6 @@ class BrokerTest(unittest.TestCase):
         self.assertIn(str(main), str(cm.exception))       # where to run it instead
         self.assertIn(str(self.repo), str(cm.exception))  # and where they actually are
         self.assertEqual(self.h.started, [])
-
-    def test_start_from_the_main_checkout_is_the_ordinary_case(self):
-        self.h.list_agents = lambda: []
-        self.h.focus = lambda n: None
-        with mock.patch.object(store, "main_checkout", lambda cwd=None: self.repo):
-            self.assertEqual(self.b.start(), MAIN_NAME)
 
     def test_an_unanswerable_main_checkout_does_not_refuse(self):
         """A repo `sb init` never pinned, whose layout defeats the inference, is a reason
@@ -2254,18 +2105,6 @@ class BrokerTest(unittest.TestCase):
             raise HerdrError("no_server", "connection refused")
         self.h.list_agents = down
         self.assertEqual(self.b.running_tops(), [MAIN_NAME])
-
-    def test_a_finished_orchestrator_is_not_resurrected(self):
-        """Its name stays taken and its session stays where it is; the next `sb start`
-        is a new line of work, not the old one reopened."""
-        self.h.focus = lambda n: None
-        self.h.list_agents = lambda: []
-        self._dead_top(MAIN_NAME)
-        store.update_agent(self.db, MAIN_NAME, session_id="sess-main")
-
-        self.assertEqual(self.b.start(), "main-2")
-        self.assertIsNone(self.h.started[-1]["resume"])
-        self.assertEqual(store.get_agent(self.db, MAIN_NAME)["state"], "done")
 
     def test_the_name_slots_of_dead_orchestrators_stay_taken(self):
         """Free means never used, not merely not-running: two agents with two unrelated

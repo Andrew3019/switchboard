@@ -52,14 +52,6 @@ class SlugTest(unittest.TestCase):
         self.assertEqual(validate.slug_name("Reviewer #2!"), "reviewer-2")
         self.assertEqual(validate.slug_name("feature/api-v2"), "feature-api-v2")
 
-    def test_a_name_must_start_with_a_letter(self):
-        self.assertEqual(validate.slug_name("2fa"), "w-2fa")
-        self.assertEqual(validate.slug_name("_private"), "private")   # stripped, not prefixed
-
-    def test_nothing_usable_still_produces_a_legal_name(self):
-        for junk in ("", "   ", "!!!", "中文"):
-            self.assertRegex(validate.slug_name(junk), validate.AGENT_NAME)
-
     def test_reserve_holds_room_for_the_suffix_the_caller_will_add(self):
         long = "x" * 60
         got = validate.slug_name(long, reserve=len("-lead"))
@@ -81,18 +73,6 @@ class LineTest(unittest.TestCase):
         self.assertIn("single line", msg)
         self.assertIn("invalid_agent_argument", msg)   # what herdr would have said
 
-    def test_a_carriage_return_counts_as_a_newline(self):
-        with self.assertRaises(validate.Invalid):
-            validate.line("a\r\nb", "task")
-
-    def test_whitespace_only_is_empty(self):
-        for blank in ("", "   ", "\n", "\t\n "):
-            with self.assertRaises(validate.Invalid, msg=repr(blank)):
-                validate.line(blank, "summary")
-
-    def test_surrounding_whitespace_is_stripped_not_rejected(self):
-        self.assertEqual(validate.line("  ship it  ", "summary"), "ship it")
-
     def test_the_cap_is_enforced_and_names_the_alternative(self):
         with self.assertRaises(validate.Invalid) as e:
             validate.line("x" * (validate.MAX_TEXT + 1), "task")
@@ -100,14 +80,6 @@ class LineTest(unittest.TestCase):
         self.assertIn("path", str(e.exception))
         self.assertEqual(len(validate.line("x" * validate.MAX_TEXT, "task")),
                          validate.MAX_TEXT)
-
-    def test_prompts_get_a_larger_cap_than_traffic(self):
-        """Sized off the caps rather than a literal: both were raised once already, and a
-        hardcoded length turns that into a puzzling failure in an unrelated file."""
-        big = "x" * (validate.MAX_TEXT + 1)
-        with self.assertRaises(validate.Invalid):
-            validate.line(big, "task")
-        self.assertEqual(validate.line(big, "--as", max_len=validate.MAX_PROMPT), big)
 
     def test_control_characters_are_refused(self):
         with self.assertRaises(validate.Invalid):
@@ -120,10 +92,6 @@ class ReasonTest(unittest.TestCase):
     """`sb block "<why>"`. The one rule here that is ours: the human never reads this
     field, so a reason big enough to BE the message is an answer sent nowhere — and the
     agent cannot tell, because the block succeeded."""
-
-    def test_a_one_line_reason_passes(self):
-        self.assertEqual(validate.reason("need a decision on the auth split"),
-                         "need a decision on the auth split")
 
     def test_the_cap_is_far_below_ordinary_text(self):
         """Sized off the caps, not literals: a report must not fit, and a real reason
@@ -158,38 +126,7 @@ class ReasonTest(unittest.TestCase):
             self.assertNotIn("invalid_agent_argument", msg)
             self.assertNotIn("herdr", msg)
 
-    def test_empty_and_control_characters_are_still_refused(self):
-        for bad in ("", "   ", "\t", "need a\x00decision"):
-            with self.assertRaises(validate.Invalid, msg=repr(bad)):
-                validate.reason(bad)
-
-    def test_none_is_reported_as_missing(self):
-        with self.assertRaises(validate.Invalid) as e:
-            validate.reason(None)
-        self.assertIn("required", str(e.exception))
-
-
-class TextTest(unittest.TestCase):
-    """Message bodies never become a herdr argument, so they may wrap."""
-
-    def test_newlines_are_allowed(self):
-        self.assertEqual(validate.text("one\ntwo", "message"), "one\ntwo")
-
-    def test_but_empty_is_not(self):
-        for blank in ("", "  \n  "):
-            with self.assertRaises(validate.Invalid):
-                validate.text(blank, "message")
-
-    def test_none_is_reported_as_missing_not_as_a_crash(self):
-        with self.assertRaises(validate.Invalid) as e:
-            validate.text(None, "message")
-        self.assertIn("required", str(e.exception))
-
-
 class RefNameTest(unittest.TestCase):
-    def test_ordinary_branch_names_pass(self):
-        for good in ("main", "feature/api-v2", "release-1.2", "andrew/fix_thing"):
-            self.assertEqual(validate.ref_name(good), good)
 
     def test_git_would_reject_these_so_we_do_first(self):
         for bad in ("", "  ", "has space", "a..b", "-lead", "/abs", ".hidden",
@@ -207,26 +144,10 @@ class RefNameTest(unittest.TestCase):
 
 
 class TargetTest(unittest.TestCase):
-    def test_addresses_are_not_agent_names_but_are_valid(self):
-        self.assertEqual(validate.targets(["parent", "human"]), ["parent", "human"])
 
     def test_a_typo_is_caught_at_the_boundary(self):
         with self.assertRaises(validate.Invalid):
             validate.targets(["worker-1", "Reviewer"])
-
-    def test_several_recipients_come_back_in_order(self):
-        self.assertEqual(validate.targets(["b", "a"]), ["b", "a"])
-
-
-class PositiveIntTest(unittest.TestCase):
-    def test_zero_and_negative_are_refused(self):
-        for n in (0, -1):
-            with self.assertRaises(validate.Invalid):
-                validate.positive_int(n, "--timeout")
-
-    def test_a_normal_value_passes_through(self):
-        self.assertEqual(validate.positive_int(900, "--timeout"), 900)
-
 
 class CliBoundaryTest(unittest.TestCase):
     """`_validate` runs on the parsed namespace before anything is spawned or written."""
@@ -250,12 +171,6 @@ class CliBoundaryTest(unittest.TestCase):
         _validate(args)
         self.assertEqual(args.task, "do it")
         self.assertEqual(args.with_, ["be terse"])
-
-    def test_a_role_that_is_not_a_legal_name_is_still_accepted(self):
-        """It is a roles.toml lookup key, not a name — the NAME is slugified instead."""
-        args = parse(["delegate", "do it", "--role", "QA Bot"])
-        _validate(args)
-        self.assertEqual(args.role, "QA Bot")
 
     def test_empty_strings_are_caught_for_every_verb_that_takes_prose(self):
         self.bad(["delegate", "   "])

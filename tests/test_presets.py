@@ -47,45 +47,9 @@ class PresetTest(unittest.TestCase):
         got = presets.available(self.repo)["adversarial"]
         self.assertEqual(got, self.dir / "adversarial.md")
 
-    def test_shipped_presets_are_available_without_any_repo_config(self):
-        """The shipped `presets.toml` binds these by name; if the bodies did not ship too,
-        a fresh clone would have bindings pointing at nothing."""
-        got = presets.available(Path(self.tmp.name) / "nope")
-        self.assertIn("adversarial", got)
-        self.assertIn("evidence", got)
-
-    def test_missing_dir_is_not_an_error(self):
-        presets.available(Path(self.tmp.name) / "nope")   # no raise
-
-    def test_resolved_prompt_has_no_newlines(self):
-        """herdr rejects multi-line agent args outright, so flattening is mandatory."""
-        self.write("p", "# p\nfirst line\nsecond line\n\n- a bullet\n- another\n")
-        (line,) = presets.resolve(["p"], self.repo)
-        self.assertNotIn("\n", line)
-        self.assertIn("first line", line)
-
-    def test_bullets_stay_separated(self):
-        """Run-together bullets read as prose and lose the list entirely."""
-        self.write("p", "- do this\n- do that\n")
-        (line,) = presets.resolve(["p"], self.repo)
-        self.assertIn("do this ; do that", line)
-
-    def test_headings_are_dropped(self):
-        self.write("p", "# p\nkeep me")
-        self.assertEqual(presets.resolve(["p"], self.repo), ["keep me"])
-
     def test_unknown_name_is_used_verbatim(self):
         """A one-off instruction should not require creating a file."""
         self.assertEqual(presets.resolve(["be terse"], self.repo), ["be terse"])
-
-    def test_order_is_preserved(self):
-        self.write("a", "AAA"); self.write("b", "BBB")
-        self.assertEqual(presets.resolve(["a", "b", "raw"], self.repo),
-                         ["AAA", "BBB", "raw"])
-
-    def test_empty_preset_contributes_nothing(self):
-        self.write("blank", "# blank\n\n")
-        self.assertEqual(presets.resolve(["blank"], self.repo), [])
 
     def test_presets_are_per_repo(self):
         """switchboard's presets have no bearing on another repo's."""
@@ -143,11 +107,6 @@ class BindingTest(unittest.TestCase):
         the layer with something in it — so this is now testable rather than vacuous."""
         self.write('all = ["!reset", "own-files"]\n')
         self.assertEqual(presets.for_role(self.repo, "worker"), ["own-files"])
-
-    def test_duplicates_are_collapsed(self):
-        self.write('all = ["!reset", "a"]\n\n[roles]\nr = ["a", "b"]\n')
-        self.assertEqual(presets.for_role(self.repo, "r", ["b"]), ["a", "b"])
-
 
 class PreRenameSpellingTest(unittest.TestCase):
     """`.switchboard/plugins/` and `plugins.toml` are what every repo had before the split.

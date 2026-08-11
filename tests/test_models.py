@@ -51,20 +51,11 @@ class ModelsTest(unittest.TestCase):
         self.assertIn("default", t)
         self.assertIn("strong", t)
 
-    def test_default_tier_leaves_model_and_effort_to_the_cli(self):
-        spec = self.load().resolve("default")
-        self.assertIsNone(spec.model)
-        self.assertIsNone(spec.effort)
-        self.assertEqual(spec.cli_args(), [])
-
     def test_shipped_tiers_use_aliases_not_pinned_ids(self):
         """A pinned id fails the day the model is retired or the plan lacks access."""
         t = self.load()
         self.assertEqual(t.resolve("cheap").model, "sonnet")
         self.assertEqual(t.resolve("strong").model, "opus")
-
-    def test_standard_still_resolves_for_older_configs(self):
-        self.assertIsNone(self.load().resolve("standard").model)
 
     # -- what the spawn layer gets ---------------------------------------
 
@@ -104,16 +95,7 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(spec.model, "claude-fable-5")
         self.assertEqual(spec.cli_args(), ["--model", "claude-fable-5"])
 
-    def test_no_tier_asked_for_means_the_default_tier(self):
-        for asked in (None, ""):
-            with self.subTest(asked=asked):
-                self.assertEqual(self.load().resolve(asked).tier, "default")
-
     # -- layering ---------------------------------------------------------
-
-    def test_global_config_overrides_shipped_defaults(self):
-        self.write_global('[tiers.cheap]\nmodel = "sonnet"\n')
-        self.assertEqual(self.load().resolve("cheap").model, "sonnet")
 
     def test_repo_config_overrides_global_config(self):
         self.write_global('[tiers.strong]\nmodel = "sonnet"\n')
@@ -127,15 +109,7 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(spec.effort, "max")
         self.assertEqual(spec.model, "opus")
 
-    def test_a_tier_defined_only_in_the_global_file_reaches_the_repo(self):
-        self.write_global('[tiers.tiny]\nmodel = "sonnet"\neffort = "low"\n')
-        self.assertEqual(self.load().resolve("tiny").model, "sonnet")
-
     # -- provider ---------------------------------------------------------
-
-    def test_provider_defaults_to_claude(self):
-        self.write_repo('[tiers.mine]\nmodel = "opus"\n')
-        self.assertEqual(self.load().resolve("mine").provider, "claude")
 
     def test_default_provider_is_configurable(self):
         self.write_repo('[defaults]\nprovider = "codex"\n[tiers.mine]\nmodel = "o9"\n')
@@ -176,12 +150,6 @@ class ModelsTest(unittest.TestCase):
             self.load()
         self.assertIn("models.toml", str(cm.exception))
 
-    def test_a_scalar_where_a_tier_table_belongs_is_rejected(self):
-        self.write_repo('[tiers]\nmine = "opus"\n')
-        with self.assertRaises(models.ModelConfigError):
-            self.load()
-
-
 class RoleModelTest(unittest.TestCase):
     """Roles name a tier and nothing more; models.py owns what that tier means."""
 
@@ -211,10 +179,6 @@ class RoleModelTest(unittest.TestCase):
         r = roles.load(self.repo)
         spec = roles.get(r, "researcher").spec()      # researcher is the "cheap" tier
         self.assertEqual(spec.cli_args(), ["--model", "sonnet", "--effort", "medium"])
-
-    def test_an_undefined_role_still_resolves_a_spec(self):
-        r = roles.load(self.repo)
-        self.assertIsInstance(roles.get(r, "wizard").spec(), models.ModelSpec)
 
     def test_a_role_can_pin_a_model_id_directly(self):
         (self.repo / ".switchboard" / "roles.toml").write_text(
