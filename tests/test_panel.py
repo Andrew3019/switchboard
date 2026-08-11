@@ -549,6 +549,47 @@ class CollectorLoop(PanelTest):
         self.assertEqual(panel.read(self.paths).collector["polls"], 3)
 
 
+class TheCollectorNoticingItsOwnCodeChanged(PanelTest):
+    """It holds the repo's one lock for hours and loads its code once, so a fix could be on
+    disk and not in the process running it — about four hours of held mail on 2026-08-11.
+    It now hashes its own `switchboard/*.py` and leaves through the existing exit if that
+    differs from what it started with, so a renderer starts a fresh import."""
+
+    def _run_with_signatures(self, sigs, **kw):
+        """As `CollectorLoop._run`, plus a scripted `source_signature`. The first value is
+        the one taken at startup; each later one answers one check."""
+        calls = iter(sigs)
+        with mock.patch.object(collector, "source_signature", lambda: next(calls)), \
+             mock.patch.object(collector, "SOURCE_CHECK_GAP", 0.0):
+            return CollectorLoop._run(self, [(a_snapshot("w1"), None)] * 20, **kw)
+
+    def test_it_exits_on_the_tick_that_first_sees_different_source(self):
+        """Exactly there and not a tick later: the whole value of this is that the next
+        tick behaves per the new code."""
+        rc = self._run_with_signatures(["old", "old", "new", "new"], max_ticks=9)
+        self.assertEqual(rc, 0)
+        self.assertEqual(panel.read(self.paths).collector["polls"], 2)
+        self.assertFalse(panel.collector_running(self.paths))   # and the lock is back
+
+    def test_an_unchanged_checkout_never_costs_a_restart(self):
+        self._run_with_signatures(["same"] * 6, max_ticks=4)
+        self.assertEqual(panel.read(self.paths).collector["polls"], 4)
+
+    def test_the_signature_covers_the_whole_package_and_not_just_this_file(self):
+        """`ring_doorbell` decides nothing itself — `ringable` is `status.py`'s, imported
+        once and frozen exactly as hard. A fix there has to count as a change."""
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d) / "switchboard"
+            pkg.mkdir()
+            for name in ("collector.py", "status.py"):
+                (pkg / name).write_text("# v1\n")
+            with mock.patch.object(collector, "__file__", str(pkg / "collector.py")):
+                before = collector.source_signature()
+                self.assertEqual(before, collector.source_signature())   # stable
+                (pkg / "status.py").write_text("# v2 — the ringable fix\n")
+                self.assertNotEqual(before, collector.source_signature())
+
+
 class TheDoorbellTrigger(PanelTest):
     """The one loop in the fleet that ticks on its own is what rings the doorbell.
 
