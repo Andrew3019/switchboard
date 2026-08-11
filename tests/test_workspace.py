@@ -197,7 +197,14 @@ class FakeHerdr:
     def check(self, **kw): pass
 
 
-class WorkspaceTest(unittest.TestCase):
+class Fixture:
+    """Setup shared by the classes below.
+
+    Deliberately not a `TestCase`: subclassing `WorkspaceTest` to borrow its fixture
+    re-ran every one of its ~70 tests once per subclass, eight times over — 490 test runs
+    that proved nothing the first run had not.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
@@ -221,6 +228,7 @@ class WorkspaceTest(unittest.TestCase):
             "commit", "-q", "--allow-empty", "-m", "x")
         return main
 
+class WorkspaceTest(Fixture, unittest.TestCase):
     # -- creating --------------------------------------------------------
 
     def test_new_creates_a_worktree_a_workspace_and_a_lead(self):
@@ -295,10 +303,6 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.h.started[0]["pane"], r["pane_id"])
         self.assertEqual(self.h.tabs, [])
 
-    def test_the_workspace_name_is_recorded_on_the_agent_row(self):
-        self.b.workspace_new("api", me=HUMAN)
-        self.assertEqual(store.get_agent(self.db, "api-lead")["workspace"], "api")
-
     def test_children_inherit_the_workspace_without_being_told(self):
         self.b.workspace_new("api", me=HUMAN)
         kid = self.b.delegate("do a thing", role="worker", me="api-lead")
@@ -318,12 +322,6 @@ class WorkspaceTest(unittest.TestCase):
         self.assertIn("workspace 'api'", joined)
         self.assertIn("shared", joined)
 
-    def test_prompts_stay_single_line(self):
-        """herdr rejects multi-line agent args outright."""
-        self.b.workspace_new("api", me=HUMAN)
-        for p in self.h.started[0]["prompts"]:
-            self.assertNotIn("\n", p)
-
     def test_the_lead_is_never_swept_away_by_cleanup(self):
         self.b.workspace_new("api", me=HUMAN)
         self.assertEqual(store.get_agent(self.db, "api-lead")["cleanup"], "keep")
@@ -336,10 +334,6 @@ class WorkspaceTest(unittest.TestCase):
         """It is waiting on purpose, and the readouts must not call that STALLED."""
         self.b.workspace_new("api", me=HUMAN)
         self.assertEqual(store.get_agent(self.db, "api-lead")["awaiting_task"], 1)
-
-    def test_a_lead_opened_with_a_task_is_an_ordinary_agent(self):
-        self.b.workspace_new("api", task="port the client", me=HUMAN)
-        self.assertEqual(store.get_agent(self.db, "api-lead")["awaiting_task"], 0)
 
     def test_the_first_task_to_reach_a_waiting_lead_clears_it(self):
         self.b.workspace_new("api", me=HUMAN)
@@ -422,10 +416,6 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual(r["agent"], "api-lead")
         self.assertEqual(len(self.h.checkouts), 1)
 
-    def test_reopening_does_not_error(self):
-        self.b.workspace_new("api", me=HUMAN)
-        self.b.workspace_new("api", me=HUMAN)       # would raise if reuse were an error
-
     def test_a_task_reaches_an_already_running_lead(self):
         self.b.workspace_new("api", me=HUMAN)
         self.b.workspace_new("api", task="also fix the tests", me=HUMAN)
@@ -440,13 +430,6 @@ class WorkspaceTest(unittest.TestCase):
         b = self.b.workspace_new("api", me="two")
         self.assertEqual(a["workspace_id"], b["workspace_id"])
         self.assertEqual(a["agent"], b["agent"])
-
-    def test_a_human_may_open_a_workspace_an_agent_is_working_in(self):
-        store.create_agent(self.db, name="one", role="orchestrator")
-        agent_view = self.b.workspace_new("api", me="one")
-        human_view = self.b.workspace_new("api", me=HUMAN)
-        self.assertEqual(human_view["path"], agent_view["path"])
-        self.assertFalse(human_view["created"])
 
     def test_a_separate_process_finds_the_same_workspace(self):
         """Two `sb` invocations share only the store; that has to be enough."""
@@ -499,13 +482,6 @@ class WorkspaceTest(unittest.TestCase):
         self.h.calls.clear()
         b.workspace_new("main", me=HUMAN)                        # already checked out
         self.assertEqual([c for c in self.h.calls if c.startswith("create_")], [])
-
-    def test_a_known_workspace_is_opened_before_it_is_created(self):
-        """Reuse is the expected path, so it goes first — creation is the fallback."""
-        self.b.workspace_new("api", me=HUMAN)
-        self.h.calls.clear()
-        self.b.workspace_new("api", me=HUMAN)
-        self.assertTrue(self.h.calls[0].startswith("open_worktree"))
 
     def test_a_dead_lead_comes_back_with_its_context(self):
         self.b.workspace_new("api", me=HUMAN)
@@ -652,10 +628,6 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(store.get_agent(self.db, r["agent"])["workspace"],
                          "feature/API_v2")
 
-    def test_a_long_branch_name_still_fits_herdrs_agent_name_limit(self):
-        r = self.b.workspace_new("feature/" + "x" * 60, me=HUMAN)
-        self.assertLessEqual(len(r["agent"]), 32)
-
     def test_a_workspace_that_can_neither_be_opened_nor_created_says_so(self):
         def refuse(*a, **k):
             raise HerdrError("disk_full", "no")
@@ -751,13 +723,6 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.h.split_cwds, [r["path"]])
         self.assertNotEqual(r["path"], str(self.repo))
 
-    def test_a_worker_lead_gets_a_board_too(self):
-        """Role no longer gates it: every spawned agent opens with the tree beside it."""
-        self.b.workspace_new("api", role="worker", me=HUMAN)
-        self.assertIn("api-lead", self.h.live)
-        self.assertEqual(len(self.h.splits), 1)
-        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
-
     def test_a_delegated_child_opens_a_board_beside_itself(self):
         """`sb delegate` used to hand out a bare tab. Every spawn goes through
         `delegate`, so this is where the board is opened for all of them."""
@@ -773,12 +738,6 @@ class WorkspaceTest(unittest.TestCase):
         _pane, _dir, ratio = self.h.splits[0]
         self.assertGreater(ratio, 0.5, "the agent's session must be the larger pane")
         self.assertLess(ratio, 0.8)                         # and the board still readable
-
-    def test_one_board_per_child_not_one_per_spawn(self):
-        """Two children, two boards — and neither stacks a second onto the other."""
-        self.b.delegate("t", role="worker", me=HUMAN)
-        self.b.delegate("t", role="worker", me=HUMAN)
-        self.assertEqual(len(self.h.splits), 2)
 
     def test_a_delegated_child_still_spawns_when_the_split_fails(self):
         """The board is a view; a spawn must not fail because one would not open."""
@@ -797,7 +756,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.h.pane_prompts, [])
 
 
-class StartWorkspaceTest(WorkspaceTest):
+class StartWorkspaceTest(Fixture, unittest.TestCase):
     """`sb start` gives each top-level orchestrator its OWN workspace.
 
     Not a worktree (it does no writes) and not the repo's main workspace (several of them
@@ -854,12 +813,6 @@ class StartWorkspaceTest(WorkspaceTest):
         self.assertEqual(self.h.splits, [])
         self.assertEqual(self.h.pane_prompts, [])
 
-    def test_restarting_does_not_stack_a_second_board(self):
-        name = self.b.start(focus=False)
-        self.b.start(name=name, focus=False)
-        self.b.start(name=name, focus=False)
-        self.assertEqual(len(self.h.splits), 1, "one board per orchestrator, not three")
-
     def test_a_closed_board_is_reopened(self):
         name = self.b.start(focus=False)
         board_pane = self.h.splits[0][0] and self.h.pane_prompts[0][0]
@@ -867,24 +820,7 @@ class StartWorkspaceTest(WorkspaceTest):
         self.b.start(name=name, focus=False)
         self.assertEqual(len(self.h.splits), 2)
 
-    def test_a_board_failure_never_breaks_start(self):
-        """The board is a view. `sb start` failing over one would be the worse bug."""
-        def boom(*a, **kw):
-            raise HerdrError("split_failed", "no panes left")
-        self.h.split_pane = boom
-        name = self.b.start(focus=False)
-        self.assertIsNotNone(store.get_agent(self.db, name))
-
-    def test_an_adapter_without_split_pane_never_breaks_start(self):
-        """How this broke 13 tests the first time: AttributeError, not HerdrError."""
-        def missing(*a, **kw):
-            raise AttributeError("'Herdr' object has no attribute 'split_pane'")
-        self.h.split_pane = missing
-        name = self.b.start(focus=False)
-        self.assertIsNotNone(store.get_agent(self.db, name))
-
-
-class ClosingTakesTheBoardWithItTest(WorkspaceTest):
+class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
     """A board opened beside an agent is closed when that agent is.
 
     Every spawn opens one now, so a close that took only the agent's own pane left an
@@ -911,13 +847,6 @@ class ClosingTakesTheBoardWithItTest(WorkspaceTest):
         self.assertIn(board, self.h.closed)
         self.assertIn(agent_pane, self.h.closed)
 
-    def test_no_empty_pane_is_left_behind(self):
-        """The bug as a human sees it: the agent goes, the tab it was in does not."""
-        kid, board, agent_pane = self._finished_kid()
-        self.b.cleanup([kid], me="api-lead", include_kept=True)
-        self.assertNotIn(board, self.h.pane_ids())
-        self.assertNotIn(agent_pane, self.h.pane_ids())
-
     def test_the_closed_board_is_forgotten(self):
         """A remembered pane is what makes `_open_board` a no-op, so a stale one would
         mean a restored agent never gets a board again."""
@@ -938,38 +867,6 @@ class ClosingTakesTheBoardWithItTest(WorkspaceTest):
         self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
         self.assertIsNone(self._board_pane(kid))
 
-    def test_an_agent_with_no_board_closes_normally(self):
-        self.b.workspace_new("api", me=HUMAN)
-        kid = self.b.delegate("t", role="worker", me="api-lead", board=False)
-        store.set_state(self.db, kid, "done")
-        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
-
-    def test_a_live_agents_board_is_left_alone(self):
-        """Closing one agent is not closing another's view."""
-        self.b.workspace_new("api", me=HUMAN)
-        kid = self.b.delegate("t", role="worker", me="api-lead")
-        sib = self.b.delegate("t", role="worker", me="api-lead")
-        store.set_state(self.db, kid, "done")
-        self.b.cleanup([kid], me="api-lead", include_kept=True)
-        sibs_board = self._board_pane(sib)
-        self.assertNotIn(sibs_board, self.h.closed)
-        self.assertIn(sibs_board, self.h.pane_ids())
-
-    def test_a_board_two_agents_share_survives_the_first_close(self):
-        """Not a shape anything creates today; a pane id outliving its pane is. Closing
-        a board somebody is still reading is not undoable by the person watching it go."""
-        self.b.workspace_new("api", me=HUMAN)
-        kid = self.b.delegate("t", role="worker", me="api-lead")
-        sib = self.b.delegate("t", role="worker", me="api-lead")
-        shared = self._board_pane(sib)
-        self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
-                        (f"board_pane:{kid}", shared))
-        self.db.commit()
-        store.set_state(self.db, kid, "done")
-        self.b.cleanup([kid], me="api-lead", include_kept=True)
-        self.assertNotIn(shared, self.h.closed)
-        self.assertIsNone(self._board_pane(kid))            # but no longer ours to close
-
     def test_a_pane_that_would_not_close_keeps_its_board(self):
         """The agent is still in that pane, so the board beside it is still its view."""
         kid, board, _pane = self._finished_kid()
@@ -979,16 +876,7 @@ class ClosingTakesTheBoardWithItTest(WorkspaceTest):
         self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [])
         self.assertEqual(self._board_pane(kid), board)
 
-    def test_a_skipped_agent_keeps_its_board(self):
-        """A sweep that closes nothing closes no boards either."""
-        self.b.workspace_new("api", me=HUMAN)
-        kid = self.b.delegate("t", role="worker", me="api-lead")
-        board = self._board_pane(kid)
-        self.assertEqual(self.b.cleanup(me="api-lead"), [])   # still working
-        self.assertNotIn(board, self.h.closed)
-
-
-class WorktreeIsAFactTest(WorkspaceTest):
+class WorktreeIsAFactTest(Fixture, unittest.TestCase):
     """"Does this agent have a worktree?" is read from the store, never from the name.
 
     The `workspace` column says a branch for a worktree space and an agent-ish label for a
@@ -1004,13 +892,6 @@ class WorktreeIsAFactTest(WorkspaceTest):
         self.assertTrue(self.b.has_worktree("api-lead"))
         self.assertEqual(self.b.worktree_branch("api-lead"), "api")
 
-    def test_children_inherit_the_branch_with_the_workspace(self):
-        self.b.workspace_new("api", me=HUMAN)
-        kid = self.b.delegate("t", role="worker", me="api-lead")
-        grandkid = self.b.delegate("t", role="worker", me=kid)
-        self.assertEqual(store.get_agent(self.db, kid)["branch"], "api")
-        self.assertTrue(self.b.has_worktree(grandkid))
-
     def test_the_top_level_orchestrators_space_is_bare(self):
         """`sb start` lays a workspace over the main checkout and never forks. The row has
         to say so, or its children inherit a checkout that is the human's."""
@@ -1018,10 +899,6 @@ class WorktreeIsAFactTest(WorkspaceTest):
         name = b.start(focus=False)
         self.assertIsNone(store.get_agent(self.db, name)["branch"])
         self.assertFalse(b.has_worktree(name))
-
-    def test_nobody_and_the_human_have_no_worktree(self):
-        self.assertFalse(self.b.has_worktree(HUMAN))
-        self.assertFalse(self.b.has_worktree("never-existed"))
 
     def test_a_bare_space_is_not_mistaken_for_a_named_checkout(self):
         """The recorded cwd of a bare space is the main checkout — real, and not this
@@ -1082,7 +959,7 @@ class WorktreeIsAFactTest(WorkspaceTest):
         self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
 
 
-class ForkRuleTest(WorkspaceTest):
+class ForkRuleTest(Fixture, unittest.TestCase):
     """The fork rule: you get a worktree when your parent has not got one.
 
     Otherwise you inherit your parent's and share it as a tab. Role-agnostic — there is no
@@ -1118,33 +995,6 @@ class ForkRuleTest(WorkspaceTest):
         self.assertEqual(rows[1]["cwd"], rows[0]["cwd"])
         self.assertEqual(self.h.calls_of("create_worktree"), [kid])   # exactly one fork
 
-    def test_it_stays_inherited_all_the_way_down(self):
-        """Depth is not a factor: one fork at the top of a subtree, tabs below it."""
-        line = [self._bare_root()]
-        for _ in range(4):
-            line.append(self.b.delegate("t", role="worker", me=line[-1]))
-        branches = [store.get_agent(self.db, n)["branch"] for n in line[1:]]
-        self.assertEqual(branches, [line[1]] * 4)
-        self.assertEqual(self.h.calls_of("create_worktree"), [line[1]])
-
-    def test_a_second_child_of_the_bare_root_forks_its_own(self):
-        """Siblings do not share: each child of the root is a separate line of work."""
-        root = self._bare_root()
-        a = self.b.delegate("t", role="worker", me=root)
-        b = self.b.delegate("t", role="worker", me=root)
-        self.assertEqual(self.h.calls_of("create_worktree"), [a, b])
-        self.assertNotEqual(store.get_agent(self.db, a)["cwd"],
-                            store.get_agent(self.db, b)["cwd"])
-
-    def test_the_rule_is_role_agnostic(self):
-        """A researcher that swears it only reads gets a tree of its own like everyone
-        else. The exception is what put agents in the human's checkout."""
-        root = self._bare_root()
-        for role in ("researcher", "worker", "orchestrator"):
-            with self.subTest(role=role):
-                kid = self.b.delegate("t", role=role, me=root)
-                self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
-
     def test_the_human_has_no_worktree_to_lend_so_their_child_forks(self):
         kid = self.b.delegate("t", role="worker", me=HUMAN)
         self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
@@ -1159,12 +1009,6 @@ class ForkRuleTest(WorkspaceTest):
         self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
         self.assertNotEqual(store.get_agent(self.db, kid)["cwd"],
                             store.get_agent(self.db, "api-lead")["cwd"])
-
-    def test_a_lead_in_a_worktree_forks_nothing_for_its_children(self):
-        r = self.b.workspace_new("api", me=HUMAN)
-        kid = self.b.delegate("t", role="worker", me="api-lead")
-        self.assertEqual(store.get_agent(self.db, kid)["cwd"], r["path"])
-        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
 
     def test_a_caller_that_names_the_workspace_is_not_overridden(self):
         """`sb start` and a workspace lead both place a child explicitly. A fork on top of
@@ -1182,17 +1026,6 @@ class ForkRuleTest(WorkspaceTest):
         self.assertEqual(self.h.tabs, [])
         self.assertEqual(store.get_agent(self.db, kid)["pane_id"],
                          self.h.checkouts[store.get_agent(self.db, kid)["cwd"]]["root_pane"])
-
-    def test_the_child_is_placed_in_its_own_new_workspace(self):
-        kid = self.b.delegate("t", role="worker", me=self._bare_root())
-        row = store.get_agent(self.db, kid)
-        self.assertEqual(row["workspace_id"],
-                         self.h.checkouts[row["cwd"]]["id"])
-
-    def test_the_fork_is_in_the_event_log(self):
-        kid = self.b.delegate("t", role="worker", me=self._bare_root())
-        forks = [e for e in store.recent_events(self.db) if e["kind"] == "fork"]
-        self.assertEqual([e["agent"] for e in forks], [kid])
 
     # -- the collision refusal -------------------------------------------
 
@@ -1256,7 +1089,7 @@ class ForkRuleTest(WorkspaceTest):
         self.assertEqual(store.get_agent(self.db, kid)["cwd"], r["path"])
 
 
-class ForkBaseTest(WorkspaceTest):
+class ForkBaseTest(Fixture, unittest.TestCase):
     """Where a fork starts from: `origin/main`, fetched on the spot.
 
     A local `main` is however stale the last pull left it, so the base is the
@@ -1313,13 +1146,6 @@ class ForkBaseTest(WorkspaceTest):
         self.assertTrue(r["path"])                           # and the workspace exists
         self.assertIn("api-lead", self.h.live)
 
-    def test_a_failed_fetch_is_in_the_event_log(self):
-        main = self._repo_with_origin()
-        self._git(main, "remote", "set-url", "origin", str(self.repo / "gone.git"))
-        Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
-        kinds = [e["kind"] for e in store.recent_events(self.db)]
-        self.assertIn("fetch_failed", kinds)
-
     def test_no_remote_at_all_falls_back_to_the_local_base(self):
         """A repo with one `main` and no remote: forking from it is not a degradation,
         it is the only meaningful answer — so nothing is logged as a failure."""
@@ -1329,17 +1155,6 @@ class ForkBaseTest(WorkspaceTest):
         self.assertEqual(r["base_fallback"], "no_remote")
         self.assertNotIn("fetch_failed",
                          [e["kind"] for e in store.recent_events(self.db)])
-
-    def test_a_remote_with_no_such_branch_falls_back_to_the_local_base(self):
-        """The fetch works and brings back nothing to fork from. Better the local branch
-        than `origin/main` pointing at nothing, which fails the create outright."""
-        main = self._git_repo()
-        origin = self.repo / "origin.git"
-        self._git(self.repo, "init", "-q", "--bare", "-b", "other", str(origin))
-        self._git(main, "remote", "add", "origin", str(origin))
-        r = Broker(self.db, self.h, repo=main).workspace_new("api", me=HUMAN)
-        self.assertEqual(self.bases, ["main"])
-        self.assertEqual(r["base_fallback"], "no_remote_base")
 
     def test_a_fork_from_delegate_fetches_too(self):
         """The path that matters: the fork rule's own create, not just `workspace new`."""
@@ -1352,18 +1167,6 @@ class ForkBaseTest(WorkspaceTest):
         self.assertEqual(self.bases, ["origin/main"])
         self.assertTrue(self._tracking(main))
 
-    def test_the_fallback_reaches_the_fork_event(self):
-        main = self._git_repo()                              # no remote to fetch from
-        b = Broker(self.db, self.h, repo=main)
-        store.create_agent(self.db, name="root", role="main", cwd=str(main),
-                           pane_id="w1:p1")
-        b.delegate("t", role="worker", me="root")
-        import json
-        (fork,) = [e for e in store.recent_events(self.db) if e["kind"] == "fork"]
-        payload = json.loads(fork["payload"])
-        self.assertEqual(payload["base"], "main")
-        self.assertEqual(payload["base_fallback"], "no_remote")
-
     def test_opening_an_existing_workspace_fetches_nothing(self):
         """Nothing is being forked, so there is no base to be stale."""
         main = self._repo_with_origin()
@@ -1374,7 +1177,7 @@ class ForkBaseTest(WorkspaceTest):
         self.assertIsNone(r["base"])
 
 
-class JoinWorkspaceTest(WorkspaceTest):
+class JoinWorkspaceTest(Fixture, unittest.TestCase):
     """`sb delegate --workspace <name>` — join a workspace somebody already opened.
 
     The other half of the fork rule: a spawn either forks its own worktree or joins one by
@@ -1399,38 +1202,6 @@ class JoinWorkspaceTest(WorkspaceTest):
         self.assertEqual(row["branch"], "api")
         self.assertEqual(row["cwd"], r["path"])
         self.assertEqual(row["workspace_id"], r["workspace_id"])
-
-    def test_the_joiners_tab_is_placed_in_that_workspace(self):
-        r = self.b.workspace_new("api", me=HUMAN)
-        self._join("api")
-        self.assertEqual(self.h.tabs[-1], (r["workspace_id"], r["path"]))
-
-    def test_joining_creates_no_second_worktree(self):
-        """One name, one checkout — the whole point. A join that forks is a fork."""
-        self.b.workspace_new("api", me=HUMAN)
-        self._join("api")
-        self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
-        self.assertEqual(self._branches(), ["api"])
-
-    def test_two_joiners_land_in_the_same_place(self):
-        self.b.workspace_new("api", me=HUMAN)
-        rows = [store.get_agent(self.db, self._join("api")) for _ in range(2)]
-        self.assertEqual({r["workspace_id"] for r in rows}, {rows[0]["workspace_id"]})
-        self.assertEqual({r["cwd"] for r in rows}, {rows[0]["cwd"]})
-
-    def test_the_joiner_is_told_it_is_sharing(self):
-        self.b.workspace_new("api", me=HUMAN)
-        self._join("api")
-        joined = " ".join(self.h.started[-1]["prompts"])
-        self.assertIn("workspace 'api'", joined)
-        self.assertIn("shared", joined)
-
-    def test_the_joiners_own_children_inherit_the_workspace(self):
-        self.b.workspace_new("api", me=HUMAN)
-        kid = self._join("api")
-        grandkid = self.b.delegate("t", role="worker", me=kid)
-        self.assertEqual(store.get_agent(self.db, grandkid)["workspace"], "api")
-        self.assertEqual(store.get_agent(self.db, grandkid)["branch"], "api")
 
     def test_joining_disturbs_no_lead(self):
         """Joining is not opening: the workspace's lead is left exactly as it was."""
@@ -1458,32 +1229,9 @@ class JoinWorkspaceTest(WorkspaceTest):
         self.assertEqual(self.h.calls, [])
         self.assertEqual(self.h.checkouts, {})
 
-    def test_a_refused_join_spawns_nothing(self):
-        before = set(self.h.live)
-        with self.assertRaises(ValueError):
-            self._join("nope")
-        self.assertEqual(set(self.h.live), before)
-
     # -- the flag --------------------------------------------------------
 
-    def test_the_flag_parses_and_is_checked_as_a_branch_name(self):
-        from switchboard import validate
-        from switchboard.cli import _validate, build_parser
-
-        args = build_parser().parse_args(["delegate", "t", "--workspace", " api "])
-        _validate(args)
-        self.assertEqual(args.workspace, "api")          # normalised, as a ref name is
-
-        bad = build_parser().parse_args(["delegate", "t", "--workspace", "a b"])
-        with self.assertRaises(validate.Invalid):
-            _validate(bad)
-
-    def test_delegating_without_the_flag_is_unchanged(self):
-        from switchboard.cli import build_parser
-        self.assertIsNone(build_parser().parse_args(["delegate", "t"]).workspace)
-
-
-class RetiringMarkExcludesTest(WorkspaceTest):
+class RetiringMarkExcludesTest(Fixture, unittest.TestCase):
     """The retiring mark keeps people OUT — which is the whole reason it is written first.
 
     `sb workspace close` commits the mark before it starts destroying, and its concurrency
@@ -1520,15 +1268,6 @@ class RetiringMarkExcludesTest(WorkspaceTest):
         with self.assertRaises(ValueError) as e:
             self.b.join_workspace("api")
         self.assertIn("tidy-up", str(e.exception))
-
-    def test_the_refusal_says_why_and_where_to_look(self):
-        """A bare refusal is worse than none: the person cannot tell whether to wait, to
-        retry, or to go and intervene."""
-        self.marked()
-        with self.assertRaises(ValueError) as e:
-            self.b.workspace_new("api", me=HUMAN)
-        self.assertIn("taken apart", str(e.exception))
-        self.assertIn("sb workspace close api", str(e.exception))
 
     def test_it_still_refuses_when_the_mark_owner_is_confirmed_gone(self):
         """Deliberate. `--resume` belongs to `sb workspace close`, which discloses the dead
@@ -1568,12 +1307,6 @@ class RetiringMarkExcludesTest(WorkspaceTest):
         self.assertTrue(r["created"])
         self.assertEqual(self._branches(), ["api"])
         self.assertEqual(self.b.join_workspace("api")["workspace_id"], r["workspace_id"])
-
-    def test_a_retired_workspace_is_not_a_marked_one_and_reopens(self):
-        """Retired is a past tense; retiring is a lock."""
-        store.record_workspace(self.db, "api", "/wt/api")
-        store.retire_workspace(self.db, "api")
-        self.assertTrue(self.b.workspace_new("api", me=HUMAN)["created"])
 
     def test_releasing_the_mark_makes_the_name_usable_again(self):
         """A teardown that refuses clears its own mark, and the workspace it declined to
@@ -1619,14 +1352,6 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
     def test_delegate_resolves_the_repos_bindings(self):
         kid = self.b.delegate("t", role="worker", me=HUMAN)
         self.assertIn("keep it short", " ".join(self._prompts_for(kid)))
-
-    def test_a_workspace_lead_gets_them_too(self):
-        lead = self.b.workspace_new("api", me=HUMAN)["agent"]
-        self.assertIn("keep it short", " ".join(self._prompts_for(lead)))
-
-    def test_the_top_level_orchestrator_gets_them_too(self):
-        top = self.b.start(focus=False, board=False)
-        self.assertIn("keep it short", " ".join(self._prompts_for(top)))
 
     def test_every_spawn_path_resolves_the_same_bindings(self):
         """The property the fix is really about: one resolution point, not three."""

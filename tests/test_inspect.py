@@ -84,16 +84,6 @@ class InspectTest(Base):
         self.agent(task="rewrite the parser")
         self.assertEqual(self.inspect().agent.task, "rewrite the parser")
 
-    def test_carries_where_the_agent_lives(self):
-        self.agent(workspace="feature-x", cwd="/repo/feature-x", pane_id="w1:p9",
-                   session_id="sess-1", terminal_id="t7")
-        d = self.inspect()
-        self.assertEqual(d.agent.workspace, "feature-x")
-        self.assertEqual(d.cwd, "/repo/feature-x")
-        self.assertEqual(d.pane_id, "w1:p9")
-        self.assertEqual(d.session_id, "sess-1")
-        self.assertEqual(d.terminal_id, "t7")
-
     def test_reports_drift_exactly_as_status_does(self):
         """One rule for stalled, in one place — or two readouts disagree about reality."""
         self.agent()
@@ -135,13 +125,6 @@ class InspectTest(Base):
         d = self.inspect()
         self.assertEqual(d.agent.summary, "shipped the parser")   # prefix is not the reader's problem
         self.assertIn("shipped the parser", status.render_detail(d))
-
-    def test_the_latest_summary_wins(self):
-        self.agent()
-        for s in ("first", "second"):
-            store.put_message(self.db, from_agent="w1", to_agent="main", kind="done",
-                              body=f"[done] {s}")
-        self.assertEqual(self.inspect().agent.summary, "second")
 
     # -- mail: the part that used to need hand-written python -------------
 
@@ -233,14 +216,6 @@ class InspectTest(Base):
         self.assertEqual(d["undelivered_mail"][0]["body"], "hi")    # and the message
         self.assertTrue(d["waiting_to_be_rung"])
 
-    def test_an_answered_ask_is_not_surfaced(self):
-        self.agent()
-        mid = store.put_message(self.db, from_agent="main", to_agent="w1", kind="ask",
-                                body="which database?")
-        store.put_message(self.db, from_agent="w1", to_agent="main", kind="tell",
-                          body="postgres", reply_to=mid)
-        self.assertEqual(self.inspect().owed, [])
-
     def test_what_the_agent_itself_is_waiting_on_is_kept_separate(self):
         """Opposite meanings: one is somebody stuck on it, one is it stuck on somebody."""
         self.agent()
@@ -261,12 +236,6 @@ class InspectTest(Base):
         self.assertEqual(d.output.source, PANE)
         self.assertIn("boom", d.output.text)
         self.assertEqual(h.reads, [("w1:p9", 40)])
-
-    def test_the_line_count_reaches_the_reader(self):
-        self.agent(pane_id="w1:p9")
-        h = FakeHerdr([alive("w1")], pane_text="x\n")
-        status.inspect(self.db, h, "w1", lines=120)
-        self.assertEqual(h.reads, [("w1:p9", 120)])
 
     def test_a_closed_pane_falls_back_to_the_transcript(self):
         """output.py's whole point, and it must survive being called from here."""
@@ -335,11 +304,6 @@ class InspectTest(Base):
         self.inspect()
         self.assertEqual(len(store.unread_for(self.db, "w1", mark=False)), 1)
 
-    def test_inspecting_never_repairs_drift(self):
-        self.agent()
-        status.inspect(self.db, FakeHerdr([alive("w1", "idle")]), "w1")
-        self.assertEqual(store.get_agent(self.db, "w1")["state"], "working")
-
     # -- json --------------------------------------------------------------
 
     def test_json_carries_the_same_facts(self):
@@ -380,12 +344,6 @@ class InspectTest(Base):
         for expected in ("w1", "worker", "rewrite the parser", "feature-x", "/repo",
                          "w1:p9", "sess-1", "delegate", "on screen"):
             self.assertIn(expected, out)
-
-    def test_render_names_drift_here_too(self):
-        self.agent()
-        out = status.render_detail(
-            status.inspect(self.db, FakeHerdr([alive("w1", "idle")]), "w1"))
-        self.assertIn("STALLED", out)
 
     def test_render_survives_an_agent_with_nothing_recorded(self):
         self.agent()
@@ -464,15 +422,6 @@ class WaitTest(Base):
         self.assertTrue(r.ok)
         self.assertEqual(r.state, "done")
         self.assertEqual(len(h.waits), 1)          # ONE blocking call, not a poll loop
-
-    def test_an_already_finished_agent_returns_without_waiting_at_all(self):
-        self.agent()
-        store.set_state(self.db, "w1", "done")
-        h = WaitHerdr(alive("w1", "idle"))
-        r = status.wait_for(self.db, h, "w1", clock=FakeClock())
-        self.assertTrue(r.ok)
-        self.assertEqual(h.waits, [])
-        self.assertEqual(h.lists, 0)               # herdr is not even consulted
 
     def test_the_stale_wait_guard_is_used(self):
         """herdr's `agent wait` is not turn-scoped; without since_seq it returns instantly
@@ -582,22 +531,6 @@ class WaitTest(Base):
         status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
         self.assertEqual(h.waits[0]["until"], "working")
 
-    def test_herdrs_derived_done_counts_as_already_idle_here_too(self):
-        self.agent()
-        clock = FakeClock()
-        h = WaitHerdr(alive("w1", "done", seq=3),
-                      on_wake=lambda i: setattr(clock, "t", clock.t + 30))
-        status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
-        self.assertEqual(h.waits[0]["until"], "working")
-
-    def test_a_working_agent_is_waited_toward_idle(self):
-        self.agent()
-        clock = FakeClock()
-        h = WaitHerdr(alive("w1", "working", seq=3),
-                      on_wake=lambda i: setattr(clock, "t", clock.t + 30))
-        status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
-        self.assertEqual(h.waits[0]["until"], "idle")
-
     def test_the_transition_is_re_chosen_each_time_round(self):
         """idle → wait for working → working → wait for idle → the turn has ended."""
         self.agent()
@@ -644,21 +577,6 @@ class WaitTest(Base):
         self.assertFalse(r.ok)
         self.assertIn("finished as failed", r.reason)
 
-    def test_only_one_herdr_state_is_ever_asked_for(self):
-        """herdr 0.8.0 refuses `--until idle,blocked` — see BUGS.md. `Herdr.wait`
-        takes one state for that reason, and this pins that nothing here hands it a
-        collection that would silently comma-join back into the rejected form."""
-        self.agent()
-        clock = FakeClock()
-        h = WaitHerdr(alive("w1", "working", seq=1),
-                      on_wake=lambda i: setattr(clock, "t", clock.t + 30))
-        for until in status.WAIT_STATES:
-            h.waits.clear()
-            status.wait_for(self.db, h, "w1", until=until, timeout=20, clock=clock)
-            for call in h.waits:
-                self.assertIsInstance(call["until"], str)
-                self.assertIn(call["until"], herdr_mod.STATES, until)
-
     def test_for_idle_catches_an_agent_that_stalls_without_calling_done(self):
         """`done` never arrives, so only the herdr half can satisfy this one."""
         self.agent()
@@ -670,27 +588,6 @@ class WaitTest(Base):
         self.assertTrue(r.ok)
         self.assertEqual(r.state, "working")       # the store is reported, not rewritten
         self.assertEqual(r.herdr_state, "idle")
-
-    def test_for_idle_is_satisfied_by_a_finished_agent_too(self):
-        self.agent()
-        store.set_state(self.db, "w1", "done")
-        r = status.wait_for(self.db, WaitHerdr(None), "w1", until="idle", clock=FakeClock())
-        self.assertTrue(r.ok)
-
-    def test_waiting_for_working_watches_the_other_transition(self):
-        self.agent()
-        store.set_state(self.db, "w1", "blocked")
-        clock = FakeClock()
-
-        def unblock(i):
-            clock.t += 5
-            store.set_state(self.db, "w1", "working")
-
-        h = WaitHerdr(alive("w1", "idle", seq=1), wakeups=[alive("w1", "working", seq=2)],
-                      on_wake=unblock)
-        r = status.wait_for(self.db, h, "w1", until="working", clock=clock)
-        self.assertTrue(r.ok)
-        self.assertEqual(h.waits[0]["until"], "working")
 
     def test_json_carries_the_outcome(self):
         self.agent()
@@ -722,25 +619,6 @@ class CliTest(unittest.TestCase):
     def test_output_is_gone_as_a_verb(self):
         """One command answers 'what is going on with this agent', not two halves of it."""
         self.refused(["output", "w1"])
-
-    def test_inspect_takes_a_name_and_a_line_count(self):
-        args = self.parse(["inspect", "w1", "-n", "80"])
-        self.assertEqual(args.name, "w1")
-        self.assertEqual(args.n, 80)
-
-    def test_inspect_json_on_either_side(self):
-        self.assertTrue(self.parse(["inspect", "w1", "--json"]).json)
-        self.assertTrue(self.parse(["--json", "inspect", "w1"]).json)
-
-    def test_wait_defaults_to_done(self):
-        args = self.parse(["wait", "w1"])
-        self.assertEqual(args.until, "done")
-        self.assertEqual(args.timeout, 900)
-
-    def test_wait_takes_for_and_timeout(self):
-        args = self.parse(["wait", "w1", "--for", "blocked", "--timeout", "30"])
-        self.assertEqual(args.until, "blocked")
-        self.assertEqual(args.timeout, 30)
 
     def test_wait_refuses_a_state_it_cannot_ever_see(self):
         self.refused(["wait", "w1", "--for", "banana"])

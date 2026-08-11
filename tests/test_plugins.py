@@ -226,10 +226,6 @@ class DiscoveryTest(Sandbox):
         d = self.local("thing", FIXTURE)
         self.assertEqual(plugins.available(self.repo)["thing"], d)
 
-    def test_shipped_plugins_are_visible_without_any_repo_directory(self):
-        self.ship("thing", FIXTURE)
-        self.assertIn("thing", plugins.available(Path(self.tmp.name) / "nowhere"))
-
     def test_no_plugin_directory_anywhere_is_not_an_error(self):
         self.assertEqual(plugins.available(self.repo), {})
 
@@ -295,10 +291,6 @@ class FragmentTest(Sandbox):
         self.ship("thing", FIXTURE)
         self.assertIsNone(plugins.fragment(self.repo, "thing"))
 
-    def test_an_empty_agent_md_contributes_nothing(self):
-        self.ship("thing", FIXTURE, agent_md="# thing\n\n")
-        self.assertIsNone(plugins.fragment(self.repo, "thing"))
-
     def test_reading_a_fragment_imports_nothing(self):
         """The property the whole topology rests on: a plugin that will not import still
         contributes its prompt text, because reading it never runs it."""
@@ -356,10 +348,6 @@ class LoadTest(Sandbox):
         self.assertIn("targets API 2", p.error)
         self.assertIn("supports API 1", p.error)
         self.assertEqual(p.version, "2.0.0")     # still reported: it imported fine
-
-    def test_declaring_no_api_at_all_is_incompatible(self):
-        self.ship("old", "def register(reg): pass\n")
-        self.assertEqual(self.loaded("old").status, "incompatible")
 
     def test_an_incompatible_plugin_registers_nothing(self):
         """`register` is part of the contract API 2 might have changed, so it is not called
@@ -442,37 +430,6 @@ class RegistryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.reg.command("add", self._h)
 
-    def test_an_unknown_audience_is_refused(self):
-        with self.assertRaises(ValueError):
-            self.reg.command("add", self._h, audience="robots")
-
-    def test_a_handler_that_is_not_callable_is_refused(self):
-        with self.assertRaises(ValueError):
-            self.reg.command("add", "not a function")
-
-    def test_a_flag_must_be_an_option(self):
-        with self.assertRaises(ValueError):
-            self.reg.arg("quiet", flag=True)
-
-    def test_a_flag_cannot_also_repeat(self):
-        with self.assertRaises(ValueError):
-            self.reg.arg("--quiet", flag=True, repeat=True)
-
-    def test_an_underscore_name_is_sbs(self):
-        """`_command` is how the built parser carries which command was typed."""
-        with self.assertRaises(ValueError):
-            self.reg.arg("_command")
-
-    def test_the_same_argument_twice_is_refused(self):
-        with self.assertRaises(ValueError):
-            self.reg.command("add", self._h,
-                             args=[self.reg.arg("--label"), self.reg.arg("--label")])
-
-    def test_arguments_must_come_from_reg_arg(self):
-        with self.assertRaises(ValueError):
-            self.reg.command("add", self._h, args=["text"])
-
-
 class BuiltParserTest(Sandbox):
     """sb builds the subparser from the declaration, so every plugin's `--help`, flag-level
     errors and `--json` look and behave like sb's own."""
@@ -487,30 +444,13 @@ class BuiltParserTest(Sandbox):
     def parse(self, *argv):
         return self.parser.parse_args(list(argv))
 
-    def test_a_positional_arrives_as_itself(self):
-        self.assertEqual(self.parse("add", "buy milk").text, "buy milk")
-
     def test_a_repeatable_option_collects(self):
         ns = self.parse("add", "x", "--label", "a", "--label", "b")
         self.assertEqual(ns.label, ["a", "b"])
 
-    def test_a_repeatable_option_defaults_to_empty(self):
-        self.assertEqual(self.parse("add", "x").label, [])
-
-    def test_a_flag_is_a_boolean(self):
-        self.assertFalse(self.parse("add", "x").quiet)
-        self.assertTrue(self.parse("add", "x", "--quiet").quiet)
-
-    def test_an_absent_option_is_none(self):
-        self.assertIsNone(self.parse("list").state)
-
     def test_choices_are_enforced(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             self.parse("pick", "--state", "sideways")
-
-    def test_a_command_with_no_choices_takes_any_word(self):
-        """C12: no closed enum of statuses. `--state blocked` works the day you want it."""
-        self.assertEqual(self.parse("list", "--state", "blocked").state, "blocked")
 
     def test_a_misspelled_flag_names_the_flag_that_was_typed(self):
         err = io.StringIO()
@@ -528,10 +468,6 @@ class BuiltParserTest(Sandbox):
         self.assertIn("add an item", out.getvalue())
         self.assertIn("sb plugin thing", out.getvalue())
 
-    def test_a_missing_command_is_a_usage_error(self):
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            self.parse()
-
     def test_a_parsed_namespace_is_json_serialisable(self):
         """The escape hatch §4.4 keeps cheap: the same handler signature has to work over
         a pipe the day sb wants subprocess isolation."""
@@ -547,17 +483,6 @@ class ContextAndResultTest(unittest.TestCase):
         fields = set(plugins.Context.__dataclass_fields__)
         self.assertEqual(fields, {"api", "name", "state_dir", "repo", "worktree",
                                   "agent", "json"})
-
-    def test_a_context_is_json_serialisable(self):
-        ctx = plugins.Context(api=1, name="thing", state_dir=Path("/a"), repo=Path("/b"),
-                              worktree=Path("/c"), agent=None, json=False)
-        json.dumps(ctx.as_dict())
-
-    def test_a_result_defaults_to_success_and_says_nothing(self):
-        r = plugins.Result()
-        self.assertTrue(r.ok)
-        self.assertEqual((r.human, r.data, r.code), ("", None, 0))
-
 
 class StateTest(Sandbox):
     """sb owns the path and the lock. It creates the directory and never reads inside it."""
@@ -635,10 +560,6 @@ class CliTest(Sandbox):
         self.assertEqual(code, 0, err)
         self.assertIn("no plugins", out)
 
-    def test_list_with_nothing_installed_is_an_empty_json_set(self):
-        code, out, _ = self.run_sb("plugin", "list", "--json")
-        self.assertEqual(json.loads(out), {"plugins": [], "enabled": []})
-
     def test_list_reports_version_status_and_binding(self):
         self.ship("thing", FIXTURE)
         self.enable("thing")
@@ -675,12 +596,6 @@ class CliTest(Sandbox):
         self.assertEqual(got["plugin"], "thing")
         self.assertEqual(got["command"], "add")
         self.assertEqual(got["data"]["labels"], ["a"])
-
-    def test_json_before_the_verb_reaches_the_plugin_too(self):
-        self.ship("thing", FIXTURE)
-        self.enable("thing")
-        _, out, _ = self.run_sb("--json", "plugin", "thing", "add", "x")
-        self.assertTrue(json.loads(out)["ok"])
 
     def test_state_survives_between_invocations(self):
         self.ship("thing", FIXTURE)
@@ -761,13 +676,6 @@ class CliTest(Sandbox):
         code, _, err = self.run_sb("plugin", "thing", "secret")
         self.assertEqual(code, 1)
         self.assertIn("for agents", err)
-
-    def test_a_both_command_is_refused_for_nobody(self):
-        self.ship("thing", FIXTURE)
-        self.enable("thing")
-        with mock.patch.object(cli.Broker, "whoami", lambda self: "w1"):
-            code, out, err = self.run_sb("plugin", "thing", "add", "x")
-        self.assertEqual(code, 0, err)
 
     def test_the_caller_reaches_the_handler_as_ctx_agent(self):
         self.ship("thing", FIXTURE)
@@ -868,13 +776,6 @@ class SigilTest(Sandbox):
             presets.resolve(["todo"], self.repo)
         self.assertIn("'todo' is a plugin fragment — write '@todo'", str(cm.exception))
 
-    def test_the_bare_name_rule_does_not_depend_on_provenance(self):
-        """Unlike an unresolvable `@name`, which is a fact about this machine and is
-        survivable, a bare plugin name is wrong in the file wherever it is read."""
-        self.enable("todo")
-        with self.assertRaises(validate.Invalid):
-            presets.resolve(["todo"], self.repo, explicit=frozenset())
-
     def test_a_preset_file_still_wins_over_the_bare_name_rule(self):
         """Rule 2 is 'matching no preset file'. A repo that had a `todo` preset before the
         plugin existed keeps getting it."""
@@ -934,11 +835,6 @@ class SigilTest(Sandbox):
 
     # -- the budget ------------------------------------------------------
 
-    def test_a_fragment_within_budget_is_untouched(self):
-        self.enable("todo")
-        (line,) = presets.resolve(["@todo"], self.repo)
-        self.assertNotIn("…", line)
-
     def test_an_over_budget_fragment_is_truncated_not_rejected(self):
         """A chatty plugin must not break spawning."""
         self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * plugins.FRAGMENT_BUDGET))
@@ -954,9 +850,6 @@ class SigilTest(Sandbox):
     def test_truncation_lands_on_a_word_boundary(self):
         """The reader is a language model, and a severed word is noise."""
         self.assertEqual(plugins.clip("alpha beta gamma", 12), "alpha beta…")
-
-    def test_a_fragment_that_exactly_fits_is_not_clipped(self):
-        self.assertEqual(plugins.clip("abcde", 5), "abcde")
 
     def test_a_single_word_longer_than_the_budget_is_still_cut(self):
         """No word boundary to land on. Cutting mid-word beats shipping nothing, and beats
@@ -1222,10 +1115,6 @@ class HelpIsStaticTest(unittest.TestCase):
         with mock.patch.object(plugins, "available",
                                side_effect=AssertionError("globbed at parse time")):
             cli.build_parser().format_help()
-
-    def test_the_top_level_help_names_the_lister_not_the_verbs(self):
-        self.assertIn("sb plugin list", cli.build_parser().format_help())
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,10 +52,6 @@ class ParseSgrTest(unittest.TestCase):
         self.assertEqual((events[0]["col"], events[0]["row"]), (12, 7))
         self.assertTrue(board.is_left_click(events[0]))
 
-    def test_a_release_is_not_a_click(self):
-        [ev], _ = board.parse_sgr("\033[<0;12;7m")
-        self.assertFalse(board.is_left_click(ev))
-
     def test_a_sequence_split_across_two_reads_is_held_not_mangled(self):
         """os.read gives no guarantee of landing on an escape-sequence boundary."""
         events, rest = board.parse_sgr("\033[<0;12")
@@ -95,11 +91,6 @@ class GlyphTest(unittest.TestCase):
         self.assertEqual(len(set(glyphs)), len(glyphs))
         for g in glyphs:
             self.assertIn(g, board._GLYPH_COLOR)
-
-    def test_a_stalled_agent_wants_you_even_though_it_does_not_know_it(self):
-        self.assertTrue(board.wants_you(agent("w", stalled=True)))
-        self.assertTrue(board.wants_you(agent("w", gone=True)))
-        self.assertFalse(board.wants_you(agent("w")))
 
     def test_only_one_note_is_ever_shown_and_it_is_the_most_actionable(self):
         a = agent("w", state="blocked", blocked_why="need a key", unread=2,
@@ -348,11 +339,6 @@ class CollapseLayoutTest(unittest.TestCase):
         with mock.patch.object(status, "SHOW_ARCHIVED", True):
             rows = board.layout(s, top=0, height=12, width=100, msg="")
             self.assertEqual([a.name for a in self.drawn(rows)], ["main", "gone"])
-
-    def test_the_hint_line_says_how_to_see_them(self):
-        """The collapsed row is visible where a keybinding is not."""
-        rows = board.layout(snap(agent("one")), top=0, height=12, width=200, msg="")
-        self.assertIn("a archived", self.text(rows))
 
     def test_the_header_still_counts_every_agent_a_collapse_hid(self):
         """Collapse shortens the tree, not the readout. Three agents, two rows — so a

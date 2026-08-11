@@ -87,9 +87,35 @@ def repo_dir(repo: Optional[Path]) -> Optional[Path]:
     return Path(repo) / _shipped_settings()["paths"]["repo_dir"]
 
 
+def shared_dir(repo: Optional[Path]) -> Optional[Path]:
+    """A repo's COMMITTED config directory, or None if there is no repo in play.
+
+    The layer between the shipped one and `.switchboard/`. It exists because `.switchboard/`
+    cannot travel: it is gitignored, and in a worktree it is a symlink git refuses to track
+    through — so a repo's own rules for its own agents reached nobody who cloned it, least
+    of all the throwaway clones our verification method runs in.
+
+    Its name comes from the shipped layer only, for the same reason `repo_dir`'s does.
+    """
+    if repo is None:
+        return None
+    return Path(repo) / _shipped_settings()["paths"]["shared_dir"]
+
+
 def path_for(key: str, repo: Optional[Path] = None) -> Optional[Path]:
     """A `[paths]` entry resolved inside the repo's config directory."""
     d = repo_dir(repo)
+    return None if d is None else d / setting(f"paths.{key}", repo=repo)
+
+
+def shared_path_for(key: str, repo: Optional[Path] = None) -> Optional[Path]:
+    """`path_for(key)`, resolved inside the repo's committed config directory instead.
+
+    Same key names, so `presets.toml` is `presets.toml` in whichever layer you are looking
+    at. No legacy fallback and none is owed: this directory is new, so nothing in it can be
+    on a pre-rename spelling.
+    """
+    d = shared_dir(repo)
     return None if d is None else d / setting(f"paths.{key}", repo=repo)
 
 
@@ -469,15 +495,19 @@ def prompt(dotted: str, repo: Optional[Path] = None, **fields: Any) -> str:
 def preset_bindings(repo: Optional[Path] = None) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
     """`(applied to every agent, per-role additions)`, shipped joined with the repo's.
 
-    Joined, not replaced: a repo adding one binding must not wipe the shipped ones. See
-    `join` for the `"!reset"` escape hatch when replacing really is what you mean.
+    Three layers, most general first: shipped, the repo's committed `shared_dir`, then the
+    local `.switchboard/`. Joined, not replaced: a repo adding one binding must not wipe the
+    shipped ones, and a machine-local binding must not wipe the repo's own. See `join` for
+    the `"!reset"` escape hatch when replacing really is what you mean.
 
     A repo still holding the pre-rename `plugins.toml` is read from there — see
     `path_for_legacy`.
     """
     shipped = read_toml(defaults_dir() / "presets.toml")
+    s = shared_path_for("presets_file", repo)
     p = path_for_legacy("presets_file", "plugins_file", repo)
-    data = merge(shipped, read_toml(p) if p is not None else {})
+    data = merge(shipped, read_toml(s) if s is not None else {})
+    data = merge(data, read_toml(p) if p is not None else {})
     every = tuple(data.get("all") or ())
     per_role = {k: tuple(v) for k, v in (data.get("roles") or {}).items()}
     return every, per_role

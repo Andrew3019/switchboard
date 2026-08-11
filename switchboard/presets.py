@@ -1,7 +1,9 @@
 """Presets — drop-in prompt text, per repo.
 
-A preset is one markdown file in `<repo>/.switchboard/presets/<name>.md`. Adding a
-behaviour means adding a file; nothing registers it, nothing imports it.
+A preset is one markdown file in `<repo>/.switchboard-shared/presets/<name>.md` if everyone
+who clones the repo should have it, or `<repo>/.switchboard/presets/<name>.md` if only this
+machine should. Adding a behaviour means adding a file; nothing registers it, nothing
+imports it.
 
     sb delegate "review PR 42" --role reviewer --with evidence --with @report-bug
     sb presets adversarial                       read one instead of being spawned with it
@@ -115,17 +117,25 @@ def bindings_file(repo: Path) -> Optional[Path]:
     return config.path_for_legacy("presets_file", "plugins_file", repo)
 
 
-def available(repo: Path) -> dict[str, Path]:
-    """Every preset this repo can name — shipped ones, then the repo's own.
+def shared_preset_dir(repo: Path) -> Optional[Path]:
+    """The repo's COMMITTED presets — see `config.shared_dir`. This is where a preset goes
+    when everyone who clones the repo should have it, `.switchboard/presets/` where it goes
+    when only this machine should."""
+    return config.shared_path_for("presets_dir", repo)
 
-    Layered like everything else in `defaults/`: a repo's `<name>.md` replaces the shipped
-    one of that name, and a repo with no preset directory still gets all the shipped ones.
-    Without this the shipped `presets.toml` bound names to files that only existed in an
-    untracked directory, so a fresh clone had bindings pointing at nothing.
+
+def available(repo: Path) -> dict[str, Path]:
+    """Every preset this repo can name — shipped, then committed, then machine-local.
+
+    Layered like everything else in `defaults/`: a `<name>.md` in a later layer replaces the
+    earlier one of that name, and a repo with no preset directory at all still gets the
+    shipped ones. Without this the shipped `presets.toml` bound names to files that only
+    existed in an untracked directory, so a fresh clone had bindings pointing at nothing —
+    and the same held for a repo's own house rules until the committed layer existed.
     """
     found: dict[str, Path] = {}
     shipped = config.defaults_dir() / "presets"
-    for d in (shipped, preset_dir(repo)):
+    for d in (shipped, shared_preset_dir(repo), preset_dir(repo)):
         if d is None or not d.is_dir():
             continue
         found.update({f.stem: f for f in sorted(d.glob("*.md"))})
