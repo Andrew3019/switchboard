@@ -323,6 +323,15 @@ pin_ms = 5000
 # will spawn — measured at 77% of a core for a six-second wait.
 agent_wait_backoff = 0.5
 
+# How long a spawn waits for its turn at creating a worktree. Only ONE `worktree create`
+# per repo may run at a time (`Broker._fork_lock`), so in a fan-out the others queue here.
+# The wait is a queue, not a hang: a creation is a fraction of a second of git plus herdr
+# opening the workspace, so six of them clear in a couple of seconds and this number is
+# nowhere near being reached. It exists so that a wedged holder — a herdr that never
+# returns — costs a waiter a bounded wait and then an ordinary attempt, rather than a
+# process blocked for ever on a lock nobody will release.
+fork_lock = 120.0
+
 
 [retries]
 # Spawn is genuinely flaky — `agent start` fails outright if the pane has not yet reached
