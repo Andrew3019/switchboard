@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""The Stop hook's entry point. Payload on stdin, hook response on stdout, always exit 0.
+
+Deliberately NOT a `sb` subcommand: every `sb` invocation is also a tick of the doorbell
+(`cli.main` calls `flush_pending`), and this runs at the exact moment a turn is ending —
+ringing an agent's own doorbell there would inject a poke into the turn it is finishing.
+The gate reads the store, decides, and touches nothing else.
+
+Exit 0 whatever happens: a hook that fails is a hook that lets the turn end, and the
+decision it does make travels in the JSON, not in the exit code.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+
+
+def main() -> int:
+    db = None
+    argv = sys.argv[1:]
+    if "--db" in argv:
+        i = argv.index("--db")
+        if i + 1 < len(argv):
+            db = argv[i + 1]
+    try:
+        from switchboard import hooks
+        out = hooks.run(sys.stdin.read(), db_path=db)
+    except Exception as e:                       # noqa: BLE001 — never trap an agent
+        print(f"sb-stop-hook: {e}", file=sys.stderr)
+        return 0
+    if out:
+        print(json.dumps(out))
+    return 0
+
+
+raise SystemExit(main())

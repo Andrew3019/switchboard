@@ -1,7 +1,7 @@
 """The `sb` command — the only surface agents ever see.
 
-Seven verbs for agents (`delegate`, `ask`, `tell`, `inbox`, `done`, `block`, `status`), a
-few more for the human (`init`, `doctor`, `cleanup`, `restore`, `interrupt`, `inspect`,
+Six verbs for agents (`delegate`, `tell`, `inbox`, `done`, `block`, `status`), a
+few more for the human (`init`, `doctor`, `cleanup`, `restore`, `inspect`,
 `wait`, `log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
 than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
 says what this repo has.
@@ -17,7 +17,7 @@ own subcommand list so a verb added later cannot quietly miss it.
 
 Arguments are checked here and nowhere else (see `_validate` and validate.py). This is
 the last point where an error can name the flag the caller typed: below it, a bad value
-comes back as a herdr error code, or as an `ask` that blocks for its whole timeout.
+comes back as a herdr error code, far from the caller that caused it.
 """
 
 from __future__ import annotations
@@ -127,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
     # something. An agent has no use for it and is not taught it.
     cmd("flush", hidden=True)
 
+    # Hidden for the same reason, and the same shape: the verb the collector's loop runs so
+    # that an agent whose turn ended without `sb done` or `sb block` is told so. The
+    # decision lives in `Broker.reconcile`, running here in a short-lived process on current
+    # code, because the loop that triggers it is version-stale by design (collector module
+    # note). An agent has no use for it and is not taught it.
+    cmd("reconcile", hidden=True)
+
     d = cmd("delegate", help="spawn a child agent to do a task")
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
@@ -143,19 +150,29 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--keep", action="store_true", help="do not auto-close when finished")
     d.add_argument("--ephemeral", action="store_true", help="close as soon as it finishes")
 
-    a = cmd("ask", help="send a question and WAIT for the answer")
-    # Agents only. `human` is still an accepted SHAPE here (validate.target) so the broker
-    # can answer it with a sentence naming `sb block`, rather than argparse answering it
-    # with a usage dump that teaches nobody anything.
-    a.add_argument("who", nargs="+", help="agent name(s) or 'parent' — not the human, "
-                                          "who is reached with `sb block`")
-    a.add_argument("question")
-    a.add_argument("--timeout", type=int, default=broker_mod.ASK_TIMEOUT)
-
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
     t.add_argument("message")
-    t.add_argument("--re", dest="reply_to", type=int, help=argparse.SUPPRESS)
+    # Says what it does to the RECIPIENT, because what it does to the sender is nothing:
+    # `tell` still returns immediately, and no agent ever waits on another agent.
+    t.add_argument("--needs-reply", action="store_true",
+                   help="tell them you are waiting for a reply — they are asked to answer "
+                        "at some point. You do not wait: this returns immediately")
+    # The three delivery modes (DESIGN-TRUTH.md:236-247). Mutually exclusive because they
+    # are one choice with three answers, and argparse saying so beats the broker raising on
+    # a combination that was never meant to exist. No `--next-turn` flag: the default is
+    # the answer for almost every message, and a flag for it would only invite the reader
+    # to think there is a fourth thing to decide.
+    m = t.add_mutually_exclusive_group()
+    m.add_argument("--when-idle", dest="mode", action="store_const",
+                   const=broker_mod.WHEN_IDLE,
+                   help="hold it until they have finished what they are doing. The "
+                        "default reaches them at their next step, which is sooner")
+    m.add_argument("--interrupt", dest="mode", action="store_const",
+                   const=broker_mod.INTERRUPT,
+                   help="CANCEL what they are doing and deliver this instead — for "
+                        "changing course, not for being quick")
+    t.set_defaults(mode=broker_mod.NEXT_TURN)
 
     # Agents only. A human has no mailbox — see the `inbox` branch in `run`.
     ib = cmd("inbox", help="read your unread messages")
@@ -302,14 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     r = cmd("restore", help="bring a closed agent back with its context")
     r.add_argument("name")
 
-    i = cmd("interrupt", help="change an agent's course mid-flight")
-    i.add_argument("name")
-    i.add_argument("text")
-
     ins = cmd(
         "inspect", help="everything about ONE agent, including its recent terminal output",
         description="What is going on with this agent: its task, state, drift, workspace, "
-                    "mail (including any ask nobody has answered), last summary, recent "
+                    "mail, last summary, recent "
                     "events, and the tail of its terminal — live pane if it has one, the "
                     "on-disk transcript if it does not.")
     ins.add_argument("name")
@@ -384,14 +397,17 @@ def _validate(args) -> None:
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
 
-    elif cmd == "ask":
-        args.who = validate.targets(args.who)
-        args.question = validate.text(args.question, "question")
-        args.timeout = validate.positive_int(args.timeout, "--timeout")
-
     elif cmd == "tell":
         args.who = validate.targets(args.who)
-        args.message = validate.text(args.message, "message")
+        # An interrupt's text travels INLINE — it is the prompt herdr sends, and herdr
+        # refuses any agent argument holding a newline. The other two modes only ring a
+        # fixed doorbell, so their body never reaches that call and may be as long and as
+        # multi-line as the sender likes. Checked here rather than left to herdr, which
+        # would fail after the escape keypress had already cancelled the target's turn.
+        if args.mode == broker_mod.INTERRUPT:
+            args.message = validate.line(args.message, "message")
+        else:
+            args.message = validate.text(args.message, "message")
 
     elif cmd == "done":
         # herdr carries the summary as `report-agent --message`, so one line.
@@ -418,10 +434,6 @@ def _validate(args) -> None:
 
     elif cmd == "restore":
         args.name = validate.agent_name(args.name)
-
-    elif cmd == "interrupt":
-        args.name = validate.agent_name(args.name)
-        args.text = validate.line(args.text, "text")
 
     elif cmd == "inspect":
         args.name = validate.agent_name(args.name)
@@ -613,6 +625,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         _emit(args, f"rang {', '.join(rung)}" if rung else "rang nobody", {"rung": rung})
         return 0
 
+    if args.cmd == "reconcile":
+        # Never fatal, for `flush`'s reason turned around: this one runs unattended on the
+        # collector's timer, so a failure has nobody to read it and must not be a traceback
+        # in a spawned process — it is a line in the log the next `sb log` shows.
+        try:
+            pinged = b.reconcile()
+        except Exception as e:                   # noqa: BLE001 — best effort, always
+            store.log_event(db, kind="reconcile_failed", error=str(e))
+            print(f"sb: reconcile: {e}", file=sys.stderr)
+            return 1
+        _emit(args, f"pinged {', '.join(pinged)}" if pinged else "pinged nobody",
+              {"pinged": pinged})
+        return 0
+
     try:
         return _dispatch(args, b, db, h)
     except HerdrError as e:
@@ -656,6 +682,20 @@ def _reason(e: Exception) -> str:
     error shape for the same class of mistake.
     """
     return str(e.args[0]) if isinstance(e, KeyError) and e.args else str(e)
+
+
+def _needs_reply(m) -> bool:
+    """Whether this message's sender said it is waiting for a reply.
+
+    Tolerant of the column being absent, which is a real state and not a hypothetical: a
+    store kept on the old shape because a live fleet was running (`store.schema_deficit`)
+    hands back rows without it, and a `sb inbox` that raised there would take an agent's
+    whole mailbox down over a flag. No column means no such message was ever sent.
+    """
+    try:
+        return bool(m["needs_reply"])
+    except (IndexError, KeyError):
+        return False
 
 
 def _dispatch(args, b: Broker, db, h: Herdr) -> int:
@@ -773,16 +813,9 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
               {"name": name, "workspace": join.get("workspace"), "unconfirmed": note})
         return 0
 
-    if cmd == "ask":
-        answers = b.ask(args.who, args.question, me=me, timeout=args.timeout)
-        missing = [k for k, v in answers.items() if v is None]
-        lines = [f"{k}: {v if v is not None else '(no answer — timed out)'}"
-                 for k, v in answers.items()]
-        _emit(args, "\n".join(lines), answers)
-        return 1 if missing else 0
-
     if cmd == "tell":
-        ids = b.tell(args.who, args.message, me=me, reply_to=args.reply_to)
+        ids = b.tell(args.who, args.message, me=me,
+                     needs_reply=args.needs_reply, mode=args.mode)
         # Whether the doorbell actually rang. `tell` used to report plain success even
         # when the ring failed outright, so the sender proceeded believing the handoff had
         # happened — liveness loss, which in an async system is worse than an error.
@@ -815,8 +848,14 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         lost = [n for n in lost if n not in closed]
         notes = []
         if waiting:
-            notes.append(f"{', '.join(waiting)} mid-turn or blocked — will be rung "
-                         f"when free")
+            # Being mid-turn only holds a message back in `--when-idle`; the default rings
+            # a working agent on the spot. So the two modes get told different things, and
+            # neither is told the other's reason: under the default, a target still waiting
+            # is one that has STOPPED for a person, and "mid-turn" would send the sender
+            # looking for a turn that is not running.
+            why = ("mid-turn or blocked" if args.mode == broker_mod.WHEN_IDLE
+                   else "blocked, waiting on the human")
+            notes.append(f"{', '.join(waiting)} {why} — will be rung when free")
         if lost:
             notes.append(f"{', '.join(lost)} UNREACHABLE — herdr no longer answers to its "
                          f"name and the doorbell will not ring again; the message is "
@@ -850,7 +889,19 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         if not msgs:
             _emit(args, "(no new messages)", {"messages": []})
             return 0
-        lines = [f"[{m['id']}] from {m['from_agent']}: {m['body']}" for m in msgs]
+        # A `--needs-reply` message reads exactly like any other until this line: the flag
+        # is a claim on the reader, and the reader only ever meets it here. Appended as its
+        # own line under the message rather than folded into the body, so the body stays
+        # what the sender typed.
+        lines = []
+        for m in msgs:
+            # `broker.tag`, not a second spelling of it: this line and the doorbell that
+            # sent the reader here are the same claim about the same message, and they used
+            # to disagree — `[3] from w1:` here, no sender at all there.
+            lines.append(f"[{m['id']}] {broker_mod.tag(m['from_agent'])} {m['body']}")
+            if _needs_reply(m):
+                lines.append("    " + config.prompt("notify.needs_reply", b.repo,
+                                                    who=m["from_agent"]))
         _emit(args, "\n".join(lines),
               {"messages": [dict(m) for m in msgs]})
         return 0
@@ -995,11 +1046,6 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "restore":
         b.restore(args.name)
         _emit(args, f"restored {args.name}", {"name": args.name})
-        return 0
-
-    if cmd == "interrupt":
-        b.interrupt(args.name, args.text)
-        _emit(args, f"interrupted {args.name}", {"name": args.name})
         return 0
 
     if cmd == "inspect":
@@ -1210,7 +1256,7 @@ def _plugin_run(args, b: Broker, db, me: str) -> int:
 
     `audience` is enforced here rather than inside the plugin: declared once, and
     impossible for a plugin author to forget (C6). The refusal names what to do instead,
-    the same treatment `sb ask human` gets.
+    the same treatment a message addressed to the human gets.
     """
     p, c = args.plugin, args.command
     agent = None if me == HUMAN else me

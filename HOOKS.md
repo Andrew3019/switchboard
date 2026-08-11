@@ -1,3 +1,29 @@
+# ✅ BUILT — the Stop hook exists (2026-08-11)
+
+`switchboard/hooks.py` is the gate, `bin/sb-stop-hook` runs it, and
+`herdr.start_agent` passes `--settings <file>` on every spawn and every restore. The scope
+pass, the decision table and the live proof are in `audit/phase3.8-scope.md`. Read that and
+the code; everything below is design notes from before it was built, and the sections after
+the correction are still the unverified research the correction warns about.
+
+Two things the build learned that the notes below get wrong or do not say:
+
+- **The gate is not an `events` query.** It reads the agent's `state` — `done`, `blocked`
+  or `failed` means it reported. The pseudocode below invents an events row that does not
+  exist.
+- **It answers with JSON, not exit 2.** `{"decision": "block", "reason": …}` on stdout with
+  exit 0 is what blocks the stop; exit 2 was never tried and is not needed. The re-entry
+  turn carries **`stop_hook_active: true`**, and the turn is then allowed to end with 3.5's
+  reconciler owning what happens next.
+- **`stop_hook_active` is NOT the loop cap**, which is what this section claimed until the
+  integration found the gate blocking one agent twice. The flag is scoped to a single
+  stop-chain — one user prompt — so anything that pokes the agent (a ring, a `tell`, the
+  reconciler's own nudge) starts a fresh chain with the flag false. The cap is the store:
+  one block per agent until it reports something (`hooks._already_nudged`,
+  `audit/phase3-edges-fix.md`).
+
+---
+
 # ⚠️ CORRECTION — read before implementing (added 2026-08-07, verified against the CLI)
 
 Two claims below are wrong, and the second would have produced a hook that never fires.

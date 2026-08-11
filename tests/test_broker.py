@@ -25,8 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
+from switchboard import broker as broker_mod  # noqa: E402
 from switchboard.broker import (  # noqa: E402
-    HUMAN, MAIN, MAIN_NAME, Broker, SbUnpinned, TaskUndelivered, Undeliverable,
+    HUMAN, INTERRUPT, MAIN, MAIN_NAME, NEXT_TURN, WHEN_IDLE, Broker, SbUnpinned,
+    TaskUndelivered, Undeliverable,
 )
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
@@ -473,93 +475,48 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(len(self.h.prompts), 1)
         self.assertNotIn("secret payload", self.h.prompts[0][1])  # payload stays in the store
 
+    def test_the_flag_is_spelled_needs_reply_on_sb_tell(self):
+        """The one thing an agent types. `sb tell w "..." --needs-reply` is the spelling
+        DESIGN-TRUTH.md:232 names, and it defaults off."""
+        from switchboard.cli import build_parser
+        self.assertTrue(
+            build_parser().parse_args(["tell", "w", "hi", "--needs-reply"]).needs_reply)
+        self.assertFalse(build_parser().parse_args(["tell", "w", "hi"]).needs_reply)
+
+    def test_needs_reply_is_recorded_and_still_nobody_waits(self):
+        """The flag is a claim on the RECIPIENT, and on nothing else. No agent ever waits
+        on another agent (DESIGN-TRUTH.md:230-234), so `--needs-reply` must leave the
+        sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
+        store.create_agent(self.db, name="b", role="worker")
+        (mid,) = self.b.tell(["b"], "what did you find?", me="a", needs_reply=True)
+        self.assertEqual(store.get_message(self.db, mid)["needs_reply"], 1)
+        self.assertEqual(len(self.h.prompts), 1)          # rung once, like any tell
+        self.assertNotIn("what did you find?", self.h.prompts[0][1])
+
+    def test_the_recipients_inbox_is_where_the_reply_prompt_actually_lands(self):
+        """The doorbell carries no payload, so `sb inbox` is the only text this can reach
+        an agent through — and a plain tell must not carry it, or the prompt means
+        nothing."""
+        import argparse, contextlib, io
+        from switchboard import cli
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        self.b.tell(["kid"], "which branch?", me="orch", needs_reply=True)
+        self.b.tell(["kid"], "fyi, no answer wanted", me="orch")
+        args = argparse.Namespace(cmd="inbox", json=False, peek=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True), \
+                contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+        out = buf.getvalue()
+        self.assertIn("The sender, orch, is waiting for a reply", out)
+        self.assertIn("sb tell orch", out)                # it says HOW to answer
+        self.assertEqual(out.count("waiting for a reply"), 1)   # not the plain tell too
+
     def test_parent_resolves(self):
         store.create_agent(self.db, name="kid", role="worker", parent="mum")
         store.create_agent(self.db, name="mum", role="orchestrator")
         self.b.tell(["parent"], "hi", me="kid")
         self.assertEqual(store.unread_for(self.db, "mum")[0]["body"], "hi")
-
-    def test_tell_answers_a_pending_ask_without_a_reply_verb(self):
-        store.create_agent(self.db, name="b", role="worker")
-        mid = store.put_message(self.db, from_agent="a", to_agent="b", kind="ask", body="q?")
-        self.b.tell(["a"], "the answer", me="b")
-        self.assertEqual(store.reply_to_ask(self.db, mid)["body"], "the answer")
-
-    def test_ask_returns_once_every_target_answers(self):
-        store.create_agent(self.db, name="x", role="worker")
-        store.create_agent(self.db, name="y", role="worker")
-
-        def answer_both(*_a, **_k):
-            for t in ("x", "y"):
-                p = store.pending_ask(self.db, asker="orch", target=t)
-                if p:
-                    store.put_message(self.db, from_agent=t, to_agent="orch",
-                                      kind="tell", body=f"{t}-done", reply_to=p["id"])
-        self.h.prompt = answer_both
-        got = self.b.ask(["x", "y"], "status?", me="orch", timeout=5, poll=0.01)
-        self.assertEqual(got, {"x": "x-done", "y": "y-done"})
-
-    def test_ask_gives_up_on_a_target_that_vanished_without_recording(self):
-        """A child can die recording nothing — no done, no failed. The store has no reason
-        to stop waiting, so without this an `ask` sits out its whole timeout."""
-        from switchboard import broker as bmod
-        store.create_agent(self.db, name="ghost", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {}                      # herdr has never heard of it
-        with mock.patch.object(bmod, "GONE_GRACE", 0.05):
-            got = self.b.ask(["ghost"], "q?", me="orch", timeout=30, poll=0.01)
-        self.assertIsNone(got["ghost"])                 # gave up early, did not hang
-
-    def test_a_single_missing_reading_is_not_treated_as_death(self):
-        """One absent reading is indistinguishable from a herdr hiccup."""
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {}
-        started = time.time()
-        got = self.b.ask(["w"], "q?", me="orch", timeout=0.4, poll=0.01)
-        self.assertIsNone(got["w"])
-        self.assertGreater(time.time() - started, 0.3)  # it kept waiting
-
-    def test_ask_waits_out_a_target_that_is_still_spawning(self):
-        """A target herdr has never listed is not necessarily dead — it may not have
-        finished starting. herdr does not list a spawning agent for the whole of
-        `status.SPAWN_GRACE`, so a `gone_grace` under that window makes `ask` write off a
-        child that has done nothing but start slowly. That is what the load-time assertion
-        in `status.py` prevents, and this is the behaviour it buys.
-
-        Both windows are minutes, so both are compressed by ONE factor: what is under test
-        is the shipped ratio between them, not either number.
-        """
-        from switchboard import broker as bmod
-        from switchboard import config
-        store.create_agent(self.db, name="slow", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {}                  # not listed yet: still spawning
-
-        spawn = 0.5
-        scale = status.SPAWN_GRACE / spawn
-        grace = config.setting("timeouts.gone_grace") / scale
-        # 0.01 is the floor `ask` puts under `poll` when it turns the grace into a count of
-        # readings; anything shorter here would compress the grace and not the loop.
-        with mock.patch.object(bmod, "GONE_GRACE", grace):
-            got = self.b.ask(["slow"], "q?", me="orch", timeout=spawn, poll=0.01)
-
-        self.assertIsNone(got["slow"])              # it ran out of time waiting, ...
-        kinds = [e["kind"] for e in store.recent_events(self.db, agent="slow")]
-        self.assertNotIn("ask_target_vanished", kinds)      # ... it never gave up on it
-
-    def test_there_is_no_way_to_ask_the_human_and_wait(self):
-        """One way to reach a person, and it is `sb block`.
-
-        Waiting on a human held the turn open for an answer that can take hours: the agent
-        showed as working the whole time, a live process sat there, and the tool call could
-        time out on top of it. Refused rather than silently aliased to `block`, because the
-        caller of `ask` goes on to use a return value and the caller of `block` stops.
-        """
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
-        with self.assertRaises(ValueError) as e:
-            self.b.ask([HUMAN], "which approach?", me="orch", timeout=0.1, poll=0.05)
-        self.assertIn("sb block", str(e.exception))
-        self.assertEqual(store.get_agent(self.db, "orch")["state"], "working")
-
-    # -- done / block ----------------------------------------------------
 
     def test_done_notifies_the_parent_so_it_need_not_poll(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
@@ -730,26 +687,85 @@ class BrokerTest(unittest.TestCase):
         """It travels inline rather than as a doorbell, so without the row the instruction
         would exist only in a pane — and the store is the only memory (C7)."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.interrupt("w", "stop and do this instead")
+        self.b.tell(["w"], "stop and do this instead", mode=INTERRUPT)
         [m] = self.db.execute(
             "SELECT * FROM messages WHERE to_agent='w'").fetchall()
         self.assertIn("stop and do this instead", m["body"])
         self.assertIsNotNone(m["read_at"])          # it already arrived, inline
         self.assertIsNotNone(m["delivered_at"])     # so nothing re-rings for it
 
+    def test_every_line_sb_puts_in_a_pane_names_who_sent_it(self):
+        """Item 3.3. The doorbell carries no payload, so before this an agent read "You
+        have mail" with no way to tell whether its parent had redirected it or a sibling
+        had said hello — nor whether sb or Andrew had typed it. One tag, three call sites:
+        the doorbell, the inline interrupt body, and the child-done poke."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.b.tell(["kid"], "have a look at this", me="lead")
+        self.assertIn("[sb: from lead]", self.h.prompts[-1][1])
+        self.b.tell(["kid"], "stop, do this instead", me=HUMAN, mode=INTERRUPT)
+        self.assertIn("[sb: from human]", self.h.prompts[-1][1])   # inline body
+        self.b.done("shipped it", me="kid")
+        self.assertIn("[sb: from kid]", self.h.prompts[-1][1])     # the parent's poke
+
+    def test_the_inbox_spells_the_tag_the_same_way_the_doorbell_does(self):
+        """They are one claim about one message and they used to disagree — `[3] from w1:`
+        in the inbox, no sender at all in the pane. A reader cannot correlate two shapes."""
+        import argparse
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.b.tell(["w"], "the branch is ready", me="orch")
+        doorbell = self.h.prompts[-1][1]
+        args = argparse.Namespace(cmd="inbox", json=False, peek=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True), \
+                contextlib.redirect_stdout(buf):
+            from switchboard import cli
+            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+        self.assertIn("[sb: from orch]", doorbell)
+        self.assertIn("[sb: from orch]", buf.getvalue())
+
     def test_the_doorbell_is_held_back_while_the_target_is_mid_turn(self):
-        """`agent prompt` INTERLEAVES — it lands inside the current turn rather than
-        after it — so ringing a working agent interrupts whatever it was doing."""
+        """WHEN IDLE only. It is no longer what an unflagged `tell` does — the default
+        rings a working agent and its own system queues the text — so this pins the mode
+        that still waits, which is what `sb done` uses."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "not urgent", me=HUMAN)
+        self.b.tell(["w"], "not urgent", me=HUMAN, mode=WHEN_IDLE)
         self.assertEqual(self.h.prompts, [])                       # not rung
         self.assertEqual(len(store.undelivered(self.db)), 1)       # but not lost
+
+    def test_the_default_mode_rings_a_busy_agent_and_cancels_nothing(self):
+        """Item 3.1's pass line. `agent prompt` queues — the text lands at the target's
+        next tool-call boundary and the call in flight finishes (measured live in
+        `audit/phase3-delivery-primitive.md`), so the default no longer waits out a whole
+        turn to say "you have mail". No `esc`: that is what separates this from interrupt,
+        and a test that only checked the prompt would pass on a stealth interrupt."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "when you get a moment", me=HUMAN)
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])     # rung, mid-turn
+        self.assertEqual(self.h.keys, [])                           # nothing cancelled
+        self.assertEqual(store.undelivered(self.db), [])            # nothing left waiting
+
+    def test_a_blocked_agent_holds_its_mail_in_every_mode_but_interrupt(self):
+        """3.4, which modes must not regress: a blocked agent is not idle, it has STOPPED
+        for a person, so "next turn" is the turn its block is answered on. Ringing it early
+        would clear the block and bury the answer under mail it never asked for."""
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        self.b.block("which branch?", me="kid")
+        self.h.prompts.clear()
+        for mode in (NEXT_TURN, WHEN_IDLE):
+            self.b.tell(["kid"], "unrelated", me="sibling", mode=mode)
+            self.assertEqual(self.h.prompts, [], mode)
+            self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked", mode)
+        self.b.tell(["kid"], "use main", me=HUMAN)          # the answer still lands
+        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
 
     def test_pending_mail_is_rung_once_the_target_goes_idle(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "later", me=HUMAN)
+        self.b.tell(["w"], "later", me=HUMAN, mode=WHEN_IDLE)
         self.h.states_by_name = {"w": "idle"}
         self.b._alive_cache = None
         self.assertEqual(self.b.flush_pending(), ["w"])
@@ -785,7 +801,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.b.tell(["w"], "review the PR", me=HUMAN, mode=WHEN_IDLE)
         self.assertEqual(self.h.prompts, [])                       # held back, mid-turn
         self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["review the PR"])
         self.h.states_by_name = {"w": "idle"}
@@ -805,7 +821,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.b.tell(["w"], "review the PR", me=HUMAN, mode=WHEN_IDLE)
         self.b.inbox(me="w")                                       # read it, unrung
         self.b.block("which branch?", me="w")
         self.h.prompts.clear()
@@ -832,7 +848,7 @@ class BrokerTest(unittest.TestCase):
         """Deferring an interrupt would defeat its entire purpose."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.interrupt("w", "stop")
+        self.b.tell(["w"], "stop", mode=INTERRUPT)
         self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
 
     def test_an_unrung_doorbell_never_falls_back_to_the_pane_shell(self):
@@ -912,7 +928,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.unreachable.add("w")
         with self.assertRaises(Undeliverable) as cm:
-            self.b.interrupt("w", "stop what you are doing")
+            self.b.tell(["w"], "stop what you are doing", mode=INTERRUPT)
         self.assertEqual(cm.exception.who, "w")
         self.assertIn("agent_not_found", cm.exception.message)   # what herdr actually said
         self.assertIn("sb inbox", cm.exception.message)          # and what to do about it
@@ -1116,7 +1132,8 @@ class BrokerTest(unittest.TestCase):
         from switchboard import cli
         self._evicted()
         args = argparse.Namespace(cmd="tell", who=["w"], message="are you there?",
-                                  reply_to=None, json=False)
+                                  reply_to=None, needs_reply=False, json=False,
+                                  mode=NEXT_TURN)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), \
                 contextlib.redirect_stdout(buf):
@@ -1141,7 +1158,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         store.set_state(self.db, "w", "done")
         with self.assertRaises(ValueError) as cm:
-            self.b.interrupt("w", "stop what you are doing")
+            self.b.tell(["w"], "stop what you are doing", mode=INTERRUPT)
         self.assertIn("already finished", str(cm.exception))
         self.assertEqual(self.h.keys, [])                         # no `esc` either
         self.assertEqual(self.db.execute(
@@ -1252,7 +1269,7 @@ class BrokerTest(unittest.TestCase):
     def test_interrupt_cancels_the_current_turn_first(self):
         """`agent prompt` alone only queues — the in-flight work would still finish."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.interrupt("w", "stop, do this instead")
+        self.b.tell(["w"], "stop, do this instead", mode=INTERRUPT)
         self.assertEqual(self.h.keys[0], ("w", ("esc",)))
         self.assertIn("INTERRUPT", self.h.prompts[-1][1])
 
@@ -1591,58 +1608,6 @@ class BrokerTest(unittest.TestCase):
         self.b.cleanup(me="orch")
         self.assertNotIn("w1:p1", self.h.closed)
 
-    def test_ask_fails_fast_on_an_unknown_target(self):
-        """Otherwise the caller blocks the entire timeout waiting on nobody."""
-        with self.assertRaises(KeyError):
-            self.b.ask(["no-such"], "q?", me="orch", timeout=0.1)
-
-    def test_ask_stops_waiting_on_a_child_that_finished_without_answering(self):
-        """Otherwise the parent sits out its whole fifteen minutes for an answer that
-        cannot arrive — `sb done` does not satisfy a pending ask."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        store.set_state(self.db, "kid", "done")
-        answers = self.b.ask(["kid"], "q?", me="orch", timeout=60, poll=0.01)
-        self.assertEqual(answers, {"kid": None})
-
-    def test_ask_keeps_waiting_on_a_child_that_is_merely_quiet(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        polls = []
-
-        def answer_on_the_third_poll(_):
-            polls.append(1)
-            if len(polls) == 3:
-                self.b.tell(["orch"], "here you go", me="kid")
-
-        with mock.patch("time.sleep", answer_on_the_third_poll):
-            answers = self.b.ask(["kid"], "q?", me="orch", timeout=60, poll=0.01)
-        self.assertEqual(answers, {"kid": "here you go"})
-        self.assertGreaterEqual(len(polls), 3)
-
-    def test_asking_the_human_never_waits_and_never_takes_a_turn(self):
-        """The trap this closes: a fifteen-minute call holding the turn open for nothing."""
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        started = time.time()
-        with self.assertRaises(ValueError):
-            self.b.ask([HUMAN], "which branch?", me="kid", timeout=30, poll=0.05)
-        self.assertLess(time.time() - started, 1)              # it did not wait at all
-
-    def test_a_refused_ask_leaves_no_half_sent_fan_out(self):
-        """The human is checked before anything is written, so a mixed ask sends nothing.
-
-        Half a fan-out would be worse than none: the peers would answer into a call that
-        raised, and the caller would never collect what it asked for.
-        """
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        store.create_agent(self.db, name="peer", role="worker", pane_id="w1:p2")
-        with self.assertRaises(ValueError):
-            self.b.ask([HUMAN, "peer"], "which branch?", me="kid", timeout=0.2, poll=0.05)
-        self.assertEqual(
-            self.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"], 0)
-
     def test_a_human_running_inbox_is_told_where_to_look_instead(self):
         """`(no new messages)` would read as "nothing needs you", which is a lie."""
         import argparse, contextlib, io
@@ -1882,43 +1847,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.closed, [])
 
     # -- answers do not ring ----------------------------------------------
-
-    def test_an_answer_to_a_pending_ask_rings_nobody(self):
-        """The asker is blocked inside `sb ask` collecting it. Ringing anyway delivered
-        every answer three times and cost the asker a turn per ask (C0)."""
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        store.put_message(self.db, from_agent="orch", to_agent="kid", kind="ask",
-                          body="how many?")
-        self.h.prompts.clear()
-        [mid] = self.b.tell(["orch"], "42", me="kid")
-        self.assertEqual(self.h.prompts, [])                              # no doorbell
-        m = store.get_message(self.db, mid)
-        self.assertIsNotNone(m["reply_to"])                               # still correlated
-        self.assertIsNotNone(m["read_at"])                                # and not pinning
-        self.assertIsNotNone(m["delivered_at"])       # so flush_pending will not ring later
-        self.assertNotIn(mid, [r["id"] for r in
-                               store.undelivered(self.db, exclude=(HUMAN,))])
-
-    def test_a_blocked_ask_retries_a_doorbell_that_was_held_back(self):
-        """Nothing else runs while `ask` blocks, so if it did not re-ring here a question
-        sent to a mid-turn agent would wait out its whole timeout unannounced."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        self.h.states_by_name = {"kid": "working"}
-        rung: list[str] = []
-
-        def go_idle(_):
-            self.h.states_by_name = {"kid": "idle"}
-            rung.append("turn ended")
-
-        with mock.patch("time.sleep", go_idle):
-            self.b.ask(["kid"], "q?", me="orch", timeout=0.1, poll=0.01)
-        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])         # rung once, late
-
-    # -- restore ----------------------------------------------------------
 
     def test_restore_refuses_a_live_agent_before_making_a_tab(self):
         """`agent start` fails all three attempts under a name herdr already runs, and the
@@ -2428,6 +2356,93 @@ class BrokerTest(unittest.TestCase):
     # -- init ------------------------------------------------------------
 
     # -- protocol sync ---------------------------------------------------
+
+    # -- the reconciler (3.5) ---------------------------------------------
+
+    def _stalled_fleet(self):
+        """Four agents, one of each kind the reconciler has to tell apart. herdr says all
+        four are idle; what separates them is the store."""
+        for name, kw in (("quiet", {}), ("stuck", {}), ("finished", {}),
+                         ("waiting", {"awaiting_task": True})):
+            # `session_id` is what says each of these has taken a turn at all: a
+            # session-less row this young has not started yet and is held off the stalled
+            # list entirely (`status.STALL_GRACE`), which would make this fleet agree for
+            # the wrong reason.
+            store.create_agent(self.db, name=name, role="worker", session_id=f"s-{name}",
+                               pane_id=f"w1:p{len(self.h.states_by_name)}", **kw)
+            self.h.states_by_name[name] = "idle"
+        store.set_state(self.db, "stuck", "blocked")
+        store.set_state(self.db, "finished", "done")
+
+    def test_only_an_agent_that_went_quiet_is_pinged(self):
+        """T1. The turn ended without `sb done` or `sb block` — the one case DESIGN-TRUTH
+        names — and the ping goes to the agent itself, never to a parent.
+
+        The other three are the exemptions: a blocked agent is waiting on a person, a done
+        one reported, and one still holding its placeholder task was told to wait.
+        """
+        self._stalled_fleet()
+        self.assertEqual(self.b.reconcile(), ["quiet"])
+        [(who, text)] = self.h.prompts
+        self.assertEqual(who, "quiet")
+        self.assertIn("sb done", text)
+        self.assertIn("sb block", text)
+
+    def test_a_parent_with_a_live_child_is_left_alone(self):
+        """T1, second half. The stop hook exempts it deliberately — the protocol tells a
+        delegating parent to end its turn and wait for the poke — so pinging it here would
+        push it to report over work still running."""
+        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p1",
+                           session_id="s-lead")   # past its spawn: the exemption is what
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")       # has to do the work here, not the grace
+        self.h.states_by_name = {"lead": "idle", "kid": "working"}
+        self.assertEqual(self.b.reconcile(), [])
+        self.assertEqual(self.h.prompts, [])
+
+    def test_a_freshly_spawned_agent_is_not_pinged_inside_its_own_spawn_window(self):
+        """The defect the integration found: a nudge that is false at the moment it lands.
+
+        The agent was pinged two seconds after its `delegate` event
+        (`audit/phase3-integration.md`) — herdr had not seen its first turn start, so it
+        read idle, and the ping told it its turn had ended. Nothing new is asked of the
+        reconciler here: `status` no longer calls that a stall (`STALL_GRACE`), and this
+        pins that the acting half agrees.
+        """
+        store.create_agent(self.db, name="fresh", role="worker", task="do the thing",
+                           pane_id="w1:p1")            # no session id: it has not run `sb`
+        self.h.states_by_name["fresh"] = "idle"
+        self.assertEqual(self.b.reconcile(), [])
+        self.assertEqual(self.h.prompts, [])
+
+        # The same agent, once the window has passed and it still has not said anything.
+        self.db.execute("UPDATE agents SET created_at=created_at-? WHERE name='fresh'",
+                        (int(status.STALL_GRACE) + 1,))
+        self.db.commit()
+        self.assertEqual(self.restart_sb().reconcile(), ["fresh"])
+
+    def test_a_stall_is_pinged_once_and_not_every_cycle(self):
+        """T2. A reconciler that nags every cycle is worse than none.
+
+        A second ping needs the agent to have DONE something since the first — it woke,
+        acted, and stalled again — and `REPING_GAP` underneath that, for the agent that
+        wakes on the ping, runs one `sb` command and stops again.
+        """
+        self._stalled_fleet()
+        self.assertEqual(self.b.reconcile(), ["quiet"])
+        self.assertEqual(self.restart_sb().reconcile(), [])        # same stall, again
+        self.assertEqual(len(self.h.prompts), 1)
+
+        # It woke and did something — but inside the gap, so still not a second ping.
+        store.log_event(self.db, kind="inbox", agent="quiet")
+        self.assertEqual(self.restart_sb().reconcile(), [])
+
+        # ...and once the gap has lapsed, with that activity behind it, it is pinged again.
+        self.db.execute("UPDATE events SET created_at=created_at-? "
+                        "WHERE kind='reconcile_ping'", (broker_mod.REPING_GAP + 1,))
+        self.db.commit()
+        self.assertEqual(self.restart_sb().reconcile(), ["quiet"])
+        self.assertEqual(len(self.h.prompts), 2)
 
 
 

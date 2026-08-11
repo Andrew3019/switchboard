@@ -438,6 +438,22 @@ class Herdr:
                 )
 
         agent_args = ["--permission-mode", PERMISSION_MODE]  # manual: agents would stall
+        # The Stop gate, on EVERY spawn and every restore, because this is the one place
+        # they all pass through. Asking each call site to opt in would make the one thing
+        # that must not be skippable exactly as skippable as the `sb done` it enforces (C6).
+        # `--settings` merges into that session alone, so no session we did not start ever
+        # sees it — and never `--bare`, which skips hooks outright. Both verified against
+        # the CLI; see `hooks.py`. Returns [] rather than raising: a hook is not worth a
+        # failed spawn.
+        #
+        # Imported HERE rather than at the top of the file: `hooks` reaches the store, and
+        # `panel` imports this module — a renderer that pulls the store in gets a WAL
+        # connection per panel process, which is the cost `test_panel` exists to keep out.
+        # A renderer never spawns, so the dependency belongs to the call and not to the
+        # module.
+        from . import hooks
+
+        agent_args += hooks.stop_hook_args()
         agent_args += list(model_args)
         if resume:
             agent_args += ["--resume", resume]
@@ -480,13 +496,25 @@ class Herdr:
     def prompt(self, name: str, text: str) -> None:
         """The doorbell. Carries no payload — messages live in the store.
 
-        **This INTERLEAVES. It does not queue.** An earlier note here said the opposite,
-        on the strength of a poke that a supposedly-busy agent handled after finishing —
-        the agent had in fact already finished. Re-verified against a genuine 60-second
-        multi-step turn: the poke was handled at +13s while the running task did not
-        complete until +63s. So prompting a working agent injects into the turn it is in
-        the middle of, which is why `Broker._ring` holds the doorbell back until the
-        target is idle and `sb interrupt` exists as the deliberate exception.
+        **This QUEUES. It does not interleave, and it cancels nothing.** The text is
+        handed to the model at the next point it can act — the instant the in-flight tool
+        call returns — and the call itself runs to completion.
+
+        Measured, three times, against the one test shape that can tell the two apart: a
+        single 90-second `Bash` call, prompted ~10s in, watched from outside the agent
+        (`audit/phase3-delivery-primitive.md`). All three loops wrote all 90 of their
+        lines; all three agents reported seeing the text attached to that call's result and
+        having no awareness of it during. Literal keystrokes into the pane behaved
+        identically, so there is no separate "human-typed" path to prefer.
+
+        This note said the opposite for a while — "INTERLEAVES", on a poke handled at +13s
+        inside a turn that ran to +63s. That is what delivery-at-the-next-boundary looks
+        like when the turn is several short tool calls rather than one long one; the test
+        could not distinguish them, and the conclusion drawn from it was wrong. It is why
+        `Broker._ring` held every doorbell back until the target was fully idle, which cost
+        one measured message five and a half minutes.
+
+        Cancelling is `send_keys`'s job, not this one — see `tell`'s interrupt mode.
 
         Its return value reflects state BEFORE the prompt lands, so never infer "it
         started" from it.
@@ -694,9 +722,9 @@ class Herdr:
         """Send raw keys to an agent. `esc` is the canonical spelling for escape.
 
         This is the only way to CANCEL an agent's turn. `agent prompt` does reach a
-        working agent (see `prompt`), but it lands inside the turn rather than replacing
-        it, so whatever was already in flight still completes — which is exactly what
-        `sb interrupt` is trying to prevent.
+        working agent (see `prompt`), but it queues behind whatever is in flight, which
+        still completes — and completing is exactly what `tell --interrupt` is trying to
+        prevent, so it sends `esc` through here first and only then prompts.
         """
         self._call("agent", "send-keys", name, *keys)
 

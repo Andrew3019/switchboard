@@ -35,11 +35,12 @@ A third disagreement, in the mailbox rather than the pane:
 
     never announced AND never read            →  UNDELIVERED
 
-`agent prompt` INTERLEAVES — it is injected into the current turn rather than queued after
-it — so ringing a working agent interrupts whatever it is doing. `sb tell` therefore holds
-the ring back while the target is mid-turn, and `broker.flush_pending` rings once it goes
-idle. That is right, and it introduces a way for mail to sit forever: if the flush never
-runs, nothing is on the agent's screen and nothing is in its inbox count.
+A doorbell can be held back rather than rung: `sb tell --when-idle` waits for the target's
+turn to end, and any message at all waits while the target is blocked. `broker.flush_pending`
+rings those once the wait is over, and that introduces a way for mail to sit forever: if the
+flush never runs, nothing is on the agent's screen and nothing is in its inbox count.
+(The default mode rings straight away — `agent prompt` queues rather than interleaving, so
+a working agent is reached at its next step without losing the one it is on.)
 
 Both halves of that predicate carry weight. Announcement alone says only whether WE rang;
 it does not say whether the agent knows. An agent that runs `sb inbox` of its own accord
@@ -78,8 +79,8 @@ from typing import Any, Callable, Optional
 
 from . import config
 from .herdr import (
-    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF, SPAWN_TIMEOUT_MS, WORKING, Herdr,
-    HerdrError,
+    BLOCKED, DELIVER_ATTEMPTS, DELIVER_TIMEOUT_MS, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF,
+    SPAWN_TIMEOUT_MS, WORKING, Herdr, HerdrError,
 )
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
@@ -144,18 +145,39 @@ _SPAWN_WORST_CASE = (
 SPAWN_SLACK = 5
 SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 
-# The one relationship between this window and `ask`'s. `ask()` writes a target off once it
-# has stayed unlisted for `timeouts.gone_grace` (broker.GONE_GRACE), and a row that is
-# merely still spawning is not listed by herdr for the whole of SPAWN_GRACE — so an ask
-# grace shorter than this window abandons a target that has done nothing but start slowly.
-# The two stay separate constants, tuned separately, because they answer different
-# questions; this is the only thing keeping them from crossing. It held nowhere when it was
-# written — 60 s of ask grace against a 287 s spawn — which is the bug it exists to make
-# impossible. Read through `config` rather than imported: broker imports status, not the
-# other way round.
-assert config.setting("timeouts.gone_grace") >= SPAWN_GRACE, (
-    f"timeouts.gone_grace must be at least SPAWN_GRACE ({SPAWN_GRACE:.0f}s), or `sb ask` "
-    f"gives up on agents that are still spawning"
+# How long an agent that has NEVER run an `sb` command is allowed to look idle before that
+# idleness is read as a stall. A third question again, and the narrowest of the three: not
+# "is this row a claim" (SPAWN_GRACE) nor "is it dead" (GONE_CONFIRM_GRACE), but "has this
+# agent ever taken a turn at all?"
+#
+# It has to be a clock, and that is the honest thing to say about it. Nothing in the store
+# records that herdr once saw an agent `working`: the collector is the only process that
+# watches continuously and it is read-only by design, so the fact is never written down.
+# The one durable trace an agent leaves of having run is its `session_id`, claimed on its
+# first `sb` call — after which "idle" really does mean a turn that started and ended.
+# Before it, `idle` and `not started yet` are the same reading, and the reconciler pinged a
+# freshly delegated agent two seconds after its `delegate` event on the strength of it
+# (`audit/phase3-integration.md`) — a nudge that says "your turn ended without a report" to
+# an agent whose turn has not begun.
+#
+# Sized as the delivery's OWN worst case, and derived from it rather than restated for the
+# reason `_SPAWN_WORST_CASE` is: nothing should be able to say "the agent never started"
+# before the machinery that hands it the task has given up trying. `deliver` re-sends
+# `deliver_attempts` times, each waiting `deliver_ms` for a turn to appear, with the same
+# backoff between them as a spawn retry.
+#
+# Not the delivery window alone: measured in an isolated clone, an agent delegated at t
+# read `idle` to herdr until t+26s and the one-window version of this constant (20 s) still
+# left four seconds of it exposed. Measured from the last thing that happened to the row
+# rather than from its creation — a slow `agent start` can put a minute between the claim
+# and the task, and it is the task that starts the clock that matters.
+#
+# Erring long costs a genuinely silent agent one window before the reconciler speaks, which
+# the stop hook has already spoken to and the board shows regardless; erring short is the
+# false nudge this exists to end.
+STALL_GRACE = (
+    DELIVER_ATTEMPTS * (DELIVER_TIMEOUT_MS / 1000)
+    + SPAWN_BACKOFF * (DELIVER_ATTEMPTS * (DELIVER_ATTEMPTS + 1) / 2)
 )
 
 # How long a row has to stay CONTINUOUSLY absent from herdr before that absence is written
@@ -495,6 +517,12 @@ def collect(
         if tracks_absence:
             absent_since[name] = row["absent_since"]
         last = max(row["created_at"], activity.get(name, 0))
+        # An agent with no session id has never run an `sb` command, so nothing here has
+        # ever seen it take a turn — and for `STALL_GRACE` after the last thing that
+        # happened to it, "idle" is as likely to mean "has not started" as "ended without
+        # saying anything". Calling that a stall is what pinged a two-second-old agent.
+        # Once the session id is there the grace is over for good, whatever the clock says.
+        starting = row["session_id"] is None and (now - last) < STALL_GRACE
         agents.append(AgentStatus(
             name=name,
             role=row["role"],
@@ -505,7 +533,8 @@ def collect(
             alive=alive,
             # The join this file exists for. Both halves must be known: an unreachable
             # herdr proves nothing, and neither does herdr's `unknown`.
-            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting),
+            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting
+                         and not starting),
             gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),

@@ -49,70 +49,42 @@ tests in `tests/test_broker.py` unless noted.
 2. **Your own `sb` is not your worktree's.** `sb` on PATH is a symlink into the main
    checkout, so it runs `main`'s code whatever branch you have out. Spawned agents are
    pinned; you are not. Drive a clone's own `./bin/sb` from inside that clone.
-3. **A running collector executes the code it started with**, for as long as any panel
-   stays open — so a doorbell fix can be on disk and not in the process ringing it. This is
-   item **3.7**, and it caused a four-hour mail delay on 2026-08-11.
-
-## Open question for Andrew — decides how 3.1 is built
-
-`DESIGN-TRUTH.md:96-97` says that while Claude is working, a message is **queued** by
-Claude's own system and delivered on the next turn. That is the premise the whole *next
-turn* mode rests on. But `Herdr.prompt()`'s docstring (`herdr.py:480-494`) says of the only
-ring primitive `sb` has: **"This INTERLEAVES. It does not queue."** — a poke handled at
-+13s inside a turn that ran to +63s — and `_ring`'s own comment agrees
-(`broker.py:4150-4153`).
-
-If it interleaves, *next turn* as specified is not buildable from this primitive: dropping
-the busy-gate yields "land inside whatever tool call is running", i.e. an interrupt without
-the cancellation. It is possible DESIGN-TRUTH describes the human-typed path (characters
-into the real terminal) rather than `agent prompt`'s API call; nothing distinguishes them
-today.
-
-**The live test that settles it** (minutes, in an isolated clone): send text via
-`agent prompt` to an agent that is *mid-tool-call*, not between steps, and read whether it
-interleaves or waits. Do this before sizing 3.1. Never resolve it by editing
-`DESIGN-TRUTH.md`.
-
 ---
 
-# Phase 3 — messaging
+# Phase 3 — messaging — **built** (branch `phase3-messaging`)
 
 Scoped in full, read-only, at `audit/phase3-scope.md` (branch `scope-phase3`, `d6b0604`) —
 that document carries the file/line evidence for every item below and is worth reading
 before starting any of them.
 
-| # | what | state | size |
-|---|---|---|---|
-| 3.1 | `sb tell` gains three delivery modes: **next turn** (default), **when idle**, **interrupt**. Only *when idle* exists (`broker.tell` → `_ring` defers while `_busy`). *Next turn* cannot be lifted out of `sb interrupt`: that verb bundles a forced ring with an escape keypress and a cancel-your-work wrapper, and no non-cancelling variant exists. **Pass:** a `tell` to a busy agent lands at its next step boundary with the in-flight tool call completing. | gated on the open question above | large, unsized |
-| 3.2 | Delete the `sb interrupt` verb once it is a mode — never before. **Pass:** `sb interrupt` no longer parses *and* the capability still works through `tell`. | after 3.1 | tiny |
-| 3.3 | Every sb message carries `[sb: from <name>]`. Nothing is marked today; the four `[notify]` strings name no sender, and `sb inbox` uses a different shape (`cli.py:853`). **Pass:** doorbell text, inline interrupt body and inbox output all carry the same tag. | ready; touches the same `_say` call sites as 3.1 | medium |
-| 3.4 | Hold when-idle mail until a block is answered. | **done** — landed with phase 1/2 | zero |
-| 3.5 | The reconciler: ping any agent that is idle, not blocked, not done, not awaiting task. Detection is exact (`status.AgentStatus.stalled`) and nothing acts on it. **Pass:** an agent whose turn ended without `done` or `block` is pinged within one cycle. | independent of 3.1; land after 3.7 (shared file) | medium-large |
-| 3.5a | `--needs-reply` does not exist in any form — no flag, no store column, no prompt text — despite 3.5 being scoped to "also cover" it. Build it as its own small step first rather than discovering its size inside 3.5. | ready | small, from zero |
-| 3.6 | Remove `sb ask`. Live and still taught (`protocol.md:124`); `broker.ask` blocks the caller in a poll loop, which DESIGN-TRUTH forbids. **Pass:** it does not parse and no shipped prompt mentions it. | after 3.1 | small |
-| 3.7 | **The collector runs stale code.** One collector per repo holds an `flock` for its whole life and never re-checks its own source; only every panel going quiet for 60s ends it. A day-old process keeps ringing the doorbell with pre-fix logic. Caused a ~4h mail delay on 2026-08-11; no filed bug report. **Pass:** after a doorbell fix lands on the running checkout, the next tick behaves per the new code. | ready, own subsystem | small-medium |
-| 3.8 | **Nothing enforces that an agent reports before its turn ends** — see below. | ready | see below |
+Every item below is built and merged onto `phase3-messaging`. The evidence for each is in
+`audit/`, named beside it.
 
-**3.8 — reporting is not enforced.** `sb done` is asked for by the protocol and enforced by
-nothing, so an agent can end its turn silently and its work stays invisible until a human
-notices. That happened four times on 2026-08-11. `PRINCIPLES.md:118-134` (C6) already names
-this as the fix — "a `Stop` hook that blocks completion until a report is emitted beats
-'please report when done'" — and says v0 does not honour it; `PLAN.md`'s D2 records the
-hook as still unbuilt. `HOOKS.md` carries the corrected mechanics: `claude --settings <file>`
-merges the hook into that session only, and **not** `--bare`, which skips hooks entirely.
-Nothing in the tree passes `--settings` today (`herdr.start_agent`'s `agent_args`,
-`herdr.py:440-460`, is where it would go). This is not 3.5: the reconciler notices a silent
-finish afterwards, the hook prevents it. **Pass:** an agent that tries to end its turn
-without `sb done` or `sb block` is stopped and told to report.
+| # | what it now does | state |
+|---|---|---|
+| 3.1 | `sb tell` has three delivery modes — **next turn** (the default), **when idle** (`--when-idle`), **interrupt** (`--interrupt`). A `tell` to a busy agent now rings anyway and lands at its next tool-call boundary; the in-flight tool call finishes. Under the old when-idle default the same message waited for the whole turn — five and a half minutes when it was last timed. | **done** (`audit/phase3-tell-modes.md`) |
+| 3.2 | The `sb interrupt` verb is gone; it is `sb tell --interrupt`, with the same escape keypress and cancel wrapper. | **done** |
+| 3.3 | Every message carries `[sb: from <name>]` — doorbell text, inline interrupt body and `sb inbox` output all use the same tag. | **done** |
+| 3.4 | Hold when-idle mail until a block is answered. | **done** — landed with phase 1/2 |
+| 3.5 | The reconciler (`Broker.reconcile`, hidden verb `sb reconcile`) pings any agent whose turn ended without a report. Three exemptions: awaiting-task, blocked/finished (never `stalled`), and a parent with live children. One ping per stall, not per cycle. | **done** (`audit/phase3.5-scope.md`) |
+| 3.5a | `sb tell --needs-reply` records that the sender is waiting; the recipient's `sb inbox` names the sender and says to answer at some point without stopping what it is doing. The sender never waits. | **done** (`audit/phase3.5a-scope.md`) |
+| 3.6 | `sb ask` is gone — verb, `broker.ask`'s poll loop, and every mention in the shipped prompts. `--needs-reply` is what replaced it. | **done** |
+| 3.7 | The collector notices its own source has changed on disk and exits, so the next tick runs the code that is on the checkout rather than the code it started with. Detection latency is up to ~45s by design. | **done** (`audit/phase3.7-scope.md`) |
+| 3.8 | A `Stop` hook (`bin/sb-stop-hook`, `switchboard/hooks.py`) refuses a turn that ends without `sb done` or `sb block`, installed via `--settings` on every spawn and restore. Exempt: an agent awaiting its task, and a parent with live children. | **done** (`audit/phase3.8-scope.md`, `HOOKS.md`) |
 
-**Decisions needed:** 3.1's live test (above), and for 3.7, what "the collector's code
-changed" should mean — commit hash, file signature, or something scoped per worktree, given
-that worktrees of one repo share a git common dir.
+**3.1's open question was settled by experiment, not by argument.** `agent prompt` **queues
+at the tool-call boundary; it does not interleave** — three 90-second single tool calls,
+none cut short, the text delivered at the boundary after each
+(`audit/phase3-delivery-primitive.md`). That is what makes *next turn* buildable from this
+primitive, and it is why the default could change safely.
 
-**Run order.** 3.7 first, in parallel with getting the two decisions. 3.5a and 3.8 any time
-— neither depends on anything else here. Then, one owner for the whole `broker.py`
-tell/interrupt/ask cluster: 3.1 + 3.3 together, then 3.2, then 3.6. 3.5 proper after 3.7
-and 3.5a.
+**What is not proved** carries into phase 4 and is worth reading before touching this code:
+multi-message ordering while an agent is busy; next-turn against very short or nested tool
+calls; interrupt against an already-idle agent; the stop hook's awaiting-task and
+live-children exemptions and its pane-id fallback (pinned by store logic, never a live run);
+the collector's staleness check as a real held doorbell under the new rule (it was proved as
+restart-with-new-code), and an edit racing an in-flight flush. `sb doctor` does not display
+the reconciler's counters — a one-line display gap, reported and deliberately left.
 
 ---
 

@@ -72,7 +72,9 @@ class StatusTest(unittest.TestCase):
     # -- drift: the reason this module exists ----------------------------
 
     def test_working_in_the_store_but_idle_in_herdr_is_stalled(self):
-        store.create_agent(self.db, name="w1", role="worker")
+        # `session_id` is what says this one has taken a turn at all: a session-less row
+        # this young has not started yet, and is held off (see the stall-grace tests).
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]))
         a = self.by_name(snap)["w1"]
         self.assertTrue(a.stalled)
@@ -81,7 +83,7 @@ class StatusTest(unittest.TestCase):
 
     def test_herdrs_derived_done_counts_as_idle(self):
         """herdr shows `done` for idle-and-unviewed; missing that hides real drift."""
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         snap = status.collect(self.db, FakeHerdr([alive("w1", "done")]))
         self.assertTrue(self.by_name(snap)["w1"].stalled)
 
@@ -175,7 +177,8 @@ class StatusTest(unittest.TestCase):
 
     def test_the_same_agent_is_stalled_once_it_has_been_given_work(self):
         """The whole point of keeping the flag: told something and then quiet IS drift."""
-        store.create_agent(self.db, name="lead", role="lead", awaiting_task=True)
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           awaiting_task=True)
         store.put_message(self.db, from_agent="human", to_agent="lead",
                           kind="tell", body="do the thing")
         a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")])))["lead"]
@@ -185,7 +188,8 @@ class StatusTest(unittest.TestCase):
         """A delegated worker is given its work AT spawn, so it is stalled-eligible with
         no message ever arriving for it. The default has to be this way round: the failure
         that costs something is a stuck agent nobody is warned about."""
-        store.create_agent(self.db, name="w1", role="worker", task="fix the parser")
+        store.create_agent(self.db, name="w1", role="worker", task="fix the parser",
+                           session_id="s1")
         self.assertTrue(self.by_name(
             status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"].stalled)
 
@@ -193,11 +197,24 @@ class StatusTest(unittest.TestCase):
         """The board and the collector hold a READ-ONLY connection and cannot migrate, so
         they meet a store an older `sb` last stamped. Missing reads as the label the row
         already had, rather than raising on every tick until a writer runs."""
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         self.db.execute("ALTER TABLE agents DROP COLUMN awaiting_task")
         self.db.commit()
         a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
         self.assertTrue(a.stalled)
+
+    def test_an_agent_that_has_never_run_sb_is_not_stalled_yet(self):
+        """The spurious nudge, from the other end. An agent two seconds out of `delegate`
+        looks exactly like one whose turn ended and said nothing — its row is `working`,
+        herdr says idle because no turn has started, and it holds no placeholder. It was
+        pinged in that window (`audit/phase3-integration.md`). No session id means it has
+        never run an `sb` command, so nothing here has seen it take a turn; after
+        `STALL_GRACE` the reading is trusted, because by then it should have."""
+        store.create_agent(self.db, name="w1", role="worker", task="fix the parser")
+        h = FakeHerdr([alive("w1", "idle")])
+        self.assertFalse(self.by_name(status.collect(self.db, h))["w1"].stalled)
+        later = store.now() + int(status.STALL_GRACE) + 1
+        self.assertTrue(self.by_name(status.collect(self.db, h, now=later))["w1"].stalled)
 
     def test_working_but_absent_from_herdr_is_gone(self):
         # `session_id` is what says this one got past its spawn: a session-less row this
@@ -295,30 +312,6 @@ class StatusTest(unittest.TestCase):
         worst = sum(bounds) / 1000 + sum(naps)
         self.assertEqual(len(bounds), herdr_mod.SPAWN_ATTEMPTS)
         self.assertGreaterEqual(status.SPAWN_GRACE, worst)
-
-    def test_the_ask_grace_covers_the_spawn_window(self):
-        """The shipped defaults, checked against each other. `ask` gives up on a target
-        that has stayed unlisted for `gone_grace`, and a spawning row is unlisted for the
-        whole of SPAWN_GRACE — the two are tuned separately and nothing but the load-time
-        assertion keeps the ask grace above the window."""
-        self.assertGreaterEqual(config.setting("timeouts.gone_grace"), status.SPAWN_GRACE)
-
-    def test_a_gone_grace_under_the_spawn_window_will_not_load(self):
-        """And it is enforced at import, not left to whoever reads the comment. Loudly:
-        a config that makes `sb ask` abandon spawning agents takes every command down
-        rather than shipping the bug quietly."""
-        real = config.setting
-
-        def shorter(dotted, *a, **kw):
-            if dotted == "timeouts.gone_grace":
-                return status.SPAWN_GRACE - 1
-            return real(dotted, *a, **kw)
-
-        self.addCleanup(importlib.reload, status)
-        with mock.patch.object(config, "setting", shorter):
-            with self.assertRaises(AssertionError) as e:
-                importlib.reload(status)
-        self.assertIn("gone_grace", str(e.exception))
 
     def test_an_unreachable_herdr_never_reaps_anything(self):
         """The guard. Absent herdr's side every row looks gone, and a hiccup would end
@@ -769,13 +762,13 @@ class StatusTest(unittest.TestCase):
         """It is not asking for anything, and that is exactly the problem: its turn ended
         without `sb done`, so the store says `working` forever, no doorbell rings it again
         and no sweep closes it. Only a person moves it, so it is owed an action."""
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), needs_me=True)
         self.assertEqual([a.name for a in snap.agents], ["w1"])
         self.assertTrue(self.by_name(snap)["w1"].needs_human)
 
     def test_a_stalled_agent_is_named_in_the_inbox_with_the_way_out(self):
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
         self.assertIn("NEEDS YOU", out)
         self.assertIn("stalled", out)
@@ -869,7 +862,7 @@ class StatusTest(unittest.TestCase):
             self.assertIn(expected, out)
 
     def test_render_names_drift_loudly(self):
-        store.create_agent(self.db, name="w1", role="worker")
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
         self.assertIn("STALLED", out)
         self.assertIn("sb done", out)             # says what was actually skipped
@@ -888,7 +881,8 @@ class StatusTest(unittest.TestCase):
 
     def test_json_carries_the_same_facts(self):
         store.create_agent(self.db, name="root", role="main", workspace="main")
-        store.create_agent(self.db, name="kid", role="worker", parent="root")
+        store.create_agent(self.db, name="kid", role="worker", parent="root",
+                           session_id="s1")
         store.put_message(self.db, from_agent="x", to_agent="kid", kind="tell", body="a")
         snap = status.collect(self.db, FakeHerdr([alive("root"), alive("kid", "idle")]))
         d = json.loads(json.dumps(snap.as_dict()))          # must be plain JSON types
@@ -928,12 +922,12 @@ class StatusCliTest(unittest.TestCase):
         """
         from switchboard.cli import build_parser
         sample = {                                  # a minimal legal argv per verb
-            "start": [], "delegate": ["do a thing"], "ask": ["w1", "q?"],
+            "start": [], "delegate": ["do a thing"],
             "tell": ["w1", "hi"], "inbox": [], "done": ["finished"], "block": ["why"],
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             "cleanup": [], "workspace": ["new"], "restore": ["w1"],
-            "interrupt": ["w1", "stop"], "inspect": ["w1"], "wait": ["w1"], "log": [],
-            "board": [], "flush": [],
+            "inspect": ["w1"], "wait": ["w1"], "log": [],
+            "board": [], "flush": [], "reconcile": [],
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
             # so it can print that instead of an argparse usage dump.
             "plugins": [],
