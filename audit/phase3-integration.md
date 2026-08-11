@@ -72,10 +72,14 @@ another turn.
 own periodic ones, and appears in no `reconcile_ping`. `sb status` still had it in
 `needs_human`.
 
-### What this run also showed — two rough edges, reported and not fixed
+### What this run also showed — two rough edges, reported here and since fixed
 
-Both are integration behaviour between 3.5 and 3.8 that no single author could have seen,
-and neither is in the scope of this branch to change.
+Both are integration behaviour between 3.5 and 3.8 that no single author could have seen.
+They were out of scope for the merge and are recorded below as they were observed; both
+were then fixed on this branch, with their causes and live proof in
+`audit/phase3-edges-fix.md`. Neither was what its symptom suggested: the first is `stalled`
+being true before the agent had started, and the second is that `stop_hook_active` caps a
+single stop-chain and every poke starts a new one.
 
 1. **The reconciler pings an agent inside its spawn window.** `sbx4m8t2-busy` was sent
    `[sb] Your turn ended … without a report` **two seconds after its `delegate` event**, by

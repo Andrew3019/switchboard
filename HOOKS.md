@@ -13,9 +13,14 @@ Two things the build learned that the notes below get wrong or do not say:
   exist.
 - **It answers with JSON, not exit 2.** `{"decision": "block", "reason": …}` on stdout with
   exit 0 is what blocks the stop; exit 2 was never tried and is not needed. The re-entry
-  turn carries **`stop_hook_active: true`**, which is the loop cap the notes below hand-wave
-  ("that's a bug in the agent, not the hook"). It is one nudge per stop-chain, then the
-  turn is allowed to end and 3.5's reconciler owns what happens next.
+  turn carries **`stop_hook_active: true`**, and the turn is then allowed to end with 3.5's
+  reconciler owning what happens next.
+- **`stop_hook_active` is NOT the loop cap**, which is what this section claimed until the
+  integration found the gate blocking one agent twice. The flag is scoped to a single
+  stop-chain — one user prompt — so anything that pokes the agent (a ring, a `tell`, the
+  reconciler's own nudge) starts a fresh chain with the flag false. The cap is the store:
+  one block per agent until it reports something (`hooks._already_nudged`,
+  `audit/phase3-edges-fix.md`).
 
 ---
 

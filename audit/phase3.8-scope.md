@@ -55,6 +55,12 @@ A hook that blocks a turn prompts a turn that could block again. Two independent
 1. `stop_hook_active` — verified true on the re-entry turn — means at most **one** block
    per stop-chain. A non-compliant agent is nudged once, then released; 3.5's reconciler
    is what catches it after that. The hook prevents the common case; it does not fight.
+
+   **Superseded — a stop-chain is one prompt, so this is not the cap it was taken for.**
+   The integration saw the gate block one agent twice, and the cause is that any poke (a
+   ring, a `tell`, the reconciler's own nudge) starts a fresh chain with the flag false.
+   The cap now comes from the store — one block per agent until it reports something.
+   Cause, fix and live proof: `audit/phase3-edges-fix.md`.
 2. Compliance ends it earlier: `sb done`/`sb block` moves the state and the next stop
    passes on the first check.
 

@@ -35,6 +35,7 @@ Work list = `a.stalled` from a *fresh* `status.collect`, minus:
 | awaiting instructions | `awaiting_task`; DESIGN-TRUTH's stated exemption |
 | a parent with a live child | 3.8 exempts it deliberately: the protocol tells a delegating parent to end its turn and wait for the poke. Pinging it would push it to report over work still running. Logged, not silent. |
 | pinged already for this stall | the re-ping rule, below |
+| not started yet | ADDED AFTER THIS PASS. An agent with no `session_id` has never run an `sb` call, so "herdr says idle" may mean "has not begun" — which is how a freshly delegated agent was pinged two seconds in. `status.STALL_GRACE` holds the label off, so this list never sees it; `audit/phase3-edges-fix.md`. |
 
 The ping goes to the agent itself, never its parent (`DESIGN-TRUTH.md:129-133`).
 
