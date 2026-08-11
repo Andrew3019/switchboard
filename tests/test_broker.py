@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
+from switchboard import broker as broker_mod  # noqa: E402
 from switchboard.broker import (  # noqa: E402
     HUMAN, MAIN, MAIN_NAME, Broker, SbUnpinned, TaskUndelivered, Undeliverable,
 )
@@ -2428,6 +2429,67 @@ class BrokerTest(unittest.TestCase):
     # -- init ------------------------------------------------------------
 
     # -- protocol sync ---------------------------------------------------
+
+    # -- the reconciler (3.5) ---------------------------------------------
+
+    def _stalled_fleet(self):
+        """Four agents, one of each kind the reconciler has to tell apart. herdr says all
+        four are idle; what separates them is the store."""
+        for name, kw in (("quiet", {}), ("stuck", {}), ("finished", {}),
+                         ("waiting", {"awaiting_task": True})):
+            store.create_agent(self.db, name=name, role="worker",
+                               pane_id=f"w1:p{len(self.h.states_by_name)}", **kw)
+            self.h.states_by_name[name] = "idle"
+        store.set_state(self.db, "stuck", "blocked")
+        store.set_state(self.db, "finished", "done")
+
+    def test_only_an_agent_that_went_quiet_is_pinged(self):
+        """T1. The turn ended without `sb done` or `sb block` — the one case DESIGN-TRUTH
+        names — and the ping goes to the agent itself, never to a parent.
+
+        The other three are the exemptions: a blocked agent is waiting on a person, a done
+        one reported, and one still holding its placeholder task was told to wait.
+        """
+        self._stalled_fleet()
+        self.assertEqual(self.b.reconcile(), ["quiet"])
+        [(who, text)] = self.h.prompts
+        self.assertEqual(who, "quiet")
+        self.assertIn("sb done", text)
+        self.assertIn("sb block", text)
+
+    def test_a_parent_with_a_live_child_is_left_alone(self):
+        """T1, second half. The stop hook exempts it deliberately — the protocol tells a
+        delegating parent to end its turn and wait for the poke — so pinging it here would
+        push it to report over work still running."""
+        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.h.states_by_name = {"lead": "idle", "kid": "working"}
+        self.assertEqual(self.b.reconcile(), [])
+        self.assertEqual(self.h.prompts, [])
+
+    def test_a_stall_is_pinged_once_and_not_every_cycle(self):
+        """T2. A reconciler that nags every cycle is worse than none.
+
+        A second ping needs the agent to have DONE something since the first — it woke,
+        acted, and stalled again — and `REPING_GAP` underneath that, for the agent that
+        wakes on the ping, runs one `sb` command and stops again.
+        """
+        self._stalled_fleet()
+        self.assertEqual(self.b.reconcile(), ["quiet"])
+        self.assertEqual(self.restart_sb().reconcile(), [])        # same stall, again
+        self.assertEqual(len(self.h.prompts), 1)
+
+        # It woke and did something — but inside the gap, so still not a second ping.
+        store.log_event(self.db, kind="inbox", agent="quiet")
+        self.assertEqual(self.restart_sb().reconcile(), [])
+
+        # ...and once the gap has lapsed, with that activity behind it, it is pinged again.
+        self.db.execute("UPDATE events SET created_at=created_at-? "
+                        "WHERE kind='reconcile_ping'", (broker_mod.REPING_GAP + 1,))
+        self.db.commit()
+        self.assertEqual(self.restart_sb().reconcile(), ["quiet"])
+        self.assertEqual(len(self.h.prompts), 2)
 
 
 

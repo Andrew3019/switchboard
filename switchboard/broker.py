@@ -91,6 +91,14 @@ DEFAULT_ROLE = config.setting("vocabulary.default_role")
 FINISHED = tuple(config.setting("states.finished"))
 _NOT_IN_NAME = re.compile(r"[^a-z0-9_-]+")
 
+# The floor between two reconciler pings to the SAME agent, in seconds. Not a tunable, for
+# `collector.DOORBELL_GAP`'s reason: it is the one number deciding how much a stall that
+# will not resolve costs the agent living it. The rule above it is already "once per
+# stall" — this only catches the agent that wakes on the ping, runs one `sb` command and
+# stops again, which reads as new activity every cycle and would otherwise be nagged at
+# the collector's tick rate for as long as it kept doing it.
+REPING_GAP = 600
+
 # The protocol travels as a system prompt, NOT a file.
 #   - ~/.claude/CLAUDE.md would leak into every ordinary Claude session
 #   - a repo CLAUDE.md would leak into every ordinary session in that repo, and in most
@@ -4339,6 +4347,129 @@ class Broker:
             self.h.notify(f"{who}: {text[:NOTIFY_CLIP]}")
         except HerdrError as e:
             store.log_event(self.db, kind="notify_failed", agent=who, error=str(e))
+
+    # -- the reconciler ---------------------------------------------------
+
+    def reconcile(self, *, snap=None) -> list[str]:
+        """Ping every agent whose turn ended without a report. -> the names pinged.
+
+        The acting half of a detection that was already exact. `AgentStatus.stalled` is
+        `True` for an agent whose row is `working`, that herdr says is alive and idle, and
+        that is not still holding its placeholder task — i.e. its turn ended and it said
+        nothing. The board has shown that for as long as there has been a board; nothing
+        has ever told the agent.
+
+        **The ping goes to the agent, never to its parent** (`DESIGN-TRUTH.md:129-133`):
+        the agent is the only party that knows whether it is finished, stuck, or simply
+        wrong about having finished, and a parent told "your child went quiet" can only
+        ask it the same question this asks directly.
+
+        **Three exemptions, and no more than three.** Blocked and finished agents are not
+        `stalled` at all — `states.running` is `working` alone — so they cost nothing here.
+        `awaiting_task` is DESIGN-TRUTH's own exemption ("unless it is awaiting
+        instructions") and `status.collect` has already applied it. The third is the stop
+        hook's (`hooks.stop_gate`): a parent with a live child was told by the protocol to
+        end its turn and wait for the poke, and pinging it would push it to report over
+        work still running. It is logged rather than skipped silently, for the reason the
+        hook logs it — it is the one exemption that could hide a real silent finish.
+
+        **The re-ping rule: once per stall.** A reconciler that nags every cycle is worse
+        than none, so a second ping needs the agent to have DONE something since the last
+        one — `status`'s own `last_activity`, which counts its `sb` calls, the mail it sent
+        and the mail it read — meaning it woke, acted, and stalled again. `REPING_GAP` is
+        the backstop underneath that for the pathological case: an agent that wakes on the
+        ping, runs one `sb` command and stops again would otherwise qualify every cycle.
+        A stall nobody attends to is therefore pinged exactly once, and stays on the board,
+        in `--needs-me` and in the DRIFT block, which is where a stall that survives being
+        told about it belongs.
+
+        **Not `_ring`.** The doorbell marks the whole mailbox delivered
+        (`store.mark_delivered`), which is right for a ring that says "you have mail" and
+        wrong for anything else: this nudge names no mail, so marking mail announced would
+        lose that announcement for good. `_ring`'s two guards are still the right guards,
+        so they are applied here and only they.
+        """
+        from . import status as status_mod
+
+        snap = snap or status_mod.collect(self.db, self.h, reap=False)
+        pinged: list[str] = []
+        last = self._last_pings()
+        for a in snap.agents:
+            if not a.stalled:
+                continue
+            if self._has_live_child(a.name):
+                store.log_event(self.db, kind="reconcile_waived", reason="live_children",
+                                target=a.name)
+                continue
+            when = last.get(a.name)
+            if when is not None and not (a.last_activity > when
+                                         and store.now() - when >= REPING_GAP):
+                continue
+            if self._nudge(a.name, self._say("notify.stalled", idle=fmt_age(a.idle))):
+                pinged.append(a.name)
+        return pinged
+
+    def _nudge(self, who: str, text: str) -> bool:
+        """One reconciler ping. -> whether it landed. Never raises.
+
+        `_ring`'s guards without `_ring`'s bookkeeping (see `reconcile`). Re-asking them is
+        not redundancy: the snapshot is a few milliseconds old, and an agent that has
+        started a turn since it was taken must not be interrupted — `agent prompt`
+        INTERLEAVES, so a ping to a working agent lands inside whatever it is doing.
+
+        The event is logged against NO agent, with the target in its payload, and that is
+        deliberate: `status._last_activity` counts every event that names an agent, so
+        logging this against the target would reset the idle clock on exactly the silent
+        agent the mechanism exists to spot — the failure that function's docstring warns
+        about for arriving mail. It is also what the re-ping rule reads, so an idle clock
+        reset by the ping would make the rule read its own footprint as activity.
+        """
+        if self._busy(who) or self._is_blocked(who):
+            return False
+        try:
+            self.h.prompt(who, text)
+        except HerdrError as e:
+            store.log_event(self.db, kind="reconcile_failed", error=str(e), target=who)
+            return False
+        store.log_event(self.db, kind="reconcile_ping", target=who)
+        return True
+
+    def _last_pings(self) -> dict[str, int]:
+        """When each agent was last pinged. Read out of the event log, not a column.
+
+        A column would be a second place to keep a fact the log already holds, and it would
+        have to be migrated onto every existing store; the log is append-only and already
+        the thing `sb log` reads when somebody asks why an agent was spoken to.
+
+        Bounded rather than open-ended: the rule only ever needs the most recent ping per
+        agent, and a fleet accumulates one of these per stall, so the newest few hundred
+        cover every agent that could still be alive.
+        """
+        out: dict[str, int] = {}
+        rows = self.db.execute(
+            "SELECT payload, created_at FROM events WHERE kind='reconcile_ping' "
+            "ORDER BY id DESC LIMIT 500").fetchall()
+        for r in rows:
+            try:
+                who = json.loads(r["payload"] or "{}").get("target")
+            except json.JSONDecodeError:
+                continue
+            if who and who not in out:
+                out[who] = r["created_at"]
+        return out
+
+    def _has_live_child(self, name: str) -> bool:
+        """The stop hook's exemption, asked the same way it asks it (`hooks._has_live_child`).
+
+        Not shared as one function, and that is a judgement rather than an oversight: the
+        hook runs in a process that must not import `broker` — it is a Stop hook on the
+        agent's own session and everything it touches has to stay small enough to fail
+        open. Two callers, one SQL line, and a test on each side is cheaper than a shared
+        module that exists to hold it.
+        """
+        return self.db.execute(
+            "SELECT 1 FROM agents WHERE parent=? AND state IN ('working', 'blocked') "
+            "AND ended_at IS NULL LIMIT 1", (name,)).fetchone() is not None
 
     # There is no `_push_state` here, and its absence is load-bearing. Every state we
     # ever reported to herdr — `working` on an unblock, `blocked` on a block, `idle` on a

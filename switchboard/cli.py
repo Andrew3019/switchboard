@@ -127,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
     # something. An agent has no use for it and is not taught it.
     cmd("flush", hidden=True)
 
+    # Hidden for the same reason, and the same shape: the verb the collector's loop runs so
+    # that an agent whose turn ended without `sb done` or `sb block` is told so. The
+    # decision lives in `Broker.reconcile`, running here in a short-lived process on current
+    # code, because the loop that triggers it is version-stale by design (collector module
+    # note). An agent has no use for it and is not taught it.
+    cmd("reconcile", hidden=True)
+
     d = cmd("delegate", help="spawn a child agent to do a task")
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
@@ -611,6 +618,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.cmd == "flush":
         _emit(args, f"rang {', '.join(rung)}" if rung else "rang nobody", {"rung": rung})
+        return 0
+
+    if args.cmd == "reconcile":
+        # Never fatal, for `flush`'s reason turned around: this one runs unattended on the
+        # collector's timer, so a failure has nobody to read it and must not be a traceback
+        # in a spawned process — it is a line in the log the next `sb log` shows.
+        try:
+            pinged = b.reconcile()
+        except Exception as e:                   # noqa: BLE001 — best effort, always
+            store.log_event(db, kind="reconcile_failed", error=str(e))
+            print(f"sb: reconcile: {e}", file=sys.stderr)
+            return 1
+        _emit(args, f"pinged {', '.join(pinged)}" if pinged else "pinged nobody",
+              {"pinged": pinged})
         return 0
 
     try:

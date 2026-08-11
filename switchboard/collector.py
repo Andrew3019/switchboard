@@ -111,6 +111,16 @@ DOORBELL_TIMEOUT = 30.0
 # Checking every tick would buy two seconds instead of forty and read the whole package
 # thirty times a minute for it.
 SOURCE_CHECK_GAP = 45.0
+# The floor between two reconciler runs, in seconds, and the period at which a stall that
+# is still there is looked at again. Two numbers because the trigger has two reasons to
+# fire: a name that has newly gone stalled (the pass this item is held to — pinged within
+# one cycle), and a sweep for the stall that has been there a while, which exists only so
+# that an agent which woke, acted and stalled again is eventually seen even though the
+# stalled SET never changed. The per-agent "once per stall" rule lives in
+# `Broker.reconcile` where the store is; these two only decide how often a process is
+# spawned to ask it.
+RECONCILE_GAP = 10.0
+RECONCILE_SWEEP = 600.0
 
 
 @dataclass
@@ -149,6 +159,15 @@ class State:
     # what says this worked.
     source_signature: Optional[str] = None
     last_source_check: Optional[float] = None
+    # The reconciler, counted like the doorbell and beside it because it is the same shape:
+    # a trigger that spawns `sb`. `reconciled` is the set of stalled names the last run was
+    # spawned for — a list rather than a set only because this dataclass is published as
+    # JSON — and it is what makes a stall that nobody attends to cost one process every
+    # `RECONCILE_SWEEP` instead of one every tick.
+    reconciles: int = 0
+    last_reconcile: Optional[float] = None
+    reconcile_error: Optional[str] = None
+    reconciled: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -229,7 +248,55 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     # In a thread, because a tick is 24 ms and an `sb` command is not: the fleet's one
     # readout must not stutter every time somebody has mail. Daemon, so it can never hold
     # this process open, and it reaps its own child so the collector grows no zombies.
-    threading.Thread(target=_run_doorbell, args=(sb, db_path, state),
+    threading.Thread(target=_run_sb, args=(sb, "flush", db_path, state, "doorbell"),
+                     daemon=True).start()
+    return True
+
+
+def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
+    """Run `sb reconcile` so that an agent which went quiet is told. -> whether one started.
+
+    The doorbell's twin, deliberately built to the same rule: this asks one question of the
+    snapshot it already has — is anybody stalled? — and if so spawns one `sb` command,
+    which decides everything else. Who is exempt, who has already been pinged, and what a
+    ping says are `Broker.reconcile`'s, running in a process on current code, for the
+    reason the module note gives: this one is version-stale on purpose and must not be the
+    place a rule lives (the four-hour doorbell incident was exactly that mistake).
+
+    **Two triggers, and the second is why this is not just `DOORBELL_GAP` again.** Mail
+    stops being pending once it is delivered, so the doorbell's work list empties itself; a
+    stall does not. An agent that goes quiet and is never attended to stays `stalled` on
+    every tick for the rest of the day, and a plain gap would spawn a process for it every
+    ten seconds — the cost `ring_doorbell` designs out for blocked agents by keeping them
+    out of the work list entirely. So the trigger fires on a stalled name this collector
+    has not already spawned for, and otherwise only every `RECONCILE_SWEEP`. The sweep is
+    not decoration: an agent that wakes on its ping, acts, and stalls again is the same
+    name in the same set, and the sweep is the only thing that looks at it again.
+
+    In-process memory, like `last_doorbell`: a replacement collector re-spawning once for
+    a stall it did not see happen costs one process, and `Broker.reconcile`'s own once-per-
+    stall rule is what stops that becoming a second ping.
+    """
+    now = panel.now()
+    stalled = sorted(a.name for a in snap.agents if a.stalled)
+    state.reconciled = [n for n in state.reconciled if n in stalled]
+    if not stalled:
+        return False
+    fresh = [n for n in stalled if n not in state.reconciled]
+    due = state.last_reconcile is None or now - state.last_reconcile >= RECONCILE_SWEEP
+    if not fresh and not due:
+        return False
+    if state.last_reconcile is not None and now - state.last_reconcile < RECONCILE_GAP:
+        return False
+    sb = doorbell_sb()
+    if sb is None:
+        state.reconcile_error = ("no `sb` in this checkout's `bin/` and none on PATH — "
+                                 "nothing can run the reconciler")
+        return False
+    state.last_reconcile = now
+    state.reconciles += 1
+    state.reconciled = stalled
+    threading.Thread(target=_run_sb, args=(sb, "reconcile", db_path, state, "reconcile"),
                      daemon=True).start()
     return True
 
@@ -356,17 +423,24 @@ def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
     return str(store_dir.parent.parent)
 
 
-def _run_doorbell(sb: str, db_path: Optional[Path], state: State) -> None:
-    """The spawned half. Swallows everything: a doorbell that fails is a line in the
-    counters, never a collector that dies."""
+def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
+            which: str = "doorbell") -> None:
+    """The spawned half, shared by both triggers. Swallows everything: a trigger that fails
+    is a line in the counters, never a collector that dies.
+
+    `which` names the counter the failure lands in — the two are kept apart for the reason
+    `doorbell_error` is kept apart from `last_error`: a reconciler that will not run is a
+    different fact from a doorbell that will not, and reporting either as the other would
+    be a lie on forty screens."""
     cwd = _doorbell_cwd(db_path)
+    field = f"{which}_error"
     try:
-        p = subprocess.run([sb, "flush"], cwd=cwd, capture_output=True, text=True,
+        p = subprocess.run([sb, verb], cwd=cwd, capture_output=True, text=True,
                            timeout=DOORBELL_TIMEOUT)
-        state.doorbell_error = None if p.returncode == 0 else \
-            (p.stderr or p.stdout or f"sb flush exited {p.returncode}").strip()[:200]
+        setattr(state, field, None if p.returncode == 0 else
+                (p.stderr or p.stdout or f"sb {verb} exited {p.returncode}").strip()[:200])
     except Exception as e:                     # noqa: BLE001 — never fatal, by design
-        state.doorbell_error = str(e)[:200]
+        setattr(state, field, str(e)[:200])
 
 
 def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
@@ -392,6 +466,11 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         # Not cleared on success: `sb doctor` wants the most recent error even on a
         # collector that has recovered, and `errors` is what says whether it is current.
         ring_doorbell(snap, state, db_path)
+        # The second trigger on the same loop, which is where DESIGN-TRUTH puts it
+        # ("maybe the same loop `sb board` runs on"). Independent of the first: a stalled
+        # agent usually has no mail pending, so a shared gate would mean each mechanism
+        # only ran when the other had work.
+        run_reconciler(snap, state, db_path)
 
     state.wrote_at = at
     panel.publish(paths, panel.envelope(last_good or {}, state.as_dict()))
