@@ -73,5 +73,43 @@ exists.
 
 ## Results
 
-*Not run yet — this section is filled in as each item lands, and its git history is the
-record of the order it was written in versus when the code changed.*
+*Filled in as each item lands. This file's git history is the record of the order the
+tests were written in versus when the code changed.*
+
+### 3.1 + 3.3 — PASS
+
+**Automated.** Four new tests in `tests/test_broker.py`
+(`test_the_default_mode_rings_a_busy_agent_and_cancels_nothing`,
+`test_a_blocked_agent_holds_its_mail_in_every_mode_but_interrupt`,
+`test_every_line_sb_puts_in_a_pane_names_who_sent_it`,
+`test_the_inbox_spells_the_tag_the_same_way_the_doorbell_does`) cover T1.4/T1.5 and
+T3.1/T3.2. Five existing tests changed because the default mode changed under them — four
+now pass `mode=WHEN_IDLE` to keep testing the deferral they were written for, and one
+asserts the reworded reply prompt. Whole suite: 1122 passed.
+
+**Live.** Isolated `git clone` of this branch at
+`<scratchpad>/tellclone`, driven throughout by that clone's own `./bin/sb`. Every spawn
+used `--no-board --no-focus`, so no collector process ever ran (`sb doctor` in the clone
+confirmed its own store under `<clone>/.git/agentflow/state.db` and "no collector"). One
+subject per trial, each running a single 90-second `Bash` loop appending timestamps to a
+`/tmp` log file watched from outside the agent — that log, not the agent's self-report, is
+the authority on whether the call was cut short.
+
+| | T1.1 default (next turn), `subject-a` | T1.2 `--when-idle`, `subject-c` | T1.3 `--interrupt`, `subject-d` |
+|---|---|---|---|
+| sent | 02:22:23, 18 lines in | 02:30:40, 10 lines in | 02:33:05, 9 lines in |
+| loop's own log | **90/90**, 02:22:06→02:23:36 | **90/90** | **stopped at 9** and never grew again |
+| `sb tell` said | `sent to subject-a` | `subject-c mid-turn or blocked — will be rung when free` | `sent to subject-d` |
+| `delivered_at` | set at send | NULL through the whole loop (18→90 lines), set at 02:32:21 once the turn ended | set at send |
+| the agent's own account | "no awareness of any message while the command was running… appeared only when the Bash call's result came back" | "nothing became visible to me during the call"; poked after it stopped | "the tool call returning as rejected, and immediately after it the interrupt text" |
+
+T3.3 passed in all three: `subject-a`'s pane read
+`[sb: from human] You have mail. Run: sb inbox`, its `sb inbox` read
+`[1] [sb: from human] T1.1 default mode probe…` (same tag, same shape), and `subject-d`
+read the interrupt body inline as `[sb: from human] [INTERRUPT — stop now] …`.
+
+One trial is recorded here and not counted: an earlier `--when-idle` subject (`subject-b`)
+held its mail correctly for the whole loop but then ended its turn with `sb done`, so the
+held message was written off as unreadable rather than rung — existing, correct behaviour
+for a finished agent, but it proves the hold and not the release, which is why T1.2 was
+re-run with a subject instructed to go idle without finishing.
