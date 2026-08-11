@@ -35,11 +35,12 @@ A third disagreement, in the mailbox rather than the pane:
 
     never announced AND never read            →  UNDELIVERED
 
-`agent prompt` INTERLEAVES — it is injected into the current turn rather than queued after
-it — so ringing a working agent interrupts whatever it is doing. `sb tell` therefore holds
-the ring back while the target is mid-turn, and `broker.flush_pending` rings once it goes
-idle. That is right, and it introduces a way for mail to sit forever: if the flush never
-runs, nothing is on the agent's screen and nothing is in its inbox count.
+A doorbell can be held back rather than rung: `sb tell --when-idle` waits for the target's
+turn to end, and any message at all waits while the target is blocked. `broker.flush_pending`
+rings those once the wait is over, and that introduces a way for mail to sit forever: if the
+flush never runs, nothing is on the agent's screen and nothing is in its inbox count.
+(The default mode rings straight away — `agent prompt` queues rather than interleaving, so
+a working agent is reached at its next step without losing the one it is on.)
 
 Both halves of that predicate carry weight. Announcement alone says only whether WE rang;
 it does not say whether the agent knows. An agent that runs `sb inbox` of its own accord

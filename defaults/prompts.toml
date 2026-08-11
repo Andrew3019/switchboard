@@ -60,6 +60,11 @@ workspace_task = "Await instructions for this workspace."
 
 [notify]
 
+# Every string in this section reaches an agent with `[sb: from <name>]` in front of it —
+# added by `broker.tag`, in code, so that overriding the wording here cannot drop the mark
+# and so that `sb inbox`, which is not a prompt at all, can spell it the same way. Do not
+# write a sender into these strings; it is already there.
+
 # The doorbell carries no payload — the message itself is in the store, and telling an
 # agent to go and read it is what keeps a message off the wire and out of the pane.
 mail = "You have mail. Run: sb inbox"
@@ -81,7 +86,7 @@ mail_question = "You have mail (a question) — someone is waiting on your answe
 # not the doorbell's; this only stops the doorbell from arguing with it.
 child_done = "A child finished. Run: sb inbox. Waking is not a reason to report — if other children are still running, wait for them."
 
-# `sb interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
+# `sb tell --interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
 # running, so it has to say plainly that the previous instruction is void.
 #
 # "Stop what you are doing" said the wrong half. An agent reads it, stops, does the new
@@ -90,7 +95,7 @@ child_done = "A child finished. Run: sb inbox. Waking is not a reason to report 
 # superseded task after the human has already redirected it is the failure this exists to
 # prevent. It ends by naming the recovery, so an agent that genuinely was mid-something
 # irreversible has somewhere to go other than guessing.
-#   {text} what the human typed
+#   {text} what the sender typed
 interrupt = "[INTERRUPT — stop now] The instruction you were following is cancelled; do not resume it. Do this instead: {text} — if stopping has left something half-done, say so with `sb block` before you go on."
 
 # `sb tell --needs-reply`. Appended to that message in the recipient's `sb inbox` output —
@@ -101,5 +106,11 @@ interrupt = "[INTERRUPT — stop now] The instruction you were following is canc
 # nothing right now. Both halves are stated. Dropping the second half turns a `tell` into
 # an `ask` in the reader's head and costs it the turn it was about to spend; dropping the
 # first leaves the sender waiting on a reply nobody knows to send.
-#   {who} the agent to reply to
-needs_reply = "[reply needed] {who} is waiting for a reply to this. Nobody is blocked on it and it does not interrupt what you are doing — but answer it at some point, with `sb tell {who} \"...\"`, before you finish."
+#
+# It names the SENDER as the one to reply to, in those words. `--needs-reply` is purely
+# agent-to-agent — a human is never a sender here, since they type into a pane rather than
+# using `sb tell`, and can never be a recipient at all — so "reply to whoever sent this" is
+# the whole of the instruction, and an agent that reads it as "report to a human" or
+# "answer your parent" has been sent somewhere nobody is waiting.
+#   {who} the agent that sent the message, and the one owed the reply
+needs_reply = "[reply needed] The sender, {who}, is waiting for a reply to this — send it back to them, not to anybody else. Nobody is blocked on it and it does not interrupt what you are doing, but answer it at some point, with `sb tell {who} \"...\"`, before you finish."

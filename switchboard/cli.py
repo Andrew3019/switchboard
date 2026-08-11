@@ -161,6 +161,21 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--needs-reply", action="store_true",
                    help="tell them you are waiting for a reply — they are asked to answer "
                         "at some point. You do not wait: this returns immediately")
+    # The three delivery modes (DESIGN-TRUTH.md:236-247). Mutually exclusive because they
+    # are one choice with three answers, and argparse saying so beats the broker raising on
+    # a combination that was never meant to exist. No `--next-turn` flag: the default is
+    # the answer for almost every message, and a flag for it would only invite the reader
+    # to think there is a fourth thing to decide.
+    m = t.add_mutually_exclusive_group()
+    m.add_argument("--when-idle", dest="mode", action="store_const",
+                   const=broker_mod.WHEN_IDLE,
+                   help="hold it until they have finished what they are doing. The "
+                        "default reaches them at their next step, which is sooner")
+    m.add_argument("--interrupt", dest="mode", action="store_const",
+                   const=broker_mod.INTERRUPT,
+                   help="CANCEL what they are doing and deliver this instead — for "
+                        "changing course, not for being quick")
+    t.set_defaults(mode=broker_mod.NEXT_TURN)
 
     # Agents only. A human has no mailbox — see the `inbox` branch in `run`.
     ib = cmd("inbox", help="read your unread messages")
@@ -396,7 +411,15 @@ def _validate(args) -> None:
 
     elif cmd == "tell":
         args.who = validate.targets(args.who)
-        args.message = validate.text(args.message, "message")
+        # An interrupt's text travels INLINE — it is the prompt herdr sends, and herdr
+        # refuses any agent argument holding a newline. The other two modes only ring a
+        # fixed doorbell, so their body never reaches that call and may be as long and as
+        # multi-line as the sender likes. Checked here rather than left to herdr, which
+        # would fail after the escape keypress had already cancelled the target's turn.
+        if args.mode == broker_mod.INTERRUPT:
+            args.message = validate.line(args.message, "message")
+        else:
+            args.message = validate.text(args.message, "message")
 
     elif cmd == "done":
         # herdr carries the summary as `report-agent --message`, so one line.
@@ -802,7 +825,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "tell":
         ids = b.tell(args.who, args.message, me=me, reply_to=args.reply_to,
-                     needs_reply=args.needs_reply)
+                     needs_reply=args.needs_reply, mode=args.mode)
         # Whether the doorbell actually rang. `tell` used to report plain success even
         # when the ring failed outright, so the sender proceeded believing the handoff had
         # happened — liveness loss, which in an async system is worse than an error.
@@ -835,8 +858,14 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         lost = [n for n in lost if n not in closed]
         notes = []
         if waiting:
-            notes.append(f"{', '.join(waiting)} mid-turn or blocked — will be rung "
-                         f"when free")
+            # Being mid-turn only holds a message back in `--when-idle`; the default rings
+            # a working agent on the spot. So the two modes get told different things, and
+            # neither is told the other's reason: under the default, a target still waiting
+            # is one that has STOPPED for a person, and "mid-turn" would send the sender
+            # looking for a turn that is not running.
+            why = ("mid-turn or blocked" if args.mode == broker_mod.WHEN_IDLE
+                   else "blocked, waiting on the human")
+            notes.append(f"{', '.join(waiting)} {why} — will be rung when free")
         if lost:
             notes.append(f"{', '.join(lost)} UNREACHABLE — herdr no longer answers to its "
                          f"name and the doorbell will not ring again; the message is "
@@ -876,7 +905,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # what the sender typed.
         lines = []
         for m in msgs:
-            lines.append(f"[{m['id']}] from {m['from_agent']}: {m['body']}")
+            # `broker.tag`, not a second spelling of it: this line and the doorbell that
+            # sent the reader here are the same claim about the same message, and they used
+            # to disagree — `[3] from w1:` here, no sender at all there.
+            lines.append(f"[{m['id']}] {broker_mod.tag(m['from_agent'])} {m['body']}")
             if _needs_reply(m):
                 lines.append("    " + config.prompt("notify.needs_reply", b.repo,
                                                     who=m["from_agent"]))
@@ -1027,7 +1059,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "interrupt":
-        b.interrupt(args.name, args.text)
+        # The verb is on its way out (item 3.2) — interrupting is a delivery mode of
+        # `tell`, and this now goes through it rather than round it, so the capability has
+        # exactly one implementation for the deletion to leave standing.
+        b.tell([args.name], args.text, me=me, mode=broker_mod.INTERRUPT)
         _emit(args, f"interrupted {args.name}", {"name": args.name})
         return 0
 

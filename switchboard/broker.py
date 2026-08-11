@@ -9,11 +9,13 @@ Everything here obeys one rule: the agent states an intent, the tooling does the
 Three pairs of verbs look like duplicates and are not. The distinctions are load-bearing,
 so they are written down where the code is rather than argued about again:
 
-- **`tell` vs `interrupt`.** `tell` writes a message and rings a doorbell that carries no
-  payload — and is held back while the target is mid-turn, because a prompt INTERLEAVES
-  rather than queues. `interrupt` cancels the turn with `esc` and puts the instruction
-  itself on the wire. Deferring an interrupt would defeat it; interrupting on every `tell`
-  is what the deferral exists to stop.
+- **`tell`'s three delivery modes.** `tell` writes a message and rings a doorbell that
+  carries no payload. *next-turn*, the default, rings straight away: the prompt QUEUES and
+  the agent's own system delivers it at the next point the model can act, so nothing is
+  cancelled and nothing waits. *when-idle* holds the ring until the target's turn has
+  ended. *interrupt* cancels the turn with `esc` and puts the instruction itself on the
+  wire. Deferring an interrupt would defeat it; interrupting on every `tell` is what the
+  other two modes exist to stop. See `TELL_MODES`.
 - **`block` vs `ask human`.** There is no `ask human`, and that pair no longer exists:
   the human has NO mailbox, so needing a person is always a block. `block` ends the turn
   and the doorbell restarts it, which for an answer that may take hours is the only shape
@@ -107,9 +109,47 @@ PROTOCOL_LINE = config.protocol()
 ASK_TIMEOUT = config.setting("timeouts.ask")
 ASK_POLL = config.setting("timeouts.ask_poll")
 GONE_GRACE = config.setting("timeouts.gone_grace")
-# What `sb interrupt` waits for the escape keypress to land before sending the new
+# What an interrupt waits for the escape keypress to land before sending the new
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
+
+# `sb tell`'s three delivery modes (DESIGN-TRUTH.md:236-247). They differ only in WHEN the
+# doorbell is allowed to ring and whether the turn in progress survives it:
+#
+#   next-turn   ring now. `agent prompt` queues the text and the agent's own system hands
+#               it over at the next point the model can act — the instant the in-flight
+#               tool call returns. Nothing is cancelled and nothing waits. The default.
+#   when-idle   hold the ring until the target has no turn left to end. What every
+#               message did before modes existed, and what `sb done` still uses.
+#   interrupt   cancel the turn with `esc` and put the instruction itself on the wire.
+#
+# That next-turn is reachable at all is a measured fact, not an assumption:
+# `audit/phase3-delivery-primitive.md` sent `agent prompt` into three genuine 90-second
+# single tool calls and all three ran to completion with the text delivered at the
+# boundary after them. The older note here — "`agent prompt` INTERLEAVES" — was wrong;
+# see `Herdr.prompt`.
+NEXT_TURN = "next-turn"
+WHEN_IDLE = "when-idle"
+INTERRUPT = "interrupt"
+TELL_MODES = (NEXT_TURN, WHEN_IDLE, INTERRUPT)
+
+
+def tag(sender: str) -> str:
+    """`[sb: from <name>]` — every line sb puts in front of an agent starts with this.
+
+    Two questions, one mark. *Did a person type this, or did the tooling?* — a doorbell
+    arrives in the pane looking exactly like Andrew's own typing, and an agent that cannot
+    tell them apart cannot weigh them (DESIGN-TRUTH.md:93-95). And *who is this from?*,
+    which the doorbell could not answer at all before: it carries no payload, so an agent
+    read "You have mail" with no idea whether its parent had redirected it or a sibling had
+    said hello, and had to spend the turn on `sb inbox` to find out.
+
+    Here in code rather than baked into each `prompts.toml` string, because it is one
+    shape decided once: a repo that overrides a doorbell's wording still gets the tag, and
+    `sb inbox` (which is not a prompt at all) spells it the same way instead of inventing
+    a second shape — which is exactly what it used to do (`[3] from w1: ...`).
+    """
+    return f"[sb: from {sender}]"
 # How long `sb workspace close`'s re-confirmation waits for the panes it just closed to
 # leave the process table before it is allowed to refuse on them. See `_gate`.
 TEARDOWN_SETTLE = config.setting("timeouts.teardown_settle")
@@ -3196,6 +3236,7 @@ class Broker:
     def tell(
         self, targets: Iterable[str], message: str, *, me: Optional[str] = None,
         reply_to: Optional[int] = None, kind: str = "tell", needs_reply: bool = False,
+        mode: str = NEXT_TURN,
     ) -> list[int]:
         """Send and return, always. `needs_reply` changes what the recipient READS.
 
@@ -3203,7 +3244,17 @@ class Broker:
         tells it to reply at some point. It does not make the sender wait, poll or block —
         no agent ever waits on another agent (DESIGN-TRUTH.md:230-234), which is why this
         is a flag on a fire-and-forget verb and not a second `ask`.
+
+        `mode` chooses WHEN the doorbell rings — see `TELL_MODES`. The sender returns
+        immediately in all three: even *interrupt*, which is the only one that changes what
+        the recipient is doing, is over the moment the keypress and the text are on the
+        wire. Defaulting to *next-turn* rather than *when-idle* is the whole of item 3.1:
+        the message a busy agent is sent now reaches it at its next tool-call boundary
+        instead of sitting until its entire turn has ended, which measured five and a half
+        minutes the last time it was timed (`audit/delivery-modes.md`).
         """
+        if mode not in TELL_MODES:
+            raise ValueError(f"no such delivery mode: {mode} (one of {', '.join(TELL_MODES)})")
         me = me or self.whoami()
         ids = []
         for who in targets:
@@ -3217,6 +3268,12 @@ class Broker:
                     "Use `sb block \"<why>\"` if you need an answer, or `sb done "
                     "\"<summary>\"` to report what you did."
                 )
+            if mode == INTERRUPT:
+                # Its own path from the first line: the text travels INLINE rather than
+                # behind a doorbell, so the row it writes holds the cancel wrapper and is
+                # marked read on delivery. Nothing below this branch applies to it.
+                ids.append(self._interrupt(t, message, me=me, needs_reply=needs_reply))
+                continue
             # A plain `tell` answers a pending `ask` — correlation is the tool's job,
             # which is why there is no `reply` verb.
             rt = reply_to
@@ -3243,7 +3300,8 @@ class Broker:
             else:
                 # Only the human answers a block, so only the human's `tell` clears one.
                 # Anyone else's mail is held until they have (see `_ring`).
-                self._ring(t, self._say("notify.mail"), answer=(me == HUMAN))
+                self._ring(t, f"{tag(me)} {self._say('notify.mail')}",
+                           mode=mode, answer=(me == HUMAN))
         return ids
 
     def ask(
@@ -3288,7 +3346,7 @@ class Broker:
             ids[t] = store.put_message(
                 self.db, from_agent=me, to_agent=t, kind="ask", body=question
             )
-            self._ring(t, self._say("notify.mail_question"))
+            self._ring(t, f"{tag(me)} {self._say('notify.mail_question')}")
 
         answers: dict[str, Optional[str]] = {t: None for t in resolved}
         deadline = time.time() + timeout
@@ -3418,7 +3476,13 @@ class Broker:
         if parent:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
-            self._ring(parent, self._say("notify.child_done"))
+            #
+            # WHEN IDLE, explicitly and not by default — DESIGN-TRUTH.md:220-224 names the
+            # mode for `done` by name. A parent that is mid-turn is already working; a
+            # child finishing is not news worth reaching it before its own next boundary,
+            # and a fan-out of five would otherwise poke it five times in one turn.
+            self._ring(parent, f"{tag(me)} {self._say('notify.child_done')}",
+                       mode=WHEN_IDLE)
         else:
             # No parent to poke, and the human has no mailbox — so the notification IS the
             # delivery, not a copy of one. A root reporting done is the end of the run, and
@@ -3845,14 +3909,16 @@ class Broker:
         store.log_event(self.db, kind="restore", agent=name)
         return name
 
-    def interrupt(self, name: str, text: str, *, me: Optional[str] = None,
-                  stop: bool = True) -> None:
-        """Change course mid-flight. Human-facing; emergencies only.
+    def _interrupt(self, name: str, text: str, *, me: Optional[str] = None,
+                   stop: bool = True, needs_reply: bool = False) -> int:
+        """Change course mid-flight — `tell(..., mode=INTERRUPT)`'s implementation.
 
-        Not a variant of `tell`, though the two look alike. `tell` rings a doorbell that
-        carries no payload and is held back while the target is mid-turn; this one cancels
-        the turn with `esc` and puts the instruction itself on the wire, because a queued
-        interrupt is not an interrupt — the work you are trying to stop would finish first.
+        Private, and no longer a verb of its own: interrupting is a delivery mode of
+        `tell` (DESIGN-TRUTH.md's rejected list). It stays a separate method because it
+        shares nothing with the other two modes below the first line — the doorbell
+        carries no payload and is allowed to wait, this cancels the turn with `esc` and
+        puts the instruction itself on the wire, because a queued interrupt is not an
+        interrupt: the work you are trying to stop would finish first.
 
         The message still goes in the store, and once delivery is confirmed it is marked
         read: the instruction is durable and shows up in `sb inspect` alongside everything
@@ -3881,13 +3947,15 @@ class Broker:
                 time.sleep(INTERRUPT_SETTLE)   # let the cancel land before the new one
             except HerdrError as e:
                 store.log_event(self.db, kind="interrupt_stop_failed", agent=name, error=str(e))
-        body = self._say("notify.interrupt", text=text)
-        mid = store.put_message(self.db, from_agent=me, to_agent=name, kind="tell", body=body)
+        body = f"{tag(me)} {self._say('notify.interrupt', text=text)}"
+        mid = store.put_message(self.db, from_agent=me, to_agent=name, kind="tell", body=body,
+                                needs_reply=needs_reply)
         # Raises Undeliverable if it cannot land — deliberately not caught here. The store
         # row survives it, undelivered, which is exactly the state a queued `tell` is in.
-        self._ring(name, body, force=True)
+        self._ring(name, body, mode=INTERRUPT)
         store.mark_collected(self.db, mid)
         store.log_event(self.db, kind="interrupt", agent=name, stopped=stop, text=text[:EVENT_CLIP])
+        return mid
 
     # -- internals -------------------------------------------------------
 
@@ -4057,7 +4125,11 @@ class Broker:
             answer = any(m["from_agent"] == HUMAN for m in mine)
             if not answer and self._is_blocked(who):
                 continue
-            if self._ring(who, self._say("notify.mail"), answer=answer):
+            # One doorbell for the whole backlog, so it names every sender waiting in it —
+            # `[sb: from parent, w3]`. Not one ring per sender: that is the per-message
+            # loop C0 exists to prevent, and the payload is in the inbox either way.
+            senders = ", ".join(dict.fromkeys(m["from_agent"] for m in mine))
+            if self._ring(who, f"{tag(senders)} {self._say('notify.mail')}", answer=answer):
                 rung.append(who)
         return rung
 
@@ -4151,16 +4223,31 @@ class Broker:
             store.log_event(self.db, kind="mail_cleared", agent=who,
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
-    def _ring(self, who: str, text: str, *, force: bool = False,
+    def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
               answer: bool = False) -> bool:
         """The doorbell. Carries no payload — the message is in the store.
 
-        Held back while the target is mid-turn: `agent prompt` INTERLEAVES, injecting into
-        the current turn rather than queueing after it, so ringing a working agent
-        interrupts whatever it was doing. `force` is for interrupt, whose whole purpose is
-        to land now.
+        `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`), and the
+        only thing it decides here is what to do about a target that is mid-turn:
 
-        Held back while the target is BLOCKED, too, and for the same reason turned inside
+        - *when-idle* holds the ring — `ring_deferred` — and `flush_pending` rings it once
+          the turn has ended. The default, because most callers here are not a `tell` at
+          all: `done`'s poke to a parent, and `flush_pending`'s own re-ring, are both
+          when-idle by their nature (DESIGN-TRUTH.md:220-224 for `done`).
+        - *next-turn* rings anyway. `agent prompt` queues rather than interleaves — three
+          90-second single tool calls, none cut short, text delivered at the boundary
+          after each (`audit/phase3-delivery-primitive.md`) — so this is not a stealth
+          interrupt: the in-flight tool call finishes and the text is waiting when it does.
+        - *interrupt* rings anyway too, and its caller has already sent `esc`.
+
+        Held back while the target is BLOCKED in every mode but interrupt, and that is a
+        deliberate widening of the old rule rather than a hole in the new one: a blocked
+        agent has no next turn to deliver to — it has stopped, and the ring would only
+        restart it, drop it out of `sb status --needs-me` and bury the answer it is
+        waiting for. *Next turn* to a blocked agent therefore means the turn its block is
+        answered on, which is `flush_pending`'s job exactly as before.
+
+        The blocked rule's reason, in full, since it is the one turned inside
         out: a blocked agent is not idle, it is waiting on a person. This used to unblock
         unconditionally before every delivery, so a sibling's unrelated `tell` — or a
         child's `done` — put the agent back to `working`, dropped it out of `sb status
@@ -4178,10 +4265,12 @@ class Broker:
 
         So a failed ring is a failed ring. For the doorbell that costs nothing — the
         message is already durable with `delivered_at` NULL, and `flush_pending` re-rings
-        it from `undelivered()` on the next `sb` command anyone runs. A `force` ring has no
-        such retry worth waiting for, because "later" is precisely what it was refusing, so
-        that one raises instead of quietly returning False.
+        it from `undelivered()` on the next `sb` command anyone runs. An INTERRUPT ring has
+        no such retry worth waiting for, because "later" is precisely what it was refusing,
+        so that one raises instead of quietly returning False. A failed *next-turn* ring is
+        an ordinary failed doorbell: the row stays undelivered and is retried.
         """
+        force = mode == INTERRUPT
         if who == HUMAN:
             return False
         if self._finished_and_unreachable(who):
@@ -4212,7 +4301,7 @@ class Broker:
             # block (see `_unblock_if_needed`) and bury the answer it is waiting for.
             store.log_event(self.db, kind="ring_held", agent=who, reason="blocked")
             return False
-        if not force and self._busy(who):
+        if mode == WHEN_IDLE and self._busy(who):
             store.log_event(self.db, kind="ring_deferred", agent=who)
             return False
         if answer:

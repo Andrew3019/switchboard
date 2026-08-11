@@ -26,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import (  # noqa: E402
-    HUMAN, MAIN, MAIN_NAME, Broker, SbUnpinned, TaskUndelivered, Undeliverable,
+    HUMAN, INTERRUPT, MAIN, MAIN_NAME, NEXT_TURN, WHEN_IDLE, Broker, SbUnpinned,
+    TaskUndelivered, Undeliverable,
 )
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
@@ -506,7 +507,7 @@ class BrokerTest(unittest.TestCase):
                 contextlib.redirect_stdout(buf):
             self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
         out = buf.getvalue()
-        self.assertIn("orch is waiting for a reply", out)
+        self.assertIn("The sender, orch, is waiting for a reply", out)
         self.assertIn("sb tell orch", out)                # it says HOW to answer
         self.assertEqual(out.count("waiting for a reply"), 1)   # not the plain tell too
 
@@ -767,26 +768,85 @@ class BrokerTest(unittest.TestCase):
         """It travels inline rather than as a doorbell, so without the row the instruction
         would exist only in a pane — and the store is the only memory (C7)."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.interrupt("w", "stop and do this instead")
+        self.b.tell(["w"], "stop and do this instead", mode=INTERRUPT)
         [m] = self.db.execute(
             "SELECT * FROM messages WHERE to_agent='w'").fetchall()
         self.assertIn("stop and do this instead", m["body"])
         self.assertIsNotNone(m["read_at"])          # it already arrived, inline
         self.assertIsNotNone(m["delivered_at"])     # so nothing re-rings for it
 
+    def test_every_line_sb_puts_in_a_pane_names_who_sent_it(self):
+        """Item 3.3. The doorbell carries no payload, so before this an agent read "You
+        have mail" with no way to tell whether its parent had redirected it or a sibling
+        had said hello — nor whether sb or Andrew had typed it. One tag, three call sites:
+        the doorbell, the inline interrupt body, and the child-done poke."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.b.tell(["kid"], "have a look at this", me="lead")
+        self.assertIn("[sb: from lead]", self.h.prompts[-1][1])
+        self.b.tell(["kid"], "stop, do this instead", me=HUMAN, mode=INTERRUPT)
+        self.assertIn("[sb: from human]", self.h.prompts[-1][1])   # inline body
+        self.b.done("shipped it", me="kid")
+        self.assertIn("[sb: from kid]", self.h.prompts[-1][1])     # the parent's poke
+
+    def test_the_inbox_spells_the_tag_the_same_way_the_doorbell_does(self):
+        """They are one claim about one message and they used to disagree — `[3] from w1:`
+        in the inbox, no sender at all in the pane. A reader cannot correlate two shapes."""
+        import argparse
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.b.tell(["w"], "the branch is ready", me="orch")
+        doorbell = self.h.prompts[-1][1]
+        args = argparse.Namespace(cmd="inbox", json=False, peek=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True), \
+                contextlib.redirect_stdout(buf):
+            from switchboard import cli
+            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+        self.assertIn("[sb: from orch]", doorbell)
+        self.assertIn("[sb: from orch]", buf.getvalue())
+
     def test_the_doorbell_is_held_back_while_the_target_is_mid_turn(self):
-        """`agent prompt` INTERLEAVES — it lands inside the current turn rather than
-        after it — so ringing a working agent interrupts whatever it was doing."""
+        """WHEN IDLE only. It is no longer what an unflagged `tell` does — the default
+        rings a working agent and its own system queues the text — so this pins the mode
+        that still waits, which is what `sb done` uses."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "not urgent", me=HUMAN)
+        self.b.tell(["w"], "not urgent", me=HUMAN, mode=WHEN_IDLE)
         self.assertEqual(self.h.prompts, [])                       # not rung
         self.assertEqual(len(store.undelivered(self.db)), 1)       # but not lost
+
+    def test_the_default_mode_rings_a_busy_agent_and_cancels_nothing(self):
+        """Item 3.1's pass line. `agent prompt` queues — the text lands at the target's
+        next tool-call boundary and the call in flight finishes (measured live in
+        `audit/phase3-delivery-primitive.md`), so the default no longer waits out a whole
+        turn to say "you have mail". No `esc`: that is what separates this from interrupt,
+        and a test that only checked the prompt would pass on a stealth interrupt."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "when you get a moment", me=HUMAN)
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])     # rung, mid-turn
+        self.assertEqual(self.h.keys, [])                           # nothing cancelled
+        self.assertEqual(store.undelivered(self.db), [])            # nothing left waiting
+
+    def test_a_blocked_agent_holds_its_mail_in_every_mode_but_interrupt(self):
+        """3.4, which modes must not regress: a blocked agent is not idle, it has STOPPED
+        for a person, so "next turn" is the turn its block is answered on. Ringing it early
+        would clear the block and bury the answer under mail it never asked for."""
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        self.b.block("which branch?", me="kid")
+        self.h.prompts.clear()
+        for mode in (NEXT_TURN, WHEN_IDLE):
+            self.b.tell(["kid"], "unrelated", me="sibling", mode=mode)
+            self.assertEqual(self.h.prompts, [], mode)
+            self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked", mode)
+        self.b.tell(["kid"], "use main", me=HUMAN)          # the answer still lands
+        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
 
     def test_pending_mail_is_rung_once_the_target_goes_idle(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "later", me=HUMAN)
+        self.b.tell(["w"], "later", me=HUMAN, mode=WHEN_IDLE)
         self.h.states_by_name = {"w": "idle"}
         self.b._alive_cache = None
         self.assertEqual(self.b.flush_pending(), ["w"])
@@ -822,7 +882,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.b.tell(["w"], "review the PR", me=HUMAN, mode=WHEN_IDLE)
         self.assertEqual(self.h.prompts, [])                       # held back, mid-turn
         self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["review the PR"])
         self.h.states_by_name = {"w": "idle"}
@@ -842,7 +902,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "review the PR", me=HUMAN)
+        self.b.tell(["w"], "review the PR", me=HUMAN, mode=WHEN_IDLE)
         self.b.inbox(me="w")                                       # read it, unrung
         self.b.block("which branch?", me="w")
         self.h.prompts.clear()
@@ -869,7 +929,7 @@ class BrokerTest(unittest.TestCase):
         """Deferring an interrupt would defeat its entire purpose."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
-        self.b.interrupt("w", "stop")
+        self.b.tell(["w"], "stop", mode=INTERRUPT)
         self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
 
     def test_an_unrung_doorbell_never_falls_back_to_the_pane_shell(self):
@@ -949,7 +1009,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.unreachable.add("w")
         with self.assertRaises(Undeliverable) as cm:
-            self.b.interrupt("w", "stop what you are doing")
+            self.b.tell(["w"], "stop what you are doing", mode=INTERRUPT)
         self.assertEqual(cm.exception.who, "w")
         self.assertIn("agent_not_found", cm.exception.message)   # what herdr actually said
         self.assertIn("sb inbox", cm.exception.message)          # and what to do about it
@@ -1153,7 +1213,8 @@ class BrokerTest(unittest.TestCase):
         from switchboard import cli
         self._evicted()
         args = argparse.Namespace(cmd="tell", who=["w"], message="are you there?",
-                                  reply_to=None, needs_reply=False, json=False)
+                                  reply_to=None, needs_reply=False, json=False,
+                                  mode=NEXT_TURN)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), \
                 contextlib.redirect_stdout(buf):
@@ -1178,7 +1239,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         store.set_state(self.db, "w", "done")
         with self.assertRaises(ValueError) as cm:
-            self.b.interrupt("w", "stop what you are doing")
+            self.b.tell(["w"], "stop what you are doing", mode=INTERRUPT)
         self.assertIn("already finished", str(cm.exception))
         self.assertEqual(self.h.keys, [])                         # no `esc` either
         self.assertEqual(self.db.execute(
@@ -1289,7 +1350,7 @@ class BrokerTest(unittest.TestCase):
     def test_interrupt_cancels_the_current_turn_first(self):
         """`agent prompt` alone only queues — the in-flight work would still finish."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.interrupt("w", "stop, do this instead")
+        self.b.tell(["w"], "stop, do this instead", mode=INTERRUPT)
         self.assertEqual(self.h.keys[0], ("w", ("esc",)))
         self.assertIn("INTERRUPT", self.h.prompts[-1][1])
 
