@@ -79,8 +79,8 @@ from typing import Any, Callable, Optional
 
 from . import config
 from .herdr import (
-    BLOCKED, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF, SPAWN_TIMEOUT_MS, WORKING, Herdr,
-    HerdrError,
+    BLOCKED, DELIVER_ATTEMPTS, DELIVER_TIMEOUT_MS, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF,
+    SPAWN_TIMEOUT_MS, WORKING, Herdr, HerdrError,
 )
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
@@ -144,6 +144,41 @@ _SPAWN_WORST_CASE = (
 # whereas erring short kills real agents during their own spawn.
 SPAWN_SLACK = 5
 SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
+
+# How long an agent that has NEVER run an `sb` command is allowed to look idle before that
+# idleness is read as a stall. A third question again, and the narrowest of the three: not
+# "is this row a claim" (SPAWN_GRACE) nor "is it dead" (GONE_CONFIRM_GRACE), but "has this
+# agent ever taken a turn at all?"
+#
+# It has to be a clock, and that is the honest thing to say about it. Nothing in the store
+# records that herdr once saw an agent `working`: the collector is the only process that
+# watches continuously and it is read-only by design, so the fact is never written down.
+# The one durable trace an agent leaves of having run is its `session_id`, claimed on its
+# first `sb` call — after which "idle" really does mean a turn that started and ended.
+# Before it, `idle` and `not started yet` are the same reading, and the reconciler pinged a
+# freshly delegated agent two seconds after its `delegate` event on the strength of it
+# (`audit/phase3-integration.md`) — a nudge that says "your turn ended without a report" to
+# an agent whose turn has not begun.
+#
+# Sized as the delivery's OWN worst case, and derived from it rather than restated for the
+# reason `_SPAWN_WORST_CASE` is: nothing should be able to say "the agent never started"
+# before the machinery that hands it the task has given up trying. `deliver` re-sends
+# `deliver_attempts` times, each waiting `deliver_ms` for a turn to appear, with the same
+# backoff between them as a spawn retry.
+#
+# Not the delivery window alone: measured in an isolated clone, an agent delegated at t
+# read `idle` to herdr until t+26s and the one-window version of this constant (20 s) still
+# left four seconds of it exposed. Measured from the last thing that happened to the row
+# rather than from its creation — a slow `agent start` can put a minute between the claim
+# and the task, and it is the task that starts the clock that matters.
+#
+# Erring long costs a genuinely silent agent one window before the reconciler speaks, which
+# the stop hook has already spoken to and the board shows regardless; erring short is the
+# false nudge this exists to end.
+STALL_GRACE = (
+    DELIVER_ATTEMPTS * (DELIVER_TIMEOUT_MS / 1000)
+    + SPAWN_BACKOFF * (DELIVER_ATTEMPTS * (DELIVER_ATTEMPTS + 1) / 2)
+)
 
 # How long a row has to stay CONTINUOUSLY absent from herdr before that absence is written
 # down as a death (see `_record_gone`).
@@ -482,6 +517,12 @@ def collect(
         if tracks_absence:
             absent_since[name] = row["absent_since"]
         last = max(row["created_at"], activity.get(name, 0))
+        # An agent with no session id has never run an `sb` command, so nothing here has
+        # ever seen it take a turn — and for `STALL_GRACE` after the last thing that
+        # happened to it, "idle" is as likely to mean "has not started" as "ended without
+        # saying anything". Calling that a stall is what pinged a two-second-old agent.
+        # Once the session id is there the grace is over for good, whatever the clock says.
+        starting = row["session_id"] is None and (now - last) < STALL_GRACE
         agents.append(AgentStatus(
             name=name,
             role=row["role"],
@@ -492,7 +533,8 @@ def collect(
             alive=alive,
             # The join this file exists for. Both halves must be known: an unreachable
             # herdr proves nothing, and neither does herdr's `unknown`.
-            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting),
+            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting
+                         and not starting),
             gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),

@@ -86,7 +86,7 @@ class InspectTest(Base):
 
     def test_reports_drift_exactly_as_status_does(self):
         """One rule for stalled, in one place — or two readouts disagree about reality."""
-        self.agent()
+        self.agent(session_id="s1")     # past its spawn, as above
         d = self.inspect(h=FakeHerdr([alive("w1", "idle")]))
         self.assertTrue(d.agent.stalled)
         self.assertEqual(d.agent.state, "working")

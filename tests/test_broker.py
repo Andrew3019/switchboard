@@ -2364,7 +2364,11 @@ class BrokerTest(unittest.TestCase):
         four are idle; what separates them is the store."""
         for name, kw in (("quiet", {}), ("stuck", {}), ("finished", {}),
                          ("waiting", {"awaiting_task": True})):
-            store.create_agent(self.db, name=name, role="worker",
+            # `session_id` is what says each of these has taken a turn at all: a
+            # session-less row this young has not started yet and is held off the stalled
+            # list entirely (`status.STALL_GRACE`), which would make this fleet agree for
+            # the wrong reason.
+            store.create_agent(self.db, name=name, role="worker", session_id=f"s-{name}",
                                pane_id=f"w1:p{len(self.h.states_by_name)}", **kw)
             self.h.states_by_name[name] = "idle"
         store.set_state(self.db, "stuck", "blocked")
@@ -2388,12 +2392,34 @@ class BrokerTest(unittest.TestCase):
         """T1, second half. The stop hook exempts it deliberately — the protocol tells a
         delegating parent to end its turn and wait for the poke — so pinging it here would
         push it to report over work still running."""
-        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p1",
+                           session_id="s-lead")   # past its spawn: the exemption is what
         store.create_agent(self.db, name="kid", role="worker", parent="lead",
-                           pane_id="w1:p2")
+                           pane_id="w1:p2")       # has to do the work here, not the grace
         self.h.states_by_name = {"lead": "idle", "kid": "working"}
         self.assertEqual(self.b.reconcile(), [])
         self.assertEqual(self.h.prompts, [])
+
+    def test_a_freshly_spawned_agent_is_not_pinged_inside_its_own_spawn_window(self):
+        """The defect the integration found: a nudge that is false at the moment it lands.
+
+        The agent was pinged two seconds after its `delegate` event
+        (`audit/phase3-integration.md`) — herdr had not seen its first turn start, so it
+        read idle, and the ping told it its turn had ended. Nothing new is asked of the
+        reconciler here: `status` no longer calls that a stall (`STALL_GRACE`), and this
+        pins that the acting half agrees.
+        """
+        store.create_agent(self.db, name="fresh", role="worker", task="do the thing",
+                           pane_id="w1:p1")            # no session id: it has not run `sb`
+        self.h.states_by_name["fresh"] = "idle"
+        self.assertEqual(self.b.reconcile(), [])
+        self.assertEqual(self.h.prompts, [])
+
+        # The same agent, once the window has passed and it still has not said anything.
+        self.db.execute("UPDATE agents SET created_at=created_at-? WHERE name='fresh'",
+                        (int(status.STALL_GRACE) + 1,))
+        self.db.commit()
+        self.assertEqual(self.restart_sb().reconcile(), ["fresh"])
 
     def test_a_stall_is_pinged_once_and_not_every_cycle(self):
         """T2. A reconciler that nags every cycle is worse than none.

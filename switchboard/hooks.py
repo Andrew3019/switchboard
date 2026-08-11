@@ -165,17 +165,53 @@ def _has_live_child(db: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
+def _already_nudged(db: sqlite3.Connection, name: str) -> bool:
+    """Has this agent been stopped once already, with nothing reported since?
+
+    THE CAP, and the reason it lives here rather than in `stop_hook_active`. That flag is
+    real and it arrives — measured twice, on the second stop of a chain the gate itself
+    caused — but it is scoped to ONE stop-chain, and a chain is one user prompt. Anything
+    that pokes the agent starts a new one: a doorbell ring, a `tell`, the reconciler's own
+    nudge. Reproduced in an isolated clone: an agent was blocked, allowed through on its
+    second stop with `stop_hook_active: true`, then told one thing and blocked again on the
+    next stop with the flag false and a new `prompt_id`. Two blocks, one agent, nothing
+    wrong with the flag — the cap was simply never the property the design claimed.
+
+    So the cap is asked of the store, which outlives every chain: the newest of this
+    agent's block/report events. `stop_gate_blocked` on top means we nudged it and it has
+    said nothing since, so it is nudged no further — the reconciler is what carries a
+    silent agent from there, and `BLOCK_REASON` promises exactly this ("you will only be
+    stopped once"), which until now it could not keep.
+
+    A report resets it, and that is the intended re-arm rather than a leak: an agent that
+    called `sb done` and is then spoken to in its pane is `working` again, and its next
+    silent turn-end is a new silence worth one nudge.
+    """
+    row = db.execute(
+        "SELECT kind FROM events WHERE agent=? AND kind IN "
+        "('stop_gate_blocked', 'done', 'blocked') ORDER BY id DESC LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None and row["kind"] == "stop_gate_blocked"
+
+
 def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
     """The reason to refuse this turn's end, or None to let it end.
 
     The order of the checks is the design, so it is worth reading as a list.
 
     **`stop_hook_active` first, and unconditionally.** It is true only on a turn that this
-    gate itself caused, which makes it the cap on the loop the gate could otherwise become:
-    block a turn, the agent takes another, it ends, block again. At most ONE stop per
-    stop-chain. A nudged agent that still will not report is then 3.5's problem — the
-    reconciler names a stalled agent afterwards, which is the right division: the hook
-    prevents the ordinary case, it does not fight the pathological one.
+    gate itself caused: block a turn, the agent takes another, it ends, and this lets that
+    second end through. At most one stop per stop-chain.
+
+    **`_already_nudged` last, and it is the real cap.** A stop-chain is one user prompt,
+    so the flag above caps nothing an agent is poked through — a ring, a `tell`, the
+    reconciler's own nudge each start a fresh chain with the flag false, which is how one
+    agent came to be blocked twice twelve seconds apart. The store remembers instead: one
+    block per agent until it reports something. A nudged agent that still will not report
+    is then 3.5's problem — the reconciler names a stalled agent afterwards, which is the
+    right division: the hook prevents the ordinary case, it does not fight the pathological
+    one.
 
     **An unresolvable caller ends its turn.** Not one of ours, or one we cannot name yet.
 
@@ -199,6 +235,13 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
         # Logged rather than silent: this is the one exemption that could hide a real
         # silent finish, so it should be visible on the board that it was used.
         store.log_event(db, kind="stop_gate_waived", agent=a["name"], reason="live_children")
+        return None
+    if _already_nudged(db, a["name"]):
+        # Logged against NO agent, with the target in the payload, for the reconciler's
+        # reason (`Broker._nudge`): `status._last_activity` counts every event that names
+        # an agent, so writing this against the target would reset the idle clock on the
+        # silent agent this hand-off exists to pass on.
+        store.log_event(db, kind="stop_gate_capped", target=a["name"])
         return None
     store.log_event(db, kind="stop_gate_blocked", agent=a["name"])
     return BLOCK_REASON

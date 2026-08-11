@@ -1,6 +1,7 @@
 """The Stop gate — the decision, its loop cap, and the wiring that delivers it.
 
-Three tests, deliberately. What a test can pin here is the DECISION (a real store, real
+Five tests: the three the gate was built with, and two for the cap that the integration
+found was not one. What a test can pin here is the DECISION (a real store, real
 rows) and the fact that every spawn carries the settings file. What it cannot pin is that
 Claude honours the response, so that half is proved live, in an isolated clone, and written
 up in `audit/phase3.8-scope.md` — not simulated here.
@@ -57,6 +58,34 @@ class StopGateTest(unittest.TestCase):
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
         self.assertIsNone(hooks.stop_gate(self.payload(stop_hook_active=True), self.db))
+
+    def test_the_cap_survives_a_new_stop_chain(self):
+        """The cap the flag above cannot keep, and the defect it was found by.
+
+        `stop_hook_active` is scoped to ONE stop-chain — one user prompt. A ring, a `tell`
+        or the reconciler's own nudge starts a fresh chain with the flag false, and the
+        gate blocked the same agent a second time twelve seconds later
+        (`audit/phase3-integration.md`). The store is what outlives a chain, so one block
+        per agent until it says something is asked of the event log.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
+        # A new chain: the flag is false and honestly so, and it still must not block.
+        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
+        blocks = self.db.execute(
+            "SELECT COUNT(*) c FROM events WHERE kind='stop_gate_blocked'").fetchone()["c"]
+        self.assertEqual(blocks, 1)
+
+    def test_a_report_re_arms_the_gate(self):
+        """Once per SILENCE, not once per lifetime. An agent that reported and was then
+        spoken to in its pane is `working` again, and that next quiet turn-end is a new
+        silence — the case `audit/phase3.8-scope.md` deliberately does not exempt."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
+        store.set_state(self.db, "w1", "done")
+        store.log_event(self.db, kind="done", agent="w1")
+        store.set_state(self.db, "w1", "working")       # revived by a person in its pane
+        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
 
 
 class SpawnCarriesTheHookTest(unittest.TestCase):
