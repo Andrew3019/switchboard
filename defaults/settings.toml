@@ -271,7 +271,7 @@ wait = 900
 # costs without turning a blocking wait into a busy one.
 wait_slice_ms = 30000
 
-# How long `sb interrupt` lets the escape keypress land before sending the new instruction.
+# How long `sb tell --interrupt` lets the escape keypress land before sending the new instruction.
 # Without the pause the interrupt races the cancel and can be swallowed by the turn it was
 # meant to stop.
 interrupt_settle = 0.5

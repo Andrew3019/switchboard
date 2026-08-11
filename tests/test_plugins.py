@@ -1019,7 +1019,7 @@ class IsolationTest(Sandbox):
         "status": [], "done": ["finished"], "ask": ["w1", "q?", "--timeout", "1"],
         "tell": ["w1", "hi"], "inbox": [], "block": ["why"], "log": [], "cleanup": [],
         "inspect": ["w1"], "wait": ["w1", "--timeout", "1"], "init": [],
-        "restore": ["w1"], "interrupt": ["w1", "stop"], "board": [], "models": [],
+        "restore": ["w1"], "board": [], "models": [],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],
     }

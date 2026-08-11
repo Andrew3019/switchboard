@@ -1,7 +1,7 @@
 """The `sb` command — the only surface agents ever see.
 
 Seven verbs for agents (`delegate`, `ask`, `tell`, `inbox`, `done`, `block`, `status`), a
-few more for the human (`init`, `doctor`, `cleanup`, `restore`, `interrupt`, `inspect`,
+few more for the human (`init`, `doctor`, `cleanup`, `restore`, `inspect`,
 `wait`, `log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
 than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
 says what this repo has.
@@ -322,10 +322,6 @@ def build_parser() -> argparse.ArgumentParser:
     r = cmd("restore", help="bring a closed agent back with its context")
     r.add_argument("name")
 
-    i = cmd("interrupt", help="change an agent's course mid-flight")
-    i.add_argument("name")
-    i.add_argument("text")
-
     ins = cmd(
         "inspect", help="everything about ONE agent, including its recent terminal output",
         description="What is going on with this agent: its task, state, drift, workspace, "
@@ -446,10 +442,6 @@ def _validate(args) -> None:
 
     elif cmd == "restore":
         args.name = validate.agent_name(args.name)
-
-    elif cmd == "interrupt":
-        args.name = validate.agent_name(args.name)
-        args.text = validate.line(args.text, "text")
 
     elif cmd == "inspect":
         args.name = validate.agent_name(args.name)
@@ -1056,14 +1048,6 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "restore":
         b.restore(args.name)
         _emit(args, f"restored {args.name}", {"name": args.name})
-        return 0
-
-    if cmd == "interrupt":
-        # The verb is on its way out (item 3.2) — interrupting is a delivery mode of
-        # `tell`, and this now goes through it rather than round it, so the capability has
-        # exactly one implementation for the deletion to leave standing.
-        b.tell([args.name], args.text, me=me, mode=broker_mod.INTERRUPT)
-        _emit(args, f"interrupted {args.name}", {"name": args.name})
         return 0
 
     if cmd == "inspect":

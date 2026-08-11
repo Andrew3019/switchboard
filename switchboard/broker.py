@@ -288,7 +288,7 @@ class Undeliverable(HerdrError):
 
     It exists because the alternative used to be typing the text into the pane's shell
     (`pane run`), where a backtick or a `$(` in an agent-authored interrupt executes as a
-    command. That fallback is gone; what replaces it for `sb interrupt` is this — the
+    command. That fallback is gone; what replaces it for an interrupt is this — the
     caller is a human reacting to something urgent, and they are owed the news that their
     instruction did not arrive, immediately, rather than a message in the store that looks
     exactly like one the agent already read.

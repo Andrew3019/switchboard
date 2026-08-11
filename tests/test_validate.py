@@ -223,10 +223,21 @@ class CliBoundaryTest(unittest.TestCase):
         _validate(args)
         self.assertEqual(args.name, "feature/api-v2")
 
+    def test_the_interrupt_verb_is_gone_and_the_mode_replaces_it(self):
+        """Item 3.2. Interrupting is a delivery mode of `tell`, and DESIGN-TRUTH's
+        rejected list says the verb is not a second way to spell it. Both halves are
+        checked here: an agent typing the old verb is told plainly by argparse, and the
+        capability it used to reach is still reachable."""
+        with self.assertRaises(SystemExit):
+            parse(["interrupt", "worker-1", "stop"])
+        args = parse(["tell", "worker-1", "stop", "--interrupt"])
+        _validate(args)
+        self.assertEqual(args.mode, "interrupt")
+
     def test_agent_lookups_are_checked_too(self):
         self.bad(["restore", "Not A Name"])
-        self.bad(["interrupt", "Worker", "stop"])
-        self.bad(["interrupt", "worker-1", "stop\nnow"])
+        self.bad(["tell", "Worker", "stop", "--interrupt"])
+        self.bad(["tell", "worker-1", "stop\nnow", "--interrupt"])
         self.bad(["inspect", "worker-1", "-n", "0"])
         self.bad(["wait", "Worker"])
         self.bad(["log", "--agent", "Worker"])
