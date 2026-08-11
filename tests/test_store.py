@@ -194,7 +194,7 @@ class StoreTest(unittest.TestCase):
     def test_a_row_has_no_branch_unless_it_is_given_one(self):
         """Bare is the default: NULL means "no checkout of my own", and guessing the other
         way hands an agent somebody else's tree."""
-        store.create_agent(self.db, name="root", role="main", workspace="main")
+        store.create_agent(self.db, name="root", role="orchestrator", workspace="main")
         self.assertIsNone(store.get_agent(self.db, "root")["branch"])
         self.assertIsNone(store.agent_branch(self.db, "root"))
 
@@ -214,7 +214,7 @@ class StoreTest(unittest.TestCase):
     def test_a_bare_workspace_has_no_branch_but_is_still_known(self):
         """The two answers that must not be confused: a place with no checkout, and a name
         we have never heard of."""
-        store.create_agent(self.db, name="root", role="main", workspace="scratch")
+        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch")
         self.assertIsNone(store.workspace_branch(self.db, "scratch"))
         self.assertTrue(store.known_workspace(self.db, "scratch"))
         self.assertFalse(store.known_workspace(self.db, "never-seen"))

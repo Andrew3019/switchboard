@@ -654,6 +654,132 @@ class Broker:
             return (a["parent"] if a and a["parent"] else HUMAN)
         return who
 
+    # -- structure: who may spawn, and who may see whom ------------------
+
+    def _refuse_bare_delegate(self, me: str) -> None:
+        """A bare agent does not spawn. DESIGN-TRUTH: "A bare agent's delegate is refused
+        outright."
+
+        Bareness is read off the ROLE's `delegate` field, never off the role's name — see
+        `roles.Role`. The human is not an agent and is refused nothing; a caller we hold no
+        row for is not refused either, because there is no role to read and inventing one
+        would refuse `sb start` on a store that has not caught up yet.
+
+        Enforced here rather than in the CLI so that every door into a spawn goes through
+        it — `sb delegate`, and `sb workspace new`, which spawns a lead the same way.
+        """
+        if me == HUMAN:
+            return
+        row = store.get_agent(self.db, me)
+        if row is None:
+            return
+        role = row["role"]
+        if roles_mod.get(self.roles, role).delegate:
+            return
+        raise ValueError(
+            f"a {role} does not spawn agents — only a role with delegate rights does "
+            f"(today: {', '.join(self._delegating_roles()) or 'none'}). If this task is "
+            f"bigger than one agent, or needs a decision you were not given, say so to "
+            f"your parent with `sb done` rather than growing a tree under yourself."
+        )
+
+    def _delegating_roles(self) -> list[str]:
+        """The roles that may spawn, generated from the roles themselves.
+
+        Named in the refusal so it says what to do instead of only what went wrong, and
+        read from the definitions so a repo that adds its own orchestrating role is
+        described correctly rather than told about `orchestrator`.
+        """
+        return sorted(n for n, r in self.roles.items() if r.delegate)
+
+    def top_of(self, name: str) -> str:
+        """Which tree this agent stands in, named by its top. The unit of scope.
+
+        DESIGN-TRUTH: "Siblings are not invisible to each other; any other top
+        orchestrator's entire tree is invisible." That is a whole tree, so the question is
+        about roots, not about descendants — `_descendants(me)`, which `cleanup` correctly
+        uses for its own tighter rule, would hide a sibling from a sibling.
+
+        Walk to the root ancestor; if that root is a STAMPED top, the tree is its. If it is
+        not — an agent the human spawned straight from a terminal, which is parentless and
+        unstamped — the tree is the HUMAN's. Those agents are siblings of each other in
+        every sense that matters here, and the rule as written makes only "another top
+        orchestrator's tree" invisible, which is not what they are in. A name with no row
+        answers the human's group too: nothing is known about it, and inventing a tree for
+        it would refuse a typo with a message about a boundary.
+
+        Cycle-safe: a parent chain that loops stops at the first name seen twice rather
+        than spinning. `_tree` in status.py breaks cycles the same way, for the same
+        reason — the store has held one.
+        """
+        return self._root_of(name, self._parentage())
+
+    def _parentage(self) -> dict:
+        """`{name: (parent, is_top)}` for the whole store, read once.
+
+        One query rather than a walk per agent: `tree_of` asks this question of every row,
+        and doing it per row is a few hundred statements for a readout.
+        """
+        return {r["name"]: (r["parent"], bool(r["is_top"]))
+                for r in self.db.execute("SELECT name, parent, is_top FROM agents")}
+
+    @staticmethod
+    def _root_of(name: str, rows: dict) -> str:
+        seen = {name}
+        cur = name
+        while True:
+            parent = rows.get(cur, (None, False))[0]
+            if not parent or parent in seen:
+                break
+            seen.add(parent)
+            cur = parent
+        return cur if rows.get(cur, (None, False))[1] else HUMAN
+
+    def tree_of(self, me: str) -> Optional[set]:
+        """Every agent name `me` may see. `None` means no boundary at all — the human.
+
+        A set rather than a root name because the human's group has no single row to name
+        it: several parentless unstamped agents are one group, and no ancestor holds them
+        together.
+        """
+        if me == HUMAN:
+            return None
+        rows = self._parentage()
+        mine = self._root_of(me, rows)
+        return {n for n in rows if self._root_of(n, rows) == mine}
+
+    def same_tree(self, me: str, target: str) -> bool:
+        """May `me` see `target` at all?
+
+        The human crosses freely into any tree — DESIGN-TRUTH:180-181, "Only agents have
+        the scope constraints" — and so does anything addressed to the human.
+        """
+        if me == HUMAN or target == HUMAN or me == target:
+            return True
+        rows = self._parentage()
+        if target not in rows:
+            # Not ours to refuse: a name nothing knows is a typo, and "that is in another
+            # tree" is the wrong thing to tell somebody who mistyped. Whatever handled an
+            # unknown name before this rule existed still handles it.
+            return True
+        return self._root_of(me, rows) == self._root_of(target, rows)
+
+    def require_same_tree(self, me: str, target: str) -> None:
+        """Refuse across the boundary, and SAY it is a boundary.
+
+        The message names the reason on purpose. A bare "no such agent" is what a caller
+        gets from a typo, and a workflow that quietly stops crossing trees after this
+        shipped would look exactly like one that mistyped a name — which is the failure
+        this refusal is most likely to cause and the hardest one to diagnose.
+        """
+        if self.same_tree(me, target):
+            return
+        raise ValueError(
+            f"{target} is in another top orchestrator's tree, which is invisible from "
+            f"here — agents cannot reach across that boundary. Ask your own parent, or "
+            f"`sb block` for a person, who can."
+        )
+
     # -- setup -----------------------------------------------------------
 
     def link_config(self, worktree: Optional[Path] = None) -> list[str]:
@@ -849,10 +975,15 @@ class Broker:
                             error=str(e))
 
         first, awaiting = self._first_task("spawn.start_task", task)
+        # `is_top=True` is stamped HERE and nowhere else. This is the only path that makes
+        # a top orchestrator, so it is the only place that may say so — `delegate` itself
+        # never sets it, which is what keeps "only `sb start` creates a top" a fact of the
+        # code rather than a convention. Everything downstream (the fork rule, the tree
+        # boundary) reads the stamp, so a second writer would be a second definition.
         self.delegate(first, role=MAIN, name=name,
                       me=HUMAN, pane=pane,
                       workspace=name, workspace_id=wsid, cwd=str(self.repo),
-                      awaiting_task=awaiting)
+                      awaiting_task=awaiting, is_top=True)
         store.log_event(self.db, kind="start", agent=name, created=True, workspace=wsid)
         # `delegate` has opened it already; this is the second, idempotent ask that
         # covers a spawn whose split failed there. Read the pane back: when
@@ -2576,6 +2707,39 @@ class Broker:
         """
         return self.worktree_branch(agent) is not None
 
+    def is_top(self, agent: str) -> bool:
+        """Was this agent created by `sb start`? The stamp, read — never re-derived.
+
+        `agents.is_top`, written by `_top` alone. Rows older than the column were
+        backfilled once (`store._backfill_is_top`); a row that somehow still reads 0 when
+        it should read 1 is a demoted top, which is why nothing here falls back to
+        inferring it from `parent`/`branch` — an inference at read time is exactly the
+        coincidence this column replaced.
+        """
+        if agent == HUMAN:
+            return False                # a person is not an agent and holds no row
+        row = store.get_agent(self.db, agent)
+        return bool(_column(row, "is_top")) if row is not None else False
+
+    def mints_space(self, agent: str) -> bool:
+        """May this caller's spawn get a space and worktree of its own? The fork rule.
+
+        A top may, because that is what a top is for. The human may, and an unknown caller
+        may, for the same reason in both cases: neither has a space to lend, and the only
+        alternative to forking is spawning into whatever checkout `sb` happened to run in —
+        which DESIGN-TRUTH rules out in as many words ("It never falls back to Andrew's own
+        checkout").
+
+        Everybody else may not: their spawn is a tab in their own space, and its whole
+        subtree stays there.
+        """
+        if agent == HUMAN:
+            return True
+        row = store.get_agent(self.db, agent)
+        if row is None:
+            return True                 # no row, no space to lend — fork rather than guess
+        return bool(_column(row, "is_top"))
+
     def worktree_branch(self, agent: str) -> Optional[str]:
         """The branch of that agent's worktree, or None if it has no worktree."""
         if agent == HUMAN:
@@ -2963,8 +3127,10 @@ class Broker:
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
+        is_top: bool = False,           # `sb start` only — see `_top`
     ) -> str:
         me = me or self.whoami()
+        self._refuse_bare_delegate(me)
         r = roles_mod.get(self.roles, role)
         name = name or self._unique_name(role)
         self.delivery_note = None       # this spawn's caveat, not the last one's
@@ -2981,18 +3147,27 @@ class Broker:
         if branch is None and inherited:
             branch = self.worktree_branch(me)
 
-        # THE FORK RULE. A worktree is forked when your parent does not have one;
-        # otherwise you inherit your parent's and share it as a tab. Role-agnostic: a
-        # researcher that only reads gets its own tree too, because "it will not write"
-        # is a claim about the future, and the one bare space in the model — the root
-        # orchestrator's, over the human's main checkout — is the one place a wrong claim
-        # costs somebody's uncommitted work.
+        # THE FORK RULE. A new space and worktree are forked when the CALLER IS A TOP;
+        # anyone else's spawn is a tab in the caller's own space, and so is that spawn's
+        # whole subtree. Role-agnostic: a researcher that only reads gets its own tree when
+        # a top spawns it, because "it will not write" is a claim about the future, and the
+        # one bare space in the model — the top's, over the human's main checkout — is the
+        # one place a wrong claim costs somebody's uncommitted work.
         #
-        # `has_worktree` is a fact READ FROM THE STORE (`agents.branch`), never inferred
-        # from the workspace name: the name says branch for a worktree space and an
-        # agent-ish label for a bare one, with nothing to tell them apart. The human
-        # answers False and so forks, which is the same rule and not an exception to it —
-        # a child of a person is a child of somebody with no tree to lend.
+        # It used to read `not self.has_worktree(me)` — worktree POSSESSION — and that is
+        # the phase-5 bug. The two facts coincide for the agents that happen to exist (a
+        # top is bare, everyone else forked), which is the only reason it looked right; but
+        # `branch IS NULL` also means "deliberately bare read-only task", and such an agent
+        # is not a top and must not mint a space. Proved live: a non-root worktree-less row
+        # delegated and its child forked a whole new space, exactly as a top's would
+        # (`audit/phase5-spawn-placement.md`). `mints_space` reads the `is_top` STAMP
+        # instead, which is written by `_top` and by nothing else.
+        #
+        # The human answers True and so forks, which is the same rule and not an exception
+        # to it — a child of a person is a child of somebody with no tree to lend, and the
+        # alternative is a spawn in the person's own checkout. So does a caller we have no
+        # row for, for the same reason: unknown provenance is not permission to write into
+        # whatever directory `sb` was run in.
         #
         # Only on the INHERITED path. A caller that named a workspace — `sb start`, a
         # workspace lead, `sb delegate --workspace <name>` — has already said where this
@@ -3000,7 +3175,7 @@ class Broker:
         #
         # A fork that fails RAISES (`ForkFailed`) rather than returning nothing, so there
         # is no path from here to "spawned in the parent's checkout after all".
-        if inherited and not self.has_worktree(me):
+        if inherited and self.mints_space(me):
             forked = self._fork_for(name, parent=me)
             ws, branch = forked["workspace"], forked["branch"]
             workspace_id = workspace_id or forked["workspace_id"]
@@ -3060,7 +3235,7 @@ class Broker:
             # which is exactly why only a confirmed one goes down. A guess written here
             # is indistinguishable from a fact by every reader after it.
             workspace_id=(wsid if confirmed else None) or None,
-            pane_id=pane, awaiting_task=awaiting_task,
+            pane_id=pane, awaiting_task=awaiting_task, is_top=is_top,
         )
         claimed = store.claim_agent(self.db, **claim)
         if not claimed and self._spawn_husk(name):
@@ -3261,6 +3436,11 @@ class Broker:
                     "Use `sb block \"<why>\"` if you need an answer, or `sb done "
                     "\"<summary>\"` to report what you did."
                 )
+            # The tree boundary. Checked after `_resolve`, so `parent` cannot smuggle a
+            # name past it, and before anything is written: a refused message must leave
+            # no row, or the recipient's tree gains a message from outside it that only
+            # the store remembers.
+            self.require_same_tree(me, t)
             if mode == INTERRUPT:
                 # Its own path from the first line: the text travels INLINE rather than
                 # behind a doorbell, so the row it writes holds the cancel wrapper and is
@@ -3688,12 +3868,19 @@ class Broker:
             frontier.extend(k["name"] for k in kids)
         return out
 
-    def restore(self, name: str, *, workspace: Optional[dict] = None) -> str:
+    def restore(self, name: str, *, workspace: Optional[dict] = None,
+                me: Optional[str] = None) -> str:
         """Bring a closed agent back with its full context.
 
         Verified: `--resume` in a fresh pane restores the conversation and replays the
         transcript, so closing really is free.
         """
+        # The tree boundary, before the row is even looked up: whether a name outside the
+        # caller's tree exists is itself something the caller may not learn. `me=None`
+        # means an internal caller (`_spawn_lead`, `_top`), which has already resolved who
+        # it is acting for and is not crossing anything.
+        if me is not None:
+            self.require_same_tree(me, name)
         a = store.get_agent(self.db, name)
         if not a:
             raise KeyError(f"no such agent: {name}")

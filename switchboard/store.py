@@ -155,6 +155,26 @@ CREATE TABLE agents (
                                       -- inferred from the name, which is a branch for a
                                       -- worktree space and an agent-ish label for a bare
                                       -- one, with nothing to tell the two apart.
+    is_top        INTEGER NOT NULL DEFAULT 0,
+                                      -- 1 = created by `sb start`, the ONLY path that makes
+                                      -- a top orchestrator. This is a STAMP, not an
+                                      -- inference: `sb delegate` branches on it (a top's
+                                      -- spawn gets a new space and worktree, anyone else's
+                                      -- gets a tab in the caller's space), and every fact
+                                      -- it could otherwise be read off — `parent IS NULL`,
+                                      -- `branch IS NULL` — only correlates with top-ness by
+                                      -- accident. `branch IS NULL` in particular is
+                                      -- "deliberately bare", which a read-only agent deep in
+                                      -- a tree is too; keying the fork rule on that is the
+                                      -- bug this column exists to end. Rows that predate it
+                                      -- are backfilled once, from `parent IS NULL AND branch
+                                      -- IS NULL` (see `_backfill_is_top`).
+                                      -- Declared AFTER `branch` deliberately: `_reconcile`
+                                      -- ALTERs and backfills columns in the order this
+                                      -- schema declares them, and this column's backfill
+                                      -- READS `branch`. Ahead of it, a store old enough to
+                                      -- lack both would run this fill against a column that
+                                      -- does not exist yet.
     workspace_id  TEXT,               -- herdr's id for that workspace. Authoritative:
                                       -- resolving a name to an id is one-to-many, so a
                                       -- child spawned from a re-derived id lands in the
@@ -524,9 +544,32 @@ def _backfill_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
                        (r["workspace"], r["name"]))
 
 
+def _backfill_is_top(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
+    """Give the rows that predate `agents.is_top` the top-ness they have always had.
+
+    `parent IS NULL AND branch IS NULL` is exactly the shape only `sb start` has ever
+    produced: `_top` is the one path that writes a row with no parent, and it always
+    writes a bare space. `workspace_new` always attaches a worktree, so its rows carry a
+    branch; `delegate` never writes a NULL parent for anything but the human's own
+    children, which fork and so carry a branch too.
+
+    NOT the rule the code may go on using — that is the whole point of the column. It is
+    the rule for rows written before anybody was stamping, applied once, and the reason it
+    is safe here and not safe at read time is that the store is a finite set of rows we can
+    check rather than an open-ended future. Verified against the reference store the day
+    this shipped: all 7 roots match it, no non-root does.
+
+    An unstamped row must not read as an ordinary agent — that would silently demote every
+    real top into something whose spawns become tabs in the human's own checkout — which is
+    why this is a backfill and not a default.
+    """
+    db.execute("UPDATE agents SET is_top=1 WHERE parent IS NULL AND branch IS NULL")
+
+
 # Columns that mean something for rows written before they existed. Keyed by
 # (table, column), run once, right after the ALTER that added them — see `_reconcile`.
-_BACKFILLS = {("agents", "branch"): _backfill_branch}
+_BACKFILLS = {("agents", "branch"): _backfill_branch,
+              ("agents", "is_top"): _backfill_is_top}
 
 # The bare-versus-worktree selector, written down once. A row means a worktree workspace
 # and that `cwd` is its checkout; no row means bare and the path is NULL — the rule reads
@@ -823,16 +866,16 @@ def now() -> int:
 # the removal keep the value they were given.
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
        (name, parent, role, task, state, session_id, cwd, workspace, branch,
-        workspace_id, terminal_id, pane_id, awaiting_task, created_at)
-       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?)"""
+        workspace_id, terminal_id, pane_id, awaiting_task, is_top, created_at)
+       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
     name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
-    terminal_id, pane_id, awaiting_task,
+    terminal_id, pane_id, awaiting_task, is_top,
 ) -> tuple:
     return (name, parent, role, task, session_id, cwd, workspace, branch, workspace_id,
-            terminal_id, pane_id, int(awaiting_task), now())
+            terminal_id, pane_id, int(awaiting_task), int(is_top), now())
 
 
 def create_agent(
@@ -850,6 +893,7 @@ def create_agent(
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
     awaiting_task: bool = False,
+    is_top: bool = False,
 ) -> sqlite3.Row:
     """Insert an agent row. Raises `sqlite3.IntegrityError` if the name is taken.
 
@@ -859,7 +903,7 @@ def create_agent(
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, awaiting_task),
+                      workspace_id, terminal_id, pane_id, awaiting_task, is_top),
     )
     db.commit()
     return get_agent(db, name)
@@ -880,6 +924,7 @@ def claim_agent(
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
     awaiting_task: bool = False,
+    is_top: bool = False,
 ) -> bool:
     """Take the name, or find out somebody else already has it. -> did we get it?
 
@@ -895,7 +940,7 @@ def claim_agent(
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, awaiting_task),
+                      workspace_id, terminal_id, pane_id, awaiting_task, is_top),
     )
     db.commit()
     return cur.rowcount == 1

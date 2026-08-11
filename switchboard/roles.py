@@ -38,7 +38,16 @@ class Role:
     name: str
     model: str = ""                 # a TIER name, not a model id
     prompt: str = ""
+    delegate: bool = False          # may an agent of this role spawn other agents?
     tiers: Optional[models.Tiers] = field(default=None, repr=False, compare=False)
+
+    # `delegate` is a FIELD, not a check against the literal role name. "Bare" is a
+    # property of a kind of agent, and a role named `worker` is only today's spelling of
+    # it — vocabulary is data (C12), there is no closed set, and a repo that adds its own
+    # leaf role or renames this one would slip straight through `role == "worker"`. It
+    # defaults to False for the same reason every other safety default points that way: a
+    # role nobody thought about is a leaf, and being wrong that way costs a refusal a
+    # person can lift, not a tree of agents nobody meant to exist.
 
     def __post_init__(self):
         # Defaulted here rather than in the signature, so that even a Role built by hand
@@ -81,4 +90,5 @@ def get(roles: dict[str, Role], name: str) -> Role:
         return roles[name]
     fallback = config.setting("vocabulary.fallback_role")
     base = roles.get(fallback) or Role(fallback)
-    return Role(name=name, model=base.model, prompt=base.prompt, tiers=base.tiers)
+    return Role(name=name, model=base.model, prompt=base.prompt,
+                delegate=base.delegate, tiers=base.tiers)

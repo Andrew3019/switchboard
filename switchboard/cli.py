@@ -502,6 +502,20 @@ def _derived_name(db, role: str) -> Optional[str]:
 _NEEDS_FRESH_SCHEMA = {"start", "delegate", "workspace", "restore"}
 
 
+def _scope(b: Broker, me: str, mine: bool) -> dict:
+    """What `sb status` is allowed to show this caller, as `collect`'s two scope kwargs.
+
+    `tree` is the boundary — the caller's own top's whole tree, siblings included, or
+    `None` for the human, who is bounded by nothing (DESIGN-TRUTH:180-181, "Only agents
+    have the scope constraints"). `mine` is the `--mine` flag and still means the caller's
+    own subtree, which is narrower; the flag asks for less and cannot ask for more.
+
+    Before this, both were off by default, which is why any agent could read every other
+    tree's state by typing the command with no flags at all.
+    """
+    return {"tree": b.tree_of(me), "mine": me if mine else None}
+
+
 def _degraded(deficit: list[str], cmd: str) -> str:
     """Why this one command cannot run while the rest of `sb` still can.
 
@@ -887,8 +901,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # Straight to the module, like `output`: this reads the store and herdr side by
         # side and belongs to neither. The whole tree, not just the caller's children —
         # drift two levels down is still drift the caller is being lied to about.
+        # THE TREE BOUNDARY. An agent sees its own top's whole tree and no other's;
+        # the human sees everything. `--mine` still means the caller's own subtree, which
+        # is narrower — the flag asks for less, and cannot ask for more.
         snap = status_mod.collect(db, h, live_only=args.live, needs_me=args.needs_me,
-                                  mine=(me if args.mine else None))
+                                  **_scope(b, me, args.mine))
         # None, not False: the flag can only ever turn collapse OFF, so with no flag the
         # answer comes from `display.show_archived` rather than from here.
         _emit(args, status_mod.render(snap, show_archived=True if args.archived else None),
@@ -996,7 +1013,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "restore":
-        b.restore(args.name)
+        b.restore(args.name, me=me)
         _emit(args, f"restored {args.name}", {"name": args.name})
         return 0
 
@@ -1005,12 +1022,22 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # side and belongs to neither. It subsumes the old `sb output` — output.py is still
         # the reader underneath, it is just no longer a verb of its own, because "show me
         # the terminal" was never really the question anyone had.
+        # Refused across the tree boundary before anything is read: `inspect` is the
+        # widest read in the CLI (task, transcript, events) and takes a bare name.
+        b.require_same_tree(me, args.name)
         d = status_mod.inspect(db, h, args.name, lines=args.n, events=args.events)
         _emit(args, status_mod.render_detail(d), d.as_dict())
         return 0
 
     if cmd == "log":
+        if args.agent:
+            b.require_same_tree(me, args.agent)
         rows = store.recent_events(db, agent=args.agent, limit=args.n)[::-1]
+        if me != HUMAN:
+            # The unfiltered log is every tree's. An event with no agent belongs to the
+            # machine rather than to anybody's tree, so it stays: hiding it would say a
+            # store-wide failure happened in somebody else's tree, which is not true.
+            rows = [r for r in rows if not r["agent"] or b.same_tree(me, r["agent"])]
         lines = [f"{r['id']:5} {r['agent'] or '-':16} {r['kind']:18} {(r['payload'] or '')[:80]}"
                  for r in rows] or ["(no events)"]
         _emit(args, "\n".join(lines), {"events": [dict(r) for r in rows]})
