@@ -274,7 +274,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # the end of every session is worse than one with a narrow column.
         w_name = max([0] + [len(("  " * a.depth) + a.name)
                             for a in window if not _is_group(a)])
-        w_state = max([0] + [len(a.state) for a in window if not _is_group(a)])
+        # `display_state`, not the store's raw word: `working` drawn next to this row's
+        # own `STALLED — idle …` note is the row contradicting itself, and the one thing
+        # a glanceable view must never do. See `AgentStatus.display_state`.
+        w_state = max([0] + [len(a.display_state) for a in window if not _is_group(a)])
         for a in window:
             if _is_group(a):
                 # No glyph, no state, no note. It is not an agent and must not
@@ -286,9 +289,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             label = ("  " * a.depth) + a.name
             # Measured plain and coloured in parallel: only the glyph is coloured,
             # so the two stay the same visible width.
-            left = f" {g} {label:<{w_name}}  {a.state:<{w_state}}  {status_mod.fmt_age(a.idle):>5}  "
+            left = (f" {g} {label:<{w_name}}  {a.display_state:<{w_state}}  "
+                    f"{status_mod.fmt_age(a.idle):>5}  ")
             line = (f" {_c(g, _GLYPH_COLOR.get(g, ''))} {label:<{w_name}}  "
-                    f"{a.state:<{w_state}}  {status_mod.fmt_age(a.idle):>5}  ")
+                    f"{a.display_state:<{w_state}}  {status_mod.fmt_age(a.idle):>5}  ")
             n = note(a)
             lead = "← " if wants_you(a) else "  "
             room = width - len(left) - len(lead)

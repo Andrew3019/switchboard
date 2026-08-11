@@ -98,6 +98,42 @@ class GlyphTest(unittest.TestCase):
         self.assertEqual(board.note(a), "BLOCKED — need a key")
 
 
+class RowSaysOneThingTest(unittest.TestCase):
+    """The row must not contradict itself.
+
+    Andrew reported seeing one agent drawn as `working` and `STALLED` at once. It was not
+    a logic bug: the STATE column printed the store's self-report ("task still open") and
+    the note printed the pane observation ("no turn is running"), two vocabularies on one
+    line with nothing reconciling them. What is pinned here is that the column now shows
+    the joined word and STALLED is only ever a qualifier beside it.
+    """
+
+    def line(self, a):
+        rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
+        return next(t for t, row in rows if row is a)
+
+    def test_a_stalled_agent_reads_idle_and_never_working_as_well(self):
+        line = self.line(agent("w", state="working", herdr_state="idle", stalled=True))
+        self.assertIn("idle", line)
+        self.assertNotIn("working", line)
+        self.assertIn("STALLED", line)
+
+    def test_the_word_is_whatever_the_pane_was_observed_to_be_doing(self):
+        """An open task reads `working` or `idle` on herdr's observation alone — and on
+        nothing at all when there was no observation to make: with herdr unreachable
+        (`alive is None`) the store's own word stands, the same rule `stalled` and `gone`
+        are built on, and `render` says at the top that ALIVE is unknown."""
+        # Explained idle — a lead waiting on live children. Same word, no warning.
+        lead = self.line(agent("lead", state="working", herdr_state="idle",
+                               stalled=False, task="mind the children"))
+        self.assertIn("idle", lead)
+        self.assertNotIn("STALLED", lead)
+        self.assertIn("working", self.line(agent("w", herdr_state="working")))
+        unreachable = self.line(agent("u", state="working", herdr_state=None, alive=None))
+        self.assertIn("working", unreachable)
+        self.assertNotIn("idle", unreachable)
+
+
 class LayoutTest(unittest.TestCase):
     def test_a_click_resolves_to_the_agent_drawn_on_that_row(self):
         rows = board.layout(snap(agent("one"), agent("two", depth=1), agent("three")),
