@@ -1,8 +1,9 @@
 # BUILD-PLAN.md — closing the gap between switchboard and DESIGN-TRUTH
 
-Handoff for the top orchestrator running this work. Phases 1 and 2 are built and merged;
-what remains is phases 3 to 6. Rewritten 2026-08-11 on `main` (`d31ae87`), folding in
-`audit/phase3-scope.md`.
+Handoff for the top orchestrator running this work. Phases 1 and 2 are built and merged.
+Phases 3, 4 and 6 are built on their own branches and unmerged; phase 5 was still being
+built when phase 6 finished. Rewritten 2026-08-11 on `main` (`d31ae87`), folding in
+`audit/phase3-scope.md`; phase 6's section corrected in place on `phase6-prompts`.
 
 **This file is derived and disposable.** It dies when the gaps close. `DESIGN-TRUTH.md` is
 the only thing that outlives it — everything below exists to make one of its entries true.
@@ -168,28 +169,69 @@ the column alone would have changed nothing, since nothing read it.
 - `sb workspace new` was still here when phase 5 shipped. It is gone now: see phase 4's
   last item, built on `phase4-workspace-new` on top of this branch.
 
-# Phase 6 — prompts and shipping
+# Phase 6 — prompts and shipping — **DONE** (branch `phase6-prompts`)
 
-Last, because it describes behaviour the earlier phases must first make true.
+Scoped in `audit/phase6-scope.md` (branch `scope-phase6`), built and proved in
+`audit/phase6-build.md`. Based on `phase5-structure` at `7847b84`, which was still
+byte-identical to `phase4-removals` when this started — so in practice phase 6 stacks on
+phase 4 and phase 5 lands beside it, not under it. That turned out to be safe: the scoping
+pass found no item here depends on phase 5, and none of the six touched a line phase 5 is
+scoped to change. The ordering note below was about avoiding a second pass over the same
+files, not a real dependency.
 
-- **6.1** The block rules and the five reasons an agent may block — three are missing from
-  every prompt and one is contradicted.
-- **6.2** Human-facing output must be concise, skimmable, bulleted, questions numbered with
-  a recommended answer. Taught nowhere today.
-- **6.3** Every agent is told at spawn what roles exist, generated from the roles
-  themselves, never hardcoded. Nothing lists them today.
-- **6.4** `sb presets` gains list / read / apply-to-this-chat; applying pastes the prompt in,
-  the same path as any message. Only orchestrators are told presets exist.
-- **6.5** Shipping work: branch named for the workspace, push, open the PR, URL in the
-  summary. Merging needs Andrew's explicit approval — a prompt rule for now, no merge verb,
-  and no agent merges without asking. None of this appears in any prompt.
-- **6.6** A lead assigns disjoint files across its shared worktree and serialises overlap.
+- **6.1 Done.** `defaults/protocol.md`'s escalation sentence now names all five of
+  DESIGN-TRUTH's sanctioned reasons — three of which reached no shipped prompt at all —
+  and keeps "a tool fails twice" as the concrete form of being blocked on a command.
+  **Nothing was contradicted after all.** The scoping pass read "an instruction is
+  ambiguous" as a contradiction and proposed narrowing it; Andrew overruled that and kept
+  it. The prompts therefore teach SIX reasons where `DESIGN-TRUTH.md:142-145` lists five.
+  That is deliberate and only he can close it, by adding the sixth to that file.
+- **6.2 Done.** The formatting half — concise, skimmable, bullets, lists, sections — is
+  stated once in the protocol, beside the numbered-questions half that was already there.
+  Not repeated per role: five copies drift.
+- **6.3 Done.** `[spawn] roles` in `prompts.toml`, filled by `Broker.delegate` from the
+  merged role table. Proved by adding a role to a clone as a file and finding it in a real
+  agent's system prompt with nothing else edited. Names only — no `Role` schema change.
+- **6.4 Done.** `sb presets <name> --apply` pastes the preset into the caller's own session
+  as a message (a store row, the `[sb: from …]` tag, `_ring` at next-turn), not as printed
+  output. No confirmation step. All sessions are told the verb exists, not just
+  orchestrators. The self-addressed message the scoping pass flagged as unexercised was
+  checked: schema-legal, and marked collected so it does not come back through the sender's
+  own inbox. One residual noted in the build doc — `put_message` clears `awaiting_task`.
+- **6.5 Done, to every role rather than to orchestrators**, per Andrew, and so it lives in
+  the protocol — the only text all five roles share. Note it is the DEFAULT shape: this
+  repo's own `house-rules` preset overrides it with "commit, never push, never PR, the
+  orchestrator integrates", and a later preset beating the protocol is the layering working.
+- **6.6 Done.** `orchestrator.md` assigns disjoint files at split time, with the shared
+  worktree stated as the reason. Serialising overlap stays as what handles the rest.
 
 ---
+
+## What is left
+
+Phase 6 was the last phase in this plan, so this file has nearly done its job. What it
+does **not** get to claim is that `DESIGN-TRUTH.md` is now entirely true of the code:
+
+- **Phase 5 was still in flight** when this was written. Until it lands and merges, 5.1–5.4
+  are open: nothing stamps a top orchestrator, `delegate` does not branch on it, a bare
+  agent can still spawn, and every tree can see every other.
+- **The block reasons now outnumber the doc's**, as above — the code and prompts are ahead
+  of `DESIGN-TRUTH.md` by one reason, which is a gap in the doc rather than in the build.
+- **`sb workspace new` is still there.** Phase 4 left it deliberately, for phase 5 to
+  remove once space creation is covered.
+- **No phase verified obedience, only presence.** Every prompt rule in phase 6 is pinned by
+  a containment check. Whether agents actually block for the right reasons, format for a
+  human, or assign files up front is a judgement from watching real runs, and nothing here
+  substitutes for it.
+- **This file has never been a full audit of `DESIGN-TRUTH.md`.** It closes the gaps the
+  phase-1 scoping found. Anything that document says which was never scoped into a phase is
+  neither built nor known to be broken — it was simply never looked at, and a fresh
+  read-through against the code is the honest next step before declaring the gap closed.
 
 ## Ordering rationale
 
 Phase 3 before 4 so nothing is deleted before its replacement exists. Phase 4 before 6 so
 prompts are not rewritten twice. Phase 5 before 6 for the same reason — the prompt should
 explain a rule the code already enforces. Within phase 3, every deletion waits on the mode
-that replaces it.
+that replaces it. In the event phase 6 ran alongside phase 5 rather than after it, and no
+item collided; the rationale held for phases 3 and 4 and was slack for 5.
