@@ -54,13 +54,13 @@ printed at the start and the end.
 
 - **The live fleet.** By construction it never touches the real store, so it says nothing
   about how the installed build behaves against Andrew's own fleet.
-- **Load.** The six delegates are issued one at a time, so the busy window that made run 4's
-  false failure appear twice in forty-two spawns is not manufactured here. If that defect
-  returns in the shape it had then — load-sensitive, ~5% — a single run of this will more
-  often than not miss it. Issuing them concurrently is not available: **two `sb delegate`s
-  started at the same moment in one checkout race in `git worktree add`** and one dies
-  `fork_failed: could not lock config file .git/config: File exists`. That is a real defect
-  in the fork path, found by this script and deliberately not fixed by it.
+- **Load, beyond six at once.** The six delegates are now issued concurrently, which is the
+  busy window that made run 4's false failure appear twice in forty-two spawns. That is one
+  fan-out per run, so a defect of that shape — load-sensitive, ~5% — is sampled, not caught:
+  a single run will still often miss it. (This was sequential for a while because six
+  simultaneous delegates raced in `git worktree add`, `could not lock config file
+  .git/config: File exists`, and one died `fork_failed`. That race is fixed — an flock
+  around worktree creation, see `audit/fork-race.md` — so the load is back.)
 - **Agent kinds other than `claude`.** The delivery proof is Claude Code's transcript;
   another kind falls through to a weaker check.
 - **Anything about the WORDING of what an agent does with its instructions.** Each probe is

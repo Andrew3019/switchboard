@@ -380,17 +380,23 @@ def check_fanout(clone: Clone, rid: str, log: Log) -> Check:
         spawns[name] = clone.sb("delegate", task, "--name", name, "--json",
                                 timeout=SPAWN_S)
 
-    # One at a time, which is the shape the criterion was written about — a lead handing
-    # out six tasks — and is not a way of going easy on the spawn path: agents 1..5 are
-    # live and working while 6 is still being forked, so the fan-out load is real.
+    # All six at once, which is the load the criterion is about — a lead handing out six
+    # tasks in one breath — and the shape under which a real spawn defect showed up at 2
+    # in 42 during phase 1. Issuing them one at a time hides that.
     #
-    # It is sequential for a reason found by this script and NOT fixed by it: two
-    # `sb delegate`s issued at the same moment in one checkout race in `git worktree add`
-    # ("could not lock config file .git/config: File exists") and one of them dies
-    # `fork_failed`. That is a defect in the fork path, reported separately; measuring it
-    # here would mean this check failed for a reason that is not what it is checking.
-    for i, n in enumerate(names, 1):
-        spawn(i, n)
+    # This was sequential for a while because six simultaneous `sb delegate`s in one
+    # checkout raced in `git worktree add` ("could not lock config file .git/config: File
+    # exists") and one of them died `fork_failed`. That race is fixed on main — an flock
+    # around worktree creation, `Broker._fork_lock`, see `audit/fork-race.md` — so the
+    # concurrent shape now measures the spawn path rather than that bug. The clone's store
+    # is already warm here (`create` runs `sb doctor` and `sb status`), which keeps this
+    # off the separate first-touch schema-creation collision that audit also notes.
+    threads = [threading.Thread(target=spawn, args=(i, n))
+               for i, n in enumerate(names, 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     deadline = now() + SPAWN_S
 
