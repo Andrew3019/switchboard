@@ -108,8 +108,11 @@ turn without reporting is invisible to the store. That is not hypothetical — i
 single most common failure in this system. What was built instead of enforcement is
 **detection**: `status.py` joins the store against herdr and names the disagreement
 (store `working`, herdr `idle` → STALLED). Surfacing beats guessing (C9), and it works on
-both backends today. A `Stop` hook is still the right answer and is still unbuilt; D2 is
-open, it is just no longer blocking.
+both backends today. A `Stop` hook was still the right answer, and it is now **built**
+(phase 3 item 3.8, `bin/sb-stop-hook` and `switchboard/hooks.py`): a turn that ends without
+`sb done` or `sb block` is refused and the agent is told to report. Detection stayed —
+`status.py` still names STALLED, and the reconciler (3.5) now pings it — so enforcement and
+detection sit on top of each other rather than one replacing the other. D2 is closed.
 
 ### D3 — Is there an LLM controller in v1?
 *Recommendation: no.* A deterministic step machine only; escalate to a human gate instead

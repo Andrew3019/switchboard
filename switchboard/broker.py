@@ -4387,8 +4387,11 @@ class Broker:
 
         `_ring`'s guards without `_ring`'s bookkeeping (see `reconcile`). Re-asking them is
         not redundancy: the snapshot is a few milliseconds old, and an agent that has
-        started a turn since it was taken must not be interrupted — `agent prompt`
-        INTERLEAVES, so a ping to a working agent lands inside whatever it is doing.
+        started a turn since it was taken must not be pinged at all. `agent prompt` queues
+        at the tool-call boundary rather than interleaving
+        (`audit/phase3-delivery-primitive.md`), so the ping would not cut its work short —
+        but it would still arrive, and telling a working agent that its turn ended without
+        a report is false at the moment it reads it.
 
         The event is logged against NO agent, with the target in its payload, and that is
         deliberate: `status._last_activity` counts every event that names an agent, so

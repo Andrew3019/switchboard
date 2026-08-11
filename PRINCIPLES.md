@@ -126,12 +126,13 @@ done". Both Claude Code and Codex have hooks with the same envelope. `[06]` Hook
 ignored, survive compaction, and cost zero context — which is C2 applied to the control
 plane.
 
-> **As built, v0 does not honour this, and it shows.** Reporting is `sb done`, which the
-> protocol asks for and nothing enforces — so an agent that ends its turn without calling
-> it is invisible to the store, which is the most common failure in the system. What
-> exists instead is *detection*: `status.py` joins the store against herdr and names the
-> disagreement (STALLED). That is C9 covering for C6, and it is not a substitute. The hook
-> is unbuilt; see D2 in `PLAN.md`.
+> **As built, v0 now honours this.** Reporting is `sb done`, and a `Stop` hook
+> (`bin/sb-stop-hook`, `switchboard/hooks.py`, installed via `--settings` on every spawn)
+> refuses a turn that ends without `sb done` or `sb block` — the failure it exists to
+> prevent, an agent finishing invisibly, was the most common one in the system. Detection
+> remains underneath it rather than in place of it: `status.py` joins the store against
+> herdr and names the disagreement (STALLED), and the reconciler pings an agent it catches.
+> See D2 in `PLAN.md`.
 
 ## C7. The store is the only memory
 
