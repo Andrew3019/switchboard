@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("who", nargs="+")
     t.add_argument("message")
     t.add_argument("--re", dest="reply_to", type=int, help=argparse.SUPPRESS)
+    # Says what it does to the RECIPIENT, because what it does to the sender is nothing:
+    # `tell` still returns immediately, and no agent ever waits on another agent.
+    t.add_argument("--needs-reply", action="store_true",
+                   help="tell them you are waiting for a reply — they are asked to answer "
+                        "at some point. You do not wait: this returns immediately")
 
     # Agents only. A human has no mailbox — see the `inbox` branch in `run`.
     ib = cmd("inbox", help="read your unread messages")
@@ -658,6 +663,20 @@ def _reason(e: Exception) -> str:
     return str(e.args[0]) if isinstance(e, KeyError) and e.args else str(e)
 
 
+def _needs_reply(m) -> bool:
+    """Whether this message's sender said it is waiting for a reply.
+
+    Tolerant of the column being absent, which is a real state and not a hypothetical: a
+    store kept on the old shape because a live fleet was running (`store.schema_deficit`)
+    hands back rows without it, and a `sb inbox` that raised there would take an agent's
+    whole mailbox down over a flag. No column means no such message was ever sent.
+    """
+    try:
+        return bool(m["needs_reply"])
+    except (IndexError, KeyError):
+        return False
+
+
 def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     cmd = args.cmd
 
@@ -782,7 +801,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 1 if missing else 0
 
     if cmd == "tell":
-        ids = b.tell(args.who, args.message, me=me, reply_to=args.reply_to)
+        ids = b.tell(args.who, args.message, me=me, reply_to=args.reply_to,
+                     needs_reply=args.needs_reply)
         # Whether the doorbell actually rang. `tell` used to report plain success even
         # when the ring failed outright, so the sender proceeded believing the handoff had
         # happened — liveness loss, which in an async system is worse than an error.
@@ -850,7 +870,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         if not msgs:
             _emit(args, "(no new messages)", {"messages": []})
             return 0
-        lines = [f"[{m['id']}] from {m['from_agent']}: {m['body']}" for m in msgs]
+        # A `--needs-reply` message reads exactly like any other until this line: the flag
+        # is a claim on the reader, and the reader only ever meets it here. Appended as its
+        # own line under the message rather than folded into the body, so the body stays
+        # what the sender typed.
+        lines = []
+        for m in msgs:
+            lines.append(f"[{m['id']}] from {m['from_agent']}: {m['body']}")
+            if _needs_reply(m):
+                lines.append("    " + config.prompt("notify.needs_reply", b.repo,
+                                                    who=m["from_agent"]))
         _emit(args, "\n".join(lines),
               {"messages": [dict(m) for m in msgs]})
         return 0

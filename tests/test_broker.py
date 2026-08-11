@@ -473,6 +473,43 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(len(self.h.prompts), 1)
         self.assertNotIn("secret payload", self.h.prompts[0][1])  # payload stays in the store
 
+    def test_the_flag_is_spelled_needs_reply_on_sb_tell(self):
+        """The one thing an agent types. `sb tell w "..." --needs-reply` is the spelling
+        DESIGN-TRUTH.md:232 names, and it defaults off."""
+        from switchboard.cli import build_parser
+        self.assertTrue(
+            build_parser().parse_args(["tell", "w", "hi", "--needs-reply"]).needs_reply)
+        self.assertFalse(build_parser().parse_args(["tell", "w", "hi"]).needs_reply)
+
+    def test_needs_reply_is_recorded_and_still_nobody_waits(self):
+        """The flag is a claim on the RECIPIENT, and on nothing else. No agent ever waits
+        on another agent (DESIGN-TRUTH.md:230-234), so `--needs-reply` must leave the
+        sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
+        store.create_agent(self.db, name="b", role="worker")
+        (mid,) = self.b.tell(["b"], "what did you find?", me="a", needs_reply=True)
+        self.assertEqual(store.get_message(self.db, mid)["needs_reply"], 1)
+        self.assertEqual(len(self.h.prompts), 1)          # rung once, like any tell
+        self.assertNotIn("what did you find?", self.h.prompts[0][1])
+
+    def test_the_recipients_inbox_is_where_the_reply_prompt_actually_lands(self):
+        """The doorbell carries no payload, so `sb inbox` is the only text this can reach
+        an agent through — and a plain tell must not carry it, or the prompt means
+        nothing."""
+        import argparse, contextlib, io
+        from switchboard import cli
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        self.b.tell(["kid"], "which branch?", me="orch", needs_reply=True)
+        self.b.tell(["kid"], "fyi, no answer wanted", me="orch")
+        args = argparse.Namespace(cmd="inbox", json=False, peek=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True), \
+                contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+        out = buf.getvalue()
+        self.assertIn("orch is waiting for a reply", out)
+        self.assertIn("sb tell orch", out)                # it says HOW to answer
+        self.assertEqual(out.count("waiting for a reply"), 1)   # not the plain tell too
+
     def test_parent_resolves(self):
         store.create_agent(self.db, name="kid", role="worker", parent="mum")
         store.create_agent(self.db, name="mum", role="orchestrator")
@@ -1116,7 +1153,7 @@ class BrokerTest(unittest.TestCase):
         from switchboard import cli
         self._evicted()
         args = argparse.Namespace(cmd="tell", who=["w"], message="are you there?",
-                                  reply_to=None, json=False)
+                                  reply_to=None, needs_reply=False, json=False)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), \
                 contextlib.redirect_stdout(buf):

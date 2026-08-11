@@ -3195,8 +3195,15 @@ class Broker:
 
     def tell(
         self, targets: Iterable[str], message: str, *, me: Optional[str] = None,
-        reply_to: Optional[int] = None, kind: str = "tell",
+        reply_to: Optional[int] = None, kind: str = "tell", needs_reply: bool = False,
     ) -> list[int]:
+        """Send and return, always. `needs_reply` changes what the recipient READS.
+
+        It records that the sender is waiting for an answer, so the recipient's `sb inbox`
+        tells it to reply at some point. It does not make the sender wait, poll or block —
+        no agent ever waits on another agent (DESIGN-TRUTH.md:230-234), which is why this
+        is a flag on a fire-and-forget verb and not a second `ask`.
+        """
         me = me or self.whoami()
         ids = []
         for who in targets:
@@ -3217,7 +3224,8 @@ class Broker:
                 pending = store.pending_ask(self.db, asker=t, target=me)
                 rt = pending["id"] if pending else None
             mid = store.put_message(
-                self.db, from_agent=me, to_agent=t, kind=kind, body=message, reply_to=rt
+                self.db, from_agent=me, to_agent=t, kind=kind, body=message, reply_to=rt,
+                needs_reply=needs_reply,
             )
             ids.append(mid)
             if rt is not None:

@@ -92,3 +92,14 @@ child_done = "A child finished. Run: sb inbox. Waking is not a reason to report 
 # irreversible has somewhere to go other than guessing.
 #   {text} what the human typed
 interrupt = "[INTERRUPT — stop now] The instruction you were following is cancelled; do not resume it. Do this instead: {text} — if stopping has left something half-done, say so with `sb block` before you go on."
+
+# `sb tell --needs-reply`. Appended to that message in the recipient's `sb inbox` output —
+# not to the doorbell, which deliberately carries no payload.
+#
+# The whole of the feature is this sentence: the sender is waiting for an answer and is
+# NOT blocked waiting for it, so the recipient owes a reply at some point but owes it
+# nothing right now. Both halves are stated. Dropping the second half turns a `tell` into
+# an `ask` in the reader's head and costs it the turn it was about to spend; dropping the
+# first leaves the sender waiting on a reply nobody knows to send.
+#   {who} the agent to reply to
+needs_reply = "[reply needed] {who} is waiting for a reply to this. Nobody is blocked on it and it does not interrupt what you are doing — but answer it at some point, with `sb tell {who} \"...\"`, before you finish."
