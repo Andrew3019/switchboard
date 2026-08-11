@@ -516,7 +516,7 @@ class Broker:
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
         if sid:
             row = self.db.execute(
-                "SELECT name, ended_at FROM agents WHERE session_id=? "
+                "SELECT name, state, ended_at FROM agents WHERE session_id=? "
                 "ORDER BY created_at DESC LIMIT 1", (sid,)
             ).fetchone()
             if row:
@@ -525,10 +525,10 @@ class Broker:
         pane = os.environ.get("HERDR_PANE_ID")
         if pane:
             row = self.db.execute(
-                "SELECT name, ended_at FROM agents WHERE pane_id=? AND ended_at IS NULL "
-                "ORDER BY created_at DESC LIMIT 1", (pane,)
+                "SELECT name, state, ended_at FROM agents WHERE pane_id=? "
+                "AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1", (pane,)
             ).fetchone() or self.db.execute(
-                "SELECT name, ended_at FROM agents WHERE pane_id=? "
+                "SELECT name, state, ended_at FROM agents WHERE pane_id=? "
                 "ORDER BY created_at DESC LIMIT 1", (pane,)
             ).fetchone()
             if row:
@@ -538,13 +538,45 @@ class Broker:
         return HUMAN
 
     def _revive(self, row) -> str:
-        """A finished agent that is calling `sb` again is working again."""
+        """An agent that is calling `sb` again is working again — finished or blocked.
+
+        THE BLOCKED HALF IS HOW A BLOCK GETS ANSWERED IN THE PANE. `sb tell` from the human
+        is not the only way to answer a question: the obvious thing to do with an agent
+        that has stopped and asked you something is to type the answer into its pane, and
+        that works — the agent reads it and carries on — while the store went on saying
+        `blocked` forever. The row stayed in NEEDS YOU with the question already answered,
+        its held mail stayed held (`_ring`'s blocked branch), and there was no verb, not
+        even for the human, that could put it right.
+
+        Nothing watches panes, and nothing needs to. An agent that is blocked has ENDED ITS
+        TURN — that is what blocking is — so it runs no commands while it waits, and the
+        next `sb` command from inside that pane is the agent taking a turn again. Whatever
+        restarted it, it is no longer stopped waiting on a person, which is the entire
+        content of `blocked`. So the same rule that already brings back a finished agent
+        brings back a blocked one, and it costs no new verb, no prompt change and no
+        pane-content diffing (there is no such mechanism to reuse).
+
+        The narrow cost, and it is worth stating plainly: an agent that runs another `sb`
+        command in the same turn AFTER `sb block`, instead of stopping the way every
+        shipped prompt tells it to, clears its own block. It does not vanish — the state
+        goes to `working` with the turn about to end, and a turn that ends without `sb
+        done` is STALLED, which `needs_human` covers, so the row comes back to NEEDS YOU
+        under a different heading rather than dropping off the human's list. The event log
+        keeps both the `blocked` and the `unblocked` rows, with the reason on the second.
+        """
         name = row["name"]
         if row["ended_at"] is not None:
             self.db.execute(
                 "UPDATE agents SET ended_at=NULL, state='working' WHERE name=?", (name,))
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
+        elif "state" in row.keys() and row["state"] == "blocked":
+            store.set_state(self.db, name, "working")
+            # The same event `_unblock_if_needed` writes, because it is the same fact and
+            # `sb log` should not need two words for it. The reason is what tells the two
+            # routes apart afterwards: `sb tell` from the human, or the human typing into
+            # the pane and the agent getting on with it.
+            store.log_event(self.db, kind="unblocked", agent=name, reason="answered_in_pane")
         return name
 
     def _claim_session(self, name: str) -> None:
@@ -3328,8 +3360,11 @@ class Broker:
         `why` for as long as it stays blocked. A dismissed desktop notification therefore
         loses nothing, which was the only reason a mailbox row was ever written here.
 
-        The human answers with `sb tell <agent> "..."`, which rings the doorbell and
-        unblocks it (see `_unblock_if_needed`).
+        Two things answer it, and both clear the row. `sb tell <agent> "..."` from the
+        human rings the doorbell and unblocks it (`_unblock_if_needed`); typing the answer
+        straight into the agent's pane restarts the agent itself, and its next `sb` command
+        is what clears the block (`_revive`). The second is the one people actually do, and
+        it used to leave the row blocked forever with the question already answered.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -3572,6 +3607,14 @@ class Broker:
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a
             # second sweep then retried release/close against a dead pane every time.
             store.update_agent(self.db, a["name"], pane_id=None)
+            # The pane this agent's inbox was reachable through has just gone, so whatever
+            # is still sitting in it is now mail nobody can ever open. Cleared HERE and not
+            # left to the next flush because the flush chases `unseen()`, and mail that was
+            # already stamped un-announceable is not in it: that backlog would sit unread
+            # for the life of the store, holding a closed agent in NEEDS YOU with no
+            # command left that could clear it. Nothing is read, deleted or hidden — see
+            # `_clear_unreadable_mail`.
+            self._clear_unreadable_mail(a["name"])
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             closed.append(a["name"])
         return closed
@@ -3935,6 +3978,28 @@ class Broker:
                 rung.append(who)
         return rung
 
+    def _pane_still_listed(self, who: str) -> bool:
+        """Does herdr still have a pane for this agent — under any name, bound or not?
+
+        Deliberately NOT `_name_bound`'s question. An evicted pane is still listed, as
+        `{"agent": "<name>"}` with no name field, so this is true for exactly the agents
+        whose binding is gone and whose pane a person could still put a turn into. That is
+        the pair `_clear_unreadable_mail` has to tell apart: a mailbox that can still be
+        opened by hand, and one that cannot be opened by anybody ever again.
+
+        `_end_still_holds` reads the same `agent list` and comes out the other way up. It
+        is asked about a row whose end was INFERRED, to decide whether closing it is safe;
+        this is asked about a row whose mail is about to be written off. Same reading, two
+        questions, and each says which it is.
+
+        Unknown reads as STILL THERE, and that direction is the whole safety of it: a
+        herdr that cannot be answered proves nothing, and reading an outage as "the pane is
+        gone" would write off a live fleet's mail on one failed subprocess. The cost of the
+        doubt is a row that stays in NEEDS YOU until the next command asks again.
+        """
+        states = self._agent_states()
+        return states is None or who in states
+
     def _clear_unreadable_mail(self, who: str, messages: Optional[Sequence] = None) -> None:
         """Stop chasing mail for an agent that has finished and cannot be rung again.
 
@@ -3946,41 +4011,60 @@ class Broker:
         `continue`s before any close is attempted. Marking the mail here, and lifting that
         gate for exactly these rows, is what lets them sweep normally again.
 
-        Nothing is destroyed. The message keeps its body, its sender and its place in the
-        log, so `sb inspect` and `sb log` still show it, and the event written here says
-        plainly that it was cleared rather than read. What it loses is its claim on an
-        inbox that is not going to be opened — and the narrow cost of that is an agent
-        brought back later by `sb restore` finding those messages already read.
+        Nothing is destroyed, and nothing is marked read. The message keeps its body, its
+        sender, its place in the log and its place in that agent's inbox: `sb inspect
+        <agent>` still lists it, and `sb restore` brings back an agent whose own `sb inbox`
+        still hands it over. What it loses is its claim on a PERSON — see
+        `store.mark_undeliverable`.
 
-        A row that still holds a PANE is treated more gently, and the difference is only
-        `read_at`. A person can put a turn back into that pane, and `done` is explicit that
-        a done parent with live children stays reachable and still collects their
-        summaries — so its own `sb inbox` remains a real way for that mail to be read, and
-        marking it read would be the one thing that ends it. What it does lose is the
-        pretence that it is still waiting to be announced: `mark_unannounceable` stamps
-        `delivered_at`, which is what takes it out of `unseen()` and so out of both
-        triggers. Without that the ring is skipped and nothing else changes — the rows stay
-        un-announced forever, `flush_pending` re-derives them on every `sb` command, and
-        the collector's doorbell spawns an `sb flush` every ten seconds for the life of the
-        row (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71
-        seconds). Skipping a ring stops the herdr call; only this stops the retry.
+        WHICH ROWS ARE STILL READABLE is the whole judgement here, and it is made on the
+        PANE, not on the `pane_id` column. A row that has finished still carries the id of
+        the pane it ran in long after that pane is gone (only `cleanup` clears it), so
+        reading the column as "there is still an inbox someone could open" wrote off
+        nothing at all for the case that actually clogs the queue: an agent that died, its
+        pane closed with it, its mail unread forever with nothing that could ever move it
+        (`2026-08-09-233230`). `_pane_still_listed` asks herdr, and answers "still there"
+        whenever it cannot tell, so an outage never writes anybody's mail off.
+
+        A pane herdr STILL has is treated gently, and the difference is what is claimed
+        about it rather than what is stored. A person can put a turn back into that pane,
+        and `done` is explicit that a done parent with live children stays reachable and
+        still collects their summaries — so its own `sb inbox` is a live route and the mail
+        is still genuinely owed to somebody. What it does lose is the pretence that it is
+        still waiting to be announced: `mark_unannounceable` stamps `delivered_at`, which
+        is what takes it out of `unseen()` and so out of both triggers. Without that the
+        ring is skipped and nothing else changes — the rows stay un-announced forever,
+        `flush_pending` re-derives them on every `sb` command, and the collector's doorbell
+        spawns an `sb flush` every ten seconds for the life of the row
+        (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71 seconds).
+        Skipping a ring stops the herdr call; only this stops the retry.
+
+        The written-off branch deliberately IGNORES `messages` and re-derives the whole
+        unread backlog. Everything the callers can pass comes from `unseen()`, and mail
+        that went through the gentle branch first is no longer in it — which is exactly the
+        backlog that had to be cleared, sitting there un-clearable because the one sweep
+        that could see it had already stopped looking.
 
         `messages` may be omitted, and then it is exactly this agent's share of `unseen`.
-        `flush_pending` passes the slice it already has; `_ring` has no list to pass.
+        `flush_pending` passes the slice it already has; `_ring` and `cleanup` have none.
         """
-        if messages is None:
-            messages = [m for m in store.unseen(self.db) if m["to_agent"] == who]
-        if not messages:
-            return
         a = store.get_agent(self.db, who)
-        if a and a["pane_id"]:
+        if a and a["pane_id"] and self._pane_still_listed(who):
+            if messages is None:
+                messages = [m for m in store.unseen(self.db) if m["to_agent"] == who]
             for m in messages:
                 store.mark_unannounceable(self.db, m["id"])
                 store.log_event(self.db, kind="mail_unannounced", agent=who,
                                 sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
             return
-        for m in messages:
-            store.mark_collected(self.db, m["id"])
+        for m in store.unread_for(self.db, who, mark=False):
+            # Already written off by an earlier sweep. Skipped rather than re-stamped, so
+            # this stays idempotent: `undeliverable_at` is not a form of read, so these
+            # rows keep coming back from `unread_for` for as long as they exist, and a
+            # second pass would otherwise log the same message again on every command.
+            if "undeliverable_at" in m.keys() and m["undeliverable_at"] is not None:
+                continue
+            store.mark_undeliverable(self.db, m["id"])
             store.log_event(self.db, kind="mail_cleared", agent=who,
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
@@ -4173,7 +4257,7 @@ class Broker:
         if not a or a["state"] != "blocked" or not a["pane_id"]:
             return
         store.set_state(self.db, who, "working")
-        store.log_event(self.db, kind="unblocked", agent=who)
+        store.log_event(self.db, kind="unblocked", agent=who, reason="told_by_human")
 
     def _surface(self, who: str, text: str) -> None:
         try:
