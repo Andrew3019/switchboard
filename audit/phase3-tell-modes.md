@@ -85,12 +85,15 @@ tests were written in versus when the code changed.*
 `test_the_inbox_spells_the_tag_the_same_way_the_doorbell_does`) cover T1.4/T1.5 and
 T3.1/T3.2. Five existing tests changed because the default mode changed under them — four
 now pass `mode=WHEN_IDLE` to keep testing the deferral they were written for, and one
-asserts the reworded reply prompt. Whole suite: 1122 passed.
+asserts the reworded reply prompt. Whole suite at this commit: 1122 passed;
+1108 after 3.6 deleted `sb ask`'s own tests.
 
 **Live.** Isolated `git clone` of this branch at
 `<scratchpad>/tellclone`, driven throughout by that clone's own `./bin/sb`. Every spawn
-used `--no-board --no-focus`, so no collector process ever ran (`sb doctor` in the clone
-confirmed its own store under `<clone>/.git/agentflow/state.db` and "no collector"). One
+spawn I made used `--no-board --no-focus`, so no collector ran for any of these trials
+(`sb doctor` in the clone confirmed its own store under `<clone>/.git/agentflow/state.db`
+and "no collector") — one did start later, in the delegate trial under 3.6, and Teardown
+below says what became of it. One
 subject per trial, each running a single 90-second `Bash` loop appending timestamps to a
 `/tmp` log file watched from outside the agent — that log, not the agent's self-report, is
 the authority on whether the call was cut short.
@@ -108,8 +111,66 @@ T3.3 passed in all three: `subject-a`'s pane read
 `[1] [sb: from human] T1.1 default mode probe…` (same tag, same shape), and `subject-d`
 read the interrupt body inline as `[sb: from human] [INTERRUPT — stop now] …`.
 
-One trial is recorded here and not counted: an earlier `--when-idle` subject (`subject-b`)
+One trial is recorded above and not counted: an earlier `--when-idle` subject (`subject-b`)
 held its mail correctly for the whole loop but then ended its turn with `sb done`, so the
 held message was written off as unreadable rather than rung — existing, correct behaviour
 for a finished agent, but it proves the hold and not the release, which is why T1.2 was
 re-run with a subject instructed to go idle without finishing.
+
+### 3.2 — PASS
+
+T2.1: `sb interrupt subject-x "stop"` in the clone exits 2 with an argparse
+`invalid choice: 'interrupt'`, and the verb is absent from the usage line. Pinned by
+`test_the_interrupt_verb_is_gone_and_the_mode_replaces_it`.
+
+T2.2, the half that matters: with the verb deleted, `subject-e` was given the same
+90-second single tool call and interrupted through `sb tell --interrupt` at 11 lines in.
+Its log stopped at **11/90** and never grew again; the agent read
+`[sb: from human] [INTERRUPT — stop now] …` inline and confirmed `sb inbox` was empty,
+i.e. the text travelled inline rather than as mail. The capability survived the deletion.
+
+### 3.6 — PASS
+
+T6.1: `sb ask w1 "q?"` in the clone exits 2 with `invalid choice: 'ask'`; `Broker.ask` no
+longer exists (both pinned by `test_the_ask_verb_is_gone`). T6.2:
+`grep -rn "sb ask" defaults/` is empty — `protocol.md` now points at
+`tell --needs-reply` instead.
+
+**One extra live trial, unasked for but worth the two minutes**, because 3.6 removed a
+method the whole `tell` path shared: `lead-a` was told to delegate a trivial task and end
+its turn. The child reported with `sb done`, the parent was woken by the held when-idle
+poke and read it as
+`[sb: from worker-1] A child finished. Run: sb inbox…`, then reported itself. Delegate →
+done → when-idle poke → inbox still works end to end with all four items landed.
+
+### Teardown
+
+Every subject and lead closed with `sb cleanup` (`sb status` in the clone showed
+`0 alive`). One collector had been started inside the clone by the delegate in that last
+trial; it was confirmed to hold the clone's own `collector.lock` and killed by its exact
+pid — never an unscoped `pkill`, and the live fleet's collector was checked to still be
+running afterwards. The child's worktree under `~/.herdr/worktrees/tellclone/` was removed
+with `git worktree remove` and the now-empty parent directory deleted. The clone itself and
+the `/tmp/sb-tellprobe-*.log` files are gone.
+
+### Not proven
+
+- **Multi-message ordering while busy.** Two next-turn tells sent before the first is
+  consumed — whether they arrive in order, coalesce, or one is lost — was not tested here
+  or in the primitive probe, and nothing in this work makes it less likely to matter now
+  that the default reaches a busy agent.
+- **Next turn against a very short tool call, or a nested subagent's own tool calls.** All
+  trials used one long `Bash` call, which is the shape that distinguishes the modes at all.
+- **`--interrupt` against an idle rather than busy agent** — the escape keypress should be
+  harmless, but it was not run.
+- **The reworded `--needs-reply` prompt** was not re-proven live; it is a text change to a
+  path 3.5a already proved, and the wording is pinned by the existing inbox test.
+- Automated tests drive a fake herdr that records `prompt`/`send_keys` rather than running
+  Claude, so they pin which primitive each mode calls and in what order — never that the
+  model queued the text. Only the live trials show that, and the fake was not grown to
+  claim otherwise.
+- `sb ask`'s removal left the store's `kind='ask'` rows, `reply_to` column, `pending_ask`
+  and `sb inspect`'s rendering of unanswered asks in place, so an old store stays readable.
+  Nothing writes those rows any more; that dead-but-harmless surface is not this item's to
+  delete and is flagged rather than removed.
+
