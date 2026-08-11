@@ -1,9 +1,11 @@
 # BUILD-PLAN.md — closing the gap between switchboard and DESIGN-TRUTH
 
 Handoff for the top orchestrator running this work. Phases 1 and 2 are built and merged.
-Phases 3, 4 and 6 are built on their own branches and unmerged; phase 5 was still being
-built when phase 6 finished. Rewritten 2026-08-11 on `main` (`d31ae87`), folding in
-`audit/phase3-scope.md`; phase 6's section corrected in place on `phase6-prompts`.
+Phases 3 to 6 are all built, on a stack of four unmerged branches (PRs #10, #11, #12, #13,
+#14), and have been run together once — `audit/full-stack-verification.md`. Rewritten
+2026-08-11 on `main` (`d31ae87`), folding in `audit/phase3-scope.md`; phase 6's section
+corrected in place on `phase6-prompts`, and this file corrected again on the stack tip
+after the whole-stack run.
 
 **This file is derived and disposable.** It dies when the gaps close. `DESIGN-TRUTH.md` is
 the only thing that outlives it — everything below exists to make one of its entries true.
@@ -157,7 +159,7 @@ the column alone would have changed nothing, since nothing read it.
 - **Done.** `delegate` is refused unless the caller's role carries `delegate = true` — a
   FIELD on the role, set only by `orchestrator.md`, never a check against the literal role
   name, which breaks the moment a role is renamed or added. Enforced in the broker, so
-  `sb workspace new` goes through it too. Live audit at ship time: 8 non-orchestrator-role
+  every door into a spawn goes through it. Live audit at ship time: 8 non-orchestrator-role
   agents had spawned children historically, all ended, none with a live child — the
   refusal cut nothing off mid-task.
 - **Done.** Tree boundary on the five verbs that were global: `tell`, `status`, `inspect`,
@@ -172,12 +174,15 @@ the column alone would have changed nothing, since nothing read it.
 # Phase 6 — prompts and shipping — **DONE** (branch `phase6-prompts`)
 
 Scoped in `audit/phase6-scope.md` (branch `scope-phase6`), built and proved in
-`audit/phase6-build.md`. Based on `phase5-structure` at `7847b84`, which was still
-byte-identical to `phase4-removals` when this started — so in practice phase 6 stacks on
-phase 4 and phase 5 lands beside it, not under it. That turned out to be safe: the scoping
-pass found no item here depends on phase 5, and none of the six touched a line phase 5 is
-scoped to change. The ordering note below was about avoiding a second pass over the same
-files, not a real dependency.
+`audit/phase6-build.md`. Built beside phase 5 rather than on top of it — at its branch
+point `phase5-structure` was still byte-identical to `phase4-removals` — and **since
+rebased onto the stack tip** (`phase4-workspace-new`, itself on phase 5). The rebase was
+clean: no item here touched a line phases 4-5 changed, exactly as the scoping pass
+predicted. 6.3 was re-checked afterwards, since phase 5 added a `delegate` field to `Role`
+and phase 4's deferred item deleted `vocabulary.workspace_role`; neither changes what the
+role list produces, because the fragment reads role NAMES off the merged table. Proved
+again live on the stack tip, in a real spawn's system prompt
+(`audit/full-stack-verification.md`).
 
 - **6.1 Done.** `defaults/protocol.md`'s escalation sentence now names all five of
   DESIGN-TRUTH's sanctioned reasons — three of which reached no shipped prompt at all —
@@ -212,13 +217,16 @@ files, not a real dependency.
 Phase 6 was the last phase in this plan, so this file has nearly done its job. What it
 does **not** get to claim is that `DESIGN-TRUTH.md` is now entirely true of the code:
 
-- **Phase 5 was still in flight** when this was written. Until it lands and merges, 5.1–5.4
-  are open: nothing stamps a top orchestrator, `delegate` does not branch on it, a bare
-  agent can still spawn, and every tree can see every other.
+- **Nothing is merged.** Every phase from 3 up is a branch and a PR waiting on Andrew.
+  Built is not landed, and this file's claims are claims about branches.
 - **The block reasons now outnumber the doc's**, as above — the code and prompts are ahead
   of `DESIGN-TRUTH.md` by one reason, which is a gap in the doc rather than in the build.
-- **`sb workspace new` is still there.** Phase 4 left it deliberately, for phase 5 to
-  remove once space creation is covered.
+- **A defect in phase 3.5's reconciler, found by the whole-stack live run and left
+  alone.** A freshly spawned agent is nudged with "your turn ended without a report"
+  one to three seconds BEFORE its task arrives — `status.collect`'s `spawning` guard
+  suppresses `gone` but not `stalled` — and one agent in that run made a premature, false
+  `sb done` because of it. Not fixed here: it is not this phase's code and nobody scoped
+  it. Written up in `audit/full-stack-verification.md`.
 - **No phase verified obedience, only presence.** Every prompt rule in phase 6 is pinned by
   a containment check. Whether agents actually block for the right reasons, format for a
   human, or assign files up front is a judgement from watching real runs, and nothing here
