@@ -1,5 +1,6 @@
 +++
 model = "default"
+delegate = true
 +++
 
 <!--

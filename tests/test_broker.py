@@ -470,7 +470,8 @@ class BrokerTest(unittest.TestCase):
     # -- messaging -------------------------------------------------------
 
     def test_tell_rings_the_doorbell_without_the_payload(self):
-        store.create_agent(self.db, name="b", role="worker")
+        store.create_agent(self.db, name="a", role="orchestrator")
+        store.create_agent(self.db, name="b", role="worker", parent="a")
         self.b.tell(["b"], "the actual secret payload", me="a")
         self.assertEqual(len(self.h.prompts), 1)
         self.assertNotIn("secret payload", self.h.prompts[0][1])  # payload stays in the store
@@ -487,7 +488,8 @@ class BrokerTest(unittest.TestCase):
         """The flag is a claim on the RECIPIENT, and on nothing else. No agent ever waits
         on another agent (DESIGN-TRUTH.md:230-234), so `--needs-reply` must leave the
         sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
-        store.create_agent(self.db, name="b", role="worker")
+        store.create_agent(self.db, name="a", role="orchestrator")
+        store.create_agent(self.db, name="b", role="worker", parent="a")
         (mid,) = self.b.tell(["b"], "what did you find?", me="a", needs_reply=True)
         self.assertEqual(store.get_message(self.db, mid)["needs_reply"], 1)
         self.assertEqual(len(self.h.prompts), 1)          # rung once, like any tell
@@ -499,7 +501,9 @@ class BrokerTest(unittest.TestCase):
         nothing."""
         import argparse, contextlib, io
         from switchboard import cli
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1")
         self.b.tell(["kid"], "which branch?", me="orch", needs_reply=True)
         self.b.tell(["kid"], "fyi, no answer wanted", me="orch")
         args = argparse.Namespace(cmd="inbox", json=False, peek=False)
@@ -656,12 +660,15 @@ class BrokerTest(unittest.TestCase):
         taking a turn again IS the answer having arrived: blocking ends a turn, so a
         blocked agent runs no commands until something restarts it.
         """
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p9")
+        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p9")
         self.b.block("which branch?", me="kid")
         self.h.states_by_name = {"kid": "idle"}
         self.b.tell(["kid"], "unrelated news", me="orch")     # held: it is blocked
         self.assertEqual(self.h.prompts, [])
-        self.assertEqual(len(status.collect(self.db, self.h, needs_me=True).agents), 1)
+        self.assertEqual(len([a for a in status.collect(self.db, self.h, needs_me=True)
+                              .agents if a.needs_human]), 1)
 
         # ...the human types the answer into the pane, and the agent runs its next command.
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p9"}, clear=True):
@@ -713,7 +720,9 @@ class BrokerTest(unittest.TestCase):
         """They are one claim about one message and they used to disagree — `[3] from w1:`
         in the inbox, no sender at all in the pane. A reader cannot correlate two shapes."""
         import argparse
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="w", role="worker", parent="orch",
+                           pane_id="w1:p1")
         self.b.tell(["w"], "the branch is ready", me="orch")
         doorbell = self.h.prompts[-1][1]
         args = argparse.Namespace(cmd="inbox", json=False, peek=False)
@@ -752,7 +761,10 @@ class BrokerTest(unittest.TestCase):
         """3.4, which modes must not regress: a blocked agent is not idle, it has STOPPED
         for a person, so "next turn" is the turn its block is answered on. Ringing it early
         would clear the block and bury the answer under mail it never asked for."""
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="lead", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p1")
+        store.create_agent(self.db, name="sibling", role="worker", parent="lead")
         self.b.block("which branch?", me="kid")
         self.h.prompts.clear()
         for mode in (NEXT_TURN, WHEN_IDLE):
@@ -1191,8 +1203,11 @@ class BrokerTest(unittest.TestCase):
         ordinary `tell` put the agent back to `working` and dropped it off the one readout
         that shows a person somebody needs them.
         """
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="w", role="worker", parent="lead",
+                           pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", parent="lead",
+                           pane_id="w1:p2")
         self.b.block("which branch?", me="w")
         self.h.prompts.clear()
 
@@ -1200,7 +1215,8 @@ class BrokerTest(unittest.TestCase):
 
         self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
         self.assertEqual(self.h.prompts, [])                       # not announced either
-        [needs] = status.collect(self.db, self.h, needs_me=True).agents
+        [needs] = [a for a in status.collect(self.db, self.h, needs_me=True).agents
+                   if a.needs_human]
         self.assertEqual((needs.name, needs.blocked_why), ("w", "which branch?"))
         # Held, not lost: it is still queued for once the block is answered.
         self.assertEqual(len(store.undelivered(self.db)), 1)
@@ -1222,8 +1238,11 @@ class BrokerTest(unittest.TestCase):
 
     def test_held_mail_is_rung_once_the_human_answers_the_block(self):
         """Held, never dropped: the sibling's mail lands with the answer that released it."""
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="w", role="worker", parent="lead",
+                           pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", parent="lead",
+                           pane_id="w1:p2")
         self.b.block("which branch?", me="w")
         self.b.tell(["w"], "fyi", me="sib")
         self.h.prompts.clear()
@@ -1237,8 +1256,11 @@ class BrokerTest(unittest.TestCase):
     def test_a_flush_does_not_cancel_a_block_for_a_siblings_mail(self):
         """`flush_pending` runs at the start of every `sb` command, so this fires on any
         traffic anywhere in the fleet — the fastest way to lose a block."""
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        store.create_agent(self.db, name="sib", role="worker", pane_id="w1:p2")
+        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="w", role="worker", parent="lead",
+                           pane_id="w1:p1")
+        store.create_agent(self.db, name="sib", role="worker", parent="lead",
+                           pane_id="w1:p2")
         self.h.states_by_name = {"w": "working"}
         self.b.tell(["w"], "fyi", me="sib")                        # queued, mid-turn
         self.b.block("which branch?", me="w")
@@ -2473,7 +2495,7 @@ class WorkspacePlacementTest(unittest.TestCase):
         # where it lands. A parent without one forks, and a fork that cannot happen now
         # refuses the spawn outright (`ForkFailed`), which is `test_workspace`'s subject.
         kw.setdefault("branch", "main")
-        store.create_agent(self.db, name="parent", role="main", workspace="main",
+        store.create_agent(self.db, name="parent", role="orchestrator", workspace="main",
                            cwd=str(self.repo), pane_id="p-parent", **kw)
 
     def _live(self, wsid):
@@ -2486,7 +2508,8 @@ class WorkspacePlacementTest(unittest.TestCase):
                 os.environ["HERDR_WORKSPACE_ID"] = env
             else:
                 os.environ.pop("HERDR_WORKSPACE_ID", None)
-            name = self.b.delegate("t", role="worker", me="parent", **kw)
+            kw.setdefault("role", "worker")
+            name = self.b.delegate("t", me="parent", **kw)
         return self.h.tabs[-1], name
 
     # -- the order -------------------------------------------------------
@@ -2546,7 +2569,7 @@ class WorkspacePlacementTest(unittest.TestCase):
 
     def test_a_grandchild_inherits_it_through_the_store(self):
         self._parent(workspace_id="wA")
-        _, child = self._spawn()
+        _, child = self._spawn(role="orchestrator")
         self.derived.clear()
         self.b.delegate("t", role="worker", me=child)
         self.assertEqual(self.h.tabs[-1], "wA")

@@ -120,18 +120,41 @@ and proved in `audit/phase4-build.md`.
 - `sb workspace new` is deleted once phase 5 covers space creation. Untouched here beyond
   its two flags.
 
-# Phase 5 — structure
+# Phase 5 — structure — DONE (branch `phase5-structure`, stacked on phase 4)
 
-- **5.1** `sb start` is the only path that creates a top orchestrator. Stamp it there.
-- **5.2** `sb delegate` branches on that stamp: a top's spawn gets a new space and worktree;
-  anyone else's gets a tab in the caller's space. This is the mechanism that makes top and
-  workspace orchestrators different — not the prompt, which only explains it. Today they
-  share a role name, a byte-identical prompt, and no code branches on it.
-- **5.3** A bare agent's `delegate` is refused outright. Nothing enforces this now: any
-  agent at any depth can spawn, and could create a space.
-- **5.4** Tree boundary: another top's whole tree is invisible. `tell`, `ask`, `status`,
-  `inspect`, `log` and `restore` are all global today — only `cleanup` checks scope.
-  Siblings inside one tree stay visible to each other.
+Scoped in `audit/phase5-scope.md`, diagnosed live in `audit/phase5-spawn-placement.md`,
+built and proved in `audit/phase5-build.md`.
+
+5.1 and 5.2 turned out to be one fix rather than two. The fork rule keyed on worktree
+POSSESSION (`has_worktree(me)`), which coincides with top-ness for every agent that
+happens to exist and is not the same fact — a non-root, worktree-less row delegated in an
+isolated clone and its child forked a whole new space, exactly as a top's would. Adding
+the column alone would have changed nothing, since nothing read it.
+
+- **Done.** `agents.is_top`, written by `_top` and by no other path. Rows that predate the
+  column are backfilled once from `parent IS NULL AND branch IS NULL` — provably the shape
+  only `sb start` has ever produced, checked against all 252 live rows (7 roots match, no
+  non-root does). An unstamped row is not treated as ordinary: that would silently demote
+  every real top.
+- **Done.** The fork rule reads the stamp (`Broker.mints_space`), not `has_worktree`. A
+  top's spawn gets a new space and worktree; anyone else's is a tab in the caller's space,
+  and its whole subtree stays there. The human and a caller with no row still fork — they
+  have no space to lend, and the alternative is spawning into somebody's own checkout.
+- **Done.** `delegate` is refused unless the caller's role carries `delegate = true` — a
+  FIELD on the role, set only by `orchestrator.md`, never a check against the literal role
+  name, which breaks the moment a role is renamed or added. Enforced in the broker, so
+  `sb workspace new` goes through it too. Live audit at ship time: 8 non-orchestrator-role
+  agents had spawned children historically, all ended, none with a live child — the
+  refusal cut nothing off mid-task.
+- **Done.** Tree boundary on the five verbs that were global: `tell`, `status`, `inspect`,
+  `log`, `restore`. Five, not the six above — `sb ask` was deleted in phase 3. Scoped to
+  the caller's TOP's whole tree, so siblings stay visible to each other; `cleanup` keeps
+  its own tighter descendants rule. The board is NOT scoped, and neither is the human.
+- The role PROMPTS still do not mention any of this. Deliberate: phase 6 owns the prompt
+  rewrite, and the refusal message says what to do instead in the meantime.
+- `sb workspace new` still exists. Phase 4 deferred its deletion to "once phase 5 covers
+  space creation"; 5.2 fixed the fork rule but did not fold `workspace_new` into
+  `delegate`, so that deletion is still outstanding.
 
 # Phase 6 — prompts and shipping
 
