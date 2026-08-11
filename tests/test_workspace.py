@@ -197,7 +197,14 @@ class FakeHerdr:
     def check(self, **kw): pass
 
 
-class WorkspaceTest(unittest.TestCase):
+class Fixture:
+    """Setup shared by the classes below.
+
+    Deliberately not a `TestCase`: subclassing `WorkspaceTest` to borrow its fixture
+    re-ran every one of its ~70 tests once per subclass, eight times over — 490 test runs
+    that proved nothing the first run had not.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
@@ -221,6 +228,7 @@ class WorkspaceTest(unittest.TestCase):
             "commit", "-q", "--allow-empty", "-m", "x")
         return main
 
+class WorkspaceTest(Fixture, unittest.TestCase):
     # -- creating --------------------------------------------------------
 
     def test_new_creates_a_worktree_a_workspace_and_a_lead(self):
@@ -797,7 +805,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(self.h.pane_prompts, [])
 
 
-class StartWorkspaceTest(WorkspaceTest):
+class StartWorkspaceTest(Fixture, unittest.TestCase):
     """`sb start` gives each top-level orchestrator its OWN workspace.
 
     Not a worktree (it does no writes) and not the repo's main workspace (several of them
@@ -884,7 +892,7 @@ class StartWorkspaceTest(WorkspaceTest):
         self.assertIsNotNone(store.get_agent(self.db, name))
 
 
-class ClosingTakesTheBoardWithItTest(WorkspaceTest):
+class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
     """A board opened beside an agent is closed when that agent is.
 
     Every spawn opens one now, so a close that took only the agent's own pane left an
@@ -988,7 +996,7 @@ class ClosingTakesTheBoardWithItTest(WorkspaceTest):
         self.assertNotIn(board, self.h.closed)
 
 
-class WorktreeIsAFactTest(WorkspaceTest):
+class WorktreeIsAFactTest(Fixture, unittest.TestCase):
     """"Does this agent have a worktree?" is read from the store, never from the name.
 
     The `workspace` column says a branch for a worktree space and an agent-ish label for a
@@ -1082,7 +1090,7 @@ class WorktreeIsAFactTest(WorkspaceTest):
         self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
 
 
-class ForkRuleTest(WorkspaceTest):
+class ForkRuleTest(Fixture, unittest.TestCase):
     """The fork rule: you get a worktree when your parent has not got one.
 
     Otherwise you inherit your parent's and share it as a tab. Role-agnostic — there is no
@@ -1256,7 +1264,7 @@ class ForkRuleTest(WorkspaceTest):
         self.assertEqual(store.get_agent(self.db, kid)["cwd"], r["path"])
 
 
-class ForkBaseTest(WorkspaceTest):
+class ForkBaseTest(Fixture, unittest.TestCase):
     """Where a fork starts from: `origin/main`, fetched on the spot.
 
     A local `main` is however stale the last pull left it, so the base is the
@@ -1374,7 +1382,7 @@ class ForkBaseTest(WorkspaceTest):
         self.assertIsNone(r["base"])
 
 
-class JoinWorkspaceTest(WorkspaceTest):
+class JoinWorkspaceTest(Fixture, unittest.TestCase):
     """`sb delegate --workspace <name>` — join a workspace somebody already opened.
 
     The other half of the fork rule: a spawn either forks its own worktree or joins one by
@@ -1483,7 +1491,7 @@ class JoinWorkspaceTest(WorkspaceTest):
         self.assertIsNone(build_parser().parse_args(["delegate", "t"]).workspace)
 
 
-class RetiringMarkExcludesTest(WorkspaceTest):
+class RetiringMarkExcludesTest(Fixture, unittest.TestCase):
     """The retiring mark keeps people OUT — which is the whole reason it is written first.
 
     `sb workspace close` commits the mark before it starts destroying, and its concurrency

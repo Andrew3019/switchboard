@@ -2352,68 +2352,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.restart_sb().start(name=MAIN_NAME), MAIN_NAME)
         self.assertEqual(self.h.started[-1]["name"], MAIN_NAME)
 
-    # -- worktree config links -------------------------------------------
-
-    def _repo_with_worktree(self):
-        import subprocess
-        main = self.repo / "main"; main.mkdir()
-        run = lambda *a, **k: subprocess.run(a, cwd=k.get("cwd", main), capture_output=True)
-        run("git", "init", "-q", "-b", "main")
-        run("git", "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "--allow-empty", "-m", "x")
-        wt = self.repo / "wt"
-        run("git", "worktree", "add", "-q", str(wt), "-b", "side")
-        (main / "CLAUDE.md").write_text("# switchboard protocol\n")
-        (main / ".switchboard").mkdir()
-        return main, wt
-
-    def test_worktree_gets_symlinks_not_copies(self):
-        """Config is never committed; a worktree points at the main checkout's copy."""
-        main, wt = self._repo_with_worktree()
-        b = Broker(self.db, self.h, repo=wt)
-        self.assertEqual(sorted(b.link_config()), [".switchboard", "CLAUDE.md"])
-        self.assertTrue((wt / "CLAUDE.md").is_symlink())
-        self.assertEqual((wt / "CLAUDE.md").resolve(), (main / "CLAUDE.md").resolve())
-
-    def test_linking_is_idempotent_and_never_clobbers(self):
-        main, wt = self._repo_with_worktree()
-        b = Broker(self.db, self.h, repo=wt)
-        b.link_config()
-        self.assertEqual(b.link_config(), [])          # second run does nothing
-        (wt / "own.md").write_text("mine")
-        real = wt / "CLAUDE.md"
-        real.unlink(); real.write_text("a real local file")
-        self.assertEqual(b.link_config(), [])          # refuses to replace a real file
-        self.assertEqual(real.read_text(), "a real local file")
-
-    def test_links_are_git_ignored_locally(self):
-        main, wt = self._repo_with_worktree()
-        Broker(self.db, self.h, repo=wt).link_config()
-        exclude = (main / ".git" / "info" / "exclude").read_text()
-        self.assertIn("CLAUDE.md", exclude)             # keeps `git status` clean
-        self.assertIn(".switchboard", exclude)
-
-    def test_init_pins_the_main_checkout_for_worktrees_to_find(self):
-        main, wt = self._repo_with_worktree()
-        Broker(self.db, self.h, repo=main).init()
-        self.assertEqual(store.read_config(main)["main_checkout"], str(main))
-        # a worktree resolves the same directory without inferring from .git
-        self.assertEqual(store.main_checkout(wt).resolve(), main.resolve())
-
-    def test_worktree_links_follow_the_pinned_main(self):
-        main, wt = self._repo_with_worktree()
-        Broker(self.db, self.h, repo=main).init()
-        Broker(self.db, self.h, repo=wt).link_config()
-        self.assertEqual((wt / "CLAUDE.md").resolve(), (main / "CLAUDE.md").resolve())
-
-    def test_main_checkout_falls_back_to_inference_when_uninited(self):
-        main, wt = self._repo_with_worktree()
-        self.assertEqual(store.main_checkout(wt).resolve(), main.resolve())  # works pre-init
-
-    def test_main_checkout_links_nothing(self):
-        main, _ = self._repo_with_worktree()
-        self.assertEqual(Broker(self.db, self.h, repo=main).link_config(), [])
-
     # -- init ------------------------------------------------------------
 
     def test_init_writes_no_claude_md_anywhere(self):

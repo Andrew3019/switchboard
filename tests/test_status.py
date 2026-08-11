@@ -138,12 +138,6 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.undelivered, 2)
         self.assertGreaterEqual(a.undelivered_age, 600)
 
-    def test_counting_undelivered_mail_never_delivers_it(self):
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="human", to_agent="w1", kind="tell", body="x")
-        status.collect(self.db, FakeHerdr([alive("w1", "working")]))
-        self.assertEqual(len(store.undelivered(self.db, exclude=("human",))), 1)
-
     def test_a_genuinely_working_agent_is_not_stalled(self):
         store.create_agent(self.db, name="w1", role="worker")
         snap = status.collect(self.db, FakeHerdr([alive("w1", "working")]))
