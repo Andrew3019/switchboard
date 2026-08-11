@@ -2156,7 +2156,8 @@ class Broker:
         (it has `core.filesRefLockTimeout` for refs and `reftable.lockTimeout`, and nothing
         for this), so it fails immediately with `could not lock config file .git/config:
         File exists`, and herdr reports a fork that did not happen. Measured on a clone of
-        this repo: 18 six-way rounds, losers every round. It bites at two.
+        this repo: twenty rounds of two concurrent adds, twenty losers — and through `sb
+        delegate`, two dead spawns out of six. It bites at two.
 
         The loser is not left half-forked — git makes no checkout — but it DOES leave the
         branch behind, which is why the fix is a queue rather than a retry: a second
