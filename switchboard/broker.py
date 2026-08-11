@@ -596,8 +596,15 @@ class Broker:
         """
         name = row["name"]
         if row["ended_at"] is not None:
+            # `turn` too, and it is not decoration: an agent running an `sb` command is
+            # inside a turn by definition, which is the same fact this method exists to
+            # act on. The `UserPromptSubmit` hook has usually said so already — typing
+            # into a pane fires it exactly as a doorbell does — so this is corroboration
+            # for the one case it cannot cover, a row revived by an `sb` call in a session
+            # that started before this settings file carried the hook.
             self.db.execute(
-                "UPDATE agents SET ended_at=NULL, state='working' WHERE name=?", (name,))
+                "UPDATE agents SET ended_at=NULL, state='working', turn=? WHERE name=?",
+                (store.TURN_WORKING, name))
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
         elif "state" in row.keys() and row["state"] == "blocked":
@@ -3841,8 +3848,16 @@ class Broker:
         # `pane_id AND ended_at IS NULL`, so leaving ended_at set makes a restored agent
         # resolve to HUMAN — everything it sends is then attributed to the human, and it
         # cannot report done. Verified end to end by QA.
+        # `turn` is CLEARED rather than set, and it is the one place that clears it. A
+        # resumed session is a new session in a new pane that has been given nothing yet,
+        # so whatever edge the old one last recorded says nothing about this one — and if
+        # the old one died mid-turn, the word left behind is `working`, which would come
+        # back with it and hold the restored agent's mail forever. NULL is the honest
+        # reading: no edge observed, so `status` and `_busy` fall back to herdr until the
+        # first prompt fires `UserPromptSubmit`.
         self.db.execute(
-            "UPDATE agents SET ended_at=NULL, state='working' WHERE name=?", (name,))
+            "UPDATE agents SET ended_at=NULL, state='working', turn=NULL WHERE name=?",
+            (name,))
         self.db.commit()
         store.log_event(self.db, kind="restore", agent=name)
         return name
@@ -4001,11 +4016,25 @@ class Broker:
         return self._name_bound(who) is False
 
     def _busy(self, who: str) -> bool:
-        """Is this agent mid-turn right now, per herdr?
+        """Is this agent mid-turn right now?
 
-        Unknown reads as not busy: the doorbell this gates is held back for a busy agent,
-        and holding it back on a hunch is how mail sits forever with nothing on screen.
+        OUR signal first (`agents.turn`, written by the hooks in `hooks.py` at the two
+        edges of a turn), herdr's screen reading only where we have none. This is the
+        single most load-bearing consumer of it: `_ring` holds a when-idle doorbell back
+        on this answer, and `_nudge` refuses to ping on it. When herdr's busy detector
+        went dark for every Claude pane on the machine, both of those inverted — held mail
+        was delivered into turns that were still running, and the reconciler told working
+        agents their turn had ended (`audit/status-ground-truth.md`).
+
+        Unknown still reads as not busy, and only the *unknown* case does: the doorbell
+        this gates is held back for a busy agent, and holding it back on a hunch is how
+        mail sits forever with nothing on screen.
         """
+        # `_column` flattens a missing column AND a NULL one to "", which is the same
+        # thing here: no edge has ever been recorded for this row, so fall through.
+        turn = _column(store.get_agent(self.db, who), "turn")
+        if turn:
+            return turn == store.TURN_WORKING
         return (self._agent_states() or {}).get(who) == WORKING
 
     def flush_pending(self, *, refresh: bool = False) -> list[str]:

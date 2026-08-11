@@ -164,7 +164,9 @@ def glyph(a) -> str:
         return "✗"
     if a.at_prompt or a.blocked:
         return "◐"
-    if a.stalled:
+    if a.stalled or a.signal_drift:
+        # One glyph for both, and no sixth one invented: the row is open, nothing is
+        # running in it, and the note beside it says which of the two it is.
         return "◌"
     if a.finished:
         return "○"
@@ -200,6 +202,10 @@ def note(a) -> str:
         return f"BLOCKED — {a.blocked_why or 'no reason recorded'}"
     if a.stalled:
         return f"STALLED — idle {status_mod.fmt_age(a.idle)}"
+    if a.signal_drift:
+        # Below STALLED because it is rarer, above mail because mail to an agent whose
+        # session is gone is going nowhere. See `status.AgentStatus.signal_drift`.
+        return "NO SESSION — died mid-turn, pane still open"
     if a.unread:
         return f"{a.unread} unread"
     if a.finished and a.summary:
@@ -212,7 +218,7 @@ def note(a) -> str:
 def _note_color(a) -> str:
     if a.gone:
         return RED
-    if a.at_prompt or a.blocked or a.stalled or a.unread:
+    if a.at_prompt or a.blocked or a.stalled or a.signal_drift or a.unread:
         return YELLOW
     return DIM
 

@@ -6,6 +6,17 @@ pass, the decision table and the live proof are in `audit/phase3.8-scope.md`. Re
 the code; everything below is design notes from before it was built, and the sections after
 the correction are still the unverified research the correction warns about.
 
+**A second hook now rides in the same settings file: `UserPromptSubmit`, run by
+`bin/sb-activity-hook`.** The pair is switchboard's own activity signal — `working` when a
+turn starts, `idle` when one ends, into `agents.turn` — and it replaces herdr's terminal
+screen-scrape as the primary answer to "is this agent mid-turn?". Why the edges rather than
+a per-tool-call hook or a timestamp, what each costs, and the live proof are in
+`audit/activity-signal.md`; the measurements behind the choice are in
+`audit/hook-signal-cost.md` and `audit/status-ground-truth.md`. One rule from that build is
+worth repeating here because it is the easiest thing to get wrong: **the Stop hook records
+`idle` only when the gate is letting the turn end.** A blocked stop continues the same
+turn.
+
 Two things the build learned that the notes below get wrong or do not say:
 
 - **The gate is not an `events` query.** It reads the agent's `state` — `done`, `blocked`

@@ -143,6 +143,16 @@ live = ["working", "blocked"]
 # stalled agent gets missed.
 idle_like = ["idle", "done"]
 
+# The two words `agents.turn` can hold — switchboard's OWN activity signal, written by the
+# hooks in `hooks.py` at the two edges of a turn. Listed here for the same reason the
+# groupings above are: the words are the store's schema, and this is the one place the
+# writer (`store.set_turn`) and the readouts (`status`, `Broker._busy`) agree on how to
+# spell them. Not something to retune — they are the two edges Claude Code fires, not a
+# policy — and `turn_idle` in particular is NOT a state and never becomes one: the state
+# column's vocabulary is working | blocked | done | failed and stays four words.
+turn_working = "working"
+turn_idle    = "idle"
+
 
 [limits]
 # Caps, in characters. None of these is a buffer limit; they are smell detectors.

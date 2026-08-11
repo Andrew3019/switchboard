@@ -1,19 +1,24 @@
-"""The Stop gate — the decision, its loop cap, and the wiring that delivers it.
+"""The two turn edges — the Stop gate's decision, and the activity signal beside it.
 
-Five tests: the three the gate was built with, and two for the cap that the integration
-found was not one. What a test can pin here is the DECISION (a real store, real
-rows) and the fact that every spawn carries the settings file. What it cannot pin is that
-Claude honours the response, so that half is proved live, in an isolated clone, and written
-up in `audit/phase3.8-scope.md` — not simulated here.
+The gate: the three tests it was built with, and two for the cap that the integration
+found was not one. The signal (`agents.turn`): the two edges, and the ordering between the
+gate and the idle mark, which is the likeliest bug in it.
+
+What a test can pin here is the DECISION and the WRITE (a real store, real rows) and the
+fact that every spawn carries the settings file. What it cannot pin is that Claude honours
+the response or fires the events at all, so those halves are proved live, in an isolated
+clone — `audit/phase3.8-scope.md` for the gate, `audit/activity-signal.md` for the signal.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -88,12 +93,105 @@ class StopGateTest(unittest.TestCase):
         self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
 
 
+class ActivitySignalTest(unittest.TestCase):
+    """The two edges — `agents.turn`. What a test can pin is the WRITE; that Claude Code
+    fires the two events at all is proved live in `audit/activity-signal.md`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "state.db"
+        self.db = store.connect(path=self.path)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def payload(self, **kw):
+        return {"session_id": "sess-1", **kw}
+
+    def turn(self, name="w1"):
+        return store.get_agent(self.db, name)["turn"]
+
+    def stop(self, **kw):
+        """The real Stop hook, over the real entry point's arguments."""
+        return hooks.run(json.dumps(self.payload(**kw)), db_path=self.path)
+
+    def start(self):
+        hooks.run_activity(json.dumps(self.payload()), db_path=self.path)
+
+    def test_a_turn_marks_working_at_its_start_and_idle_at_its_end(self):
+        """The whole signal, in the order a turn actually happens in.
+
+        Nothing is recorded before the first prompt: a row that has never been given
+        anything has no edge to report, and NULL is what every reader falls back to herdr
+        on.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.assertIsNone(self.turn())
+        self.start()
+        self.assertEqual(self.turn(), store.TURN_WORKING)
+        store.set_state(self.db, "w1", "done")          # it reported, so the gate allows it
+        self.assertEqual(self.stop(), {})
+        self.assertEqual(self.turn(), store.TURN_IDLE)
+
+    def test_a_turn_the_gate_refuses_to_end_is_not_recorded_idle(self):
+        """THE ordering bug this change could most easily have shipped.
+
+        A blocked stop is not the end of a turn: the agent is handed `BLOCK_REASON` and
+        keeps going in the same turn, and `UserPromptSubmit` does not fire again for it.
+        Marking idle there would hand its held mail over mid-turn and have the reconciler
+        ask a working agent why its turn ended.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.start()
+        out = self.stop()                               # silent finish: refused
+        self.assertIn("sb done", out["reason"])
+        self.assertEqual(self.turn(), store.TURN_WORKING)
+
+        # The continued turn ends for real, carrying the flag the gate's own block sets.
+        self.assertEqual(self.stop(stop_hook_active=True), {})
+        self.assertEqual(self.turn(), store.TURN_IDLE)
+
+    def test_an_agent_that_blocked_has_ended_its_turn(self):
+        """`blocked` is a report, so the gate lets the stop through — and a blocked agent
+        is stopped, waiting on a person. Both columns are true at once and they are
+        answering different questions: state=blocked, turn=idle."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.start()
+        store.set_state(self.db, "w1", "blocked")
+        self.assertEqual(self.stop(), {})
+        self.assertEqual(store.get_agent(self.db, "w1")["state"], "blocked")
+        self.assertEqual(self.turn(), store.TURN_IDLE)
+
+    def test_a_session_that_is_not_ours_is_never_written(self):
+        """The isolation, from the writing end. Only agents we spawned are handed the
+        settings file at all, and an unresolvable caller writes nothing even so."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            hooks.run_activity(json.dumps({"session_id": "somebody-else"}),
+                               db_path=self.path)
+        self.assertIsNone(self.turn())
+
+    def test_the_edges_do_not_reset_the_idle_clock(self):
+        """Logged against no agent, with the target in the payload — `Broker._nudge`'s
+        rule and for its reason. `status._last_activity` counts every event that NAMES an
+        agent, and the reconciler's ping IS a prompt, so an edge logged against the agent
+        would let the reconciler read its own footprint as the agent having done
+        something and nag forever."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.start()
+        rows = self.db.execute(
+            "SELECT agent, payload FROM events WHERE kind='turn_start'").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["agent"])
+        self.assertIn("w1", rows[0]["payload"])
+
+
 class SpawnCarriesTheHookTest(unittest.TestCase):
-    def test_every_spawn_passes_the_settings_file_and_it_holds_a_stop_hook(self):
+    def test_every_spawn_passes_the_settings_file_and_it_holds_both_hooks(self):
         """Wiring, in the one place every spawn and restore passes through.
 
         `--settings` merges into that session only and `--bare` is absent, which is what
-        makes the hook reach our agents and nobody else's sessions.
+        makes the hooks reach our agents and nobody else's sessions.
         """
         fake = FakeHerdr(ok({"agent": AGENT_JSON}))
         Herdr("herdr", runner=fake).start_agent("w1", "w1:p9")
@@ -106,6 +204,12 @@ class SpawnCarriesTheHookTest(unittest.TestCase):
         body = json.loads(path.read_text())
         cmd = body["hooks"]["Stop"][0]["hooks"][0]["command"]
         self.assertTrue(cmd.split()[0].endswith("bin/sb-stop-hook"), cmd)
+        start = body["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        self.assertTrue(start.split()[0].endswith("bin/sb-activity-hook"), start)
+        # Both hooks name the same store explicitly, rather than resolving it from
+        # wherever the agent happens to be standing when they fire.
+        self.assertIn("--db", cmd)
+        self.assertIn("--db", start)
 
 
 if __name__ == "__main__":
