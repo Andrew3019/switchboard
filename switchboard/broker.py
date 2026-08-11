@@ -6,8 +6,8 @@ the human.
 Everything here obeys one rule: the agent states an intent, the tooling does the work
 (P0). Correlation, retries, seq counters, pane ids, and model names never surface.
 
-Three pairs of verbs look like duplicates and are not. The distinctions are load-bearing,
-so they are written down where the code is rather than argued about again:
+Some verbs look like duplicates of each other and are not. The distinctions are
+load-bearing, so they are written down where the code is rather than argued about again:
 
 - **`tell`'s three delivery modes.** `tell` writes a message and rings a doorbell that
   carries no payload. *next-turn*, the default, rings straight away: the prompt QUEUES and
@@ -16,14 +16,15 @@ so they are written down where the code is rather than argued about again:
   ended. *interrupt* cancels the turn with `esc` and puts the instruction itself on the
   wire. Deferring an interrupt would defeat it; interrupting on every `tell` is what the
   other two modes exist to stop. See `TELL_MODES`.
-- **`block` vs `ask human`.** There is no `ask human`, and that pair no longer exists:
-  the human has NO mailbox, so needing a person is always a block. `block` ends the turn
-  and the doorbell restarts it, which for an answer that may take hours is the only shape
-  that is not a trap. `ask` is agent-to-agent, where waiting is seconds and the answer is
-  used inline.
-- **`wait` vs deferred delivery.** `wait` is not `ask --when-idle`; see status.py. Deferred
-  delivery is already the default for every message, and `wait` serves callers that are
-  not agents.
+- **`block` vs telling somebody.** The human has NO mailbox, so needing a person is always
+  a block. `block` ends the turn and the doorbell restarts it, which for an answer that may
+  take hours is the only shape that is not a trap. There is no verb that waits: `sb ask`
+  used to be one, blocking its caller in a poll loop, and it is gone — no agent ever waits
+  on another agent, so a question is a `tell --needs-reply` and the answer is a `tell`
+  back.
+- **`wait` vs deferred delivery.** They are deliberately not merged; see status.py.
+  Deferred delivery is what `--when-idle` does to a message, and `wait` serves callers
+  that are not agents.
 """
 
 from __future__ import annotations
@@ -105,10 +106,6 @@ _NOT_IN_NAME = re.compile(r"[^a-z0-9_-]+")
 # its own `.switchboard/protocol.md` — see `Broker._protocol`.
 PROTOCOL_LINE = config.protocol()
 
-# How long `sb ask` blocks, and how often it re-reads the store while blocked.
-ASK_TIMEOUT = config.setting("timeouts.ask")
-ASK_POLL = config.setting("timeouts.ask_poll")
-GONE_GRACE = config.setting("timeouts.gone_grace")
 # What an interrupt waits for the escape keypress to land before sending the new
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
@@ -772,7 +769,7 @@ class Broker:
         work forever.
 
         Fails OPEN: an unreachable herdr proves nothing, so a row claiming to work is
-        left claiming it. Same rule as `_is_registered` and `status.collect`. Nothing
+        left claiming it. Same rule as `status.collect`. Nothing
         branches on this any more — `sb start` reads it only to tell the human which
         orchestrators they already have, and naming a dead one there costs a line of
         text, while omitting a live one costs them the way back to it.
@@ -3235,15 +3232,15 @@ class Broker:
 
     def tell(
         self, targets: Iterable[str], message: str, *, me: Optional[str] = None,
-        reply_to: Optional[int] = None, kind: str = "tell", needs_reply: bool = False,
-        mode: str = NEXT_TURN,
+        kind: str = "tell", needs_reply: bool = False, mode: str = NEXT_TURN,
     ) -> list[int]:
         """Send and return, always. `needs_reply` changes what the recipient READS.
 
         It records that the sender is waiting for an answer, so the recipient's `sb inbox`
         tells it to reply at some point. It does not make the sender wait, poll or block —
         no agent ever waits on another agent (DESIGN-TRUTH.md:230-234), which is why this
-        is a flag on a fire-and-forget verb and not a second `ask`.
+        is a flag on a fire-and-forget verb rather than a verb that waits. There used to
+        be one of those, `sb ask`, and it is gone for exactly this reason.
 
         `mode` chooses WHEN the doorbell rings — see `TELL_MODES`. The sender returns
         immediately in all three: even *interrupt*, which is the only one that changes what
@@ -3274,138 +3271,16 @@ class Broker:
                 # marked read on delivery. Nothing below this branch applies to it.
                 ids.append(self._interrupt(t, message, me=me, needs_reply=needs_reply))
                 continue
-            # A plain `tell` answers a pending `ask` — correlation is the tool's job,
-            # which is why there is no `reply` verb.
-            rt = reply_to
-            if rt is None and kind == "tell":
-                pending = store.pending_ask(self.db, asker=t, target=me)
-                rt = pending["id"] if pending else None
             mid = store.put_message(
-                self.db, from_agent=me, to_agent=t, kind=kind, body=message, reply_to=rt,
+                self.db, from_agent=me, to_agent=t, kind=kind, body=message,
                 needs_reply=needs_reply,
             )
             ids.append(mid)
-            if rt is not None:
-                # An answer needs no doorbell: whoever asked is blocked inside `sb ask`
-                # collecting it already, and it comes back as that call's return value.
-                # Ringing anyway delivered every answer three times — as the return value,
-                # as an unread inbox row, and as a prompt injected into the asker's turn —
-                # which cost the asker a turn per ask, one per target on a fan-out. That is
-                # exactly the per-message loop C0 exists to prevent.
-                #
-                # The cost of this: an asker whose `ask` had already timed out gets the
-                # answer with no announcement. It is still in the store, and `sb log` still
-                # shows it; the alternative is paying a turn on every answer forever.
-                store.mark_collected(self.db, mid)
-            else:
-                # Only the human answers a block, so only the human's `tell` clears one.
-                # Anyone else's mail is held until they have (see `_ring`).
-                self._ring(t, f"{tag(me)} {self._say('notify.mail')}",
-                           mode=mode, answer=(me == HUMAN))
+            # Only the human answers a block, so only the human's `tell` clears one.
+            # Anyone else's mail is held until they have (see `_ring`).
+            self._ring(t, f"{tag(me)} {self._say('notify.mail')}",
+                       mode=mode, answer=(me == HUMAN))
         return ids
-
-    def ask(
-        self, targets: Sequence[str], question: str, *,
-        me: Optional[str] = None, timeout: int = ASK_TIMEOUT, poll: float = ASK_POLL,
-    ) -> dict[str, Optional[str]]:
-        """Send and block until every target answers.
-
-        For AGENTS only, and it is the only blocking verb. Multi-target because "ask three
-        researchers and wait" is the common fan-out; looping would cost the caller a turn
-        per child. Waiting on another agent is legitimate: it is usually seconds, and the
-        answer is this call's return value, used inline.
-
-        Asking the HUMAN is refused outright — `sb block` is the one and only way to reach
-        a person, and this is not a second one. Holding a turn open for a human is a trap:
-        the answer can take hours, and all that time the agent shows as working, a live
-        process sits there, and the tool call may time out on top of it. `block` ends the
-        turn, costs nothing while it waits (C10), and the doorbell restarts it — so for a
-        human target it is strictly better and there is nothing to choose between.
-
-        An error rather than a silent alias, because the two verbs do not merely differ in
-        mechanism, they differ in what the CALLER does next: `ask` returns an answer to use
-        inline, `block` means stop. Quietly turning one into the other would leave an agent
-        marked blocked while its turn ran on, waiting for a return value that never comes.
-        Told plainly, it runs `sb block` and stops, which is the whole point.
-        """
-        me = me or self.whoami()
-        resolved = [self._resolve(w, me) for w in targets]
-        if any(t == HUMAN for t in resolved):
-            # Before anything is written: a refused ask must leave no half-sent fan-out.
-            raise ValueError(
-                "there is no way to ask the human and wait — they have no mailbox, and "
-                "an answer can take hours. Use `sb block \"<why>\"`: it ends your turn "
-                "and you are poked the moment they answer."
-            )
-        missing = [t for t in resolved if store.get_agent(self.db, t) is None]
-        if missing:
-            # Otherwise the caller blocks for the whole timeout waiting on nobody.
-            raise KeyError(f"no such agent: {', '.join(missing)}")
-        ids = {}
-        for t in resolved:
-            ids[t] = store.put_message(
-                self.db, from_agent=me, to_agent=t, kind="ask", body=question
-            )
-            self._ring(t, f"{tag(me)} {self._say('notify.mail_question')}")
-
-        answers: dict[str, Optional[str]] = {t: None for t in resolved}
-        deadline = time.time() + timeout
-        # A child can die recording NOTHING — no done, no failed — and the store then has
-        # no reason to stop waiting. herdr knows it is gone, but a single absent reading
-        # is indistinguishable from a hiccup, so require it to stay gone.
-        vanished: dict[str, int] = {t: 0 for t in resolved}
-        gone_for = max(3, int(GONE_GRACE / max(poll, 0.01)))
-        while time.time() < deadline:
-            waiting = False
-            for t, mid in ids.items():
-                if answers[t] is not None:
-                    continue
-                r = store.reply_to_ask(self.db, mid)
-                if r:
-                    answers[t] = r["body"]
-                    continue
-                if self._will_never_answer(t):
-                    continue
-                vanished[t] = 0 if self._is_registered(t) else vanished[t] + 1
-                if vanished[t] >= gone_for:
-                    store.log_event(self.db, kind="ask_target_vanished", agent=t,
-                                    waited=round(time.time() - (deadline - timeout), 1))
-                    continue                  # gone long enough to not be a hiccup
-                waiting = True
-            if not waiting:
-                # Either everyone answered, or whoever has not is finished and never
-                # will. Sitting out the remaining fourteen minutes would be a lie about
-                # what this call is doing.
-                return answers
-            time.sleep(poll)
-            # The doorbell above may have been held back because the target was mid-turn
-            # (see `_ring`). Nothing else is running in this process while we block, so if
-            # we did not retry it here an `ask` to a busy agent would wait out its whole
-            # timeout for a question that was never announced.
-            self.flush_pending(refresh=True)
-        return answers  # unanswered stay None; the caller decides (C9)
-
-    def _is_registered(self, who: str) -> bool:
-        """Does herdr still know this agent? Refreshed each poll, unlike `_busy`."""
-        try:
-            self._fill_agent_caches(self.h.list_agents())
-        except HerdrError:
-            return True                       # cannot tell: assume alive, never kill on doubt
-        return who in self._alive_cache
-
-    def _will_never_answer(self, who: str) -> bool:
-        """Whether waiting on this target is waiting forever.
-
-        The STORE only — deliberately not herdr. An agent missing from `agent list` looks
-        identical whether it died or herdr hiccupped, and treating a hiccup as death would
-        make `ask` return nothing at all the moment herdr coughed. A `done` or `failed`
-        row, by contrast, is something the agent itself recorded: it has ended its turn
-        for good, and the answer is not coming.
-
-        Only ever called for agent targets: the human is never waited on (see `ask`).
-        """
-        a = store.get_agent(self.db, who)
-        return a is not None and a["state"] in FINISHED
 
     def inbox(self, *, me: Optional[str] = None, peek: bool = False) -> list:
         """All unread at once — a per-message loop would cost a turn each (C0).
@@ -3500,8 +3375,9 @@ class Broker:
         Routing blocks around the parent is what keeps parent context from growing with
         every problem (C14, C4).
 
-        This is the ONE way an agent reaches a person, and `sb ask human` is a spelling of
-        it (see `ask`). There is no human mailbox to leave the reason in, and it does not
+        This is the ONE way an agent reaches a person — there is no second spelling of it
+        and never was one worth keeping. There is no human mailbox to leave the reason in,
+        and it does not
         need one: the block is durable in the agent's own state and in the event log, and
         both readouts are driven from there — `sb status --needs-me` lists this agent with
         `why` for as long as it stays blocked. A dismissed desktop notification therefore
@@ -3784,8 +3660,8 @@ class Broker:
         forever, which is precisely the "the board looks fine and something is silently
         not happening" class.
 
-        **The STORE only, deliberately not herdr** — the same call `_will_never_answer`
-        makes, for the same reason. An agent missing from `agent list` looks identical
+        **The STORE only, deliberately not herdr.** An agent missing from `agent list`
+        looks identical
         whether it died or herdr hiccupped, and a hiccup that read as "no live children"
         would wave through exactly the close this exists to stop. A row that says
         `working` when the pane is long dead costs a refusal, which the human undoes by
@@ -4073,9 +3949,9 @@ class Broker:
     def flush_pending(self, *, refresh: bool = False) -> list[str]:
         """Ring the doorbell for anyone who has mail they cannot know about, and is idle.
 
-        Called at the start of every `sb` command (see `cli.main`) and on every pass of
-        `ask`'s wait loop, so a deferred message lands as soon as anything at all touches
-        the store — which, in a live session, is constantly. The store query is free when
+        Called at the start of every `sb` command (see `cli.main`), so a deferred message
+        lands as soon as anything at all touches the store — which, in a live session, is
+        constantly. The store query is free when
         there is nothing pending; only then do we ask herdr.
 
         `store.unseen`, NOT `store.undelivered`: the doorbell exists to tell an agent

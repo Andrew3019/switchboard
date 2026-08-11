@@ -69,12 +69,6 @@ workspace_task = "Await instructions for this workspace."
 # agent to go and read it is what keeps a message off the wire and out of the pane.
 mail = "You have mail. Run: sb inbox"
 
-# A pending `ask` is worth distinguishing: somebody is BLOCKED on the answer — `sb ask` is
-# the one verb that waits, so the asker is spending real time in a pane doing nothing. The
-# old text said "(a question)" and left the reader to infer the urgency; saying it outright
-# costs a clause and is the only thing separating this doorbell from the one above.
-mail_question = "You have mail (a question) — someone is waiting on your answer and cannot continue without it. Run: sb inbox"
-
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
 #
@@ -103,9 +97,9 @@ interrupt = "[INTERRUPT — stop now] The instruction you were following is canc
 #
 # The whole of the feature is this sentence: the sender is waiting for an answer and is
 # NOT blocked waiting for it, so the recipient owes a reply at some point but owes it
-# nothing right now. Both halves are stated. Dropping the second half turns a `tell` into
-# an `ask` in the reader's head and costs it the turn it was about to spend; dropping the
-# first leaves the sender waiting on a reply nobody knows to send.
+# nothing right now. Both halves are stated. Dropping the second half makes the reader
+# think it must stop and answer now, and costs it the turn it was about to spend; dropping
+# the first leaves the sender waiting on a reply nobody knows to send.
 #
 # It names the SENDER as the one to reply to, in those words. `--needs-reply` is purely
 # agent-to-agent — a human is never a sender here, since they type into a pane rather than

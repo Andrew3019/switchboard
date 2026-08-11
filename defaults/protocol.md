@@ -126,9 +126,9 @@ wait; `--when-idle` holds it until they have finished instead, and `--interrupt`
 cancels what they are doing, which is for changing course and nothing else.
 Everything sb puts in front of you is marked `[sb: from <name>]`, so a message is
 never mistaken for the human typing.
-`sb ask <who> "<question>"` sends to another agent and WAITS for its answer — for
-agents only, and only when the answer is seconds away. Pass file paths, never file
-contents — large payloads in messages are a bug.
+Nothing waits for a reply: if you need one, `sb tell <who> "<question>"
+--needs-reply` asks them to answer at some point and returns immediately. Pass file
+paths, never file contents — large payloads in messages are a bug.
 To finish: commit your work, then call `sb done "<summary>"` as your last action —
 your parent acts on commits, and anything left uncommitted is invisible in a
 worktree nobody opens. That summary is the only thing your parent ever sees of you;

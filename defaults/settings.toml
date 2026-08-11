@@ -82,8 +82,8 @@ linked_config = ["CLAUDE.md", ".switchboard"]
 # Names, not behaviour. Every one of these used to be a string literal in Python.
 
 # The two addresses that are not agents. `parent` is an ordinary target; `human` is not a
-# target at all — a person has no mailbox, so `sb tell human` and `sb ask human` are both
-# refused and point at `sb block`. The name is still needed to recognise those cases.
+# target at all — a person has no mailbox, so `sb tell human` is refused and points at
+# `sb block`. The name is still needed to recognise that case.
 human  = "human"
 parent = "parent"
 
@@ -236,30 +236,12 @@ herdr_log_clip = 500
 [timeouts]
 # Seconds, unless the name says _ms.
 
-# `sb ask` — the only blocking verb. Fifteen minutes: long enough for a human to come back
-# from lunch, short enough that a forgotten ask does not hold a pane all day.
-ask = 900
-
-# How often a blocked `ask` re-reads the store for its answer. Cheap (one indexed query),
-# so this is about latency, not load.
-ask_poll = 2.0
-# How long a target must stay absent from herdr before `ask` gives up on it. A single
-# missing reading is indistinguishable from a hiccup; a run of them is a death.
-#
-# It must never be shorter than `status.SPAWN_GRACE` (~287 s — herdr's whole retry worst
-# case), and that floor is asserted at load time in `switchboard/status.py`. An agent that
-# is still spawning is not listed by herdr yet and looks exactly like a dead one, so a
-# grace under that window makes `sb ask` write off a target that has done nothing but start
-# slowly. This was 60 s and did exactly that until the assertion was added. Tuning it DOWN
-# means moving that floor, which means changing what a spawn costs — not this line alone.
-gone_grace = 300.0
-
 # How long a `working` row must stay CONTINUOUSLY absent from herdr before that absence is
-# recorded as a death (`status.GONE_CONFIRM_GRACE`). Same reasoning as `gone_grace`, but a
-# separate question — one is `ask` giving up on a target, the other is the store writing a
-# verdict nothing else will ever revise — and it is bound to neither `gone_grace` nor the
-# spawn window: `gone` is already forced false for a row that is still spawning, so nothing
-# here can be confirmed dead during its own spawn.
+# recorded as a death (`status.GONE_CONFIRM_GRACE`). A single missing reading is
+# indistinguishable from a herdr hiccup; a run of them is a death, and this one is the
+# store writing a verdict nothing else will ever revise. It is not bound to the spawn
+# window: `gone` is already forced false for a row that is still spawning, so nothing here
+# can be confirmed dead during its own spawn.
 gone_confirm_grace = 60.0
 
 # `sb wait`, which is for humans and shell scripts.

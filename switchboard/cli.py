@@ -1,6 +1,6 @@
 """The `sb` command — the only surface agents ever see.
 
-Seven verbs for agents (`delegate`, `ask`, `tell`, `inbox`, `done`, `block`, `status`), a
+Six verbs for agents (`delegate`, `tell`, `inbox`, `done`, `block`, `status`), a
 few more for the human (`init`, `doctor`, `cleanup`, `restore`, `inspect`,
 `wait`, `log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
 than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
@@ -17,7 +17,7 @@ own subcommand list so a verb added later cannot quietly miss it.
 
 Arguments are checked here and nowhere else (see `_validate` and validate.py). This is
 the last point where an error can name the flag the caller typed: below it, a bad value
-comes back as a herdr error code, or as an `ask` that blocks for its whole timeout.
+comes back as a herdr error code, far from the caller that caused it.
 """
 
 from __future__ import annotations
@@ -143,19 +143,9 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--keep", action="store_true", help="do not auto-close when finished")
     d.add_argument("--ephemeral", action="store_true", help="close as soon as it finishes")
 
-    a = cmd("ask", help="send a question and WAIT for the answer")
-    # Agents only. `human` is still an accepted SHAPE here (validate.target) so the broker
-    # can answer it with a sentence naming `sb block`, rather than argparse answering it
-    # with a usage dump that teaches nobody anything.
-    a.add_argument("who", nargs="+", help="agent name(s) or 'parent' — not the human, "
-                                          "who is reached with `sb block`")
-    a.add_argument("question")
-    a.add_argument("--timeout", type=int, default=broker_mod.ASK_TIMEOUT)
-
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
     t.add_argument("message")
-    t.add_argument("--re", dest="reply_to", type=int, help=argparse.SUPPRESS)
     # Says what it does to the RECIPIENT, because what it does to the sender is nothing:
     # `tell` still returns immediately, and no agent ever waits on another agent.
     t.add_argument("--needs-reply", action="store_true",
@@ -325,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     ins = cmd(
         "inspect", help="everything about ONE agent, including its recent terminal output",
         description="What is going on with this agent: its task, state, drift, workspace, "
-                    "mail (including any ask nobody has answered), last summary, recent "
+                    "mail, last summary, recent "
                     "events, and the tail of its terminal — live pane if it has one, the "
                     "on-disk transcript if it does not.")
     ins.add_argument("name")
@@ -399,11 +389,6 @@ def _validate(args) -> None:
         # prompt text, so both are checked again after resolution (see _dispatch).
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
-
-    elif cmd == "ask":
-        args.who = validate.targets(args.who)
-        args.question = validate.text(args.question, "question")
-        args.timeout = validate.positive_int(args.timeout, "--timeout")
 
     elif cmd == "tell":
         args.who = validate.targets(args.who)
@@ -807,16 +792,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
               {"name": name, "workspace": join.get("workspace"), "unconfirmed": note})
         return 0
 
-    if cmd == "ask":
-        answers = b.ask(args.who, args.question, me=me, timeout=args.timeout)
-        missing = [k for k, v in answers.items() if v is None]
-        lines = [f"{k}: {v if v is not None else '(no answer — timed out)'}"
-                 for k, v in answers.items()]
-        _emit(args, "\n".join(lines), answers)
-        return 1 if missing else 0
-
     if cmd == "tell":
-        ids = b.tell(args.who, args.message, me=me, reply_to=args.reply_to,
+        ids = b.tell(args.who, args.message, me=me,
                      needs_reply=args.needs_reply, mode=args.mode)
         # Whether the doorbell actually rang. `tell` used to report plain success even
         # when the ring failed outright, so the sender proceeded believing the handoff had
@@ -1258,7 +1235,7 @@ def _plugin_run(args, b: Broker, db, me: str) -> int:
 
     `audience` is enforced here rather than inside the plugin: declared once, and
     impossible for a plugin author to forget (C6). The refusal names what to do instead,
-    the same treatment `sb ask human` gets.
+    the same treatment a message addressed to the human gets.
     """
     p, c = args.plugin, args.command
     agent = None if me == HUMAN else me

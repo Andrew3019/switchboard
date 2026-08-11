@@ -145,20 +145,6 @@ _SPAWN_WORST_CASE = (
 SPAWN_SLACK = 5
 SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 
-# The one relationship between this window and `ask`'s. `ask()` writes a target off once it
-# has stayed unlisted for `timeouts.gone_grace` (broker.GONE_GRACE), and a row that is
-# merely still spawning is not listed by herdr for the whole of SPAWN_GRACE — so an ask
-# grace shorter than this window abandons a target that has done nothing but start slowly.
-# The two stay separate constants, tuned separately, because they answer different
-# questions; this is the only thing keeping them from crossing. It held nowhere when it was
-# written — 60 s of ask grace against a 287 s spawn — which is the bug it exists to make
-# impossible. Read through `config` rather than imported: broker imports status, not the
-# other way round.
-assert config.setting("timeouts.gone_grace") >= SPAWN_GRACE, (
-    f"timeouts.gone_grace must be at least SPAWN_GRACE ({SPAWN_GRACE:.0f}s), or `sb ask` "
-    f"gives up on agents that are still spawning"
-)
-
 # How long a row has to stay CONTINUOUSLY absent from herdr before that absence is written
 # down as a death (see `_record_gone`).
 #

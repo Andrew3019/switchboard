@@ -177,7 +177,6 @@ class CliBoundaryTest(unittest.TestCase):
         self.bad(["done", "   "])
         self.bad(["block", "\t"])
         self.bad(["tell", "worker-1", "  "])
-        self.bad(["ask", "worker-1", ""])
 
     def test_done_and_block_must_be_one_line(self):
         # Both reach herdr as `report-agent --message`.
@@ -202,16 +201,13 @@ class CliBoundaryTest(unittest.TestCase):
         self.assertIn("\n", args.message)
         self.bad(["delegate", "line one\nline two"])
 
-    def test_ask_rejects_a_useless_timeout(self):
-        self.bad(["ask", "worker-1", "ready?", "--timeout", "0"])
-
-    def test_recipients_are_checked_before_the_blocking_call(self):
-        self.bad(["ask", "No-Such-Agent", "anyone home?"])
+    def test_recipients_are_checked_before_the_message_is_written(self):
+        self.bad(["tell", "No-Such-Agent", "anyone home?"])
         self.bad(["tell", "worker-1", "Reviewer", "hi"])   # last positional is the message
 
     def test_parent_and_human_stay_addressable(self):
         for who in ("parent", "human"):
-            args = parse(["ask", who, "what now?"])
+            args = parse(["tell", who, "what now?"])
             _validate(args)
             self.assertEqual(args.who, [who])
 
@@ -233,6 +229,15 @@ class CliBoundaryTest(unittest.TestCase):
         args = parse(["tell", "worker-1", "stop", "--interrupt"])
         _validate(args)
         self.assertEqual(args.mode, "interrupt")
+
+    def test_the_ask_verb_is_gone(self):
+        """Item 3.6. It blocked its caller in a poll loop, which is the one thing
+        DESIGN-TRUTH forbids outright — no agent ever waits on another agent. What
+        replaces it is a `tell --needs-reply`, which returns immediately."""
+        with self.assertRaises(SystemExit):
+            parse(["ask", "worker-1", "ready?"])
+        from switchboard import broker as broker_mod
+        self.assertFalse(hasattr(broker_mod.Broker, "ask"))
 
     def test_agent_lookups_are_checked_too(self):
         self.bad(["restore", "Not A Name"])

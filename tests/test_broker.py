@@ -517,88 +517,6 @@ class BrokerTest(unittest.TestCase):
         self.b.tell(["parent"], "hi", me="kid")
         self.assertEqual(store.unread_for(self.db, "mum")[0]["body"], "hi")
 
-    def test_tell_answers_a_pending_ask_without_a_reply_verb(self):
-        store.create_agent(self.db, name="b", role="worker")
-        mid = store.put_message(self.db, from_agent="a", to_agent="b", kind="ask", body="q?")
-        self.b.tell(["a"], "the answer", me="b")
-        self.assertEqual(store.reply_to_ask(self.db, mid)["body"], "the answer")
-
-    def test_ask_returns_once_every_target_answers(self):
-        store.create_agent(self.db, name="x", role="worker")
-        store.create_agent(self.db, name="y", role="worker")
-
-        def answer_both(*_a, **_k):
-            for t in ("x", "y"):
-                p = store.pending_ask(self.db, asker="orch", target=t)
-                if p:
-                    store.put_message(self.db, from_agent=t, to_agent="orch",
-                                      kind="tell", body=f"{t}-done", reply_to=p["id"])
-        self.h.prompt = answer_both
-        got = self.b.ask(["x", "y"], "status?", me="orch", timeout=5, poll=0.01)
-        self.assertEqual(got, {"x": "x-done", "y": "y-done"})
-
-    def test_ask_gives_up_on_a_target_that_vanished_without_recording(self):
-        """A child can die recording nothing — no done, no failed. The store has no reason
-        to stop waiting, so without this an `ask` sits out its whole timeout."""
-        from switchboard import broker as bmod
-        store.create_agent(self.db, name="ghost", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {}                      # herdr has never heard of it
-        with mock.patch.object(bmod, "GONE_GRACE", 0.05):
-            got = self.b.ask(["ghost"], "q?", me="orch", timeout=30, poll=0.01)
-        self.assertIsNone(got["ghost"])                 # gave up early, did not hang
-
-    def test_a_single_missing_reading_is_not_treated_as_death(self):
-        """One absent reading is indistinguishable from a herdr hiccup."""
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {}
-        started = time.time()
-        got = self.b.ask(["w"], "q?", me="orch", timeout=0.4, poll=0.01)
-        self.assertIsNone(got["w"])
-        self.assertGreater(time.time() - started, 0.3)  # it kept waiting
-
-    def test_ask_waits_out_a_target_that_is_still_spawning(self):
-        """A target herdr has never listed is not necessarily dead — it may not have
-        finished starting. herdr does not list a spawning agent for the whole of
-        `status.SPAWN_GRACE`, so a `gone_grace` under that window makes `ask` write off a
-        child that has done nothing but start slowly. That is what the load-time assertion
-        in `status.py` prevents, and this is the behaviour it buys.
-
-        Both windows are minutes, so both are compressed by ONE factor: what is under test
-        is the shipped ratio between them, not either number.
-        """
-        from switchboard import broker as bmod
-        from switchboard import config
-        store.create_agent(self.db, name="slow", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {}                  # not listed yet: still spawning
-
-        spawn = 0.5
-        scale = status.SPAWN_GRACE / spawn
-        grace = config.setting("timeouts.gone_grace") / scale
-        # 0.01 is the floor `ask` puts under `poll` when it turns the grace into a count of
-        # readings; anything shorter here would compress the grace and not the loop.
-        with mock.patch.object(bmod, "GONE_GRACE", grace):
-            got = self.b.ask(["slow"], "q?", me="orch", timeout=spawn, poll=0.01)
-
-        self.assertIsNone(got["slow"])              # it ran out of time waiting, ...
-        kinds = [e["kind"] for e in store.recent_events(self.db, agent="slow")]
-        self.assertNotIn("ask_target_vanished", kinds)      # ... it never gave up on it
-
-    def test_there_is_no_way_to_ask_the_human_and_wait(self):
-        """One way to reach a person, and it is `sb block`.
-
-        Waiting on a human held the turn open for an answer that can take hours: the agent
-        showed as working the whole time, a live process sat there, and the tool call could
-        time out on top of it. Refused rather than silently aliased to `block`, because the
-        caller of `ask` goes on to use a return value and the caller of `block` stops.
-        """
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
-        with self.assertRaises(ValueError) as e:
-            self.b.ask([HUMAN], "which approach?", me="orch", timeout=0.1, poll=0.05)
-        self.assertIn("sb block", str(e.exception))
-        self.assertEqual(store.get_agent(self.db, "orch")["state"], "working")
-
-    # -- done / block ----------------------------------------------------
-
     def test_done_notifies_the_parent_so_it_need_not_poll(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
@@ -1689,58 +1607,6 @@ class BrokerTest(unittest.TestCase):
         self.b.cleanup(me="orch")
         self.assertNotIn("w1:p1", self.h.closed)
 
-    def test_ask_fails_fast_on_an_unknown_target(self):
-        """Otherwise the caller blocks the entire timeout waiting on nobody."""
-        with self.assertRaises(KeyError):
-            self.b.ask(["no-such"], "q?", me="orch", timeout=0.1)
-
-    def test_ask_stops_waiting_on_a_child_that_finished_without_answering(self):
-        """Otherwise the parent sits out its whole fifteen minutes for an answer that
-        cannot arrive — `sb done` does not satisfy a pending ask."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        store.set_state(self.db, "kid", "done")
-        answers = self.b.ask(["kid"], "q?", me="orch", timeout=60, poll=0.01)
-        self.assertEqual(answers, {"kid": None})
-
-    def test_ask_keeps_waiting_on_a_child_that_is_merely_quiet(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        polls = []
-
-        def answer_on_the_third_poll(_):
-            polls.append(1)
-            if len(polls) == 3:
-                self.b.tell(["orch"], "here you go", me="kid")
-
-        with mock.patch("time.sleep", answer_on_the_third_poll):
-            answers = self.b.ask(["kid"], "q?", me="orch", timeout=60, poll=0.01)
-        self.assertEqual(answers, {"kid": "here you go"})
-        self.assertGreaterEqual(len(polls), 3)
-
-    def test_asking_the_human_never_waits_and_never_takes_a_turn(self):
-        """The trap this closes: a fifteen-minute call holding the turn open for nothing."""
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        started = time.time()
-        with self.assertRaises(ValueError):
-            self.b.ask([HUMAN], "which branch?", me="kid", timeout=30, poll=0.05)
-        self.assertLess(time.time() - started, 1)              # it did not wait at all
-
-    def test_a_refused_ask_leaves_no_half_sent_fan_out(self):
-        """The human is checked before anything is written, so a mixed ask sends nothing.
-
-        Half a fan-out would be worse than none: the peers would answer into a call that
-        raised, and the caller would never collect what it asked for.
-        """
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        store.create_agent(self.db, name="peer", role="worker", pane_id="w1:p2")
-        with self.assertRaises(ValueError):
-            self.b.ask([HUMAN, "peer"], "which branch?", me="kid", timeout=0.2, poll=0.05)
-        self.assertEqual(
-            self.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"], 0)
-
     def test_a_human_running_inbox_is_told_where_to_look_instead(self):
         """`(no new messages)` would read as "nothing needs you", which is a lie."""
         import argparse, contextlib, io
@@ -1980,43 +1846,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.closed, [])
 
     # -- answers do not ring ----------------------------------------------
-
-    def test_an_answer_to_a_pending_ask_rings_nobody(self):
-        """The asker is blocked inside `sb ask` collecting it. Ringing anyway delivered
-        every answer three times and cost the asker a turn per ask (C0)."""
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        store.put_message(self.db, from_agent="orch", to_agent="kid", kind="ask",
-                          body="how many?")
-        self.h.prompts.clear()
-        [mid] = self.b.tell(["orch"], "42", me="kid")
-        self.assertEqual(self.h.prompts, [])                              # no doorbell
-        m = store.get_message(self.db, mid)
-        self.assertIsNotNone(m["reply_to"])                               # still correlated
-        self.assertIsNotNone(m["read_at"])                                # and not pinning
-        self.assertIsNotNone(m["delivered_at"])       # so flush_pending will not ring later
-        self.assertNotIn(mid, [r["id"] for r in
-                               store.undelivered(self.db, exclude=(HUMAN,))])
-
-    def test_a_blocked_ask_retries_a_doorbell_that_was_held_back(self):
-        """Nothing else runs while `ask` blocks, so if it did not re-ring here a question
-        sent to a mid-turn agent would wait out its whole timeout unannounced."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1")
-        self.h.states_by_name = {"kid": "working"}
-        rung: list[str] = []
-
-        def go_idle(_):
-            self.h.states_by_name = {"kid": "idle"}
-            rung.append("turn ended")
-
-        with mock.patch("time.sleep", go_idle):
-            self.b.ask(["kid"], "q?", me="orch", timeout=0.1, poll=0.01)
-        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])         # rung once, late
-
-    # -- restore ----------------------------------------------------------
 
     def test_restore_refuses_a_live_agent_before_making_a_tab(self):
         """`agent start` fails all three attempts under a name herdr already runs, and the
