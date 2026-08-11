@@ -629,10 +629,30 @@ def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
 
     Aggregated rather than looped so status stays one pass, and read-only for the same
     reason `--peek` exists: looking at the board must never eat somebody's mail.
+
+    Mail written off as UNDELIVERABLE is not counted, and that is what stops the human's
+    queue filling up with rows nothing can ever move. `needs_human` reads this count, so
+    one message to an agent that later died kept that agent in NEEDS YOU for the life of
+    the store, with no verb — not even for the human — that could clear it
+    (`2026-08-09-233230`). The message is still unread and still there; what it has lost is
+    any recipient who could read it, and `broker._clear_unreadable_mail` is the only thing
+    that decides that. See `store.mark_undeliverable` for what survives.
+
+    Read defensively for the reason `collect` reads `absent_since` defensively: the board
+    and the collector reach this on a READ-ONLY connection and cannot migrate a store older
+    than the column, and a viewer that raises every two seconds until some writer happens
+    to run is worse than one that counts the way it always did.
     """
+    where = "read_at IS NULL"
+    if _has_column(db, "messages", "undeliverable_at"):
+        where += " AND undeliverable_at IS NULL"
     return {r["to_agent"]: r["n"] for r in db.execute(
-        "SELECT to_agent, COUNT(*) n FROM messages WHERE read_at IS NULL GROUP BY to_agent"
+        f"SELECT to_agent, COUNT(*) n FROM messages WHERE {where} GROUP BY to_agent"
     )}
+
+
+def _has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})"))
 
 
 def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int, bool]]:
