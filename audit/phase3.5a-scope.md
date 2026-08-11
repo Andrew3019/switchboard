@@ -69,7 +69,38 @@ one keyword argument and one pass-through line; the `tell` parser gains one
 (the exact line 3.3 is scoped to change); the prompt is a new key, not an edit to any of
 the four `[notify]` strings 3.3 rewrites.
 
-## Unproven
+## Live proof (run against an isolated clone, then torn down)
 
-Recorded in the summary, not hidden here — see the end of the branch's commit message and
-the `sb done` summary.
+`git clone` of the repo into a scratch directory, `git checkout phase3.5a-needs-reply`,
+driven by that clone's own `./bin/sb` from inside it. `sb doctor` confirmed its own store
+(`<clone>/.git/agentflow/state.db`), `sb status` confirmed it empty.
+
+Agent-to-agent, which is the in-spec path (`DESIGN-TRUTH.md:246-249`: `sb tell` is for
+agents only, both ways round). A real agent `nr35a-sender` ran
+`sb tell nr35a-proof "Which branch are you on?" --needs-reply`; a real agent
+`nr35a-proof` was rung, ran `sb inbox`, and read, verbatim:
+
+```
+[3] from nr35a-sender: Which branch are you on?
+    [reply needed] nr35a-sender is waiting for a reply to this. Nobody is blocked on it
+    and it does not interrupt what you are doing — but answer it at some point, with
+    `sb tell nr35a-sender "..."`, before you finish.
+```
+
+It then replied with `sb tell nr35a-sender "..."` — message 4 in that store — so the round
+trip closed on the delivered text alone. Test 1 passed (`needs_reply=1` on the row), test 2
+passed (a plain `tell` sent to the same agent in the same mailbox carried no such line),
+test 3 passed (the sender's `tell` returned at once and went on to its own `sb done`;
+nothing blocked, and no reply was waited for). Both agents cleaned up with
+`sb cleanup --force`, the clone deleted, `herdr workspace list` clean afterwards.
+
+## One edge found, deliberately not fixed here
+
+A **human-sent** `--needs-reply` renders `answer it with sb tell human "..."`, and
+`Broker.tell` refuses a message to the human (it has no mailbox). Observed live on the
+first run: the agent tried it, was refused, and folded its answer into `sb done` instead —
+a wasted step, not a lost answer. Not fixed, because `sb tell` is agent-only in both
+directions by `DESIGN-TRUTH.md:246-249`, so a human using this flag is already outside the
+design, and the fix is either a second prompt string (which item 3.3 would then also have
+to rewrite) or a refusal at send time — both bigger than this item. Reported rather than
+taken on.
