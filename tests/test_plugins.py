@@ -1041,7 +1041,8 @@ class IsolationTest(Sandbox):
         level lands here, which is the point."""
         verbs = set(cli.build_parser()._subparsers._group_actions[0].choices)
         higher = {"presets",                            # level 1
-                  "delegate", "start", "workspace",     # level 2
+                  "delegate", "start",                  # level 2
+                  "workspace",                          # reads and tears down; no spawn
                   "plugin", "doctor",                   # level 3
                   "plugins"}                            # retired, answers before anything
         self.assertEqual(verbs - higher, set(self.LEVEL_0))
@@ -1069,18 +1070,13 @@ class IsolationTest(Sandbox):
         self.assertEqual(len(self.h.started), 1)
         self.assertNeverImported()
 
-    def test_2_workspace_new_spawns_normally(self):
-        code, out, err = self.run_sb("workspace", "new", "api")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(len(self.h.started), 1)
-        self.assertNeverImported()
-
-    def test_2_all_three_spawn_verbs_are_covered(self):
-        """It has to be all three: testing `delegate` alone would have passed on the day
-        `start` was silently getting no bindings at all."""
+    def test_2_both_spawn_verbs_are_covered(self):
+        """It has to be both: testing `delegate` alone would have passed on the day
+        `start` was silently getting no bindings at all. There were three until
+        `sb workspace new` was deleted; nothing else spawns now."""
         covered = {n.split("_2_")[1].split("_")[0] for n in dir(self)
                    if n.startswith("test_2_") and "spawns_normally" in n}
-        self.assertEqual(covered, {"delegate", "start", "workspace"})
+        self.assertEqual(covered, {"delegate", "start"})
 
     # 3 ------------------------------------------------------------------
 

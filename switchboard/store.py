@@ -518,8 +518,8 @@ def _backfill_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
     a named workspace outside the primary checkout was in a worktree, and its workspace
     name is its branch (the name is used verbatim as the branch when one is forked).
 
-    Wrong in one direction only, and deliberately: an old `sb workspace new main`, which
-    attaches to the primary checkout rather than forking, reads back as bare. A child of
+    Wrong in one direction only, and deliberately: an old row for a workspace that
+    attached to the primary checkout rather than forking reads back as bare. A child of
     it then forks its own worktree instead of writing into the main checkout — the safe
     way to be wrong, and what the model wants anyway.
 
@@ -549,9 +549,9 @@ def _backfill_is_top(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
 
     `parent IS NULL AND branch IS NULL` is exactly the shape only `sb start` has ever
     produced: `_top` is the one path that writes a row with no parent, and it always
-    writes a bare space. `workspace_new` always attaches a worktree, so its rows carry a
-    branch; `delegate` never writes a NULL parent for anything but the human's own
-    children, which fork and so carry a branch too.
+    writes a bare space. The deleted `workspace new` always attached a worktree, so the
+    rows it left carry a branch; `delegate` never writes a NULL parent for anything but
+    the human's own children, which fork and so carry a branch too.
 
     NOT the rule the code may go on using — that is the whole point of the column. It is
     the rule for rows written before anybody was stamping, applied once, and the reason it
@@ -1186,9 +1186,9 @@ def claim_retiring(db: sqlite3.Connection, name: str, owner: str) -> bool:
 
     The mark records its OWNER rather than being a flag, so a losing invocation cannot
     release a mark it never held (see `release_retiring`). It is still not a lock and no
-    lock verb enters the tree for it: `workspace_new`'s docstring advertises
-    non-exclusivity as deliberate policy, and one path is no reason to teach the rest of
-    the codebase a rule it does not otherwise follow.
+    lock verb enters the tree for it: a workspace is non-exclusive as deliberate policy
+    (`Broker._refuse_retiring`), and one path is no reason to teach the rest of the
+    codebase a rule it does not otherwise follow.
 
     False for a workspace with no row at all, which is a caller that skipped
     `record_workspace` — nothing here invents a row for a workspace nobody has recorded.

@@ -212,10 +212,11 @@ class CliBoundaryTest(unittest.TestCase):
             self.assertEqual(args.who, [who])
 
     def test_workspace_names_are_branch_names(self):
-        self.bad(["workspace", "new", "My Feature"])
-        self.bad(["workspace", "new", "ok", "--base", "no space"])
-        self.bad(["workspace", "new", "ok", "--agent", "Lead"])
-        args = parse(["workspace", "new", "feature/api-v2"])
+        """`sb workspace close` and `--workspace` are what name one now: `sb workspace
+        new` is deleted, and the rule it was held to travels to the verbs that stayed."""
+        self.bad(["workspace", "close", "My Feature"])
+        self.bad(["delegate", "t", "--workspace", "no space"])
+        args = parse(["workspace", "close", "feature/api-v2"])
         _validate(args)
         self.assertEqual(args.name, "feature/api-v2")
 

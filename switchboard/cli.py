@@ -138,7 +138,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--name")
     d.add_argument("--workspace", metavar="NAME",
                    help="join this EXISTING workspace instead of working where you are "
-                        "(open one with: sb workspace new <name>)")
+                        "(a workspace is opened by a top orchestrator delegating: the "
+                        "child's --name is the workspace's name)")
     d.add_argument("--model", help=_tier_help())
 
     t = cmd("tell", help="send a message, do not wait")
@@ -250,18 +251,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "(the escape hatch for one that is genuinely stuck)")
     c.add_argument("--dry-run", action="store_true")
 
+    # No `new` here. A space is minted by ONE path — a top's `sb delegate` — and this verb
+    # is what is left of workspaces once that is true: the two read/teardown halves, which
+    # are the human's, not an agent's. See DESIGN-TRUTH.md's "`sb workspace new` is
+    # deleted, provided the other commands cover it fully".
     w = cmd("workspace", help="workspaces (worktree + herdr workspace + lead)")
     wsub = w.add_subparsers(dest="wcmd", required=True)
-    wn = wsub.add_parser("new", parents=[common], help="open a workspace, creating it if absent")
-    wn.add_argument("name", nargs="?", help="defaults to the checkout you are in")
-    wn.add_argument("--task", help="first instruction for the lead agent")
-    wn.add_argument("--role", default=broker_mod.WORKSPACE_ROLE)
-    # `--name` everywhere an agent is being named — `sb start --name`, `sb delegate --name`,
-    # and this. `--agent` was the odd one out and stays as an alias on the same dest, the
-    # same way `sb status --live` does.
-    wn.add_argument("--name", "--agent", dest="agent", help="name for the lead agent")
-    wn.add_argument("--base", default=broker_mod.BASE_BRANCH,
-                    help="branch to fork the worktree from")
 
     wsub.add_parser(
         "list", parents=[common],
@@ -344,7 +339,7 @@ def _validate(args) -> None:
         if args.name is not None:
             args.name = validate.agent_name(args.name, "--name")
         # A workspace name IS a branch name, so it is checked as one — the same rule
-        # `sb workspace new` is held to, since both name the same place.
+        # `sb workspace close` is held to, since both name the same place.
         if args.workspace is not None:
             args.workspace = validate.ref_name(args.workspace, "--workspace")
         if args.model is not None:
@@ -381,16 +376,9 @@ def _validate(args) -> None:
 
     elif cmd == "workspace":
         # `list` takes no arguments at all and `close` takes only a name, so each one is
-        # checked for what it actually carries rather than for `new`'s whole set.
+        # checked for what it actually carries.
         if getattr(args, "name", None) is not None:
             args.name = validate.ref_name(args.name)
-        if args.wcmd == "new":
-            args.base = validate.ref_name(args.base, "--base")
-            args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
-            if args.agent is not None:
-                args.agent = validate.agent_name(args.agent, "--agent")
-            if args.task is not None:
-                args.task = validate.line(args.task, "--task")
 
     elif cmd == "restore":
         args.name = validate.agent_name(args.name)
@@ -494,12 +482,15 @@ def _derived_name(db, role: str) -> Optional[str]:
 
 
 # The only verbs refused while the store is degraded — see `store.schema_deficit`. All
-# four create an agent, which is what writes the columns a degraded store does not have;
+# three create an agent, which is what writes the columns a degraded store does not have;
 # everything else runs, because a live fleet has to be able to drain itself and a human has
 # to be able to watch it do so. A deny-list, not an allow-list, on purpose: a verb added
 # later defaults to *working*, and after a deadlock that cost seventeen agents, that is the
 # direction to be wrong in.
-_NEEDS_FRESH_SCHEMA = {"start", "delegate", "workspace", "restore"}
+#
+# `workspace` left the list with `workspace new`: what is left of the verb reads and tears
+# down, and a store too old to spawn into is exactly when a human still needs both.
+_NEEDS_FRESH_SCHEMA = {"start", "delegate", "restore"}
 
 
 def _scope(b: Broker, me: str, mine: bool) -> dict:
@@ -1004,12 +995,6 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             _emit(args, f"{r['workspace']} was retired already — nothing left to do", r)
             return 0
         _emit(args, _workspace_closed(r), r)
-        return 0
-
-    if cmd == "workspace":
-        r = b.workspace_new(args.name, task=args.task, role=args.role, agent=args.agent,
-                            base=args.base, me=me)
-        _emit(args, "\n".join(f"  {k}: {v}" for k, v in r.items()), r)
         return 0
 
     if cmd == "restore":

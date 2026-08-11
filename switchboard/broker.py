@@ -68,8 +68,8 @@ MAIN_NAME = config.setting("vocabulary.main_name")
 LINKED_CONFIG = tuple(config.setting("paths.linked_config"))
 
 # A workspace is a *named place to work*: one git worktree, one herdr workspace, one lead
-# orchestrator. The name is the whole identity — `sb workspace new <name>` run twice, by
-# two agents, or by an agent and a human at the same moment, all land in the SAME place.
+# orchestrator. The name is the whole identity — the same name reached twice, by two
+# agents, or by an agent and a human at the same moment, lands in the SAME place.
 #
 # There is deliberately no lock, no owner, no "in use" flag, and no name suffixing. A
 # workspace that only one party may hold is just a checkout; being shareable is the point.
@@ -77,22 +77,16 @@ LINKED_CONFIG = tuple(config.setting("paths.linked_config"))
 # there is nothing to open (or the other way round, when the store already knows it).
 #
 # The workspace name IS the branch name — no prefix. An earlier draft namespaced branches
-# as `sb/<name>`, which meant `workspace new main` forked main into `sb/main` instead of
+# as `sb/<name>`, which meant opening `main` forked it into `sb/main` instead of
 # attaching to the checkout you were standing in. Attaching is the whole point: a branch
 # that already exists is somewhere to go, not a collision to route around. herdr agrees —
 # `worktree create --branch` checks out an existing branch and only creates a new one when
 # there is nothing to check out.
-WORKSPACE_NAME = re.compile(r"^[^\s/-][^\s]*$")   # a branch name; git rejects the rest
-# <slug> + this must still fit herdr's 32-char agent name, which is why the slug is
-# truncated by exactly this much before it is appended.
-LEAD_SUFFIX = config.setting("vocabulary.lead_suffix")
 BASE_BRANCH = config.setting("vocabulary.base_branch")
-WORKSPACE_ROLE = config.setting("vocabulary.workspace_role")
 DEFAULT_ROLE = config.setting("vocabulary.default_role")
 # States an agent will never move out of on its own — the same `[states]` grouping the
 # readouts use, so "finished" cannot come to mean two different things in two files.
 FINISHED = tuple(config.setting("states.finished"))
-_NOT_IN_NAME = re.compile(r"[^a-z0-9_-]+")
 
 # The floor between two reconciler pings to the SAME agent, in seconds. Not a tunable, for
 # `collector.DOORBELL_GAP`'s reason: it is the one number deciding how much a stall that
@@ -183,8 +177,9 @@ class AgentNameTaken(ValueError):
     which is what `sb delegate --name <existing>` used to produce, because the collision
     only surfaced as a raw `sqlite3.IntegrityError` from the middle of a spawn.
 
-    Not always a mistake, though: two openers of one workspace both try for the same lead
-    name by design, and the loser is supposed to join rather than fail. See `_spawn_lead`.
+    Not always a mistake, though: two spawners racing for one name is a normal state, and
+    `delegate` distinguishes a real owner from the husk a dead spawn left behind rather
+    than treating every collision as somebody's work.
     """
 
     def __init__(self, name: str):
@@ -199,7 +194,7 @@ class BranchTaken(ValueError):
     refused BEFORE anything is claimed or spawned.
 
     Never silently attached to, which is the difference between this and
-    `workspace_new`: opening a NAMED workspace means "take me to that branch", so an
+    `join_workspace`: joining a NAMED workspace means "take me to that branch", so an
     existing one is somewhere to go. A fork means "give this agent a tree of its own", and
     an existing branch of that name is somebody else's work, with somebody else's commits
     on it. Both ways forward are in the message because they are genuinely different
@@ -350,21 +345,6 @@ def _own_sb_bin(cwd) -> Optional[Path]:
         return None
     sb = root / "bin" / "sb"
     return sb.parent if os.access(sb, os.X_OK) else None
-
-
-def _slug(name: str) -> str:
-    """A branch name reduced to something herdr will accept as an agent name.
-
-    herdr enforces `[a-z][a-z0-9_-]{0,31}`, so `feature/api-v2` cannot be an agent name
-    even though it is a perfectly good branch — and therefore a perfectly good workspace.
-
-    Truncated with room for LEAD_SUFFIX held back, because trimming AFTER appending is how
-    a name loses the part that made it unique.
-    """
-    s = _NOT_IN_NAME.sub("-", name.lower()).strip("-")
-    if not s or not s[0].isalpha():
-        s = "w-" + s
-    return s[:validate.MAX_AGENT_NAME - len(LEAD_SUFFIX)].strip("-")
 
 
 def _accepts(fn: Callable, param: str) -> bool:
@@ -666,7 +646,7 @@ class Broker:
         would refuse `sb start` on a store that has not caught up yet.
 
         Enforced here rather than in the CLI so that every door into a spawn goes through
-        it — `sb delegate`, and `sb workspace new`, which spawns a lead the same way.
+        it — every spawn is a `delegate`, whoever asked for it.
         """
         if me == HUMAN:
             return
@@ -925,12 +905,12 @@ class Broker:
             raise ValueError(
                 f"the name {name!r} already belongs to a workspace with a checkout of its "
                 f"own, and a top-level orchestrator's space has none — one name is one "
-                f"workspace. Go to that one with `sb workspace new {name}`, or start this "
-                f"orchestrator under another name."
+                f"workspace. Work in that one with `sb delegate --workspace {name}`, or "
+                f"start this orchestrator under another name."
             )
-        # A bare space is closeable too, and `sb start --name X` is the other door into
-        # one: without this the refusal would guard `sb workspace new` and leave a
-        # top-level orchestrator free to reopen the name a teardown is mid-way through.
+        # A bare space is closeable too, and `sb start --name X` is a door into one:
+        # without this the refusal would guard the spawn paths and leave a top-level
+        # orchestrator free to reopen the name a teardown is mid-way through.
         self._refuse_retiring(name)
         self._record_workspace(name, None)
 
@@ -938,9 +918,9 @@ class Broker:
         if a is not None:
             if not a["pane_id"] and not a["session_id"]:
                 # A row with no pane AND no session is a husk; replace it rather than
-                # orphan it. Same rule as `_spawn_lead`'s (`session id → restore; pane,
-                # no session → join; neither → husk`) — this used to claim that rule and
-                # test only the session id, which made "pane, no session" a husk too.
+                # orphan it. The rule is `session id → restore; pane, no session →
+                # join; neither → husk` — this used to claim that rule and test only the
+                # session id, which made "pane, no session" a husk too.
                 #
                 # That shape is not exotic, it is every agent's first turn. herdr's
                 # `agent list` carries no session id at all (`herdr.py:104`), so the only
@@ -955,7 +935,7 @@ class Broker:
             elif task:
                 # Alive, or a pane we cannot see an agent in yet — a claim somebody made
                 # moments ago and is still spawning into. Either way the name is somebody
-                # else's; hand it the work, as `_joined_lead` does.
+                # else's; hand it the work rather than spawn a rival.
                 self.tell([name], task, me=HUMAN)
             store.log_event(self.db, kind="start", agent=name, created=False)
             self._open_board(name, a["pane_id"])
@@ -1038,7 +1018,7 @@ class Broker:
 
         The name is the identity of a workspace, and it is only unique because this asks:
         two places mint into one namespace — the auto-minter behind a bare `sb start`, and
-        a human typing `sb workspace new <name>` — and neither used to consult the other.
+        the fork a top's `sb delegate` makes — and neither used to consult the other.
         A name is one kind of workspace or the other and never both.
 
         The record first, and the agent rows only for a workspace that predates or escaped
@@ -1080,10 +1060,10 @@ class Broker:
         """Open the board beside this agent, unless one is up already.
 
         Every agent, not only an orchestrator: `delegate` calls this, and every spawn
-        goes through `delegate`. Called a second time by `_top` and `workspace_new`,
-        which is safe by design — the recorded pane makes it a no-op when the board is
-        already up, and the retry is what covers the paths that never reach `delegate`
-        (a restore) or whose split failed inside it.
+        goes through `delegate`. Called a second time by `_top`, which is safe by
+        design — the recorded pane makes it a no-op when the board is already up, and the
+        retry is what covers the paths that never reach `delegate` (a restore) or whose
+        split failed inside it.
 
         The pane id is remembered so re-running `sb start` returns you to a
         workspace with one board rather than stacking a new one every time. If we
@@ -1213,89 +1193,6 @@ class Broker:
 
     # -- workspaces ------------------------------------------------------
 
-    def workspace_new(
-        self,
-        name: Optional[str] = None,
-        *,
-        task: Optional[str] = None,
-        role: str = WORKSPACE_ROLE,
-        agent: Optional[str] = None,
-        base: str = BASE_BRANCH,
-        me: Optional[str] = None,
-    ) -> dict:
-        """Open the workspace called `name`, creating it only if it isn't there.
-
-        "new" is what the caller *wants* (P0: verbs are named after wants), not a promise
-        that something is created. Same name always means the same worktree, the same
-        herdr workspace and the same lead agent — so this is safe to call repeatedly and
-        safe to call concurrently. Nothing here is exclusive: another agent or a human may
-        be in this workspace already, and that is a normal state, not a conflict.
-
-        With no name, it means the checkout you ran it in — opening a workspace over where
-        you already are, which is how you get a visual boundary around a line of work
-        without moving anywhere.
-
-        A board opens beside the lead whatever its role — every spawned agent gets one,
-        and it is the small pane rather than half the screen, so a worker that runs
-        nobody pays a third of its width for a view of the tree it is part of. There is
-        no declining it: every sb-made view is split with the board.
-
-        Nothing focuses here. Only `sb start` focuses on spawn, and nothing can ask for
-        it (DESIGN-TRUTH.md's "Focus as a flag").
-        """
-        me = me or self.whoami()
-        name = name or self._here()
-        if not name:
-            raise ValueError(
-                "no workspace name given, and this is not a git checkout on a branch — "
-                "say which workspace you want: sb workspace new <name>"
-            )
-        if not WORKSPACE_NAME.match(name) or ".." in name:
-            raise ValueError(
-                f"bad workspace name {name!r}: it is used verbatim as the git branch "
-                "name, so no whitespace, no '..', and it may not start with '-' or '/'"
-            )
-        if self._name_held_by(name) == "bare":
-            # The other half of the single namespace (see `_name_held_by`). Forking a
-            # worktree under a name a top-level orchestrator is already living under would
-            # give one record two checkouts — and this one is worth refusing loudly, since
-            # the person can see the name is theirs.
-            raise ValueError(
-                f"the name {name!r} already belongs to a top-level orchestrator's space "
-                f"over the main checkout, which has no checkout of its own — one name is "
-                f"one workspace. Open this workspace under another name, or go back to "
-                f"that orchestrator with `sb start --name {name}`."
-            )
-        self._refuse_retiring(name)
-
-        ws = self._attach_workspace(name, base=base)
-        self.link_config(Path(ws["path"]) if ws["path"] else None)
-
-        lead = agent or f"{_slug(name)}{LEAD_SUFFIX}"
-        row = store.get_agent(self.db, lead) or self._adopt(lead, ws, role=role, me=me)
-        if row is not None and self._alive(lead):
-            # Somebody is already leading this workspace. Join them; do not start a rival.
-            if task:
-                self.tell([lead], task, me=me)
-            store.log_event(self.db, kind="workspace_open", agent=lead,
-                            workspace=name, created=False)
-            return self._result(ws, lead, created=False)
-
-        created = self._spawn_lead(lead, ws, role=role, task=task, me=me, prior=row)
-        store.log_event(self.db, kind="workspace_open", agent=lead,
-                        workspace=name, created=created)
-        # A fresh lead already has its board from `delegate`; this idempotent second
-        # ask is what covers the leads that never reach it — one restored from a
-        # session, or one whose split failed there.
-        #
-        # Read the pane back rather than trusting `ws["pane_id"]`: `_spawn_lead` uses
-        # the workspace's root pane only when it is fresh, and opens a tab otherwise —
-        # so which pane the lead ended up in is a fact only the row has.
-        row = store.get_agent(self.db, lead)
-        self._open_board(lead, row["pane_id"] if row else ws["pane_id"],
-                         cwd=ws["path"] or None)
-        return self._result(ws, lead, created=created)
-
     def join_workspace(self, name: str) -> dict:
         """Where a child has to be placed to JOIN the existing workspace `name`.
 
@@ -1303,12 +1200,12 @@ class Broker:
         keywords `delegate` already takes, so the CLI is `delegate(..., **join)` and no
         second spawn path exists to drift from the first.
 
-        Shared by name, exactly as `sb workspace new` is — one name is one branch, one
-        worktree, one herdr workspace, however many agents work in it. The one difference
-        is that this never CREATES. `--workspace` is what somebody types *because* a fork
-        was refused (the branch is already checked out); quietly forking them another one
-        is the single outcome they did not ask for. So a name nobody has opened is an
-        error naming the verb that opens it, not a new worktree.
+        Shared by name — one name is one branch, one worktree, one herdr workspace,
+        however many agents work in it. The one difference from a fork is that this never
+        CREATES. `--workspace` is what somebody types *because* a fork was refused (the
+        branch is already checked out); quietly forking them another one is the single
+        outcome they did not ask for. So a name nobody has opened is an error naming the
+        one path that opens one, not a new worktree.
         """
         self._refuse_retiring(name)
         if store.known_workspace(self.db, name) \
@@ -1326,8 +1223,9 @@ class Broker:
         except HerdrError as e:
             raise ValueError(
                 f"no workspace called {name!r} to join: --workspace joins one that "
-                f"already exists and never forks. Open it with `sb workspace new "
-                f"{name}`, or leave --workspace off to work where you are ({e.message})"
+                f"already exists and never forks — a workspace is opened by a top "
+                f"orchestrator delegating into a fork of that name. Leave --workspace "
+                f"off to work where you are ({e.message})"
             ) from e
         store.log_event(self.db, kind="workspace_join", workspace=name,
                         workspace_id=ws["workspace_id"])
@@ -1713,8 +1611,9 @@ class Broker:
             raise ValueError(
                 f"cannot close {name!r}: its recorded checkout {checkout} IS this "
                 f"repository's primary working tree, which this command never removes. A "
-                f"record can legitimately point there — `sb workspace new` typed in the "
-                f"main clone records exactly that — so this is a rule of the gate rather "
+                f"record can legitimately point there — a top orchestrator's bare space "
+                f"over the main clone records exactly that — so this is a rule of the "
+                f"gate rather "
                 f"than something git is left to catch after the panes are closed."
             )
         self._gate(name, checkout, me=me)
@@ -1747,7 +1646,7 @@ class Broker:
         in.
 
         What it will not do is fall back to the workspace's own NAME. That fallback read
-        as harmless because `sb workspace new` makes the two strings equal, but they are
+        as harmless because opening a workspace makes the two strings equal, but they are
         different facts: a workspace with no row carrying a branch would aim `git branch
         -d` at whatever unrelated branch happened to share its name. `-d` bounds the
         damage to a merged branch and the reflog keeps the tip, so it was small — but it
@@ -2030,8 +1929,9 @@ class Broker:
         The one directory this command may never be aimed at, and refusing it is a rule of
         the gate rather than something git happens to catch at the end. A record can point
         here without any fallback being involved: `git worktree list` reports the primary
-        checkout alongside the linked ones, which is what makes `sb workspace new main`
-        attach to the repo you are standing in, and those rows re-validate as a perfectly
+        checkout alongside the linked ones, which is what makes a workspace named for
+        the checked-out branch attach to the repo you are standing in, and those rows
+        re-validate as a perfectly
         good worktree of this repo. Git does refuse the removal — at the very last step,
         by which time the inventory has listed the human's own `.env` as material about to
         be destroyed and the workspace's panes are closed.
@@ -2067,9 +1967,9 @@ class Broker:
         The whole reason the mark is committed before the first destructive step is that
         this refusal can exist: it is the exclusion `sb workspace close` is built out of,
         and without it the mark is written, read only by the command that wrote it, and
-        keeps nobody out. It is still not a lock and there is no lock verb —
-        `workspace_new` keeps its non-exclusive posture everywhere else, and this reads
-        one column the record carries anyway.
+        keeps nobody out. It is still not a lock and there is no lock verb — a workspace
+        keeps its non-exclusive posture everywhere else, and this reads one column the
+        record carries anyway.
 
         Refused whether or not the mark's owner is still alive, and that is where this
         parts company with `sb workspace close`. A dead owner means a teardown died
@@ -2110,8 +2010,8 @@ class Broker:
         human holds no `agents` row, so `_owner_gone` can only ever answer None for one —
         and a human is the likeliest caller of a destructive command. Under
         "unknown reads as live" a mark a human left behind was reachable by no flag, no
-        caller and no amount of waiting, with `workspace_new`, `start --name` and
-        `--workspace` all refusing the name as well: a review reproduced that permanent
+        caller and no amount of waiting, with `start --name` and `--workspace` both
+        refusing the name as well: a review reproduced that permanent
         brick. What must never happen is a live mark being taken AUTOMATICALLY, and
         `--resume` is the opposite of automatic — it is a person who can see the machine
         saying they know what they are doing. So an unadjudicable owner offers the flag
@@ -2266,20 +2166,6 @@ class Broker:
                 f"git would not deregister {checkout}: {(out.stderr or '').strip()}"
             )
         return "removed"
-
-    @staticmethod
-    def _result(ws: dict, lead: str, *, created: bool) -> dict:
-        """What the caller gets. `created` is the only signal of newness — `fresh` stays
-        internal, because two near-synonyms in one payload is how a caller picks wrong."""
-        return {"workspace": ws["workspace"], "branch": ws.get("branch"),
-                "workspace_id": ws["workspace_id"],
-                "path": ws["path"], "pane_id": ws["pane_id"],
-                # What this worktree was actually forked from, and why that is not what
-                # was asked for when it is not. A stale fork is invisible otherwise: the
-                # branch is there, the checkout works, and the commits it is missing only
-                # surface as a conflict much later.
-                "base": ws.get("base"), "base_fallback": ws.get("base_fallback"),
-                "agent": lead, "created": created}
 
     def _attach_workspace(self, name: str, *, base: str = BASE_BRANCH,
                           create: bool = True) -> dict:
@@ -2554,98 +2440,6 @@ class Broker:
             "fresh": fresh,
         }
 
-    def _spawn_lead(self, lead: str, ws: dict, *, role: str, task: Optional[str],
-                    me: str, prior) -> bool:
-        """Put a lead agent in the workspace. Returns whether we actually made one.
-
-        Three shapes of `prior`, and they mean different things:
-
-          session id      an agent that ran and was closed — restore it, context and all;
-          pane, no session  a claim another opener made moments ago and is still spawning
-                          into — join it, because same name means the same lead;
-          neither         a husk from a run that died before it spawned — replace it.
-        """
-        if prior is not None and prior["session_id"]:
-            self.restore(lead, workspace=ws)          # brings its context back with it
-            if task:
-                self.tell([lead], task, me=me)
-            return False
-        if prior is not None and prior["pane_id"]:
-            return self._joined_lead(lead, ws, task=task, me=me)
-        if prior is not None:
-            # A row with no pane and no session is a husk; replace it rather than orphan it.
-            store.drop_agent(self.db, lead)
-
-        # The freshly-created workspace's root pane is already an idle shell; a
-        # re-attached one may not be, so give that case its own tab.
-        fresh_root = ws["pane_id"] if ws.get("fresh") and ws["pane_id"] else ""
-        pane, wsid = fresh_root, ws["workspace_id"]
-        if not pane:
-            # `wsid` comes back corrected: if herdr has forgotten this workspace, the tab
-            # call says so and the lead is recorded with no id rather than the dead one.
-            pane, wsid = self._tab_for(wsid, ws["path"] or self.repo)
-        first, awaiting = self._first_task("spawn.workspace_task", task)
-        try:
-            self.delegate(first, role=role,
-                          name=lead, me=me,
-                          workspace=ws["workspace"], branch=ws.get("branch"),
-                          workspace_id=wsid,
-                          cwd=ws["path"] or None, pane=pane,
-                          awaiting_task=awaiting)
-        except (AgentNameTaken, HerdrError) as e:
-            # Two openers, one instant: the other won the name. Same name means the same
-            # lead, so join theirs instead of erroring or suffixing — and take the empty
-            # tab back out, or a contested workspace slowly fills with dead shells.
-            if isinstance(e, HerdrError) and "agent_name_taken" not in str(e):
-                raise
-            if not fresh_root:
-                try:
-                    self.h.close_pane(pane)
-                except HerdrError as ce:
-                    store.log_event(self.db, kind="orphan_pane", agent=lead, error=str(ce))
-            return self._joined_lead(lead, ws, task=task, me=me)
-        return True
-
-    def _joined_lead(self, lead: str, ws: dict, *, task: Optional[str], me: str) -> bool:
-        """We lost the race for this workspace's lead. Hand our work to the winner."""
-        if task:
-            self.tell([lead], task, me=me)
-        store.log_event(self.db, kind="workspace_lead_race", agent=lead,
-                        workspace=ws["workspace"])
-        return False
-
-    def _adopt(self, name: str, ws: Optional[dict], *, role: str, me: str):
-        """Take over an agent herdr is running that our store has no row for.
-
-        This is a *normal* state, not corruption. The store is disposable by construction
-        — a schema change drops every row — while herdr's agents keep running in their
-        panes. Without this, the next `sb start` tries to spawn a second agent under a
-        name herdr still holds and dies on `agent_name_taken`. Same principle as a branch
-        that already exists: what is already there is somewhere to go, not an obstacle.
-
-        Races with every other opener of the same workspace, so the write is a claim
-        rather than an insert: losing it means somebody else wrote the row we were about
-        to write, and re-reading theirs is the whole recovery.
-        """
-        try:
-            live = next((a for a in self.h.list_agents() if a.name == name), None)
-        except HerdrError:
-            return None
-        if live is None:
-            return None
-        ws = ws or {}
-        if store.claim_agent(
-            self.db, name=name, role=role, parent=(None if me == HUMAN else me),
-            session_id=live.session_id or None,
-            cwd=(live.raw.get("cwd") or ws.get("path") or str(self.repo)),
-            workspace=ws.get("workspace"), branch=ws.get("branch"),
-            terminal_id=live.terminal_id,
-            pane_id=live.pane_id,
-        ):
-            store.log_event(self.db, kind="adopt", agent=name,
-                            workspace=ws.get("workspace"), pane=live.pane_id)
-        return store.get_agent(self.db, name)
-
     def _alive(self, name: str) -> bool:
         a = store.get_agent(self.db, name)
         if not a or not a["pane_id"]:
@@ -2751,8 +2545,9 @@ class Broker:
         """Where this branch is already checked out, if it is.
 
         `git worktree list` reports the PRIMARY checkout alongside the linked ones, which
-        is what makes `sb workspace new main` attach to the repo you are standing in
-        rather than fail (git refuses a second checkout of one branch) or fork it.
+        is what makes a workspace named for the branch you are on attach to the repo you
+        are standing in rather than fail (git refuses a second checkout of one branch) or
+        fork it.
         """
         out = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -3021,6 +2816,22 @@ class Broker:
         a branch. The caller is told instead; see `ForkFailed`, and DESIGN-TRUTH's "A fork
         that fails refuses the spawn and tells the parent."
         """
+        # THE TWO GUARDS `sb workspace new` USED TO HOLD, and its deletion moved here.
+        # Neither is covered by the branch check below: that refuses because a BRANCH
+        # exists, which is a different fact from either of these.
+        #
+        # A workspace mid-teardown is not somewhere to fork into — its checkout may be
+        # gone by the time the child gets there.
+        self._refuse_retiring(name)
+        if self._name_held_by(name) == "bare":
+            # One name is one workspace (`_name_held_by`). Forking under a name a
+            # top-level orchestrator already holds over the main checkout would give one
+            # record two checkouts — the confusion `agents.branch` exists to end.
+            raise ValueError(
+                f"the name {name!r} already belongs to a top-level orchestrator's space "
+                f"over the main checkout, which has no checkout of its own — one name is "
+                f"one workspace. Spawn this agent under another name."
+            )
         if self._branch_exists(name):
             raise BranchTaken(name)
         base = self._inherited_base()
@@ -3074,8 +2885,8 @@ class Broker:
             workspace forks from `origin/main` by default" describes.
           - a detached HEAD, which has no branch to inherit and nothing to name.
 
-        `sb start --base` and `sb workspace new --base` are untouched: a caller who says
-        which base they want still gets it.
+        Nothing overrides this any more: the `--base` flag went when `sb workspace new`
+        did, and the two rules above are the whole answer to what a fork starts from.
         """
         here = self._here()
         if here is None:                          # detached: no branch to inherit
@@ -3181,7 +2992,7 @@ class Broker:
             workspace_id = workspace_id or forked["workspace_id"]
             cwd = cwd or forked["path"]
             # A freshly forked workspace already has an idle shell; spending a tab on top
-            # of it leaves an empty pane behind forever. Same trade as `_spawn_lead`'s.
+            # of it leaves an empty pane behind forever.
             pane = pane or forked["pane_id"]
 
         if cwd:
@@ -3242,8 +3053,8 @@ class Broker:
             # THE NAME-REUSE CARVE-OUT. The one row that may hold this name and not be
             # somebody is the husk a previous spawn's failure left below — evidence, not
             # an owner, and `claim_agent`'s `INSERT OR IGNORE` cannot tell the two apart.
-            # Drop it and claim again, the same replacement `_top` and `_spawn_lead` make
-            # for a husk of their own. Check-then-act, so two spawners can both find the
+            # Drop it and claim again, the same replacement `_top` makes for a husk of
+            # its own. Check-then-act, so two spawners can both find the
             # husk — but the second claim is still the arbiter, and the loser is refused
             # below exactly as before.
             store.drop_agent(self.db, name)
@@ -3265,7 +3076,7 @@ class Broker:
             # or in the log said this agent had ever been asked for — which is no answer
             # at all for a caller who backgrounded the spawn and came looking later.
             #
-            # `failed` with no pane and no session is the shape `_top` and `_spawn_lead`
+            # `failed` with no pane and no session is the shape `_top`
             # already read as "a dead run's leftovers, safe to replace", and the claim
             # above carves the same rule out for this name — so the name is no more held
             # against a later attempt than it was, and the failure survives as a fact.
@@ -3384,8 +3195,8 @@ class Broker:
         """Is the row under this name the leftovers of a spawn that failed?
 
         `failed`, no pane, no session — what `delegate`'s except path writes, and the
-        same shape `_top` and `_spawn_lead` replace. Every other row under a name is
-        somebody: a claim mid-spawn carries a pane, an agent that ran carries a session,
+        same shape `_top` replaces. Every other row under a name is somebody: a claim
+        mid-spawn carries a pane, an agent that ran carries a session,
         and a `failed` row with either of those is a real agent `status` reaped, whose
         pane may still be open and whose session `sb restore` can still bring back.
         """
@@ -3877,7 +3688,7 @@ class Broker:
         """
         # The tree boundary, before the row is even looked up: whether a name outside the
         # caller's tree exists is itself something the caller may not learn. `me=None`
-        # means an internal caller (`_spawn_lead`, `_top`), which has already resolved who
+        # means an internal caller (`_top`), which has already resolved who
         # it is acting for and is not crossing anything.
         if me is not None:
             self.require_same_tree(me, name)
@@ -3898,7 +3709,7 @@ class Broker:
         # And never back into a workspace that is being taken apart. Restoring is the
         # third door into one — the agent comes back into the checkout it was recorded
         # in, which is the directory the teardown is about to remove — and a door that
-        # only `sb workspace new` guards is not guarded.
+        # only the spawn paths guard is not guarded.
         self._refuse_retiring(a["workspace"])
         # Come back into the workspace it belongs to, not into whichever one has focus.
         ws = workspace or {}

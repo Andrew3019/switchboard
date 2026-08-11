@@ -59,6 +59,17 @@ class Harness:
         return subprocess.run(["git", *args], cwd=str(cwd or self.repo),
                               capture_output=True, text=True)
 
+    def open_workspace(self, name: str = "api") -> dict:
+        """Open the workspace `name` the one way left: a top delegates, and the child's
+        NAME is the workspace. Returns the child's row facts."""
+        if store.get_agent(self.db, "root") is None:
+            store.create_agent(self.db, name="root", role="orchestrator",
+                               workspace="scratch", cwd=str(self.repo),
+                               pane_id="w1:p1", is_top=True)
+        agent = self.b.delegate("t", role="orchestrator", name=name, me="root")
+        row = store.get_agent(self.db, agent)
+        return {"workspace": row["workspace"], "path": row["cwd"], "agent": agent}
+
     def worktree(self, name: str, *, commit: bool = False) -> str:
         """A real linked checkout of `name`, as `_attach_workspace` would end up with."""
         path = self.root / "wt" / name
@@ -303,37 +314,41 @@ class OneNamespaceTest(Harness, unittest.TestCase):
     """A name is one kind of workspace or the other, never both.
 
     Two places mint names into one namespace and never used to consult each other: the
-    auto-minter behind a bare `sb start`, whose freeness test asked the AGENTS table (and
-    a worktree workspace's lead is called `<name>-lead`, so it never matched), and a human
-    typing `sb workspace new <name>`. Under a name-keyed record those are one row
+    auto-minter behind a bare `sb start`, whose freeness test asked the AGENTS table, and
+    the fork a top's `sb delegate` makes. Under a name-keyed record those are one row
     describing two workspaces in two different directories — the same failure that
     disqualified keying on the path, arriving from the other side.
     """
 
     def test_a_bare_start_refuses_a_name_a_worktree_workspace_holds(self):
-        self.b.workspace_new("api", me=HUMAN)
+        self.open_workspace("api")
         with self.assertRaises(ValueError) as e:
             self.b.start(name="api")
         self.assertIn("checkout of its own", str(e.exception))   # which kind holds it
-        self.assertIn("sb workspace new api", str(e.exception))  # and the way to it
+        self.assertIn("--workspace api", str(e.exception))       # and the way to it
 
-    def test_a_new_workspace_refuses_a_name_a_bare_one_holds(self):
-        self.b.start(name="main")
+    def test_a_fork_refuses_a_name_a_bare_one_holds(self):
+        """The other direction, and the guard `sb workspace new` used to hold: with the
+        verb gone, `_fork_for` is what has to refuse a name a bare space already owns."""
+        self.b.start(name="spike")
         with self.assertRaises(ValueError) as e:
-            self.b.workspace_new("main", me=HUMAN)
+            self.open_workspace("spike")
         self.assertIn("no checkout of its own", str(e.exception))
-        self.assertIn("sb start --name main", str(e.exception))
+        self.assertEqual(self.h.calls_of("create_worktree"), [])
 
     def test_the_auto_minted_name_skips_one_a_worktree_workspace_holds(self):
-        """`_next_top_name`'s freeness test asks about workspaces now, not only about an
-        agent row that happens to share the string — a worktree workspace's lead is called
-        `main-lead`, which is not the name being tested."""
-        self.b.workspace_new("main", me=HUMAN)
+        """`_next_top_name`'s freeness test asks about workspaces, not only about an agent
+        row that happens to share the string — the agent in a worktree workspace need not
+        be named after it at all.
+
+        The workspace record is written here rather than forked: `main` is this repo's own
+        branch, so a fork of that name is refused before it gets as far as a record."""
+        store.record_workspace(self.db, "main", str(self.root / "wt" / "main"))
         self.assertEqual(self.b.start(), "main-2")
 
     def test_a_retired_name_is_free_again(self):
         """Retirement is a record of end-of-life, not a tombstone on the name."""
-        self.b.workspace_new("api", me=HUMAN)
+        self.open_workspace("api")
         store.retire_workspace(self.db, "api")
         self.b.start(name="api")               # no longer held
         self.assertIsNone(store.get_workspace(self.db, "api")["retired_at"])
@@ -343,15 +358,15 @@ class RecordedPathTest(Harness, unittest.TestCase):
     """The path is a record of where the checkout IS, not of where it once was."""
 
     def test_attaching_again_re_writes_it_from_the_workspace_actually_attached(self):
-        self.b.workspace_new("api", me=HUMAN)
+        r = self.open_workspace("api")
         store.record_workspace(self.db, "api", "/somewhere/else")
-        r = self.b.workspace_new("api", me=HUMAN)
+        self.b._attach_workspace("api")                  # somebody joins it
         self.assertEqual(store.get_workspace(self.db, "api")["checkout"], r["path"])
 
-    def test_reopening_a_retired_workspace_clears_the_retirement_and_records_the_path(self):
-        r = self.b.workspace_new("api", me=HUMAN)
+    def test_reattaching_a_retired_workspace_clears_the_retirement_and_records_the_path(self):
+        r = self.open_workspace("api")
         store.retire_workspace(self.db, "api")
-        self.b.workspace_new("api", me=HUMAN)
+        self.b._attach_workspace("api")
         row = store.get_workspace(self.db, "api")
         self.assertIsNone(row["retired_at"])
         self.assertEqual(row["checkout"], r["path"])
@@ -365,7 +380,7 @@ class RecordedPathTest(Harness, unittest.TestCase):
     def test_a_bare_start_never_clears_a_worktree_workspaces_path(self):
         """Defence in depth behind the namespace rule: even if a bare name reached a
         worktree workspace's row, NULL is not written over a real checkout."""
-        self.b.workspace_new("api", me=HUMAN)
+        self.open_workspace("api")
         path = store.get_workspace(self.db, "api")["checkout"]
         self.b._record_workspace("api", None)
         self.assertEqual(store.get_workspace(self.db, "api")["checkout"], path)

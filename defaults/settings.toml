@@ -104,18 +104,10 @@ default_role = "worker"
 # works with nobody having defined an archaeologist; it just behaves like this one.
 fallback_role = "worker"
 
-# The lead agent `sb workspace new` puts in a workspace — the same role as everything else
-# that orchestrates.
-workspace_role = "orchestrator"
-
 # What a role file gets for a tier it does not name. No shipped role names one, so this is
 # what every role gets — and it is what a role somebody wrote in three lines gets too,
 # which is exactly the case that should not have to know what a tier is called.
 default_tier    = "default"
-
-# Appended to a workspace's slug to name its lead. Slug + this must still fit the 32
-# characters herdr allows in an agent name, which is why the slug is truncated first.
-lead_suffix = "-lead"
 
 # What a new worktree is forked from when `--base` is not given. The REMOTE-tracking ref,
 # not the local branch: a local `main` is however stale the last `git pull` left it, and a

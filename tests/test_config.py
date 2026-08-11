@@ -139,8 +139,8 @@ class ShippedDefaultsTest(_Layered):
                 self.assertNotIn("cleanup", r, f"{name} hardcodes a disposition")
 
     def test_the_roles_named_in_settings_all_exist(self):
-        """`sb start` and `sb workspace new` each name a role that must have a prompt: a
-        typo there is an orchestrator that silently resolves to nothing.
+        """`sb start` names a role that must have a prompt: a typo there is an
+        orchestrator that silently resolves to nothing.
 
         `default_role` and `fallback_role` are deliberately NOT checked. Both name
         `worker`, which ships no file — an agent delegated with no `--role` gets the
@@ -148,9 +148,7 @@ class ShippedDefaultsTest(_Layered):
         consolidating the roles. What they must not do is name something half-defined, so
         the assertion is that they resolve, not that a file backs them."""
         roles = config.roles(None)
-        for key in ("main_role", "workspace_role"):
-            with self.subTest(key=key):
-                self.assertIn(config.setting(f"vocabulary.{key}"), roles)
+        self.assertIn(config.setting("vocabulary.main_role"), roles)
         for key in ("default_role", "fallback_role"):
             with self.subTest(key=key):
                 self.assertTrue(config.setting(f"vocabulary.{key}"))
@@ -173,7 +171,6 @@ class ShippedDefaultsTest(_Layered):
             "spawn.identity": {"name": "a", "role": "b", "parent": "c"},
             "spawn.workspace": {"workspace": "w", "path": "/p"},
             "spawn.start_task": {},
-            "spawn.workspace_task": {},
             "notify.mail": {}, "notify.child_done": {},
             "notify.interrupt": {"text": "t"},
         }
@@ -429,7 +426,6 @@ class NothingLeftInPythonTest(unittest.TestCase):
         self.assertEqual(broker.HUMAN, config.setting("vocabulary.human"))
         self.assertEqual(broker.PARENT, config.setting("vocabulary.parent"))
         self.assertEqual(broker.MAIN, config.setting("vocabulary.main_role"))
-        self.assertEqual(broker.LEAD_SUFFIX, config.setting("vocabulary.lead_suffix"))
         self.assertEqual(list(broker.LINKED_CONFIG), config.setting("paths.linked_config"))
 
 

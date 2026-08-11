@@ -907,7 +907,7 @@ class StatusCliTest(unittest.TestCase):
             "start": [], "delegate": ["do a thing"],
             "tell": ["w1", "hi"], "inbox": [], "done": ["finished"], "block": ["why"],
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
-            "cleanup": [], "workspace": ["new"], "restore": ["w1"],
+            "cleanup": [], "workspace": ["list"], "restore": ["w1"],
             "inspect": ["w1"], "log": [],
             "board": [], "flush": [], "reconcile": [],
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
@@ -933,13 +933,13 @@ class StatusCliTest(unittest.TestCase):
                 self.assertFalse(plain.json)
 
     def test_naming_an_agent_is_spelled_the_same_way_everywhere(self):
-        """One way to name an agent. `--agent` was the odd one out on `workspace new`."""
+        """One way to name an agent: `--name`, on both verbs that spawn. `--agent` was
+        the odd one out on `sb workspace new`, and went with it."""
         from switchboard.cli import build_parser
         for argv in (["start", "--name", "x"], ["delegate", "t", "--name", "x"]):
             self.assertEqual(build_parser().parse_args(argv).name, "x")
-        for flag in ("--name", "--agent"):
-            args = build_parser().parse_args(["workspace", "new", "api", flag, "x"])
-            self.assertEqual(args.agent, "x")
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["delegate", "t", "--agent", "x"])
 
     def test_a_missing_thing_reads_the_same_whichever_verb_named_it(self):
         """`str(KeyError)` adds quotes and `str(ValueError)` does not, so half the errors

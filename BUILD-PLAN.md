@@ -117,8 +117,21 @@ and proved in `audit/phase4-build.md`.
   the flags; nothing else in them changed, because phase 6 owns the rewrite.
 - **Done.** `sb wait` is gone, with `status.wait_for` and its three settings keys. The
   human inbox was already gone and was left alone.
-- `sb workspace new` is deleted once phase 5 covers space creation. Untouched here beyond
-  its two flags.
+- **Done, after phase 5** (branch `phase4-workspace-new`, stacked on phase 5). `sb
+  workspace new` is deleted — the verb, `Broker.workspace_new`, and the `_spawn_lead` /
+  `_adopt` / `_result` machinery under it, with `vocabulary.workspace_role`,
+  `vocabulary.lead_suffix` and the `spawn.workspace_task` prompt. Its two remaining halves
+  are covered: a top's `sb delegate` mints the space (the child's `--name` is the
+  workspace, the branch and the checkout), and `sb delegate --workspace <name>` joins one
+  that exists. `sb workspace list` and `sb workspace close` are untouched. Two guards the
+  verb held moved to `_fork_for`, because nothing else was holding them: a workspace
+  mid-teardown is refused, and so is a name a bare space already owns. Written up in
+  `audit/full-stack-verification.md`.
+  - **Not covered, deliberately:** the no-name form (`sb workspace new` with no argument,
+    which laid a workspace over the checkout you were standing in) and `--base`. The first
+    is a second minting path, which is the thing phase 5 exists to end; the second is
+    answered by the fork rule — a fork starts from the parent's branch, or `origin/main`
+    when that branch is main.
 
 # Phase 5 — structure — DONE (branch `phase5-structure`, stacked on phase 4)
 
@@ -152,9 +165,8 @@ the column alone would have changed nothing, since nothing read it.
   its own tighter descendants rule. The board is NOT scoped, and neither is the human.
 - The role PROMPTS still do not mention any of this. Deliberate: phase 6 owns the prompt
   rewrite, and the refusal message says what to do instead in the meantime.
-- `sb workspace new` still exists. Phase 4 deferred its deletion to "once phase 5 covers
-  space creation"; 5.2 fixed the fork rule but did not fold `workspace_new` into
-  `delegate`, so that deletion is still outstanding.
+- `sb workspace new` was still here when phase 5 shipped. It is gone now: see phase 4's
+  last item, built on `phase4-workspace-new` on top of this branch.
 
 # Phase 6 — prompts and shipping
 
