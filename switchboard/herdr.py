@@ -438,6 +438,22 @@ class Herdr:
                 )
 
         agent_args = ["--permission-mode", PERMISSION_MODE]  # manual: agents would stall
+        # The Stop gate, on EVERY spawn and every restore, because this is the one place
+        # they all pass through. Asking each call site to opt in would make the one thing
+        # that must not be skippable exactly as skippable as the `sb done` it enforces (C6).
+        # `--settings` merges into that session alone, so no session we did not start ever
+        # sees it — and never `--bare`, which skips hooks outright. Both verified against
+        # the CLI; see `hooks.py`. Returns [] rather than raising: a hook is not worth a
+        # failed spawn.
+        #
+        # Imported HERE rather than at the top of the file: `hooks` reaches the store, and
+        # `panel` imports this module — a renderer that pulls the store in gets a WAL
+        # connection per panel process, which is the cost `test_panel` exists to keep out.
+        # A renderer never spawns, so the dependency belongs to the call and not to the
+        # module.
+        from . import hooks
+
+        agent_args += hooks.stop_hook_args()
         agent_args += list(model_args)
         if resume:
             agent_args += ["--resume", resume]
