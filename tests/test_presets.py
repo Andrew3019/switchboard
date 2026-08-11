@@ -245,6 +245,14 @@ class ReadingAPresetTest(unittest.TestCase):
         self.assertIsNone(parser.parse_args(["presets"]).name)
         self.assertEqual(parser.parse_args(["presets", "adversarial"]).name, "adversarial")
 
+    def test_the_third_parameter_is_apply(self):
+        """List, read, apply — the three DESIGN-TRUTH.md:292-295 asks for, on one verb."""
+        from switchboard import cli
+
+        parser = cli.build_parser()
+        self.assertFalse(parser.parse_args(["presets", "adversarial"]).apply)
+        self.assertTrue(parser.parse_args(["presets", "adversarial", "--apply"]).apply)
+
 
 if __name__ == "__main__":
     unittest.main()

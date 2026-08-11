@@ -73,6 +73,67 @@ class RolesTest(unittest.TestCase):
                          + [r.prompt for r in roles.load(self.repo).values()])
         self.assertNotIn("say in it", every)
 
+    # -- what the shipped prompts teach about phase 6's rules -------------
+    #
+    # Containment checks, and honestly so: they prove the rule is IN the text every agent
+    # is sent, not that an agent obeys it. That second thing is not testable here — the
+    # only instrument for it is reading what agents actually produce. What these do catch
+    # is the failure that has happened repeatedly on this repo: a rule edited into one
+    # prompt and silently dropped from the one that ships.
+
+    def test_the_protocol_names_every_sanctioned_reason_to_block(self):
+        """DESIGN-TRUTH.md:142-145's five, three of which reached no prompt at all. Each is
+        checked by a phrase only that reason would produce, so a rewrite that drops one
+        fails here rather than passing on the word "block"."""
+        p = config.protocol(self.repo)
+        for reason, phrase in {
+            "a big design question": "behaviour-changing design question",
+            "blocked on running something": "blocked on running",
+            "told to block": "told to block",
+            "going back and forth": "back and forth",
+            "finished work needing approval": "needs Andrew's input or approval",
+        }.items():
+            with self.subTest(reason=reason):
+                self.assertIn(phrase, p)
+
+    def test_the_protocol_states_the_default_shape_of_shipping_work(self):
+        """DESIGN-TRUTH.md:281-284, and it goes to every role rather than to orchestrators
+        alone — so it is asserted on the protocol, which is the only text all five share."""
+        p = config.protocol(self.repo)
+        for part in ("branch named for your workspace", "push", "pull request",
+                     "URL in your summary", "explicit approval"):
+            with self.subTest(part=part):
+                self.assertIn(part, p)
+
+    def test_no_shipped_prompt_lets_an_agent_merge_without_asking(self):
+        every = " ".join([config.protocol(self.repo)]
+                         + [r.prompt for r in roles.load(self.repo).values()])
+        self.assertIn("no agent merges without asking", every)
+
+    def test_the_protocol_asks_for_skimmable_human_facing_output(self):
+        """DESIGN-TRUTH.md:135-140. The numbered-questions half was already taught; the
+        formatting half was in no shipped prompt anywhere."""
+        p = config.protocol(self.repo)
+        for part in ("concise and skimmable", "bullets", "sections",
+                     "numbered", "recommended answer"):
+            with self.subTest(part=part):
+                self.assertIn(part, p)
+
+    def test_every_session_is_told_presets_exist_and_can_be_applied(self):
+        """"This must be known to all sessions" (DESIGN-TRUTH.md:292-295) — it used to be
+        known to orchestrators only, so the protocol is where it has to be."""
+        p = config.protocol(self.repo)
+        self.assertIn("sb presets", p)
+        self.assertIn("--apply", p)
+
+    def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
+        """DESIGN-TRUTH.md:161-162. Serialising overlap was already taught; assigning
+        ownership up front — the half that prevents the overlap — was not."""
+        prompt = roles.load(self.repo)["orchestrator"].prompt
+        self.assertIn("disjoint", prompt)
+        self.assertIn("share your worktree", prompt)
+        self.assertIn("Serialise", prompt)      # and the half that was already right
+
     # -- model tiers -----------------------------------------------------
 
     def test_an_override_replaces_the_roles_tier(self):

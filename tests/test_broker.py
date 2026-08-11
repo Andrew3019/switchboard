@@ -382,6 +382,27 @@ class BrokerTest(unittest.TestCase):
         joined = " ".join(self.h.started[0]["prompts"])
         self.assertIn("haiku critic", joined)
 
+    # -- what a spawn is told exists ---------------------------------------
+
+    def test_every_spawn_is_told_what_roles_exist(self):
+        """DESIGN-TRUTH.md:107-110 — knowing there are roles, and which."""
+        self.b.delegate("t", role="worker", me="orch")
+        joined = " ".join(self.h.started[0]["prompts"])
+        for role in ("orchestrator", "worker", "qa", "researcher", "reviewer"):
+            with self.subTest(role=role):
+                self.assertIn(role, joined)
+
+    def test_the_role_list_is_generated_from_the_roles_and_not_written_down(self):
+        """The whole of the requirement, and the only test that can tell the two apart:
+        a role this repo invented appears in the spawn prompt with no code or prompt text
+        edited. A hardcoded list passes every other check and fails this one."""
+        d = self.repo / ".switchboard" / "roles"
+        d.mkdir(parents=True)
+        (d / "archaeologist.md").write_text("You dig.\n")
+        self.restart_sb()                     # roles are read once, at Broker construction
+        self.b.delegate("t", role="worker", me="orch")
+        self.assertIn("archaeologist", " ".join(self.h.started[0]["prompts"]))
+
     # -- the spawn race: a claim is not a dead agent -----------------------
 
     def _collect_during_spawn(self):
@@ -947,6 +968,50 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.pane_prompts, [])                # no shell fallback
         [m] = store.undelivered(self.db)                         # queued, not read
         self.assertIsNone(m["read_at"])
+
+    # -- applying a preset to your own session (6.4) -----------------------
+
+    def _preset(self, name: str, text: str) -> None:
+        d = self.repo / ".switchboard" / "presets"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(text)
+
+    def test_applying_a_preset_pastes_it_into_the_callers_own_session(self):
+        """"sb pastes it in, the same path as any other message" — so the text is on the
+        wire, not merely printed by the command the agent ran."""
+        self._preset("ritual", "# ritual\nCount to three before answering.")
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.b.apply_preset("ritual", me="w")
+        [(who, text)] = self.h.prompts
+        self.assertEqual(who, "w")
+        self.assertIn("Count to three", text)
+        self.assertIn("[sb: from w]", text)      # tagged, like every other sb line
+        self.assertNotIn("\n", text)             # herdr refuses a multi-line argument
+
+    def test_the_applied_preset_is_a_message_the_agent_sent_to_itself(self):
+        """The one shape no other verb produces. It has to be durable — `sb inspect` shows
+        what an agent was told, and a procedure it adopted mid-run belongs in that record."""
+        self._preset("ritual", "Count to three.")
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        mid = self.b.apply_preset("ritual", me="w")
+        m = store.get_message(self.db, mid)
+        self.assertEqual((m["from_agent"], m["to_agent"]), ("w", "w"))
+        self.assertIsNotNone(m["delivered_at"])
+        # ...and NOT waiting in its own inbox: it travelled inline, so a second copy would
+        # be the agent reading the same procedure twice and `cleanup` calling it unread mail.
+        self.assertEqual(store.unread_for(self.db, "w", mark=False), [])
+
+    def test_a_preset_that_does_not_exist_is_refused_before_anything_is_sent(self):
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        with self.assertRaises(KeyError):
+            self.b.apply_preset("no-such-thing", me="w")
+        self.assertEqual(self.h.prompts, [])
+
+    def test_a_human_has_no_session_to_apply_a_preset_to(self):
+        self._preset("ritual", "Count to three.")
+        with self.assertRaises(ValueError) as cm:
+            self.b.apply_preset("ritual", me=HUMAN)
+        self.assertIn("sb presets ritual", str(cm.exception))   # what to type instead
 
     # -- mail to an agent that has finished -------------------------------
 
