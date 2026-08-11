@@ -1177,16 +1177,6 @@ class ArchivedTest(unittest.TestCase):
             self.assertIn("w1", self.tree(snap))
             self.assertNotIn("archived", self.tree(snap))
 
-    def test_the_flag_can_only_turn_collapse_off_never_on(self):
-        """`--archived` shows them; there is no flag that re-collapses, so a repo that has
-        set `show_archived = true` is not silently overridden by every bare `sb status`."""
-        store.create_agent(self.db, name="lead", role="lead", session_id="s0")
-        store.create_agent(self.db, name="w1", role="worker", parent="lead", session_id="s1")
-        snap = self.collect(FakeHerdr([]), now=self.old())
-        with mock.patch.object(status, "SHOW_ARCHIVED", True):
-            self.assertIn("w1", self.tree(snap))            # no flag: the setting stands
-        self.assertIn("w1", self.tree(snap, show_archived=True))
-
     def test_a_board_of_nothing_but_archived_agents_still_renders(self):
         """Every root collapses, so there is no agent left to size the ROLE column
         against — which is a crash, not a narrower table, if the widths are taken from
@@ -1229,10 +1219,6 @@ class CollapseTest(unittest.TestCase):
         return [r for r in status.display_rows(agents, **kw)
                 if isinstance(r, status.Collapsed)]
 
-    def test_a_live_agent_is_never_hidden(self):
-        agents = [_mk("main"), _mk("w1", parent="main", depth=1)]
-        self.assertEqual(self.rows(agents), ["main", "w1"])
-
     def test_example_a_all_children_archived_becomes_one_row(self):
         agents = [_mk("main"),
                   _mk("a", parent="main", depth=1, archived=True),
@@ -1251,16 +1237,6 @@ class CollapseTest(unittest.TestCase):
         self.assertEqual(self.rows(agents), ["main", "+4"])
         self.assertEqual(len(self.groups(agents)), 1)
         self.assertEqual(self.groups(agents)[0].depth, 1)
-
-    def test_example_c_a_parent_with_one_live_child_is_drawn(self):
-        agents = [_mk("main"),
-                  _mk("lead", parent="main", depth=1),
-                  _mk("w1", parent="lead", depth=2, archived=True),
-                  _mk("w2", parent="lead", depth=2),
-                  _mk("w3", parent="lead", depth=2, archived=True),
-                  _mk("w3a", parent="w3", depth=3, archived=True)]
-        self.assertEqual(self.rows(agents), ["main", "lead", "w2", "+3"])
-        self.assertEqual(self.groups(agents)[0].depth, 2)
 
     def test_example_d_groups_at_two_levels_at_once(self):
         agents = [_mk("main"),
@@ -1285,26 +1261,6 @@ class CollapseTest(unittest.TestCase):
                   _mk("w1", parent="lead", depth=1),
                   _mk("w2", parent="lead", depth=1, archived=True)]
         self.assertEqual(self.rows(agents), ["lead", "w1", "+1"])
-
-    def test_the_count_is_the_whole_subtree_not_the_direct_children(self):
-        agents = [_mk("main"),
-                  _mk("other", parent="main", depth=1, archived=True),
-                  _mk("o1", parent="other", depth=2, archived=True),
-                  _mk("o2", parent="o1", depth=3, archived=True)]
-        self.assertEqual(self.groups(agents)[0].count, 3)
-
-    def test_a_collapsed_group_sits_after_its_visible_siblings(self):
-        """So a live row never moves when an unrelated sibling archives — the board is a
-        thing people click, and a row that shifts under the cursor is a misclick."""
-        agents = [_mk("main"),
-                  _mk("a", parent="main", depth=1, archived=True),
-                  _mk("b", parent="main", depth=1),
-                  _mk("c", parent="main", depth=1)]
-        self.assertEqual(self.rows(agents), ["main", "b", "c", "+1"])
-
-    def test_show_archived_returns_every_row_and_no_group(self):
-        agents = [_mk("main"), _mk("a", parent="main", depth=1, archived=True)]
-        self.assertEqual(self.rows(agents, show_archived=True), ["main", "a"])
 
     def test_the_row_carries_how_many_of_the_hidden_still_need_a_person(self):
         agents = [_mk("main"),

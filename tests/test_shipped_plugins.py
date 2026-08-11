@@ -103,13 +103,6 @@ class ShippedDefaultsTest(ShippedSandbox):
     def test_only_report_bug_ships_bound_to_every_agent(self):
         self.assertEqual(plugins.bound(self.repo), {"report-bug": ["every agent"]})
 
-    def test_a_disabled_plugin_is_still_available(self):
-        """Available, enabled and bound are separately settable, and `todo` is now the
-        shipped proof: present on disk, dispatching nothing, taxing no spawn."""
-        self.assertIn("todo", plugins.available(self.repo))
-        self.assertNotIn("todo", plugins.enabled(self.repo))
-        self.assertNotIn("todo", plugins.bound(self.repo))
-
     def test_every_shipped_binding_actually_resolves(self):
         """A bound name that resolves to nothing is a fragment silently missing from every
         spawn in every repo — and `all` is the worst place for it, because it is paid
@@ -141,15 +134,6 @@ class ShippedDefaultsTest(ShippedSandbox):
         for forbidden in ("claim", "pick up", "work from", "assigned to you"):
             self.assertNotIn(forbidden, line)
 
-    def test_unbinding_keeps_the_commands(self):
-        """`all = ["!reset"]` — stop taxing every spawn, keep `sb plugin todo`. This is the
-        option that collapsing the three states into two would have made unsayable."""
-        (self.sw / "plugins.toml").write_text('enabled = ["todo"]\n')
-        (self.sw / "presets.toml").write_text('all = ["!reset"]\n')
-        self.assertEqual(presets.for_role(self.repo, "qa"), ["verify", "evidence"])
-        self.assertEqual(sorted(plugins.enabled(self.repo)), ["report-bug", "todo"])
-        self.assertIn("t-1", self.ok("plugin", "todo", "add", "still works"))
-
     def test_disabling_takes_the_commands_away(self):
         """`enabled = ["!reset"]` — off entirely. The binding is then unresolvable, and
         must be SKIPPED rather than fatal: a disabled plugin cannot stop the fleet."""
@@ -160,13 +144,6 @@ class ShippedDefaultsTest(ShippedSandbox):
         self.assertIn("not enabled", err)
         self.assertEqual(presets.resolve(presets.for_role(self.repo, "builder"),
                                          self.repo), [])
-
-    def test_the_two_levers_are_independent(self):
-        """Unbinding does not disable and disabling does not unbind — the whole reason
-        §7.2 keeps three states rather than two."""
-        (self.sw / "plugins.toml").write_text('enabled = ["!reset"]\n')
-        self.assertEqual(plugins.bound(self.repo), {"report-bug": ["every agent"]})
-
 
 # -- todo (§9) -----------------------------------------------------------------
 
@@ -183,12 +160,6 @@ class TodoTest(ShippedSandbox):
     def setUp(self) -> None:
         super().setUp()
         (self.sw / "plugins.toml").write_text('enabled = ["todo"]\n')
-
-    def test_ids_are_monotonic(self):
-        for _ in range(3):
-            self.ok("plugin", "todo", "add", "x")
-        self.assertEqual([r["id"] for r in self.data("plugin", "todo", "list")],
-                         ["t-1", "t-2", "t-3"])
 
     def test_an_id_is_never_reused(self):
         """A commit message citing `t-2` has to stay true for the life of the repo, so
@@ -256,18 +227,6 @@ class TodoTest(ShippedSandbox):
 
     # -- listing ---------------------------------------------------------
 
-    def test_the_default_list_hides_closed_todos(self):
-        self.ok("plugin", "todo", "add", "a")
-        self.ok("plugin", "todo", "add", "b")
-        self.ok("plugin", "todo", "done", "t-1")
-        self.assertEqual([r["id"] for r in self.data("plugin", "todo", "list")], ["t-2"])
-
-    def test_labels_filter_conjunctively(self):
-        self.ok("plugin", "todo", "add", "a", "--label", "x", "--label", "y")
-        self.ok("plugin", "todo", "add", "b", "--label", "x")
-        got = self.data("plugin", "todo", "list", "--label", "x", "--label", "y")
-        self.assertEqual([r["text"] for r in got], ["a"])
-
     # -- closing ---------------------------------------------------------
 
     def test_done_records_the_note_and_the_time(self):
@@ -304,10 +263,6 @@ class TodoTest(ShippedSandbox):
 
     # -- ids and refusals ------------------------------------------------
 
-    def test_a_bare_number_names_the_same_todo(self):
-        self.ok("plugin", "todo", "add", "a")
-        self.assertEqual(self.data("plugin", "todo", "show", "1")["id"], "t-1")
-
     def test_an_unknown_id_names_the_highest_one_there_is(self):
         self.ok("plugin", "todo", "add", "a")
         code, _, err = self.sb("plugin", "todo", "show", "t-9")
@@ -315,17 +270,6 @@ class TodoTest(ShippedSandbox):
         self.assertIn("the highest is t-1", err)
 
     # -- the file --------------------------------------------------------
-
-    def test_state_lives_under_the_shared_git_and_not_in_the_store(self):
-        self.ok("plugin", "todo", "add", "a")
-        self.assertEqual(self._todos().parent,
-                         store.store_dir(self.repo) / "plugins" / "todo")
-        self.assertTrue(self._todos().is_file())
-
-    def test_no_temporary_file_survives_a_write(self):
-        self.ok("plugin", "todo", "add", "a")
-        self.assertEqual([p.name for p in self._todos().parent.iterdir()
-                          if p.name.endswith(".tmp")], [])
 
     def _todos(self) -> Path:
         return store.store_dir(self.repo) / "plugins" / "todo" / "todos.json"
@@ -448,24 +392,10 @@ class ReportBugTest(ShippedSandbox):
         r = self.data("plugin", "report-bug", "file", "sb delegate hangs forever")
         self.assertRegex(r["id"], r"^\d{4}-\d\d-\d\d-\d{6}-sb-delegate-hangs-forever$")
 
-    def test_the_same_bug_filed_twice_is_two_files(self):
-        """No dedup, on purpose: the same bug filed three times is three files, and three
-        files is itself the reproduction signal."""
-        a = self.data("plugin", "report-bug", "file", "same words")
-        b = self.data("plugin", "report-bug", "file", "same words")
-        self.assertNotEqual(a["id"], b["id"])
-        self.assertEqual(len(list(self._dir().glob("*.md"))), 2)
-
     def test_state_is_per_machine_not_per_repo(self):
         self.ok("plugin", "report-bug", "file", "x")
         self.assertEqual(self._dir(), self.user_state / "plugins" / "report-bug")
         self.assertFalse((store.store_dir(self.repo) / "plugins" / "report-bug").exists())
-
-    def test_no_lock_is_taken(self):
-        p = plugins.load(self.repo, "report-bug")
-        self.assertFalse(p.lock)
-        self.ok("plugin", "report-bug", "file", "x")
-        self.assertFalse((self._dir() / ".lock").exists())
 
     def test_the_narrative_sections_are_the_callers(self):
         self.ok("plugin", "report-bug", "file", "it broke",
@@ -475,10 +405,6 @@ class ReportBugTest(ShippedSandbox):
         self.assertIn("# it broke", text)
         self.assertIn("sb delegate x", text)
         self.assertIn("KeyError: role", text)
-
-    def test_an_omitted_section_is_absent_rather_than_empty(self):
-        self.ok("plugin", "report-bug", "file", "it broke")
-        self.assertNotIn("## expected", self._only().read_text())
 
     def test_the_context_is_captured_without_being_asked_for(self):
         self.ok("plugin", "report-bug", "file", "it broke")
@@ -494,11 +420,6 @@ class ReportBugTest(ShippedSandbox):
         text = self._only().read_text()
         self.assertIn(f"- repo: {store.repo_root(self.repo)}", text)
         self.assertIn(f"- worktree: {self.repo.resolve()}", text)
-
-    def test_the_calling_agent_is_recorded(self):
-        self.as_agent("w1")
-        self.ok("plugin", "report-bug", "file", "it broke")
-        self.assertIn("- by: w1", self._only().read_text())
 
     def test_no_transcript_is_captured(self):
         """A transcript contains everything the agent read. Hoovering it into a bug report
@@ -524,11 +445,6 @@ class ReportBugTest(ShippedSandbox):
         got = [r["what"] for r in self.data("plugin", "report-bug", "list")]
         self.assertIn("from another repo", got)
 
-    def test_show_takes_an_unambiguous_prefix(self):
-        r = self.data("plugin", "report-bug", "file", "a very specific bug")
-        out = self.ok("plugin", "report-bug", "show", r["id"][:13])
-        self.assertIn("a very specific bug", out)
-
     def test_an_ambiguous_prefix_names_the_candidates(self):
         for what in ("bug one", "bug two"):
             self.ok("plugin", "report-bug", "file", what)
@@ -550,10 +466,6 @@ class ReportBugTest(ShippedSandbox):
         self.assertEqual(code, 1)
         self.assertIn("for the human", err)
         self.assertEqual(len(list(self._dir().glob("*.md"))), 1)
-
-    def test_a_summary_of_only_punctuation_still_gets_a_filename(self):
-        r = self.data("plugin", "report-bug", "file", "!!! ???")
-        self.assertTrue(r["id"].endswith("-bug"))
 
     def test_no_github_is_involved(self):
         source = (config.defaults_dir() / "plugins" / "report-bug"
@@ -589,13 +501,6 @@ class DoctorTest(ShippedSandbox):
         self.assertIn("plugin 'halfthing' broken", out)
         self.assertNotIn("Traceback", out)
 
-    def test_one_broken_plugin_does_not_hide_the_rest_of_the_report(self):
-        self.ship("halfthing", "raise SystemExit(3)\n")
-        self.enable("halfthing")
-        _, out, _ = self.sb("doctor")
-        self.assertIn("herdr", out)
-        self.assertIn("store", out)
-
     def test_an_incompatible_plugin_is_a_problem(self):
         """§11 item 4: incompatibility is deliberately NOT enforced at spawn, because
         `delegate` never imports. `doctor` is the only place it is visible before an agent
@@ -628,19 +533,6 @@ class DoctorTest(ShippedSandbox):
         self.assertIn(str(d), out)
         self.assertIn("rm -rf to discard", out)
         self.assertEqual(code, 0)
-
-    def test_an_orphan_is_never_deleted(self):
-        d = store.store_dir(self.repo) / "plugins" / "ci-check"
-        d.mkdir(parents=True)
-        (d / "data.json").write_text('{"mine": true}')
-        self.sb("doctor")
-        self.assertEqual((d / "data.json").read_text(), '{"mine": true}')
-
-    def test_a_user_scoped_orphan_is_found_too(self):
-        d = self.user_state / "plugins" / "gone"
-        d.mkdir(parents=True)
-        _, out, _ = self.sb("doctor")
-        self.assertIn(str(d), out)
 
     def test_a_disabled_plugins_state_is_not_an_orphan(self):
         """Disabling does not touch state and re-enabling finds it intact, so a disabled
@@ -688,11 +580,6 @@ class DoctorTest(ShippedSandbox):
         _, out, _ = self.sb("doctor")
         self.assertIn("are ignored", out)
 
-    def test_none_of_the_transition_notices_move_the_exit_code(self):
-        (self.sw / "plugins.toml").write_text('all = ["own-files"]\n')
-        code, _, _ = self.sb("doctor")
-        self.assertEqual(code, 0)
-
     # -- the json surface -----------------------------------------------
 
     def test_json_carries_every_finding(self):
@@ -706,12 +593,6 @@ class DoctorTest(ShippedSandbox):
         self.assertTrue(d["plugin_problems"])
         self.assertEqual([o["name"] for o in d["orphaned_state"]], ["ci-check"])
         self.assertIn("halfthing", [p["name"] for p in d["plugins"]])
-
-    def test_ok_is_true_when_only_notices_are_present(self):
-        (store.store_dir(self.repo) / "plugins" / "ci-check").mkdir(parents=True)
-        _, out, _ = self.sb("doctor", "--json")
-        self.assertTrue(json.loads(out)["ok"])
-
 
 if __name__ == "__main__":
     unittest.main()

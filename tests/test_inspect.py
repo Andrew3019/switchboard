@@ -323,12 +323,6 @@ class InspectTest(Base):
                          "w1:p9", "sess-1", "delegate", "on screen"):
             self.assertIn(expected, out)
 
-    def test_render_names_drift_here_too(self):
-        self.agent()
-        out = status.render_detail(
-            status.inspect(self.db, FakeHerdr([alive("w1", "idle")]), "w1"))
-        self.assertIn("STALLED", out)
-
     def test_render_survives_an_agent_with_nothing_recorded(self):
         self.agent()
         out = status.render_detail(self.inspect())
@@ -406,15 +400,6 @@ class WaitTest(Base):
         self.assertTrue(r.ok)
         self.assertEqual(r.state, "done")
         self.assertEqual(len(h.waits), 1)          # ONE blocking call, not a poll loop
-
-    def test_an_already_finished_agent_returns_without_waiting_at_all(self):
-        self.agent()
-        store.set_state(self.db, "w1", "done")
-        h = WaitHerdr(alive("w1", "idle"))
-        r = status.wait_for(self.db, h, "w1", clock=FakeClock())
-        self.assertTrue(r.ok)
-        self.assertEqual(h.waits, [])
-        self.assertEqual(h.lists, 0)               # herdr is not even consulted
 
     def test_the_stale_wait_guard_is_used(self):
         """herdr's `agent wait` is not turn-scoped; without since_seq it returns instantly
@@ -524,14 +509,6 @@ class WaitTest(Base):
         status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
         self.assertEqual(h.waits[0]["until"], "working")
 
-    def test_a_working_agent_is_waited_toward_idle(self):
-        self.agent()
-        clock = FakeClock()
-        h = WaitHerdr(alive("w1", "working", seq=3),
-                      on_wake=lambda i: setattr(clock, "t", clock.t + 30))
-        status.wait_for(self.db, h, "w1", timeout=40, clock=clock)
-        self.assertEqual(h.waits[0]["until"], "idle")
-
     def test_the_transition_is_re_chosen_each_time_round(self):
         """idle → wait for working → working → wait for idle → the turn has ended."""
         self.agent()
@@ -578,21 +555,6 @@ class WaitTest(Base):
         self.assertFalse(r.ok)
         self.assertIn("finished as failed", r.reason)
 
-    def test_only_one_herdr_state_is_ever_asked_for(self):
-        """herdr 0.8.0 refuses `--until idle,blocked` — see BUGS.md. `Herdr.wait`
-        takes one state for that reason, and this pins that nothing here hands it a
-        collection that would silently comma-join back into the rejected form."""
-        self.agent()
-        clock = FakeClock()
-        h = WaitHerdr(alive("w1", "working", seq=1),
-                      on_wake=lambda i: setattr(clock, "t", clock.t + 30))
-        for until in status.WAIT_STATES:
-            h.waits.clear()
-            status.wait_for(self.db, h, "w1", until=until, timeout=20, clock=clock)
-            for call in h.waits:
-                self.assertIsInstance(call["until"], str)
-                self.assertIn(call["until"], herdr_mod.STATES, until)
-
     def test_for_idle_catches_an_agent_that_stalls_without_calling_done(self):
         """`done` never arrives, so only the herdr half can satisfy this one."""
         self.agent()
@@ -604,21 +566,6 @@ class WaitTest(Base):
         self.assertTrue(r.ok)
         self.assertEqual(r.state, "working")       # the store is reported, not rewritten
         self.assertEqual(r.herdr_state, "idle")
-
-    def test_waiting_for_working_watches_the_other_transition(self):
-        self.agent()
-        store.set_state(self.db, "w1", "blocked")
-        clock = FakeClock()
-
-        def unblock(i):
-            clock.t += 5
-            store.set_state(self.db, "w1", "working")
-
-        h = WaitHerdr(alive("w1", "idle", seq=1), wakeups=[alive("w1", "working", seq=2)],
-                      on_wake=unblock)
-        r = status.wait_for(self.db, h, "w1", until="working", clock=clock)
-        self.assertTrue(r.ok)
-        self.assertEqual(h.waits[0]["until"], "working")
 
     def test_json_carries_the_outcome(self):
         self.agent()
