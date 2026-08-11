@@ -47,15 +47,12 @@ overwriting somebody's work is not recoverable from a summary.
 # The first instruction a top-level orchestrator gets when `sb start` was given no task.
 # It must be an instruction to STOP, not to start: the human is about to type the real one.
 #
-# Reword these two freely, here or in a repo's own prompts.toml. An agent holding one of
-# them is recorded as waiting for its first instruction (`agents.awaiting_task`, which is
+# Reword it freely, here or in a repo's own prompts.toml. An agent holding it is
+# recorded as waiting for its first instruction (`agents.awaiting_task`, which is
 # what keeps it out of STALLED), and that fact comes from `Broker._first_task` noticing
 # that no task was passed — never from comparing the text back, which is what would go
 # stale on an edit like that one.
 start_task = "Await my instructions."
-
-# The same, for the lead of a freshly opened workspace.
-workspace_task = "Await instructions for this workspace."
 
 
 [notify]

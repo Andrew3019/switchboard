@@ -128,6 +128,15 @@ ValueError, which the CLI already reports properly. And the losers no longer cre
 at all, so there is nothing to close afterwards — a contested workspace cannot fill with
 dead shells because none are made.
 
+**Postscript, 2026-08-11.** The code this entry is about no longer exists: `workspace_new`,
+`_spawn_lead` and `_adopt` went with `sb workspace new` (phase 4's deferred item). The
+fix's load-bearing half stayed, because it was never in those methods — `store.claim_agent`
+and `delegate` claiming the name before `agent start` are what the race turned on, and the
+surviving guarantee is pinned by
+`tests/test_workspace.py::test_concurrent_spawners_of_one_name_leave_exactly_one_agent`.
+Joining is no longer one of the outcomes: a spawn under a taken name is refused, because
+the name is a branch and two agents cannot both own one.
+
 ---
 
 ## `Herdr.wait` sends `--until idle,blocked`, which herdr 0.8.0 refuses

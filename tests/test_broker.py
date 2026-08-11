@@ -2675,17 +2675,6 @@ class WorkspacePlacementTest(unittest.TestCase):
         _, child = self._spawn(env=None)
         self.assertIsNone(store.get_agent(self.db, child)["workspace_id"])
 
-    def test_a_lead_is_not_recorded_in_a_workspace_herdr_has_forgotten(self):
-        """`_spawn_lead`'s copy of the same bug: it holds `ws["workspace_id"]` across the
-        tab call and passed that, not what the call learned."""
-        self._parent(workspace_id="wA")
-        self._workspace_gone()
-        self.b._spawn_lead("api-lead", {"workspace": "api", "branch": "api",
-                                        "workspace_id": "wA", "path": str(self.repo),
-                                        "pane_id": "", "fresh": False},
-                           role="worker", task="t", me="parent", prior=None)
-        self.assertIsNone(store.get_agent(self.db, "api-lead")["workspace_id"])
-
     def test_the_dead_id_is_dropped_from_this_processs_cache_too(self):
         """The store is cleared but `_ws_ids` was not, so a second lookup of the same name
         within one invocation handed the dead id straight back out."""
@@ -2946,13 +2935,16 @@ class ForkBaseTest(unittest.TestCase):
         _, err = self._fork()
         self.assertEqual(err, "")
 
-    def test_an_explicit_base_still_wins(self):
-        """`--base` is a caller saying which base they want; inheritance is the default
-        underneath it, not a replacement for it."""
+    def test_nothing_overrides_the_inherited_base_any_more(self):
+        """`--base` went with `sb workspace new`. What a fork starts from is the caller's
+        own branch, or `origin/main` when that branch IS main — and there is no longer a
+        third answer anyone can ask for."""
+        import inspect
+        self.assertNotIn("base", inspect.signature(self.b.delegate).parameters)
         self._git("checkout", "-q", "-b", "fix-thing")
         self._git("branch", "release")
-        self.b.workspace_new("ws", base="release", me=HUMAN)
-        self.assertEqual(self.h.bases[-1][1], "release")
+        self._fork()
+        self.assertEqual(self.h.bases[-1][1], "fix-thing")
 
 
 class PinningHerdr(FakeHerdrAPI):

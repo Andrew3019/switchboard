@@ -6,8 +6,8 @@ delegate = true
 <!--
 THE orchestrator role — there is only one, deliberately.
 
-`sb start` spawns it at the top, `sb workspace new` spawns it as a workspace lead, and an
-orchestrator spawns it again for any sub-job. A sub-orchestrator is not a lesser kind of
+`sb start` spawns it at the top, a top's `sb delegate` spawns it as a workspace lead, and
+an orchestrator spawns it again for any sub-job. A sub-orchestrator is not a lesser kind of
 thing: the only difference between the top one and the deepest one is scope, and scope is
 already told to it at spawn (its parent, its workspace, its task). Two roles meant two
 prompts to keep in sync, and they had already drifted — the workspace lead, where the real

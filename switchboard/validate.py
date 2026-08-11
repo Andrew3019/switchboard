@@ -56,11 +56,6 @@ AGENT_NAME = re.compile(r"[a-z][a-z0-9_-]{0,%d}\Z" % (MAX_AGENT_NAME - 1))
 RESERVED_TARGETS = (config.setting("vocabulary.parent"),
                     config.setting("vocabulary.human"))
 
-# A workspace's lead agent is named `<slug><LEAD_SUFFIX>`, so a suggested slug has to hold
-# that much room back. The broker owns the naming; this only has to suggest the same thing
-# the broker would actually produce, which means reading it from the same place.
-LEAD_SUFFIX = config.setting("vocabulary.lead_suffix")
-
 # Named in the error you get for a multi-line prompt, because that error's whole job is to
 # say where multi-line guidance DOES belong. Assembled from `[paths]` so it cannot become
 # a lie the day someone moves the directory.
@@ -199,7 +194,7 @@ def slug_name(value: str, *, reserve: int = 0) -> str:
 
     Names are derived from things people choose freely — a role, a branch, a workspace —
     so `--role "QA Bot"` would otherwise produce the agent name `QA Bot-1` and fail at
-    spawn. `reserve` holds back room for a suffix the caller will append (`-1`, `-lead`),
+    spawn. `reserve` holds back room for a suffix the caller will append (`-1`, `-99`),
     because truncating AFTER appending is how a name loses the part that made it unique.
     """
     limit = max(1, MAX_AGENT_NAME - max(0, reserve))
@@ -238,7 +233,7 @@ def ref_name(value: Optional[str], field: str = "workspace name") -> str:
     if problem:
         raise Invalid(
             f"bad {field} {v!r}: it is used verbatim as the git branch name, and "
-            f"{problem}. Try {slug_name(v, reserve=len(LEAD_SUFFIX))!r}."
+            f"{problem}. Try {slug_name(v)!r}."
         )
     return v
 

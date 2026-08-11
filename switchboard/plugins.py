@@ -24,12 +24,12 @@ question, and the assignment is fixed rather than incidental:
                                             cleanup, inspect, wait, init, restore,
                                             interrupt, board, models
     1  glob the roots, merge plugins.toml   presets                    -> available/enabled
-    2  + read <plugin>/agent.md, flatten    delegate, start, workspace -> fragment()
+    2  + read <plugin>/agent.md, flatten    delegate, start             -> fragment()
     3  + import, call register()            plugin list, plugin <name> -> load()
     4  + invoke one handler                 plugin <name> <verb>       -> run()
 
-**No verb that spawns imports plugin code.** `delegate`, and `start` and `workspace new`
-which reach it, read a markdown file and stop. That is a topology, not defensive coding:
+**No verb that spawns imports plugin code.** `delegate`, and `start` which reaches it,
+read a markdown file and stop. That is a topology, not defensive coding:
 a plugin with a SyntaxError cannot slow, crash, hang or `sys.exit()` the verbs the whole
 system is built on, because those verbs have never heard of it. It is the single most
 important property in this module, and `tests/test_plugins.py` is where it is pinned.
