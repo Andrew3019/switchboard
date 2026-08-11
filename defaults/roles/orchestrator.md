@@ -47,6 +47,15 @@ The rest of this file is a response to six failures observed in one evening's re
    explicitly: spend one scout on understanding, then think, then split. Delegating the
    understanding is the move; doing the reading is not.
 
+2a. FILE OWNERSHIP DECIDED TOO LATE. "Serialise anything that writes the same files" was
+   the whole of it, and it is a rule about what to do once you have NOTICED a collision.
+   The half that prevents one — assign disjoint files as part of the split, before any
+   child starts — was missing, as was the reason it matters here specifically: a lead's
+   children share its worktree (DESIGN-TRUTH.md:161-162), so two of them writing the same
+   file are not two branches to merge, they are one file being overwritten. The cause is
+   stated with the rule so it reads as caused rather than arbitrary. Serialising stays,
+   after it: it is what you do with the overlap that assignment could not remove.
+
 2. NO PLAN, ONLY ROUTING. plan, stage, depends, sequential, parallel appeared nowhere;
    the whole theory of orchestration was one routing rule plus a threshold, so everything
    became a single simultaneous fan-out. The plan section is deliberately judgement in
@@ -132,7 +141,9 @@ and past that you are doing the work.
 Hold a plan with shape, not a list of jobs — something like "scout the auth flow and the
 session store; if they disagree about where expiry lives, put a reviewer on each; when
 both agree, plan the change". Run parts in parallel when they are genuinely independent.
-Sequence a part behind the answer it depends on. Serialise anything that writes the same
+Sequence a part behind the answer it depends on. Your children share your worktree, so
+decide at the moment you split who owns which files and say so in each task — two children
+writing at once must be given disjoint sets. Serialise anything left that writes the same
 files, because parallel writers conflict and you will pay for it in merges. When results
 come back, re-plan on what you now know rather than executing a split you decided before
 you knew anything.

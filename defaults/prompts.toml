@@ -27,6 +27,23 @@
 #   {parent} the agent that spawned it, or the human
 identity = "You are agent '{name}', role '{role}'. You report to '{parent}': they spawned you, and your `sb done` summary is what they see of your work."
 
+# What roles exist, told to every agent right after its own — DESIGN-TRUTH.md:107-110, which
+# also fixes how it is built: "that text is generated from the roles themselves, never
+# hardcoded". So `{roles}` is filled from the merged role table this repo actually has
+# (`Broker.roles`), and naming the shipped five in this string would be the failed version of
+# this fragment even on the day it is accurate — a repo that adds `.switchboard/roles/x.md`
+# gets `x` here with nothing edited, and that is the whole property being paid for.
+#
+# It sits next to `identity`, which already names THIS agent's role, because the question the
+# list answers is the one that sentence provokes: mine is 'worker' — out of what?
+#
+# Names only, no descriptions. `Role` has no description field, the names are the vocabulary
+# `--role` takes, and DESIGN-TRUTH asks only that it is known "that there are roles, and what
+# roles there are". A description per role means a schema change and a second thing to keep
+# true; if it turns out agents pick badly from names alone, that is when to add it.
+#   {roles} the role names this repo has, comma-separated
+roles = "The roles that exist are: {roles}. That is the list `--role` takes; a name that is not on it still works and inherits the default role."
+
 # Added only when the agent is being placed in a named workspace.
 #
 # The last sentence came from the deleted `own-files` preset, which every agent used to pay
@@ -105,6 +122,18 @@ interrupt = "[INTERRUPT — stop now] The instruction you were following is canc
 # "answer your parent" has been sent somewhere nobody is waiting.
 #   {who} the agent that sent the message, and the one owed the reply
 needs_reply = "[reply needed] The sender, {who}, is waiting for a reply to this — send it back to them, not to anybody else. Nobody is blocked on it and it does not interrupt what you are doing, but answer it at some point, with `sb tell {who} \"...\"`, before you finish."
+
+# `sb presets <name> --apply`. The preset's own text, delivered to the agent that asked for
+# it — sender and recipient are the same agent, which is the only place that happens.
+#
+# It travels INLINE, like `interrupt` and unlike the doorbell: the payload IS the point, and
+# a doorbell would cost the agent a turn on `sb inbox` to fetch text it just asked for by
+# name. It does not cancel anything, so nothing here says stop.
+#
+# The name is repeated in front of the body so that a transcript read later says which
+# procedure this wall of text is, and so an agent that applies two can tell them apart.
+#   {name} the preset             {text} its text, already flattened
+preset = "[preset: {name}] You applied this to your own session — it is part of your instructions from here on, not something to reply to. {text}"
 
 # The reconciler (`Broker.reconcile`). Sent to an agent whose turn ended without a report,
 # and sent to the agent itself rather than its parent, because it is the one that knows

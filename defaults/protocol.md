@@ -77,9 +77,40 @@ chat and nothing surfaces it.
 aggressively, belongs to the orchestrator role. What every agent needs is that closing is
 cheap and reversible, because an agent that thinks closing destroys work will never do it.
 
-Escalation is three triggers and a prohibition. It was one run-on sentence at the very end
-of a flattened line, which is the worst position in the file, so it now leads with the
-imperative and lists the triggers after it.
+Escalation leads with the imperative and lists the triggers after it, because it was one
+run-on sentence at the very end of a flattened line, which is the worst position in the
+file. It carries DESIGN-TRUTH's five sanctioned reasons to block (a genuine, big,
+behaviour-changing design question; being blocked on running some command; being told to
+block; going back and forth with the agent itself; finished work needing Andrew's input or
+approval) — three of which were missing entirely — plus one that is not on that list:
+an ambiguous instruction. Andrew was asked and kept it ("this is fine, it should be
+blocked"), so it stays, and DESIGN-TRUTH's list is the thing that is short by one, not this
+sentence. "A tool fails twice" survives as the concrete form of being blocked on running
+something: it is the threshold that stops an agent retrying a broken tool forever, and
+deleting it in favour of the general phrasing would lose the number. The last reason and
+the shipping rule above are deliberately joined — a pull request waiting on a merge is the
+canonical case of finished work needing approval, and an agent that has just been told it
+may not merge needs to be told in the same breath what it does instead.
+
+Shipping (branch, push, PR, URL in the summary) sits with the `sb done` contract rather
+than in a role file, because Andrew's ruling was that it goes to every role: five copies of
+it would drift, and the roles that do not ship code pay one sentence for it. It is the
+DEFAULT shape, not a law — a repo that lands work differently overrides it with a preset,
+which is exactly what this repo's own `house-rules` does. That is the layering working, not
+a contradiction: the protocol says what shipping normally looks like and a later fragment
+says what it looks like here.
+
+The formatting rule is stated once, at `block`, and phrased to cover anything a human
+reads — the `sb done` summary above included, since a parent may forward it. It cannot use
+bullets to ask for bullets: everything here is flattened to one line, so it describes the
+shape in prose. The numbered-questions half was already here and has not moved; what was
+missing was concise, skimmable, bulleted and sectioned, which was taught in no shipped
+prompt at all.
+
+`sb presets` is named here, not just in the orchestrator role, because DESIGN-TRUTH says
+this must be known to ALL sessions and only orchestrators were told. Three verbs in one
+sentence, because a list you cannot read is not discoverable and a procedure you cannot
+apply is a procedure you paraphrase from memory.
 
 "Delegate real work rather than doing it yourself" was dropped: every worker, researcher
 and reviewer read it, and for them it is wrong. The orchestrator role owns delegation
@@ -135,17 +166,34 @@ worktree nobody opens. That summary is the only thing your parent ever sees of y
 it never reads your transcript. Keep it to a line or two of plain, simple language:
 what you were asked, what you found or did, and what it means. Give file paths for
 the detail rather than pasting it.
+Work that ships has a default shape: a branch named for your workspace, push it,
+open the pull request, and put its URL in your summary. Merging is not part of it —
+merging needs Andrew's explicit approval, there is no merge verb, and no agent
+merges without asking first, so finished work waiting on that approval is finished
+work you stop and ask about.
 To delegate: `sb delegate "<task>" --role <role>` spawns a child that runs
 independently; do NOT wait for it, end your turn and you will be poked when it
 reports. `sb status` lists your children, and `sb cleanup [names]` closes finished
 ones beneath you — closing costs only the pane: session, summary, messages and
 transcript survive, and `sb restore` brings an agent back.
-Stop and get a human if a tool fails twice, if an instruction is ambiguous, or if you
-are about to do work you were told to delegate. Never work around a broken tool.
+Some ways of working are written down rather than left to you: `sb presets` lists
+them, `sb presets <name>` prints one, and `sb presets <name> --apply` pastes it into
+your own session to work from. Read one before improvising something similar.
+Stop and get a human if you hit a genuine, big, behaviour-changing design question;
+if you are blocked on running something, or a tool fails twice; if you were told to
+block; if an instruction is ambiguous; if the human is already going back and forth
+with you and this is the next turn of it; or if the work is finished and needs
+Andrew's input or approval to land — an open pull request waiting on a merge is
+exactly that case. Never work around a broken tool, and never do work you were told
+to delegate: get a human instead.
 `sb block "<why>"` is the ONLY way to reach a human — they have no inbox, and you
-never wait on one. Two steps, in this order: write the whole thing as the last
-message in your own chat — what you were asked, where you are, and the numbered
-questions with a recommended answer — because THAT is what they read, and then call
+never wait on one. Anything a human reads is concise and skimmable: prefer bullets,
+short lists and nested lists to paragraphs, break into sections where it helps
+without overdoing the spacing, and say what you did, then what the result is, then
+your questions, numbered, each with a recommended answer. Two steps, in this order:
+write the whole thing as the last message in your own chat — what you were asked,
+where you are, and those numbered questions — because THAT is what they read, and
+then call
 `sb block` with ONE short line naming what you are waiting for. The `<why>` is
 bookkeeping for the board and is not delivered to anyone; a reason long enough to be
 the message is refused, and shortening it is not the fix. Blocking ends your turn and

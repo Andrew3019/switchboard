@@ -207,8 +207,14 @@ def build_parser() -> argparse.ArgumentParser:
     # on demand the only way to reach a procedure was to be spawned with it already
     # attached, paying its length on every such spawn forever. Read-only, load level 1, no
     # plugin import: safe for an agent to run mid-turn.
-    pr = cmd("presets", help="list available presets, or print one")
+    pr = cmd("presets", help="list available presets, print one, or apply one to yourself")
     pr.add_argument("name", nargs="?", help="print this preset instead of listing")
+    # The third parameter DESIGN-TRUTH.md:292-295 asks for, next to list and read: applying
+    # pastes the preset into the caller's OWN session, the same path as any other message,
+    # so it arrives tagged and durable rather than as command output. No confirmation step
+    # and no dry run — an agent that types this has already decided.
+    pr.add_argument("--apply", action="store_true",
+                    help="paste this preset into your own session instead of printing it")
     # REMAINDER, so the top-level parser stays static and unbreakable by anything on
     # disk. Registering plugin commands here would mean importing plugin code to print
     # `sb --help` — and `_tier_help` above already has to wrap a config read in a bare
@@ -906,6 +912,14 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "presets":
         if args.name:
             try:
+                if args.apply:
+                    # The text goes to the caller's own session, so what is printed here is
+                    # a receipt, not the preset: printing both would deliver it twice, once
+                    # as output and once as the message that is the point of the verb.
+                    mid = b.apply_preset(args.name, me=me)
+                    _emit(args, f"applied preset '{args.name}' to this session",
+                          {"preset": args.name, "applied": True, "message_id": mid})
+                    return 0
                 path, body = presets_mod.text(b.repo, args.name)
             except KeyError:
                 # Name the alternatives rather than just refusing: the caller is an agent
@@ -917,6 +931,14 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             _emit(args, body.rstrip("\n"),
                   {"preset": args.name, "path": str(path), "text": body})
             return 0
+        if args.apply:
+            # Listing is what a bare `sb presets` does, and applying "all of them" is not a
+            # thing. Refused here rather than silently listing, because the caller asked
+            # for a side effect and would otherwise be told nothing happened by being shown
+            # something that looks like success.
+            print("sb: --apply needs a preset name — `sb presets` lists them",
+                  file=sys.stderr)
+            return 2
         found = presets_mod.available(b.repo)
         every, per_role = presets_mod.bindings(b.repo)
         lines = []

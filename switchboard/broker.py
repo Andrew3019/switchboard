@@ -3005,6 +3005,14 @@ class Broker:
         prompts = [
             self._protocol(),
             self._say("spawn.identity", name=name, role=role, parent=me),
+            # Generated from the role table, never a literal list (DESIGN-TRUTH.md:107-110).
+            # `self.roles` is already the merged shipped + repo set, read once per broker, so
+            # a repo's own `.switchboard/roles/*.md` shows up here with nothing edited.
+            # Sorted for a stable prompt: the merge order is dict order, and a spawn prompt
+            # that reshuffles between runs is a diff nobody can read. One flat clause because
+            # herdr refuses a newline in any agent argument — if a repo ever defines enough
+            # roles for this to run long, this is the line that needs a limit.
+            self._say("spawn.roles", roles=", ".join(sorted(self.roles))),
         ]
         if ws:
             prompts.append(self._say("spawn.workspace", workspace=ws, path=where))
@@ -3280,6 +3288,64 @@ class Broker:
         instead (`sb status --needs-me`), rather than by an empty list here.
         """
         return store.unread_for(self.db, me or self.whoami(), mark=not peek)
+
+    def apply_preset(self, name: str, *, me: Optional[str] = None) -> int:
+        """Paste a preset into the caller's own session — `sb presets <name> --apply`.
+
+        DESIGN-TRUTH.md:292-295: "Picking a preset should inject a prompt: sb pastes it in,
+        the same path as any other message." So it IS a message: a row in the store, the
+        `[sb: from <name>]` tag, and `_ring` putting it in the pane. Printing the text
+        instead would have been the easy version and a different thing — command output is
+        something an agent read, a message is something it was told, and only the second one
+        is durable, visible in `sb inspect`, and framed as an instruction.
+
+        Sender and recipient are both the caller, which is the one shape no other verb
+        produces. Checked rather than assumed, since `tell` has no path to it: the messages
+        table has no constraint either column would violate, `unread_for` is a plain
+        `to_agent=?` scan and so would hand the text back a second time through `sb inbox` —
+        which is why the row is marked collected the moment delivery is confirmed, exactly
+        as `_interrupt` does for the same reason. The one live side effect is
+        `put_message`'s `awaiting_task=0`: an agent that applied a preset while still
+        holding its placeholder task would be recorded as having been given work. That is
+        arguably true — it has been given something — and the case is nearly unreachable,
+        since an agent with no task yet has nothing to pick a procedure for.
+
+        NEXT_TURN, not INTERRUPT: applying a procedure is not changing course, and the
+        caller is mid-turn running this very command. The text lands at the next tool-call
+        boundary, which is where the agent will read it before deciding what to do next.
+        No confirmation step — Andrew's ruling ("no. autonomous. i trust agents have enough
+        reasoning to invoke it where appropriate").
+
+        Raises `KeyError` for an unknown preset, so the CLI can name the alternatives the
+        same way the read path already does.
+        """
+        me = me or self.whoami()
+        # The name is resolved BEFORE the caller is, so that a typo is reported as a typo
+        # whoever typed it. The other order sent a human who misspelled a preset to `sb
+        # presets <misspelling>`, which fails too.
+        path, _ = presets_mod.text(self.repo, name)
+        if me == HUMAN:
+            # A person has no session sb can paste into. `sb presets <name>` already prints
+            # it for them, which is the whole of what applying would mean here.
+            raise ValueError(
+                "`--apply` pastes a preset into an AGENT's own session; you have none. "
+                f"`sb presets {name}` prints it."
+            )
+        # `flatten`, not the prose `text()` returned: this is going out as an agent
+        # argument, and herdr refuses a newline in one. Same rule, same function, as the
+        # copy a spawn is born with.
+        line = validate.line(presets_mod.flatten(path.read_text()), f"preset '{name}'",
+                             max_len=validate.MAX_PROMPT)
+        body = f"{tag(me)} {self._say('notify.preset', name=name, text=line)}"
+        mid = store.put_message(self.db, from_agent=me, to_agent=me, kind="tell", body=body)
+        if self._ring(me, body, mode=NEXT_TURN):
+            store.mark_collected(self.db, mid)
+        # A ring that did not land leaves the row undelivered and unread on purpose: it is
+        # then an ordinary queued message, re-rung by `flush_pending`, and the caller reads
+        # it out of `sb inbox` instead. Marking it collected regardless would file a
+        # procedure as applied that nobody ever saw.
+        store.log_event(self.db, kind="preset_applied", agent=me, preset=name)
+        return mid
 
     # -- status ----------------------------------------------------------
 

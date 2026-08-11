@@ -169,10 +169,12 @@ class ShippedDefaultsTest(_Layered):
         invisible until someone reads a transcript."""
         filled = {
             "spawn.identity": {"name": "a", "role": "b", "parent": "c"},
+            "spawn.roles": {"roles": "worker, qa"},
             "spawn.workspace": {"workspace": "w", "path": "/p"},
             "spawn.start_task": {},
             "notify.mail": {}, "notify.child_done": {},
             "notify.interrupt": {"text": "t"},
+            "notify.preset": {"name": "n", "text": "t"},
         }
         for key, fields in filled.items():
             with self.subTest(prompt=key):
