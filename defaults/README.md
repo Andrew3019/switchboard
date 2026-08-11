@@ -11,20 +11,33 @@ files are the opposite of internal.
 
 ## Layering
 
-For any repo, two layers, most general first:
+For any repo, three layers, most general first:
 
-    defaults/                 (this directory — shipped, never edited per repo)
-    <repo>/.switchboard/      (that repo's own)
+    defaults/                    (this directory — shipped, never edited per repo)
+    <repo>/.switchboard-shared/  (that repo's own, committed — presets only)
+    <repo>/.switchboard/         (that checkout's own, never committed)
 
-`defaults/` alone is a complete, working configuration: switchboard runs in a repo with no
-`.switchboard/` at all. A repo's own layer only says what differs.
+`defaults/` alone is a complete, working configuration: switchboard runs in a repo with
+neither of the other two. A repo's own layers only say what differs.
+
+The middle layer covers **presets only** — `presets.toml` and `presets/<name>.md`, under
+the same key names as the local layer. It exists because `.switchboard/` cannot travel: it
+is gitignored in switchboard's own repo, and in a fleet worktree it is a symlink git refuses
+to track through, so a repo's house rules for its own agents reached nobody who cloned it.
+Since cloning is how a verification run is isolated, the clones doing the riskiest work were
+precisely the ones with no rules in them. Nothing else is layered there because nothing else
+needed to travel; a small layer that is complete for what it covers beats a wide one that is
+half wired up.
+
+Which of the two a file goes in is one question: is this true of the REPO, or of this
+checkout on this machine? House rules, committed. Your own scratch preset, local.
 
 | shipped                     | repo override                          |
 | --------------------------- | -------------------------------------- |
 | `defaults/roles/<name>.md`  | `.switchboard/roles/<name>.md`, `.switchboard/roles.toml` |
 | `defaults/models.toml`      | `~/.config/switchboard/models.toml`, then `.switchboard/models.toml` |
-| `defaults/presets.toml`     | `.switchboard/presets.toml`            |
-| `defaults/presets/<name>.md`| `.switchboard/presets/<name>.md`       |
+| `defaults/presets.toml`     | `.switchboard-shared/presets.toml`, then `.switchboard/presets.toml` |
+| `defaults/presets/<name>.md`| `.switchboard-shared/presets/<name>.md`, then `.switchboard/presets/<name>.md` |
 | `defaults/plugins.toml`     | `.switchboard/plugins.toml`            |
 | `defaults/plugins/<name>/`  | `.switchboard/plugins/<name>/`         |
 | `defaults/protocol.md`      | `.switchboard/protocol.md`             |
@@ -32,7 +45,8 @@ For any repo, two layers, most general first:
 | `defaults/settings.toml`    | `.switchboard/settings.toml`           |
 
 Preset *files* are layered too — `defaults/presets/<name>.md`, replaced by name by a repo's
-`.switchboard/presets/<name>.md`. This reverses an earlier decision, and the reversal is
+`.switchboard-shared/presets/<name>.md` and then by its `.switchboard/presets/<name>.md`.
+This reverses an earlier decision, and the reversal is
 worth stating rather than quietly reflecting: preset files were originally *not* shipped, on
 the grounds that what switchboard's own agents need has no bearing on another repo's. That
 held until `defaults/presets.toml` started shipping bindings, at which point a fresh clone

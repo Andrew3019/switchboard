@@ -5,13 +5,27 @@
 # tables merge, so setting `[limits] text` leaves every other limit alone. Arrays JOIN
 # rather than replace; put `"!reset"` first to replace instead.
 #
-# One exception: `[paths] repo_dir` is read from THIS file only. It is the name of the
-# directory the repo's own settings are read from, so a repo cannot use it to move itself.
+# Two exceptions: `[paths] repo_dir` and `[paths] shared_dir` are read from THIS file only.
+# They name the directories a repo's own settings are read from, so a repo cannot use them
+# to move itself.
 
 
 [paths]
-# The repo's own configuration layer, relative to the repo root.
+# The repo's own configuration layer, relative to the repo root. Per MACHINE: gitignored in
+# switchboard's own repo, and in a fleet worktree it is a symlink to the main checkout, so
+# git cannot track through it either way.
 repo_dir = ".switchboard"
+
+# The repo's COMMITTED configuration layer, between the shipped one and the local one.
+# Ordinary tracked files, so a fresh clone has them and every worktree gets its own real
+# copy. This is where a repo puts what everyone working on it should get — its house rules
+# — as against `.switchboard/`, which is what this checkout alone wants.
+#
+# Presets only, for now: `presets.toml` and `presets/<name>.md` within it, read under the
+# same key names as the local layer. Nothing else is layered here, because nothing else
+# needed to travel and a config layer that only half exists is worth less than a small one
+# that is complete for what it covers.
+shared_dir = ".switchboard-shared"
 
 # Within it. Roles may be a single TOML file, a directory of markdown files, or both —
 # roles.toml first, then roles/, so the more specific form wins field by field.

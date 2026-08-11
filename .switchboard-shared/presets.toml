@@ -1,0 +1,25 @@
+# This repo's own preset bindings — the COMMITTED layer.
+#
+# Read between `defaults/presets.toml` and `.switchboard/presets.toml`, and joined with
+# both, so a machine-local binding adds to these rather than replacing them. Same file
+# format and same keys as either of those; see `defaults/README.md` for the layering and
+# the `"!reset"` escape hatch.
+#
+# What belongs here rather than in `.switchboard/presets.toml`: anything that is true of
+# the REPO rather than of one checkout of it. `.switchboard/` is gitignored and is a
+# symlink in every worktree, so nothing in it reaches a clone — and a fresh clone is
+# exactly where our agents do the riskiest work, because cloning is how we isolate a
+# verification run.
+
+# Applied to every agent, whatever its role and whether or not its parent asked.
+#
+# `house-rules` is this repo's working rules — how to verify, what to test, which documents
+# to trust, how work lands. Bound in `all` rather than offered as `--with house-rules`
+# because a rule a parent has to remember is a rule that gets dropped: `all` is the only
+# binding in the system no caller has to know about.
+all = ["house-rules"]
+
+# Per-role additions, appended to `all`. Nothing yet: every per-role binding this repo had
+# turned out to be a fact about the ROLE rather than about the repo, and lives in
+# `defaults/presets.toml`.
+[roles]
