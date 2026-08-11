@@ -174,6 +174,48 @@ touched; the production store was only ever read, read-only.
 
 ---
 
+## `./acceptance/accept.py phase5-structure` — three runs, verbatim
+
+**Run 1**, before the two fixes it caught:
+
+      1  a cold fan-out of six starts six         PASS   6/6 took their task and reported into 6 new checkouts, 0 spawns misreported   [48s]
+      2  a child's report wakes its parent        FAIL   the child never reported to its parent   [4m32s]
+      3  a block holds until the human answers    FAIL   the sibling never sent its message   [4m48s]
+      4  a sweep names what it refused            PASS   closed 1, refused 1 and said why: 'refused sbyo18xs4-k: blocked, not finished — it has not reported an end'   [1m09s]
+
+    2 of 4 FAILED — the fleet is not sound   (4m56s)
+
+Neither was a flake, and both were worth having. Check 2's parent is a `worker` whose whole
+job is to delegate — refused by 5.3, which reads from outside as "the child never
+reported"; the fixture now asks for `--role orchestrator`. Check 3 is two agents the human
+spawned directly, i.e. two parentless unstamped roots, and its `sb tell` was refused by a
+boundary rule that should never have separated them; that is the `top_of` fix above.
+
+**Run 2**, after both:
+
+      1  a cold fan-out of six starts six         PASS   6/6 took their task and reported into 6 new checkouts, 0 spawns misreported   [16m36s]
+      2  a child's report wakes its parent        PASS   deferred while the parent worked, then delivered by the doorbell 42s later; the parent woke and read it   [17m33s]
+      3  a block holds until the human answers    FAIL   the agent could not be spawned   [15m51s]
+      4  a sweep names what it refused            PASS   closed 1, refused 1 and said why: 'refused sbk6njm74-k: blocked, not finished — it has not reported an end'   [50s]
+
+    1 of 4 FAILED — the fleet is not sound   (17m39s)
+
+Check 3's failure here is the known spawn-delivery flake, named as such in the brief:
+`herdr [task_undelivered] sbk6njm73-b started, and its task could not be got into it`. The
+run took 17m39s against 4m56s for run 1 — the machine was loaded, which is the condition
+the flake is known to appear under. Re-run, as the brief instructs.
+
+**Run 3**, unchanged code:
+
+      1  a cold fan-out of six starts six         PASS   6/6 took their task and reported into 6 new checkouts, 0 spawns misreported   [1m28s]
+      2  a child's report wakes its parent        PASS   deferred while the parent worked, then delivered by the doorbell 49s later; the parent woke and read it   [2m14s]
+      3  a block holds until the human answers    PASS   held 52s against a sibling, released by the human's answer and read it   [1m45s]
+      4  a sweep names what it refused            PASS   closed 1, refused 1 and said why: 'refused sbn3ntk84-k: blocked, not finished — it has not reported an end'   [1m06s]
+
+    all 4 pass — the fleet is sound   (2m20s)
+
+---
+
 ## Live-fleet audit — who the 5.3 refusal would cut off
 
 Read-only query against `/Users/andrew/Code/switchboard/.git/agentflow/state.db`, 252 rows,
