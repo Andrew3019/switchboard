@@ -179,9 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
     ss.add_argument("--active", "--live", dest="live", action="store_true",
                     help="hide finished agents")
     ss.add_argument("--needs-me", dest="needs_me", action="store_true",
-                    help="only agents that are blocked, at a prompt, or holding unread mail")
+                    help="only agents that are blocked, at a prompt, stalled, or holding "
+                         "unread mail")
+    # A human has no subtree — `_subtree` reads `human` as every root and everything under
+    # it, so the flag filters nothing for them. Says that rather than "for a human: every
+    # agent", which read as an invitation to use this as their view; theirs is `sb board`.
     ss.add_argument("--mine", action="store_true",
-                    help="only your own subtree (for a human: every agent)")
+                    help="only your own subtree (a human has no subtree: every agent is "
+                         "theirs, and `sb board` is their view of them)")
     # Not a filter, unlike the three above: they drop rows and say so in `hidden`, this
     # only stops fully-archived subtrees being drawn as one line each. `--json` is
     # unaffected either way and always carries every row.
@@ -830,12 +835,15 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "inbox":
         if me == HUMAN:
             # A person has no mailbox — an agent that needs you blocks instead, and the
-            # block is a row in `sb status --needs-me` until you answer it. Saying so
-            # beats printing "(no new messages)", which reads as "nothing needs you" and
-            # is a different claim entirely.
+            # block waits on the board until you answer it. Saying so beats printing
+            # "(no new messages)", which reads as "nothing needs you" and is a different
+            # claim entirely. The board, not `sb status`: `sb board` is the human's
+            # surface (DESIGN-TRUTH.md), and a blocked agent is a marked row there
+            # carrying its reason (`board.wants_you`, `board.note`).
             _emit(args,
-                  "you have no inbox — agents that need you BLOCK, and a block waits for "
-                  "you in `sb status --needs-me` (answer with `sb tell <agent> \"...\"`)",
+                  "you have no inbox — agents that need you BLOCK, and a blocked agent "
+                  "waits on `sb board` as a marked row with its reason (answer with "
+                  "`sb tell <agent> \"...\"`)",
                   {"messages": [], "human": True})
             return 0
         msgs = b.inbox(me=me, peek=args.peek)
@@ -862,8 +870,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         b.block(args.why, me=me)
         # Says WHAT they read, not just that they were told. The old note ("they will see
         # it") let a caller believe the reason was the delivered message, which is the
-        # misuse validate.reason now refuses.
-        _emit(args, "blocked — your reason marks the row in `sb status --needs-me` until "
+        # misuse validate.reason now refuses. "The board", not `sb board`: this is read by
+        # an agent, and the verb is deliberately not part of an agent's vocabulary (see
+        # the human-only refusal in `board` above, and the shipped prompts, which say
+        # "a board row" and never name the command).
+        _emit(args, "blocked — your reason marks your row on the human's board until "
                     "they answer; what they actually read is your own chat, so the full "
                     "question belongs there", {"agent": me})
         return 0

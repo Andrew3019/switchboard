@@ -1124,16 +1124,22 @@ def _attention(snap: Snapshot) -> list[str]:
 
     needs = snap.needs_human
     if needs:
-        # This IS the human's inbox. There is no other one: an agent that needs a person
-        # blocks, and a block is a row here until somebody answers it.
+        # Not the human's inbox — `sb board` is what Andrew watches, and a blocked agent
+        # is a marked row there (DESIGN-TRUTH.md: "`sb status` is not for Andrew — only
+        # `sb board` is"). This list is for an agent reading its own cohort, which is why
+        # the rows name the agent rather than addressing the reader as the one who answers.
         w = max(len(a.name) for a in needs)
         out.append("")
         out.append("NEEDS YOU")
         for a in needs:
             if a.blocked:
+                # Says whose answer counts: only the human's `tell` clears a block
+                # (`Broker.tell` passes `answer=(me == HUMAN)`). Another agent's mail is
+                # written and then held, so telling one without that caveat sends an agent
+                # off to unblock something it cannot unblock.
                 why = a.blocked_why or "no reason recorded"
                 out.append(f"  {a.name:<{w}}  blocked: {why[:70]}"
-                           f"  →  sb tell {a.name} \"...\"")
+                           f"  →  the human answers it: sb tell {a.name} \"...\"")
             elif a.at_prompt:
                 out.append(f"  {a.name:<{w}}  waiting at a prompt in its own TUI"
                            f"  →  sb inspect {a.name}")
@@ -1172,12 +1178,24 @@ def _attention(snap: Snapshot) -> list[str]:
         out.append("mid-turn (`agent prompt` interleaves), and released when it goes idle.")
         out.append("Mail an agent read of its own accord is never counted here, however we")
         out.append("came to ring — it is already in front of it.")
+        # A blocked agent is the one case where "when it goes idle" is not merely late but
+        # wrong: `_ring`/`flush_pending` hold its mail on `_is_blocked`, and only the
+        # human's own `tell` lifts that. Said here rather than left to the reader, because
+        # a row that reads "waiting, blocked" under the sentence above looks like something
+        # that will resolve itself.
+        blocked = [a for a in pending if a.blocked]
+        if blocked:
+            out.append("A blocked agent is the exception: its mail is held until the human")
+            out.append("answers the block, not until it goes idle. Answering releases it.")
         for a in pending:
             out.append(f"  {a.name:<{w}}  {a.undelivered} waiting, "
                        f"oldest {fmt_age(a.undelivered_age)}, "
                        f"{'still working' if a.state in RUNNING and not a.stalled else a.state}")
         out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; the doorbell rings when "
                    f"the agent next goes idle")
+        if blocked:
+            out.append(f"  {'':<{w}}  →  for a blocked one, when the human answers: "
+                       f"sb tell <name> \"...\"")
 
     drift = [a for a in snap.agents if a.stalled or a.gone]
     if drift:
@@ -1386,9 +1404,19 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
         out.append("")
         out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it, "
                    f"never read (oldest {fmt_age(a.undelivered_age)})")
-        out.append("  The doorbell is held while an agent is mid-turn and released when it")
-        out.append("  goes idle; until then this agent does not know these exist. Anything")
-        out.append("  it has already read is excluded — every row below has `read: false`.")
+        if a.blocked:
+            # This agent is blocked, so the generic sentence below is false for it: its
+            # mail is held on `_is_blocked` in `_ring`/`flush_pending` and nothing but the
+            # human's `tell` releases it. Going idle is not a state it passes through —
+            # `block` stopped reporting herdr state at all.
+            out.append("  This agent is blocked, so its mail is held until the human")
+            out.append("  answers the block — not until it goes idle. Until then it does")
+            out.append("  not know these exist. Anything it has already read is excluded —")
+            out.append("  every row below has `read: false`.")
+        else:
+            out.append("  The doorbell is held while an agent is mid-turn and released when it")
+            out.append("  goes idle; until then this agent does not know these exist. Anything")
+            out.append("  it has already read is excluded — every row below has `read: false`.")
         for m in d.undelivered:
             out.append(f"  [{m['id']}] from {m['from']}: {clip(m['body'], 90)}")
 
