@@ -2,13 +2,9 @@
 
 Six verbs for agents (`delegate`, `tell`, `inbox`, `done`, `block`, `status`), a
 few more for the human (`init`, `doctor`, `cleanup`, `restore`, `inspect`,
-`wait`, `log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
+`log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
 than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
 says what this repo has.
-
-`wait` is the one verb that is *only* for a human: an agent that blocks on a child is
-burning a turn to do what the doorbell already does for free (see broker.done). It says so
-in its own help, because that is where anyone about to misuse it is looking.
 
 Every command takes `--json`, on either side of the subcommand, so wrapping this in an MCP
 server later is mechanical (C13). It was global-only for a while, which cost a QA run its
@@ -109,9 +105,6 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("task", nargs="?", help="optional first instruction")
     st.add_argument("--name", help="name it — and, if that name is already yours, "
                                    "return to it instead of starting another")
-    st.add_argument("--no-focus", dest="focus", action="store_false")
-    st.add_argument("--no-board", dest="board", action="store_false",
-                    help="do not open the clickable board beside it")
 
     # Hidden on purpose. The board is a human's screen, and `sb` is the vocabulary
     # agents are handed — see the refusal in main(). SUPPRESS keeps it out of
@@ -147,8 +140,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="join this EXISTING workspace instead of working where you are "
                         "(open one with: sb workspace new <name>)")
     d.add_argument("--model", help=_tier_help())
-    d.add_argument("--keep", action="store_true", help="do not auto-close when finished")
-    d.add_argument("--ephemeral", action="store_true", help="close as soon as it finishes")
 
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
@@ -252,26 +243,11 @@ def build_parser() -> argparse.ArgumentParser:
         "cleanup", help="close finished agents",
         description="With no name, closes every finished agent in your subtree (for a "
                     "human: all of them). Naming agents closes those instead, and a name "
-                    "also means you want it closed whatever disposition it was spawned "
-                    "with.")
+                    "also means you want it closed whatever state it is in.")
     c.add_argument("name", nargs="*", help="specific agents to close")
-    # `--all-idle` is the older spelling and stays forever: it is in scripts and in muscle
-    # memory. One dest, so the two can never disagree. The newer name is the honest one —
-    # this has never closed agents by idleness, only agents that FINISHED, and the old
-    # name promised a sweep by idleness that would close an agent mid-turn.
-    c.add_argument("--include-kept", "--all-idle", dest="include_kept", action="store_true",
-                   # No role carries a disposition any more — it is set per spawn by
-                   # `sb delegate --keep` / `--ephemeral` and stored on the agent. The help
-                   # said "whose role says keep" long after roles stopped saying anything.
-                   help="also close finished agents that were spawned to be kept")
     c.add_argument("--force", action="store_true",
                    help="close a NAMED agent whatever state it is in, unread mail and all "
                         "(the escape hatch for one that is genuinely stuck)")
-    # Its own flag rather than a corner of --force: --force is you overriding facts about
-    # the agent you named, and this overrides a fact about agents you did not name.
-    c.add_argument("--leave-children", action="store_true",
-                   help="close an agent whose children are still working, leaving them "
-                        "running with no pane above them (--force does not do this)")
     c.add_argument("--dry-run", action="store_true")
 
     w = cmd("workspace", help="workspaces (worktree + herdr workspace + lead)")
@@ -286,9 +262,6 @@ def build_parser() -> argparse.ArgumentParser:
     wn.add_argument("--name", "--agent", dest="agent", help="name for the lead agent")
     wn.add_argument("--base", default=broker_mod.BASE_BRANCH,
                     help="branch to fork the worktree from")
-    wn.add_argument("--focus", action="store_true")
-    wn.add_argument("--no-board", dest="board", action="store_false",
-                    help="do not open the clickable board beside the lead")
 
     wsub.add_parser(
         "list", parents=[common],
@@ -330,19 +303,6 @@ def build_parser() -> argparse.ArgumentParser:
                      help="lines of terminal output to show")
     ins.add_argument("--events", type=int, default=status_mod.DEFAULT_EVENTS,
                      help="how many recent events to include")
-
-    wt = cmd(
-        "wait", help="block until an agent reaches a state (for HUMANS, not agents)",
-        description="For a human at a terminal, or a shell script. Agents must NOT use "
-                    "this: end your turn instead and you will be poked the moment a child "
-                    "reports — waiting burns a turn to do what the doorbell does free. "
-                    "Exits non-zero if the timeout runs out or the agent finishes some "
-                    "other way.")
-    wt.add_argument("name")
-    wt.add_argument("--for", dest="until", default="done", choices=status_mod.WAIT_STATES,
-                    help="state to wait for (default: done)")
-    wt.add_argument("--timeout", type=int, default=status_mod.WAIT_TIMEOUT,
-                    help=f"seconds (default: {status_mod.WAIT_TIMEOUT})")
 
     lg = cmd("log", help="recent events (debugging)")
     lg.add_argument("--agent")
@@ -439,10 +399,6 @@ def _validate(args) -> None:
         args.name = validate.agent_name(args.name)
         args.n = validate.positive_int(args.n, "-n")
         args.events = validate.positive_int(args.events, "--events")
-
-    elif cmd == "wait":
-        args.name = validate.agent_name(args.name)
-        args.timeout = validate.positive_int(args.timeout, "--timeout")
 
     elif cmd == "cleanup":
         args.name = [validate.agent_name(n) for n in args.name]
@@ -774,8 +730,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the only thing left standing between "always start another" and losing track of
         # the ones you have: nothing here reuses them, so the way back has to be said.
         others = [] if args.name else b.running_tops()
-        name = b.start(name=args.name, task=args.task, focus=args.focus,
-                       board=args.board)
+        name = b.start(name=args.name, task=args.task)
         also = (f"\n  still running: {', '.join(others)}"
                 f" — back to one with: sb start --name {others[-1]}") if others else ""
         _emit(args, f"orchestrator '{name}' ready in its own workspace — switch to it, "
@@ -784,7 +739,6 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "delegate":
-        cleanup = "keep" if args.keep else ("close" if args.ephemeral else None)
         # `--with` goes down as NAMES. Resolution and layering live in the broker's
         # `_resolve_bindings`, because this branch is not the only way a spawn happens:
         # `sb workspace new` and `sb start` reach `delegate` directly, and while the
@@ -796,8 +750,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           name=args.name or _derived_name(db, args.role),
-                          model=args.model, with_=args.with_,
-                          cleanup=cleanup, me=me, **join)
+                          model=args.model, with_=args.with_, me=me, **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
         # agent is plainly running (this note), or raised. The middle one is a name plus a
@@ -997,8 +950,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "cleanup":
-        names = b.cleanup(args.name, include_kept=args.include_kept, force=args.force,
-                          dry_run=args.dry_run, leave_children=args.leave_children, me=me)
+        names = b.cleanup(args.name, force=args.force, dry_run=args.dry_run, me=me)
         verb = "would close" if args.dry_run else "closed"
         text = f"{verb}: {', '.join(names) or '(nothing)'}"
         # Named agents always get every reason, because naming one is asking about it in
@@ -1039,7 +991,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "workspace":
         r = b.workspace_new(args.name, task=args.task, role=args.role, agent=args.agent,
-                            base=args.base, focus=args.focus, board=args.board, me=me)
+                            base=args.base, me=me)
         _emit(args, "\n".join(f"  {k}: {v}" for k, v in r.items()), r)
         return 0
 
@@ -1056,12 +1008,6 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         d = status_mod.inspect(db, h, args.name, lines=args.n, events=args.events)
         _emit(args, status_mod.render_detail(d), d.as_dict())
         return 0
-
-    if cmd == "wait":
-        r = status_mod.wait_for(db, h, args.name, until=args.until, timeout=args.timeout)
-        _emit(args, r.render(), r.as_dict())
-        # Non-zero so `sb wait w1 && ...` in a shell script means what it looks like.
-        return 0 if r.ok else 1
 
     if cmd == "log":
         rows = store.recent_events(db, agent=args.agent, limit=args.n)[::-1]

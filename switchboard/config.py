@@ -378,7 +378,7 @@ def flag(dotted: str, repo: Optional[Path] = None) -> bool:
 
 
 def roles(repo: Optional[Path] = None) -> dict[str, dict]:
-    """Every role, merged field by field. `{name: {model, cleanup, prompt}}`.
+    """Every role, merged field by field. `{name: {model, prompt}}`.
 
     Three sources, most general first — the shipped markdown, the repo's single TOML file,
     then the repo's own markdown directory:
@@ -388,7 +388,7 @@ def roles(repo: Optional[Path] = None) -> dict[str, dict]:
         <repo>/.switchboard/roles/*.md
 
     Field by field is the point: a repo that says `[reviewer] model = "strong"` keeps the
-    reviewer's cleanup disposition and its prompt.
+    reviewer's prompt.
     """
     out = _roles_from_dir(defaults_dir() / "roles")
     d = repo_dir(repo)

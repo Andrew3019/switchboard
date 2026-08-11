@@ -413,7 +413,7 @@ class CleanupResult(list):
 
     It exists because `closed: (nothing)` is not a report. Every gate in `cleanup` used to
     `continue` in silence except the live-descendants one, so an agent that named an agent
-    outright and got a blank line back had no way at all to learn which of five rules had
+    outright and got a blank line back had no way at all to learn which rule had
     fired — and `--force`, the documented way through, is exactly the wrong thing to reach
     for before you know that.
 
@@ -422,8 +422,8 @@ class CleanupResult(list):
     rows that are already closed and agents that are simply still working: naming those
     is a list of the fleet, it grows with the fleet, and nobody reading it learns
     anything. Every other gate held back a row a human might have meant — blocked,
-    `failed` with a pane herdr still has, mail it has not read, live children underneath,
-    a kept role — and those are news whatever else the sweep did. `refused` keeps every
+    `failed` with a pane herdr still has, mail it has not read, live children
+    underneath — and those are news whatever else the sweep did. `refused` keeps every
     one of them and `--json` reports every one of them; `expected` only says which are
     not worth a line on their own.
     """
@@ -716,10 +716,7 @@ class Broker:
             pass                                      # not a git repo
         return self.repo
 
-    def start(
-        self, *, name: Optional[str] = None, task: Optional[str] = None,
-        focus: bool = True, board: bool = True,
-    ) -> str:
+    def start(self, *, name: Optional[str] = None, task: Optional[str] = None) -> str:
         """The one command worth remembering. Everything else, an agent does for you.
 
         Always a NEW orchestrator, in a new workspace of its own — a bare one, laid over
@@ -736,8 +733,8 @@ class Broker:
         """
         self._refuse_outside_main_checkout()
         if name:
-            return self._top(name, task, focus, board)
-        return self._top(self._next_top_name(), task, focus, board)
+            return self._top(name, task)
+        return self._top(self._next_top_name(), task)
 
     def _refuse_outside_main_checkout(self) -> None:
         """`sb start` belongs in the main checkout, and nowhere else.
@@ -786,8 +783,7 @@ class Broker:
         known = self._agent_states()
         return tops if known is None else [n for n in tops if n in known]
 
-    def _top(self, name: str, task: Optional[str], focus: bool,
-             board: bool = True) -> str:
+    def _top(self, name: str, task: Optional[str]) -> str:
         """Each top-level orchestrator gets its OWN herdr workspace.
 
         Not a worktree, and not the repo's main workspace: a top-level orchestrator does
@@ -827,7 +823,7 @@ class Broker:
                 # DELETED its row: the session id went with it, so `restore` had nothing
                 # to restore, and `whoami` resolved the still-running agent to HUMAN.
                 store.drop_agent(self.db, name)
-                return self._top(name, task, focus, board)
+                return self._top(name, task)
             if a["session_id"] and not self._alive_or_unknown(name):
                 self.restore(name)
             elif task:
@@ -836,9 +832,8 @@ class Broker:
                 # else's; hand it the work, as `_joined_lead` does.
                 self.tell([name], task, me=HUMAN)
             store.log_event(self.db, kind="start", agent=name, created=False)
-            if board:
-                self._open_board(name, a["pane_id"])
-            self._focus(name, focus)
+            self._open_board(name, a["pane_id"])
+            self._focus(name)
             return name
 
         pane, wsid = None, ""
@@ -855,18 +850,17 @@ class Broker:
 
         first, awaiting = self._first_task("spawn.start_task", task)
         self.delegate(first, role=MAIN, name=name,
-                      cleanup="keep", me=HUMAN, pane=pane,
+                      me=HUMAN, pane=pane,
                       workspace=name, workspace_id=wsid, cwd=str(self.repo),
-                      board=board, awaiting_task=awaiting)
+                      awaiting_task=awaiting)
         store.log_event(self.db, kind="start", agent=name, created=True, workspace=wsid)
-        if board:
-            # `delegate` has opened it already; this is the second, idempotent ask that
-            # covers a spawn whose split failed there. Read the pane back: when
-            # create_workspace failed, `pane` here is None and `delegate` fell back to
-            # a tab, whose pane only the row knows.
-            row = store.get_agent(self.db, name)
-            self._open_board(name, row["pane_id"] if row else pane)
-        self._focus(name, focus)
+        # `delegate` has opened it already; this is the second, idempotent ask that
+        # covers a spawn whose split failed there. Read the pane back: when
+        # create_workspace failed, `pane` here is None and `delegate` fell back to
+        # a tab, whose pane only the row knows.
+        row = store.get_agent(self.db, name)
+        self._open_board(name, row["pane_id"] if row else pane)
+        self._focus(name)
         return name
 
     def _here(self) -> Optional[str]:
@@ -1078,9 +1072,9 @@ class Broker:
         except Exception:
             pass
 
-    def _focus(self, name: str, focus: bool) -> None:
-        if not focus:
-            return
+    def _focus(self, name: str) -> None:
+        """`sb start` focuses what it started. Nothing else focuses, and nothing can ask
+        for it (DESIGN-TRUTH.md's "Focus as a flag")."""
         try:
             self.h.focus(name)
         except HerdrError as e:
@@ -1096,8 +1090,6 @@ class Broker:
         role: str = WORKSPACE_ROLE,
         agent: Optional[str] = None,
         base: str = BASE_BRANCH,
-        focus: bool = False,
-        board: bool = True,
         me: Optional[str] = None,
     ) -> dict:
         """Open the workspace called `name`, creating it only if it isn't there.
@@ -1112,10 +1104,13 @@ class Broker:
         you already are, which is how you get a visual boundary around a line of work
         without moving anywhere.
 
-        A board opens beside the lead whatever its role — every spawned agent gets one
-        now, and it is the small pane rather than half the screen, so a worker that runs
-        nobody pays a third of its width for a view of the tree it is part of.
-        `board=False` declines it, as `sb start --no-board` does.
+        A board opens beside the lead whatever its role — every spawned agent gets one,
+        and it is the small pane rather than half the screen, so a worker that runs
+        nobody pays a third of its width for a view of the tree it is part of. There is
+        no declining it: every sb-made view is split with the board.
+
+        Nothing focuses here. Only `sb start` focuses on spawn, and nothing can ask for
+        it (DESIGN-TRUTH.md's "Focus as a flag").
         """
         me = me or self.whoami()
         name = name or self._here()
@@ -1153,25 +1148,21 @@ class Broker:
                 self.tell([lead], task, me=me)
             store.log_event(self.db, kind="workspace_open", agent=lead,
                             workspace=name, created=False)
-            self._focus(lead, focus)
             return self._result(ws, lead, created=False)
 
-        created = self._spawn_lead(lead, ws, role=role, task=task, me=me, prior=row,
-                                   board=board)
+        created = self._spawn_lead(lead, ws, role=role, task=task, me=me, prior=row)
         store.log_event(self.db, kind="workspace_open", agent=lead,
                         workspace=name, created=created)
-        if board:
-            # A fresh lead already has its board from `delegate`; this idempotent second
-            # ask is what covers the leads that never reach it — one restored from a
-            # session, or one whose split failed there.
-            #
-            # Read the pane back rather than trusting `ws["pane_id"]`: `_spawn_lead` uses
-            # the workspace's root pane only when it is fresh, and opens a tab otherwise —
-            # so which pane the lead ended up in is a fact only the row has.
-            row = store.get_agent(self.db, lead)
-            self._open_board(lead, row["pane_id"] if row else ws["pane_id"],
-                             cwd=ws["path"] or None)
-        self._focus(lead, focus)
+        # A fresh lead already has its board from `delegate`; this idempotent second
+        # ask is what covers the leads that never reach it — one restored from a
+        # session, or one whose split failed there.
+        #
+        # Read the pane back rather than trusting `ws["pane_id"]`: `_spawn_lead` uses
+        # the workspace's root pane only when it is fresh, and opens a tab otherwise —
+        # so which pane the lead ended up in is a fact only the row has.
+        row = store.get_agent(self.db, lead)
+        self._open_board(lead, row["pane_id"] if row else ws["pane_id"],
+                         cwd=ws["path"] or None)
         return self._result(ws, lead, created=created)
 
     def join_workspace(self, name: str) -> dict:
@@ -2433,7 +2424,7 @@ class Broker:
         }
 
     def _spawn_lead(self, lead: str, ws: dict, *, role: str, task: Optional[str],
-                    me: str, prior, board: bool = True) -> bool:
+                    me: str, prior) -> bool:
         """Put a lead agent in the workspace. Returns whether we actually made one.
 
         Three shapes of `prior`, and they mean different things:
@@ -2465,10 +2456,10 @@ class Broker:
         first, awaiting = self._first_task("spawn.workspace_task", task)
         try:
             self.delegate(first, role=role,
-                          name=lead, cleanup="keep", me=me,
+                          name=lead, me=me,
                           workspace=ws["workspace"], branch=ws.get("branch"),
                           workspace_id=wsid,
-                          cwd=ws["path"] or None, pane=pane, board=board,
+                          cwd=ws["path"] or None, pane=pane,
                           awaiting_task=awaiting)
         except (AgentNameTaken, HerdrError) as e:
             # Two openers, one instant: the other won the name. Same name means the same
@@ -2518,7 +2509,7 @@ class Broker:
             cwd=(live.raw.get("cwd") or ws.get("path") or str(self.repo)),
             workspace=ws.get("workspace"), branch=ws.get("branch"),
             terminal_id=live.terminal_id,
-            pane_id=live.pane_id, cleanup="keep",
+            pane_id=live.pane_id,
         ):
             store.log_event(self.db, kind="adopt", agent=name,
                             workspace=ws.get("workspace"), pane=live.pane_id)
@@ -2965,14 +2956,12 @@ class Broker:
         name: Optional[str] = None,
         model: Optional[str] = None,
         with_: Sequence[str] = (),      # NAMES to bind (or literal lines) — see below
-        cleanup: Optional[str] = None,
         me: Optional[str] = None,
         workspace: Optional[str] = None,
         branch: Optional[str] = None,
         workspace_id: Optional[str] = None,     # "" is "there is none", not "work it out"
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
-        board: bool = True,
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
     ) -> str:
         me = me or self.whoami()
@@ -3071,7 +3060,7 @@ class Broker:
             # which is exactly why only a confirmed one goes down. A guess written here
             # is indistinguishable from a fact by every reader after it.
             workspace_id=(wsid if confirmed else None) or None,
-            pane_id=pane, cleanup=cleanup or r.cleanup, awaiting_task=awaiting_task,
+            pane_id=pane, awaiting_task=awaiting_task,
         )
         claimed = store.claim_agent(self.db, **claim)
         if not claimed and self._spawn_husk(name):
@@ -3119,16 +3108,15 @@ class Broker:
         store.mark_spawned(self.db, name)
         store.log_event(self.db, kind="delegate", agent=name, parent=me, role=role,
                         workspace=ws)
-        if board:
-            # EVERY agent opens with the tree beside it, not just the top-level
-            # orchestrator `sb start` makes: `delegate` is the one place every spawn
-            # passes through, so this is the one place the board can be opened without
-            # a second path to drift from the first. Split before the task is delivered,
-            # so the agent's first draw is already at its final width.
-            #
-            # The pane herdr actually put the agent in, not the one we asked for — the
-            # same value the row above was updated with.
-            self._open_board(name, agent.pane_id or pane, cwd=str(where))
+        # EVERY agent opens with the tree beside it, not just the top-level
+        # orchestrator `sb start` makes: `delegate` is the one place every spawn
+        # passes through, so this is the one place the board can be opened without
+        # a second path to drift from the first. Split before the task is delivered,
+        # so the agent's first draw is already at its final width.
+        #
+        # The pane herdr actually put the agent in, not the one we asked for — the
+        # same value the row above was updated with.
+        self._open_board(name, agent.pane_id or pane, cwd=str(where))
         # THE SPAWN IS NOT DONE UNTIL THE TASK IS IN. `agent start` retries and raises
         # loudly, but the first task used to go down as a bare `agent prompt` — one
         # unverified call that can paste without submitting or never arrive, after which
@@ -3437,16 +3425,15 @@ class Broker:
 
     # -- lifecycle -------------------------------------------------------
 
-    def cleanup(self, names: Sequence[str] = (), *, include_kept: bool = False,
+    def cleanup(self, names: Sequence[str] = (), *,
                 force: bool = False, dry_run: bool = False,
-                leave_children: bool = False,
                 me: Optional[str] = None) -> "CleanupResult":
         """Close agents. With no names, every finished one in the caller's scope.
 
         Safe to be aggressive: closing costs only the pane. Session, summary, messages
         and the on-disk transcript all survive, and `sb restore` brings the agent back.
 
-        Five gates, and which of them a caller may lift is the whole design:
+        Four gates, and which of them a caller may lift is the whole design:
 
         - **finished, and no unread mail it could still read.** A sweep never lifts these.
           Closing an agent mid-turn would strand whatever it was doing, and taking away
@@ -3458,21 +3445,18 @@ class Broker:
           own word; `failed` is `status._record_gone`'s inference from one `agent list`,
           and that call can be taken mid-spawn or against a herdr that hiccupped. So for
           a `failed` row we ask again, and a sweep never lifts it either.
-        - **the role's `cleanup` disposition.** `include_kept` lifts this one, and only
-          this one: it says "I mean the keepers too", not "close anything".
         - **everything.** `force` lifts all of it, and is only legal for agents named
           outright — it is the escape hatch for an agent that is genuinely stuck (its
           state never advanced, its name was lost by herdr, it holds mail it can never
           read) and that no sweep can therefore ever reach. Naming it IS the confirmation.
 
-        - **live descendants**, and `force` does NOT lift this one. See
-          `live_descendants` for the invariant. Every other gate is a fact about the
-          agent you named — its state, its mail, its role — and `--force` is you saying
-          you know that fact and mean it anyway. Live children are facts about agents you
-          did NOT name, and no flag about this agent gets to decide their fate. So the
-          gate takes its own flag, `leave_children`, which says the thing it does: close
-          the parent's pane, leave the children running. The other way out is to close
-          the subtree from the leaves up, which never breaks the invariant at all.
+        - **live descendants**, and nothing lifts this one — `force` does not, and there
+          is no flag that does. See `live_descendants` for the invariant. Every other
+          gate is a fact about the agent you named — its state, its mail — and `--force`
+          is you saying you know that fact and mean it anyway. Live children are facts
+          about agents you did NOT name, and no flag about this agent gets to decide
+          their fate. The way out is to close the subtree from the leaves up, which never
+          breaks the invariant at all.
 
           Named agents get a refusal before anything is closed, rather than a skip: you
           asked for this agent by name, so silence would be a lie. A sweep skips it the
@@ -3482,7 +3466,12 @@ class Broker:
         Every gate that holds a candidate back records its reason on the returned
         `CleanupResult.refused`, and logs `cleanup_refused`. A gate firing in silence is
         the bug this closes: `closed: (nothing)` told you the outcome and never the rule,
-        and the only remaining move was `--force`, which lifts all five at once.
+        and the only remaining move was `--force`, which lifts all it can at once.
+
+        Nothing writes `agents.cleanup` any more — the column and the gate below stay so
+        that a row written before the flags went keeps behaving exactly as it did (see
+        DESIGN-TRUTH.md's "`--keep`, `--ephemeral`, `--include-kept`, `--leave-children`").
+        For every agent spawned since, it is `close` and the gate never fires.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -3506,7 +3495,7 @@ class Broker:
 
         # Computed for every candidate up front, so a named agent is refused before
         # anything at all has been closed: half a `sb cleanup a b` is worse than none.
-        held = {} if leave_children else {
+        held = {
             a["name"]: kids for a in candidates
             if a["name"] != me and (kids := self.live_descendants(a["name"]))
         }
@@ -3514,8 +3503,7 @@ class Broker:
             raise ValueError(
                 "still working underneath: "
                 + "; ".join(f"{p} → {', '.join(kids)}" for p, kids in held.items())
-                + ". Close them first (the subtree closes from the leaves up), or "
-                  "--leave-children to close the parent and leave them running."
+                + ". Close them first: the subtree closes from the leaves up."
             )
 
         closed = CleanupResult()
@@ -3557,7 +3545,7 @@ class Broker:
                 continue                      # the invariant; see the docstring
             if not force:
                 if a["state"] not in FINISHED:
-                    # only finished agents; --all-idle too
+                    # only finished agents, and no flag lifts this
                     #
                     # Blocked is the one state in here a sweep must still say out loud.
                     # An agent that is working will finish on its own and the next sweep
@@ -3582,10 +3570,12 @@ class Broker:
                     # `sb restore` brings back an inbox that still holds it.
                     refuse(a, "unread mail it could still read")
                     continue
-                # Naming an agent is itself the instruction to close it, so an explicit
-                # name lifts the role's disposition exactly as `include_kept` does.
-                if a["cleanup"] != "close" and not (include_kept or names):
-                    refuse(a, f"role {a['role']} is kept, not closed (--include-kept)")
+                # A row written before `--keep` was removed. Nothing writes this any
+                # more, so this only ever fires for an agent that predates the removal —
+                # and for that one it holds exactly as it always did. Naming the agent is
+                # still the instruction to close it.
+                if a["cleanup"] != "close" and not names:
+                    refuse(a, f"{a['name']} was spawned to be kept — name it to close it")
                     continue
             if dry_run:
                 closed.append(a["name"]); continue
@@ -4454,7 +4444,7 @@ class Broker:
     # measurement). Each one was removed as the bug it caused was found, `done` last, and
     # nothing was lost with any of them: herdr's own detector reads idle and working off
     # the pane unprompted, and the two states it has no word for — blocked, done — have
-    # always lived in our store, which is what the board, `sb status` and `sb wait` read.
+    # always lived in our store, which is what the board and `sb status` read.
     # Anything reaching for a state write again should read `block`, `_unblock_if_needed`
     # and `done` first: the eviction is silent, permanent, and only visible later as mail
     # that can never be delivered.

@@ -22,10 +22,10 @@ happened to be reading. One convention, stated identically in three files. (It w
 files before too; designer.md was the third and is gone. Any new reporting role joins this
 list rather than inventing a fourth phrasing.)
 
-No `cleanup` field, here or in any other role. A disposition is a run-time decision —
-`sb delegate --keep` / `--ephemeral`, and the orchestrator deciding what survives its sweep
-— not a property of a kind of agent, and a role that carried one was deciding in advance
-something only whoever is watching the panes can know.
+No `cleanup` field, here or in any other role. A disposition is a run-time decision — the
+orchestrator deciding what survives its sweep — not a property of a kind of agent, and a
+role that carried one was deciding in advance something only whoever is watching the panes
+can know.
 
 `notes/` is a plain relative path on purpose. There is no `sb` verb for reports and none
 is invented here; a path in a prompt needs no code behind it. It is inside the checkout so

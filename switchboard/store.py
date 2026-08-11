@@ -163,6 +163,12 @@ CREATE TABLE agents (
     pane_id       TEXT,               -- NOT stable across pane move; debugging only
     seq           INTEGER NOT NULL DEFAULT 0,  -- our monotonic --seq for herdr writes
     cleanup       TEXT NOT NULL DEFAULT 'close',
+                                      -- Legacy. Nothing writes it any more (the `--keep`
+                                      -- and `--ephemeral` flags that did are gone), and
+                                      -- every row written since takes the default. It is
+                                      -- kept, not dropped, so a row that already says
+                                      -- 'keep' still reads as one: `Broker.cleanup` holds
+                                      -- those back from a sweep exactly as it always did.
     awaiting_task INTEGER NOT NULL DEFAULT 0,   -- 1 = spawned with a placeholder task and
                                       -- given nothing since. Such an agent is idle because
                                       -- nobody has asked it for anything, which is not the
@@ -811,18 +817,22 @@ def now() -> int:
 # ---------------------------------------------------------------------------
 
 
+# No `cleanup`: nothing writes that column any more, so every new row takes its `close`
+# default (see `Broker.cleanup`, and DESIGN-TRUTH.md's "`--keep`, `--ephemeral`,
+# `--include-kept`, `--leave-children`"). The column itself stays, and rows written before
+# the removal keep the value they were given.
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
        (name, parent, role, task, state, session_id, cwd, workspace, branch,
-        workspace_id, terminal_id, pane_id, cleanup, awaiting_task, created_at)
-       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
+        workspace_id, terminal_id, pane_id, awaiting_task, created_at)
+       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
     name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
-    terminal_id, pane_id, cleanup, awaiting_task,
+    terminal_id, pane_id, awaiting_task,
 ) -> tuple:
     return (name, parent, role, task, session_id, cwd, workspace, branch, workspace_id,
-            terminal_id, pane_id, cleanup, int(awaiting_task), now())
+            terminal_id, pane_id, int(awaiting_task), now())
 
 
 def create_agent(
@@ -839,7 +849,6 @@ def create_agent(
     workspace_id: Optional[str] = None,
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
-    cleanup: str = "close",
     awaiting_task: bool = False,
 ) -> sqlite3.Row:
     """Insert an agent row. Raises `sqlite3.IntegrityError` if the name is taken.
@@ -850,7 +859,7 @@ def create_agent(
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, cleanup, awaiting_task),
+                      workspace_id, terminal_id, pane_id, awaiting_task),
     )
     db.commit()
     return get_agent(db, name)
@@ -870,7 +879,6 @@ def claim_agent(
     workspace_id: Optional[str] = None,
     terminal_id: Optional[str] = None,
     pane_id: Optional[str] = None,
-    cleanup: str = "close",
     awaiting_task: bool = False,
 ) -> bool:
     """Take the name, or find out somebody else already has it. -> did we get it?
@@ -887,7 +895,7 @@ def claim_agent(
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, cleanup, awaiting_task),
+                      workspace_id, terminal_id, pane_id, awaiting_task),
     )
     db.commit()
     return cur.rowcount == 1
@@ -1000,7 +1008,7 @@ def set_state(db: sqlite3.Connection, name: str, state: str) -> None:
 
 def update_agent(db: sqlite3.Connection, name: str, **fields: Any) -> None:
     allowed = {"session_id", "cwd", "workspace", "branch", "workspace_id", "terminal_id",
-               "pane_id", "cleanup", "task"}
+               "pane_id", "task"}
     bad = set(fields) - allowed
     if bad:
         raise ValueError(f"cannot update {bad}")

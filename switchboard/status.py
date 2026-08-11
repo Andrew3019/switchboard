@@ -1,4 +1,4 @@
-"""M4 — the readouts: `sb status` (the board), `sb inspect` (one agent), `sb wait`.
+"""M4 — the readouts: `sb status` (the board) and `sb inspect` (one agent).
 
 The store says what an agent was *told* to be; herdr says what its pane is *doing*. Read
 either one alone and you get a confident answer that is regularly wrong, so this module
@@ -73,14 +73,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from . import config
 from .herdr import (
-    BLOCKED, DELIVER_ATTEMPTS, DELIVER_TIMEOUT_MS, IDLE, SPAWN_ATTEMPTS, SPAWN_BACKOFF,
-    SPAWN_TIMEOUT_MS, WORKING, Herdr, HerdrError,
+    BLOCKED, DELIVER_ATTEMPTS, DELIVER_TIMEOUT_MS, SPAWN_ATTEMPTS, SPAWN_BACKOFF,
+    SPAWN_TIMEOUT_MS, Herdr, HerdrError,
 )
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
@@ -1509,170 +1508,3 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
         else:
             out.append("  (nothing)")
     return "\n".join(l.rstrip() for l in out)
-
-
-# ---------------------------------------------------------------------------
-# `sb wait` — block until an agent gets somewhere
-# ---------------------------------------------------------------------------
-#
-# FOR HUMANS AND SHELL SCRIPTS. An agent must never call this: agents end their turn and
-# get poked when a child reports (see broker.done), so a waiting agent is one burning a
-# turn to do what the doorbell already does for free.
-#
-# It is NOT a deferred `ask`, and the two are deliberately not merged. Deferred delivery
-# already exists and is the default: `Broker._ring` holds a doorbell back while the target
-# is mid-turn and `flush_pending` rings once it is free, so "when you are idle" is what
-# `tell` and `ask` already do, with nobody blocking. What this waits for is a STATE, on
-# behalf of a caller that is not an agent — it has no turn to end and no doorbell to be
-# rung on, and `sb wait w1 && deploy` in a shell script has no other shape available.
-#
-# It does NOT poll the store. herdr blocks server-side in `agent wait --until`, and we
-# read the store once each time that returns — because the two can disagree, and `done` is
-# a STORE state that herdr has no vocabulary for (herdr's enum is idle|working|blocked|
-# unknown, and broker.done reports NOTHING to it — a report would cost the agent its name,
-# so herdr learns the turn ended from its own detector and `done` lives only with us).
-#
-# Herdr.wait handles the other half: `agent wait` is not turn-scoped, so a previous turn's
-# transition satisfies it instantly. Passing `since_seq` makes it re-wait until herdr's
-# state_change_seq has actually advanced past the value we snapshotted.
-
-# A ceiling on one server-side block, not a poll interval. Nothing announces a `done` on
-# herdr's side — we report no state to it at all (see broker.done), so the only signal is
-# its own detector noticing the turn ended, and that can lag or, on a pane it has lost
-# track of, never come. This bounds how long that costs us, without turning a blocking
-# wait into a busy one: the store, which has the real answer, is re-read every slice.
-WAIT_SLICE_MS = config.setting("timeouts.wait_slice_ms")
-
-# What `--for` accepts. The first four are store states; `idle` is the honest name for
-# "its turn ended", however it ended — which is the one an agent that stalls still reaches.
-WAIT_STATES = tuple(config.setting("states.wait"))
-
-# How long `sb wait` blocks by default. `--timeout` overrides it per call.
-WAIT_TIMEOUT = config.setting("timeouts.wait")
-
-
-@dataclass
-class WaitResult:
-    name: str
-    ok: bool
-    until: str
-    state: str                       # the store's state when we stopped
-    herdr_state: Optional[str]
-    waited: int                      # seconds
-    reason: str = ""                 # why not, when not ok
-
-    def as_dict(self) -> dict:
-        return {"name": self.name, "ok": self.ok, "until": self.until,
-                "state": self.state, "herdr_state": self.herdr_state,
-                "waited": self.waited, "reason": self.reason}
-
-    def render(self) -> str:
-        if self.ok:
-            return f"{self.name} is {self.state} (waited {fmt_age(self.waited)})"
-        return (f"{self.name} did not reach {self.until} — {self.reason} "
-                f"(state {self.state}, waited {fmt_age(self.waited)})")
-
-
-def wait_for(
-    db: sqlite3.Connection,
-    h: Herdr,
-    name: str,
-    *,
-    until: str = "done",
-    timeout: int = WAIT_TIMEOUT,
-    clock: Callable[[], float] = time.time,
-) -> WaitResult:
-    """Block until `name` reaches `until`, or the timeout runs out.
-
-    Returns rather than raises on failure: a timeout is an ordinary outcome of waiting,
-    and the caller wants the state it stopped at, not a traceback.
-    """
-    from . import store
-
-    if until not in WAIT_STATES:
-        raise ValueError(f"cannot wait for {until!r}; one of {', '.join(WAIT_STATES)}")
-    if store.get_agent(db, name) is None:
-        raise KeyError(f"no such agent: {name}")
-
-    started = clock()
-    deadline = started + timeout
-    seq: Optional[int] = None
-    hstate: Optional[str] = None
-
-    def result(ok: bool, state: str, reason: str = "") -> WaitResult:
-        return WaitResult(name=name, ok=ok, until=until, state=state,
-                          herdr_state=hstate, waited=int(clock() - started), reason=reason)
-
-    while True:
-        row = store.get_agent(db, name)
-        if row is None:
-            return result(False, "-", "its row disappeared from the store")
-        state = row["state"]
-        if _reached(state, hstate, until):
-            return result(True, state)
-        if state in FINISHED:
-            # It will never move again, so waiting the rest of the timeout out would be a
-            # lie about what we are doing.
-            return result(False, state, f"it finished as {state} instead")
-
-        remaining = deadline - clock()
-        if remaining <= 0:
-            return result(False, state, f"timed out after {timeout}s")
-
-        # herdr's own view first: it is where the seq comes from, and an agent herdr has
-        # never heard of cannot be waited on at all.
-        slice_ms = min(WAIT_SLICE_MS, max(1, int(remaining * 1000)))
-        t0 = clock()
-        try:
-            if seq is None:
-                cur = h.get_agent(name)
-                if cur is None:
-                    return result(False, state,
-                                  "herdr does not know this agent (its pane is gone) — "
-                                  "nothing will ever announce a change")
-                seq, hstate = cur.change_seq, cur.state
-                if _reached(state, hstate, until):
-                    return result(True, state)
-
-            got = h.wait(name, until=_next_transition(hstate, until), since_seq=seq,
-                         timeout_ms=slice_ms)
-            seq, hstate = got.change_seq, got.state
-        except HerdrError as e:
-            # A slice that ran its course tells us nothing except "still nothing"; loop and
-            # read the store again. One that fails immediately is a real failure — the
-            # agent is gone, or herdr is down — and looping on it would spin.
-            if clock() - t0 < min(1.0, slice_ms / 2000):
-                return result(False, state, f"herdr: {e}")
-        except OSError as e:
-            return result(False, state, f"herdr unreachable: {e}")
-
-
-def _reached(state: str, herdr_state: Optional[str], until: str) -> bool:
-    if until == "idle":
-        # Finished counts: an agent that called `sb done` is not running a turn either, and
-        # herdr may not have caught up (or may have dropped the report entirely).
-        return state in FINISHED or herdr_state in IDLE_LIKE
-    return state == until
-
-
-def _next_transition(herdr_state: Optional[str], until: str) -> str:
-    """The herdr state to block on: always the one the agent is NOT currently in.
-
-    `agent wait --until <state>` returns INSTANTLY when the agent is already in that state
-    (verified against a live 0.8.0 binary). Asking an idle agent to wait until idle
-    therefore returns at once, `since_seq` correctly refuses to accept it as progress, and
-    the adapter has to back off and ask again — which turns a wait into a series of naps.
-    Waiting for the state it is *not* in blocks properly instead: an idle agent is waited
-    toward `working`, and the turn-ending `idle` is picked up on the next pass through
-    `wait_for`'s own loop.
-
-    Only `idle` and `working` are ever asked for. `blocked` is not, and that costs nothing
-    an agent does — broker.block reports nothing at all and records the block with us, and
-    it explains why — only herdr's own detector spotting an unanswered permission prompt,
-    which `wait_for` reads off the next status pass anyway.
-    """
-    target = WORKING if until == "working" else IDLE
-    at_target = (herdr_state in IDLE_LIKE) if target == IDLE else (herdr_state == WORKING)
-    if at_target:
-        return IDLE if target == WORKING else WORKING
-    return target

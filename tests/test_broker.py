@@ -1278,7 +1278,7 @@ class BrokerTest(unittest.TestCase):
     def test_cleanup_closes_finished_children(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
         self.assertIn("w1:p1", self.h.closed)
@@ -1291,7 +1291,7 @@ class BrokerTest(unittest.TestCase):
         # `session_id` marks it as past its spawn — status holds off on reaping a
         # session-less row this young, since that is a claim mid-spawn.
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}                     # herdr has never heard of it
         self.assertEqual(self.b.cleanup(me="orch"), [])          # still reads 'working'
         reap_gone(self.db, self.h)
@@ -1303,7 +1303,7 @@ class BrokerTest(unittest.TestCase):
         every close on herdr's silence would leave nothing for `sb cleanup` to do."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         store.set_state(self.db, "kid", "done")
         self.h.states_by_name = {"kid": "idle"}
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
@@ -1316,7 +1316,7 @@ class BrokerTest(unittest.TestCase):
         alone."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}                     # a readout mid-spawn sees nothing
         reap_gone(self.db, self.h)
         self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
@@ -1332,7 +1332,7 @@ class BrokerTest(unittest.TestCase):
         an unreachable herdr must stop the sweep, not wave it through."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
         reap_gone(self.db, self.h)                     # reaped while herdr was answering
 
@@ -1347,7 +1347,7 @@ class BrokerTest(unittest.TestCase):
         is how they learn to trust the sweep that kills it."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
         status.collect(self.db, self.h)
         self.h.states_by_name = {"kid": "working"}
@@ -1358,7 +1358,7 @@ class BrokerTest(unittest.TestCase):
         lost track of — listed but dead — becomes unreachable by any command."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
         status.collect(self.db, self.h)
         self.h.states_by_name = {"kid": "working"}
@@ -1368,7 +1368,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         store.set_state(self.db, "kid", "blocked")
-        self.assertEqual(self.b.cleanup(me="orch", include_kept=True), [])
+        self.assertEqual(self.b.cleanup(me="orch"), [])
 
     def test_cleanup_never_closes_an_agent_with_unread_mail(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
@@ -1390,7 +1390,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
         store.put_message(self.db, from_agent="orch", to_agent="kid", kind="tell", body="wait")
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
@@ -1408,7 +1408,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
 
         def gone(pane):
@@ -1429,7 +1429,7 @@ class BrokerTest(unittest.TestCase):
         closeable rather than be marked done on a failure."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
 
         def blip(pane):
@@ -1445,13 +1445,13 @@ class BrokerTest(unittest.TestCase):
         """A sweeping agent must not close a sibling's agents."""
         store.create_agent(self.db, name="mine", role="orchestrator")
         store.create_agent(self.db, name="my-kid", role="worker", parent="mine",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.create_agent(self.db, name="theirs", role="orchestrator")
         store.create_agent(self.db, name="their-kid", role="worker", parent="theirs",
-                           pane_id="w1:p2", cleanup="close")
+                           pane_id="w1:p2")
         for n in ("my-kid", "their-kid"):
             store.set_state(self.db, n, "done")
-        self.assertEqual(self.b.cleanup(me="mine", include_kept=True), ["my-kid"])
+        self.assertEqual(self.b.cleanup(me="mine"), ["my-kid"])
         self.assertNotIn("w1:p2", self.h.closed)
 
     # -- cleanup: the invariant ------------------------------------------
@@ -1464,9 +1464,9 @@ class BrokerTest(unittest.TestCase):
         """orch → lead (done, pane w1:p1) → worker (still going, pane w1:p2)."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="lead", role="orchestrator", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.create_agent(self.db, name="worker", role="worker", parent="lead",
-                           pane_id="w1:p2", cleanup="close")
+                           pane_id="w1:p2")
         store.set_state(self.db, "lead", "done")
         if child_state != "working":
             store.set_state(self.db, "worker", child_state)
@@ -1512,7 +1512,7 @@ class BrokerTest(unittest.TestCase):
         the caller reads one error and cannot tell what already happened."""
         self._family()
         store.create_agent(self.db, name="sib", role="worker", parent="orch",
-                           pane_id="w1:p3", cleanup="close")
+                           pane_id="w1:p3")
         store.set_state(self.db, "sib", "done")
         with self.assertRaises(ValueError):
             self.b.cleanup(["sib", "lead"], me="orch")
@@ -1533,13 +1533,16 @@ class BrokerTest(unittest.TestCase):
         self.b.cleanup(["lead"], me="orch")
         self.assertIn("w1:p1", self.h.closed)
 
-    def test_leave_children_is_the_one_way_to_close_over_a_live_child(self):
-        """The other way out, for a human who means it: the parent's pane goes, the
-        child's work does not. It has its own flag because it does its own harm."""
+    def test_nothing_at_all_closes_over_a_live_child(self):
+        """`--leave-children` was the one way through this gate, and it is gone
+        (DESIGN-TRUTH.md's "`--include-kept`, `--leave-children`"). Force does not lift
+        it — it never did — so now nothing does."""
         self._family()
-        self.b.cleanup(["lead"], me="orch", leave_children=True)
-        self.assertIn("w1:p1", self.h.closed)
-        self.assertNotIn("w1:p2", self.h.closed)        # the child keeps working
+        for kw in ({}, {"force": True}):
+            with self.assertRaises(ValueError):
+                self.b.cleanup(["lead"], me="orch", **kw)
+        self.assertNotIn("w1:p1", self.h.closed)        # the parent's pane stays up
+        self.assertNotIn("w1:p2", self.h.closed)        # and so does the child's
 
     def test_a_fully_finished_subtree_still_sweeps(self):
         """The gate must not cost the normal sweep. A finished child is not live work."""
@@ -1548,7 +1551,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("w1:p1", self.h.closed)
         self.assertIn("w1:p2", self.h.closed)
 
-    def test_a_child_of_a_closed_parent_cannot_deliver_its_summary(self):
+    def test_a_child_of_a_pane_less_parent_cannot_deliver_its_summary(self):
         """WHY the gate exists, spelled out end to end.
 
         The child reports `sb done`; the summary is written to the parent and the doorbell
@@ -1556,11 +1559,15 @@ class BrokerTest(unittest.TestCase):
         the ring fails and the summary sits in the store with nobody able to read it — the
         failure class where the board looks fine and something is silently not happening.
 
-        Reached here only through `--leave-children`, which is the point: this is the harm
-        the flag names, and the only route to it that switchboard still has.
+        `cleanup` can no longer produce this state at all — `--leave-children` was the
+        only route through the live-descendants gate and it is gone — so the parent's
+        pane is taken away here directly. The harm is still worth pinning: it is what the
+        gate exists to prevent, and any future way of losing a parent's pane meets it.
         """
         self._family()
-        self.b.cleanup(["lead"], me="orch", leave_children=True)
+        store.set_state(self.db, "lead", "done")
+        self.db.execute("UPDATE agents SET pane_id=NULL WHERE name='lead'")
+        self.db.commit()
         self.h.unreachable.add("lead")                  # the binding went with the pane
 
         self.b.done("my part is finished", me="worker")
@@ -1643,7 +1650,8 @@ class BrokerTest(unittest.TestCase):
         can never read, is unreachable by every sweep — and there was no other way out."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="stuck", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="keep")
+                           pane_id="w1:p1")
+        self._legacy_keep("stuck")
         store.put_message(self.db, from_agent="orch", to_agent="stuck",
                           kind="tell", body="unreadable")
         self.assertEqual(self.b.cleanup(me="orch"), [])                    # every gate holds
@@ -1658,7 +1666,7 @@ class BrokerTest(unittest.TestCase):
         only move, with no way to learn which one had fired."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         self.b.block("which branch?", me="kid")
         r = self.b.cleanup(["kid"], me="orch")
         self.assertEqual(r, [])
@@ -1668,7 +1676,7 @@ class BrokerTest(unittest.TestCase):
     def test_cleanup_names_the_unread_mail_that_holds_a_row(self):
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close", session_id="s-kid")
+                           pane_id="w1:p1", session_id="s-kid")
         store.set_state(self.db, "kid", "done")
         self.h.states_by_name = {"kid": "idle"}      # still reachable, so the mail holds
         store.put_message(self.db, from_agent="orch", to_agent="kid",
@@ -1677,26 +1685,39 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(r, [])
         self.assertIn("unread mail", r.refused[0][1])
 
-    def test_cleanup_names_the_role_that_keeps_its_agents(self):
-        """A sweep, where the reason is the role rather than anything about this run."""
+    def _legacy_keep(self, name: str) -> None:
+        """A row as it was written before `--keep` was removed. Nothing writes this any
+        more (see `store._INSERT_AGENT`), so a test that wants one writes the column."""
+        self.db.execute("UPDATE agents SET cleanup='keep' WHERE name=?", (name,))
+        self.db.commit()
+
+    def test_a_row_written_before_keep_was_removed_is_still_held_by_a_sweep(self):
+        """The one thing the removal must not break: an agent spawned `--keep` before the
+        flag went keeps behaving exactly as it did — held by a sweep, closed when named.
+        """
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="lead", parent="orch",
-                           pane_id="w1:p1", cleanup="keep")
+                           pane_id="w1:p1")
+        self._legacy_keep("kid")
         store.set_state(self.db, "kid", "done")
         r = self.b.cleanup(me="orch")
         self.assertEqual(r, [])
-        self.assertIn("--include-kept", r.refused[0][1])
+        self.assertIn("spawned to be kept", r.refused[0][1])
+        self.assertEqual(self.b.cleanup(["kid"], me="orch"), ["kid"])   # naming it closes it
+
+    def test_nothing_spawned_now_is_ever_written_kept(self):
+        """The write path is what went, not the column."""
+        name = self.b.delegate("t", role="orchestrator", me="orch")
+        self.assertEqual(store.get_agent(self.db, name)["cleanup"], "close")
 
     def test_cleanup_prints_the_refusals_it_collected(self):
         """The reason has to reach the person who typed the command, not just the log."""
         import argparse, contextlib, io
         from switchboard import cli
-        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1",
-                           cleanup="close")
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
         self.b.block("which branch?", me="kid")
-        args = argparse.Namespace(cmd="cleanup", name=["kid"], include_kept=False,
-                                  force=False, dry_run=False, leave_children=False,
-                                  json=False)
+        args = argparse.Namespace(cmd="cleanup", name=["kid"], force=False,
+                                  dry_run=False, json=False)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
@@ -1717,7 +1738,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="orchestrator")
         for n in ("done1", "blocked1", "busy1", "gone1"):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
-                               pane_id=f"w1:{n}", cleanup="close", session_id=f"s-{n}")
+                               pane_id=f"w1:{n}", session_id=f"s-{n}")
         store.set_state(self.db, "done1", "done")
         self.b.block("which branch?", me="blocked1")
         store.set_state(self.db, "gone1", "done")          # closed before this sweep ran
@@ -1740,15 +1761,14 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="orchestrator")
         for n in ("done1", "blocked1", "busy1"):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
-                               pane_id=f"w1:{n}", cleanup="close", session_id=f"s-{n}")
+                               pane_id=f"w1:{n}", session_id=f"s-{n}")
         store.set_state(self.db, "done1", "done")
         self.b.block("which branch?", me="blocked1")
         self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
 
         def run(as_json):
-            args = argparse.Namespace(cmd="cleanup", name=[], include_kept=False,
-                                      force=False, dry_run=False, leave_children=False,
-                                      json=as_json)
+            args = argparse.Namespace(cmd="cleanup", name=[], force=False,
+                                      dry_run=False, json=as_json)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
@@ -1771,11 +1791,11 @@ class BrokerTest(unittest.TestCase):
         """Past a handful the lines stop being a report and start being a listing."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="done1", role="worker", parent="orch",
-                           pane_id="w1:done1", cleanup="close", session_id="s-done1")
+                           pane_id="w1:done1", session_id="s-done1")
         store.set_state(self.db, "done1", "done")
         for i in range(8):
             store.create_agent(self.db, name=f"b{i}", role="worker", parent="orch",
-                               pane_id=f"w1:b{i}", cleanup="close", session_id=f"s-b{i}")
+                               pane_id=f"w1:b{i}", session_id=f"s-b{i}")
             self.b.block("which branch?", me=f"b{i}")
         from switchboard import cli
         r = self.b.cleanup(me="orch")
@@ -1838,7 +1858,7 @@ class BrokerTest(unittest.TestCase):
         later sweep retries release/close against a dead pane and logs a failure."""
         store.create_agent(self.db, name="orch", role="orchestrator")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", cleanup="close")
+                           pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
         self.assertFalse(store.get_agent(self.db, "kid")["pane_id"])
@@ -1953,7 +1973,6 @@ class BrokerTest(unittest.TestCase):
         a = store.get_agent(self.db, name)
         self.assertEqual(name, MAIN_NAME)
         self.assertIsNone(a["parent"])          # root: parent NULL, not "human"
-        self.assertEqual(a["cleanup"], "keep")  # never swept away
 
     def test_start_always_starts_another_one(self):
         """The contract: unnamed, `sb start` is only ever the start of something.
@@ -2641,7 +2660,7 @@ class WorkspacePlacementTest(unittest.TestCase):
         self.b._spawn_lead("api-lead", {"workspace": "api", "branch": "api",
                                         "workspace_id": "wA", "path": str(self.repo),
                                         "pane_id": "", "fresh": False},
-                           role="worker", task="t", me="parent", prior=None, board=False)
+                           role="worker", task="t", me="parent", prior=None)
         self.assertIsNone(store.get_agent(self.db, "api-lead")["workspace_id"])
 
     def test_the_dead_id_is_dropped_from_this_processs_cache_too(self):
@@ -2700,10 +2719,11 @@ class SbPinTest(unittest.TestCase):
         self.db.close(); self.tmp.cleanup()
 
     def _spawn(self, **kw):
-        # `board=False`: the board pane is opened with the same `pane run` the pin uses,
-        # and this class is reading what that call was for.
+        # The board pane is opened with the same `pane run` the pin uses, and it opens
+        # for every spawn now, so this class reads the FIRST of those calls — the pin,
+        # which happens before the agent is started at all.
         return self.b.delegate("t", role="worker", me=HUMAN, cwd=str(self.repo),
-                               workspace="ws", board=False, **kw)
+                               workspace="ws", **kw)
 
     # -- the pin ---------------------------------------------------------
 
@@ -2716,7 +2736,7 @@ class SbPinTest(unittest.TestCase):
         """`agent start` runs the provider CLI in that same shell, so the export has to be
         in it already — afterwards is a shell the agent never sees."""
         self._spawn()
-        self.assertEqual(self.h.order, ["pin", "start"])
+        self.assertEqual(self.h.order[:2], ["pin", "start"])
 
     def test_the_pin_is_confirmed_not_assumed(self):
         """`pane run` is accepted whether or not a shell was there to take it, and the
@@ -2775,8 +2795,7 @@ class SbPinTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=space, check=True, capture_output=True)
         (space / "bin" / "sb").write_text("#!/bin/sh\n")
         (space / "bin" / "sb").chmod(0o755)
-        self.b.delegate("t", role="worker", me=HUMAN, cwd=str(space), workspace="ws",
-                        board=False)
+        self.b.delegate("t", role="worker", me=HUMAN, cwd=str(space), workspace="ws")
         _, text = self.h.pane_prompts[0]
         self.assertIn(shlex.quote(str(space / "bin")), text)
 

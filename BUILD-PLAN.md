@@ -98,17 +98,27 @@ Andrew. `audit/phase1-scope.md`, `audit/phase2-scope.md` and `audit/phase3-scope
 the shape. Expect that pass to close some items outright — phase 3's found four already
 done — and to grow others.
 
-# Phase 4 — removals
+# Phase 4 — removals — DONE (branch `phase4-removals`, stacked on phase 3)
 
 Cheap, mechanical, and it unblocks phase 6: the prompts cannot be rewritten while they
-still name flags that are supposed to be gone.
+still name flags that are supposed to be gone. Scoped in `audit/phase4-scope.md`, built
+and proved in `audit/phase4-build.md`.
 
-- `--keep`, `--ephemeral`, `--include-kept`, `--leave-children`, `--no-board`, and focus as
-  a flag are all still live CLI options.
-- `keep`/`ephemeral` are persisted state: a store column, a settings default, a field on
-  every role, and all five shipped role prompts tell agents to use them.
-- `sb wait` and the human inbox: the inbox is genuinely gone; `sb wait` is not.
-- `sb workspace new` is deleted once phase 5 covers space creation.
+- **Done.** `--keep`, `--ephemeral`, `--include-kept` (and its `--all-idle` alias),
+  `--leave-children`, `--no-board` (on both `sb start` and `sb workspace new`) and focus as
+  a flag (`sb start --no-focus`, `sb workspace new --focus`) no longer parse. `sb start`
+  always focuses; nothing else focuses; every sb-made view is split with the board.
+- **Done, as write-paths rather than a collapse.** Nothing writes `agents.cleanup` any
+  more — not the CLI, not `_top`, not `_spawn_lead`, not `_adopt`, and `Role.cleanup` and
+  its `default_cleanup` setting are gone. The COLUMN and its read-side gate stay: live
+  rows already carried `'keep'`, written automatically rather than by opt-in, and
+  collapsing the column would have swept them. Such a row still behaves exactly as it did
+  — held back by a sweep, closed when named. All five shipped role prompts stopped naming
+  the flags; nothing else in them changed, because phase 6 owns the rewrite.
+- **Done.** `sb wait` is gone, with `status.wait_for` and its three settings keys. The
+  human inbox was already gone and was left alone.
+- `sb workspace new` is deleted once phase 5 covers space creation. Untouched here beyond
+  its two flags.
 
 # Phase 5 — structure
 

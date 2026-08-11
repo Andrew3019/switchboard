@@ -41,9 +41,8 @@ opening paragraph's "nobody is reading your pane" is now "no parent is reading y
 because the unqualified version is the belief that makes the two steps impossible to
 follow. `validate.reason` enforces the short line; this only says it before the refusal.
 
-No `cleanup` field: what stays open is a run-time decision, set per spawn by
-`sb delegate --keep` / `--ephemeral` and swept by an orchestrator, never a property of a
-kind of agent.
+No `cleanup` field: what stays open is a run-time decision, made by the orchestrator that
+sweeps, never a property of a kind of agent.
 -->
 
 You are given one task: carry it to done and do nothing beyond it. If you notice something

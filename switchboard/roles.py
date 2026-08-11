@@ -1,7 +1,7 @@
 """Role profiles.
 
-A role is a spawn profile: which model tier, what cleanup disposition, and the prompt that
-tells an agent who it is. Vocabulary is data (C12) — there is no closed set, and a role
+A role is a spawn profile: which model tier, and the prompt that tells an agent who it
+is. Vocabulary is data (C12) — there is no closed set, and a role
 that isn't defined still works with defaults.
 
 A role names a TIER only. What a tier maps to — provider, model, effort — is models.py's
@@ -13,7 +13,7 @@ either: the definitions are files, one markdown file per role, read by config.py
     <repo>/.switchboard/roles/*.md    this repo's own roles, in the same form
 
 Later layers override earlier ones FIELD BY FIELD, so changing a reviewer's tier keeps its
-disposition and its prompt. See config.py for the merge rules.
+prompt. See config.py for the merge rules.
 """
 
 from __future__ import annotations
@@ -37,18 +37,13 @@ def _default_tier() -> str:
 class Role:
     name: str
     model: str = ""                 # a TIER name, not a model id
-    cleanup: str = ""
     prompt: str = ""
     tiers: Optional[models.Tiers] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         # Defaulted here rather than in the signature, so that even a Role built by hand
-        # gets its tier and disposition from `[vocabulary]` rather than from a literal in
-        # this file. Every shipped role sets both; this only bites a three-line role
-        # somebody wrote, which is exactly the case that should not need to know what the
-        # default tier is called.
+        # gets its tier from `[vocabulary]` rather than from a literal in this file.
         self.model = self.model or _default_tier()
-        self.cleanup = self.cleanup or config.setting("vocabulary.default_cleanup")
 
     def spec(self, override: Optional[str] = None) -> models.ModelSpec:
         """The resolved provider + model + effort for this role's tier.
@@ -86,5 +81,4 @@ def get(roles: dict[str, Role], name: str) -> Role:
         return roles[name]
     fallback = config.setting("vocabulary.fallback_role")
     base = roles.get(fallback) or Role(fallback)
-    return Role(name=name, model=base.model, cleanup=base.cleanup, prompt=base.prompt,
-                tiers=base.tiers)
+    return Role(name=name, model=base.model, prompt=base.prompt, tiers=base.tiers)

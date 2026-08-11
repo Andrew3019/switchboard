@@ -33,8 +33,7 @@ reviewer.md: the shipped baseline should not spend anyone's money by default, an
 that wants its QA expensive says so in its own `.switchboard/roles.toml`.
 
 No `cleanup` field, here or in any other role: what stays open is a run-time decision
-(`sb delegate --keep` / `--ephemeral`, and the orchestrator's own sweep), not a property of
-a kind of agent.
+(the orchestrator's own sweep), not a property of a kind of agent.
 
 The file/summary split, and the `notes/` path, are shared verbatim with researcher.md and
 reviewer.md — see the note in researcher.md for why that location and not another.
