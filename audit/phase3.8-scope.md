@@ -86,6 +86,34 @@ Automated (two or three, no more, and no new tricks in the fake herdr):
 - **T3** every spawn carries `--settings <file>`, and the file it names holds a `Stop`
   hook. (Pins the wiring; the delivery itself is P1/P2's job.)
 
+## Result — run in an isolated clone, 2026-08-11
+
+A `git clone` of this repo into a scratch directory, this branch checked out, driven by
+that clone's own `./bin/sb` and its own store (`<clone>/.git/agentflow/state.db`). Two real
+agents, both since closed, their workspaces retired and the clone deleted.
+
+- **P1 — pass.** `silent38`, given a task ending "do NOT call sb done and do NOT call sb
+  block", ran its command, said "Stopping here as instructed", and was stopped:
+
+      ⏺ Ran 1 stop hook
+        ⎿ Stop hook error: switchboard: your turn cannot end without a report. Call
+          `sb done "<summary>"` … or `sb block "<why>"` …
+
+  The store logged one `stop_gate_blocked` event against `silent38`.
+- **F1 — pass.** Exactly one. The agent took its extra turn, argued that neither verb
+  applied, and stopped — the second stop carried `stop_hook_active` and was allowed
+  through. One `stop_gate_blocked` event in the log, not two. `sb status` then showed it as
+  STALLED, which is the intended hand-off to 3.5.
+- **P2 — pass.** `good38`, given an ordinary task, ran it, called `sb done`, and stopped on
+  the first try. No `stop_gate_*` event of any kind against it.
+
+T1, T2 and T3 are `tests/test_hooks.py`; the full suite is 1118 passing.
+
+Unproven, and worth saying: nothing here exercised a real agent hitting the
+`awaiting_task` or live-children exemptions — both are pinned only by the store logic, not
+by a live run. Nor was the pane-id fallback exercised live, because both test agents had
+claimed a session id by the time they stopped.
+
 Out of scope, stated so it is not mistaken for an omission: `broker.py`'s
 tell/interrupt/ask cluster and the collector are owned by other agents right now and are
 not touched. The wiring goes in `herdr.start_agent`, which is the one place every spawn
