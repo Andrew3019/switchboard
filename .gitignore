@@ -5,6 +5,10 @@ __pycache__/
 # Local, per-machine switchboard config. `defaults/` ships the baseline; anything here is
 # this checkout's own override and is deliberately not shared. Worktrees get symlinks to
 # the main checkout's copy rather than their own.
+#
+# What this repo wants EVERY agent to have, including in a fresh clone, goes in the
+# committed `.switchboard-shared/` instead — which is tracked precisely because neither the
+# ignore below nor the worktree symlink lets anything here travel.
 /.switchboard/
 /CLAUDE.md
 
