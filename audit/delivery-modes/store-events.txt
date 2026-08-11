@@ -1,0 +1,36 @@
+id   t         agent          kind           payload                                                                         
+---  --------  -------------  -------------  --------------------------------------------------------------------------------
+5    21:13:54  expt-top       sb_pinned      {"pane_id": "wHC:p1", "path": "/private/tmp/claude-501/-Users-andrew--herdr-work
+7    21:13:57  expt-top       delegate       {"parent": "human", "role": "orchestrator", "workspace": "expt-top"}            
+11   21:13:57  expt-top       board_open     {"pane": "wHC:p2"}                                                              
+14   21:13:58  expt-top       start          {"created": true, "workspace": "wHC"}                                           
+19   21:14:09  subject-one    fork           {"parent": "expt-top", "workspace": "subject-one", "branch": "subject-one", "pat
+23   21:14:09  subject-one    sb_pinned      {"pane_id": "wHD:p1", "path": "/Users/andrew/.herdr/worktrees/clone/subject-one/
+25   21:14:12  subject-one    delegate       {"parent": "expt-top", "role": "worker", "workspace": "subject-one"}            
+29   21:14:12  subject-one    board_open     {"pane": "wHD:p2"}                                                              
+37   21:14:40  subject-two    fork           {"parent": "expt-top", "workspace": "subject-two", "branch": "subject-two", "pat
+41   21:14:41  subject-two    sb_pinned      {"pane_id": "wHN:p1", "path": "/Users/andrew/.herdr/worktrees/clone/subject-two/
+43   21:14:44  subject-two    delegate       {"parent": "expt-top", "role": "worker", "workspace": "subject-two"}            
+47   21:14:45  subject-two    board_open     {"pane": "wHN:p2"}                                                              
+55   21:15:15  subject-three  fork           {"parent": "expt-top", "workspace": "subject-three", "branch": "subject-three", 
+59   21:15:16  subject-three  sb_pinned      {"pane_id": "wHP:p1", "path": "/Users/andrew/.herdr/worktrees/clone/subject-thre
+61   21:15:19  subject-three  delegate       {"parent": "expt-top", "role": "worker", "workspace": "subject-three"}          
+65   21:15:19  subject-three  board_open     {"pane": "wHP:p2"}                                                              
+70   21:15:29  expt-top       blocked        {"why": "experiment subjects running; the experimenter drives from here"}       
+76   21:16:58  subject-one    interrupt      {"stopped": true, "text": "MSG-ONE-INTERRUPT sent via sb interrupt"}            
+78   21:16:58  subject-two    ring_deferred                                                                                  
+83   21:17:19  subject-one    done           {"summary": "Timing-experiment subject: read 8 of 20 files, logging each with a 
+84   21:17:19  expt-top       ring_held      {"reason": "blocked"}                                                           
+133  21:22:15  subject-two    done           {"summary": "Timing experiment complete: read all 20 files in order with date/re
+134  21:22:15  expt-top       ring_held      {"reason": "blocked"}                                                           
+140  21:22:35  subject-two    revived                                                                                        
+145  21:22:53  subject-three  done           {"summary": "Timing experiment done: read all 20 named files in order with date/
+146  21:22:53  expt-top       ring_held      {"reason": "blocked"}                                                           
+148  21:22:56  subject-two    done           {"summary": "Correction to my previous report: a message DID arrive, but only af
+149  21:22:56  expt-top       ring_held      {"reason": "blocked"}                                                           
+161  21:25:19  subject-three  revived                                                                                        
+163  21:25:36  subject-three  done           {"summary": "Message received AFTER the twenty-file run had finished. Awareness 
+164  21:25:36  expt-top       ring_held      {"reason": "blocked"}                                                           
+170  21:25:54  subject-three  revived                                                                                        
+172  21:26:10  subject-three  done           {"summary": "Second post-run message logged. Awareness 21:25:44 via text in my p
+173  21:26:10  expt-top       ring_held      {"reason": "blocked"}                                                           

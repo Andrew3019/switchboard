@@ -1,0 +1,12 @@
+id  from_agent     to_agent       kind  created   delivered  read      body                                              
+--  -------------  -------------  ----  --------  ---------  --------  --------------------------------------------------
+1   human          subject-one    tell  21:16:58  21:16:58   21:16:58  [INTERRUPT — stop now] The instruction you were fo
+2   human          subject-two    tell  21:16:58  21:22:24   21:22:35  MSG-TWO-TELL sent via sb tell                     
+3   subject-one    expt-top       done  21:17:19                       [done] Timing-experiment subject: read 8 of 20 fil
+4   subject-two    expt-top       done  21:22:15                       [done] Timing experiment complete: read all 20 fil
+5   subject-three  expt-top       done  21:22:53                       [done] Timing experiment done: read all 20 named f
+6   subject-two    expt-top       done  21:22:56                       [done] Correction to my previous report: a message
+7   human          subject-three  tell  21:25:02  21:25:02   21:25:19  MSG-THREE-TELL-IDLE sent via sb tell while you wer
+8   subject-three  expt-top       done  21:25:36                       [done] Message received AFTER the twenty-file run 
+9   human          subject-three  tell  21:25:41  21:25:41   21:25:54  MSG-THREE-TELL-SECOND sent after you had reported 
+10  subject-three  expt-top       done  21:26:10                       [done] Second post-run message logged. Awareness 2
