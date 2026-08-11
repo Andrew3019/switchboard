@@ -96,4 +96,45 @@ Automated (three, no more; no new tricks in the fake herdr):
 
 ## Result — run 2026-08-11
 
-Filled in below once the tests above have been run.
+A `git clone` of this repo into a scratch directory, this branch checked out there, driven
+by that clone's own `./bin/sb` and its own store
+(`<clone>/.git/agentflow/state.db` — confirmed by `sb doctor`, and `sb status` empty). Four
+real agents, one per case, all since closed, their herdr workspaces gone and the clone
+deleted. The loop was the collector itself, run from the clone
+(`collector.run(max_ticks=8)`), not a hand-called `reconcile`.
+
+- **L1 — pass.** `rc35quiet`, told to run one command and then stop without reporting, ended
+  its turn and `sb status` showed it `STALLED`. The collector spawned `sb reconcile` on its
+  **first tick** (`started_at` → `last_reconcile`: 0.2s, i.e. within one cycle), and the
+  agent's own pane shows the text arriving verbatim:
+
+      ❯ [sb] Your turn ended 2m ago without a report, so nothing in the fleet knows where
+        you are. If you are finished, run `sb done "<summary>"`; if you are stuck or need a
+        person, run `sb block "<why>"`; if you are neither, carry on with your task — this
+        is asked once, not repeatedly.
+
+  It read the ping, said so, and — still under its original instruction not to report —
+  declined. That is the agent's call, which is the point of pinging the agent rather than
+  its parent.
+- **L2, L3, L4 — pass.** `rc35block` (blocked), `rc35done` (reported done) and `rc35wait`
+  (started with no task, `awaiting_task=1`) were live in the same store for the whole run.
+  The event log holds exactly one `reconcile_ping` row, and its target is `rc35quiet`.
+- **L5 — pass, and it exercised both layers.** The collector spawned `sb reconcile` twice
+  (10s apart): the ping made the agent take a turn, so it left `stalled` and re-entered it,
+  which is a new name to the trigger's in-process set. The store-side rule refused —
+  `pinged nobody` — because the agent had run no `sb` command, so its `last_activity` had
+  not moved. Two further `./bin/sb reconcile` runs by hand: `pinged nobody`, `pinged
+  nobody`. One ping, for a stall that is still there now.
+
+Automated: **T1** is
+`test_only_an_agent_that_went_quiet_is_pinged` plus
+`test_a_parent_with_a_live_child_is_left_alone`, **T2** is
+`test_a_stall_is_pinged_once_and_not_every_cycle` (`tests/test_broker.py`), **T3** is
+`TheReconcilerTrigger` (`tests/test_panel.py`). Suite: 1122 passing.
+
+**Unproven, and worth saying.** The live run never exercised the *second* ping — an agent
+that wakes, runs an `sb` command, stalls again and outlives `REPING_GAP` — only T2 pins
+that. Nor was a parent-with-a-live-child exemption seen live; it is pinned by the store
+logic alone, the same gap `audit/phase3.8-scope.md` records for the same exemption. And
+the `sb reconcile` spawned by a collector whose `sb` had to come off PATH rather than out
+of its own `bin/` was not exercised — the clone had its own.
