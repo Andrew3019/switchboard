@@ -1,0 +1,5 @@
+{
+  "hooks": {
+    "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "/usr/bin/touch /private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-measure-hook-cost/37363a75-26af-413c-8e12-1b3b87915e3a/scratchpad/stamps/agent.alive", "timeout": 10}]}]
+  }
+}
