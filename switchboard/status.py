@@ -521,6 +521,25 @@ def collect(
     # then degrades to what this file did before it existed, which is documented at
     # `_record_gone`.
     tracks_absence = bool(rows) and "absent_since" in rows[0].keys()
+    # Parents with work still out, by exactly the rule the stop gate asks it by
+    # (`hooks._has_live_child`: a child row still `working` or `blocked` and not ended).
+    # Computed from the rows already in hand rather than re-queried, so this costs nothing
+    # and no reader needs a second connection.
+    #
+    # It joins `awaiting_task` and the two grace windows as an EXCUSE for being idle, and
+    # for the same reason they are excuses: an orchestrator that ended its turn because the
+    # protocol told it to and is waiting to be poked has done exactly what was asked of it.
+    # Calling that STALLED — on the board, in `--needs-me`, in DRIFT — says something false
+    # about the one agent shape the design most expects to see idle.
+    #
+    # The stop gate and the reconciler already exempt the same rows themselves
+    # (`hooks.stop_gate`, `broker.reconcile`) and are deliberately left alone: their copies
+    # of this test now agree with the flag instead of correcting it. One consequence worth
+    # knowing — `reconcile`'s `reconcile_waived` event no longer fires, because the rows it
+    # waived no longer arrive as stalled.
+    live_parent = {row["parent"] for row in rows
+                   if row["parent"] and row["state"] in ("working", "blocked")
+                   and row["ended_at"] is None}
     absent_since: dict[str, Optional[int]] = {}
     agents = []
     for row, depth in ordered:
@@ -578,8 +597,10 @@ def collect(
             alive=alive,
             # The join this file exists for. Both halves must be known: an unreachable
             # herdr proves nothing, and neither does herdr's `unknown`.
+            # Idle with no excuse left: not awaiting a first task, not still starting,
+            # and with nothing of its own still running. See `live_parent` above.
             stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting
-                         and not starting),
+                         and not starting and name not in live_parent),
             gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),

@@ -118,23 +118,20 @@ class RowSaysOneThingTest(unittest.TestCase):
         self.assertNotIn("working", line)
         self.assertIn("STALLED", line)
 
-    def test_an_idle_orchestrator_reads_idle_with_no_stalled_label(self):
-        """Waiting on live children is idle WITH an excuse — the same word, no warning.
-        `stalled=False` is what the reconciler's exemption chain produces for it."""
-        line = self.line(agent("lead", state="working", herdr_state="idle",
+    def test_the_word_is_whatever_the_pane_was_observed_to_be_doing(self):
+        """An open task reads `working` or `idle` on herdr's observation alone — and on
+        nothing at all when there was no observation to make: with herdr unreachable
+        (`alive is None`) the store's own word stands, the same rule `stalled` and `gone`
+        are built on, and `render` says at the top that ALIVE is unknown."""
+        # Explained idle — a lead waiting on live children. Same word, no warning.
+        lead = self.line(agent("lead", state="working", herdr_state="idle",
                                stalled=False, task="mind the children"))
-        self.assertIn("idle", line)
-        self.assertNotIn("STALLED", line)
-        # And a pane herdr sees mid-turn is the other reading of the same open task.
+        self.assertIn("idle", lead)
+        self.assertNotIn("STALLED", lead)
         self.assertIn("working", self.line(agent("w", herdr_state="working")))
-
-    def test_with_herdr_unreachable_the_store_word_stands(self):
-        """`alive is None` means nothing was observed, so nothing may be claimed about
-        the pane — the same rule `stalled` and `gone` are built on. `render` says at the
-        top of the readout that ALIVE is unknown."""
-        line = self.line(agent("w", state="working", herdr_state=None, alive=None))
-        self.assertIn("working", line)
-        self.assertNotIn("idle", line)
+        unreachable = self.line(agent("u", state="working", herdr_state=None, alive=None))
+        self.assertIn("working", unreachable)
+        self.assertNotIn("idle", unreachable)
 
 
 class LayoutTest(unittest.TestCase):

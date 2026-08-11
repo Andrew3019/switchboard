@@ -81,6 +81,25 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.state, "working")      # the store is reported, not rewritten
         self.assertEqual(a.herdr_state, "idle")
 
+    def test_a_lead_waiting_on_a_live_child_is_idle_but_not_stalled(self):
+        """The exemption the stop gate and the reconciler already apply, read one step
+        earlier so the board agrees with them: an orchestrator that ended its turn because
+        the protocol told it to and is waiting to be poked is idle WITH a reason. It goes
+        back to stalled the moment nothing of its own is running."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2")
+        h = FakeHerdr([alive("lead", "idle"), alive("w1", "working")])
+        lead = self.by_name(status.collect(self.db, h))["lead"]
+        self.assertFalse(lead.stalled)
+        self.assertFalse(lead.needs_human)
+        self.assertEqual(lead.display_state, "idle")
+
+        store.set_state(self.db, "w1", "done")
+        lead = self.by_name(status.collect(self.db, h))["lead"]
+        self.assertTrue(lead.stalled)
+        self.assertEqual(lead.display_state, "idle")   # never `working` beside a stall
+
     def test_herdrs_derived_done_counts_as_idle(self):
         """herdr shows `done` for idle-and-unviewed; missing that hides real drift."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
