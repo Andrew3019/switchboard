@@ -629,36 +629,39 @@ class BrokerTest(unittest.TestCase):
         [m] = store.unread_for(self.db, "orch", mark=False)
         self.assertIn("[done] counted 144", m["body"])
 
-    def test_done_pushes_idle_because_herdr_has_no_done_state(self):
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.done("x", me="kid")
-        self.assertEqual(self.h.states[-1][1], "idle")
+    def test_a_finished_agent_can_still_be_reached_on_an_evicting_herdr(self):
+        """The follow-up question, against a herdr that behaves the way the real one does.
 
-    def test_a_state_write_checks_for_a_conflicting_integration_once(self):
-        """`Herdr.check` says it fails "at startup" and nothing calls it at startup, so
-        an installed integration eats every state write for a whole session in silence.
-        Asked where the risk is — at the write — and once per process, not per write."""
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        store.create_agent(self.db, name="k2", role="worker", parent="orch", pane_id="w1:p2")
-        self.b.done("x", me="kid")
-        self.b.done("y", me="k2")
-        self.assertEqual(self.h.checks, 1)
+        `done` used to report `idle`, and a `pane report-agent` costs the agent its name
+        for good (`EvictingHerdr` charges that price; `Herdr.report_state` carries the
+        measurement). So the ordinary next move after a report — asking the agent that
+        still holds the whole context one more thing — was impossible, and the only move
+        left was spawning a fresh agent and re-teaching it everything. Nothing is reported
+        now, so the name survives the report and the doorbell still rings.
+        """
+        self.h = EvictingHerdr()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}
+        self.b.done("shipped the parser", me="w")
 
-    def test_a_command_that_writes_no_state_never_pays_for_the_check(self):
-        """A subprocess spawn on every `sb status` for a fault that cannot reach it."""
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.tell(["kid"], "hello", me="orch")
-        self.assertEqual(self.h.checks, 0)
+        self.assertEqual(self.h.states, [])                       # nothing was reported
+        self.b.tell(["w"], "one more thing", me=HUMAN)
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])   # the doorbell rang
+        self.assertEqual(store.undelivered(self.db), [])          # and it landed
+        self.assertIsNone(self.b.unreachable("w"))
 
-    def test_a_conflicting_integration_is_logged_not_raised(self):
-        """Logged and carried on with: the write may well have landed, and hard-failing
-        the `sb done` that discovered it would lose the summary as well."""
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.h.check_error = HerdrError("integration_conflict", "claude integration installed")
-        self.b.done("x", me="kid")
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
-        self.assertIn("herdr_check_failed",
-                      [e["kind"] for e in store.recent_events(self.db)])
+    def test_a_root_agents_done_is_announced_because_nothing_else_will(self):
+        """A root has no parent to poke and the human has no mailbox, so the notification
+        is the delivery rather than a copy of one — and the end of the top of the tree is
+        the end of the run. A child's done is not announced: its parent gets rung."""
+        store.create_agent(self.db, name="root", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="root", pane_id="w1:p2")
+        self.b.done("counted 144", me="kid")
+        self.assertEqual(self.h.notifications, [])
+        self.b.done("shipped the parser", me="root")
+        self.assertEqual(len(self.h.notifications), 1)
+        self.assertIn("shipped the parser", self.h.notifications[0])
 
     def test_block_reports_no_state_to_herdr_at_all(self):
         """The one thing that makes a block answerable.
@@ -722,6 +725,32 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("which branch?", why[0]["payload"])
         [needs] = status.collect(self.db, self.h, needs_me=True).agents
         self.assertEqual((needs.name, needs.blocked_why), ("kid", "which branch?"))
+
+    def test_answering_in_the_pane_clears_the_block_and_releases_its_mail(self):
+        """The way a person actually answers a question: they type into the pane.
+
+        The message lands — that is herdr's pane, not ours — and the agent carries on, but
+        nothing told the store, so the row sat in NEEDS YOU with the question already
+        answered and its mail held behind a block nobody was still waiting on. The agent
+        taking a turn again IS the answer having arrived: blocking ends a turn, so a
+        blocked agent runs no commands until something restarts it.
+        """
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p9")
+        self.b.block("which branch?", me="kid")
+        self.h.states_by_name = {"kid": "idle"}
+        self.b.tell(["kid"], "unrelated news", me="orch")     # held: it is blocked
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(len(status.collect(self.db, self.h, needs_me=True).agents), 1)
+
+        # ...the human types the answer into the pane, and the agent runs its next command.
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p9"}, clear=True):
+            self.assertEqual(self.b.whoami(), "kid")
+
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "working")
+        [e] = [e for e in store.recent_events(self.db, agent="kid") if e["kind"] == "unblocked"]
+        self.assertIn("answered_in_pane", e["payload"])
+        self.restart_sb()                                     # the next `sb` command
+        self.assertEqual(self.b.flush_pending(), ["kid"])     # the held mail goes
 
     def test_answering_a_block_unblocks_it_and_does_ring(self):
         """The reply is what restarts the agent: its turn ended, so unlike an answer to a
@@ -984,12 +1013,72 @@ class BrokerTest(unittest.TestCase):
 
     def test_the_flush_keeps_mail_for_a_finished_agent_whose_pane_is_still_there(self):
         """A person can put a turn back into that pane, so its inbox is not written off —
-        it only loses the doorbell."""
+        it only loses the doorbell.
+
+        herdr has to SAY the pane is still there, and that is why `states_by_name` is set
+        here: the `pane_id` on a finished row outlives the pane itself, so the column alone
+        was never evidence of an inbox anybody could open (see `_clear_unreadable_mail`).
+        """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         store.set_state(self.db, "w", "done")
+        self.h.states_by_name = {"w": "idle"}
+        self.h.evicted.add("w")               # listed, but no longer rung by name
+        self.h.unreachable.add("w")
         store.put_message(self.db, from_agent=HUMAN, to_agent="w", kind="tell", body="hi")
         self.assertEqual(self.b.flush_pending(), [])
         self.assertEqual([m["body"] for m in store.unread_for(self.db, "w", mark=False)], ["hi"])
+        # Un-announceable, not written off: it is still owed to a mailbox that exists.
+        [m] = self.db.execute("SELECT * FROM messages").fetchall()
+        self.assertIsNone(m["undeliverable_at"])
+
+    def test_mail_to_an_agent_whose_pane_died_stops_asking_the_human_for_anything(self):
+        """The queue that is always full is the same as no queue (`2026-08-09-233230`).
+
+        The row keeps its `pane_id` when an agent dies — only `cleanup` clears it — so the
+        old rule read "there is still a mailbox someone could open" off a pane that no
+        longer existed, stamped the mail un-announceable and left it unread forever. Unread
+        is what `needs_human` counts, so the dead agent stayed on the human's list with
+        nothing in the fleet able to move it.
+        """
+        # A session id, so its absence from herdr is a death rather than a spawn still in
+        # flight (`status.collect`'s SPAWN_GRACE).
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1",
+                           session_id="sess-w")
+        store.put_message(self.db, from_agent="orch", to_agent="w", kind="tell",
+                          body="please review the auth change")
+        self.h.states_by_name = {}                  # its pane went with it
+        reap_gone(self.db, self.h)
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "failed")
+
+        self.restart_sb()
+        self.assertEqual(self.b.flush_pending(), [])
+        self.assertEqual(status.collect(self.db, self.h, needs_me=True).agents, [])
+
+        # Nothing is discarded, and nothing is pretended to have been read: the message is
+        # still in that agent's inbox, body and all, for `sb inspect` and for a restore.
+        [m] = store.unread_for(self.db, "w", mark=False)
+        self.assertEqual(m["body"], "please review the auth change")
+        self.assertIsNotNone(m["undeliverable_at"])
+
+    def test_closing_an_agent_clears_the_backlog_the_open_pane_left_behind(self):
+        """The half no sweep could reach.
+
+        Mail held gently while the pane was open is stamped `delivered_at`, which takes it
+        out of `unseen()` — the only work list `flush_pending` has. So once the pane went,
+        nothing looked at those rows again: unread forever, the agent in NEEDS YOU forever,
+        and `sb cleanup` itself the one event that could have known.
+        """
+        self._evicted()                                   # done, pane open, name evicted
+        self.b.tell(["w"], "are you there?", me=HUMAN)
+        self.assertIsNone(self.db.execute(
+            "SELECT undeliverable_at u FROM messages").fetchone()["u"])
+        self.assertEqual(status.collect(self.db, self.h, needs_me=True).agents[0].name, "w")
+
+        self.restart_sb()
+        self.assertEqual(list(self.b.cleanup(["w"], me=HUMAN)), ["w"])
+        self.assertEqual(status.collect(self.db, self.h, needs_me=True).agents, [])
+        [m] = store.unread_for(self.db, "w", mark=False)   # still there, still unread
+        self.assertIsNotNone(m["undeliverable_at"])
 
     # -- the endless ring loop: a done agent herdr still LISTS but no longer answers to --
 
@@ -1633,7 +1722,10 @@ class BrokerTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), \
                 contextlib.redirect_stdout(buf):
             self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
-        self.assertIn("--needs-me", buf.getvalue())
+        # `sb board`, not `sb status --needs-me`: the board is the human's surface
+        # (DESIGN-TRUTH.md), and pointing them at status is what this used to do.
+        self.assertIn("sb board", buf.getvalue())
+        self.assertNotIn("sb status", buf.getvalue())
         self.assertNotIn("no new messages", buf.getvalue())
 
     def test_telling_the_human_is_refused_rather_than_written_and_lost(self):

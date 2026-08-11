@@ -778,9 +778,12 @@ class Herdr:
         does; making the call is what evicts. Measured on herdr 0.8.0 against a throwaway
         pane: `agent start` → resolvable, `report_session` → still resolvable, one
         `report_state(..., IDLE)` → agent_not_found for good. This is the mechanism behind
-        the "lost name binding" the rest of this file talks about, and it is why `block`
-        and `_unblock_if_needed` report nothing at all; `Broker.done` is the only caller
-        left, on an agent that has just said it is finished.
+        the "lost name binding" the rest of this file talks about, and it is why nothing in
+        the broker calls this any more — `block`, `_unblock_if_needed` and `done` all
+        report nothing at all, `done` last, once the price of it turned out to be that a
+        finished agent could never be asked a follow-up question. Kept because it is the
+        measurement, and because the eviction is invisible without a written record of it;
+        a new caller is a new instance of that bug, not a new feature.
 
         Two ways to lose a write, both returning success: reusing a seq, or omitting it.
         `seq` therefore comes from the store's strictly-increasing per-agent counter.

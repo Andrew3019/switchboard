@@ -196,7 +196,18 @@ CREATE TABLE messages (
     reply_to      INTEGER REFERENCES messages(id),
     created_at    INTEGER NOT NULL,
     read_at       INTEGER,
-    delivered_at  INTEGER
+    delivered_at  INTEGER,
+    undeliverable_at INTEGER          -- epoch at which we gave up on this ever being
+                                      -- announced OR read: the recipient's turn ended and
+                                      -- its pane is gone, so there is no inbox left to
+                                      -- open. NOT a form of read — the body, the sender
+                                      -- and the row are all untouched, `sb inspect` still
+                                      -- lists it and a restored agent's `sb inbox` still
+                                      -- hands it over. What it stops is the CLAIM on a
+                                      -- person: mail nobody can deliver stops counting as
+                                      -- an open item (`status._unread_counts`), which is
+                                      -- the whole of it. NULL for rows predating the
+                                      -- column, which is what they have always meant.
 );
 CREATE INDEX idx_msgs_inbox ON messages(to_agent, read_at);
 CREATE INDEX idx_msgs_undelivered ON messages(to_agent, delivered_at);
@@ -1374,6 +1385,36 @@ def mark_unannounceable(db: sqlite3.Connection, mid: int) -> None:
     """
     db.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at, ?) WHERE id=?",
                (now(), mid))
+    db.commit()
+
+
+def mark_undeliverable(db: sqlite3.Connection, mid: int) -> None:
+    """Nobody can ever deliver this, and nobody was ever going to read it.
+
+    The end of the line for mail addressed to an agent whose turn has ended and whose pane
+    is GONE — `mark_unannounceable` is the softer version for a pane that is still open,
+    where a person can put a turn back in and the agent's own `sb inbox` is still a real
+    way for the message to be read. Once the pane has gone there is no inbox to open, and
+    the row's only remaining effect was on a person: `status._unread_counts` counts
+    `read_at IS NULL`, so it kept the recipient in NEEDS YOU forever with nothing anyone
+    could do to clear it (filed as `2026-08-09-233230`). This is what clears it.
+
+    `read_at` is deliberately NOT set, and that is the difference from `mark_collected`,
+    which is what this used to do. Marking it read would be a lie about a message nobody
+    read, and it would cost the two places it can still be seen: `sb inspect <agent>`
+    lists unread mail with its body, and `sb restore` brings back an agent whose own
+    `sb inbox` (`unread_for`) then hands it over. Both still work. The message stops being
+    a demand on the human; it does not stop existing.
+
+    `delivered_at` is stamped for the reason `mark_unannounceable` stamps it: it is what
+    takes the row out of `unseen()`, and so out of `flush_pending` and the collector's
+    doorbell, which is the whole of "stop retrying".
+    """
+    db.execute(
+        "UPDATE messages SET delivered_at=COALESCE(delivered_at, ?), "
+        "undeliverable_at=COALESCE(undeliverable_at, ?) WHERE id=?",
+        (now(), now(), mid),
+    )
     db.commit()
 
 
