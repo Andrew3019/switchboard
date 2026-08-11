@@ -98,6 +98,45 @@ class GlyphTest(unittest.TestCase):
         self.assertEqual(board.note(a), "BLOCKED — need a key")
 
 
+class RowSaysOneThingTest(unittest.TestCase):
+    """The row must not contradict itself.
+
+    Andrew reported seeing one agent drawn as `working` and `STALLED` at once. It was not
+    a logic bug: the STATE column printed the store's self-report ("task still open") and
+    the note printed the pane observation ("no turn is running"), two vocabularies on one
+    line with nothing reconciling them. What is pinned here is that the column now shows
+    the joined word and STALLED is only ever a qualifier beside it.
+    """
+
+    def line(self, a):
+        rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
+        return next(t for t, row in rows if row is a)
+
+    def test_a_stalled_agent_reads_idle_and_never_working_as_well(self):
+        line = self.line(agent("w", state="working", herdr_state="idle", stalled=True))
+        self.assertIn("idle", line)
+        self.assertNotIn("working", line)
+        self.assertIn("STALLED", line)
+
+    def test_an_idle_orchestrator_reads_idle_with_no_stalled_label(self):
+        """Waiting on live children is idle WITH an excuse — the same word, no warning.
+        `stalled=False` is what the reconciler's exemption chain produces for it."""
+        line = self.line(agent("lead", state="working", herdr_state="idle",
+                               stalled=False, task="mind the children"))
+        self.assertIn("idle", line)
+        self.assertNotIn("STALLED", line)
+        # And a pane herdr sees mid-turn is the other reading of the same open task.
+        self.assertIn("working", self.line(agent("w", herdr_state="working")))
+
+    def test_with_herdr_unreachable_the_store_word_stands(self):
+        """`alive is None` means nothing was observed, so nothing may be claimed about
+        the pane — the same rule `stalled` and `gone` are built on. `render` says at the
+        top of the readout that ALIVE is unknown."""
+        line = self.line(agent("w", state="working", herdr_state=None, alive=None))
+        self.assertIn("working", line)
+        self.assertNotIn("idle", line)
+
+
 class LayoutTest(unittest.TestCase):
     def test_a_click_resolves_to_the_agent_drawn_on_that_row(self):
         rows = board.layout(snap(agent("one"), agent("two", depth=1), agent("three")),

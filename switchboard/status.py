@@ -250,6 +250,47 @@ class AgentStatus:
         return self.state == "blocked"
 
     @property
+    def display_state(self) -> str:
+        """The one word a readout shows for this agent. Five of them, not four.
+
+        The store's `state` column is a self-report about the TASK — "still open", or the
+        terminal word the agent itself wrote. It is not an observation of the pane, and
+        drawing it raw is what let a single row say `working` in its STATE column and
+        `STALLED — idle 12m` beside it: two vocabularies, un-reconciled, on one line
+        (`audit/status-model-audit.md` §1.3, and the contradiction Andrew reported). So
+        the join this module already computes happens for the STATE column too, once,
+        here, and every readout draws the result:
+
+            task open  + herdr says a turn is running   →  working
+            task open  + herdr says otherwise           →  idle
+            anything else                               →  the store's word
+
+        `idle` is not a new state and `stalled` is not a sixth one. Nothing is stored,
+        no predicate is new: `state`, `alive` and `herdr_state` are all already on this
+        row, and this reads the three together instead of one of them alone. `stalled`
+        stays exactly what it is — idle with nothing to excuse it, no live child, no
+        awaited first task, no startup grace — and it stays a QUALIFIER, drawn beside
+        this word by `_flags` and `board.note`, never instead of it.
+
+        Both halves must be known, the rule `stalled` and `gone` are already built on.
+        With herdr unreachable (`alive is None`) nothing was observed, so the store's own
+        word stands and `render` says at the top that ALIVE is unknown. With herdr
+        answered and the agent absent from its list (`alive is False`) no turn can be
+        running, so the word is `idle` and the GONE note beside it says why — until the
+        absence is confirmed and `_record_gone` writes `failed` into `state` for real.
+
+        Honest, too, when the pane signal is wrong in the other direction: herdr reading
+        a working agent as idle (its busy detector is a known upstream weak point) shows
+        `idle` here rather than `working`, which is what the row is entitled to claim
+        from what it observed. It never shows two answers at once.
+        """
+        if self.state not in RUNNING or self.alive is None:
+            return self.state
+        if self.alive and self.herdr_state not in IDLE_LIKE:
+            return self.state
+        return "idle"
+
+    @property
     def at_prompt(self) -> bool:
         """herdr's own detector says the TUI is waiting on a person.
 
@@ -359,7 +400,8 @@ class AgentStatus:
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
-        d.update(blocked=self.blocked, at_prompt=self.at_prompt,
+        d.update(display_state=self.display_state,
+                 blocked=self.blocked, at_prompt=self.at_prompt,
                  finished=self.finished, needs_human=self.needs_human,
                  waiting_to_be_rung=self.waiting_to_be_rung,
                  ringable=self.ringable,
@@ -1095,7 +1137,7 @@ def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
             lines.append(label)     # no columns: it is not an agent and must not read as one
             continue
         lines.append(
-            f"{label:<{w_name}}  {a.role:<{w_role}}  {a.state:<8}  {_herdr_cell(a):<7}  "
+            f"{label:<{w_name}}  {a.role:<{w_role}}  {a.display_state:<8}  {_herdr_cell(a):<7}  "
             f"{(str(a.unread) if a.unread else '-'):>4}  {fmt_age(a.age):>6}  "
             f"{fmt_age(a.idle):>6}  {(a.workspace or '-'):<{w_ws}}{_flags(a)}"
         )
@@ -1258,8 +1300,8 @@ def _attention(snap: Snapshot) -> list[str]:
     if drift:
         w = max(len(a.name) for a in drift)
         out.append("")
-        out.append("DRIFT — the store called these 'working'; their panes disagree, so the")
-        out.append("STATE column above is a guess. A GONE one is recorded as failed once it")
+        out.append("DRIFT — the store still has these open; their panes are running nothing,")
+        out.append("which is why STATE reads idle above. A GONE one is recorded as failed once it")
         out.append(f"has stayed gone ({GONE_STATE} after {fmt_age(int(GONE_CONFIRM_GRACE))} "
                    f"of it, so a herdr hiccup")
         out.append("does not end a live agent) — its pane is gone, so nothing will ever")
