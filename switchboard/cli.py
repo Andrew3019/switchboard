@@ -870,10 +870,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         b.block(args.why, me=me)
         # Says WHAT they read, not just that they were told. The old note ("they will see
         # it") let a caller believe the reason was the delivered message, which is the
-        # misuse validate.reason now refuses.
-        _emit(args, "blocked — your reason marks your row on the human's board (`sb "
-                    "board`) until they answer; what they actually read is your own "
-                    "chat, so the full "
+        # misuse validate.reason now refuses. "The board", not `sb board`: this is read by
+        # an agent, and the verb is deliberately not part of an agent's vocabulary (see
+        # the human-only refusal in `board` above, and the shipped prompts, which say
+        # "a board row" and never name the command).
+        _emit(args, "blocked — your reason marks your row on the human's board until "
+                    "they answer; what they actually read is your own chat, so the full "
                     "question belongs there", {"agent": me})
         return 0
 
