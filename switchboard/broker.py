@@ -693,31 +693,60 @@ class Broker:
         return sorted(n for n, r in self.roles.items() if r.delegate)
 
     def top_of(self, name: str) -> str:
-        """The top of the tree this agent stands in — its root ancestor.
+        """Which tree this agent stands in, named by its top. The unit of scope.
 
-        The unit of scope. DESIGN-TRUTH: "Siblings are not invisible to each other; any
-        other top orchestrator's entire tree is invisible." That is a whole tree, so the
-        question is about roots, not about descendants — `_descendants(me)`, which
-        `cleanup` correctly uses for its own tighter rule, would hide a sibling from a
-        sibling.
+        DESIGN-TRUTH: "Siblings are not invisible to each other; any other top
+        orchestrator's entire tree is invisible." That is a whole tree, so the question is
+        about roots, not about descendants — `_descendants(me)`, which `cleanup` correctly
+        uses for its own tighter rule, would hide a sibling from a sibling.
 
-        The human is their own root and is bounded by nothing (`same_tree`). A name with no
-        row answers itself, which makes it its own tree and so invisible to everyone — the
-        safe direction for a name nothing knows.
+        Walk to the root ancestor; if that root is a STAMPED top, the tree is its. If it is
+        not — an agent the human spawned straight from a terminal, which is parentless and
+        unstamped — the tree is the HUMAN's. Those agents are siblings of each other in
+        every sense that matters here, and the rule as written makes only "another top
+        orchestrator's tree" invisible, which is not what they are in. A name with no row
+        answers the human's group too: nothing is known about it, and inventing a tree for
+        it would refuse a typo with a message about a boundary.
 
         Cycle-safe: a parent chain that loops stops at the first name seen twice rather
         than spinning. `_tree` in status.py breaks cycles the same way, for the same
         reason — the store has held one.
         """
+        return self._root_of(name, self._parentage())
+
+    def _parentage(self) -> dict:
+        """`{name: (parent, is_top)}` for the whole store, read once.
+
+        One query rather than a walk per agent: `tree_of` asks this question of every row,
+        and doing it per row is a few hundred statements for a readout.
+        """
+        return {r["name"]: (r["parent"], bool(r["is_top"]))
+                for r in self.db.execute("SELECT name, parent, is_top FROM agents")}
+
+    @staticmethod
+    def _root_of(name: str, rows: dict) -> str:
         seen = {name}
         cur = name
         while True:
-            row = store.get_agent(self.db, cur)
-            parent = row["parent"] if row is not None else None
+            parent = rows.get(cur, (None, False))[0]
             if not parent or parent in seen:
-                return cur
+                break
             seen.add(parent)
             cur = parent
+        return cur if rows.get(cur, (None, False))[1] else HUMAN
+
+    def tree_of(self, me: str) -> Optional[set]:
+        """Every agent name `me` may see. `None` means no boundary at all — the human.
+
+        A set rather than a root name because the human's group has no single row to name
+        it: several parentless unstamped agents are one group, and no ancestor holds them
+        together.
+        """
+        if me == HUMAN:
+            return None
+        rows = self._parentage()
+        mine = self._root_of(me, rows)
+        return {n for n in rows if self._root_of(n, rows) == mine}
 
     def same_tree(self, me: str, target: str) -> bool:
         """May `me` see `target` at all?
@@ -727,7 +756,13 @@ class Broker:
         """
         if me == HUMAN or target == HUMAN or me == target:
             return True
-        return self.top_of(me) == self.top_of(target)
+        rows = self._parentage()
+        if target not in rows:
+            # Not ours to refuse: a name nothing knows is a typo, and "that is in another
+            # tree" is the wrong thing to tell somebody who mistyped. Whatever handled an
+            # unknown name before this rule existed still handles it.
+            return True
+        return self._root_of(me, rows) == self._root_of(target, rows)
 
     def require_same_tree(self, me: str, target: str) -> None:
         """Refuse across the boundary, and SAY it is a boundary.

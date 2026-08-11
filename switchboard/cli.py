@@ -502,21 +502,18 @@ def _derived_name(db, role: str) -> Optional[str]:
 _NEEDS_FRESH_SCHEMA = {"start", "delegate", "workspace", "restore"}
 
 
-def _scope(b: Broker, me: str, mine: bool) -> Optional[str]:
-    """What `sb status` is allowed to show this caller. `None` = everything.
+def _scope(b: Broker, me: str, mine: bool) -> dict:
+    """What `sb status` is allowed to show this caller, as `collect`'s two scope kwargs.
 
-    Three answers, and only three. The human gets `None` — the board is shared and a
-    person crosses freely into any tree (DESIGN-TRUTH:180-181). An agent gets its own
-    top's whole tree, siblings included, because that is the boundary the model draws.
-    `--mine` narrows an agent further to its own subtree, and for a person it means what
-    it always meant: everything they started.
+    `tree` is the boundary — the caller's own top's whole tree, siblings included, or
+    `None` for the human, who is bounded by nothing (DESIGN-TRUTH:180-181, "Only agents
+    have the scope constraints"). `mine` is the `--mine` flag and still means the caller's
+    own subtree, which is narrower; the flag asks for less and cannot ask for more.
 
-    The old default was `None` for everybody, which is why every agent could read every
-    other tree's state by typing the command with no flags at all.
+    Before this, both were off by default, which is why any agent could read every other
+    tree's state by typing the command with no flags at all.
     """
-    if mine:
-        return me
-    return None if me == HUMAN else b.top_of(me)
+    return {"tree": b.tree_of(me), "mine": me if mine else None}
 
 
 def _degraded(deficit: list[str], cmd: str) -> str:
@@ -908,7 +905,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the human sees everything. `--mine` still means the caller's own subtree, which
         # is narrower — the flag asks for less, and cannot ask for more.
         snap = status_mod.collect(db, h, live_only=args.live, needs_me=args.needs_me,
-                                  mine=_scope(b, me, args.mine))
+                                  **_scope(b, me, args.mine))
         # None, not False: the flag can only ever turn collapse OFF, so with no flag the
         # answer comes from `display.show_archived` rather than from here.
         _emit(args, status_mod.render(snap, show_archived=True if args.archived else None),

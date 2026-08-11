@@ -319,6 +319,32 @@ class TreeBoundaryTest(Fixture, unittest.TestCase):
         self.assertTrue(self.b.same_tree(HUMAN, "top-b-1"))
         self.assertEqual(len(self.b.tell(["top-b-1"], "hi", me=HUMAN)), 1)
 
+    def test_agents_the_human_spawned_directly_are_one_group(self):
+        """Parentless and UNSTAMPED is not a tree of one.
+
+        `sb delegate` typed by a person makes a root that is not a top, and two of them are
+        siblings in every sense that matters. The rule makes "another top orchestrator's
+        tree" invisible, and that is not what they are in. Treating each as its own tree
+        cut a sibling off from a sibling — caught by the acceptance run's check 3, not by
+        this file, which is why it is here now.
+        """
+        store.create_agent(self.db, name="solo-1", role="worker")
+        store.create_agent(self.db, name="solo-2", role="worker")
+        self.assertEqual(self.b.top_of("solo-1"), HUMAN)
+        self.assertTrue(self.b.same_tree("solo-1", "solo-2"))
+        self.assertEqual(len(self.b.tell(["solo-2"], "hi", me="solo-1")), 1)
+
+    def test_the_humans_group_still_cannot_see_into_a_tops_tree(self):
+        store.create_agent(self.db, name="solo-1", role="worker")
+        self.assertFalse(self.b.same_tree("solo-1", "top-a-1"))
+        self.assertFalse(self.b.same_tree("top-a-1", "solo-1"))
+        self.assertNotIn("top-a", self.b.tree_of("solo-1"))
+
+    def test_a_name_nothing_knows_is_not_refused_as_a_boundary(self):
+        """A typo is a typo. "That is in another tree" is the wrong thing to tell somebody
+        who mistyped, and whatever handled an unknown name before still handles it."""
+        self.assertTrue(self.b.same_tree("top-a-1", "no-such-agent"))
+
     def test_a_cycle_in_the_parent_chain_does_not_spin(self):
         """The store has held one. A readout that hangs is worse than one that is wrong."""
         self.db.execute("UPDATE agents SET parent='top-a-1' WHERE name='top-a'")

@@ -74,7 +74,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Collection, Optional
 
 from . import config
 from .herdr import (
@@ -380,6 +380,7 @@ def collect(
     live_only: bool = False,
     needs_me: bool = False,
     mine: Optional[str] = None,
+    tree: Optional[Collection[str]] = None,
     reap: bool = True,
 ) -> Snapshot:
     """The whole readout: one herdr call, one pass over the store.
@@ -394,9 +395,12 @@ def collect(
     mail, or stalled — the ones an action is owed to.
     `mine` scopes to one agent's own subtree (pass `human` for the roots and everything
     under them, which for a human is the whole tree).
+    `tree` is THE BOUNDARY rather than a filter: the names the caller is allowed to see at
+    all, computed by `Broker.tree_of`. `None` is the human, who is bounded by nothing.
 
-    All three keep the ancestors of whatever survives, or the indentation would lie about
-    who reports to whom. `mine` bounds that: it never re-adds anything above the caller.
+    All four keep the ancestors of whatever survives, or the indentation would lie about
+    who reports to whom. `mine` and `tree` bound that: neither re-adds anything from
+    outside the caller's scope.
 
     `reap=False` computes every flag exactly as before but writes nothing: the drift is
     still rendered, it is just not recorded (see `_record_gone`). It is for a caller that
@@ -520,7 +524,7 @@ def collect(
             absent = _confirmed_gone(db, absent, absent_since, now)
         _record_gone(db, absent)
 
-    kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine)
+    kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine, tree=tree)
     hidden = len(agents) - len(kept)
 
     return Snapshot(now=now, agents=kept, herdr_error=herdr_error, hidden=hidden)
@@ -785,18 +789,23 @@ def _tree(rows) -> list[tuple[Any, int]]:
 
 
 def _filter(agents: list[AgentStatus], *, live_only: bool, needs_me: bool,
-            mine: Optional[str]) -> list[AgentStatus]:
+            mine: Optional[str], tree: Optional[Collection[str]] = None
+            ) -> list[AgentStatus]:
     """Apply the filters, then put back the ancestors the tree needs to read straight."""
-    if not (live_only or needs_me or mine is not None):
+    if not (live_only or needs_me or mine is not None or tree is not None):
         return agents
 
     by_name = {a.name: a for a in agents}
     keep = {a.name for a in agents}
 
     scope: Optional[set[str]] = None
-    if mine is not None:
-        scope = _subtree(agents, mine)
+    if tree is not None:
+        scope = set(tree)
         keep &= scope
+    if mine is not None:
+        sub = _subtree(agents, mine)
+        scope = sub if scope is None else (scope & sub)
+        keep &= sub
     if live_only:
         keep &= {a.name for a in agents if not a.finished or a.unread}
     if needs_me:
