@@ -43,7 +43,7 @@ from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
 from . import validate
-from .herdr import BLOCKED, IDLE, WORKING, Herdr, HerdrError, StateWriteDropped
+from .herdr import WORKING, Herdr, HerdrError
 from .status import GONE_STATE, fmt_age
 from . import live
 
@@ -454,10 +454,6 @@ class Broker:
         # cache, which means herdr answered and is running nothing — see `_agent_states`.
         self._alive_unknown = False
         self._ws_ids: dict[str, str] = {}   # workspace name -> herdr id, this call only
-        # Whether `_check_integration` has run in THIS process. Not a result, just "asked
-        # already": the answer cannot change under us often enough to be worth re-asking,
-        # and the cost it saves is a subprocess spawn per state write.
-        self._integration_checked = False
         # Only if this repo wrote one. Absent — the normal case — leaves the module-level
         # PROTOCOL_LINE in charge, which is also what makes it patchable in a test.
         self._protocol_override = config.protocol_override(self.repo)
@@ -3259,7 +3255,22 @@ class Broker:
         mail — it is a record. The event log carries it, and that is what the readouts
         show: `sb status` puts it on the done row, `sb inspect` prints it in full, `sb
         log` has it. Nothing is lost by not addressing anybody; a row in a mailbox nobody
-        reads was only ever a second copy of this.
+        reads was only ever a second copy of this. What WAS lost is that nothing announced
+        it: a record on a board is only seen by someone already looking at the board, and
+        the top of a tree finishing is the one event in a run that ends the run. So a root
+        `done` notifies, the same way `block` does — see the `_surface` call below.
+
+        **Finishing costs the agent nothing it needs to be reached by.** This used to
+        report `idle` to herdr, which is not an annotation but a replacement: it evicts the
+        name `agent start` registered, permanently, so `sb tell <name>` after a `done`
+        could never land again (`Herdr.report_state` carries the measurement; `block` had
+        the same call removed for the same reason). That made the ordinary next move after
+        a report — a follow-up question to the agent still holding the whole context —
+        impossible, and the only remaining move was spawning a fresh agent and re-teaching
+        it everything. Nothing needed the report: herdr's own detector reads the pane as
+        idle the moment the turn ends, which is the entire content of what we were paying
+        the name binding to tell it, and `done` is a state herdr has no word for anyway —
+        our store is where it lives and where every readout reads it from.
 
         **Reporting done with children still working stays legal**, and the returned list
         of their names is the whole change here. Refusing it would be a protocol change —
@@ -3281,7 +3292,9 @@ class Broker:
             store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",
                               body=f"[done] {summary}")
         store.set_state(self.db, me, "done")
-        self._push_state(a, IDLE, summary)   # herdr has no `done`; it derives it from idle
+        # NOTHING is reported to herdr here, and that silence is what keeps a finished
+        # agent addressable — see the docstring, and `block` for the same call and the
+        # same reason.
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP])
         still_working = self.live_descendants(me)
         if still_working:
@@ -3291,6 +3304,15 @@ class Broker:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
             self._ring(parent, self._say("notify.child_done"))
+        else:
+            # No parent to poke, and the human has no mailbox — so the notification IS the
+            # delivery, not a copy of one. A root reporting done is the end of the run, and
+            # before this it was indistinguishable on the board from any other row: nothing
+            # rang, nothing entered NEEDS YOU, and the only way to learn a run had finished
+            # was to already be watching. Dismissing it loses nothing, the same way it
+            # loses nothing for `block`: the summary is durable in the event log and on the
+            # done row, and this only says "now".
+            self._surface(me, f"done — {summary}")
         return still_working
 
     def block(self, why: str, *, me: Optional[str] = None) -> None:
@@ -3808,11 +3830,16 @@ class Broker:
     def _finished_and_unreachable(self, who: str) -> bool:
         """Has this agent ended its turn for good, with no pane left to ring?
 
-        `sb done` ends a turn, and a real Claude Code process stops answering to its name
-        the moment that turn ends — herdr says `agent_not_found` from then on. The row,
-        though, keeps its `pane_id` and stays a perfectly good target, so every doorbell
-        aimed at it fails, and `flush_pending` re-aims it on every `sb` command anybody
-        runs, forever. This is the predicate that stops that.
+        A finished agent is NOT unreachable by virtue of being finished, and the version of
+        this that said so was reading our own damage as a fact about Claude Code. What
+        stopped a done agent answering to its name was the `pane report-agent` that `done`
+        itself made; with that call gone, a `done` agent whose pane is still open answers
+        to its name and takes a doorbell like anyone else — measured on herdr 0.8.0 from an
+        isolated clone: agent reports done, `agent get <name>` still resolves, `sb tell`
+        lands, the agent wakes and reports again. So this stays a NAME question. What it
+        catches now is a row that kept its `pane_id` after the pane or the process went
+        away: still a perfectly good-looking target, so every doorbell aimed at it fails
+        and `flush_pending` re-aims it on every `sb` command anybody runs, forever.
 
         Two ways to be sure, and both are needed. A row with no `pane_id` has nothing to
         ring by construction — `cleanup` cleared it, or it never got one. A row that still
@@ -4154,39 +4181,14 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="notify_failed", agent=who, error=str(e))
 
-    def _check_integration(self) -> None:
-        """Is a conflicting `claude` integration silently eating our state writes?
-
-        `Herdr.check` says it fails "at startup", and nothing calls it at startup: `sb
-        doctor` is its only caller, so an installed integration makes every state write
-        in every session look successful and be dropped, for as long as it is installed.
-
-        Asked HERE rather than in `main()`, and logged rather than raised. The blast
-        radius is `_push_state`, the one place a state write is made, so a process that
-        never writes state — `sb status`, `sb log` — should neither pay for a subprocess
-        nor be hard-failed by a fault that cannot reach it. Once per process, the way `_alive_cache` and
-        `_ws_ids` are once per process, and the flag is set before the call so a herdr
-        that is slow or broken costs that price exactly once either way.
-
-        `doctor` keeps `check()` as the loud, deliberate diagnosis it reads as.
-        """
-        if self._integration_checked:
-            return
-        self._integration_checked = True
-        try:
-            self.h.check()
-        except HerdrError as e:
-            store.log_event(self.db, kind="herdr_check_failed", code=e.code, error=str(e))
-
-    def _push_state(self, a, state: str, message: str = "") -> None:
-        if not a or not a["pane_id"]:
-            return
-        self._check_integration()   # a write is actually about to be attempted
-        try:
-            self.h.report_state(a["pane_id"], a["name"], state,
-                                store.next_seq(self.db, a["name"]), message=message[:NOTIFY_CLIP])
-        except StateWriteDropped as e:
-            # Loud, because both causes return ok and this is how the board goes stale.
-            store.log_event(self.db, kind="state_dropped", agent=a["name"], error=str(e))
-        except HerdrError as e:
-            store.log_event(self.db, kind="state_failed", agent=a["name"], error=str(e))
+    # There is no `_push_state` here, and its absence is load-bearing. Every state we
+    # ever reported to herdr — `working` on an unblock, `blocked` on a block, `idle` on a
+    # done — was a `pane report-agent`, which REPLACES the pane's named agent rather than
+    # annotating it and so evicts the name for good (`Herdr.report_state` carries the
+    # measurement). Each one was removed as the bug it caused was found, `done` last, and
+    # nothing was lost with any of them: herdr's own detector reads idle and working off
+    # the pane unprompted, and the two states it has no word for — blocked, done — have
+    # always lived in our store, which is what the board, `sb status` and `sb wait` read.
+    # Anything reaching for a state write again should read `block`, `_unblock_if_needed`
+    # and `done` first: the eviction is silent, permanent, and only visible later as mail
+    # that can never be delivered.
