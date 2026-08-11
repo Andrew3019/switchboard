@@ -129,8 +129,8 @@ base_branch = "origin/main"
 done_prefix = "[done] "
 
 # There is deliberately no `blocked_prefix`. A block is not mail: the human has no mailbox,
-# so `sb block` records the reason against the agent and it reaches you through
-# `sb status --needs-me`, which needs no marker to tell it apart from anything else.
+# so `sb block` records the reason against the agent and it reaches you as a marked row on
+# `sb board`, which needs no marker in the body to tell it apart from anything else.
 
 
 [states]
@@ -336,6 +336,15 @@ pin_ms = 5000
 # state asked for, so the stale-seq guard would otherwise re-ask as fast as two subprocesses
 # will spawn — measured at 77% of a core for a six-second wait.
 agent_wait_backoff = 0.5
+
+# How long a spawn waits for its turn at creating a worktree. Only ONE `worktree create`
+# per repo may run at a time (`Broker._fork_lock`), so in a fan-out the others queue here.
+# The wait is a queue, not a hang: a creation is a fraction of a second of git plus herdr
+# opening the workspace, so six of them clear in a couple of seconds and this number is
+# nowhere near being reached. It exists so that a wedged holder — a herdr that never
+# returns — costs a waiter a bounded wait and then an ordinary attempt, rather than a
+# process blocked for ever on a lock nobody will release.
+fork_lock = 120.0
 
 
 [retries]

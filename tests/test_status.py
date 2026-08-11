@@ -649,6 +649,37 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]))
         self.assertFalse(self.by_name(snap)["w1"].stalled)
 
+    def test_a_blocked_agents_undelivered_mail_is_not_explained_as_waiting_for_idle(self):
+        """The explanation branches, because the mechanism does.
+
+        A blocked agent's mail is held on `_is_blocked` in `_ring`/`flush_pending` and
+        released by the human's answer alone — going idle is not a state it passes
+        through. The unbranched sentence told the reader to wait for something that will
+        never happen.
+        """
+        store.create_agent(self.db, name="w1", role="worker")
+        store.set_state(self.db, "w1", "blocked")
+        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
+        self.assertIn("held until the human", out)
+        self.assertIn("not until it goes idle", out)
+
+    def test_an_unblocked_agent_is_still_told_the_doorbell_waits_for_idle(self):
+        """The branch is an exception, not a replacement: this case is unchanged."""
+        store.create_agent(self.db, name="w1", role="worker")
+        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
+        self.assertIn("released when it goes idle", out)
+        self.assertNotIn("not until it goes idle", out)
+
+    def test_the_blocked_row_names_who_can_actually_answer(self):
+        """Only the human's `tell` clears a block (`answer=(me == HUMAN)`)."""
+        store.create_agent(self.db, name="w1", role="worker")
+        store.set_state(self.db, "w1", "blocked")
+        store.log_event(self.db, kind="blocked", agent="w1", why="which branch?")
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
+        self.assertIn("the human answers it: sb tell w1", out)
+
     def test_the_latest_block_reason_wins(self):
         store.create_agent(self.db, name="w1", role="worker")
         store.log_event(self.db, kind="blocked", agent="w1", why="first")

@@ -179,6 +179,28 @@ class InspectTest(Base):
         self.assertIn("UNDELIVERED", out)
         self.assertNotIn("not picked up", out)          # there is nothing it ignored
 
+    def test_a_blocked_agent_is_told_its_mail_waits_on_the_human_not_on_idle(self):
+        """Same branch as `sb status`, because it is the same held mail.
+
+        `_ring` holds a blocked agent's mail on `_is_blocked` until a `tell` from the
+        human specifically. "Released when it goes idle" describes a path this agent no
+        longer takes at all — `block` stopped reporting herdr state.
+        """
+        self.agent()
+        store.set_state(self.db, "w1", "blocked")
+        store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="a")
+        out = status.render_detail(self.inspect(h=FakeHerdr([alive("w1", "idle")])))
+        self.assertIn("held until the human", out)
+        self.assertNotIn("released when it", out)
+
+    def test_no_undelivered_section_when_everything_was_announced(self):
+        self.agent()
+        store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="a")
+        store.mark_delivered(self.db, "w1")
+        d = self.inspect()
+        self.assertEqual(d.undelivered, [])
+        self.assertNotIn("UNDELIVERED", status.render_detail(d))
+
     def test_inspecting_never_delivers_the_mail_it_reports(self):
         self.agent()
         store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="a")

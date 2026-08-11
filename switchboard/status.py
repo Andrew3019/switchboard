@@ -629,10 +629,30 @@ def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
 
     Aggregated rather than looped so status stays one pass, and read-only for the same
     reason `--peek` exists: looking at the board must never eat somebody's mail.
+
+    Mail written off as UNDELIVERABLE is not counted, and that is what stops the human's
+    queue filling up with rows nothing can ever move. `needs_human` reads this count, so
+    one message to an agent that later died kept that agent in NEEDS YOU for the life of
+    the store, with no verb — not even for the human — that could clear it
+    (`2026-08-09-233230`). The message is still unread and still there; what it has lost is
+    any recipient who could read it, and `broker._clear_unreadable_mail` is the only thing
+    that decides that. See `store.mark_undeliverable` for what survives.
+
+    Read defensively for the reason `collect` reads `absent_since` defensively: the board
+    and the collector reach this on a READ-ONLY connection and cannot migrate a store older
+    than the column, and a viewer that raises every two seconds until some writer happens
+    to run is worse than one that counts the way it always did.
     """
+    where = "read_at IS NULL"
+    if _has_column(db, "messages", "undeliverable_at"):
+        where += " AND undeliverable_at IS NULL"
     return {r["to_agent"]: r["n"] for r in db.execute(
-        "SELECT to_agent, COUNT(*) n FROM messages WHERE read_at IS NULL GROUP BY to_agent"
+        f"SELECT to_agent, COUNT(*) n FROM messages WHERE {where} GROUP BY to_agent"
     )}
+
+
+def _has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})"))
 
 
 def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int, bool]]:
@@ -1124,16 +1144,22 @@ def _attention(snap: Snapshot) -> list[str]:
 
     needs = snap.needs_human
     if needs:
-        # This IS the human's inbox. There is no other one: an agent that needs a person
-        # blocks, and a block is a row here until somebody answers it.
+        # Not the human's inbox — `sb board` is what Andrew watches, and a blocked agent
+        # is a marked row there (DESIGN-TRUTH.md: "`sb status` is not for Andrew — only
+        # `sb board` is"). This list is for an agent reading its own cohort, which is why
+        # the rows name the agent rather than addressing the reader as the one who answers.
         w = max(len(a.name) for a in needs)
         out.append("")
         out.append("NEEDS YOU")
         for a in needs:
             if a.blocked:
+                # Says whose answer counts: only the human's `tell` clears a block
+                # (`Broker.tell` passes `answer=(me == HUMAN)`). Another agent's mail is
+                # written and then held, so telling one without that caveat sends an agent
+                # off to unblock something it cannot unblock.
                 why = a.blocked_why or "no reason recorded"
                 out.append(f"  {a.name:<{w}}  blocked: {why[:70]}"
-                           f"  →  sb tell {a.name} \"...\"")
+                           f"  →  the human answers it: sb tell {a.name} \"...\"")
             elif a.at_prompt:
                 out.append(f"  {a.name:<{w}}  waiting at a prompt in its own TUI"
                            f"  →  sb inspect {a.name}")
@@ -1172,12 +1198,24 @@ def _attention(snap: Snapshot) -> list[str]:
         out.append("mid-turn (`agent prompt` interleaves), and released when it goes idle.")
         out.append("Mail an agent read of its own accord is never counted here, however we")
         out.append("came to ring — it is already in front of it.")
+        # A blocked agent is the one case where "when it goes idle" is not merely late but
+        # wrong: `_ring`/`flush_pending` hold its mail on `_is_blocked`, and only the
+        # human's own `tell` lifts that. Said here rather than left to the reader, because
+        # a row that reads "waiting, blocked" under the sentence above looks like something
+        # that will resolve itself.
+        blocked = [a for a in pending if a.blocked]
+        if blocked:
+            out.append("A blocked agent is the exception: its mail is held until the human")
+            out.append("answers the block, not until it goes idle. Answering releases it.")
         for a in pending:
             out.append(f"  {a.name:<{w}}  {a.undelivered} waiting, "
                        f"oldest {fmt_age(a.undelivered_age)}, "
                        f"{'still working' if a.state in RUNNING and not a.stalled else a.state}")
         out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; the doorbell rings when "
                    f"the agent next goes idle")
+        if blocked:
+            out.append(f"  {'':<{w}}  →  for a blocked one, when the human answers: "
+                       f"sb tell <name> \"...\"")
 
     drift = [a for a in snap.agents if a.stalled or a.gone]
     if drift:
@@ -1386,9 +1424,19 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
         out.append("")
         out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it, "
                    f"never read (oldest {fmt_age(a.undelivered_age)})")
-        out.append("  The doorbell is held while an agent is mid-turn and released when it")
-        out.append("  goes idle; until then this agent does not know these exist. Anything")
-        out.append("  it has already read is excluded — every row below has `read: false`.")
+        if a.blocked:
+            # This agent is blocked, so the generic sentence below is false for it: its
+            # mail is held on `_is_blocked` in `_ring`/`flush_pending` and nothing but the
+            # human's `tell` releases it. Going idle is not a state it passes through —
+            # `block` stopped reporting herdr state at all.
+            out.append("  This agent is blocked, so its mail is held until the human")
+            out.append("  answers the block — not until it goes idle. Until then it does")
+            out.append("  not know these exist. Anything it has already read is excluded —")
+            out.append("  every row below has `read: false`.")
+        else:
+            out.append("  The doorbell is held while an agent is mid-turn and released when it")
+            out.append("  goes idle; until then this agent does not know these exist. Anything")
+            out.append("  it has already read is excluded — every row below has `read: false`.")
         for m in d.undelivered:
             out.append(f"  [{m['id']}] from {m['from']}: {clip(m['body'], 90)}")
 
@@ -1452,16 +1500,18 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
 # It does NOT poll the store. herdr blocks server-side in `agent wait --until`, and we
 # read the store once each time that returns — because the two can disagree, and `done` is
 # a STORE state that herdr has no vocabulary for (herdr's enum is idle|working|blocked|
-# unknown; broker.done reports `idle` and records `done` with us).
+# unknown, and broker.done reports NOTHING to it — a report would cost the agent its name,
+# so herdr learns the turn ended from its own detector and `done` lives only with us).
 #
 # Herdr.wait handles the other half: `agent wait` is not turn-scoped, so a previous turn's
 # transition satisfies it instantly. Passing `since_seq` makes it re-wait until herdr's
 # state_change_seq has actually advanced past the value we snapshotted.
 
-# A ceiling on one server-side block, not a poll interval. herdr's report can be dropped
-# silently (see StateWriteDropped: a stale seq or a session-owner conflict both return
-# ok), and then no state change is ever announced for a `done` that really happened. This
-# bounds how long that costs us, without turning a blocking wait into a busy one.
+# A ceiling on one server-side block, not a poll interval. Nothing announces a `done` on
+# herdr's side — we report no state to it at all (see broker.done), so the only signal is
+# its own detector noticing the turn ended, and that can lag or, on a pane it has lost
+# track of, never come. This bounds how long that costs us, without turning a blocking
+# wait into a busy one: the store, which has the real answer, is re-read every slice.
 WAIT_SLICE_MS = config.setting("timeouts.wait_slice_ms")
 
 # What `--for` accepts. The first four are store states; `idle` is the honest name for
@@ -1588,8 +1638,8 @@ def _next_transition(herdr_state: Optional[str], until: str) -> str:
     `wait_for`'s own loop.
 
     Only `idle` and `working` are ever asked for. `blocked` is not, and that costs nothing
-    an agent does — broker.block reports `idle` and records the block with us, and it
-    explains why — only herdr's own detector spotting an unanswered permission prompt,
+    an agent does — broker.block reports nothing at all and records the block with us, and
+    it explains why — only herdr's own detector spotting an unanswered permission prompt,
     which `wait_for` reads off the next status pass anyway.
     """
     target = WORKING if until == "working" else IDLE

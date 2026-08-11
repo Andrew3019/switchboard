@@ -26,6 +26,8 @@ so they are written down where the code is rather than argued about again:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import inspect
 import json
 import os
@@ -43,7 +45,7 @@ from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
 from . import validate
-from .herdr import BLOCKED, IDLE, WORKING, Herdr, HerdrError, StateWriteDropped
+from .herdr import WORKING, Herdr, HerdrError
 from .status import GONE_STATE, fmt_age
 from . import live
 
@@ -115,6 +117,9 @@ TEARDOWN_SETTLE_POLL = config.setting("timeouts.teardown_settle_poll")
 # Every git we shell out to. A fork waits on `git fetch`, which is a network call and the
 # one command here that can hang for as long as a bad connection wants it to.
 SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+# How long a spawn queues for its turn at creating a worktree. See `Broker._fork_lock`.
+FORK_LOCK_WAIT = config.setting("timeouts.fork_lock")
+FORK_LOCK_POLL = 0.05
 # Pointing a spawning pane's `sb` at its own checkout, and confirming it took. See `_pin_sb`.
 PIN_MS = config.setting("timeouts.pin_ms")
 PIN_ATTEMPTS = config.setting("retries.pin_attempts")
@@ -454,10 +459,6 @@ class Broker:
         # cache, which means herdr answered and is running nothing — see `_agent_states`.
         self._alive_unknown = False
         self._ws_ids: dict[str, str] = {}   # workspace name -> herdr id, this call only
-        # Whether `_check_integration` has run in THIS process. Not a result, just "asked
-        # already": the answer cannot change under us often enough to be worth re-asking,
-        # and the cost it saves is a subprocess spawn per state write.
-        self._integration_checked = False
         # Only if this repo wrote one. Absent — the normal case — leaves the module-level
         # PROTOCOL_LINE in charge, which is also what makes it patchable in a test.
         self._protocol_override = config.protocol_override(self.repo)
@@ -520,7 +521,7 @@ class Broker:
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
         if sid:
             row = self.db.execute(
-                "SELECT name, ended_at FROM agents WHERE session_id=? "
+                "SELECT name, state, ended_at FROM agents WHERE session_id=? "
                 "ORDER BY created_at DESC LIMIT 1", (sid,)
             ).fetchone()
             if row:
@@ -529,10 +530,10 @@ class Broker:
         pane = os.environ.get("HERDR_PANE_ID")
         if pane:
             row = self.db.execute(
-                "SELECT name, ended_at FROM agents WHERE pane_id=? AND ended_at IS NULL "
-                "ORDER BY created_at DESC LIMIT 1", (pane,)
+                "SELECT name, state, ended_at FROM agents WHERE pane_id=? "
+                "AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1", (pane,)
             ).fetchone() or self.db.execute(
-                "SELECT name, ended_at FROM agents WHERE pane_id=? "
+                "SELECT name, state, ended_at FROM agents WHERE pane_id=? "
                 "ORDER BY created_at DESC LIMIT 1", (pane,)
             ).fetchone()
             if row:
@@ -542,13 +543,45 @@ class Broker:
         return HUMAN
 
     def _revive(self, row) -> str:
-        """A finished agent that is calling `sb` again is working again."""
+        """An agent that is calling `sb` again is working again — finished or blocked.
+
+        THE BLOCKED HALF IS HOW A BLOCK GETS ANSWERED IN THE PANE. `sb tell` from the human
+        is not the only way to answer a question: the obvious thing to do with an agent
+        that has stopped and asked you something is to type the answer into its pane, and
+        that works — the agent reads it and carries on — while the store went on saying
+        `blocked` forever. The row stayed in NEEDS YOU with the question already answered,
+        its held mail stayed held (`_ring`'s blocked branch), and there was no verb, not
+        even for the human, that could put it right.
+
+        Nothing watches panes, and nothing needs to. An agent that is blocked has ENDED ITS
+        TURN — that is what blocking is — so it runs no commands while it waits, and the
+        next `sb` command from inside that pane is the agent taking a turn again. Whatever
+        restarted it, it is no longer stopped waiting on a person, which is the entire
+        content of `blocked`. So the same rule that already brings back a finished agent
+        brings back a blocked one, and it costs no new verb, no prompt change and no
+        pane-content diffing (there is no such mechanism to reuse).
+
+        The narrow cost, and it is worth stating plainly: an agent that runs another `sb`
+        command in the same turn AFTER `sb block`, instead of stopping the way every
+        shipped prompt tells it to, clears its own block. It does not vanish — the state
+        goes to `working` with the turn about to end, and a turn that ends without `sb
+        done` is STALLED, which `needs_human` covers, so the row comes back to NEEDS YOU
+        under a different heading rather than dropping off the human's list. The event log
+        keeps both the `blocked` and the `unblocked` rows, with the reason on the second.
+        """
         name = row["name"]
         if row["ended_at"] is not None:
             self.db.execute(
                 "UPDATE agents SET ended_at=NULL, state='working' WHERE name=?", (name,))
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
+        elif "state" in row.keys() and row["state"] == "blocked":
+            store.set_state(self.db, name, "working")
+            # The same event `_unblock_if_needed` writes, because it is the same fact and
+            # `sb log` should not need two words for it. The reason is what tells the two
+            # routes apart afterwards: `sb tell` from the human, or the human typing into
+            # the pane and the agent getting on with it.
+            store.log_event(self.db, kind="unblocked", agent=name, reason="answered_in_pane")
         return name
 
     def _claim_session(self, name: str) -> None:
@@ -2113,8 +2146,14 @@ class Broker:
                     # --cwd names WHICH REPO. Without it herdr uses the focused
                     # workspace's repo, so a worktree asked for from a pane sitting in
                     # another project silently targets that one.
-                    r = self._call_adapter("create_worktree", branch, base=forked_from,
-                                           cwd=str(self.repo))
+                    #
+                    # The lock is taken HERE and not around `_fork_base`: the fetch is a
+                    # network call, it is the slowest thing in a fork, and it does not
+                    # race (thirty concurrent fetches, no failures). Six spawns therefore
+                    # still fetch at the same time and only queue for the git write.
+                    with self._fork_lock():
+                        r = self._call_adapter("create_worktree", branch, base=forked_from,
+                                               cwd=str(self.repo))
                 else:
                     r = self._open_worktree(name, path=known, branch=branch)
                     forked_from, fallback = None, None
@@ -2133,6 +2172,70 @@ class Broker:
             "workspace_unavailable",
             f"could not open or create workspace {name!r} (branch {branch}): {first}",
         )
+
+    @contextlib.contextmanager
+    def _fork_lock(self):
+        """One `worktree create` per repo at a time. The rest of a spawn stays concurrent.
+
+        What races: `git worktree add -b <name> origin/main` creates a branch whose
+        upstream it then records in `.git/config`, and that write takes `.git/config.lock`.
+        Two spawns issued at the same moment therefore collide on a file created with
+        `O_EXCL`, and the loser does not wait — git has no lock timeout for the config file
+        (it has `core.filesRefLockTimeout` for refs and `reftable.lockTimeout`, and nothing
+        for this), so it fails immediately with `could not lock config file .git/config:
+        File exists`, and herdr reports a fork that did not happen. Measured on a clone of
+        this repo: twenty rounds of two concurrent adds, twenty losers — and through `sb
+        delegate`, two dead spawns out of six. It bites at two.
+
+        The loser is not left half-forked — git makes no checkout — but it DOES leave the
+        branch behind, which is why the fix is a queue rather than a retry: a second
+        attempt at the same name meets a branch that now exists, and `_fork_for` refuses
+        exactly that (`BranchTaken`). Waiting for a turn has no such debris.
+
+        Scope is deliberately one call. Everything a spawn does around it — the fetch, the
+        tab, `agent start`, delivering the task — is untouched, so a six-way fan-out still
+        overlaps everywhere except the fraction of a second git is writing.
+
+        `flock` on a file under the shared `.git`, so it is per-repo, is seen from every
+        worktree, and is released by the kernel if the holder is killed. The wait is
+        bounded (`timeouts.fork_lock`) and expiring is NOT a failure: a spawn that cannot
+        get its turn proceeds anyway and takes its chances with git, because the thing this
+        exists to prevent is a spawn that dies, and a process blocked for ever on a lock
+        whose holder wedged is a worse version of that.
+        """
+        try:
+            d = store.store_dir(self.repo)
+            d.mkdir(parents=True, exist_ok=True)
+            fd = os.open(d / "fork.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        except (OSError, RuntimeError):
+            # Nowhere to put a lock means no repo to fork in either: let the create run
+            # and fail with git's own reason rather than with ours.
+            yield
+            return
+        try:
+            t0 = time.time()
+            deadline = t0 + FORK_LOCK_WAIT
+            queued = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        store.log_event(self.db, kind="fork_lock_timeout",
+                                        waited=int(FORK_LOCK_WAIT),
+                                        note="forking anyway rather than waiting longer")
+                        break
+                    queued = True
+                    time.sleep(FORK_LOCK_POLL)
+            # Only when it actually waited: this is how a fan-out's queueing cost is read
+            # back afterwards, and a row per spawn saying "waited 0 ms" would bury it.
+            if queued:
+                store.log_event(self.db, kind="fork_queued",
+                                waited_ms=int((time.time() - t0) * 1000))
+            yield
+        finally:
+            os.close(fd)                # closing releases the lock
 
     def _fork_base(self, base: str) -> tuple[str, Optional[str]]:
         """Bring `base` up to date, and say what we ended up forking from.
@@ -3259,7 +3362,22 @@ class Broker:
         mail — it is a record. The event log carries it, and that is what the readouts
         show: `sb status` puts it on the done row, `sb inspect` prints it in full, `sb
         log` has it. Nothing is lost by not addressing anybody; a row in a mailbox nobody
-        reads was only ever a second copy of this.
+        reads was only ever a second copy of this. What WAS lost is that nothing announced
+        it: a record on a board is only seen by someone already looking at the board, and
+        the top of a tree finishing is the one event in a run that ends the run. So a root
+        `done` notifies, the same way `block` does — see the `_surface` call below.
+
+        **Finishing costs the agent nothing it needs to be reached by.** This used to
+        report `idle` to herdr, which is not an annotation but a replacement: it evicts the
+        name `agent start` registered, permanently, so `sb tell <name>` after a `done`
+        could never land again (`Herdr.report_state` carries the measurement; `block` had
+        the same call removed for the same reason). That made the ordinary next move after
+        a report — a follow-up question to the agent still holding the whole context —
+        impossible, and the only remaining move was spawning a fresh agent and re-teaching
+        it everything. Nothing needed the report: herdr's own detector reads the pane as
+        idle the moment the turn ends, which is the entire content of what we were paying
+        the name binding to tell it, and `done` is a state herdr has no word for anyway —
+        our store is where it lives and where every readout reads it from.
 
         **Reporting done with children still working stays legal**, and the returned list
         of their names is the whole change here. Refusing it would be a protocol change —
@@ -3281,7 +3399,9 @@ class Broker:
             store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",
                               body=f"[done] {summary}")
         store.set_state(self.db, me, "done")
-        self._push_state(a, IDLE, summary)   # herdr has no `done`; it derives it from idle
+        # NOTHING is reported to herdr here, and that silence is what keeps a finished
+        # agent addressable — see the docstring, and `block` for the same call and the
+        # same reason.
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP])
         still_working = self.live_descendants(me)
         if still_working:
@@ -3291,6 +3411,15 @@ class Broker:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
             self._ring(parent, self._say("notify.child_done"))
+        else:
+            # No parent to poke, and the human has no mailbox — so the notification IS the
+            # delivery, not a copy of one. A root reporting done is the end of the run, and
+            # before this it was indistinguishable on the board from any other row: nothing
+            # rang, nothing entered NEEDS YOU, and the only way to learn a run had finished
+            # was to already be watching. Dismissing it loses nothing, the same way it
+            # loses nothing for `block`: the summary is durable in the event log and on the
+            # done row, and this only says "now".
+            self._surface(me, f"done — {summary}")
         return still_working
 
     def block(self, why: str, *, me: Optional[str] = None) -> None:
@@ -3306,8 +3435,11 @@ class Broker:
         `why` for as long as it stays blocked. A dismissed desktop notification therefore
         loses nothing, which was the only reason a mailbox row was ever written here.
 
-        The human answers with `sb tell <agent> "..."`, which rings the doorbell and
-        unblocks it (see `_unblock_if_needed`).
+        Two things answer it, and both clear the row. `sb tell <agent> "..."` from the
+        human rings the doorbell and unblocks it (`_unblock_if_needed`); typing the answer
+        straight into the agent's pane restarts the agent itself, and its next `sb` command
+        is what clears the block (`_revive`). The second is the one people actually do, and
+        it used to leave the row blocked forever with the question already answered.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -3550,6 +3682,14 @@ class Broker:
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a
             # second sweep then retried release/close against a dead pane every time.
             store.update_agent(self.db, a["name"], pane_id=None)
+            # The pane this agent's inbox was reachable through has just gone, so whatever
+            # is still sitting in it is now mail nobody can ever open. Cleared HERE and not
+            # left to the next flush because the flush chases `unseen()`, and mail that was
+            # already stamped un-announceable is not in it: that backlog would sit unread
+            # for the life of the store, holding a closed agent in NEEDS YOU with no
+            # command left that could clear it. Nothing is read, deleted or hidden — see
+            # `_clear_unreadable_mail`.
+            self._clear_unreadable_mail(a["name"])
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             closed.append(a["name"])
         return closed
@@ -3808,11 +3948,16 @@ class Broker:
     def _finished_and_unreachable(self, who: str) -> bool:
         """Has this agent ended its turn for good, with no pane left to ring?
 
-        `sb done` ends a turn, and a real Claude Code process stops answering to its name
-        the moment that turn ends — herdr says `agent_not_found` from then on. The row,
-        though, keeps its `pane_id` and stays a perfectly good target, so every doorbell
-        aimed at it fails, and `flush_pending` re-aims it on every `sb` command anybody
-        runs, forever. This is the predicate that stops that.
+        A finished agent is NOT unreachable by virtue of being finished, and the version of
+        this that said so was reading our own damage as a fact about Claude Code. What
+        stopped a done agent answering to its name was the `pane report-agent` that `done`
+        itself made; with that call gone, a `done` agent whose pane is still open answers
+        to its name and takes a doorbell like anyone else — measured on herdr 0.8.0 from an
+        isolated clone: agent reports done, `agent get <name>` still resolves, `sb tell`
+        lands, the agent wakes and reports again. So this stays a NAME question. What it
+        catches now is a row that kept its `pane_id` after the pane or the process went
+        away: still a perfectly good-looking target, so every doorbell aimed at it fails
+        and `flush_pending` re-aims it on every `sb` command anybody runs, forever.
 
         Two ways to be sure, and both are needed. A row with no `pane_id` has nothing to
         ring by construction — `cleanup` cleared it, or it never got one. A row that still
@@ -3908,6 +4053,28 @@ class Broker:
                 rung.append(who)
         return rung
 
+    def _pane_still_listed(self, who: str) -> bool:
+        """Does herdr still have a pane for this agent — under any name, bound or not?
+
+        Deliberately NOT `_name_bound`'s question. An evicted pane is still listed, as
+        `{"agent": "<name>"}` with no name field, so this is true for exactly the agents
+        whose binding is gone and whose pane a person could still put a turn into. That is
+        the pair `_clear_unreadable_mail` has to tell apart: a mailbox that can still be
+        opened by hand, and one that cannot be opened by anybody ever again.
+
+        `_end_still_holds` reads the same `agent list` and comes out the other way up. It
+        is asked about a row whose end was INFERRED, to decide whether closing it is safe;
+        this is asked about a row whose mail is about to be written off. Same reading, two
+        questions, and each says which it is.
+
+        Unknown reads as STILL THERE, and that direction is the whole safety of it: a
+        herdr that cannot be answered proves nothing, and reading an outage as "the pane is
+        gone" would write off a live fleet's mail on one failed subprocess. The cost of the
+        doubt is a row that stays in NEEDS YOU until the next command asks again.
+        """
+        states = self._agent_states()
+        return states is None or who in states
+
     def _clear_unreadable_mail(self, who: str, messages: Optional[Sequence] = None) -> None:
         """Stop chasing mail for an agent that has finished and cannot be rung again.
 
@@ -3919,41 +4086,60 @@ class Broker:
         `continue`s before any close is attempted. Marking the mail here, and lifting that
         gate for exactly these rows, is what lets them sweep normally again.
 
-        Nothing is destroyed. The message keeps its body, its sender and its place in the
-        log, so `sb inspect` and `sb log` still show it, and the event written here says
-        plainly that it was cleared rather than read. What it loses is its claim on an
-        inbox that is not going to be opened — and the narrow cost of that is an agent
-        brought back later by `sb restore` finding those messages already read.
+        Nothing is destroyed, and nothing is marked read. The message keeps its body, its
+        sender, its place in the log and its place in that agent's inbox: `sb inspect
+        <agent>` still lists it, and `sb restore` brings back an agent whose own `sb inbox`
+        still hands it over. What it loses is its claim on a PERSON — see
+        `store.mark_undeliverable`.
 
-        A row that still holds a PANE is treated more gently, and the difference is only
-        `read_at`. A person can put a turn back into that pane, and `done` is explicit that
-        a done parent with live children stays reachable and still collects their
-        summaries — so its own `sb inbox` remains a real way for that mail to be read, and
-        marking it read would be the one thing that ends it. What it does lose is the
-        pretence that it is still waiting to be announced: `mark_unannounceable` stamps
-        `delivered_at`, which is what takes it out of `unseen()` and so out of both
-        triggers. Without that the ring is skipped and nothing else changes — the rows stay
-        un-announced forever, `flush_pending` re-derives them on every `sb` command, and
-        the collector's doorbell spawns an `sb flush` every ten seconds for the life of the
-        row (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71
-        seconds). Skipping a ring stops the herdr call; only this stops the retry.
+        WHICH ROWS ARE STILL READABLE is the whole judgement here, and it is made on the
+        PANE, not on the `pane_id` column. A row that has finished still carries the id of
+        the pane it ran in long after that pane is gone (only `cleanup` clears it), so
+        reading the column as "there is still an inbox someone could open" wrote off
+        nothing at all for the case that actually clogs the queue: an agent that died, its
+        pane closed with it, its mail unread forever with nothing that could ever move it
+        (`2026-08-09-233230`). `_pane_still_listed` asks herdr, and answers "still there"
+        whenever it cannot tell, so an outage never writes anybody's mail off.
+
+        A pane herdr STILL has is treated gently, and the difference is what is claimed
+        about it rather than what is stored. A person can put a turn back into that pane,
+        and `done` is explicit that a done parent with live children stays reachable and
+        still collects their summaries — so its own `sb inbox` is a live route and the mail
+        is still genuinely owed to somebody. What it does lose is the pretence that it is
+        still waiting to be announced: `mark_unannounceable` stamps `delivered_at`, which
+        is what takes it out of `unseen()` and so out of both triggers. Without that the
+        ring is skipped and nothing else changes — the rows stay un-announced forever,
+        `flush_pending` re-derives them on every `sb` command, and the collector's doorbell
+        spawns an `sb flush` every ten seconds for the life of the row
+        (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71 seconds).
+        Skipping a ring stops the herdr call; only this stops the retry.
+
+        The written-off branch deliberately IGNORES `messages` and re-derives the whole
+        unread backlog. Everything the callers can pass comes from `unseen()`, and mail
+        that went through the gentle branch first is no longer in it — which is exactly the
+        backlog that had to be cleared, sitting there un-clearable because the one sweep
+        that could see it had already stopped looking.
 
         `messages` may be omitted, and then it is exactly this agent's share of `unseen`.
-        `flush_pending` passes the slice it already has; `_ring` has no list to pass.
+        `flush_pending` passes the slice it already has; `_ring` and `cleanup` have none.
         """
-        if messages is None:
-            messages = [m for m in store.unseen(self.db) if m["to_agent"] == who]
-        if not messages:
-            return
         a = store.get_agent(self.db, who)
-        if a and a["pane_id"]:
+        if a and a["pane_id"] and self._pane_still_listed(who):
+            if messages is None:
+                messages = [m for m in store.unseen(self.db) if m["to_agent"] == who]
             for m in messages:
                 store.mark_unannounceable(self.db, m["id"])
                 store.log_event(self.db, kind="mail_unannounced", agent=who,
                                 sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
             return
-        for m in messages:
-            store.mark_collected(self.db, m["id"])
+        for m in store.unread_for(self.db, who, mark=False):
+            # Already written off by an earlier sweep. Skipped rather than re-stamped, so
+            # this stays idempotent: `undeliverable_at` is not a form of read, so these
+            # rows keep coming back from `unread_for` for as long as they exist, and a
+            # second pass would otherwise log the same message again on every command.
+            if "undeliverable_at" in m.keys() and m["undeliverable_at"] is not None:
+                continue
+            store.mark_undeliverable(self.db, m["id"])
             store.log_event(self.db, kind="mail_cleared", agent=who,
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
@@ -4146,7 +4332,7 @@ class Broker:
         if not a or a["state"] != "blocked" or not a["pane_id"]:
             return
         store.set_state(self.db, who, "working")
-        store.log_event(self.db, kind="unblocked", agent=who)
+        store.log_event(self.db, kind="unblocked", agent=who, reason="told_by_human")
 
     def _surface(self, who: str, text: str) -> None:
         try:
@@ -4154,39 +4340,14 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="notify_failed", agent=who, error=str(e))
 
-    def _check_integration(self) -> None:
-        """Is a conflicting `claude` integration silently eating our state writes?
-
-        `Herdr.check` says it fails "at startup", and nothing calls it at startup: `sb
-        doctor` is its only caller, so an installed integration makes every state write
-        in every session look successful and be dropped, for as long as it is installed.
-
-        Asked HERE rather than in `main()`, and logged rather than raised. The blast
-        radius is `_push_state`, the one place a state write is made, so a process that
-        never writes state — `sb status`, `sb log` — should neither pay for a subprocess
-        nor be hard-failed by a fault that cannot reach it. Once per process, the way `_alive_cache` and
-        `_ws_ids` are once per process, and the flag is set before the call so a herdr
-        that is slow or broken costs that price exactly once either way.
-
-        `doctor` keeps `check()` as the loud, deliberate diagnosis it reads as.
-        """
-        if self._integration_checked:
-            return
-        self._integration_checked = True
-        try:
-            self.h.check()
-        except HerdrError as e:
-            store.log_event(self.db, kind="herdr_check_failed", code=e.code, error=str(e))
-
-    def _push_state(self, a, state: str, message: str = "") -> None:
-        if not a or not a["pane_id"]:
-            return
-        self._check_integration()   # a write is actually about to be attempted
-        try:
-            self.h.report_state(a["pane_id"], a["name"], state,
-                                store.next_seq(self.db, a["name"]), message=message[:NOTIFY_CLIP])
-        except StateWriteDropped as e:
-            # Loud, because both causes return ok and this is how the board goes stale.
-            store.log_event(self.db, kind="state_dropped", agent=a["name"], error=str(e))
-        except HerdrError as e:
-            store.log_event(self.db, kind="state_failed", agent=a["name"], error=str(e))
+    # There is no `_push_state` here, and its absence is load-bearing. Every state we
+    # ever reported to herdr — `working` on an unblock, `blocked` on a block, `idle` on a
+    # done — was a `pane report-agent`, which REPLACES the pane's named agent rather than
+    # annotating it and so evicts the name for good (`Herdr.report_state` carries the
+    # measurement). Each one was removed as the bug it caused was found, `done` last, and
+    # nothing was lost with any of them: herdr's own detector reads idle and working off
+    # the pane unprompted, and the two states it has no word for — blocked, done — have
+    # always lived in our store, which is what the board, `sb status` and `sb wait` read.
+    # Anything reaching for a state write again should read `block`, `_unblock_if_needed`
+    # and `done` first: the eviction is silent, permanent, and only visible later as mail
+    # that can never be delivered.
