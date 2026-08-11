@@ -1452,16 +1452,18 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
 # It does NOT poll the store. herdr blocks server-side in `agent wait --until`, and we
 # read the store once each time that returns — because the two can disagree, and `done` is
 # a STORE state that herdr has no vocabulary for (herdr's enum is idle|working|blocked|
-# unknown; broker.done reports `idle` and records `done` with us).
+# unknown, and broker.done reports NOTHING to it — a report would cost the agent its name,
+# so herdr learns the turn ended from its own detector and `done` lives only with us).
 #
 # Herdr.wait handles the other half: `agent wait` is not turn-scoped, so a previous turn's
 # transition satisfies it instantly. Passing `since_seq` makes it re-wait until herdr's
 # state_change_seq has actually advanced past the value we snapshotted.
 
-# A ceiling on one server-side block, not a poll interval. herdr's report can be dropped
-# silently (see StateWriteDropped: a stale seq or a session-owner conflict both return
-# ok), and then no state change is ever announced for a `done` that really happened. This
-# bounds how long that costs us, without turning a blocking wait into a busy one.
+# A ceiling on one server-side block, not a poll interval. Nothing announces a `done` on
+# herdr's side — we report no state to it at all (see broker.done), so the only signal is
+# its own detector noticing the turn ended, and that can lag or, on a pane it has lost
+# track of, never come. This bounds how long that costs us, without turning a blocking
+# wait into a busy one: the store, which has the real answer, is re-read every slice.
 WAIT_SLICE_MS = config.setting("timeouts.wait_slice_ms")
 
 # What `--for` accepts. The first four are store states; `idle` is the honest name for
@@ -1588,8 +1590,8 @@ def _next_transition(herdr_state: Optional[str], until: str) -> str:
     `wait_for`'s own loop.
 
     Only `idle` and `working` are ever asked for. `blocked` is not, and that costs nothing
-    an agent does — broker.block reports `idle` and records the block with us, and it
-    explains why — only herdr's own detector spotting an unanswered permission prompt,
+    an agent does — broker.block reports nothing at all and records the block with us, and
+    it explains why — only herdr's own detector spotting an unanswered permission prompt,
     which `wait_for` reads off the next status pass anyway.
     """
     target = WORKING if until == "working" else IDLE

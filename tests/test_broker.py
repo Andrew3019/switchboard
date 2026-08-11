@@ -629,36 +629,39 @@ class BrokerTest(unittest.TestCase):
         [m] = store.unread_for(self.db, "orch", mark=False)
         self.assertIn("[done] counted 144", m["body"])
 
-    def test_done_pushes_idle_because_herdr_has_no_done_state(self):
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.done("x", me="kid")
-        self.assertEqual(self.h.states[-1][1], "idle")
+    def test_a_finished_agent_can_still_be_reached_on_an_evicting_herdr(self):
+        """The follow-up question, against a herdr that behaves the way the real one does.
 
-    def test_a_state_write_checks_for_a_conflicting_integration_once(self):
-        """`Herdr.check` says it fails "at startup" and nothing calls it at startup, so
-        an installed integration eats every state write for a whole session in silence.
-        Asked where the risk is — at the write — and once per process, not per write."""
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        store.create_agent(self.db, name="k2", role="worker", parent="orch", pane_id="w1:p2")
-        self.b.done("x", me="kid")
-        self.b.done("y", me="k2")
-        self.assertEqual(self.h.checks, 1)
+        `done` used to report `idle`, and a `pane report-agent` costs the agent its name
+        for good (`EvictingHerdr` charges that price; `Herdr.report_state` carries the
+        measurement). So the ordinary next move after a report — asking the agent that
+        still holds the whole context one more thing — was impossible, and the only move
+        left was spawning a fresh agent and re-teaching it everything. Nothing is reported
+        now, so the name survives the report and the doorbell still rings.
+        """
+        self.h = EvictingHerdr()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}
+        self.b.done("shipped the parser", me="w")
 
-    def test_a_command_that_writes_no_state_never_pays_for_the_check(self):
-        """A subprocess spawn on every `sb status` for a fault that cannot reach it."""
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.tell(["kid"], "hello", me="orch")
-        self.assertEqual(self.h.checks, 0)
+        self.assertEqual(self.h.states, [])                       # nothing was reported
+        self.b.tell(["w"], "one more thing", me=HUMAN)
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])   # the doorbell rang
+        self.assertEqual(store.undelivered(self.db), [])          # and it landed
+        self.assertIsNone(self.b.unreachable("w"))
 
-    def test_a_conflicting_integration_is_logged_not_raised(self):
-        """Logged and carried on with: the write may well have landed, and hard-failing
-        the `sb done` that discovered it would lose the summary as well."""
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.h.check_error = HerdrError("integration_conflict", "claude integration installed")
-        self.b.done("x", me="kid")
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
-        self.assertIn("herdr_check_failed",
-                      [e["kind"] for e in store.recent_events(self.db)])
+    def test_a_root_agents_done_is_announced_because_nothing_else_will(self):
+        """A root has no parent to poke and the human has no mailbox, so the notification
+        is the delivery rather than a copy of one — and the end of the top of the tree is
+        the end of the run. A child's done is not announced: its parent gets rung."""
+        store.create_agent(self.db, name="root", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="root", pane_id="w1:p2")
+        self.b.done("counted 144", me="kid")
+        self.assertEqual(self.h.notifications, [])
+        self.b.done("shipped the parser", me="root")
+        self.assertEqual(len(self.h.notifications), 1)
+        self.assertIn("shipped the parser", self.h.notifications[0])
 
     def test_block_reports_no_state_to_herdr_at_all(self):
         """The one thing that makes a block answerable.
