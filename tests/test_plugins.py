@@ -1018,7 +1018,7 @@ class IsolationTest(Sandbox):
     LEVEL_0 = {
         "status": [], "done": ["finished"],
         "tell": ["w1", "hi"], "inbox": [], "block": ["why"], "log": [], "cleanup": [],
-        "inspect": ["w1"], "wait": ["w1", "--timeout", "1"], "init": [],
+        "inspect": ["w1"], "init": [],
         "restore": ["w1"], "board": [], "models": [],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],

@@ -129,9 +129,9 @@ class ShippedDefaultsTest(_Layered):
         self.assertEqual(set(config.roles(None)), names)
 
     def test_every_shipped_role_has_a_tier_and_a_prompt(self):
-        """No `cleanup` here on purpose. A disposition is a run-time decision — set per
-        spawn by `sb delegate --keep` / `--ephemeral`, and swept by the orchestrator — not
-        a property of a kind of agent, so no role file carries one any more."""
+        """No `cleanup` here on purpose. A disposition is a run-time decision — the
+        orchestrator's own sweep — not a property of a kind of agent, so no role file
+        carries one, and `Role` no longer has the field to put it in."""
         for name, r in config.roles(None).items():
             with self.subTest(role=name):
                 self.assertTrue(r.get("model"), f"{name} names no tier")
@@ -412,8 +412,6 @@ class NothingLeftInPythonTest(unittest.TestCase):
             (broker.INTERRUPT_SETTLE, "timeouts.interrupt_settle"),
             (broker.TEARDOWN_SETTLE, "timeouts.teardown_settle"),
             (broker.TEARDOWN_SETTLE_POLL, "timeouts.teardown_settle_poll"),
-            (status.WAIT_SLICE_MS, "timeouts.wait_slice_ms"),
-            (status.WAIT_TIMEOUT, "timeouts.wait"),
             (status.DEFAULT_EVENTS, "display.events"),
             (status.TASK_CLIP, "limits.task_clip"),
             (output.DEFAULT_LINES, "display.output_lines"),

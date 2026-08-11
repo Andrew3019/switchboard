@@ -322,9 +322,11 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         self.assertIn("workspace 'api'", joined)
         self.assertIn("shared", joined)
 
-    def test_the_lead_is_never_swept_away_by_cleanup(self):
+    def test_a_lead_is_written_with_no_disposition_of_its_own(self):
+        """It used to be written `keep`. Nothing writes that column any more — what stays
+        open is the orchestrator's run-time call, not a value stamped at spawn."""
         self.b.workspace_new("api", me=HUMAN)
-        self.assertEqual(store.get_agent(self.db, "api-lead")["cleanup"], "keep")
+        self.assertEqual(store.get_agent(self.db, "api-lead")["cleanup"], "close")
 
     def test_a_task_is_delivered_to_a_new_lead(self):
         self.b.workspace_new("api", task="port the client", me=HUMAN)
@@ -549,28 +551,27 @@ class WorkspaceTest(Fixture, unittest.TestCase):
     def test_start_opens_a_workspace_over_the_checkout_you_ran_it_in(self):
         main = self._git_repo()
         b = Broker(self.db, self.h, repo=main)
-        self.assertEqual(b.start(focus=False), "main")
+        self.assertEqual(b.start(), "main")
         row = store.get_agent(self.db, "main")
         self.assertEqual(row["workspace"], "main")
         self.assertEqual(Path(row["cwd"]).resolve(), main.resolve())
         self.assertIsNone(row["parent"])                     # still a root
-        self.assertEqual(row["cleanup"], "keep")
 
     def test_restarting_opens_another_workspace_rather_than_returning(self):
         """Unnamed, `sb start` is only ever the start of something — a second line of
         work in a second bare space over the same checkout. Naming one is how you go
         back to it, and that is what the test below pins."""
         b = Broker(self.db, self.h, repo=self._git_repo())
-        first = b.start(focus=False)
-        second = b.start(task="merge PR 41", focus=False)
+        first = b.start()
+        second = b.start(task="merge PR 41")
         self.assertNotEqual(first, second)
         self.assertEqual(len(self.h.started), 2)
         self.assertEqual(store.unread_for(self.db, first), [])   # left entirely alone
 
     def test_naming_the_running_orchestrator_returns_to_it(self):
         b = Broker(self.db, self.h, repo=self._git_repo())
-        name = b.start(focus=False)
-        b.start(name=name, task="merge PR 41", focus=False)
+        name = b.start()
+        b.start(name=name, task="merge PR 41")
         self.assertEqual(len(self.h.started), 1)             # nothing spawned twice
         self.assertEqual(store.unread_for(self.db, name)[-1]["body"], "merge PR 41")
 
@@ -584,7 +585,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         """
         main = self._git_repo()
         b = Broker(self.db, self.h, repo=main)
-        b.start(focus=False)
+        b.start()
         kid = b.delegate("do a thing", role="worker", me="main")
         row = store.get_agent(self.db, kid)
         self.assertEqual(row["workspace"], kid)              # a tree of its own
@@ -595,11 +596,11 @@ class WorkspaceTest(Fixture, unittest.TestCase):
 
     def test_adoption_does_not_invent_agents_herdr_does_not_have(self):
         b = Broker(self.db, self.h, repo=self._git_repo())
-        b.start(focus=False)
+        b.start()
         self.db.execute("DELETE FROM agents")
         self.db.commit()
         self.h.live.clear()                                  # herdr lost it too
-        b.start(focus=False)
+        b.start()
         self.assertEqual(len(self.h.started), 2)             # genuinely gone: respawn
         self.assertFalse(any(e["kind"] == "adopt"
                              for e in store.recent_events(self.db)))
@@ -749,11 +750,12 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         self.assertTrue(any(e["kind"] == "board_open_failed"
                             for e in store.recent_events(self.db)))
 
-    def test_no_board_declines_the_split(self):
-        self.b.workspace_new("api", board=False, me=HUMAN)
+    def test_the_board_cannot_be_declined(self):
+        """`--no-board` is gone: every sb-made view is split with the board."""
+        self.b.workspace_new("api", me=HUMAN)
         self.assertIn("api-lead", self.h.live)
-        self.assertEqual(self.h.splits, [])
-        self.assertEqual(self.h.pane_prompts, [])
+        self.assertEqual(len(self.h.splits), 1)
+        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
 
 
 class StartWorkspaceTest(Fixture, unittest.TestCase):
@@ -765,30 +767,30 @@ class StartWorkspaceTest(Fixture, unittest.TestCase):
     """
 
     def test_start_creates_its_own_workspace(self):
-        self.b.start(focus=False)
+        self.b.start()
         self.assertIn("main", self.h.calls_of("create_workspace"))
 
     def test_each_start_gets_its_own_workspace(self):
-        first = self.b.start(focus=False)
-        second = self.b.start(focus=False)
+        first = self.b.start()
+        second = self.b.start()
         self.assertNotEqual(first, second)
         made = self.h.calls_of("create_workspace")
         self.assertEqual(made, [first, second])
 
     def test_returning_to_an_orchestrator_by_name_makes_no_new_workspace(self):
-        name = self.b.start(focus=False)
+        name = self.b.start()
         before = len(self.h.calls_of("create_workspace"))
-        self.b.start(name=name, focus=False)
+        self.b.start(name=name)
         self.assertEqual(len(self.h.calls_of("create_workspace")), before)
 
     def test_start_creates_no_branch_and_no_worktree(self):
         """A top-level orchestrator does no writes, so it needs a place, not a checkout."""
-        self.b.start(focus=False)
+        self.b.start()
         self.assertEqual(self.h.calls_of("create_worktree"), [])
 
     def test_a_workspace_failure_still_starts_the_orchestrator(self):
         self.h.fail_workspace_create = True
-        name = self.b.start(focus=False)
+        name = self.b.start()
         self.assertIsNotNone(store.get_agent(self.db, name))
 
     # -- the board -------------------------------------------------------
@@ -798,7 +800,7 @@ class StartWorkspaceTest(Fixture, unittest.TestCase):
     # next reader can tell "unused" from "untested".
 
     def test_start_opens_the_board_beside_the_orchestrator(self):
-        name = self.b.start(focus=False)
+        name = self.b.start()
         agent = store.get_agent(self.db, name)
         self.assertEqual(len(self.h.splits), 1)
         from_pane, direction, _ratio = self.h.splits[0]
@@ -808,16 +810,17 @@ class StartWorkspaceTest(Fixture, unittest.TestCase):
         self.assertEqual(len(self.h.pane_prompts), 1)
         self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
 
-    def test_no_board_declines_the_split(self):
-        self.b.start(focus=False, board=False)
-        self.assertEqual(self.h.splits, [])
-        self.assertEqual(self.h.pane_prompts, [])
+    def test_the_board_cannot_be_declined(self):
+        """`--no-board` is gone: every sb-made view is split with the board."""
+        self.b.start()
+        self.assertEqual(len(self.h.splits), 1)
+        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
 
     def test_a_closed_board_is_reopened(self):
-        name = self.b.start(focus=False)
+        name = self.b.start()
         board_pane = self.h.splits[0][0] and self.h.pane_prompts[0][0]
         self.h.panes.discard(board_pane)                    # the human closed it
-        self.b.start(name=name, focus=False)
+        self.b.start(name=name)
         self.assertEqual(len(self.h.splits), 2)
 
 class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
@@ -843,7 +846,7 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
     def test_closing_an_agent_closes_its_board(self):
         kid, board, agent_pane = self._finished_kid()
         self.assertIsNotNone(board)
-        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
+        self.assertEqual(self.b.cleanup([kid], me="api-lead"), [kid])
         self.assertIn(board, self.h.closed)
         self.assertIn(agent_pane, self.h.closed)
 
@@ -851,7 +854,7 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
         """A remembered pane is what makes `_open_board` a no-op, so a stale one would
         mean a restored agent never gets a board again."""
         kid, _board, _pane = self._finished_kid()
-        self.b.cleanup([kid], me="api-lead", include_kept=True)
+        self.b.cleanup([kid], me="api-lead")
         self.assertIsNone(self._board_pane(kid))
 
     def test_a_board_already_gone_is_tolerated(self):
@@ -864,7 +867,7 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
                 raise HerdrError("pane_not_found", f"no pane {pane}")
             real(pane)
         self.h.close_pane = gone
-        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [kid])
+        self.assertEqual(self.b.cleanup([kid], me="api-lead"), [kid])
         self.assertIsNone(self._board_pane(kid))
 
     def test_a_pane_that_would_not_close_keeps_its_board(self):
@@ -873,7 +876,7 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
         def refuse(pane):
             raise HerdrError("close_failed", "no")
         self.h.close_pane = refuse
-        self.assertEqual(self.b.cleanup([kid], me="api-lead", include_kept=True), [])
+        self.assertEqual(self.b.cleanup([kid], me="api-lead"), [])
         self.assertEqual(self._board_pane(kid), board)
 
 class WorktreeIsAFactTest(Fixture, unittest.TestCase):
@@ -896,7 +899,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
         """`sb start` lays a workspace over the main checkout and never forks. The row has
         to say so, or its children inherit a checkout that is the human's."""
         b = Broker(self.db, self.h, repo=self._git_repo())
-        name = b.start(focus=False)
+        name = b.start()
         self.assertIsNone(store.get_agent(self.db, name)["branch"])
         self.assertFalse(b.has_worktree(name))
 
@@ -1284,7 +1287,7 @@ class RetiringMarkExcludesTest(Fixture, unittest.TestCase):
         """Bare workspaces are closeable too, and `sb start --name` is the other door in."""
         self.marked("main-2", bare=True)
         with self.assertRaises(ValueError) as e:
-            self.b.start(name="main-2", focus=False)
+            self.b.start(name="main-2")
         self.assertIn("tidy-up", str(e.exception))
         self.assertIsNone(store.get_agent(self.db, "main-2"))
 
@@ -1357,7 +1360,7 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         """The property the fix is really about: one resolution point, not three."""
         kid = self.b.delegate("t", role="orchestrator", me=HUMAN)
         lead = self.b.workspace_new("api", me=HUMAN)["agent"]
-        top = self.b.start(focus=False, board=False)
+        top = self.b.start()
         plugins = [[p for p in self._prompts_for(n) if "keep it short" in p]
                    for n in (kid, lead, top)]
         self.assertEqual(plugins[0], plugins[1])

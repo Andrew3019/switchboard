@@ -16,8 +16,7 @@ fact worth keeping is which work repays a better model; the mechanism for acting
 flag, not a file.
 
 No `cleanup` field, here or in any other role: what stays open is a run-time decision
-(`sb delegate --keep` / `--ephemeral`, and the orchestrator's own sweep), not a property of
-a kind of agent.
+(the orchestrator's own sweep), not a property of a kind of agent.
 
 A verdict is mandatory. "Some thoughts on this PR" is what a review degenerates into
 without one.

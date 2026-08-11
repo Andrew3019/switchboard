@@ -73,7 +73,7 @@ class Harness:
                            session_id=None, cwd=kw.get("cwd"),
                            workspace=kw.get("workspace"), branch=kw.get("branch"),
                            workspace_id="", terminal_id=None, pane_id=None,
-                           cleanup="close", awaiting_task=False)
+                           awaiting_task=False)
         if kw.get("state"):
             store.set_state(self.db, name, kw["state"])
 
@@ -318,7 +318,7 @@ class OneNamespaceTest(Harness, unittest.TestCase):
         self.assertIn("sb workspace new api", str(e.exception))  # and the way to it
 
     def test_a_new_workspace_refuses_a_name_a_bare_one_holds(self):
-        self.b.start(name="main", board=False)
+        self.b.start(name="main")
         with self.assertRaises(ValueError) as e:
             self.b.workspace_new("main", me=HUMAN)
         self.assertIn("no checkout of its own", str(e.exception))
@@ -329,13 +329,13 @@ class OneNamespaceTest(Harness, unittest.TestCase):
         agent row that happens to share the string — a worktree workspace's lead is called
         `main-lead`, which is not the name being tested."""
         self.b.workspace_new("main", me=HUMAN)
-        self.assertEqual(self.b.start(board=False), "main-2")
+        self.assertEqual(self.b.start(), "main-2")
 
     def test_a_retired_name_is_free_again(self):
         """Retirement is a record of end-of-life, not a tombstone on the name."""
         self.b.workspace_new("api", me=HUMAN)
         store.retire_workspace(self.db, "api")
-        self.b.start(name="api", board=False)               # no longer held
+        self.b.start(name="api")               # no longer held
         self.assertIsNone(store.get_workspace(self.db, "api")["retired_at"])
 
 
@@ -357,7 +357,7 @@ class RecordedPathTest(Harness, unittest.TestCase):
         self.assertEqual(row["checkout"], r["path"])
 
     def test_a_bare_start_records_a_workspace_with_no_checkout(self):
-        self.b.start(name="main", board=False)
+        self.b.start(name="main")
         row = store.get_workspace(self.db, "main")
         self.assertIsNotNone(row)
         self.assertIsNone(row["checkout"])

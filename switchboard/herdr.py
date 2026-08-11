@@ -930,10 +930,10 @@ class Herdr:
             # that state, so the stale-seq guard above can reject the answer as fast as
             # herdr can produce it — two subprocesses per turn of this loop, as fast as
             # they will spawn, for the whole timeout. Measured at 77% of a core for a
-            # six-second wait; a default `sb wait` would have done it for fifteen minutes.
-            # Sleeping here turns a spin back into a wait. Callers that can pick the state
-            # the agent is NOT in should still do so (see status._next_transition) — that
-            # makes every block a real one and this backoff a formality.
+            # six-second wait; a fifteen-minute one would have done it for fifteen
+            # minutes. Sleeping here turns a spin back into a wait. Callers that can pick
+            # the state the agent is NOT in should still do so — that makes every block a
+            # real one and this backoff a formality.
             if not self._nap(WAIT_BACKOFF, deadline):
                 raise HerdrError("wait_timeout", f"{name} never advanced past {since_seq}")
 

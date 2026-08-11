@@ -1,7 +1,7 @@
 """The clickable board — a human's live view of the tree. A RENDERER.
 
 Three ways in, all the same screen: `sb start` opens one beside the orchestrator
-it starts (`--no-board` declines), `sb board` opens one here, and
+it starts, `sb board` opens one here, and
 `python3 -m switchboard.board` is the plumbing both go through.
 
 This is a HUMAN-ONLY surface and must stay one. `sb board` is hidden from
@@ -36,9 +36,8 @@ stay as the record of what was proven; this is the version that is maintained.
 `open_beside()` below was once removed as dead code, because it was written a
 turn before anything called it. It is now called from `broker._open_board`, which
 every spawn reaches through `broker.delegate` — so every agent, not only a
-top-level orchestrator, opens with a board beside it. Auto-opening a board IS a
-decision about a human's screen, which is why it is one `--no-board` can decline
-rather than one nobody gets a say in.
+top-level orchestrator, opens with a board beside it. There is no declining it:
+every sb-made view is split with the board (DESIGN-TRUTH.md's "`--no-board`").
 """
 
 from __future__ import annotations

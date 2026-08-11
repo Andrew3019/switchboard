@@ -17,9 +17,8 @@ closing an agent someone is talking to is never what anyone wanted however idle 
 which is true, and still not a property of a KIND of agent. What stays open depends on
 what is happening in the room: whether anyone is mid-conversation with it, whether its
 work is the thing being read right now. A role deciding that at spawn time is deciding it
-before anyone could know. It is a run-time call — `sb delegate --keep` / `--ephemeral` per
-spawn, and the sweep below — so the field is gone from every role file and the store's
-default (`close`) stands.
+before anyone could know. It is a run-time call — the orchestrator's own sweep, below —
+so the field is gone from every role file and the store's default (`close`) stands.
 
 Which puts the whole weight on the rule stated in the prompt: keep only agents blocked
 waiting on a human, and finished implementation work someone may want to read. That is now

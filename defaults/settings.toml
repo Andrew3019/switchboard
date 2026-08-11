@@ -108,11 +108,10 @@ fallback_role = "worker"
 # that orchestrates.
 workspace_role = "orchestrator"
 
-# What a role file gets for a field it does not set. Every shipped role sets both, so these
-# only ever apply to a role somebody wrote in three lines — which is exactly the case that
-# should not have to know what a tier is called.
+# What a role file gets for a tier it does not name. No shipped role names one, so this is
+# what every role gets — and it is what a role somebody wrote in three lines gets too,
+# which is exactly the case that should not have to know what a tier is called.
 default_tier    = "default"
-default_cleanup = "close"
 
 # Appended to a workspace's slug to name its lead. Slug + this must still fit the 32
 # characters herdr allows in an agent name, which is why the slug is truncated first.
@@ -151,10 +150,6 @@ live = ["working", "blocked"]
 # means exactly what idle means: no turn is running. Treating it as its own thing is how a
 # stalled agent gets missed.
 idle_like = ["idle", "done"]
-
-# What `sb wait --for` accepts. The first four are store states; `idle` is the honest name
-# for "its turn ended", however it ended — the one a stalled agent still reaches.
-wait = ["done", "failed", "blocked", "working", "idle"]
 
 
 [limits]
@@ -243,15 +238,6 @@ herdr_log_clip = 500
 # window: `gone` is already forced false for a row that is still spawning, so nothing here
 # can be confirmed dead during its own spawn.
 gone_confirm_grace = 60.0
-
-# `sb wait`, which is for humans and shell scripts.
-wait = 900
-
-# A ceiling on ONE server-side block inside `sb wait`, not a poll interval. herdr can drop
-# a state report silently — a stale seq or a session-owner conflict both return ok — and
-# then no change is ever announced for a `done` that really happened. This bounds what that
-# costs without turning a blocking wait into a busy one.
-wait_slice_ms = 30000
 
 # How long `sb tell --interrupt` lets the escape keypress land before sending the new instruction.
 # Without the pause the interrupt races the cancel and can be swallowed by the turn it was
