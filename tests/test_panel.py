@@ -549,6 +549,47 @@ class CollectorLoop(PanelTest):
         self.assertEqual(panel.read(self.paths).collector["polls"], 3)
 
 
+class TheCollectorNoticingItsOwnCodeChanged(PanelTest):
+    """It holds the repo's one lock for hours and loads its code once, so a fix could be on
+    disk and not in the process running it — about four hours of held mail on 2026-08-11.
+    It now hashes its own `switchboard/*.py` and leaves through the existing exit if that
+    differs from what it started with, so a renderer starts a fresh import."""
+
+    def _run_with_signatures(self, sigs, **kw):
+        """As `CollectorLoop._run`, plus a scripted `source_signature`. The first value is
+        the one taken at startup; each later one answers one check."""
+        calls = iter(sigs)
+        with mock.patch.object(collector, "source_signature", lambda: next(calls)), \
+             mock.patch.object(collector, "SOURCE_CHECK_GAP", 0.0):
+            return CollectorLoop._run(self, [(a_snapshot("w1"), None)] * 20, **kw)
+
+    def test_it_exits_on_the_tick_that_first_sees_different_source(self):
+        """Exactly there and not a tick later: the whole value of this is that the next
+        tick behaves per the new code."""
+        rc = self._run_with_signatures(["old", "old", "new", "new"], max_ticks=9)
+        self.assertEqual(rc, 0)
+        self.assertEqual(panel.read(self.paths).collector["polls"], 2)
+        self.assertFalse(panel.collector_running(self.paths))   # and the lock is back
+
+    def test_an_unchanged_checkout_never_costs_a_restart(self):
+        self._run_with_signatures(["same"] * 6, max_ticks=4)
+        self.assertEqual(panel.read(self.paths).collector["polls"], 4)
+
+    def test_the_signature_covers_the_whole_package_and_not_just_this_file(self):
+        """`ring_doorbell` decides nothing itself — `ringable` is `status.py`'s, imported
+        once and frozen exactly as hard. A fix there has to count as a change."""
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d) / "switchboard"
+            pkg.mkdir()
+            for name in ("collector.py", "status.py"):
+                (pkg / name).write_text("# v1\n")
+            with mock.patch.object(collector, "__file__", str(pkg / "collector.py")):
+                before = collector.source_signature()
+                self.assertEqual(before, collector.source_signature())   # stable
+                (pkg / "status.py").write_text("# v2 — the ringable fix\n")
+                self.assertNotEqual(before, collector.source_signature())
+
+
 class TheDoorbellTrigger(PanelTest):
     """The one loop in the fleet that ticks on its own is what rings the doorbell.
 
@@ -672,6 +713,71 @@ class TheDoorbellTrigger(PanelTest):
         from switchboard import cli
         args = cli.build_parser().parse_args(["flush"])
         self.assertEqual(args.cmd, "flush")
+
+
+class TheReconcilerTrigger(PanelTest):
+    """T3 — the second trigger on the same loop (3.5).
+
+    Same subject as the doorbell's tests above: WHEN a process is spawned, never what it
+    then decides. Who is pinged, who is exempt and how often is `Broker.reconcile`'s, and
+    that is tested where the store is (`tests/test_broker.py`).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ran: list[list[str]] = []
+        self.enterContext(mock.patch.object(
+            collector.threading, "Thread",
+            lambda target, args=(), **kw: mock.Mock(start=lambda: target(*args))))
+        self.enterContext(mock.patch.object(
+            collector.subprocess, "run",
+            lambda argv, **kw: (self.ran.append(argv), mock.Mock(returncode=0))[1]))
+        self.enterContext(mock.patch.object(collector, "doorbell_sb", lambda: "/bin/sb"))
+
+    def sb_runs(self) -> list:
+        """Only the spawns this trigger made. `collector.subprocess` is the one module
+        object, so patching it catches every `git` anything else in the process runs."""
+        return [a for a in self.ran if a[0] == "/bin/sb"]
+
+    def _stalled(self, *names):
+        snap = a_snapshot(*names)
+        for a in snap.agents:
+            a.stalled = True
+        return snap
+
+    def test_a_stall_spawns_sb_reconcile_once_and_a_new_name_within_one_cycle(self):
+        """Three facts, one run of the trigger, because they are one behaviour.
+
+        A stall does not clear itself the way delivered mail does — the same name is
+        stalled on every tick for as long as it lasts — so without the set the trigger
+        would spawn a process every two seconds for it. A name that goes stalled *after*
+        that must still be seen on the next tick, which is the pass this item is held to.
+        """
+        from switchboard import cli
+        state = collector.State(pid=1, started_at=0.0)
+
+        self.assertTrue(collector.run_reconciler(self._stalled("w1"), state, None))
+        self.assertEqual(self.sb_runs(), [["/bin/sb", "reconcile"]])
+        self.assertEqual((state.reconciles, state.reconcile_error), (1, None))
+        # Spawned by name, so a rename would fail silently in a thread nobody watches.
+        self.assertEqual(cli.build_parser().parse_args(["reconcile"]).cmd, "reconcile")
+
+        for _ in range(3):                                        # the same stall, again
+            state.last_reconcile -= collector.RECONCILE_GAP + 1   # the floor is not it
+            self.assertFalse(collector.run_reconciler(self._stalled("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 1)
+
+        state.last_reconcile -= collector.RECONCILE_SWEEP         # the sweep is
+        self.assertTrue(collector.run_reconciler(self._stalled("w1"), state, None))
+
+        state.last_reconcile -= collector.RECONCILE_GAP + 1       # and a NEW stalled name
+        self.assertTrue(collector.run_reconciler(self._stalled("w1", "w2"), state, None))
+        self.assertEqual(len(self.sb_runs()), 3)
+
+        # A fleet with nobody stalled costs nothing at all.
+        state.last_reconcile -= collector.RECONCILE_SWEEP
+        self.assertFalse(collector.run_reconciler(a_snapshot("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 3)
 
 
 class WhichSbTheDoorbellRuns(PanelTest):

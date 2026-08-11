@@ -12,9 +12,9 @@ possible and is as visible as possible.
 
 **`readonly=True` and `reap=False` are load-bearing here, not tidy-ups.** They are the
 two arguments that moved here with the connect, and the reason is the same one they had
-on the board: this process outlives the code it started with. It ticks for hours against
-the `status.py` and the `store.SCHEMA` string that existed when the human opened a panel,
-so anything it writes is written by a version nobody is running any more. `reap=False`
+on the board: this process outlives the code it started with. It ticks against the
+`status.py` and the `store.SCHEMA` string that existed when it was launched, so anything
+it writes is written by a version nobody is running any more. `reap=False`
 stops `collect` ending an agent's turn (`status._record_gone`); `readonly=True` stops
 `connect` migrating the schema, which is the larger of the two — when something missing
 can be given to no existing row it REBUILDS the store, dropping every table `SCHEMA`
@@ -57,11 +57,22 @@ target that stays busy from costing a process a tick.
 **It cannot become a daemon nobody owns.** Renderers stamp `panel/demand` as they draw,
 and this exits once nothing has looked for `panel.collector_idle_exit` seconds. Closing
 the last panel retires the collector within a minute; opening one starts another.
+
+**It cannot keep running code that has been fixed, either.** Being version-stale is safe
+for the store (above) and was never safe for the decisions — `ringable` and the
+undelivered counts are `status.py`'s, imported once, so a doorbell fix could sit on disk
+while the process ringing it used the old rule, which is what cost about four hours of
+held mail on 2026-08-11. It now hashes its own `switchboard/*.py` every
+`SOURCE_CHECK_GAP` seconds and, if that differs from what it started with, takes the exit
+above (`source_signature`). A renderer starts a replacement within seconds, and the
+replacement is a fresh import: the same retire-and-be-restarted mechanism, given a second
+reason to fire.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -94,6 +105,22 @@ DOORBELL_GAP = 10.0
 # handful of herdr calls; anything past this is a herdr that is not answering, and waiting
 # longer only stacks threads.
 DOORBELL_TIMEOUT = 30.0
+# The floor between two source checks, in seconds. Not a tunable, for `DOORBELL_GAP`'s
+# reason: it is the one number that decides how long a fix can be on disk and not in the
+# process running it, and the latency being bought is "within a minute instead of never".
+# Checking every tick would buy two seconds instead of forty and read the whole package
+# thirty times a minute for it.
+SOURCE_CHECK_GAP = 45.0
+# The floor between two reconciler runs, in seconds, and the period at which a stall that
+# is still there is looked at again. Two numbers because the trigger has two reasons to
+# fire: a name that has newly gone stalled (the pass this item is held to — pinged within
+# one cycle), and a sweep for the stall that has been there a while, which exists only so
+# that an agent which woke, acted and stalled again is eventually seen even though the
+# stalled SET never changed. The per-agent "once per stall" rule lives in
+# `Broker.reconcile` where the store is; these two only decide how often a process is
+# spawned to ask it.
+RECONCILE_GAP = 10.0
+RECONCILE_SWEEP = 600.0
 
 
 @dataclass
@@ -126,6 +153,21 @@ class State:
     doorbells: int = 0
     last_doorbell: Optional[float] = None
     doorbell_error: Optional[str] = None
+    # What this process's own source looked like when it started, and when that was last
+    # re-checked. Published for the same reason as the rest: a mechanism nobody can see is
+    # indistinguishable from one that is not running, and `pid` changing after an edit is
+    # what says this worked.
+    source_signature: Optional[str] = None
+    last_source_check: Optional[float] = None
+    # The reconciler, counted like the doorbell and beside it because it is the same shape:
+    # a trigger that spawns `sb`. `reconciled` is the set of stalled names the last run was
+    # spawned for — a list rather than a set only because this dataclass is published as
+    # JSON — and it is what makes a stall that nobody attends to cost one process every
+    # `RECONCILE_SWEEP` instead of one every tick.
+    reconciles: int = 0
+    last_reconcile: Optional[float] = None
+    reconcile_error: Optional[str] = None
+    reconciled: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -206,7 +248,55 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     # In a thread, because a tick is 24 ms and an `sb` command is not: the fleet's one
     # readout must not stutter every time somebody has mail. Daemon, so it can never hold
     # this process open, and it reaps its own child so the collector grows no zombies.
-    threading.Thread(target=_run_doorbell, args=(sb, db_path, state),
+    threading.Thread(target=_run_sb, args=(sb, "flush", db_path, state, "doorbell"),
+                     daemon=True).start()
+    return True
+
+
+def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
+    """Run `sb reconcile` so that an agent which went quiet is told. -> whether one started.
+
+    The doorbell's twin, deliberately built to the same rule: this asks one question of the
+    snapshot it already has — is anybody stalled? — and if so spawns one `sb` command,
+    which decides everything else. Who is exempt, who has already been pinged, and what a
+    ping says are `Broker.reconcile`'s, running in a process on current code, for the
+    reason the module note gives: this one is version-stale on purpose and must not be the
+    place a rule lives (the four-hour doorbell incident was exactly that mistake).
+
+    **Two triggers, and the second is why this is not just `DOORBELL_GAP` again.** Mail
+    stops being pending once it is delivered, so the doorbell's work list empties itself; a
+    stall does not. An agent that goes quiet and is never attended to stays `stalled` on
+    every tick for the rest of the day, and a plain gap would spawn a process for it every
+    ten seconds — the cost `ring_doorbell` designs out for blocked agents by keeping them
+    out of the work list entirely. So the trigger fires on a stalled name this collector
+    has not already spawned for, and otherwise only every `RECONCILE_SWEEP`. The sweep is
+    not decoration: an agent that wakes on its ping, acts, and stalls again is the same
+    name in the same set, and the sweep is the only thing that looks at it again.
+
+    In-process memory, like `last_doorbell`: a replacement collector re-spawning once for
+    a stall it did not see happen costs one process, and `Broker.reconcile`'s own once-per-
+    stall rule is what stops that becoming a second ping.
+    """
+    now = panel.now()
+    stalled = sorted(a.name for a in snap.agents if a.stalled)
+    state.reconciled = [n for n in state.reconciled if n in stalled]
+    if not stalled:
+        return False
+    fresh = [n for n in stalled if n not in state.reconciled]
+    due = state.last_reconcile is None or now - state.last_reconcile >= RECONCILE_SWEEP
+    if not fresh and not due:
+        return False
+    if state.last_reconcile is not None and now - state.last_reconcile < RECONCILE_GAP:
+        return False
+    sb = doorbell_sb()
+    if sb is None:
+        state.reconcile_error = ("no `sb` in this checkout's `bin/` and none on PATH — "
+                                 "nothing can run the reconciler")
+        return False
+    state.last_reconcile = now
+    state.reconciles += 1
+    state.reconciled = stalled
+    threading.Thread(target=_run_sb, args=(sb, "reconcile", db_path, state, "reconcile"),
                      daemon=True).start()
     return True
 
@@ -240,6 +330,72 @@ def doorbell_sb() -> Optional[str]:
     return shutil.which("sb")
 
 
+def source_signature() -> Optional[str]:
+    """A hash of this checkout's `switchboard/*.py`. -> the digest, or None if unreadable.
+
+    THE PROBLEM, measured. This process loads its code once, at the import that starts it,
+    and then holds the repo's one collector lock for hours — so a fix can be on disk and
+    not in the process running it, with nothing but every panel going quiet for a minute
+    to end it. That is not hypothetical: a doorbell fix landed and a day-old collector kept
+    ringing with pre-fix logic for about four hours on 2026-08-11.
+
+    CONTENT, not a commit. `git rev-parse HEAD` answers "has the ref moved", and the case
+    that actually happens here is an edit saved in the working tree while somebody is
+    iterating — uncommitted, and invisible to any ref. mtime would catch that too, a touch
+    cheaper, but it has both failure directions (a touch with no edit restarts for nothing;
+    a writer that preserves mtime never restarts) and content hashing has neither.
+
+    THE WHOLE PACKAGE, not a file list. The stale logic in that incident was not in this
+    file: `ring_doorbell` only asks `AgentStatus.ringable`, which is `status.py`'s, imported
+    once and frozen exactly as hard. Every module this process's read path reaches is
+    equally stale, and a hand-maintained list of them silently rots the next time a fix
+    lands somewhere this file does not obviously touch. The package is under a megabyte;
+    hashing all of it costs a few milliseconds every `SOURCE_CHECK_GAP` and removes the
+    maintenance hazard rather than restating it.
+
+    THIS process's own checkout (`__file__`), not a canonical one — `ensure_collector`
+    launches the collector with the spawning renderer's checkout on `PYTHONPATH`, so which
+    one that is depends on who won the election. The question being asked is "has the code
+    I loaded changed underneath me", and `__file__` is the only thing that answers it. A
+    *different* worktree of the same repo is different code, not this code gone stale.
+
+    Same technique as `store._SCHEMA_HASH` — hash a source string, compare it to what was
+    true earlier — pointed at `.py` files instead of the schema.
+    """
+    h = hashlib.sha256()
+    try:
+        for p in sorted(Path(__file__).resolve().parent.glob("*.py")):
+            h.update(p.name.encode())     # so a rename or a deletion counts as a change
+            h.update(b"\0")
+            h.update(p.read_bytes())
+    except OSError:                       # mid-write, unreadable, gone — see `_source_changed`
+        return None
+    return h.hexdigest()[:16]
+
+
+def _source_changed(state: State, gap: Optional[float] = None) -> bool:
+    """Whether this process is now running code that is no longer what is on disk.
+
+    Rate-limited off `state.last_source_check` the way `ring_doorbell` is off
+    `last_doorbell`, and for the same kind of reason: nothing needs sub-doorbell latency
+    here, and a floor keeps the read off the hot tick.
+
+    Unreadable answers to either half — at startup or now — are read as "no", never as
+    "changed". A file caught half-written by an editor would otherwise restart a collector
+    for a version of the source nobody ever meant to run, twice: once for the truncated
+    file and once for the whole one.
+    """
+    if state.source_signature is None:
+        return False
+    gap = SOURCE_CHECK_GAP if gap is None else gap   # read now, so a test can set it
+    now = panel.now()
+    if state.last_source_check is not None and now - state.last_source_check < gap:
+        return False
+    state.last_source_check = now
+    current = source_signature()
+    return current is not None and current != state.source_signature
+
+
 def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
     """Where to run `sb` — a WORK TREE, and not the `.git` the store lives in.
 
@@ -267,17 +423,24 @@ def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
     return str(store_dir.parent.parent)
 
 
-def _run_doorbell(sb: str, db_path: Optional[Path], state: State) -> None:
-    """The spawned half. Swallows everything: a doorbell that fails is a line in the
-    counters, never a collector that dies."""
+def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
+            which: str = "doorbell") -> None:
+    """The spawned half, shared by both triggers. Swallows everything: a trigger that fails
+    is a line in the counters, never a collector that dies.
+
+    `which` names the counter the failure lands in — the two are kept apart for the reason
+    `doorbell_error` is kept apart from `last_error`: a reconciler that will not run is a
+    different fact from a doorbell that will not, and reporting either as the other would
+    be a lie on forty screens."""
     cwd = _doorbell_cwd(db_path)
+    field = f"{which}_error"
     try:
-        p = subprocess.run([sb, "flush"], cwd=cwd, capture_output=True, text=True,
+        p = subprocess.run([sb, verb], cwd=cwd, capture_output=True, text=True,
                            timeout=DOORBELL_TIMEOUT)
-        state.doorbell_error = None if p.returncode == 0 else \
-            (p.stderr or p.stdout or f"sb flush exited {p.returncode}").strip()[:200]
+        setattr(state, field, None if p.returncode == 0 else
+                (p.stderr or p.stdout or f"sb {verb} exited {p.returncode}").strip()[:200])
     except Exception as e:                     # noqa: BLE001 — never fatal, by design
-        state.doorbell_error = str(e)[:200]
+        setattr(state, field, str(e)[:200])
 
 
 def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
@@ -303,6 +466,11 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         # Not cleared on success: `sb doctor` wants the most recent error even on a
         # collector that has recovered, and `errors` is what says whether it is current.
         ring_doorbell(snap, state, db_path)
+        # The second trigger on the same loop, which is where DESIGN-TRUTH puts it
+        # ("maybe the same loop `sb board` runs on"). Independent of the first: a stalled
+        # agent usually has no mail pending, so a shared gate would mean each mechanism
+        # only ran when the other had work.
+        run_reconciler(snap, state, db_path)
 
     state.wrote_at = at
     panel.publish(paths, panel.envelope(last_good or {}, state.as_dict()))
@@ -326,6 +494,10 @@ def run(*, cwd: Optional[Path] = None, interval: float = INTERVAL,
 
     stop = _stop_on_signal()
     state = State(pid=os.getpid(), started_at=panel.now())
+    # What "my code" is, taken once, here, before the first tick — everything after this
+    # is compared against it (`source_signature`).
+    state.source_signature = source_signature()
+    state.last_source_check = state.started_at
     last_good: Optional[dict] = None
     try:
         # The one `git rev-parse` this process will ever make. If it fails there is no
@@ -349,6 +521,13 @@ def run(*, cwd: Optional[Path] = None, interval: float = INTERVAL,
             if max_ticks is not None and ticks >= max_ticks:
                 break
             if _nobody_is_looking(paths, state, idle_exit):
+                break
+            # A second reason to take the exit that already exists, and nothing more: the
+            # lock goes with the process, a renderer starts a replacement on its next tick
+            # whatever the reason this one is gone, and the replacement is a fresh import.
+            # It is checked here, at a tick boundary after `tick` has published, so no
+            # panel can read a half-written envelope out of it.
+            if _source_changed(state):
                 break
             stop.wait(interval)
         return 0

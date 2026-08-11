@@ -108,3 +108,15 @@ interrupt = "[INTERRUPT — stop now] The instruction you were following is canc
 # "answer your parent" has been sent somewhere nobody is waiting.
 #   {who} the agent that sent the message, and the one owed the reply
 needs_reply = "[reply needed] The sender, {who}, is waiting for a reply to this — send it back to them, not to anybody else. Nobody is blocked on it and it does not interrupt what you are doing, but answer it at some point, with `sb tell {who} \"...\"`, before you finish."
+
+# The reconciler (`Broker.reconcile`). Sent to an agent whose turn ended without a report,
+# and sent to the agent itself rather than its parent, because it is the one that knows
+# what its true status is (DESIGN-TRUTH).
+#
+# It names both verbs and a third way out, because the agent that gets this has already
+# ended a turn believing it was finished: told only to report done, an agent with work
+# left would report done. It also says the nudge comes once, for the reason the stop
+# hook's block reason says the same — an agent that genuinely has nothing to report should
+# not spiral trying to satisfy it.
+#   {idle} how long it has been idle, already formatted ("4m")
+stalled = "[sb] Your turn ended {idle} ago without a report, so nothing in the fleet knows where you are. If you are finished, run `sb done \"<summary>\"`; if you are stuck or need a person, run `sb block \"<why>\"`; if you are neither, carry on with your task — this is asked once, not repeatedly."
