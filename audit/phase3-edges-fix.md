@@ -123,6 +123,22 @@ reconciler without exercising the exemption at all — and now say which fact th
 
 Suite: **1122 passing** (1118 before, plus these four).
 
+`./acceptance/accept.py`, run twice against this branch:
+
+- run `sb5yas0c`: **all 4 pass — the fleet is sound** (2m58s) — a cold fan-out of six
+  started six (6/6 took their task and reported into 6 new checkouts, 0 spawns
+  misreported); a child's report woke its parent, deferred and then delivered by the
+  doorbell 47s later; a block held 55s against a sibling and was released by the human's
+  answer; a sweep closed 1 and refused 1 with its reason.
+- run `sb2mwjea`, the run before it: **1 of 4 FAILED — the fleet is not sound** (3m19s).
+  Checks 1–3 passed; check 4 could not spawn its fourth agent —
+  "the text was sent 3 times and none of them could be confirmed to have arrived", which is
+  `deliver`'s documented flake on a cold checkout, and it happened minutes after another
+  agent's acceptance run of six agents had finished on the same machine. Nothing in this
+  change is on that path: `stalled` is read only by the board, the collector's trigger and
+  the reconciler, and the gate only ever runs at a turn end. Recorded rather than dropped,
+  because a re-run that passes is not proof the first one was noise.
+
 ## Unproven, and worth saying
 
 - The grace is a clock, and a clock is an approximation of the fact nobody records. An
