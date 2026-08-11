@@ -726,15 +726,15 @@ Plus `all = ["@report-bug"]`, the one fragment every agent carries whatever its 
 
 Shipping a file only makes a preset available; a binding is what makes it applied. The
 mechanism (`presets.available`/`bindings`/`for_role`/`resolve`/`text`) is wired into
+`sb delegate --with`, `sb presets`, and `sb presets <name> --apply`, which pastes one into
+a running agent's own session. An unrecognized `--with` name is treated as a literal inline
+instruction, not an error.
 
 This paragraph was wrong twice before, in both directions, and the correction is worth
 keeping visible: it once said preset files ship *inert with zero shipped bindings* while six
 files shipped and, later, while two bindings shipped. The claim to check when this changes
 again is not "does anything ship" but "which of the two lists is non-empty" — they move
 independently and always have.
-`sb delegate --with`, `sb presets`, and `sb presets <name> --apply`, which pastes one into
-a running agent's own session. An unrecognized `--with` name is treated as a literal inline
-instruction, not an error.
 
 Preset files layer in three: shipped, then the repo's committed `.switchboard-shared/
 presets/`, then its machine-local `.switchboard/presets/`. A repo's own house rules
