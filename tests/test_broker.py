@@ -1633,7 +1633,10 @@ class BrokerTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), \
                 contextlib.redirect_stdout(buf):
             self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
-        self.assertIn("--needs-me", buf.getvalue())
+        # `sb board`, not `sb status --needs-me`: the board is the human's surface
+        # (DESIGN-TRUTH.md), and pointing them at status is what this used to do.
+        self.assertIn("sb board", buf.getvalue())
+        self.assertNotIn("sb status", buf.getvalue())
         self.assertNotIn("no new messages", buf.getvalue())
 
     def test_telling_the_human_is_refused_rather_than_written_and_lost(self):

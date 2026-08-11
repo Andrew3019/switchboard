@@ -115,8 +115,8 @@ base_branch = "origin/main"
 done_prefix = "[done] "
 
 # There is deliberately no `blocked_prefix`. A block is not mail: the human has no mailbox,
-# so `sb block` records the reason against the agent and it reaches you through
-# `sb status --needs-me`, which needs no marker to tell it apart from anything else.
+# so `sb block` records the reason against the agent and it reaches you as a marked row on
+# `sb board`, which needs no marker in the body to tell it apart from anything else.
 
 
 [states]
