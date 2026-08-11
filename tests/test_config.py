@@ -158,7 +158,7 @@ class ShippedDefaultsTest(_Layered):
     def test_the_protocol_is_a_single_line_and_names_the_verbs(self):
         line = config.protocol(None)
         self.assertNotIn("\n", line)
-        for verb in ("sb inbox", "sb tell", "sb ask", "sb done", "sb delegate", "sb status"):
+        for verb in ("sb inbox", "sb tell", "sb done", "sb delegate", "sb status"):
             self.assertIn(verb, line)
 
     def test_the_protocols_editing_notes_do_not_reach_the_agent(self):
@@ -174,7 +174,7 @@ class ShippedDefaultsTest(_Layered):
             "spawn.workspace": {"workspace": "w", "path": "/p"},
             "spawn.start_task": {},
             "spawn.workspace_task": {},
-            "notify.mail": {}, "notify.mail_question": {}, "notify.child_done": {},
+            "notify.mail": {}, "notify.child_done": {},
             "notify.interrupt": {"text": "t"},
         }
         for key, fields in filled.items():
@@ -409,8 +409,6 @@ class NothingLeftInPythonTest(unittest.TestCase):
             (validate.MAX_AGENT_NAME, "limits.agent_name"),
             (validate.MAX_REF, "limits.ref"),
             (validate.MAX_TOKEN, "limits.token"),
-            (broker.ASK_TIMEOUT, "timeouts.ask"),
-            (broker.ASK_POLL, "timeouts.ask_poll"),
             (broker.INTERRUPT_SETTLE, "timeouts.interrupt_settle"),
             (broker.TEARDOWN_SETTLE, "timeouts.teardown_settle"),
             (broker.TEARDOWN_SETTLE_POLL, "timeouts.teardown_settle_poll"),

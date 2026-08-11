@@ -194,6 +194,18 @@ CREATE TABLE messages (
     kind          TEXT NOT NULL,      -- ask | tell | done
     body          TEXT NOT NULL,
     reply_to      INTEGER REFERENCES messages(id),
+    needs_reply   INTEGER NOT NULL DEFAULT 0,  -- 1 = the sender said it is waiting for a
+                                      -- reply, so the recipient is told to answer at some
+                                      -- point (`sb tell --needs-reply`). It is a claim on
+                                      -- the recipient's attention and NOTHING ELSE: no
+                                      -- agent ever waits on another agent, so the sender
+                                      -- returns immediately either way. Stored rather
+                                      -- than glued onto `body` because the body must stay
+                                      -- what the sender typed — `sb inspect` and `sb log`
+                                      -- show it — and because it has to be queryable by
+                                      -- whoever later looks for one still unanswered. 0
+                                      -- for rows predating the column, which is what they
+                                      -- have always meant: an ordinary tell.
     created_at    INTEGER NOT NULL,
     read_at       INTEGER,
     delivered_at  INTEGER,
@@ -1262,13 +1274,15 @@ def put_message(
     kind: str,
     body: str,
     reply_to: Optional[int] = None,
+    needs_reply: bool = False,
 ) -> int:
     if kind not in ("ask", "tell", "done"):
         raise ValueError(f"bad message kind: {kind}")
     cur = db.execute(
-        """INSERT INTO messages (from_agent, to_agent, kind, body, reply_to, created_at)
-           VALUES (?,?,?,?,?,?)""",
-        (from_agent, to_agent, kind, body, reply_to, now()),
+        """INSERT INTO messages
+              (from_agent, to_agent, kind, body, reply_to, needs_reply, created_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        (from_agent, to_agent, kind, body, reply_to, 1 if needs_reply else 0, now()),
     )
     # Somebody has now given this agent something, which is the whole of what
     # `agents.awaiting_task` records. Cleared HERE rather than in `Broker.tell`, because

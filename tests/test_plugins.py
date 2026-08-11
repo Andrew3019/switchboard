@@ -1016,10 +1016,10 @@ class IsolationTest(Sandbox):
     # Every level-0 verb of §4.2, with a minimal legal argv. `--timeout 1` where a verb
     # would otherwise block: what is being tested is that it runs, not how long it waits.
     LEVEL_0 = {
-        "status": [], "done": ["finished"], "ask": ["w1", "q?", "--timeout", "1"],
+        "status": [], "done": ["finished"],
         "tell": ["w1", "hi"], "inbox": [], "block": ["why"], "log": [], "cleanup": [],
         "inspect": ["w1"], "wait": ["w1", "--timeout", "1"], "init": [],
-        "restore": ["w1"], "interrupt": ["w1", "stop"], "board": [], "models": [],
+        "restore": ["w1"], "board": [], "models": [],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],
     }
