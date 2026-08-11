@@ -1357,6 +1357,26 @@ def mark_collected(db: sqlite3.Connection, mid: int) -> None:
     db.commit()
 
 
+def mark_unannounceable(db: sqlite3.Connection, mid: int) -> None:
+    """Announced-as-far-as-anyone-ever-will-be, but still unread — and still readable.
+
+    The half-way state `mark_collected` is too strong for. A finished agent whose name
+    herdr has evicted can never be rung again (`Broker._finished_and_unreachable`), so
+    every trigger that chases un-announced mail — `flush_pending` on every `sb` command,
+    and the collector's doorbell every ten seconds — is chasing a ring that cannot happen.
+    Stamping `delivered_at` is what takes those rows out of `unseen()` and out of
+    `status._undelivered_counts`, which is the whole of "stop retrying".
+
+    `read_at` is deliberately left alone. The pane is still open, so a person can put a
+    turn back into it and that agent's own `sb inbox` still finds the mail waiting —
+    reading it is the one thing that never stopped working. Marking it read here would
+    destroy the only remaining way it gets read.
+    """
+    db.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at, ?) WHERE id=?",
+               (now(), mid))
+    db.commit()
+
+
 def mark_delivered(db: sqlite3.Connection, to_agent: str) -> int:
     cur = db.execute(
         "UPDATE messages SET delivered_at=? WHERE to_agent=? AND delivered_at IS NULL",
@@ -1432,16 +1452,29 @@ def recent_events(
 # ---------------------------------------------------------------------------
 
 
+def transcript_dir(cwd: Optional[str]) -> Optional[Path]:
+    """The bucket Claude Code keeps every session it ran in `cwd` under.
+
+    Separate from `transcript_path` because there is one question that has to be asked
+    BEFORE a session id exists: did the task we just sent actually arrive? At that moment
+    the agent may have no session at all — a spawn that never took its prompt never
+    starts one — so the id cannot be the way in, and the directory is.
+    """
+    if not cwd:
+        return None
+    return Path.home() / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
+
+
 def transcript_path(agent: sqlite3.Row) -> Optional[Path]:
     """Where Claude Code already wrote this agent's full transcript.
 
     Free debuggability: nothing is captured by us, and it survives pane close. Bucketed
     by cwd, which is why cwd is stored alongside the session id.
     """
-    if not agent["session_id"] or not agent["cwd"]:
+    d = transcript_dir(agent["cwd"])
+    if not agent["session_id"] or d is None:
         return None
-    slug = re.sub(r"[^a-zA-Z0-9]", "-", agent["cwd"])
-    p = Path.home() / ".claude" / "projects" / slug / f"{agent['session_id']}.jsonl"
+    p = d / f"{agent['session_id']}.jsonl"
     return p if p.exists() else None
 
 

@@ -167,6 +167,18 @@ agent_name = 32
 # and this number is now only the runaway guard behind it.
 text = 40000
 
+# `sb block "<why>"`. NOT a runaway guard and not style advice — the only cap here that is
+# load-bearing, because the reason is the one field whose SIZE tells the agent it is using
+# the verb wrong. The human never reads it (he reads the agent's own chat, via
+# `sb inspect`); it is bookkeeping on a board row. An orchestrator wrote its entire answer
+# to him into a `why` — several paragraphs, findings and questions — left its own chat
+# empty, and when the newline check refused it, flattened the whole thing into one run-on
+# line and got through. 200 characters is roomy for the one line this is meant to be and
+# has no room at all for a report, which is the only way to make the flattening trick fail
+# too. Raising it re-opens that hole; the capability it appears to take away is not lost —
+# long text goes in the chat, which is where he actually reads it.
+block_reason = 200
+
 # Authored prompt text (`--as`, and preset files after flattening). Config rather than
 # traffic: a preset is allowed to be a substantial briefing, and the orchestrator role is
 # already ~4.7k on its own. Kept strictly ABOVE `text` — authored config should never be
@@ -278,6 +290,33 @@ spawn_ms = 90000
 # `agent wait`, the adapter's own ceiling.
 agent_wait_ms = 300000
 
+# Delivering a task with `agent prompt`: how long the agent has to actually start a turn
+# before the send counts as not taken, and how often that is checked. Twenty seconds
+# because the only thing being waited for is herdr reporting a state change on a session
+# that is already interactive — a fresh spawn's slowness is `spawn_ms`, and it has already
+# been paid by the time anything is delivered.
+deliver_ms = 20000
+deliver_poll = 0.5
+
+# How much LONGER the proof is waited for when, at the end of `deliver_ms`, herdr reports
+# the agent is running a turn. Granted once per send, and only then.
+#
+# The proof of delivery is the agent's own transcript, and Claude Code does not flush that
+# file when the text is submitted — it flushes when it gets round to it. Measured under a
+# six-way fan-out: a task taken at 05:01:59 reached the transcript at 05:02:34, a 35 s lag
+# against a 20 s window, and the spawn declared a working agent's task lost. A turn running
+# is not proof the text arrived (a startup dialog can move an agent without it), so it does
+# not confirm anything — it only buys the proof time to show up, which is exactly what was
+# missing. An agent that never starts a turn is never granted it, so a genuinely lost task
+# still fails in `deliver_ms` per send as before.
+deliver_working_ms = 60000
+
+# Pinning a spawning pane's `sb` to the checkout that pane is standing in, and confirming
+# it took. One shell command and one `pane wait-output`, both against a shell that is
+# already at a prompt — so this is short by design. It is paid BEFORE the agent's row is
+# claimed, which is why it does not enter `status.SPAWN_GRACE`.
+pin_ms = 5000
+
 # How long the adapter pauses before re-issuing an `agent wait` that came straight back
 # without the agent having moved. herdr returns instantly when the agent is ALREADY in the
 # state asked for, so the stale-seq guard would otherwise re-ask as fast as two subprocesses
@@ -296,6 +335,17 @@ spawn_attempts = 3
 # 12 s of backoff, not 2 + 4. Reading it as 2 + 4 is how `status.SPAWN_GRACE` came to be
 # 12 s shorter than the spawn it guards; it now derives the whole worst case from here.
 spawn_backoff = 2
+
+# How many times a task is sent to an agent that never took it. Same backoff as a spawn
+# retry — this is the other half of the same flakiness, and a second knob for it would only
+# be a second thing to keep in step.
+deliver_attempts = 3
+
+# How many times the `sb` pin is typed into a spawning pane before the spawn is refused.
+# Two, not three: the only failure it recovers from is a shell that had not quite reached
+# its prompt, and if a second try a backoff later still finds nothing then the pane is not
+# a shell we can pin — which is a refusal, not something to keep paying for.
+pin_attempts = 2
 
 
 [display]

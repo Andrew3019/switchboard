@@ -870,6 +870,24 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr([alive("w1", "blocked")]), needs_me=True)
         self.assertEqual([a.name for a in snap.agents], ["w1"])
 
+    def test_needs_me_includes_a_stalled_agent(self):
+        """It is not asking for anything, and that is exactly the problem: its turn ended
+        without `sb done`, so the store says `working` forever, no doorbell rings it again
+        and no sweep closes it. Only a person moves it, so it is owed an action."""
+        store.create_agent(self.db, name="w1", role="worker")
+        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), needs_me=True)
+        self.assertEqual([a.name for a in snap.agents], ["w1"])
+        self.assertTrue(self.by_name(snap)["w1"].needs_human)
+
+    def test_a_stalled_agent_is_named_in_the_inbox_with_the_way_out(self):
+        store.create_agent(self.db, name="w1", role="worker")
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
+        self.assertIn("NEEDS YOU", out)
+        self.assertIn("stalled", out)
+        self.assertIn('sb tell w1 "wrap up and run sb done"', out)
+        # Not the unread branch's sentence, which would blame it for silence of ours.
+        self.assertNotIn("0 unread", out)
+
     def test_needs_me_keeps_ancestors_so_the_tree_still_reads(self):
         store.create_agent(self.db, name="root", role="main")
         store.create_agent(self.db, name="kid", role="worker", parent="root")
@@ -1067,7 +1085,7 @@ class StatusCliTest(unittest.TestCase):
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             "cleanup": [], "workspace": ["new"], "restore": ["w1"],
             "interrupt": ["w1", "stop"], "inspect": ["w1"], "wait": ["w1"], "log": [],
-            "board": [],
+            "board": [], "flush": [],
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
             # so it can print that instead of an argparse usage dump.
             "plugins": [],

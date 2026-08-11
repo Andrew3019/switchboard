@@ -276,6 +276,31 @@ class InspectTest(Base):
         self.assertIn("pane_not_found", got.output.detail)   # provenance, never silent
         self.assertTrue(got.transcript.endswith("sess-1.jsonl"))
 
+    def test_a_long_message_still_reaches_the_human_through_the_chat(self):
+        """The capability the short `sb block` reason must not cost anyone.
+
+        `validate.reason` caps the `why` at one line, so this is the path that has to carry
+        a full question: the agent writes it in its own chat, blocks with a one-line note,
+        and the human reads the chat here — every paragraph of it, with the reason only
+        marking the row. Asserted end to end rather than trusted, because if this failed the
+        cap would be taking a capability away instead of moving it.
+        """
+        message = ("Need human input: the audit found three ways the spawn path drops a "
+                   "prompt.\n\n"
+                   "1. Fix spawn before the prompts? Recommended: yes.\n"
+                   "2. Ship the prompt rewrite anyway? Recommended: no.\n\n"
+                   "Detail is in audit/2026-08-09/CONSOLIDATED.md.")
+        self.agent(pane_id="w1:p9")
+        store.set_state(self.db, "w1", "blocked")
+        store.log_event(self.db, kind="blocked", agent="w1", why="need a decision on spawn")
+        h = FakeHerdr([alive("w1", "idle")], pane_text=message + "\n")
+        d = status.inspect(self.db, h, "w1", lines=100)
+        self.assertEqual(d.agent.blocked_why, "need a decision on spawn")   # the row
+        for part in ("Need human input", "Recommended: yes", "Recommended: no",
+                     "CONSOLIDATED.md"):
+            self.assertIn(part, d.output.text)                              # the message
+        self.assertIn("Recommended: yes", status.render_detail(d))
+
     def test_no_terminal_anywhere_is_reported_not_hidden(self):
         self.agent()
         d = self.inspect()

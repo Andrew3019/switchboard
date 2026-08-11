@@ -27,7 +27,9 @@ so they are written down where the code is rather than argued about again:
 from __future__ import annotations
 
 import inspect
+import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from . import config
+from . import output
 from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
@@ -112,9 +115,16 @@ TEARDOWN_SETTLE_POLL = config.setting("timeouts.teardown_settle_poll")
 # Every git we shell out to. A fork waits on `git fetch`, which is a network call and the
 # one command here that can hang for as long as a bad connection wants it to.
 SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+# Pointing a spawning pane's `sb` at its own checkout, and confirming it took. See `_pin_sb`.
+PIN_MS = config.setting("timeouts.pin_ms")
+PIN_ATTEMPTS = config.setting("retries.pin_attempts")
+PIN_BACKOFF = config.setting("retries.spawn_backoff")
 # How much of a summary or a reason reaches the event log and a desktop notification.
 EVENT_CLIP = config.setting("limits.event_clip")
 NOTIFY_CLIP = config.setting("limits.notify_clip")
+# How far back `unreachable` reads an agent's events to find the last doorbell. Only the
+# newest ring matters, and rings are rare next to the herdr call logged on every command.
+EVENT_SCAN = 200
 
 class AgentNameTaken(ValueError):
     """Somebody else holds this agent name.
@@ -158,6 +168,72 @@ class BranchTaken(ValueError):
         )
 
 
+class ForkFailed(HerdrError):
+    """A child was owed a worktree of its own and could not be given one.
+
+    The spawn is REFUSED rather than degraded. It used to fall through to the parent's own
+    cwd with nothing but a `fork_failed` row to say so — and for a top-level orchestrator
+    that cwd is the human's main checkout, so a child that was supposed to write on a
+    branch of its own wrote in the one place everybody else's uncommitted work lives.
+    Sharing a checkout is not a smaller version of forking one; it is a different and
+    unrecoverable outcome, and nobody asked for it. See DESIGN-TRUTH: "A fork that fails
+    refuses the spawn and tells the parent. It never falls back to Andrew's own checkout."
+
+    A HerdrError so the parent is TOLD — `sb delegate` prints it and exits 1, in the same
+    shape as every other spawn failure — rather than reading a name and believing the
+    child is off working somewhere safe.
+    """
+
+    def __init__(self, name: str, where: Path, cause: HerdrError):
+        self.name, self.where, self.cause = name, where, cause
+        super().__init__(
+            "fork_failed",
+            f"{name} could not be given a worktree of its own, so it was not spawned — "
+            f"{cause.message}. It is not being put in {where} instead: that checkout is "
+            f"somebody else's working copy. Fix the fork, or place the child deliberately "
+            f"with `sb delegate --workspace <name>`",
+            [name],
+        )
+
+
+class TaskUndelivered(HerdrError):
+    """An agent started, its first task could not be got into it, AND it is not running.
+
+    A HerdrError so `sb` reports it as a failed herdr call rather than a traceback, on the
+    same path every other spawn failure takes. It is raised in place of returning the
+    agent's name, because a name printed for an agent that never received its task is the
+    failure this whole spawn path exists to prevent: the caller believes it delegated, and
+    the work is never done by anyone.
+
+    BOTH HALVES ARE REQUIRED, and the second one was not always checked. "The delivery
+    could not be confirmed" alone is not this: the confirmation is a file the agent flushes
+    on its own schedule, and under a six-way fan-out it has been seen tens of seconds late,
+    so a spawn twice told its caller a working agent had never taken its task — once for an
+    agent that had already reported `done`. Following the advice this used to print
+    (respawn, then `sb cleanup --force`) duplicates the work and closes a live pane
+    mid-turn. `Broker._spawn` therefore raises this only for an agent that is neither
+    running a turn nor has reported anything, and says so in the words below.
+
+    Even then the caller is asked to look before it acts: the one thing that is certain
+    here is that we could not confirm the task, and a remedy that closes a pane deserves a
+    second pair of eyes.
+    """
+
+    def __init__(self, name: str, cause: HerdrError):
+        self.name, self.cause = name, cause
+        super().__init__(
+            "task_undelivered",
+            f"{name} started, and its task could not be got into it — {cause.message}. "
+            f"herdr reports it is not running a turn and it has reported nothing, so as "
+            f"far as anything here can tell nobody is doing that work. Look before you "
+            f"act on that: `sb inspect {name}` shows what is in its pane and `sb status` "
+            f"whether it has moved since. If it is idle with the task nowhere in it, "
+            f"delegate the work again — and close this one with "
+            f"`sb cleanup {name} --force` only once you have seen that it is idle",
+            [name],
+        )
+
+
 class Undeliverable(HerdrError):
     """A ring that had to land in the target's current turn could not be delivered.
 
@@ -183,6 +259,47 @@ class Undeliverable(HerdrError):
             f"will reach {who} on its next `sb inbox`; if it has to land now, that needs "
             f"a human in that pane.",
         )
+
+
+class SbUnpinned(HerdrError):
+    """A pane's `sb` could not be pointed at the checkout the agent is about to work in.
+
+    Refuses the spawn rather than starting the agent anyway, and the reason is the whole
+    point of the check: an agent that falls back to the installed `sb` runs the MAIN
+    checkout's code no matter which branch its own worktree is on. That is not a
+    degradation anybody notices — every command still works, it is simply the wrong build
+    — so a whole phase of fixes was acceptance-tested against code that was never running.
+    Silence is what made that possible; this is the noise instead.
+    """
+
+    def __init__(self, name: str, pane_id: str, bin_dir: str):
+        super().__init__(
+            "sb_unpinned",
+            f"{name}: the pane never confirmed `sb` resolving to {bin_dir}/sb, so it "
+            f"would have run whichever build is on PATH — usually the main checkout's, "
+            f"not this checkout's. Refused rather than spawned against the wrong code. "
+            f"The pane is {pane_id}; `herdr pane read {pane_id}` shows what it did with "
+            f"the command.",
+            [name, pane_id],
+        )
+
+
+def _own_sb_bin(cwd) -> Optional[Path]:
+    """The `bin/` of the checkout at `cwd`, if that checkout ships an `sb` of its own.
+
+    Every worktree and every clone of this repo has a real `bin/sb` — only the installed
+    entrypoint is a symlink — and `bin/sb` puts its OWN parent's parent on `sys.path`. So
+    naming this directory is the whole of "run the code you are standing in".
+
+    None for anything that is not a checkout of a repo shipping `sb`: an agent sent into
+    some other project keeps the installed build, which is the only one it could mean.
+    """
+    try:
+        root = store.worktree_root(Path(cwd))
+    except (RuntimeError, OSError):
+        return None
+    sb = root / "bin" / "sb"
+    return sb.parent if os.access(sb, os.X_OK) else None
 
 
 def _slug(name: str) -> str:
@@ -234,6 +351,44 @@ def _column(row, name: str) -> str:
 def _names(found: Sequence[str]) -> str:
     """A list of agent names as a phrase, with the verb that goes with it."""
     return f"{', '.join(sorted(found))} {'is' if len(found) == 1 else 'are'}"
+
+
+class CleanupResult(list):
+    """The names `cleanup` closed, and — the point of it — why it closed nothing else.
+
+    A `list` of the closed names, because that is what every caller has always read out
+    of `cleanup` and the refusals are the new half, not the replacement. `refused` carries
+    one `(name, reason)` per candidate that a gate held back, in the order the candidates
+    were considered.
+
+    It exists because `closed: (nothing)` is not a report. Every gate in `cleanup` used to
+    `continue` in silence except the live-descendants one, so an agent that named an agent
+    outright and got a blank line back had no way at all to learn which of five rules had
+    fired — and `--force`, the documented way through, is exactly the wrong thing to reach
+    for before you know that.
+
+    `expected` splits those refusals into the two kinds a *sweep* has, which is the whole
+    reason a sweep can say something short instead of nothing. A sweep is FOR skipping
+    rows that are already closed and agents that are simply still working: naming those
+    is a list of the fleet, it grows with the fleet, and nobody reading it learns
+    anything. Every other gate held back a row a human might have meant — blocked,
+    `failed` with a pane herdr still has, mail it has not read, live children underneath,
+    a kept role — and those are news whatever else the sweep did. `refused` keeps every
+    one of them and `--json` reports every one of them; `expected` only says which are
+    not worth a line on their own.
+    """
+
+    def __init__(self, closed: Sequence[str] = (),
+                 refused: Optional[list[tuple[str, str]]] = None,
+                 expected: Optional[set[str]] = None):
+        super().__init__(closed)
+        self.refused: list[tuple[str, str]] = [] if refused is None else refused
+        self.expected: set[str] = set() if expected is None else expected
+
+    @property
+    def notable(self) -> list[tuple[str, str]]:
+        """The refusals a sweep must not swallow. See `expected`."""
+        return [(n, why) for n, why in self.refused if n not in self.expected]
 
 
 def _resolved(path: str) -> Optional[Path]:
@@ -292,6 +447,9 @@ class Broker:
         self.repo = repo or Path.cwd()
         self.roles = roles_mod.load(self.repo)
         self._alive_cache: Optional[dict] = None
+        # The subset of the above whose names herdr is actually BOUND to, filled by the
+        # same `agent list` — see `Agent.bound` and `_finished_and_unreachable`.
+        self._bound_cache: set[str] = set()
         # Set once herdr has been asked and refused to answer. Distinct from an empty
         # cache, which means herdr answered and is running nothing — see `_agent_states`.
         self._alive_unknown = False
@@ -303,6 +461,14 @@ class Broker:
         # Only if this repo wrote one. Absent — the normal case — leaves the module-level
         # PROTOCOL_LINE in charge, which is also what makes it patchable in a test.
         self._protocol_override = config.protocol_override(self.repo)
+        # What the last spawn's delivery could not promise, if anything. A spawn either
+        # confirms the task (returns the name), or cannot confirm it for an agent that is
+        # plainly doing something (returns the name AND leaves this), or fails loudly
+        # (raises). The middle case exists because the confirmation is a file the child
+        # flushes on its own schedule; it is a caveat and it has to reach the caller, and a
+        # `delegate` that returned a name plus a warning object would change three call
+        # sites and every test that spawns. Read by `cli` immediately after the call.
+        self.delivery_note: Optional[str] = None
 
     def _protocol(self) -> str:
         return config.flatten(self._protocol_override) if self._protocol_override \
@@ -487,10 +653,41 @@ class Broker:
         told otherwise. That is a different intent and now has a different spelling: name
         the one you want, `sb start --name main`, which still reuses, restores and hands
         it a task. Unnamed, `sb start` is only ever the start of something.
+
+        Refused from inside a worktree — see `_refuse_outside_main_checkout`.
         """
+        self._refuse_outside_main_checkout()
         if name:
             return self._top(name, task, focus, board)
         return self._top(self._next_top_name(), task, focus, board)
+
+    def _refuse_outside_main_checkout(self) -> None:
+        """`sb start` belongs in the main checkout, and nowhere else.
+
+        A top-level orchestrator's space is laid over the checkout `sb` was run in
+        (`_top` passes `self.repo` as the cwd), and `self.repo` is THIS worktree. Typed
+        inside somebody's worktree, `sb start` therefore quietly puts a new top — and,
+        through the fork rule, everything it delegates that cannot fork — over an agent's
+        working copy, on that agent's branch. Nothing about the command says so.
+
+        The check is skipped, never guessed, when the main checkout cannot be established:
+        a repo that `sb init` has not pinned and whose layout defeats the inference is a
+        reason not to answer, not a reason to refuse. See DESIGN-TRUTH: "`sb start` run
+        inside a worktree is refused too, naming the main checkout to run it from."
+        """
+        try:
+            main = Path(store.main_checkout(self.repo)).resolve()
+        except Exception:                       # noqa: BLE001 — not a repo, no config
+            return
+        if self.repo.resolve() == main:
+            return
+        raise ValueError(
+            f"`sb start` starts a top-level orchestrator over the checkout it is run in, "
+            f"and this is a worktree ({self.repo}) — starting one here would lay it over "
+            f"somebody's working copy and their branch. Run it from the main checkout "
+            f"instead: cd {main} && sb start. To get an agent working in THIS tree, "
+            f"delegate to one from the orchestrator that owns it."
+        )
 
     def running_tops(self) -> list[str]:
         """Top-level orchestrators that could still be going, oldest first.
@@ -1940,10 +2137,12 @@ class Broker:
     def _fork_base(self, base: str) -> tuple[str, Optional[str]]:
         """Bring `base` up to date, and say what we ended up forking from.
 
-        The base is a REMOTE-tracking ref (`origin/main`), because the local branch of the
-        same name is however stale the human's last pull left it. Fetching it on the spot
-        is the difference between a fork that starts at today's main and one that starts
-        wherever this checkout happened to be.
+        When the base is a REMOTE-tracking ref (`origin/main`) it is fetched, because the
+        local branch of the same name is however stale the human's last pull left it.
+        Fetching it on the spot is the difference between a fork that starts at today's
+        main and one that starts wherever this checkout happened to be. A local branch —
+        what `_inherited_base` returns for a parent working on one — has no remote to be
+        stale against and is used as it stands, which is the point of inheriting it.
 
         Nothing here is fatal, and that is deliberate: a spawn that dies because a laptop
         is on a train is a worse failure than a fork from a base an hour old. Two
@@ -1958,6 +2157,14 @@ class Broker:
         path, and is carried into the event log and the workspace result so a stale fork
         is something the caller can see rather than something they discover in a merge.
         """
+        # A LOCAL branch wins the read, and is asked first because the name alone cannot
+        # be told apart from `remote/ref`: `fix/fork-branch` is one branch, not `ref` in a
+        # remote called `fix`. Splitting first sent such a name to a remote that does not
+        # exist and forked from `fork-branch` — the wrong branch when it exists, and a
+        # silent "no_remote" fallback when it does not. This is the ordinary case now that
+        # a child inherits its parent's branch (`_inherited_base`).
+        if self._git("show-ref", "--verify", "--quiet", f"refs/heads/{base}", check=True):
+            return base, None
         remote, _, ref = base.partition("/")
         if not ref:
             return base, None                    # a plain local branch: nothing to fetch
@@ -2378,6 +2585,64 @@ class Broker:
                 workspace_id = ""
         return self.h.create_tab(cwd=str(cwd)), workspace_id
 
+    def _pin_sb(self, name: str, pane: str, cwd) -> None:
+        """Make `sb` in this pane mean the checkout this agent is standing in.
+
+        THE PROBLEM. `sb` on PATH is one symlink per machine, pointing into the main
+        checkout, and `bin/sb` resolves its own real path to decide what to import. So
+        every agent in every worktree ran the main checkout's code, whatever branch it had
+        checked out — an agent could not exercise its own work, and a branch's fixes were
+        acceptance-tested against a build that did not contain them. Measured, not feared:
+        a phase of merged fixes was found to be entirely out of force for this reason.
+
+        THE SHAPE OF THE FIX. Nothing is installed and nothing outside this pane moves.
+        The pane's shell is handed its own checkout's `bin/` at the front of PATH, once,
+        before `agent start` runs the provider CLI in that same shell — so the agent, and
+        every shell it spawns, inherits it. C6: the agent is not told to type `./bin/sb`,
+        because an agent told that will type `sb`.
+
+        WHY IT IS CONFIRMED. `pane run` is a write into the dark — herdr accepts the text
+        whether or not the shell was at a prompt to take it — and the failure it hides is
+        exactly the silent one above. So the command prints where `sb` actually resolved
+        and the answer is read back; a pane that will not say costs the spawn (`SbUnpinned`)
+        rather than producing an agent quietly running the wrong build.
+
+        The marker cannot be matched off the echoed command line: what is typed contains
+        the bin directory, and what comes back is `sb=<bin>/sb`, which the typed line does
+        not contain.
+
+        WHERE IT SITS. Before the name is claimed, so the seconds it can cost stay out of
+        the window `status.SPAWN_GRACE` covers, and a refusal leaves no row behind.
+
+        A checkout with no `bin/sb` — any other project — is left alone entirely: no
+        herdr calls, PATH untouched, exactly as before.
+        """
+        bin_dir = _own_sb_bin(cwd)
+        if bin_dir is None:
+            return
+        quoted = shlex.quote(str(bin_dir))
+        # `command -v`, not `which`: it is the shell's own resolution, which is the thing
+        # being asserted. `"$PATH"` quoted, so a PATH with a space in it survives.
+        command = f'export PATH={quoted}:"$PATH"; echo "sb=$(command -v sb)"'
+        marker = f"sb={bin_dir}/sb"
+        for attempt in range(PIN_ATTEMPTS):
+            try:
+                self.h.prompt_pane(pane, command)
+                if self.h.wait_output(pane, marker, timeout_ms=PIN_MS):
+                    store.log_event(self.db, kind="sb_pinned", agent=name,
+                                    pane_id=pane, path=str(bin_dir))
+                    return
+            except HerdrError as e:
+                store.log_event(self.db, kind="sb_pin_error", agent=name,
+                                pane_id=pane, error=str(e))
+            if attempt + 1 < PIN_ATTEMPTS:
+                # The one failure worth retrying is a shell that had not reached its
+                # prompt when the text arrived, and waiting is the whole of that fix.
+                time.sleep(PIN_BACKOFF)
+        store.log_event(self.db, kind="sb_unpinned", agent=name, pane_id=pane,
+                        path=str(bin_dir))
+        raise SbUnpinned(name, pane, str(bin_dir))
+
     # -- spawning --------------------------------------------------------
 
     def _resolve_bindings(self, role: str, extra: Sequence[str] = ()) -> list[str]:
@@ -2430,7 +2695,7 @@ class Broker:
                       f"without it", file=sys.stderr)
         return note
 
-    def _fork_for(self, name: str, *, parent: str) -> Optional[dict]:
+    def _fork_for(self, name: str, *, parent: str) -> dict:
         """Give this child a worktree of its own. The branch is the agent's NAME.
 
         No prefix and no suffix: the name is already unique (`agents.name` is the primary
@@ -2440,27 +2705,94 @@ class Broker:
 
         An existing branch of that name is REFUSED, not attached to — see `BranchTaken`.
 
-        Everything else that can go wrong is not fatal. A herdr with no `worktree create`,
-        a repo that is not a repo, a disk that is full: the child still spawns, in its
-        parent's space, and the event log says a fork was wanted and did not happen.
-        Refusing to spawn at all would take the whole delegation down with it, and the
-        collision refusal above is deliberately the ONE case worth that — because there
-        the failure is somebody's existing branch, and reusing it is unrecoverable in a
-        way that sharing a checkout is not.
+        What it forks FROM is the parent's own branch — see `_inherited_base`, and the
+        note the parent gets when that branch has uncommitted work the fork leaves behind.
+
+        EVERY other failure refuses the spawn too, and this used to be the opposite: a
+        herdr with no `worktree create`, a repo that is not a repo, a disk that is full
+        all returned None, and the child spawned in its parent's space with only a
+        `fork_failed` row to say a fork had been wanted. For a child of a top-level
+        orchestrator that space is the human's own checkout, so the degraded outcome was
+        an agent writing where somebody else's uncommitted work lives — which is not a
+        smaller version of what was asked for, and is exactly as unrecoverable as reusing
+        a branch. The caller is told instead; see `ForkFailed`, and DESIGN-TRUTH's "A fork
+        that fails refuses the spawn and tells the parent."
         """
         if self._branch_exists(name):
             raise BranchTaken(name)
+        base = self._inherited_base()
+        inherited = base != BASE_BRANCH
+        # Asked BEFORE the fork, because that is when it is still true, and only when the
+        # answer means something: a fork from `origin/main` was never going to carry this
+        # checkout's edits and nobody thought it would.
+        dirty = self._uncommitted() if inherited else 0
         try:
-            ws = self._attach_workspace(name)
+            ws = self._attach_workspace(name, base=base)
         except HerdrError as e:
             store.log_event(self.db, kind="fork_failed", agent=name, parent=parent,
                             error=str(e))
-            return None
+            raise ForkFailed(name, self.repo, e) from None
         store.log_event(self.db, kind="fork", agent=name, parent=parent,
                         workspace=ws["workspace"], branch=ws.get("branch"),
                         path=ws["path"], base=ws.get("base"),
-                        base_fallback=ws.get("base_fallback"))
+                        base_fallback=ws.get("base_fallback"),
+                        inherited=inherited, dirty=dirty)
+        if inherited:
+            # The parent is the only one who can act on this, and it is reading stderr
+            # right now — the same channel a skipped fragment uses. Silence here is how a
+            # parent comes to believe a child can see work the child has never had.
+            print(f"sb: {name} forked from {base!r} — your branch, not {BASE_BRANCH}",
+                  file=sys.stderr)
+            if dirty:
+                print(f"sb: {dirty} uncommitted file(s) in your checkout did NOT go with "
+                      f"it — a fork carries commits, not a working tree. Commit and "
+                      f"respawn if {name} needs them", file=sys.stderr)
         return ws                # `delegate` links this worktree's config on its way past
+
+    def _inherited_base(self) -> str:
+        """What a delegated child forks FROM: the branch this checkout is on.
+
+        A fork used to start at `origin/main` unconditionally, so an orchestrator working
+        on a branch got children that had never seen that branch — which made a change to
+        fleet behaviour untestable by the fleet doing it, since every agent it spawned ran
+        the old code. A child now starts from its parent's work.
+
+        The parent's branch is read from the CHECKOUT (`_here`), not from a row: this runs
+        in the parent's cwd, and the fork only happens at all when the parent has no
+        worktree of its own — so the branch it is standing on is the only record of what
+        it is working on. There is nothing to pass and nothing to remember (C6).
+
+        Two cases fall back to `BASE_BRANCH`, and neither is an exception to the rule:
+
+          - the checkout is on `main` already, where inheriting means `origin/main` —
+            except we take the REMOTE one, freshly fetched, rather than however stale the
+            local `main` is. A top orchestrator starting fresh work therefore forks from
+            today's main exactly as it always has, which is what DESIGN-TRUTH's "a
+            workspace forks from `origin/main` by default" describes.
+          - a detached HEAD, which has no branch to inherit and nothing to name.
+
+        `sb start --base` and `sb workspace new --base` are untouched: a caller who says
+        which base they want still gets it.
+        """
+        here = self._here()
+        if here is None:                          # detached: no branch to inherit
+            return BASE_BRANCH
+        local_base = BASE_BRANCH.partition("/")[2] or BASE_BRANCH
+        return BASE_BRANCH if here in (BASE_BRANCH, local_base) else here
+
+    def _uncommitted(self) -> int:
+        """Tracked files in THIS checkout with changes a fork cannot carry.
+
+        Inheriting a branch is not inheriting a working tree: `git worktree add` starts at
+        a COMMIT, so anything merely saved here stays here. Counting rather than listing,
+        because the number is the whole decision — commit first, or spawn anyway.
+
+        Tracked files only. Untracked ones do not travel either, but a checkout with stray
+        scratch files in it is the normal state of a checkout, and a warning that fires on
+        every spawn is a warning nobody reads (C6 again, from the other side).
+        """
+        out = self._git("status", "--porcelain", "--untracked-files=no")
+        return len([ln for ln in (out or "").splitlines() if ln.strip()])
 
     def _branch_exists(self, branch: str) -> bool:
         """Is there already a branch of this name?
@@ -2498,6 +2830,7 @@ class Broker:
         me = me or self.whoami()
         r = roles_mod.get(self.roles, role)
         name = name or self._unique_name(role)
+        self.delivery_note = None       # this spawn's caveat, not the last one's
 
         # A child inherits its parent's workspace unless told otherwise, so a whole
         # delegation subtree stays inside one worktree without anyone passing it down.
@@ -2527,10 +2860,11 @@ class Broker:
         # Only on the INHERITED path. A caller that named a workspace — `sb start`, a
         # workspace lead, `sb delegate --workspace <name>` — has already said where this
         # agent goes, and forking over that would ignore the instruction.
-        forked = None
+        #
+        # A fork that fails RAISES (`ForkFailed`) rather than returning nothing, so there
+        # is no path from here to "spawned in the parent's checkout after all".
         if inherited and not self.has_worktree(me):
             forked = self._fork_for(name, parent=me)
-        if forked:
             ws, branch = forked["workspace"], forked["branch"]
             workspace_id = workspace_id or forked["workspace_id"]
             cwd = cwd or forked["path"]
@@ -2567,6 +2901,10 @@ class Broker:
             wsid, confirmed = workspace_id, True
         if not pane:
             pane, wsid = self._tab_for(wsid, where)
+
+        # Before the claim, so a pane that cannot be pinned costs no row and no name, and
+        # so the wait stays outside the window `status.SPAWN_GRACE` covers.
+        self._pin_sb(name, pane, where)
 
         # Claim the name BEFORE herdr is asked to start anything. `agents.name` is a
         # PRIMARY KEY, and that index is the only arbiter two concurrent spawners share —
@@ -2643,8 +2981,93 @@ class Broker:
             # The pane herdr actually put the agent in, not the one we asked for — the
             # same value the row above was updated with.
             self._open_board(name, agent.pane_id or pane, cwd=str(where))
-        self.h.prompt(name, task)
+        # THE SPAWN IS NOT DONE UNTIL THE TASK IS IN. `agent start` retries and raises
+        # loudly, but the first task used to go down as a bare `agent prompt` — one
+        # unverified call that can paste without submitting or never arrive, after which
+        # `delegate` returned the name as if all of it had worked. That is how a fan-out
+        # reports six agents and starts two, and it cost this project roughly eight agents
+        # in one session. `deliver` re-sends until the task is confirmed to have landed.
+        #
+        # And the proof it is confirmed BY is the child's own transcript, not anything
+        # herdr says about it: a Claude Code still showing its workspace trust dialog eats
+        # the prompt and changes state anyway, which passed the previous confirmation for
+        # three of four agents in one cold fan-out. `where`, not the row's cwd — the row
+        # has only just been written and this is the same value that went into it.
+        try:
+            self.h.deliver(
+                name, task,
+                proof=lambda since: output.task_arrived(str(where), task, since=since),
+            )
+        except HerdrError as e:
+            # UNCONFIRMED IS NOT FAILED. The proof is the child's own transcript and the
+            # child flushes it when it feels like it — 35 s late, measured, under the load
+            # a six-way fan-out makes. So this exception says one thing only: no send could
+            # be confirmed. It does not say the agent has nothing, and treating the two as
+            # the same is how a spawn came to stamp `failed` over a row one second after
+            # the agent wrote `done` into it, and to tell its caller to respawn the work
+            # and force-close the pane.
+            #
+            # So ask the two questions that CAN separate them, both cheap and both about
+            # what the agent has actually done: has it reported anything, and is it running
+            # a turn. Either one is an agent that took something — a spawn's pane has
+            # nothing else to be doing — and neither is proof the TEXT arrived, which is
+            # why this is a caveat on a returned name and not a success.
+            alive = self._took_a_turn(name)
+            if alive:
+                store.log_event(self.db, kind="task_unconfirmed", agent=name, parent=me,
+                                role=role, pane_id=agent.pane_id or pane, alive=alive,
+                                error=str(e))
+                self.delivery_note = (
+                    f"{name}'s delivery was not confirmed — {e.message}. But {alive}, so "
+                    f"it most likely took the task and nothing has been closed or "
+                    f"respawned. Check with `sb inspect {name}` before you act as though "
+                    f"it did or did not: a second agent on the same work costs as much as "
+                    f"none"
+                )
+                return name
+            # Nothing to show for it: not running, nothing reported. A started agent with
+            # no task is not a success, so it is not recorded as one.
+            # `failed` and NOT a husk — the pane and the session stay on the row, because
+            # something is genuinely sitting in that pane and whoever reads this needs to
+            # be able to look at it, close it, or restore it. The husk carve-out above
+            # tests for neither being present, so this row is never silently replaced.
+            store.set_state(self.db, name, GONE_STATE)
+            store.log_event(self.db, kind="task_undelivered", agent=name, parent=me,
+                            role=role, pane_id=agent.pane_id or pane, error=str(e))
+            raise TaskUndelivered(name, e) from None
         return name
+
+    def _took_a_turn(self, name: str) -> Optional[str]:
+        """Has this freshly spawned agent done anything at all? -> why we think so.
+
+        The question that separates a lost task from an unflushed transcript, and it is
+        asked of the agent's own actions rather than of any clock. A spawn's pane has one
+        thing in it and nothing to do but the task it was sent, so:
+
+        - a row that says `done` or `blocked` was written BY THE AGENT, through `sb` — it
+          cannot have reported an end it never ran to. This is the case that mattered
+          most: the row that was overwritten with `failed` had a `done` on it, one second
+          old, with a summary of the work.
+        - herdr reporting `working` is a turn in flight. It does not prove the text
+          arrived (a startup dialog can move an agent without it), which is exactly why
+          the caller keeps this as a caveat rather than a confirmation.
+
+        `failed` is deliberately NOT in the first list: `status._record_gone` writes it
+        for an agent that vanished, so it is a verdict about the agent, not a report from
+        it. None means neither holds — nobody is doing that work as far as we can tell.
+        """
+        a = store.get_agent(self.db, name)
+        if a is not None and a["state"] in ("done", "blocked"):
+            return f"it has since reported {a['state']} itself"
+        # Asked of herdr directly and not through `_agent_states`, whose one-probe-per-
+        # process cache may have been filled before this agent existed.
+        try:
+            live = self.h.get_agent(name)
+        except HerdrError:
+            live = None                  # a herdr that cannot answer proves nothing
+        if live is not None and live.state == WORKING:
+            return "herdr reports it is running a turn"
+        return None
 
     def _spawn_husk(self, name: str) -> bool:
         """Is the row under this name the leftovers of a spawn that failed?
@@ -2707,7 +3130,9 @@ class Broker:
                 # shows it; the alternative is paying a turn on every answer forever.
                 store.mark_collected(self.db, mid)
             else:
-                self._ring(t, self._say("notify.mail"))
+                # Only the human answers a block, so only the human's `tell` clears one.
+                # Anyone else's mail is held until they have (see `_ring`).
+                self._ring(t, self._say("notify.mail"), answer=(me == HUMAN))
         return ids
 
     def ask(
@@ -2794,7 +3219,7 @@ class Broker:
     def _is_registered(self, who: str) -> bool:
         """Does herdr still know this agent? Refreshed each poll, unlike `_busy`."""
         try:
-            self._alive_cache = {a.name: a.state for a in self.h.list_agents()}
+            self._fill_agent_caches(self.h.list_agents())
         except HerdrError:
             return True                       # cannot tell: assume alive, never kill on doubt
         return who in self._alive_cache
@@ -2887,19 +3312,32 @@ class Broker:
         me = me or self.whoami()
         if me == HUMAN:
             raise ValueError("`sb block` is for agents")
-        a = store.get_agent(self.db, me)
         store.set_state(self.db, me, "blocked")
-        # NOT herdr's `blocked`. Reporting it makes the agent permanently un-targetable:
-        # the name drops out of `agent list`, `agent get`/`agent prompt` answer
-        # agent_not_found, and a pane-targeted prompt answers agent_not_ready. The binding
-        # does not come back — herdr has recorded the agent leaving the foreground (`sb`
-        # itself ran there), so no later report re-registers it.
+        # NOTHING is reported to herdr here, and that silence is the whole of what makes a
+        # block answerable (see `_binding_lost` for what it costs when it is not).
         #
-        # That badge would cost us the only way back in to the one verb whose entire
-        # purpose is "stop and get a human". `idle` is honest — the agent IS idle, waiting
-        # — and keeps it reachable. Blocked-ness lives in our store, which is the truth
-        # anyway (C5), and reaches you through the notification below.
-        self._push_state(a, IDLE, why)
+        # `pane report-agent` does not annotate a pane's agent, it REPLACES it. The named
+        # agent `agent start` registered is evicted and a source-reported record put in its
+        # place, and a reported record is not a target: `agent get`/`agent prompt <name>`
+        # answer agent_not_found, and a pane-targeted prompt answers agent_not_ready
+        # ("<pane> is not an active named agent"). It is one-way — `pane release-agent`
+        # deletes the record rather than handing detection back (the pane then drops out of
+        # `agent list` entirely), and `agent start` on the still-live pane refuses
+        # agent_pane_busy. So the doorbell can never ring that agent again, on the one verb
+        # whose entire purpose is "stop and get a human".
+        #
+        # This used to push `idle`, on the reading that herdr's `blocked` badge is what
+        # costs the binding. That reading was half right and the wrong half was load-
+        # bearing: `blocked` does cost it, and so does `idle`, and so does every other
+        # value. The state is not what evicts the name — making the call is. Measured on
+        # herdr 0.8.0 against a throwaway pane: `agent start` → bound; `pane
+        # report-agent-session` → still bound; one `pane report-agent --state idle` →
+        # agent_not_found, and nothing brings it back.
+        #
+        # Nothing is lost by staying quiet. Blocked-ness has always lived in our store
+        # (`_is_blocked`), which is what `sb status --needs-me` and the board read (C5), and
+        # herdr's own detector reads a waiting agent as idle unprompted — the very value we
+        # were paying the binding to tell it. The notification below is what reaches you.
         self._surface(me, why)
         store.log_event(self.db, kind="blocked", agent=me, why=why[:EVENT_CLIP])
 
@@ -2914,7 +3352,7 @@ class Broker:
     def cleanup(self, names: Sequence[str] = (), *, include_kept: bool = False,
                 force: bool = False, dry_run: bool = False,
                 leave_children: bool = False,
-                me: Optional[str] = None) -> list[str]:
+                me: Optional[str] = None) -> "CleanupResult":
         """Close agents. With no names, every finished one in the caller's scope.
 
         Safe to be aggressive: closing costs only the pane. Session, summary, messages
@@ -2952,6 +3390,11 @@ class Broker:
           asked for this agent by name, so silence would be a lie. A sweep skips it the
           way it skips every other gate, and logs `cleanup_held` so the log can answer
           "why is that one still here".
+
+        Every gate that holds a candidate back records its reason on the returned
+        `CleanupResult.refused`, and logs `cleanup_refused`. A gate firing in silence is
+        the bug this closes: `closed: (nothing)` told you the outcome and never the rule,
+        and the only remaining move was `--force`, which lifts all five at once.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -2987,22 +3430,59 @@ class Broker:
                   "--leave-children to close the parent and leave them running."
             )
 
-        closed = []
+        closed = CleanupResult()
+
+        def refuse(a, reason: str, *, log: bool = True, expected: bool = False) -> None:
+            """Say why this candidate stays. The one exit every gate now takes.
+
+            A dry run reads and never writes, so it records the reason and logs nothing —
+            the same rule the live-descendants gate already followed. That gate keeps its
+            own `cleanup_held` event rather than logging twice; only its reason comes
+            through here.
+
+            `expected` is a claim about a SWEEP's readout and nothing else: it says this
+            refusal is the sweep doing its job rather than a row held back. Every refusal
+            is recorded and reported either way — see `CleanupResult.expected`.
+            """
+            closed.refused.append((a["name"], reason))
+            if expected:
+                closed.expected.add(a["name"])
+            if log and not dry_run:
+                store.log_event(self.db, kind="cleanup_refused", agent=a["name"],
+                                reason=reason[:EVENT_CLIP])
+
         for a in candidates:
             if a["name"] == me:
-                continue                      # never close the caller
+                # Named, this is somebody asking to close the pane they are typing in.
+                refuse(a, "that is you — an agent cannot close its own pane")
+                continue
             if a["ended_at"] and not a["pane_id"]:
-                continue                      # already gone
+                # Nothing was held back — this row was closed before the sweep started.
+                refuse(a, "already closed", expected=True)
+                continue
             if a["name"] in held:
                 if not dry_run:               # a dry run reads; it never writes
                     store.log_event(self.db, kind="cleanup_held", agent=a["name"],
                                     live_children=",".join(held[a["name"]]))
+                refuse(a, "still working underneath: " + ", ".join(held[a["name"]]),
+                       log=False)
                 continue                      # the invariant; see the docstring
             if not force:
                 if a["state"] not in FINISHED:
-                    continue                  # only finished agents; --all-idle too
+                    # only finished agents; --all-idle too
+                    #
+                    # Blocked is the one state in here a sweep must still say out loud.
+                    # An agent that is working will finish on its own and the next sweep
+                    # takes it; an agent that is BLOCKED is stopped, waiting on a person,
+                    # and the person most likely to see that line is the one who just ran
+                    # `sb cleanup` and is about to walk away believing the fleet is idle.
+                    refuse(a, f"{a['state']}, not finished — it has not reported an end",
+                           expected=a["state"] != "blocked")
+                    continue
                 if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
-                    continue                  # nobody reported this end, and herdr disagrees
+                    refuse(a, f"recorded {GONE_STATE}, but herdr still has its pane — "
+                              f"nobody reported this end")
+                    continue
                 if (store.unread_for(self.db, a["name"], mark=False)
                         and not self._finished_and_unreachable(a["name"])):
                     # Unread mail it could still read holds the row, as it always has.
@@ -3012,10 +3492,12 @@ class Broker:
                     # jams that row forever, closable by neither a sweep nor `--force`
                     # having been meant. Closing loses nothing; the message survives, and
                     # `sb restore` brings back an inbox that still holds it.
+                    refuse(a, "unread mail it could still read")
                     continue
                 # Naming an agent is itself the instruction to close it, so an explicit
                 # name lifts the role's disposition exactly as `include_kept` does.
                 if a["cleanup"] != "close" and not (include_kept or names):
+                    refuse(a, f"role {a['role']} is kept, not closed (--include-kept)")
                     continue
             if dry_run:
                 closed.append(a["name"]); continue
@@ -3043,6 +3525,7 @@ class Broker:
                     store.log_event(self.db, kind="cleanup_failed", agent=a["name"],
                                     error=str(e))
                     if not force:
+                        refuse(a, f"herdr could not close its pane: {e}", log=False)
                         continue
                     # Under force we fall straight on into the bookkeeping below and mark
                     # this row `done` with no pane, having just failed to close its pane.
@@ -3151,9 +3634,42 @@ class Broker:
         # workspaces, so deriving it would bring the agent back somewhere else.
         wsid = (ws.get("workspace_id") or _column(a, "workspace_id")
                 or self._workspace_id(a["workspace"]))
+        where = ws.get("path") or a["cwd"] or str(self.repo)
+        # A worktree that has been deleted is the end of this agent, and saying so is the
+        # whole of the fix: herdr silently substitutes `$HOME` for a `--cwd` that does not
+        # exist, so restoring into a removed checkout reported `restored <name>` and put a
+        # live agent in Andrew's home directory with none of its context and every
+        # intention of writing there. DESIGN-TRUTH is explicit that restore is gone once
+        # the worktree is — the push is the recovery path for the work — so this refuses
+        # and names the branch the work is still on.
+        #
+        # Checked here rather than in `_tab_for`, which `delegate` and the workspace spawn
+        # also call: this is the one caller whose directory was recorded long ago and can
+        # have been removed since.
+        if not Path(where).is_dir():
+            branch = store.agent_branch(self.db, name)
+            raise ValueError(
+                f"{name} cannot be restored: its checkout is gone ({where}). "
+                + (f"Its work is on branch {branch} — that branch is the recovery path, "
+                   f"not restore."
+                   if branch else
+                   "No branch was recorded for it, so there is nothing to bring back.")
+            )
         # The corrected id is deliberately dropped: restore rewrites pane and state, never
         # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
-        pane, _ = self._tab_for(wsid, ws.get("path") or a["cwd"] or str(self.repo))
+        pane, _ = self._tab_for(wsid, where)
+        # A restored agent gets the same pinning a fresh one does — it comes back into the
+        # same checkout and would otherwise come back on the installed build. The tab is
+        # ours, so a refusal closes it rather than leaving an empty shell behind, exactly
+        # as a failed `agent start` does below.
+        try:
+            self._pin_sb(name, pane, where)
+        except SbUnpinned:
+            try:
+                self.h.close_pane(pane)
+            except HerdrError as e:
+                store.log_event(self.db, kind="orphan_pane", agent=name, error=str(e))
+            raise
         # Same tier it was spawned on. The role is what we recorded, and the tier table is
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with
@@ -3239,10 +3755,33 @@ class Broker:
         """
         if self._alive_cache is None and not self._alive_unknown:
             try:
-                self._alive_cache = {a.name: a.state for a in self.h.list_agents()}
+                self._fill_agent_caches(self.h.list_agents())
             except HerdrError:
                 self._alive_unknown = True
         return self._alive_cache
+
+    def _fill_agent_caches(self, listed) -> None:
+        """Both views of one `agent list`: who is there, and whose NAME herdr will answer to.
+
+        One call fills both because they are one answer read two ways, and asking twice
+        would spend a subprocess to get a version of the same list that could disagree
+        with itself.
+        """
+        self._alive_cache = {a.name: a.state for a in listed}
+        self._bound_cache = {a.name for a in listed if a.bound}
+
+    def _name_bound(self, who: str) -> Optional[bool]:
+        """Does herdr still ANSWER TO this name? None if herdr could not be asked.
+
+        Not the same question as "is this agent in `agent list`", and the difference is
+        the whole of `audit/phase1-acceptance-3.md` §6.1: `sb done` evicts the name binding, and the pane is
+        then listed under a row with no `name` field at all, which
+        `Agent.from_json` fills in from `agent` — so membership in `_agent_states()` is
+        true for exactly the agents whose names have been lost.
+        """
+        if self._agent_states() is None:
+            return None
+        return who in self._bound_cache
 
     def _end_still_holds(self, name: str) -> bool:
         """Does herdr STILL agree that this agent's turn ended?
@@ -3277,21 +3816,30 @@ class Broker:
 
         Two ways to be sure, and both are needed. A row with no `pane_id` has nothing to
         ring by construction — `cleanup` cleared it, or it never got one. A row that still
-        holds a pane id is only unreachable if herdr, asked and answering, does not list
-        the name: unknown is NOT gone (`_agent_states` returns None for "cannot tell"), and
-        reading a herdr outage as death would silence the doorbell for a whole live fleet.
+        holds a pane id is only unreachable if herdr, asked and answering, no longer
+        answers to the name: unknown is NOT gone (`_name_bound` returns None for "cannot
+        tell"), and reading a herdr outage as death would silence the doorbell for a whole
+        live fleet.
 
         That positive answer is also what makes this safe against `_revive`. An agent that
         reports done and then runs `sb` again is mid-turn while it does so, so herdr knows
         the name, and the guard does not fire on the one row that is about to come back.
+
+        THE NAME AND NOT THE LIST, and this is what the first version got wrong. It asked
+        `_agent_states()` for membership, and the evicted pane is still listed — as
+        `{"agent": "<name>"}`, which `Agent.from_json` turns back into that same name. So
+        the guard written to stop the loop read the fallback as proof the binding was
+        intact, never fired once, and the loop it names in its own first paragraph ran
+        every ten seconds for as long as the row existed, measured at
+        `audit/phase1-acceptance-3.md` §6.1. `_name_bound` asks the question this
+        paragraph asks.
         """
         a = store.get_agent(self.db, who)
         if a is None or a["state"] not in FINISHED:
             return False
         if not a["pane_id"]:
             return True
-        states = self._agent_states()
-        return states is not None and who not in states
+        return self._name_bound(who) is False
 
     def _busy(self, who: str) -> bool:
         """Is this agent mid-turn right now, per herdr?
@@ -3312,9 +3860,10 @@ class Broker:
         `store.unseen`, NOT `store.undelivered`: the doorbell exists to tell an agent
         something it does not already know, and an agent that read its inbox proactively
         already knows. Ringing on un-announced alone burns that agent a turn to find an
-        empty inbox, and — because `_ring` unblocks first — silently cancels a `block`,
-        putting an agent that stopped to ask a person back to `working` with its question
-        never surfaced. `status._undelivered_counts` reads the same pair, so what the
+        empty inbox — and it used to be worse than a wasted turn: `_ring` unblocked before
+        every delivery, so a stale doorbell put an agent that had stopped to ask a person
+        back to `working` with its question never surfaced. Only the human's answer clears
+        a block now. `status._undelivered_counts` reads the same pair, so what the
         board calls outstanding and what this chases can never drift apart.
 
         `refresh` discards the per-process view of who is busy. `sb` invocations are short
@@ -3339,20 +3888,28 @@ class Broker:
             return []
         if refresh:
             self._alive_cache = None
+            self._bound_cache = set()
             self._alive_unknown = False
         rung = []
         for who in dict.fromkeys(m["to_agent"] for m in pending):
+            mine = [m for m in pending if m["to_agent"] == who]
             if self._finished_and_unreachable(who):
-                self._clear_unreadable_mail(who, [m for m in pending if m["to_agent"] == who])
+                self._clear_unreadable_mail(who, mine)
                 continue
             if self._busy(who):
                 continue
-            if self._ring(who, self._say("notify.mail")):
+            # A blocked agent is not idle. Its mail waits, exactly as a busy agent's does,
+            # unless the human's answer is among it — that one both clears the block and
+            # is the news worth announcing.
+            answer = any(m["from_agent"] == HUMAN for m in mine)
+            if not answer and self._is_blocked(who):
+                continue
+            if self._ring(who, self._say("notify.mail"), answer=answer):
                 rung.append(who)
         return rung
 
-    def _clear_unreadable_mail(self, who: str, messages: Sequence) -> None:
-        """Stop chasing mail for an agent that has finished and has no pane.
+    def _clear_unreadable_mail(self, who: str, messages: Optional[Sequence] = None) -> None:
+        """Stop chasing mail for an agent that has finished and cannot be rung again.
 
         The doorbell is never going to ring for these (`_ring` guards it), and left alone
         they are worse than merely undelivered: `store.unread_for` keeps reporting them, so
@@ -3368,22 +3925,40 @@ class Broker:
         inbox that is not going to be opened — and the narrow cost of that is an agent
         brought back later by `sb restore` finding those messages already read.
 
-        Only for a row whose pane is GONE. A finished agent that still holds a pane is a
-        different animal: a person can put a turn back into that pane, and `done` is
-        explicit that a done parent with live children stays reachable and still collects
-        their summaries. It loses the doorbell here (see `_ring`) and nothing else. Its
-        mail is cleared once `cleanup` closes it, which is now something `cleanup` can
-        actually do — see the unread gate there.
+        A row that still holds a PANE is treated more gently, and the difference is only
+        `read_at`. A person can put a turn back into that pane, and `done` is explicit that
+        a done parent with live children stays reachable and still collects their
+        summaries — so its own `sb inbox` remains a real way for that mail to be read, and
+        marking it read would be the one thing that ends it. What it does lose is the
+        pretence that it is still waiting to be announced: `mark_unannounceable` stamps
+        `delivered_at`, which is what takes it out of `unseen()` and so out of both
+        triggers. Without that the ring is skipped and nothing else changes — the rows stay
+        un-announced forever, `flush_pending` re-derives them on every `sb` command, and
+        the collector's doorbell spawns an `sb flush` every ten seconds for the life of the
+        row (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71
+        seconds). Skipping a ring stops the herdr call; only this stops the retry.
+
+        `messages` may be omitted, and then it is exactly this agent's share of `unseen`.
+        `flush_pending` passes the slice it already has; `_ring` has no list to pass.
         """
+        if messages is None:
+            messages = [m for m in store.unseen(self.db) if m["to_agent"] == who]
+        if not messages:
+            return
         a = store.get_agent(self.db, who)
         if a and a["pane_id"]:
+            for m in messages:
+                store.mark_unannounceable(self.db, m["id"])
+                store.log_event(self.db, kind="mail_unannounced", agent=who,
+                                sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
             return
         for m in messages:
             store.mark_collected(self.db, m["id"])
             store.log_event(self.db, kind="mail_cleared", agent=who,
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
-    def _ring(self, who: str, text: str, *, force: bool = False) -> bool:
+    def _ring(self, who: str, text: str, *, force: bool = False,
+              answer: bool = False) -> bool:
         """The doorbell. Carries no payload — the message is in the store.
 
         Held back while the target is mid-turn: `agent prompt` INTERLEAVES, injecting into
@@ -3391,12 +3966,21 @@ class Broker:
         interrupts whatever it was doing. `force` is for interrupt, whose whole purpose is
         to land now.
 
+        Held back while the target is BLOCKED, too, and for the same reason turned inside
+        out: a blocked agent is not idle, it is waiting on a person. This used to unblock
+        unconditionally before every delivery, so a sibling's unrelated `tell` — or a
+        child's `done` — put the agent back to `working`, dropped it out of `sb status
+        --needs-me`, and buried the human's eventual answer under mail it never asked for.
+        `answer=True` is the one ring that is the human's reply, and it is the only thing
+        that clears a block. Everything else waits its turn: the message stays queued and
+        `flush_pending` rings it once the block is answered.
+
         There is no fallback when `agent prompt` fails. There used to be one — type the
         text into the agent's pane with `pane run` — and it was a shell: any backtick or
         `$(` in an agent-authored interrupt ran as a command in that pane (confirmed live).
-        It was never a recovery path either, only a lookalike: herdr loses a name binding
-        when it sees the agent leave the foreground, and an agent whose TUI is not there to
-        read a prompt is not there to read typed-in text either.
+        It was never a recovery path either, only a lookalike: a lost name binding is a
+        `pane report-agent` we made (`Herdr.report_state`), and an agent whose TUI is not
+        there to read a prompt is not there to read typed-in text either.
 
         So a failed ring is a failed ring. For the doorbell that costs nothing — the
         message is already durable with `delivered_at` NULL, and `flush_pending` re-rings
@@ -3413,9 +3997,15 @@ class Broker:
             # its own work list — and a write-time guard would leave every message already
             # on disk being re-attempted on every `sb` command anyone runs, forever.
             #
-            # The message itself is untouched: written, queued, and still there to be
-            # found. This skips the announcement, not the mail.
+            # The message itself survives — body, sender, its place in the log, and, while
+            # the pane is still there, its place in that agent's inbox. What it gives up is
+            # its claim on an announcement that can never be made: left un-announced it is
+            # re-derived by `flush_pending` on every `sb` command and by the collector's
+            # doorbell every ten seconds, forever. Skipping the ring alone was the shape of
+            # the loop, not the fix for it.
             store.log_event(self.db, kind="ring_skipped", agent=who, reason="finished")
+            if not force:
+                self._clear_unreadable_mail(who)
             if force:
                 # `interrupt` refuses this in plainer words before it gets here, so this
                 # is the backstop for any future forced ring: force must never quietly
@@ -3423,43 +4013,140 @@ class Broker:
                 raise Undeliverable(who, HerdrError(
                     "agent_finished", "it reported done and holds no live pane"))
             return False
+        if not force and not answer and self._is_blocked(who):
+            # Not idle — waiting on a person. Announcing anything else would cancel the
+            # block (see `_unblock_if_needed`) and bury the answer it is waiting for.
+            store.log_event(self.db, kind="ring_held", agent=who, reason="blocked")
+            return False
         if not force and self._busy(who):
             store.log_event(self.db, kind="ring_deferred", agent=who)
             return False
-        self._unblock_if_needed(who)
+        if answer:
+            self._unblock_if_needed(who)
         try:
             self.h.prompt(who, text)
         except HerdrError as e:
-            store.log_event(self.db, kind="ring_failed", agent=who, error=str(e))
+            store.log_event(self.db, kind="ring_failed", agent=who, error=str(e),
+                            reason=("name_binding_lost" if self._binding_lost(who, e)
+                                    else None))
             if force:
                 raise Undeliverable(who, e) from e
             return False
         store.mark_delivered(self.db, who)
         return True
 
+    def _binding_lost(self, who: str, e: HerdrError) -> bool:
+        """Did that ring fail because herdr has lost the agent's NAME, not the agent?
+
+        The distinct failure this exists to name: herdr can stop answering to a live
+        agent's name — `agent prompt` says `agent_not_found`, a pane-targeted one says
+        `agent_not_ready` — while the agent itself is still sitting in its pane with real
+        work in it, and nothing re-registers the name. Filed as `2026-08-09-004626`.
+        Nothing can ring it again, so its mail queues forever.
+
+        The cause is ours and is now known: a `pane report-agent` on the pane evicts the
+        named agent (`Herdr.report_state` measures it). `block` and `_unblock_if_needed`
+        used to make that call, which is what made blocking a one-way door; they no longer
+        report anything. `Broker.done` still does, so this remains reachable — for an agent
+        that has just said it is finished, which is the case `_finished_and_unreachable`
+        already covers.
+
+        Told apart from an agent that has simply died by asking herdr twice, in two
+        different ways: `agent prompt` refuses the name, and `agent list` — asked fresh,
+        after the failure, not from the cache this process may have filled minutes of
+        subprocess time ago — still HAS the name. Both at once is the signature, and it is
+        the one the bug report recorded (`sb status still shows the row as alive/idle`).
+        An agent whose process really has gone drops out of the list, and one herdr cannot
+        be asked about at all (`None`) is not evidence of anything.
+
+        This only names it. It cannot fix it: the binding lives in herdr, which is a
+        separate binary. What it buys is that a sender is told the doorbell will never
+        ring rather than "mid-turn, will be rung when free" — see `unreachable`.
+        """
+        if e.code not in ("agent_not_found", "agent_not_ready"):
+            return False
+        a = store.get_agent(self.db, who)
+        if a is None or a["state"] in FINISHED:
+            return False
+        self._alive_cache = None            # ask again, now: the failure is the news
+        self._bound_cache = set()
+        self._alive_unknown = False
+        states = self._agent_states()
+        return states is not None and who in states
+
+    def unreachable(self, who: str) -> Optional[str]:
+        """The doorbell's last word on this agent, if it was "this will never ring".
+
+        Read from the event log rather than a column on the row, because it is an
+        observation and not a state — and disproved by a later DELIVERY rather than by an
+        event of its own. A successful ring deliberately writes nothing to the log: those
+        rows are `status._last_activity`'s idea of an agent having done something, and a
+        doorbell is somebody else acting, so logging one would reset the idle clock on
+        exactly the silent agent a person is trying to spot.
+
+        `sb tell` uses it to stop promising delivery it cannot make.
+
+        The FINISHED case is answered first and from the row, not the log, because there is
+        no failure to read: nothing is attempted at all for an agent whose turn has ended
+        and whose name no longer binds (`_ring` skips it, and `sb tell` is usually the
+        first thing to reach that row, so the log is empty). Without this the sender is
+        told "will be rung when free" about an agent that is neither busy nor ever coming
+        back — the promise this method exists to stop making.
+        """
+        if self._finished_and_unreachable(who):
+            return "it reported done and herdr no longer answers to its name"
+        failed = None
+        for row in store.recent_events(self.db, agent=who, limit=EVENT_SCAN):
+            if row["kind"] != "ring_failed":
+                continue
+            payload = json.loads(row["payload"]) if row["payload"] else {}
+            if payload.get("reason") != "name_binding_lost":
+                return None                        # the newest failure was something else
+            failed = (row["created_at"], payload)
+            break
+        if failed is None:
+            return None
+        landed = self.db.execute(
+            "SELECT MAX(delivered_at) t FROM messages WHERE to_agent=?", (who,)
+        ).fetchone()["t"]
+        if landed is not None and landed >= failed[0]:
+            return None                            # a later ring got through after all
+        return failed[1].get("error") or "herdr no longer answers to its name"
+
+    def _is_blocked(self, who: str) -> bool:
+        """Is this agent stopped waiting on a person, per our own store?
+
+        Our store and not herdr, because `block` reports nothing to herdr at all (see
+        there — a report would cost the agent its name), so herdr cannot tell a blocked
+        agent from an idle one and this is the only place the difference is recorded.
+        """
+        a = store.get_agent(self.db, who)
+        return bool(a and a["state"] == "blocked")
+
     def _unblock_if_needed(self, who: str) -> None:
-        """A blocked agent is un-targetable in herdr, by herdr's design.
+        """Clear a block, because the human has answered it. Only that.
 
-        Reporting `blocked` drops the name binding: `agent get`/`agent prompt` answer
-        `agent_not_found`, and a pane-targeted prompt answers `agent_not_ready`. Sensible
-        from herdr's side — a blocked agent is waiting on a human, so nothing should poke
-        it programmatically. But it would leave the one verb whose purpose is "stop and
-        get a human" with no way back in.
+        Called from `_ring` for an `answer=True` ring and nowhere else. It used to run
+        before EVERY delivery, which is what let a sibling's ordinary mail cancel a block.
 
-        Pushing `working` re-registers the name, and it is what is actually happening:
-        answering a blocked agent IS unblocking it.
+        Store-only, and deliberately: this runs one line before the doorbell, on an agent
+        whose name MUST still bind. It used to push herdr `working` here, on the reading
+        that a report re-registers the name — it does the opposite, and this was the second
+        of the two calls that made blocking a one-way door. Any `pane report-agent` evicts
+        the pane's named agent for good; see `block` for the measurement. Pushed here it
+        evicted the name in the same breath as the ring that needed it, so the human's
+        answer failed with `agent_not_found` on the line below while the block cleared
+        anyway — the block row went away and the answer never arrived.
+
+        Nothing needs the report. herdr's detector marks the pane working of its own accord
+        the moment the prompt lands, and our store is where "no longer blocked" is read
+        from (`_is_blocked`, `sb status --needs-me`).
         """
         a = store.get_agent(self.db, who)
         if not a or a["state"] != "blocked" or not a["pane_id"]:
             return
-        self._check_integration()   # the other place a state write is attempted
-        try:
-            self.h.report_state(a["pane_id"], who, WORKING,
-                                store.next_seq(self.db, who), verify=False)
-            store.set_state(self.db, who, "working")
-            store.log_event(self.db, kind="unblocked", agent=who)
-        except HerdrError as e:
-            store.log_event(self.db, kind="unblock_failed", agent=who, error=str(e))
+        store.set_state(self.db, who, "working")
+        store.log_event(self.db, kind="unblocked", agent=who)
 
     def _surface(self, who: str, text: str) -> None:
         try:
@@ -3475,9 +4162,9 @@ class Broker:
         in every session look successful and be dropped, for as long as it is installed.
 
         Asked HERE rather than in `main()`, and logged rather than raised. The blast
-        radius is the two `report_state` call sites, so a process that never writes state
-        — `sb status`, `sb log` — should neither pay for a subprocess nor be hard-failed
-        by a fault that cannot reach it. Once per process, the way `_alive_cache` and
+        radius is `_push_state`, the one place a state write is made, so a process that
+        never writes state — `sb status`, `sb log` — should neither pay for a subprocess
+        nor be hard-failed by a fault that cannot reach it. Once per process, the way `_alive_cache` and
         `_ws_ids` are once per process, and the flag is set before the call so a herdr
         that is slow or broken costs that price exactly once either way.
 

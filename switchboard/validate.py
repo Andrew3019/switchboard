@@ -14,6 +14,10 @@ Two rules do most of the work, and both come from herdr:
     shell") and refuses. This covers the ``--append-system-prompt`` lines AND the task
     text handed to ``agent prompt``.
 
+One rule is ours rather than herdr's, and it is in `reason`: a `sb block` reason is capped
+short, because the human never reads that field and a long one is an answer the agent has
+sent nowhere. See that docstring — it is the one place here enforcing a shape.
+
 Left to herdr, both surface as an error that names neither the flag the human typed nor
 the fix — and in the ``ask`` case as a wedged shell that blocks for the full timeout.
 Shell injection is NOT the concern: every subprocess call is an argument list and
@@ -37,6 +41,7 @@ from . import config
 # reasoning lives next to the number.
 MAX_AGENT_NAME = config.setting("limits.agent_name")
 MAX_TEXT = config.setting("limits.text")
+MAX_BLOCK_REASON = config.setting("limits.block_reason")
 MAX_PROMPT = config.setting("limits.prompt")
 MAX_REF = config.setting("limits.ref")
 MAX_TOKEN = config.setting("limits.token")
@@ -115,6 +120,44 @@ def line(value: Optional[str], field: str, *, max_len: int = MAX_TEXT) -> str:
             f"a newline (invalid_agent_argument), so this would fail at spawn. Put "
             f"multi-line guidance in a file and pass the path, or in a "
             f"{PRESET_DIR_HINT}<name>.md preset."
+        )
+    return v
+
+
+def reason(value: Optional[str], field: str = "reason") -> str:
+    """`sb block "<why>"` — a one-line note on a board row, not a message to the human.
+
+    The only validator here that is enforcing a SHAPE rather than a constraint somebody
+    else imposes, and the reason it has to be mechanical is C6: the right shape was
+    written down in the protocol and an orchestrator still put its whole answer here.
+    The human reads a blocked agent's own chat, with `sb inspect`; this field reaches him
+    as at most a clipped row on the board. So a `why` big enough to be the answer is not
+    a long reason, it is an answer that has been sent nowhere — and the agent cannot tell,
+    because `block` succeeded.
+
+    Both refusals therefore say the same thing and name the same fix, including the one
+    that used to blame herdr. herdr's newline rule is real (the reason travels on to
+    `report-agent --message`) but it is the wrong thing to tell the caller: an agent that
+    hears "herdr refuses newlines" learns that its text is fine and its formatting is not,
+    flattens six paragraphs into one line, and gets through — which is exactly what
+    happened, and it filed a bug against the refusal afterwards. The cap is what closes
+    that door, so the two checks are one message with one fix in it.
+    """
+    v = _require_str(value, field).strip()
+    if not v:
+        raise Invalid(f"{field} is empty — say in one line what you need")
+    if _CONTROL.search(v):
+        raise Invalid(f"{field} contains control characters; send plain text")
+    if "\n" in v or "\r" in v or len(v) > MAX_BLOCK_REASON:
+        problem = (f"is {len(v)} characters, over the {MAX_BLOCK_REASON} a block reason "
+                   f"may carry" if len(v) > MAX_BLOCK_REASON else "must be a single line")
+        raise Invalid(
+            f"{field} {problem}. It is bookkeeping on a board row, NOT the message the "
+            f"human reads — they read your own chat, and nothing you put here. So do not "
+            f"shorten or flatten the long version into it: write the full thing — the "
+            f"findings, the options, the numbered questions — as the last message in your "
+            f"chat, where they will read it, and then block with one line naming what you "
+            f"are waiting for, like `sb block \"need a decision on the auth split\"`."
         )
     return v
 

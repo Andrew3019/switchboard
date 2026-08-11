@@ -54,6 +54,16 @@ def a_snapshot(*names, herdr_error=None, hidden=0, now=1000):
             blocked_why=None, summary=None) for n in names])
 
 
+def a_git_repo(root: Path) -> Path:
+    """A real checkout, so path code is exercised against `git` and not against a mock."""
+    root.mkdir(parents=True, exist_ok=True)
+    for cmd in (["init", "-q", "-b", "main"],
+                ["-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", *cmd], cwd=str(root), check=True, capture_output=True)
+    return root
+
+
 def published(paths, snap, **counters):
     """Put a snapshot on disk the way the collector would."""
     meta = {"pid": 1, "started_at": 0.0, "polls": 1, "errors": 0,
@@ -145,14 +155,7 @@ class PathsWithoutGit(unittest.TestCase):
     def _repo(self) -> Path:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name) / "repo"
-        root.mkdir()
-        for cmd in (["init", "-q", "-b", "main"],
-                    ["-c", "user.email=t@t", "-c", "user.name=t",
-                     "commit", "-q", "--allow-empty", "-m", "x"]):
-            subprocess.run(["git", *cmd], cwd=str(root), check=True,
-                           capture_output=True)
-        return root
+        return a_git_repo(Path(tmp.name) / "repo")
 
     def test_it_agrees_with_store_in_a_plain_checkout(self):
         root = self._repo()
@@ -603,6 +606,239 @@ class CollectorLoop(PanelTest):
         self.assertFalse(self.paths.demand.exists())
         self._run([(a_snapshot("w1"), None)] * 3, idle_exit=60.0, max_ticks=3)
         self.assertEqual(panel.read(self.paths).collector["polls"], 3)
+
+
+class TheDoorbellTrigger(PanelTest):
+    """The one loop in the fleet that ticks on its own is what rings the doorbell.
+
+    A message held back because its target was mid-turn used to wait for the next `sb`
+    command somebody happened to run — so a parent whose last child reported while it was
+    busy was never woken at all. This is the minimal trigger for that and nothing else: it
+    runs `sb`, which flushes at startup like every `sb` command, and every decision about
+    who may be rung stays in `Broker.flush_pending`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ran: list[list[str]] = []
+        # The thread runs its target here and now, so a test never races the doorbell.
+        self.enterContext(mock.patch.object(
+            collector.threading, "Thread",
+            lambda target, args=(), **kw: mock.Mock(start=lambda: target(*args))))
+        self.ran_cwd: list = []                # the directory each one was run FROM
+
+        def record(argv, **kw):
+            self.ran.append(argv)
+            self.ran_cwd.append(kw.get("cwd"))
+            return mock.Mock(returncode=0)
+
+        self.enterContext(mock.patch.object(collector.shutil, "which", lambda n: "/bin/sb"))
+        self.enterContext(mock.patch.object(collector.subprocess, "run", record))
+        # Which `sb` gets picked is `WhichSbTheDoorbellRuns`'s subject, and it answers with
+        # this checkout's real `bin/sb` — a path these tests would then have to know. They
+        # are about WHEN it runs, so they take the PATH answer.
+        self.enterContext(mock.patch.object(
+            collector, "doorbell_sb", lambda: collector.shutil.which("sb")))
+
+    def _snap(self, undelivered):
+        snap = a_snapshot("w1")
+        snap.agents[0].undelivered = undelivered
+        return snap
+
+    def test_mail_nobody_has_been_told_about_runs_sb(self):
+        state = collector.State(pid=1, started_at=0.0)
+        self.assertTrue(collector.ring_doorbell(self._snap(1), state, Path("/r/.sb/s.db")))
+        self.assertEqual(self.ran, [["/bin/sb", "flush"]])
+        self.assertEqual(state.doorbells, 1)
+        self.assertIsNone(state.doorbell_error)
+
+    def test_an_idle_fleet_costs_nothing(self):
+        state = collector.State(pid=1, started_at=0.0)
+        self.assertFalse(collector.ring_doorbell(self._snap(0), state, None))
+        self.assertEqual((self.ran, state.doorbells), ([], 0))
+
+    def test_a_target_that_stays_busy_does_not_cost_a_process_a_tick(self):
+        """Mail held back stays pending, tick after tick. Without the floor this would
+        spawn one `sb` every two seconds for as long as that agent keeps working."""
+        state = collector.State(pid=1, started_at=0.0)
+        collector.ring_doorbell(self._snap(1), state, None)
+        self.assertFalse(collector.ring_doorbell(self._snap(1), state, None))
+        self.assertEqual(len(self.ran), 1)
+
+        state.last_doorbell -= collector.DOORBELL_GAP + 1      # ...and again once it lapses
+        self.assertTrue(collector.ring_doorbell(self._snap(1), state, None))
+        self.assertEqual(len(self.ran), 2)
+
+    def test_a_blocked_agents_held_mail_does_not_cost_a_process_a_tick(self):
+        """The floor divides the cost of a stuck target; it does not end it.
+
+        Mail for a blocked agent is undelivered and stays that way — the agent is waiting
+        on a person, not idle — so every tick rediscovers it, spawns `sb flush`, and
+        `flush_pending` holds it again. Measured at 85 processes for one block held
+        thirteen minutes, bounded by nothing but how long the human takes.
+        """
+        state = collector.State(pid=1, started_at=0.0)
+        snap = self._snap(2)
+        snap.agents[0].state = "blocked"
+        for _ in range(3):
+            self.assertFalse(collector.ring_doorbell(snap, state, None))
+            state.last_doorbell = None                    # the floor is not what stops it
+        self.assertEqual((self.ran, state.doorbells), ([], 0))
+
+    def test_the_humans_answer_to_a_blocked_agent_still_rings(self):
+        """The one ring `_ring` lets a block through, so it is the one the doorbell must
+        still chase — the answer's own `sb tell` flushes, but a target that was mid-turn
+        at that moment has nothing else coming."""
+        state = collector.State(pid=1, started_at=0.0)
+        snap = self._snap(2)
+        snap.agents[0].state = "blocked"
+        snap.agents[0].undelivered_answer = True
+        self.assertTrue(collector.ring_doorbell(snap, state, None))
+        self.assertEqual(self.ran, [["/bin/sb", "flush"]])
+
+    def test_a_failing_sb_is_a_counter_and_not_a_stale_snapshot(self):
+        """`last_error` is what every panel reads as "this data is old". A doorbell that
+        will not run is a different complaint about perfectly good data."""
+        state = collector.State(pid=1, started_at=0.0)
+        with mock.patch.object(collector.subprocess, "run",
+                               lambda *a, **k: mock.Mock(returncode=2, stderr="boom",
+                                                         stdout="")):
+            collector.ring_doorbell(self._snap(1), state, None)
+        self.assertEqual(state.doorbell_error, "boom")
+        self.assertIsNone(state.last_error)
+
+    def test_with_no_sb_to_run_it_says_so_rather_than_writing_itself(self):
+        """Falling back to this process's own code would put the write back in the one
+        process that is read-only and version-stale on purpose."""
+        state = collector.State(pid=1, started_at=0.0)
+        with mock.patch.object(collector, "doorbell_sb", lambda: None):
+            self.assertFalse(collector.ring_doorbell(self._snap(1), state, None))
+        self.assertEqual((self.ran, state.doorbells), ([], 0))
+        self.assertIn("nothing can ring the doorbell", state.doorbell_error)
+
+    def test_sb_is_run_from_the_checkout_and_never_from_dot_git(self):
+        """The store sits INSIDE `.git`, which is not a work tree. Running `sb` there
+        made every doorbell die in `store.worktree_root()` before it did anything —
+        one directory, on every machine, whatever was on PATH."""
+        state = collector.State(pid=1, started_at=0.0)
+        collector.ring_doorbell(self._snap(1), state,
+                                Path("/r/.git/agentflow/state.db"))
+        self.assertEqual(self.ran_cwd, ["/r"])
+
+    def test_the_verb_it_runs_exists(self):
+        """The collector spawns `sb flush` by name. If that verb is ever renamed, the
+        trigger fails silently in a thread nobody is watching."""
+        from switchboard import cli
+        args = cli.build_parser().parse_args(["flush"])
+        self.assertEqual(args.cmd, "flush")
+
+
+class WhichSbTheDoorbellRuns(PanelTest):
+    """WHICH `sb` binary the doorbell spawns — the last environment fact it depended on.
+
+    `shutil.which("sb")` asks the board pane's PATH, and that resolves the one machine-wide
+    symlink into the main checkout. A collector running a branch's code therefore rang the
+    doorbell by running a DIFFERENT build, and when the verb it needs is newer than the
+    installed one every ring dies in argparse: 55 doorbells in 5.5 minutes, all failed,
+    five reports left undelivered, until the collector was restarted by hand with the right
+    `bin` in front (`audit/phase1-acceptance-3.md` §3.2-3.3). Nothing pins a board pane —
+    `_pin_sb` covers spawned agents only — so the fix is for the doorbell to name its own
+    build rather than to arrange anybody's PATH.
+    """
+
+    def test_it_runs_the_sb_of_the_checkout_it_is_running_from(self):
+        """The collector is launched with its checkout on PYTHONPATH, so its own
+        `__file__` names that checkout, and that checkout's `bin/sb` is the same file
+        `_pin_sb` puts in front of an agent's PATH."""
+        own = Path(collector.__file__).resolve().parent.parent / "bin" / "sb"
+        self.assertTrue(os.access(own, os.X_OK))          # the premise, asserted
+        self.assertEqual(collector.doorbell_sb(), str(own))
+
+    def test_an_unrelated_sb_on_path_cannot_win(self):
+        """The whole point: a correct doorbell must not be defeated by whatever binary
+        happens to be installed. Nothing here arranges PATH, and PATH is not consulted."""
+        with mock.patch.object(collector.shutil, "which", lambda n: "/usr/local/bin/sb"):
+            self.assertNotEqual(collector.doorbell_sb(), "/usr/local/bin/sb")
+
+    def test_and_it_is_the_binary_that_actually_gets_spawned(self):
+        """`ring_doorbell` asks the same question — the resolution is not left where only
+        a unit test can see it."""
+        ran = []
+        with mock.patch.object(collector.threading, "Thread",
+                               lambda target, args=(), **kw: mock.Mock(
+                                   start=lambda: target(*args))), \
+             mock.patch.object(collector.subprocess, "run",
+                               lambda argv, **kw: ran.append(argv) or mock.Mock(
+                                   returncode=0)), \
+             mock.patch.object(collector, "doorbell_sb", lambda: "/checkout/bin/sb"):
+            snap = a_snapshot("w1")
+            snap.agents[0].undelivered = 1
+            collector.ring_doorbell(snap, collector.State(pid=1, started_at=0.0), None)
+        self.assertEqual(ran, [["/checkout/bin/sb", "flush"]])
+
+    def test_a_switchboard_with_no_bin_beside_it_falls_back_to_path(self):
+        """Installed as a package, or vendored: there is no build of its own to run, and
+        the installed `sb` is then the only one it could have meant."""
+        with mock.patch.object(collector.os, "access", lambda p, m: False), \
+             mock.patch.object(collector.shutil, "which", lambda n: "/usr/local/bin/sb"):
+            self.assertEqual(collector.doorbell_sb(), "/usr/local/bin/sb")
+
+    def test_with_neither_it_answers_none(self):
+        with mock.patch.object(collector.os, "access", lambda p, m: False), \
+             mock.patch.object(collector.shutil, "which", lambda n: None):
+            self.assertIsNone(collector.doorbell_sb())
+
+
+class TheDoorbellsWorkingDirectory(PanelTest):
+    """Which directory the spawned `sb` is run FROM, which decides whether it runs at all.
+
+    The store lives inside `.git`, and the first version of this handed `sb` the store's
+    grandparent — the `.git` directory itself. `cli.main` resolves `store.worktree_root()`
+    for every verb and `git rev-parse --show-toplevel` fails inside `.git`, so every
+    doorbell ever rung died there before it delivered anything, on every machine, whatever
+    was on PATH (`audit/phase1-acceptance-2.md` §3.3). Real repositories here rather than
+    mocked paths, because the thing that was wrong was a real path.
+    """
+
+    def test_the_directory_it_picks_is_one_sb_can_actually_run_in(self):
+        """The assertion the counter could not make: `sb` calls `store.worktree_root()`
+        for every verb, so the doorbell's cwd has to satisfy `--show-toplevel`."""
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        cwd = collector._doorbell_cwd(store.db_path(root))
+        self.assertEqual(store.worktree_root(Path(cwd)), root.resolve())
+
+    def test_a_collector_started_in_a_worktree_rings_from_the_main_checkout(self):
+        """The normal case here: agents live in worktrees, and every worktree shares the
+        one `.git`. Its parent is the main checkout, a work tree like any other, so the
+        flush lands on the right store from a directory `sb` accepts."""
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        wt = Path(self.tmp.name) / "wt"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "side", str(wt)],
+                       cwd=str(root), check=True, capture_output=True)
+        self.assertEqual(store.db_path(wt), store.db_path(root))     # one store, shared
+        cwd = collector._doorbell_cwd(store.db_path(wt))
+        self.assertEqual(store.worktree_root(Path(cwd)), root.resolve())
+
+    def test_a_relocated_git_dir_uses_the_checkout_sb_init_recorded(self):
+        """`.git`'s parent is only the checkout in an ordinary layout. `sb init` writes
+        the answer down for the rest; this reads the same file `store.main_checkout` does
+        rather than importing it, so the doorbell half stays importless."""
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        store.write_config({"main_checkout": str(elsewhere)}, cwd=root)
+        self.assertEqual(collector._doorbell_cwd(store.db_path(root)), str(elsewhere))
+
+    def test_a_recorded_checkout_that_is_gone_falls_back_to_the_inference(self):
+        root = a_git_repo(Path(self.tmp.name) / "repo")
+        store.write_config({"main_checkout": str(Path(self.tmp.name) / "deleted")},
+                           cwd=root)
+        cwd = collector._doorbell_cwd(store.db_path(root))
+        self.assertEqual(store.worktree_root(Path(cwd)), root.resolve())
+
+    def test_with_no_store_at_all_it_inherits_the_collectors_own_directory(self):
+        self.assertEqual(collector._doorbell_cwd(Path("/r/.git/agentflow/state.db")), "/r")
+        self.assertIsNone(collector._doorbell_cwd(None))
 
 
 class GitIsPaidOncePerCollector(PanelTest):

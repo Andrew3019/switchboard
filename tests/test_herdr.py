@@ -194,6 +194,247 @@ class SpawnTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "spawn_failed")
 
 
+class DeliverTest(unittest.TestCase):
+    """`deliver` — a prompt that is confirmed to have been taken, or raises.
+
+    The bug it exists for: `agent prompt` reports nothing about whether the text was
+    submitted, pasted-and-left-sitting, or lost, so a spawn could hand back a name for an
+    agent that never ran. See BUILD-PLAN item 1.1.
+    """
+
+    def herdr(self, *, takes_on=1, prompt_errors=(), moves_to="working"):
+        """An agent that takes the text on its `takes_on`-th send, and never before.
+
+        `takes_on=0` is the agent that never takes it at all. State is a property of how
+        many sends have landed rather than of how many times it has been read, so the poll
+        loop can turn over as often as it likes without that being the thing under test.
+        `prompt_errors` is consumed one per `agent prompt`; a falsy entry succeeds.
+
+        `moves_to` is what the agent's status becomes when it moves. `working` is a turn
+        starting. The other values are the ones a startup dialog produces while eating
+        the prompt — a move that is not a turn, and must not read as delivery.
+        """
+        state = {"sends": 0, "errs": list(prompt_errors)}
+        calls: list[list[str]] = []
+
+        def runner(argv, *, timeout=None):
+            calls.append(list(argv))
+            if argv[1:3] == ["agent", "prompt"]:
+                e = state["errs"].pop(0) if state["errs"] else None
+                if e:
+                    return err(e)
+                state["sends"] += 1
+                return ok({})
+            took = bool(takes_on) and state["sends"] >= takes_on
+            return ok({"agents": [dict(AGENT_JSON,
+                                       state_change_seq=88 + int(took),
+                                       agent_status=moves_to if took else "idle")]})
+
+        return Herdr("herdr", runner=runner, sleep=lambda _: None), calls
+
+    def sends(self, calls):
+        return [c for c in calls if c[1:3] == ["agent", "prompt"]]
+
+    def test_a_prompt_the_agent_took_is_sent_once(self):
+        """The agent moved: seq 88 before, 89 after. Nothing is re-sent."""
+        h, calls = self.herdr(takes_on=1)
+        h.deliver("w1", "do the thing")
+        self.assertEqual(len(self.sends(calls)), 1)
+        self.assertIn("do the thing", self.sends(calls)[0])
+
+    def test_a_prompt_that_never_started_a_turn_is_re_sent(self):
+        """Pasted without submitting: herdr took the call and the agent never moved.
+
+        This is the mode that loses agents — `agent prompt` returns success either way,
+        so only reading the agent back afterwards can tell them apart.
+        """
+        h, calls = self.herdr(takes_on=2)
+        h.deliver("w1", "task", timeout_ms=1)
+        self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_a_task_that_never_lands_raises_instead_of_reporting_success(self):
+        h, calls = self.herdr(takes_on=0)
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=3, timeout_ms=1)
+        self.assertEqual(cm.exception.code, "not_delivered")
+        self.assertIn("w1", cm.exception.message)
+        self.assertEqual(len(self.sends(calls)), 3)
+
+    def test_a_refused_prompt_is_retried_and_then_confirmed(self):
+        """The other failure mode: the call itself fails, e.g. agent_not_ready."""
+        h, calls = self.herdr(takes_on=1, prompt_errors=["agent_not_ready", None])
+        h.deliver("w1", "task", timeout_ms=1)
+        self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_an_unaskable_herdr_is_not_mistaken_for_a_delivery(self):
+        """`agent list` failing proves nothing, so it must not read as confirmation."""
+        def runner(argv, *, timeout=None):
+            if argv[1:3] == ["agent", "prompt"]:
+                return ok({})
+            return err("herdr_unavailable")
+
+        h = Herdr("herdr", runner=runner, sleep=lambda _: None)
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=2, timeout_ms=1)
+        self.assertEqual(cm.exception.code, "not_delivered")
+
+    def test_a_status_change_that_is_not_a_turn_is_not_a_delivery(self):
+        """THE BUG THIS WHOLE PATH EXISTS FOR, in its second form.
+
+        Measured live: `agent start` returns with the pane `interactive_ready` while
+        Claude Code is still showing its workspace trust dialog. The prompt types into
+        the modal, the text is thrown away, the Enter answers the dialog — and the agent
+        flips to `blocked` or `done` within a second. Under the old rule ("the seq
+        moved") that was confirmation, and three of four spawns in one cold fan-out were
+        reported as delivered having never run.
+        """
+        for state in ("blocked", "done", "idle"):
+            with self.subTest(state=state):
+                h, calls = self.herdr(takes_on=1, moves_to=state)
+                with self.assertRaises(HerdrError) as cm:
+                    h.deliver("w1", "task", attempts=2, timeout_ms=1)
+                self.assertEqual(cm.exception.code, "not_delivered")
+                self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_the_baseline_is_re_read_before_every_send(self):
+        """A stale baseline confirms a new prompt with an old change.
+
+        `before` used to be snapshotted once, ahead of the first attempt. By the third,
+        anything that had moved the agent in the intervening minute — including the
+        answer to the dialog that ate attempt one — satisfied it.
+        """
+        h, calls = self.herdr(takes_on=99)
+        with self.assertRaises(HerdrError):
+            h.deliver("w1", "task", attempts=3, timeout_ms=1)
+        lists = [c for c in calls if c[1:3] == ["agent", "list"]]
+        sends = [i for i, c in enumerate(calls) if c[1:3] == ["agent", "prompt"]]
+        self.assertEqual(len(sends), 3)
+        for i in sends:                          # every send is preceded by a fresh read
+            self.assertEqual(calls[i - 1][1:3], ["agent", "list"])
+        self.assertGreaterEqual(len(lists), 3)
+
+
+class DeliverProofTest(unittest.TestCase):
+    """`proof` — the agent's own record of the text, which herdr cannot fake.
+
+    See `output.task_arrived`. When one is supplied it is the ONLY thing believed: the
+    status read it replaces is a reading of the terminal, and the terminal lies during
+    startup.
+
+    `working_ms=1` alongside `timeout_ms=1` throughout, for the same reason: these are
+    about how many times the text is sent, not about how long anything waits, and the
+    stretch these numbers switch off has its own test below.
+    """
+
+    def herdr(self, arrives_on, *, status="working"):
+        """herdr always says the agent moved; the proof only agrees on send `arrives_on`.
+
+        `arrives_on=0` never arrives — the false-success case, with herdr insisting all
+        the way through that the agent is working.
+        """
+        state = {"sends": 0}
+        calls: list[list[str]] = []
+
+        def runner(argv, *, timeout=None):
+            calls.append(list(argv))
+            if argv[1:3] == ["agent", "prompt"]:
+                state["sends"] += 1
+                return ok({})
+            return ok({"agents": [dict(AGENT_JSON, state_change_seq=88 + state["sends"],
+                                       agent_status=status)]})
+
+        def proof(since):
+            return bool(arrives_on) and state["sends"] >= arrives_on
+
+        return Herdr("herdr", runner=runner, sleep=lambda _: None), calls, proof
+
+    def sends(self, calls):
+        return [c for c in calls if c[1:3] == ["agent", "prompt"]]
+
+    def test_a_task_the_transcript_never_shows_is_not_a_delivery(self):
+        h, calls, proof = self.herdr(0)
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=3, timeout_ms=1, working_ms=1, proof=proof)
+        self.assertEqual(cm.exception.code, "not_delivered")
+        self.assertEqual(len(self.sends(calls)), 3)
+
+    def test_a_task_the_transcript_shows_is_delivered_once(self):
+        h, calls, proof = self.herdr(1)
+        h.deliver("w1", "task", timeout_ms=1, working_ms=1, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 1)
+
+    def test_a_re_send_is_what_makes_a_swallowed_first_prompt_land(self):
+        h, calls, proof = self.herdr(2)
+        h.deliver("w1", "task", timeout_ms=1, working_ms=1, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 2)
+
+    def test_proof_needs_no_state_change_at_all(self):
+        """A task can be taken, finished and forgotten between two polls.
+
+        The status read has to allow for that and cannot; the transcript simply has the
+        text in it either way.
+        """
+        h, calls, proof = self.herdr(1, status="idle")
+        h.deliver("w1", "task", timeout_ms=1, working_ms=1, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 1)
+
+    def late(self, *, status):
+        """A proof that only shows up after the send's window has already run out.
+
+        The real thing: Claude Code flushes its transcript when it gets round to it, and
+        under a six-way fan-out one was measured 35 s after the task was taken, against a
+        20 s window. Nothing about the agent is wrong in that case — only the file is
+        late.
+
+        "After the window" is counted in status reads rather than in polls or seconds,
+        which is what makes it exact: with a proof in hand herdr is asked exactly twice
+        per send — once for the baseline before it, once when the window expires — so a
+        proof that waits for the second read is a proof that arrives one moment too late,
+        every time this runs.
+        """
+        state = {"sends": 0, "reads": 0}
+        calls: list[list[str]] = []
+
+        def runner(argv, *, timeout=None):
+            calls.append(list(argv))
+            if argv[1:3] == ["agent", "prompt"]:
+                state["sends"] += 1
+                return ok({})
+            state["reads"] += 1
+            return ok({"agents": [dict(AGENT_JSON, state_change_seq=88 + state["sends"],
+                                       agent_status=status)]})
+
+        def proof(since):
+            return state["reads"] >= 2
+
+        return Herdr("herdr", runner=runner, sleep=lambda _: None), calls, proof
+
+    def test_a_running_turn_buys_a_late_proof_time_to_arrive(self):
+        """The false failure this fix is for, in one send.
+
+        The window ran out, the transcript had not been written yet, and the spawn
+        reported that a working agent had never taken its task — twice in a 42-agent
+        acceptance run, once for an agent that had already reported `done`. herdr saying
+        `working` cannot confirm the text arrived, so it does not: it extends the window,
+        and the proof itself still has to turn up.
+        """
+        h, calls, proof = self.late(status="working")
+        h.deliver("w1", "task", attempts=1, timeout_ms=1, working_ms=5000, proof=proof)
+        self.assertEqual(len(self.sends(calls)), 1)     # no re-send, and no exception
+
+    def test_an_agent_that_is_not_running_gets_no_extra_time(self):
+        """The other half, and the one that keeps the guarantee.
+
+        An idle agent with no proof is the case the loud failure exists for: a prompt a
+        dialog ate leaves an idle pane and an empty transcript. It waits exactly as long
+        as it always did, so a genuinely lost task still fails as fast as it used to.
+        """
+        h, calls, proof = self.late(status="idle")
+        with self.assertRaises(HerdrError) as cm:
+            h.deliver("w1", "task", attempts=1, timeout_ms=1, working_ms=5000, proof=proof)
+        self.assertEqual(cm.exception.code, "not_delivered")
+
+
 class TopologyTest(unittest.TestCase):
     def test_uses_tab_not_pane_split(self):
         # verified live shape: the pane id lives under root_pane, not tab
@@ -395,6 +636,36 @@ class ReadTest(unittest.TestCase):
         Herdr("herdr", runner=fake).read_pane("w1:p9")
         # without --source recent, an alt-screen agent reads back as an empty prompt frame
         self.assertIn("--source recent", fake.argv())
+
+
+class WaitOutputTest(unittest.TestCase):
+    """The read half of `pane run` — how a caller learns a typed command did anything."""
+
+    def test_a_match_is_yes(self):
+        fake = FakeHerdr(ok({"matched": True}))
+        self.assertTrue(
+            Herdr("herdr", runner=fake).wait_output("w1:p9", "sb=/repo/bin/sb",
+                                                    timeout_ms=5000))
+        argv = fake.argv()
+        self.assertIn("pane wait-output w1:p9", argv)
+        self.assertIn("--match sb=/repo/bin/sb", argv)
+        # A path is the usual thing matched, and a wrapped line splits one in half.
+        self.assertIn("--source recent-unwrapped", argv)
+        self.assertIn("--timeout 5000", argv)
+
+    def test_the_deadline_expiring_is_no_not_an_exception(self):
+        """herdr reports a miss as an error envelope. Every caller wants a yes/no —
+        raising would make "the pane did not answer" indistinguishable from "herdr is
+        down", and the caller has to act differently on those."""
+        h = Herdr("herdr", runner=FakeHerdr(err("timeout", "no match within 5000ms")))
+        self.assertFalse(h.wait_output("w1:p9", "sb=/repo/bin/sb", timeout_ms=5000))
+
+    def test_our_ceiling_leaves_room_for_herdrs_own(self):
+        """A call that is *supposed* to block for its timeout must not be killed at ten
+        seconds — the same allowance `agent start` and `agent wait` get."""
+        fake = FakeHerdr(ok({}))
+        Herdr("herdr", runner=fake).wait_output("w1:p9", "x", timeout_ms=5000)
+        self.assertGreater(fake.timeouts[0], 5.0)
 
 
 class SubprocessTimeoutTest(unittest.TestCase):

@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import config, store  # noqa: E402
-from switchboard.broker import HUMAN, Broker  # noqa: E402
+from switchboard.broker import HUMAN, Broker, ForkFailed  # noqa: E402
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
 
@@ -187,6 +187,7 @@ class FakeHerdr:
         return [self.live[n] for n in sorted(self.live)]
 
     def prompt(self, name, text): self.prompts.append((name, text))
+    def deliver(self, name, text, **kw): self.prompt(name, text)   # confirmed prompt
     def send_keys(self, name, *keys): self.calls.append(f"send_keys:{name}:{','.join(keys)}")
     def notify(self, text): self.notifications.append(text)
     def focus(self, name): pass
@@ -703,23 +704,29 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(row["cwd"], str(self.repo))
         self.assertEqual(self.h.tabs[-1][0], "w1")           # but placed where I am
 
-    def test_with_nothing_to_fork_into_and_no_workspace_anywhere_it_still_delegates(self):
-        """A fork that cannot happen must not take the spawn down with it.
+    def test_a_fork_that_cannot_happen_refuses_the_spawn_and_says_so(self):
+        """A fork that fails takes the spawn down with it, deliberately.
 
         The parent has no worktree, so the rule says fork — and this herdr cannot make
-        one. The child lands where its parent is, which is the pre-fork-rule behaviour and
-        the right thing to degrade to; the refusal that IS worth failing a spawn is a
-        branch collision, and only that.
+        one. It used to degrade: the child spawned in its parent's space instead, with a
+        `fork_failed` row as the only trace. For a child of the top orchestrator that
+        space is Andrew's own checkout, so the degraded child wrote its work into the one
+        place everybody's uncommitted work lives, on somebody else's branch. Nothing is
+        spawned now, and the caller is told why — DESIGN-TRUTH: "A fork that fails refuses
+        the spawn and tells the parent. It never falls back to Andrew's own checkout."
         """
         import os
         from unittest import mock
         self.h.create_worktree = None                        # an adapter that cannot fork
         self.h.open_worktree = None
+        before = {a["name"] for a in store.live_agents(self.db)}
         with mock.patch.dict(os.environ, {}, clear=True):
-            kid = self.b.delegate("t", role="worker", me=HUMAN)
-        self.assertEqual(self.h.tabs[-1][0], "")
-        self.assertIsNotNone(store.get_agent(self.db, kid))
-        self.assertIsNone(store.get_agent(self.db, kid)["branch"])
+            with self.assertRaises(ForkFailed) as cm:
+                self.b.delegate("t", role="worker", me=HUMAN)
+        self.assertIn("worktree of its own", str(cm.exception))
+        self.assertIn(str(self.repo), str(cm.exception))      # the checkout it refused
+        self.assertEqual({a["name"] for a in store.live_agents(self.db)}, before)
+        self.assertEqual(self.h.started, [])                  # and nothing was started
         self.assertTrue(any(e["kind"] == "fork_failed"
                             for e in store.recent_events(self.db)))
 

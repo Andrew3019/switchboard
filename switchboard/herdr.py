@@ -53,6 +53,16 @@ SPAWN_TIMEOUT_MS = config.setting("timeouts.spawn_ms")
 SPAWN_ATTEMPTS = config.setting("retries.spawn_attempts")
 SPAWN_BACKOFF = config.setting("retries.spawn_backoff")
 
+# Delivering an agent's first task. `agent prompt` can paste without submitting, or never
+# reach the pane at all, and says nothing either way — so the delivery is confirmed by
+# reading the agent back, and re-sent if it was not taken. `[timeouts]` and `[retries]`.
+DELIVER_TIMEOUT_MS = config.setting("timeouts.deliver_ms")
+DELIVER_POLL = config.setting("timeouts.deliver_poll")
+DELIVER_ATTEMPTS = config.setting("retries.deliver_attempts")
+# The extra window a send is given when the agent turns out to be running a turn — see
+# `_took_prompt`, and the setting, which is where the measurement is written down.
+DELIVER_WORKING_MS = config.setting("timeouts.deliver_working_ms")
+
 # The adapter's own ceiling on `agent wait`, and how long it pauses before re-issuing one
 # that came straight back without the agent having moved. `agent wait` returns instantly
 # when the agent is already in the state asked for, so without the pause the stale-seq
@@ -100,12 +110,25 @@ class Agent:
     workspace_id: str = ""       # where the pane actually IS, straight from herdr
     state: str = UNKNOWN
     change_seq: int = 0          # herdr's global counter. Guards READS, unlike our --seq.
+    # Whether `name` came from herdr's NAME BINDING or from the fallback below. They are
+    # not the same fact and one caller depends on the difference: a bound row is
+    # `{"agent": "claude", "name": "w2"}` and herdr answers `agent get w2`; an agent whose
+    # binding has been evicted lists as `{"agent": "w2"}` with no name at all, and herdr
+    # answers `agent_not_found` for it. Both yield `name="w2"` here, so a predicate asking
+    # "does herdr still know this name?" off `name` alone reads the fallback as proof of
+    # the very binding it is trying to detect the loss of (`Broker._finished_and_unreachable`).
+    #
+    # True by default because an Agent built by hand rather than parsed — every one of them
+    # is constructed FROM a name — is bound by construction. Only `from_json` can find out
+    # otherwise, and it is the only thing in the package that builds these from herdr.
+    bound: bool = True
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_json(cls, d: dict) -> "Agent":
         return cls(
             name=d.get("name") or d.get("agent") or "",
+            bound=bool(d.get("name")),
             pane_id=d.get("pane_id", ""),
             terminal_id=d.get("terminal_id", ""),
             session_id=(d.get("agent_session") or {}).get("value", ""),
@@ -470,14 +493,171 @@ class Herdr:
         """
         self._call("agent", "prompt", name, text)
 
+    def deliver(
+        self,
+        name: str,
+        text: str,
+        *,
+        attempts: int = DELIVER_ATTEMPTS,
+        timeout_ms: int = DELIVER_TIMEOUT_MS,
+        working_ms: int = DELIVER_WORKING_MS,
+        proof: Optional[Callable[[float], bool]] = None,
+    ) -> None:
+        """`prompt`, confirmed — the agent really took the text, or this raises.
+
+        `agent prompt` returns nothing worth reading (see `prompt`), and it has two
+        observed silent failure modes: the text is pasted into the prompt box and never
+        submitted, or it never arrives at all. Both leave the caller holding a success it
+        did not get, which is how a spawn reports a name for an agent that never ran.
+
+        WHAT CONFIRMATION MAY BE. This used to be "herdr's `state_change_seq` for this
+        agent moved after we prompted", and that is not a fact about the text: it is a
+        fact about herdr's status record, which anything at all can move. Measured, in a
+        fresh checkout: `agent start` returns with the pane already `interactive_ready`
+        while Claude Code is still showing its *workspace trust* dialog. The prompt then
+        types into a modal — the text is thrown away and the Enter answers the dialog —
+        and dismissing it flips the agent to `blocked` or `done`, i.e. the seq moves, in
+        under a second. Three of four spawns in one cold fan-out confirmed exactly that
+        way and never ran, with `sb delegate` reporting success for all four. So the old
+        test could not tell a delivered task from a swallowed one, and the failure it was
+        written to end is the failure it passed on.
+
+        `proof` is what replaces it: a callable given the moment the text was sent, which
+        answers whether the AGENT'S OWN record now holds it (see
+        `output.task_arrived` — Claude Code appends the submitted text to its session
+        transcript about a second after it is entered, and writes nothing at all for a
+        prompt eaten by a dialog). Nothing herdr says can fake that.
+
+        With no proof available the fallback demands `state == working`: a turn, not a
+        movement. It is weaker — herdr infers `working` from the terminal — but every
+        false positive observed was a transition to `blocked`, `done` or `idle`, and none
+        of those is a turn starting.
+
+        WHAT A FAILURE HERE MEANS. Not "the agent has no task": only that no send could be
+        confirmed. The proof is a file the agent flushes on its own schedule, and it has
+        been seen 35 s late under load, so a running agent's task was reported lost —
+        which is why `_took_prompt` stretches its window for an agent herdr says is
+        working, and why the exception below is worded as a failure to confirm rather than
+        as a verdict on the agent. `Broker._spawn` decides what it means.
+
+        The baseline is re-read before EVERY attempt. It used to be snapshotted once,
+        before the first, so by a third attempt any unrelated change in the intervening
+        minute counted as confirmation of a prompt sent seconds ago.
+
+        A prompt that was not taken is RE-SENT, which is the documented recovery for the
+        paste-without-submit mode: the second prompt types and presses enter, carrying the
+        stuck text in with it. The cost when the first prompt did land but we could not
+        see it is the task arriving twice — a duplicate is recoverable and a silence is
+        not. On a cold checkout the first send is lost far more often than not, so a spawn
+        routinely pays a full `timeout_ms` before the send that works. That is the price
+        of the guarantee, and it is the right way round.
+        """
+        last = "nothing in the agent's own record ever held the text"
+        for attempt in range(attempts):
+            before = self._peek(name)
+            sent = time.time()
+            try:
+                self.prompt(name, text)
+            except HerdrError as e:
+                last = str(e)
+            else:
+                if self._took_prompt(name, before, timeout_ms, sent=sent, proof=proof,
+                                     working_ms=working_ms):
+                    return
+            if attempt + 1 < attempts:
+                self._sleep(SPAWN_BACKOFF)
+        # WHAT THIS DOES AND DOES NOT SAY. Only that no send could be confirmed — which is
+        # not the same as the agent having nothing, and this used to claim the second.
+        # A proof that has not appeared can also be a transcript that has not been flushed,
+        # and the caller (`Broker._spawn`) is the one that can go and look at what the
+        # agent has done since. Wording it as a verdict is how a working agent came to be
+        # recorded `failed` with an instruction to force-close it.
+        raise HerdrError(
+            "not_delivered",
+            f"{name}: the text was sent {attempts} times and none of them could be "
+            f"confirmed to have arrived — {last}. Its pane may hold the text unsubmitted, "
+            f"be sitting on a dialog that ate it, or hold nothing at all",
+            [name],
+        )
+
+    def _peek(self, name: str) -> Optional[Agent]:
+        """The agent as herdr has it right now, or None if it cannot be asked.
+
+        Never raises: this only ever informs a comparison, and a herdr that cannot answer
+        must not turn a delivery that may well have landed into an exception of its own.
+        """
+        try:
+            return self.get_agent(name)
+        except HerdrError:
+            return None
+
+    def _took_prompt(
+        self,
+        name: str,
+        before: Optional[Agent],
+        timeout_ms: int,
+        *,
+        sent: float,
+        proof: Optional[Callable[[float], bool]] = None,
+        working_ms: int = DELIVER_WORKING_MS,
+    ) -> bool:
+        """Did the agent TAKE the prompt? Polled until `timeout_ms` runs out.
+
+        Took it, not merely moved: see `deliver` for what moving turned out to prove.
+        `proof` is the only thing that ever answers yes here when it is available; the
+        status read is a fallback for an agent whose own record cannot be found, and it
+        insists on `working` rather than on any change at all.
+
+        WHY THE WINDOW STRETCHES. The proof is a file the agent writes, and Claude Code
+        does not flush its transcript when the text is submitted — under a six-way
+        fan-out one was measured 35 s late, against a 20 s window. So "no proof yet" and
+        "no task" were the same answer, and a fan-out reported two working agents' tasks
+        as lost. Herdr's status cannot confirm the text arrived, but a turn running does
+        rule out the case this window is short for: an agent that took nothing does
+        nothing. So when the window runs out on an agent herdr says is `working`, it is
+        extended ONCE by `working_ms` — not to accept anything weaker, but to give the
+        proof time to appear. It usually does, and then this returns for the right reason.
+
+        Herdr is asked only when the window expires, never on the poll: this loop runs
+        twice a second and every status read is a subprocess.
+        """
+        deadline = time.time() + timeout_ms / 1000
+        seq = before.change_seq if before else 0
+        was_working = before is not None and before.state == WORKING
+        stretched = False
+        while True:
+            if proof is not None:
+                if proof(sent):
+                    return True
+            elif self._running_turn(name, seq, was_working):
+                return True
+            if not self._nap(DELIVER_POLL, deadline):
+                if (proof is None or stretched or working_ms <= 0
+                        or not self._running_turn(name, seq, was_working)):
+                    return False
+                stretched = True
+                deadline = time.time() + working_ms / 1000
+
+    def _running_turn(self, name: str, seq: int, was_working: bool) -> bool:
+        """Is herdr reporting a turn that started after we prompted?
+
+        `working`, and either newly so or freshly moved. Not "the status changed": every
+        false confirmation this path ever produced was a transition to `blocked`, `done`
+        or `idle` — a startup dialog being dismissed — and none of those is a turn.
+        """
+        a = self._peek(name)
+        return (a is not None and a.state == WORKING
+                and (a.change_seq > seq or not was_working))
+
     def prompt_pane(self, pane_id: str, text: str) -> None:
         """Run a command in a pane. For FIXED commands only — `text` reaches a shell.
 
         Named `prompt_pane` because it was once used as a delivery path of last resort:
-        herdr can lose an agent's name binding permanently (once it has seen the agent
-        leave the foreground, which `sb` running in that pane causes, `agent prompt` and
-        even a pane-targeted `agent prompt` answer agent_not_found / agent_not_ready, and
-        no later report re-registers it), and pane input does not go through that registry.
+        herdr can lose an agent's name binding permanently (a `pane report-agent` on the
+        pane evicts it — see `report_state`, which is the whole cause; not, as this note
+        used to say, `sb` running in the pane and taking the foreground), after which
+        `agent prompt` and even a pane-targeted `agent prompt` answer agent_not_found /
+        agent_not_ready, and pane input does not go through that registry.
         That use is gone: `pane run` types into whatever shell is sitting in the pane, so a
         backtick or a `$(` in agent-authored text executed there. `Broker._ring` fails
         instead. The one remaining caller passes a literal `exec` line (`board.open_beside`).
@@ -487,6 +667,28 @@ class Herdr:
         """
         self._call("pane", "run", pane_id, text)
         self._call("pane", "send-keys", pane_id, "enter")
+
+    def wait_output(self, pane_id: str, match: str, *, timeout_ms: int) -> bool:
+        """Did `match` appear in this pane's output within the deadline?
+
+        The read half of `prompt_pane`: a fixed command is typed into a pane, and this is
+        how the caller learns whether it did what it was supposed to. Without it a `pane
+        run` is a write into the dark — herdr accepts the text whether or not the shell
+        was at a prompt to receive it.
+
+        `recent-unwrapped` rather than the default, because the thing being matched is
+        usually a path and a wrapped line splits one in half at the terminal's width.
+
+        Never raises. A miss is an answer, not a failure — herdr reports the deadline
+        expiring as an error, and every caller here wants a yes/no.
+        """
+        try:
+            self._call("pane", "wait-output", pane_id, "--match", match,
+                       "--source", "recent-unwrapped", "--timeout", str(timeout_ms),
+                       timeout=_grace(timeout_ms))
+        except HerdrError:
+            return False
+        return True
 
     def send_keys(self, name: str, *keys: str) -> None:
         """Send raw keys to an agent. `esc` is the canonical spelling for escape.
@@ -561,6 +763,24 @@ class Herdr:
         verify: bool = True,
     ) -> None:
         """Push authoritative state IN. Never read state out and trust it.
+
+        **This costs the agent its name, permanently. Call it only on an agent nobody
+        needs to reach again.** `pane report-agent` does not annotate the pane's agent, it
+        replaces it: the named agent registered by `agent start` is evicted and a
+        source-reported record put in its place, and a reported record is not a target —
+        `agent get`/`agent prompt <name>` answer agent_not_found, and a pane-targeted
+        prompt answers agent_not_ready ("<pane> is not an active named agent"). Nothing
+        undoes it: `release_agent` deletes the record instead of handing detection back
+        (the pane then drops out of `agent list` altogether), and `agent start` on the
+        live pane refuses agent_pane_busy.
+
+        The state VALUE has nothing to do with it — `idle` evicts exactly as `blocked`
+        does; making the call is what evicts. Measured on herdr 0.8.0 against a throwaway
+        pane: `agent start` → resolvable, `report_session` → still resolvable, one
+        `report_state(..., IDLE)` → agent_not_found for good. This is the mechanism behind
+        the "lost name binding" the rest of this file talks about, and it is why `block`
+        and `_unblock_if_needed` report nothing at all; `Broker.done` is the only caller
+        left, on an agent that has just said it is finished.
 
         Two ways to lose a write, both returning success: reusing a seq, or omitting it.
         `seq` therefore comes from the store's strictly-increasing per-agent counter.

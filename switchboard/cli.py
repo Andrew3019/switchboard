@@ -120,6 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
     # the equivalent, unhidden way in.
     cmd("board", hidden=True)
 
+    # Hidden for the same reason: it is machinery, not vocabulary. Every `sb` command
+    # already flushes the doorbell before it dispatches (see main), so this one is that
+    # and nothing else — the verb the collector's loop runs so that a message held back
+    # while its target was mid-turn is announced without waiting for a person to type
+    # something. An agent has no use for it and is not taught it.
+    cmd("flush", hidden=True)
+
     d = cmd("delegate", help="spawn a child agent to do a task")
     d.add_argument("task")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
@@ -159,7 +166,12 @@ def build_parser() -> argparse.ArgumentParser:
     dn.add_argument("summary")
 
     bl = cmd("block", help="stop and surface to the human (they answer with `sb tell`)")
-    bl.add_argument("why")
+    # The help string is where a caller looks before its first block, so it states the
+    # split rather than just naming the field: the full text goes in the chat, one line
+    # comes here. Enforced in validate.reason — this only stops the enforcement being a
+    # surprise.
+    bl.add_argument("why", help="ONE short line for the board; write the full question in "
+                                "your own chat, which is what the human reads")
 
     ss = cmd("status", help="the agent tree, with drift and what needs you")
     # `--live` is the older spelling of the same want and stays forever: it is in scripts,
@@ -381,7 +393,10 @@ def _validate(args) -> None:
         args.summary = validate.line(args.summary, "summary")
 
     elif cmd == "block":
-        args.why = validate.line(args.why, "reason")
+        # Not `line`: the reason has its own rule and its own error, because the human
+        # never reads this field and a caller told only "one line" flattens a report into
+        # it. See validate.reason.
+        args.why = validate.reason(args.why)
 
     elif cmd == "workspace":
         # `list` takes no arguments at all and `close` takes only a name, so each one is
@@ -578,13 +593,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Every `sb` invocation is also a tick of the doorbell. A message to an agent that was
     # mid-turn is held back rather than injected into its turn (see Broker._ring), and
-    # something has to ring it once it is free — until an events daemon exists, that
-    # something is the next command anyone runs, which in a live session is constantly.
+    # something has to ring it once it is free. That was ONLY the next command anyone
+    # happened to run, which left a parent whose last child reported mid-turn waiting for
+    # traffic that may never come; `sb flush` is the same tick with nothing after it, and
+    # the collector's loop runs it on a timer so the fleet no longer depends on a person.
     # Never fatal: a doorbell that cannot ring must not take down `sb status`.
+    rung: list[str] = []
     try:
-        b.flush_pending()
+        rung = b.flush_pending()
     except Exception as e:                       # noqa: BLE001 — best effort, always
         store.log_event(db, kind="flush_failed", error=str(e))
+
+    if args.cmd == "flush":
+        _emit(args, f"rang {', '.join(rung)}" if rung else "rang nobody", {"rung": rung})
+        return 0
 
     try:
         return _dispatch(args, b, db, h)
@@ -732,8 +754,18 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                           model=args.model, with_=args.with_,
                           cleanup=cleanup, me=me, **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
-        _emit(args, f"delegated to {name}{where}",
-              {"name": name, "workspace": join.get("workspace")})
+        # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
+        # agent is plainly running (this note), or raised. The middle one is a name plus a
+        # caveat and it must arrive WITH the name — a caller that reads "delegated to w3"
+        # and nothing else has been told the delivery was proved, and the note is the
+        # difference between that and "something is running; go and look".
+        #
+        # Exit 0, and deliberately: an agent is up, it has been sent the task three times,
+        # and the actions this would otherwise provoke — respawn, force-close — are the
+        # expensive ones. See `Broker._took_a_turn`.
+        note = b.delivery_note
+        _emit(args, f"delegated to {name}{where}" + (f" — {note}" if note else ""),
+              {"name": name, "workspace": join.get("workspace"), "unconfirmed": note})
         return 0
 
     if cmd == "ask":
@@ -753,11 +785,46 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # Still exit 0, and deliberately: the message is durable, and the next `sb`
         # command anyone runs re-rings it (see Broker.flush_pending). Being mid-turn is
         # the ordinary reason, not a failure. The report says who has not been told YET.
-        waiting = sorted({m["to_agent"] for m in store.undelivered(db, exclude=(HUMAN,))
-                          if m["id"] in set(ids)})
-        note = f" ({', '.join(waiting)} mid-turn — will be rung when free)" if waiting else ""
+        mine = [m for m in (store.get_message(db, i) for i in ids) if m is not None]
+        undelivered = sorted({m["to_agent"] for m in mine if m["delivered_at"] is None})
+        # "will be rung when free" is a promise, and for one of these it is a false one:
+        # herdr can lose a live agent's name binding, and then no `sb` command anybody
+        # runs will ever ring it again. Saying so is the whole recovery path — a person
+        # goes and types in that pane.
+        #
+        # Asked of every target and not only of the ones still un-announced, because an
+        # agent that has finished no longer leaves its mail un-announced: it is stamped on
+        # the spot precisely so nothing retries it (`_clear_unreadable_mail`). Reading the
+        # note off the undelivered set alone would have printed nothing at all — plain
+        # "sent to w2", the same words a delivery gets.
+        lost = [n for n in sorted({m["to_agent"] for m in mine}) if b.unreachable(n)]
+        waiting = [n for n in undelivered if n not in lost]
+
+        def _has_pane(n: str) -> bool:
+            a = store.get_agent(db, n)
+            return bool(a and a["pane_id"])
+
+        # The two unreachable populations differ only in what a person can do about it, and
+        # that is the whole content of the note: a pane that is still open can be typed in.
+        closed = [n for n in lost if not _has_pane(n)]
+        lost = [n for n in lost if n not in closed]
+        notes = []
+        if waiting:
+            notes.append(f"{', '.join(waiting)} mid-turn or blocked — will be rung "
+                         f"when free")
+        if lost:
+            notes.append(f"{', '.join(lost)} UNREACHABLE — herdr no longer answers to its "
+                         f"name and the doorbell will not ring again; the message is "
+                         f"stored and still in its inbox, but somebody has to go to its "
+                         f"pane")
+        if closed:
+            notes.append(f"{', '.join(closed)} has finished and its pane is closed — the "
+                         f"message is stored (`sb inspect {closed[0]}`) but nobody will "
+                         f"read it")
+        note = f" ({'; '.join(notes)})" if notes else ""
         _emit(args, f"sent to {', '.join(args.who)}{note}",
-              {"ids": ids, "undelivered": waiting})
+              {"ids": ids, "undelivered": waiting, "unreachable": lost + closed,
+               "closed": closed})
         return 0
 
     if cmd == "inbox":
@@ -793,8 +860,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "block":
         b.block(args.why, me=me)
-        _emit(args, "blocked — surfaced to the human, who will see it in "
-                    "`sb status --needs-me` until they answer", {"agent": me})
+        # Says WHAT they read, not just that they were told. The old note ("they will see
+        # it") let a caller believe the reason was the delivered message, which is the
+        # misuse validate.reason now refuses.
+        _emit(args, "blocked — your reason marks the row in `sb status --needs-me` until "
+                    "they answer; what they actually read is your own chat, so the full "
+                    "question belongs there", {"agent": me})
         return 0
 
     if cmd == "status":
@@ -867,7 +938,28 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         names = b.cleanup(args.name, include_kept=args.include_kept, force=args.force,
                           dry_run=args.dry_run, leave_children=args.leave_children, me=me)
         verb = "would close" if args.dry_run else "closed"
-        _emit(args, f"{verb}: {', '.join(names) or '(nothing)'}", {"closed": names})
+        text = f"{verb}: {', '.join(names) or '(nothing)'}"
+        # Named agents always get every reason, because naming one is asking about it in
+        # particular — and so does a sweep that closed NOTHING, where the refusals are
+        # the entire outcome.
+        #
+        # A sweep that closed SOMETHING used to print no refusals at all, and that was
+        # the same silence in a better disguise: `closed: five names` reads as "all
+        # done", and twice in acceptance run 4 the row it left out was the one the human
+        # needed (`audit/phase1-acceptance-4.md` §5). The whole fleet is not the answer
+        # either — a sweep skips most of it by design, so listing every skip grows with
+        # the fleet and buries the line that matters. So it reports `refused.notable`:
+        # rows already closed and agents merely working are the sweep working as intended
+        # and stay quiet, everything else gets its name and its reason. `--json` is
+        # unchanged and still carries every refusal of either kind.
+        if names.refused and (args.name or not names):
+            text += "\n" + "\n".join(f"  refused {n}: {why}" for n, why in names.refused)
+        elif names.notable:
+            text += "\n" + _sweep_refusals(names.notable)
+        _emit(args, text,
+              {"closed": list(names),
+               "refused": [{"name": n, "reason": why} for n, why in names.refused],
+               "expected": sorted(names.expected)})
         return 0
 
     if cmd == "workspace" and args.wcmd == "list":
@@ -922,6 +1014,30 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     return 2
+
+
+_SWEEP_REFUSALS_SHOWN = 5
+
+
+def _sweep_refusals(notable: list[tuple[str, str]]) -> str:
+    """What a sweep that closed something still has to say about what it did not.
+
+    Named and reasoned, like every other refusal, because "one row was left behind" that
+    does not say WHICH row sends the human back to `sb status` to find it. Bounded,
+    because a sweep is the one shape of this command whose refusal list scales with the
+    fleet: past a handful the lines stop being a report and start being a listing, and
+    the tail is one line saying so rather than a hundred saying it individually.
+
+    The cut is `CleanupResult.notable`, made in the broker where the gates are — so this
+    is only formatting, and the decision about what counts as news lives next to the code
+    that knows why a row was held.
+    """
+    shown = notable[:_SWEEP_REFUSALS_SHOWN]
+    lines = [f"  refused {n}: {why}" for n, why in shown]
+    rest = len(notable) - len(shown)
+    if rest:
+        lines.append(f"  … and {rest} more refused — `sb cleanup --json` lists them all")
+    return "\n".join(lines)
 
 
 def _workspace_closed(r: dict) -> str:

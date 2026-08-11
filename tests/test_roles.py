@@ -69,6 +69,34 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(got.prompt, fallback.prompt)
         self.assertTrue(got.prompt, "the fallback must carry a prompt, not an empty string")
 
+    # -- what the shipped prompts teach about blocking -------------------
+
+    def test_every_shipped_prompt_that_mentions_blocking_says_where_the_message_goes(self):
+        """The misuse this guards: an orchestrator wrote its whole answer to the human into
+        a `sb block` reason, which he never reads, and left its own chat empty. `<why>` is
+        a clipped field on a board row; the CHAT is what he reads (`sb inspect`).
+
+        Asserted over every shipped prompt rather than the one that was wrong, because the
+        original fix was applied to the first file somebody found and three others went on
+        teaching the opposite. A prompt is free to never mention blocking; one that does
+        must name the chat.
+        """
+        texts = {"protocol.md": config.protocol(self.repo)}
+        for name, role in roles.load(self.repo).items():
+            texts[name] = role.prompt
+        mentions = {n: t for n, t in texts.items() if "sb block" in t}
+        self.assertIn("protocol.md", mentions)         # the one text every agent gets
+        for name, t in mentions.items():
+            self.assertIn("chat", t, f"{name} names `sb block` but not where the message "
+                                     f"goes; the human does not read the reason")
+
+    def test_no_shipped_prompt_tells_an_agent_to_put_the_message_in_the_reason(self):
+        """The exact sentence that caused it — "they read that one message ... so say in it
+        what you were asked" — read as an instruction to write the message into `<why>`."""
+        every = " ".join([config.protocol(self.repo)]
+                         + [r.prompt for r in roles.load(self.repo).values()])
+        self.assertNotIn("say in it", every)
+
     # -- model tiers -----------------------------------------------------
 
     def test_tiers_resolve_to_aliases_not_pinned_ids(self):

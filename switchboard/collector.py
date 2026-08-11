@@ -36,6 +36,24 @@ collector that is up and failing therefore reads as forty screens saying "snapsh
 old — herdr unreachable", which is the truth, rather than forty screens holding a wrong
 answer perfectly still.
 
+**It is also the thing that rings the doorbell, and it rings it by SPAWNING `sb`.**
+A message to an agent that was mid-turn is held back rather than injected into its turn,
+and until this, the only thing that ever re-rang it was the next `sb` command somebody
+happened to run — so a parent whose last child reported while it was busy was never woken
+at all, and mail to an idle agent sat for forty minutes (`2026-08-09-004538`,
+`2026-08-09-035933`). This loop is the only thing in the fleet that ticks on its own, so
+it is where that trigger belongs.
+
+It does NOT call `flush_pending` itself, and that is the whole design of it: this process
+is read-only and version-stale on purpose (see above), and both properties would be lost
+the moment it wrote. It spawns `sb` instead — a short-lived process that flushes at
+startup like every other `sb` command — so the write is made by code running now and this
+file keeps its two invariants. The `sb` it spawns is THIS checkout's `bin/sb` and not
+whatever the pane's PATH resolves (`doorbell_sb`), so the doorbell cannot be defeated by
+an unrelated build being installed. Nothing is imported to do it and no state is kept: the
+snapshot it already has says whether anything is waiting, and `DOORBELL_GAP` keeps a
+target that stays busy from costing a process a tick.
+
 **It cannot become a daemon nobody owns.** Renderers stamp `panel/demand` as they draw,
 and this exits once nothing has looked for `panel.collector_idle_exit` seconds. Closing
 the last panel retires the collector within a minute; opening one starts another.
@@ -44,8 +62,11 @@ the last panel retires the collector within a minute; opening one starts another
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -58,6 +79,21 @@ from . import panel
 from . import status as status_mod
 
 INTERVAL = config.setting("display.board_refresh")
+# The floor between two doorbell runs, in seconds. Not a tunable: it is the one number
+# that decides how much a stuck target costs. Mail held back for an agent that stays busy
+# stays pending tick after tick, so without a floor this would spawn a process every
+# `INTERVAL` for as long as that agent works — and the latency being bought is "somebody
+# is woken within seconds instead of never", which ten does as well as two.
+#
+# It is a floor and not a bound: it divides the cost of a stuck target, it does not end
+# it. A target that stays stuck for hours — a blocked agent waiting on a person — costs a
+# process every ten seconds for all of them, which is why that case is kept out of the
+# trigger's work list entirely rather than merely rate-limited (`ring_doorbell`).
+DOORBELL_GAP = 10.0
+# How long the spawned `sb` is given before it is given up on. It is one flush and a
+# handful of herdr calls; anything past this is a herdr that is not answering, and waiting
+# longer only stacks threads.
+DOORBELL_TIMEOUT = 30.0
 
 
 @dataclass
@@ -83,6 +119,13 @@ class State:
     tick_ms: Optional[float] = None
     last_error: Optional[str] = None
     last_error_at: Optional[float] = None
+    # The doorbell, counted the same way and for the same reason: a trigger nobody can see
+    # is indistinguishable from one that is not running. `doorbell_error` is kept apart
+    # from `last_error` deliberately — an `sb` that will not run is not a stale snapshot,
+    # and saying so on forty screens would be a lie about the data they are showing.
+    doorbells: int = 0
+    last_doorbell: Optional[float] = None
+    doorbell_error: Optional[str] = None
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -116,6 +159,127 @@ def snapshot(db_path: Optional[Path] = None):
         db.close()
 
 
+def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
+    """Run `sb` so that whatever is waiting gets announced. -> whether one was started.
+
+    The minimal trigger, and deliberately nothing more. It answers one question from the
+    snapshot it already has — is anybody holding a message that has never been announced?
+    — and if so runs one `sb` command. That command flushes the doorbell at startup like
+    every `sb` command does, which is the entire mechanism; who is idle, who is busy, who
+    is blocked and what is safe to ring are decisions `Broker.flush_pending` already
+    makes, and duplicating any of them here would be a second opinion in a second process.
+
+    It does not look at stalled agents, does not correct a state, and pings nobody. An
+    agent that is idle without having reported is a different problem with a different
+    answer (the reconciler, phase 3.5), and a half of it built here would be thrown away.
+
+    `undelivered` and not `unread`: an agent that read its own inbox needs no doorbell,
+    and the snapshot's `undelivered` is derived from the same pair `flush_pending` chases
+    (`status._undelivered_counts`), so this cannot ask for a ring that will not happen.
+
+    `ringable` and not `undelivered`, for the one case where that is not enough. Mail for
+    a BLOCKED agent is undelivered and must stay that way — the agent is waiting on a
+    person, not idle — so `flush_pending` looks at it, holds it, and changes nothing,
+    every ten seconds, for as long as the human takes. Measured: 85 spawned processes for
+    one block held thirteen minutes, bounded by nothing but the person
+    (`audit/phase1-acceptance-4.md` §4). Nothing about the mail changes here — it stays
+    held, still counted, still on the board — and nothing needs this trigger to deliver
+    it, because the only thing that lifts a block is an `sb tell` from the human, which
+    flushes in its own process. `AgentStatus.ringable` is the predicate and it lives in
+    `status.py` beside the count it refines, so this and `flush_pending` cannot come to
+    disagree about which mail a ring would move.
+    """
+    now = panel.now()
+    if state.last_doorbell is not None and now - state.last_doorbell < DOORBELL_GAP:
+        return False
+    if not any(a.ringable for a in snap.agents):
+        return False
+    sb = doorbell_sb()
+    if sb is None:
+        # Nothing to fall back to: running this module's own code would put the write back
+        # in this process, which is the one thing the arrangement above exists to prevent.
+        state.doorbell_error = ("no `sb` in this checkout's `bin/` and none on PATH — "
+                                "nothing can ring the doorbell")
+        return False
+    state.last_doorbell = now
+    state.doorbells += 1
+    # In a thread, because a tick is 24 ms and an `sb` command is not: the fleet's one
+    # readout must not stutter every time somebody has mail. Daemon, so it can never hold
+    # this process open, and it reaps its own child so the collector grows no zombies.
+    threading.Thread(target=_run_doorbell, args=(sb, db_path, state),
+                     daemon=True).start()
+    return True
+
+
+def doorbell_sb() -> Optional[str]:
+    """Which `sb` the doorbell runs — THIS build's, not whatever is installed.
+
+    THE PROBLEM, measured. `shutil.which("sb")` asks the board pane's PATH, and that PATH
+    is one machine-wide symlink into the main checkout. So a collector running a branch's
+    code rang the branch's doorbell by spawning a *different* build — and when the verb it
+    needs is newer than the installed one, every ring dies in argparse. 55 doorbells in
+    5.5 minutes, all failed, five reports left undelivered, until the collector was
+    restarted by hand with the right `bin` on its PATH, after which everything landed in
+    one tick (`audit/phase1-acceptance-3.md` §3.2-3.3).
+
+    `_pin_sb` already solves this shape for a spawned agent's pane, but a board pane is
+    nobody's agent and nothing pins it. The fix does not need a pin at all: this process
+    IS the build, launched with the checkout on `PYTHONPATH` by `panel.ensure_collector`,
+    so its own `__file__` names the checkout, and that checkout's `bin/sb` is the same
+    file `_pin_sb` puts at the front of an agent's PATH. Naming it here removes the
+    environment from the question entirely: no PATH, no symlink, no ordering, and a
+    correct doorbell can no longer be defeated by an unrelated binary.
+
+    PATH remains the fallback, and only that: a `switchboard` imported from somewhere with
+    no `bin/sb` beside it (installed as a package, vendored) has nothing of its own to run,
+    and the installed build is then the only `sb` it could have meant.
+    """
+    own = Path(__file__).resolve().parent.parent / "bin" / "sb"
+    if os.access(own, os.X_OK):
+        return str(own)
+    return shutil.which("sb")
+
+
+def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
+    """Where to run `sb` — a WORK TREE, and not the `.git` the store lives in.
+
+    `db_path` is `<git-common-dir>/agentflow/state.db`, so its grandparent is `.git`
+    itself. `cli.main` calls `store.worktree_root()` for every verb and
+    `git rev-parse --show-toplevel` fails inside a `.git` directory, so every doorbell
+    since the mechanism was written died there before it did anything — one directory,
+    on every machine, whatever was on PATH (`audit/phase1-acceptance-2.md` §3.3).
+
+    The checkout is `.git`'s parent, except under `--separate-git-dir` or a relocated
+    `.git`, where it is whatever `sb init` recorded — the same rule `store.main_checkout`
+    follows, read from the file here rather than asked of `store` so that this half stays
+    importless and cannot be the thing that makes the collector write (module note).
+    """
+    if db_path is None:
+        return None
+    store_dir = db_path.parent
+    recorded = None
+    try:
+        recorded = json.loads((store_dir / "config.json").read_text()).get("main_checkout")
+    except Exception:                          # no config yet, or unreadable — infer
+        pass
+    if recorded and Path(recorded).is_dir():
+        return str(recorded)
+    return str(store_dir.parent.parent)
+
+
+def _run_doorbell(sb: str, db_path: Optional[Path], state: State) -> None:
+    """The spawned half. Swallows everything: a doorbell that fails is a line in the
+    counters, never a collector that dies."""
+    cwd = _doorbell_cwd(db_path)
+    try:
+        p = subprocess.run([sb, "flush"], cwd=cwd, capture_output=True, text=True,
+                           timeout=DOORBELL_TIMEOUT)
+        state.doorbell_error = None if p.returncode == 0 else \
+            (p.stderr or p.stdout or f"sb flush exited {p.returncode}").strip()[:200]
+    except Exception as e:                     # noqa: BLE001 — never fatal, by design
+        state.doorbell_error = str(e)[:200]
+
+
 def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
          last_good: Optional[dict]) -> Optional[dict]:
     """One collect-and-publish. -> the snapshot dict now published.
@@ -138,6 +302,7 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         state.collected_at = at
         # Not cleared on success: `sb doctor` wants the most recent error even on a
         # collector that has recovered, and `errors` is what says whether it is current.
+        ring_doorbell(snap, state, db_path)
 
     state.wrote_at = at
     panel.publish(paths, panel.envelope(last_good or {}, state.as_dict()))
