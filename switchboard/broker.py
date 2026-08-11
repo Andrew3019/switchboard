@@ -3830,11 +3830,16 @@ class Broker:
     def _finished_and_unreachable(self, who: str) -> bool:
         """Has this agent ended its turn for good, with no pane left to ring?
 
-        `sb done` ends a turn, and a real Claude Code process stops answering to its name
-        the moment that turn ends — herdr says `agent_not_found` from then on. The row,
-        though, keeps its `pane_id` and stays a perfectly good target, so every doorbell
-        aimed at it fails, and `flush_pending` re-aims it on every `sb` command anybody
-        runs, forever. This is the predicate that stops that.
+        A finished agent is NOT unreachable by virtue of being finished, and the version of
+        this that said so was reading our own damage as a fact about Claude Code. What
+        stopped a done agent answering to its name was the `pane report-agent` that `done`
+        itself made; with that call gone, a `done` agent whose pane is still open answers
+        to its name and takes a doorbell like anyone else — measured on herdr 0.8.0 from an
+        isolated clone: agent reports done, `agent get <name>` still resolves, `sb tell`
+        lands, the agent wakes and reports again. So this stays a NAME question. What it
+        catches now is a row that kept its `pane_id` after the pane or the process went
+        away: still a perfectly good-looking target, so every doorbell aimed at it fails
+        and `flush_pending` re-aims it on every `sb` command anybody runs, forever.
 
         Two ways to be sure, and both are needed. A row with no `pane_id` has nothing to
         ring by construction — `cleanup` cleared it, or it never got one. A row that still
