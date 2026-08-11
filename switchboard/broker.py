@@ -3320,6 +3320,10 @@ class Broker:
         same way the read path already does.
         """
         me = me or self.whoami()
+        # The name is resolved BEFORE the caller is, so that a typo is reported as a typo
+        # whoever typed it. The other order sent a human who misspelled a preset to `sb
+        # presets <misspelling>`, which fails too.
+        path, _ = presets_mod.text(self.repo, name)
         if me == HUMAN:
             # A person has no session sb can paste into. `sb presets <name>` already prints
             # it for them, which is the whole of what applying would mean here.
@@ -3327,7 +3331,6 @@ class Broker:
                 "`--apply` pastes a preset into an AGENT's own session; you have none. "
                 f"`sb presets {name}` prints it."
             )
-        path, _ = presets_mod.text(self.repo, name)
         # `flatten`, not the prose `text()` returned: this is going out as an agent
         # argument, and herdr refuses a newline in one. Same rule, same function, as the
         # copy a spawn is born with.
