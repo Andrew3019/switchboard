@@ -180,19 +180,19 @@ its feet*.
 ## Teardown
 
 `sb cleanup <name>` after each trial (`subject-a`, `subject-b`, `subject-c` all closed;
-`sb status` in the clone shows `0 alive` after the third). `sb doctor` in the clone
-reported no collector ever ran (every spawn used `--no-board`), so there was no panel
-process to kill. The clone directory itself is scratch under this session's scratchpad and
-was not merged, pushed, or referenced by anything outside this probe; it is left in place
-for now in case anyone wants to re-inspect the transcripts, but nothing in the live repo or
-fleet depends on it.
+`sb status` in the clone showed `0 alive` after the third, confirmed before deleting
+anything). `sb doctor` in the clone reported no collector ever ran (every spawn used
+`--no-board`), so there was no panel process to kill — nothing unscoped was touched. The
+scratch clone itself, and the `/tmp/probe31-subject-*.log` files it wrote, have since been
+deleted (`rm -rf` on the clone directory only, under this session's own scratchpad — never
+run against the live repo or store). Nothing in the live repo or fleet depended on it.
 
 ## Reproducing
 
-Subject task files and raw `/tmp` log files are not committed (they lived in the scratch
-clone, torn down as agents but not deleted from disk). The commands to reproduce are
-exactly as described above: clone `main`, `sb start --no-board` a subject with a
-single-long-tool-call task, watch its `/tmp` log fill, fire `herdr agent prompt <name>
-"..."` (or `herdr pane send-text <pane> "..."` + `herdr pane send-keys <pane> enter`) partway
-through, and compare the log's own timestamps (ground truth) against the agent's
-self-reported awareness time and `sb inspect`'s transcript.
+Subject task files and raw `/tmp` log files no longer exist (scratch, deleted with the
+clone per teardown above). The commands to reproduce are exactly as described: clone
+`main`, `sb start --no-board` a subject with a single-long-tool-call task, watch its
+`/tmp` log fill, fire `herdr agent prompt <name> "..."` (or `herdr pane send-text <pane>
+"..."` + `herdr pane send-keys <pane> enter`) partway through, and compare the log's own
+timestamps (ground truth) against the agent's self-reported awareness time and
+`sb inspect`'s transcript.
