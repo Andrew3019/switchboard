@@ -6,12 +6,15 @@ at the rest, this works from a full conformance audit: `audit/design-truth-confo
 (branch `design-truth-audit`, `af01c42`), which checked every `DESIGN-TRUTH.md` entry
 against `main` @ `0a0fa4f` — 1148 tests passing. It found all seven explicitly-rejected
 items genuinely gone, most journeys and decisions honoured and pinned by tests, and about
-ten places where the code and the design record still disagree. Those are below: three are
-code defects, the rest are decisions only Andrew can make.
+ten places where the code and the design record still disagree. Two of those ten have since
+been closed by `small-fixes` (PR #20), which landed after the audit was taken; they are
+recorded as finished below rather than listed as gaps. That leaves eight: one is a code
+defect, the rest are decisions only Andrew can make.
 
 **This file is derived and disposable.** It dies when the gaps close. `DESIGN-TRUTH.md` is
-the only thing that outlives it. Every claim here was true of `main` @ `0a0fa4f`; correct
-this file in place when you find it wrong, and say which commit you checked against.
+the only thing that outlives it. Every claim here was true of `main` @ `0a0fa4f`, revised
+where `small-fixes` closed something and marked as such; correct this file in place when
+you find it wrong, and say which commit you checked against.
 
 The audit is the source for everything below. Nothing here was re-derived from the code
 except where it says so.
@@ -25,8 +28,8 @@ Taken from the audit's own "fully true and pinned" list, compressed:
 - **The entire "Explicitly rejected" section, 7 of 7.** The human inbox, `sb ask`,
   `sb wait`, `sb interrupt` as a verb, `--keep`/`--ephemeral`/`--include-kept`/
   `--leave-children`, `--no-board`, and focus-as-a-flag are all genuinely gone — checked
-  statically and by live invocation. (One piece of `sb ask` residue survives; it is gap 2
-  below.)
+  statically and by live invocation. (The audit found one piece of `sb ask` residue still
+  standing; `small-fixes` has since removed it — see below.)
 - **Top-stamp mechanics.** Only `sb start` creates a top, only a human may run it, the
   `is_top` column (not the prompt, not worktree possession) drives fork-vs-tab, and a bare
   agent's `delegate` is refused on a field of its role rather than its name. Pinned by
@@ -46,16 +49,31 @@ Taken from the audit's own "fully true and pinned" list, compressed:
 - **`sb workspace new` deletion**, `sb restore`'s worktree-gone refusal, `sb inbox --peek`,
   `sb presets` list/read/apply.
 
-One item the old plan left open is also closed, and this is the single claim here checked
-against the code rather than taken from the audit: the reconciler no longer nudges a
-seconds-old agent before its task arrives. `status.py:770` adds a `starting` guard whose
-comment names that exact symptom, and `stalled` now depends on it.
+Three more items are closed, and these are the only claims here checked against the code
+rather than taken from the audit:
+
+- **The reconciler no longer nudges a seconds-old agent before its task arrives** — the one
+  item the old plan left open. `status.py:770` adds a `starting` guard whose comment names
+  that exact symptom, and `stalled` now depends on it.
+- **`sb inspect`'s "owed" and "waiting on" panels are gone**, along with
+  `status._unanswered` and `store.pending_ask`/`reply_to_ask`. They were structurally dead:
+  they selected `messages.kind='ask'`, and nothing has written that kind since `sb ask` was
+  deleted, so they could only ever match rows older than the removal — and the action they
+  printed was false of every one of those rows. Closed by `small-fixes` (PR #20); the audit
+  had it as a code gap.
+- **`sb inspect` shows about 100 lines of tail, not 40.** `defaults/settings.toml` moves
+  `display.output_lines` from 40 to 100, which is what the record asks for. All three
+  readers of that knob move together — `status.py` (`inspect`), `herdr.READ_LINES` and
+  `output.py` — deliberately, so the tail that exists to be read and the tail that is read
+  are one number rather than two that can disagree. Closed by `small-fixes` (PR #20); the
+  audit had it as a code gap, and this also settles what was its open question 7.
 
 ---
 
 ## Gaps that are code work
 
-Three. Each is a defect against `DESIGN-TRUTH.md`, not a future improvement.
+One. It is a defect against `DESIGN-TRUTH.md`, not a future improvement. The audit found
+three; the other two were both `sb inspect` and are closed above.
 
 ### 1. The board's click lands on the wrong agent when a row contains a wide character
 
@@ -73,45 +91,10 @@ Three. Each is a defect against `DESIGN-TRUTH.md`, not a future improvement.
 - **Touches:** `board.py` (about five call sites), plus a wide-character case in
   `tests/test_board.py`, which today only covers overlong ASCII.
 
-### 2. `sb inspect`'s "owed" and "waiting on" panels are structurally dead
-
-- **The record requires:** `status._unanswered` and `store.pending_ask` back the "owed" /
-  "waiting on" panels of `sb inspect`.
-- **The code does:** renders both panels from `messages.kind='ask'`
-  (`status.py:1766-1781`, `store.py:1568-1577`), and nothing writes that kind any more —
-  every `put_message` call site passes `tell` or `done` (`broker.py:3276, 3347, 3400,
-  3904`). `sb ask` is gone; this is its unfinished cleanup. `store.reply_to_ask` is dead
-  too (zero call sites), and `kind='ask'` survives as a legal-but-unwritten value in the
-  CHECK constraint (`store.py:1399`). The panels are not merely empty — no code path can
-  ever fill them again.
-- **Pass condition:** `sb inspect` cannot render a section sourced from a mechanism that
-  no longer exists. Either the panels and their dead backing are gone, or they are
-  repointed at `messages.needs_reply`, which is the live "waiting for an answer" signal
-  (`cli.py:917-919`).
-- **Size:** small.
-- **Touches:** `status.py` (`_unanswered`, `Detail.owed`/`waiting_on`, the rendering at
-  `1753-1754, 1815-1830`), `store.py` (`pending_ask`, `reply_to_ask`, the CHECK
-  constraint), tests.
-
-### 3. `sb inspect` shows 40 lines of tail, not "like 100"
-
-- **The record requires:** more tail on `sb inspect` — "like 100 lines."
-- **The code does:** defaults `-n` to `status.DEFAULT_LINES`, which reads
-  `display.output_lines` (`status.py:1668`), set to 40 in `defaults/settings.toml:368`.
-- **Pass condition:** `sb inspect <agent>` with no `-n` shows roughly 100 lines of tail.
-- **Size:** trivial as a value change, but it carries a scope decision: that one knob has
-  three readers — `herdr.py:74` (`READ_LINES`) and `output.py:50` as well as `inspect` —
-  and all three are at 40. Bumping it moves all three. Giving `inspect` its own setting is
-  the alternative. That is question 7 below.
-- **Touches:** `defaults/settings.toml`, and `status.py`/`cli.py` if `inspect` gets its
-  own knob.
-
-**Ordering.** Not by size. Gap 1 first: it is the only one that makes someone act on the
-wrong agent rather than merely see less than they should, and it fails silently — a
-mis-resolved click looks like a successful one. Gaps 2 and 3 are both `sb inspect` and
-should be done together, so the command's output is touched once rather than twice; 2
-before 3 because deleting the dead panels changes what the tail shares the screen with,
-and because gap 3 is waiting on an answer to question 7 while gap 2 is not.
+**Why it is the one left.** It is the only code gap the audit found that makes someone act
+on the wrong agent rather than merely see less than they should, and it fails silently — a
+mis-resolved click looks like a successful one. The other two only ever cost information,
+and both are closed.
 
 ---
 
@@ -175,8 +158,10 @@ trust-the-system ones, and reading DESIGN-TRUTH without this note implies otherw
 
 ## Questions for Andrew
 
-Six from the audit, plus one that falls out of gap 3. Each with the audit's recommended
-answer.
+Six, all from the audit, each with the audit's recommended answer. The audit raised a
+seventh — whether `display.output_lines` should move for all three of its readers or
+`sb inspect` should get its own knob — and `small-fixes` has since answered it by moving
+the shared knob, so it is not repeated here.
 
 1. **The "(This has not been the case.)" parenthetical in the spawn-landing entry now
    describes a fixed, regression-tested bug. Drop it, or keep it as historical colour?**
@@ -199,10 +184,6 @@ answer.
    side) become hard gates like `board`, or stay soft conventions?** *Recommended: soft
    conventions* — hard-gating `sb status` would remove a debugging tool you may want, and
    nothing suggests their availability has confused anyone. Then the doc should say so.
-7. **For gap 3: should `display.output_lines` move to ~100 for all three of its readers,
-   or should `sb inspect` get its own setting?** *Recommended: give `inspect` its own* —
-   the DESIGN-TRUTH claim is about `inspect` specifically, and `herdr.py`'s read budget
-   and `output.py` have no reason to move with it.
 
 ---
 
