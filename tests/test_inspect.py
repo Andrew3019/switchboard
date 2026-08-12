@@ -43,7 +43,7 @@ class FakeHerdr:
     def get_agent(self, name):
         return next((a for a in self.agents if a.name == name), None)
 
-    def read_pane(self, pane_id, *, lines=40):
+    def read_pane(self, pane_id, *, lines=100):
         self.reads.append((pane_id, lines))
         if self.pane_error:
             raise self.pane_error
@@ -137,20 +137,21 @@ class InspectTest(Base):
         self.assertEqual(d.unread[0]["from"], "main")
         self.assertIn("use the other library", d.unread[0]["body"])
 
-    def test_an_unanswered_ask_is_surfaced_even_after_it_was_read(self):
-        """The dangerous one: read and never answered LOOKS handled, and is not."""
+    def test_an_old_ask_row_renders_as_ordinary_mail_and_gets_no_panel(self):
+        """`sb ask` is gone, so the two "unanswered" panels went with it — but a store
+        written before the deletion still holds `kind='ask'` rows, and inspecting the
+        agent they belong to must neither crash nor claim somebody is blocked on it."""
         self.agent()
         store.put_message(self.db, from_agent="main", to_agent="w1", kind="ask",
                           body="which database?")
-        store.unread_for(self.db, "w1")                    # the agent read it
         d = self.inspect()
-        self.assertEqual(d.agent.unread, 0)                # nothing in the mailbox
-        self.assertEqual(len(d.owed), 1)                   # but somebody is still stuck
-        self.assertEqual(d.owed[0]["from"], "main")
-        self.assertTrue(d.owed[0]["read"])
+        self.assertEqual(d.agent.unread, 1)
+        self.assertEqual(d.unread[0]["kind"], "ask")
         out = status.render_detail(d)
-        self.assertIn("UNANSWERED ASK", out)
-        self.assertIn("which database?", out)
+        self.assertIn("which database?", out)              # still readable
+        self.assertNotIn("UNANSWERED ASK", out)
+        self.assertNotIn("IT IS WAITING ON", out)
+        self.assertFalse(hasattr(d, "owed"))
 
     def test_undelivered_mail_is_listed_apart_from_unread(self):
         """Two different failures: one we caused, one the agent did."""
@@ -216,17 +217,6 @@ class InspectTest(Base):
         self.assertEqual(d["undelivered_mail"][0]["body"], "hi")    # and the message
         self.assertTrue(d["waiting_to_be_rung"])
 
-    def test_what_the_agent_itself_is_waiting_on_is_kept_separate(self):
-        """Opposite meanings: one is somebody stuck on it, one is it stuck on somebody."""
-        self.agent()
-        store.put_message(self.db, from_agent="w1", to_agent="main", kind="ask",
-                          body="may I force-push?")
-        d = self.inspect()
-        self.assertEqual(d.owed, [])
-        self.assertEqual(len(d.waiting_on), 1)
-        self.assertEqual(d.waiting_on[0]["to"], "main")
-        self.assertIn("IT IS WAITING ON", status.render_detail(d))
-
     # -- the terminal, via output.py --------------------------------------
 
     def test_the_live_pane_is_included(self):
@@ -235,7 +225,7 @@ class InspectTest(Base):
         d = status.inspect(self.db, h, "w1")
         self.assertEqual(d.output.source, PANE)
         self.assertIn("boom", d.output.text)
-        self.assertEqual(h.reads, [("w1:p9", 40)])
+        self.assertEqual(h.reads, [("w1:p9", 100)])
 
     def test_a_closed_pane_falls_back_to_the_transcript(self):
         """output.py's whole point, and it must survive being called from here."""
@@ -309,7 +299,7 @@ class InspectTest(Base):
     def test_json_carries_the_same_facts(self):
         self.agent(task="rewrite the parser", workspace="feature-x", pane_id="w1:p9",
                    cwd="/repo", session_id="sess-1", parent=None)
-        store.put_message(self.db, from_agent="main", to_agent="w1", kind="ask", body="q?")
+        store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="q?")
         store.log_event(self.db, kind="delegate", agent="w1")
         h = FakeHerdr([alive("w1", "idle")], pane_text="on screen\n")
         d = json.loads(json.dumps(status.inspect(self.db, h, "w1").as_dict()))
@@ -328,7 +318,6 @@ class InspectTest(Base):
         # a trap for anything reading both.
         self.assertEqual(d["unread"], 1)
         self.assertEqual(d["unread_mail"][0]["body"], "q?")
-        self.assertEqual(d["owed"][0]["from"], "main")
         self.assertEqual([e["kind"] for e in d["events"]], ["delegate"])
         self.assertEqual(d["output"]["source"], PANE)
         self.assertIn("on screen", d["output"]["text"])

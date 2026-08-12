@@ -411,9 +411,12 @@ it is the widest read in the CLI and takes a bare name.
   Code JSONL transcript if the pane is gone), `store.transcript_path`
 - Status: working. Subsumes a former `sb output` verb — that verb no longer exists;
   `output.py` is called directly by `inspect` now.
-- The two "unanswered in both directions" blocks (`status._unanswered`) select
-  `messages.kind = 'ask'`, and nothing writes that kind any more — `sb ask` is gone and
-  `tell` writes `tell`. They can only ever match rows older than the removal.
+- The two "unanswered in both directions" blocks are GONE (2026-08-11), with
+  `status._unanswered` and `store.pending_ask`/`reply_to_ask`. They selected
+  `messages.kind = 'ask'`, and nothing has written that kind since `sb ask` was deleted,
+  so they could only ever match rows older than the removal — and the action they printed
+  ("X is blocked until this agent answers") is false of every one of those rows. Old
+  `kind='ask'` rows still render, as the ordinary mail they now are.
 - Config: `settings.toml [display] output_lines/events`, `[limits] output_clip`
 
 ### `sb log [--agent] [-n]`
