@@ -134,10 +134,14 @@ class OnlyAHumanStartsATopTest(Fixture, unittest.TestCase):
         self.assertEqual(self.h.started, [])
 
     def test_a_human_still_starts_one(self):
-        """The entire point of the command. A terminal carries neither marker."""
-        code, out = self._start({})
-        self.assertEqual(code, 0, out)
-        self.assertEqual(len(self.h.started), 1)
+        """The entire point of the command, from both terminals a human has: a plain one,
+        carrying nothing, and a herdr pane of their own, carrying a pane id no agent row
+        claims. Neither has a session marker, so neither is mistaken for an agent."""
+        for env in ({}, {"HERDR_PANE_ID": "w9:p9"}):
+            with self.subTest(env=env):
+                code, out = self._start(env)
+                self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.h.started), 2)
 
 
 class TopStampMigrationTest(unittest.TestCase):
