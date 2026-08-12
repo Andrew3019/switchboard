@@ -92,6 +92,54 @@ class TopStampTest(Fixture, unittest.TestCase):
         self.assertFalse(self.b.is_top("loner"))
 
 
+class OnlyAHumanStartsATopTest(Fixture, unittest.TestCase):
+    """`sb start` is refused for agents (DESIGN-TRUTH, confirmed 2026-08-11).
+
+    At the CLI, because "who typed this" only exists there. The rule has two halves and
+    they fail for different reasons: an agent this store knows is caught by `whoami`, and
+    an agent it does not know — one standing in a clone, driving that clone's own store —
+    is caught only by the Claude Code markers in its environment. The second half is the
+    hole this closes: a clone IS its own main checkout, so the worktree refusal passes and
+    three unwanted tops got made in one afternoon.
+    """
+
+    def _start(self, env: dict) -> tuple[int, str]:
+        import argparse, contextlib, io, os  # noqa: E401
+        from unittest import mock
+        from switchboard import cli
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli._dispatch(argparse.Namespace(cmd="start", name=None, task=None,
+                                                    json=False), self.b, self.db, self.h)
+        return code, out.getvalue() + err.getvalue()
+
+    def test_an_agent_this_store_knows_is_refused(self):
+        self._top("top-a")
+        store.create_agent(self.db, name="w1", role="worker", parent="top-a",
+                           workspace="top-a", branch="top-a", pane_id="w1:p9")
+        code, out = self._start({"HERDR_PANE_ID": "w1:p9"})
+        self.assertEqual(code, 1)
+        self.assertIn("only a human", out)
+        # The refusal has to carry the alternative, or it is a wall.
+        self.assertIn("sb delegate", out)
+        self.assertEqual(self.h.started, [])
+
+    def test_an_agent_in_a_clone_is_refused_though_the_store_has_no_row(self):
+        """The clone. No agents at all — `whoami` says HUMAN and means it — so the only
+        thing left saying otherwise is the session marker the harness sets."""
+        code, out = self._start({"CLAUDE_CODE_SESSION_ID": "sess-from-a-clone"})
+        self.assertEqual(code, 1)
+        self.assertIn("only a human", out)
+        self.assertEqual(self.h.started, [])
+
+    def test_a_human_still_starts_one(self):
+        """The entire point of the command. A terminal carries neither marker."""
+        code, out = self._start({})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.h.started), 1)
+
+
 class TopStampMigrationTest(unittest.TestCase):
     """The rows that predate the column. This is the migration risk, so it is proved.
 

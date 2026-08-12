@@ -1065,7 +1065,12 @@ class IsolationTest(Sandbox):
         self.assertNeverImported()
 
     def test_2_start_spawns_normally(self):
-        code, out, err = self.run_sb("start")
+        # As a human: `sb start` is refused for agents, and this suite is run from a
+        # Claude Code session, whose markers the test process inherits.
+        with mock.patch.dict(os.environ):
+            for var in cli._CLAUDE_SESSION_ENV:
+                os.environ.pop(var, None)
+            code, out, err = self.run_sb("start")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.h.started), 1)
         self.assertNeverImported()

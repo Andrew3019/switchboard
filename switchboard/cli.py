@@ -499,6 +499,46 @@ def _derived_name(db, role: str) -> Optional[str]:
 _NEEDS_FRESH_SCHEMA = {"start", "delegate", "restore"}
 
 
+# A Claude Code session sets both of these in the environment of every command it runs, so
+# either one, in a shell a human is typing into, says the typing is not being done by a
+# human. Two rather than one because they are set by different parts of the harness and an
+# agent that has only one of them is still an agent.
+_CLAUDE_SESSION_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE")
+
+
+def _agent_caller(me: str) -> Optional[str]:
+    """The agent behind this call, described; None if a human is typing.
+
+    Two signals, because one of them has a hole exactly where it matters.
+
+    `whoami()` is the good signal: it resolves a caller against the agents THIS store
+    knows, by session id or pane id, both injected into every pane we spawn. It is what
+    `sb board` is gated on. But it can only recognise an agent the store has a row for,
+    and an agent standing in a fresh `git clone` is driving that clone's own store, which
+    has no rows at all — so it resolves to HUMAN. That clone is not a hypothetical: it is
+    this repo's verification convention, and it is how an agent created three unwanted top
+    orchestrators in one afternoon.
+
+    So the environment is the second signal, and it is the one that closes the clone: a
+    Claude Code session marks the environment of every command it runs, wherever it is
+    standing and whatever store it is talking to.
+
+    This fails CLOSED on the unnameable caller, and the cost is worth naming: a human who
+    runs `sb start` from inside a Claude Code session — `!sb start` at the prompt — is
+    refused along with the agents, because at that point nothing distinguishes them.
+    Failing open instead would leave the rule enforced only where it was already enforced.
+    A human's own terminal carries neither marker and is untouched, which is the case the
+    command exists for.
+    """
+    if me != HUMAN:
+        return f"you are '{me}'"
+    if any(os.environ.get(v) for v in _CLAUDE_SESSION_ENV):
+        # No name to give: an agent this store has never heard of, which in practice means
+        # one running against a clone's store rather than the fleet's.
+        return "you are an agent, and this store has no row for you"
+    return None
+
+
 def _scope(b: Broker, me: str, mine: bool) -> dict:
     """What `sb status` is allowed to show this caller, as `collect`'s two scope kwargs.
 
@@ -737,6 +777,17 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return board_mod.main()
 
     if cmd == "start":
+        # Only a human creates a top orchestrator (DESIGN-TRUTH, confirmed 2026-08-11).
+        # The worktree refusal in `Broker._refuse_outside_main_checkout` used to be the
+        # nearest thing to this, and it does not reach: a clone is its own main checkout,
+        # so the check passes and the agent gets its top. See `_agent_caller` for how the
+        # caller is named and what happens when it cannot be.
+        if (who := _agent_caller(me)) is not None:
+            print(f"sb: `sb start` creates a top-level orchestrator, and only a human "
+                  f"does that — {who}.\n"
+                  f"    An agent that needs another agent delegates one:\n"
+                  f"      sb delegate \"<task>\" --role worker", file=sys.stderr)
+            return 1
         # Read BEFORE starting, or the one we are about to make is in the list. This is
         # the only thing left standing between "always start another" and losing track of
         # the ones you have: nothing here reuses them, so the way back has to be said.
