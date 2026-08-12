@@ -207,6 +207,41 @@ CREATE TABLE agents (
                                       -- which is also what rows predating the column read
                                       -- as — their absence simply starts being counted the
                                       -- first time a reaping command looks at them.
+    turn          TEXT,               -- switchboard's OWN activity signal: 'working' from
+                                      -- the moment a turn starts, 'idle' from the moment
+                                      -- one ends. Written by the two hooks in `hooks.py`
+                                      -- and by nothing else on the happy path, so it is a
+                                      -- fact Claude Code's own runtime handed us rather
+                                      -- than an inference from what a terminal looks
+                                      -- like. It is not `state`, and the overlap in the
+                                      -- word `working` is worth being careful about:
+                                      -- `state` is the agent's self-report about its TASK
+                                      -- ("still open", or the word it finished on), and
+                                      -- this is an observation about its TURN. A blocked
+                                      -- agent has ended its turn, so it is `blocked` here
+                                      -- and 'idle' there, and both are true.
+                                      -- NULL means we have never seen an edge for this
+                                      -- row — a row predating the column, an agent
+                                      -- nobody spawned with our settings file, or one
+                                      -- freshly restored. Readers fall back to herdr's
+                                      -- reading there and behave exactly as they did
+                                      -- before this column existed (`status.collect`,
+                                      -- `Broker._busy`).
+    turn_doubt_since INTEGER,         -- epoch of the FIRST reading that found the `turn`
+                                      -- above saying 'working' with nothing behind it —
+                                      -- no event for TURN_STALE_GRACE and herdr reporting
+                                      -- no turn in that pane. Cleared the moment either
+                                      -- half stops holding. An edge that fails to be
+                                      -- written leaves 'working' there for good, and that
+                                      -- row is unpingable, unsweepable and holds its mail
+                                      -- forever; a doubt that survives TURN_DOUBT_GRACE is
+                                      -- what lets `status._forget_turn` drop the edge back
+                                      -- to NULL. Same shape and same reason as
+                                      -- `absent_since`: two readings minutes apart are two
+                                      -- short-lived `sb` processes, and a column is the
+                                      -- only thing they share. NULL means "no doubt as far
+                                      -- as anyone has looked", which is what rows predating
+                                      -- the column read as too.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );
@@ -296,6 +331,14 @@ CREATE TABLE workspaces (
 _SCHEMA_HASH = hashlib.sha256(SCHEMA.encode()).hexdigest()[:16]
 
 LIVE_STATES = tuple(config.setting("states.live"))
+
+# The two words `agents.turn` can hold, from `[states]` in settings.toml — where every
+# other spelling of a store state already lives, so the writer here and the readouts in
+# `status.py` cannot come to disagree about them. `working` is shared with `state` on
+# purpose (an agent mid-turn is working in both senses); `idle` is deliberately NOT a
+# state and never becomes one — see the schema note and `status.AgentStatus.display_state`.
+TURN_WORKING = config.setting("states.turn_working")
+TURN_IDLE = config.setting("states.turn_idle")
 
 
 class LiveAgentsError(RuntimeError):
@@ -1049,6 +1092,30 @@ def set_state(db: sqlite3.Connection, name: str, state: str) -> None:
         (state, ended, name),
     )
     db.commit()
+
+
+def set_turn(db: sqlite3.Connection, name: str, turn: Optional[str]) -> None:
+    """Record that this agent's turn just started, just ended, or is unknown again.
+
+    The write half of `agents.turn` — switchboard's own activity signal. Two callers on
+    the happy path, both in `hooks.py`: the `UserPromptSubmit` hook writes TURN_WORKING,
+    the `Stop` hook writes TURN_IDLE once it has decided to let the turn end. `None`
+    clears the signal, which is what a restore does: a resumed session has taken no turn
+    yet and the old row's word says nothing about it.
+
+    Deliberately NOT folded into `set_state`. The two columns answer different questions
+    (see the schema note) and every path that writes one would have to guess at the other:
+    `sb block` sets state=blocked from inside a turn that is still running, and the turn
+    does not end until the hook says so.
+
+    Fails soft on a store too old to have the column, for `log_event`'s reason: this runs
+    inside a hook, and a hook that raises is a hook that costs an agent its turn.
+    """
+    try:
+        db.execute("UPDATE agents SET turn=? WHERE name=?", (turn, name))
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def update_agent(db: sqlite3.Connection, name: str, **fields: Any) -> None:

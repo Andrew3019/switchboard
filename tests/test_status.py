@@ -159,6 +159,166 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.undelivered, 2)
         self.assertGreaterEqual(a.undelivered_age, 600)
 
+    # -- our own signal, and where herdr is still asked ---------------------
+    #
+    # `agents.turn` is written by the hooks in `hooks.py` at the two edges of a turn. These
+    # are the join, not the hooks: the write is pinned in `test_hooks.py` and the fact that
+    # Claude Code fires the events is proved live in `audit/activity-signal.md`.
+
+    def test_our_signal_outranks_herdrs_reading_in_both_directions(self):
+        """The bug this exists for, and its mirror.
+
+        herdr infers a running turn from Claude's spinner glyphs; 2.1.228 changed them and
+        every pane on the machine read `idle`, including agents mid-tool-call. An agent
+        whose turn we KNOW is running is working, whatever the screen looks like — and an
+        agent whose turn we know has ended is stalled even while herdr insists otherwise.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.display_state, "working")
+
+        store.set_turn(self.db, "w1", store.TURN_IDLE)
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")])))["w1"]
+        self.assertTrue(a.stalled)
+        self.assertEqual(a.display_state, "idle")
+
+    def test_a_long_tool_call_never_reads_idle(self):
+        """No N, and this is why the design needs none. The longest tool call in this
+        repo's history ran 18 minutes; a turn that started and has not ended reads
+        `working` for however long it runs, with nothing to tune."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+        now = store.now() + 3600
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=now))["w1"]
+        self.assertGreaterEqual(a.idle, 3600)
+        self.assertFalse(a.stalled)
+        self.assertFalse(a.signal_drift)
+        self.assertEqual(a.display_state, "working")
+
+    def test_a_row_with_no_signal_of_ours_still_reads_herdr(self):
+        """The fallback, and it is the whole compatibility story: a row predating the
+        column, an agent nobody spawned with our settings file, or one freshly restored
+        behaves exactly as it did before any of this existed."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.assertIsNone(store.get_agent(self.db, "w1")["turn"])
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertTrue(a.stalled)
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")])))["w1"]
+        self.assertFalse(a.stalled)
+
+    def test_a_session_that_died_mid_turn_is_surfaced_not_left_working(self):
+        """The failure mode the signal introduces: no `Stop` ever fires, so `working` is
+        the last word forever and nothing in the fleet would ever move that row.
+
+        herdr is the cross-check, on the one reading of its that the broken spinner regex
+        cannot fake: `unknown` is "no Claude rule matched anything", i.e. a pane with no
+        agent in it. Not repaired here — surfacing beats guessing — but it reaches a
+        person, which is the whole requirement.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+        now = store.now() + int(status.STALL_GRACE) + 1
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "unknown")]),
+                                        now=now))["w1"]
+        self.assertTrue(a.signal_drift)
+        self.assertTrue(a.needs_human)
+        self.assertFalse(a.stalled)                       # not the same fact
+        self.assertEqual(store.get_agent(self.db, "w1")["state"], "working")  # not repaired
+        self.assertIn("NO SESSION", status.render(status.Snapshot(now=now, agents=[a])))
+
+    def test_a_pane_that_reads_unknown_for_a_moment_is_not_a_dead_session(self):
+        """The debounce, and the reason it is not a timeout: a pane can read `unknown`
+        while a tool call has a full-screen program in it. Nothing here is being asked to
+        tell a long tool call from a finished turn — the edges already did that."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "unknown")])))["w1"]
+        self.assertFalse(a.signal_drift)
+
+    # -- the repair: a `working` edge that was never closed --------------------
+    #
+    # The cost of owning the signal, and the one thing about it that is worse than what it
+    # replaced. A `Stop` that fails to write — a locked database, the blanket `except`, the
+    # hook's own 10 s timeout, all silent — leaves `working` on a live pane for good, and
+    # that row is pinged by nothing, swept by nothing and holds its mail forever
+    # (`audit/activity-signal-verification.md` §7). These pin the way out.
+
+    def stale(self, name="w1", *, herdr="idle", at=None):
+        """Collect twice over a doubt long enough to be confirmed. -> the second snapshot.
+
+        One reading only remembers the doubt — the whole safety of this is that a single
+        herdr disagreement can never move a row — so a test about what gets WRITTEN has to
+        look twice, with the clock past both windows.
+        """
+        h = FakeHerdr([alive(name, herdr)])
+        at = (store.now() + int(status.TURN_STALE_GRACE) + 1) if at is None else at
+        status.collect(self.db, h, now=at)
+        return status.collect(self.db, h, now=at + int(status.TURN_DOUBT_GRACE) + 1)
+
+    def test_a_working_edge_nothing_stands_behind_is_dropped_and_the_row_moves_again(self):
+        """The wedge, and what ends it. The edge is dropped back to NULL rather than
+        rewritten to idle: NULL is what a row with no signal has always held, so the row
+        goes back to being read exactly as it was before the signal existed — stalled,
+        therefore pingable, therefore reachable by everything else. Nothing is invented:
+        `state` is untouched and no end is recorded."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+
+        first = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", "idle")]),
+            now=store.now() + int(status.TURN_STALE_GRACE) + 1))["w1"]
+        self.assertTrue(first.turn_doubted)               # doubted...
+        self.assertFalse(first.stalled)                   # ...and still believed
+        self.assertEqual(store.get_agent(self.db, "w1")["turn"], store.TURN_WORKING)
+
+        self.stale()
+        self.assertIsNone(store.get_agent(self.db, "w1")["turn"])
+        self.assertEqual(store.get_agent(self.db, "w1")["state"], "working")
+
+        # The next reading is the repaired one — the write lands after the snapshot it was
+        # computed from, exactly as `_record_gone`'s does.
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertTrue(a.stalled)
+        self.assertEqual(a.display_state, "idle")
+
+    def test_one_reading_that_disagrees_with_the_doubt_starts_the_clock_over(self):
+        """Fail safe, and the reason this works at all. herdr's busy detector is
+        intermittent rather than dead, so a genuinely working agent reads `working` to it
+        sooner or later — and ONE such reading anywhere in the window clears the doubt. So
+        does one `sb` command from the agent, which resets the staleness half. An agent
+        that is quiet because its turn really ended produces neither."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+        t = store.now() + int(status.TURN_STALE_GRACE) + 1
+
+        status.collect(self.db, FakeHerdr([alive("w1", "idle")]), now=t)
+        status.collect(self.db, FakeHerdr([alive("w1", "working")]), now=t + 1)
+        self.assertIsNone(store.get_agent(self.db, "w1")["turn_doubt_since"])
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=t + int(status.TURN_DOUBT_GRACE) + 2))["w1"]
+        self.assertEqual(store.get_agent(self.db, "w1")["turn"], store.TURN_WORKING)
+        self.assertEqual(a.display_state, "working")
+
+    def test_a_long_tool_call_is_never_doubted_and_neither_is_a_pane_with_nobody_in_it(self):
+        """The two readings that must not reach the repair. Under the staleness bound
+        nothing is even asked — that bound is set clear of the longest tool call this repo
+        has recorded — and `unknown` is `signal_drift`'s case: a pane with no agent in it
+        has nothing to be pinged back to life, so it stays a person's to decide about."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_WORKING)
+        soon = store.now() + int(status.TURN_STALE_GRACE) - 60
+        self.assertFalse(self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", "idle")]), now=soon))["w1"].turn_doubted)
+
+        a = self.by_name(self.stale(herdr="unknown"))["w1"]
+        self.assertFalse(a.turn_doubted)
+        self.assertTrue(a.signal_drift)
+        self.assertEqual(store.get_agent(self.db, "w1")["turn"], store.TURN_WORKING)
+
     def test_a_finished_agent_sitting_idle_is_not_drift(self):
         store.create_agent(self.db, name="w1", role="worker")
         store.set_state(self.db, "w1", "done")

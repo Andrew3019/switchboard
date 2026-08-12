@@ -1,12 +1,22 @@
 """M4 — the readouts: `sb status` (the board) and `sb inspect` (one agent).
 
-The store says what an agent was *told* to be; herdr says what its pane is *doing*. Read
-either one alone and you get a confident answer that is regularly wrong, so this module
-exists to join them and to say so when they disagree.
+The store says what an agent was *told* to be; the activity signal says whether it is
+mid-turn; herdr says what its pane looks like. Read any one alone and you get a confident
+answer that is regularly wrong, so this module exists to join them and to say so when they
+disagree.
 
 The disagreement that matters is one specific pair:
 
-    store: working        herdr: idle        →  STALLED
+    state: working        turn: idle        →  STALLED
+
+`turn` is `agents.turn`, switchboard's OWN signal, written by the two hooks in `hooks.py`
+at the two edges of a turn (see that file for why the edges and not a heartbeat). It is
+primary here. herdr's reading is the fallback for a row that has no signal yet, and the
+corroboration for the one thing our signal cannot see — see `AgentStatus.signal_drift`.
+That order is not a preference: herdr infers a running turn by matching Claude's spinner
+glyphs in the terminal title, and when Claude Code 2.1.228 changed those glyphs every pane
+on the machine read idle, so this file called every working agent STALLED and the
+reconciler pinged them mid-tool-call (`audit/status-ground-truth.md`).
 
 That agent finished its turn and never called `sb done`. It happens constantly and
 silently — nothing errors, nothing logs, the pane just goes quiet — and every readout
@@ -21,6 +31,15 @@ or a top-level orchestrator from a bare `sb start` — is idle because nobody ha
 for anything. STALLED there is false, and a warning that is routinely false is a warning
 nobody reads. So the flag is not computed for those rows at all until the first thing
 arrives for them (`agents.awaiting_task`); nothing about what gets swept changes.
+
+Owning the signal buys one new way to be wrong, and it is the expensive kind: an edge that
+fails to be written leaves `working` on a row for good, and a row that says `working` is one
+nothing pings, nothing sweeps and nothing delivers mail to. So an edge is treated as a fact
+with an age. A `working` edge with no event of the agent's own behind it, and herdr reading
+no turn in its pane at every reading for long enough, is dropped back to "no signal" and the
+row goes back to being read the way it was before the signal existed — `AgentStatus
+.turn_doubted` for the rule, `_forget_turn` for what it writes and why NULL is the only safe
+thing to write.
 
 Two other joins fall out of the same table:
 
@@ -79,7 +98,7 @@ from typing import Any, Collection, Optional
 from . import config
 from .herdr import (
     BLOCKED, DELIVER_ATTEMPTS, DELIVER_TIMEOUT_MS, SPAWN_ATTEMPTS, SPAWN_BACKOFF,
-    SPAWN_TIMEOUT_MS, Herdr, HerdrError,
+    SPAWN_TIMEOUT_MS, UNKNOWN, Herdr, HerdrError,
 )
 
 # Which states count as what — `[states]` in defaults/settings.toml. The state NAMES are
@@ -89,6 +108,14 @@ from .herdr import (
 # .report_state documents it). For drift it means exactly what idle means: no turn is
 # running. Treating it as its own thing is how a stalled agent gets missed.
 IDLE_LIKE = frozenset(config.setting("states.idle_like"))
+
+# The two words OUR OWN signal writes into `agents.turn` (see `hooks.py`). Read from
+# `[states]` rather than imported from `store`, and that is not a stylistic choice: this
+# module is in the renderers' import graph (`panel`, `board`) and a renderer must never
+# load the store — an invariant `test_panel` pins in a fresh interpreter. Two spellings of
+# one word is what settings.toml exists to prevent, so both sides read the same key.
+TURN_WORKING = config.setting("states.turn_working")
+TURN_IDLE = config.setting("states.turn_idle")
 
 # Store states that claim the agent is still going, and so can be contradicted.
 RUNNING = tuple(config.setting("states.running"))
@@ -198,6 +225,28 @@ STALL_GRACE = (
 # the bug this exists for.
 GONE_CONFIRM_GRACE = config.setting("timeouts.gone_confirm_grace")
 
+# The two halves of "this `working` edge is not to be trusted" — see `AgentStatus
+# .turn_doubted` for the rule and `_forget_turn` for what is done about it.
+#
+# TURN_STALE_GRACE is how long a `working` row must have no event of its own behind it
+# before the edge is even questioned. It is NOT the timeout the edge design exists to
+# avoid, and the difference is the whole of why this is safe: a timeout decides on its own
+# that a turn ended, and no N can do that (2.18% of this repo's tool calls run past 72 s and
+# the longest ran 18 min). This N decides nothing. It only says when a row is worth asking
+# herdr about, and it is set clear of both of those numbers — 30 min, against a measured
+# p99 of 20.6 min for how long a live agent goes inside one turn without touching `sb`
+# across 406 real sessions here.
+#
+# TURN_DOUBT_GRACE is how long the doubt must then hold CONTINUOUSLY, with herdr reporting
+# no turn in that pane at every reading in between. That is the half that decides, and what
+# makes it worth anything is the finding that herdr's busy detector is intermittent rather
+# than uniformly dead (`audit/activity-signal-verification.md` §2): a genuinely working
+# agent eventually reads `working` to it, and ONE such reading anywhere in the window clears
+# the doubt — as does one `sb` command from the agent, which resets the staleness half.
+# A row that is quiet because its turn really ended produces neither, ever.
+TURN_STALE_GRACE = config.setting("timeouts.turn_stale_grace")
+TURN_DOUBT_GRACE = config.setting("timeouts.turn_doubt_grace")
+
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
 # mailbox rather than something every reader has to know about.
@@ -239,6 +288,16 @@ class AgentStatus:
     task: Optional[str]
     blocked_why: Optional[str]
     summary: Optional[str] = None   # what it said when it last called `sb done`
+    # Switchboard's OWN activity signal — `agents.turn`, written by the two hooks in
+    # `hooks.py` at the two edges of a turn. `working` | `idle`, and None for a row no
+    # hook has ever fired for: a row predating the column, an agent nobody spawned with
+    # our settings file, or one freshly restored. Every reader below treats None as "fall
+    # back to herdr" and behaves exactly as it did before this existed.
+    #
+    # Defaulted, and last, because it has to be: a hand-built row in a test or a panel
+    # snapshot from an older `sb --json` has no such field, and this must not be the thing
+    # that makes those constructors fail.
+    turn: Optional[str] = None
     # Mail neither announced nor read — see `undelivered_age` and the module note.
     undelivered: int = 0
     undelivered_age: int = 0        # seconds since the OLDEST one was written; 0 = none
@@ -279,16 +338,124 @@ class AgentStatus:
         running, so the word is `idle` and the GONE note beside it says why — until the
         absence is confirmed and `_record_gone` writes `failed` into `state` for real.
 
-        Honest, too, when the pane signal is wrong in the other direction: herdr reading
-        a working agent as idle (its busy detector is a known upstream weak point) shows
-        `idle` here rather than `working`, which is what the row is entitled to claim
-        from what it observed. It never shows two answers at once.
+        Since the activity signal exists, the middle line of that table is OURS and herdr
+        is the fallback: `agents.turn` is a fact Claude Code's own runtime wrote down at
+        the two edges of the turn, and herdr's reading is a screen-scrape that one
+        cosmetic change upstream was able to invalidate for every pane on the machine.
+        So the order is: our signal if we have one, herdr's if we do not.
+
+        One herdr reading still outranks ours, and only one: `alive is False`, the agent
+        is not in herdr's list at all. No turn can be running in a pane that is not there,
+        whatever our last edge said — and that is exactly the reading the crash case needs,
+        since a session that dies mid-turn leaves `working` behind forever. GONE says why,
+        beside it.
+
+        Honest, too, when the pane signal is wrong in the other direction: with no signal
+        of our own, herdr reading a working agent as idle (its busy detector is a known
+        upstream weak point) shows `idle` here rather than `working`, which is what the row
+        is entitled to claim from what it observed. It never shows two answers at once.
         """
-        if self.state not in RUNNING or self.alive is None:
+        if self.state not in RUNNING:
             return self.state
-        if self.alive and self.herdr_state not in IDLE_LIKE:
+        if self.alive is False:
+            return "idle"
+        if self.turn is not None:
+            return self.state if self.turn == TURN_WORKING else "idle"
+        if self.alive is None:
             return self.state
-        return "idle"
+        return self.state if self.herdr_state not in IDLE_LIKE else "idle"
+
+    @property
+    def signal_drift(self) -> bool:
+        """Our signal says a turn is running, and there is no agent in that pane at all.
+
+        THE FAILURE MODE THE ACTIVITY SIGNAL INTRODUCES, named rather than left silent. A
+        session that crashes, is killed, or is `/exit`ed mid-turn never fires `Stop`, so
+        `agents.turn` says `working` for good: no doorbell will ever be released to it, the
+        reconciler will never ping it, and `sb cleanup` cannot reach a row that is not
+        finished. Nothing in the fleet moves it. That is a strictly worse silence than the
+        one this signal fixed, unless something independent notices — so this is herdr
+        earning its keep as the cross-check (requirement 2 of the brief): it watches the
+        pane, which we cannot.
+
+        `herdr_state == UNKNOWN` and deliberately NOT `in IDLE_LIKE`, which is the reading
+        you would reach for first and is currently useless. herdr's `unknown` means "plain
+        shell or unrecognised program" — no Claude rule matched anything — and it is
+        produced by the ABSENCE of a match, so it survives the broken spinner regex that
+        took its `working` rule out (`audit/status-ground-truth.md` §4). Its `idle`, by
+        contrast, is what a live agent mid-tool-call reads as today, so drifting on that
+        would light up every genuinely working agent in the fleet.
+
+        `idle >= STALL_GRACE` is a debounce and not a timeout: a pane can read `unknown`
+        for a moment during a spawn, or while a tool call has a full-screen program in it.
+        No N is being asked to distinguish a long tool call from a finished turn — the
+        edges already do that — so the constant here is only "long enough that a flicker
+        is not a death", and the existing grace is the right size for that without
+        inventing a new one.
+
+        A flag, never a state: `stalled` is idle with no excuse, this is working with no
+        pane to work in, and neither is a sixth word for the STATE column. Nothing is
+        written back — surfacing beats guessing (C9) — and the row is left for a person,
+        which is why `needs_human` counts it.
+
+        This is NOT the wedge `turn_doubted` repairs, and the two are deliberately disjoint
+        on `herdr_state`: here the pane runs nothing herdr recognises, there it runs a
+        perfectly healthy Claude that herdr reads as idle because the turn genuinely ended
+        and only the `Stop` hook's write was lost. The second is the ordinary one, and it is
+        the one with a repair; a pane with no agent in it has nothing to be pinged back to
+        life and stays a person's to decide about.
+        """
+        return (self.state in RUNNING and self.turn == TURN_WORKING
+                and self.alive is True and self.herdr_state == UNKNOWN
+                and self.idle >= STALL_GRACE)
+
+    @property
+    def turn_doubted(self) -> bool:
+        """Our signal says a turn is running, and nothing else agrees any more.
+
+        THE REPAIR PATH FOR A `working` EDGE THAT WAS NEVER CLOSED. `signal_drift` names
+        the case where the pane is running nothing recognisable; this names the far more
+        ordinary one, where the pane is a perfectly healthy Claude sitting at its prompt and
+        the `Stop` hook simply never wrote. Three real paths reach it and all three are
+        silent — `store.set_turn` swallows a locked database, `hooks.run` catches
+        everything, and the `Stop` entry has a 10-second timeout that fails open — and the
+        row it leaves behind is worse than anything this signal fixed: `stalled` is false so
+        the reconciler never pings it, `gone` is false because the pane is alive,
+        `signal_drift` is false because herdr answers `idle` rather than `unknown`, and
+        `sb cleanup` refuses a row that has not reported an end. Its `--when-idle` mail is
+        held for good. Constructed live and confirmed to behave exactly that way in
+        `audit/activity-signal-verification.md` §7.
+
+        So a `working` edge is a fact with an age, and past a point it stops being evidence.
+        Both halves have to hold, and neither is enough alone:
+
+            no event of its own for TURN_STALE_GRACE   — it has not run an `sb` command,
+                                                          sent mail or read any, for 30 min
+            herdr, asked and answering, says its pane   — `alive is True` and a state in
+            is running no turn                            IDLE_LIKE
+
+        `alive is True` and not merely truthy: a herdr outage (`alive is None`) observed
+        nothing, and an agent herdr answered about and did not list is GONE's case, not
+        this one. `herdr_state in IDLE_LIKE` and pointedly not `!= WORKING`, because
+        `unknown` is `signal_drift`'s reading and `blocked` is a person being asked
+        something in the TUI — an agent sitting on a permission prompt is mid-turn, and it
+        is the shape that produces the longest silences of all.
+
+        This is a doubt and not a verdict. It says a reading disagreed once; `_sustained`
+        is what requires the disagreement to hold, and `_forget_turn` is the only thing that
+        acts on it. Herdr's reading is intermittent, so one disagreement must never be
+        enough to move a row — that is the finding this design is built on rather than
+        around.
+        """
+        return (self.state in RUNNING and self.turn == TURN_WORKING
+                and self.alive is True and self.herdr_state in IDLE_LIKE
+                and self.idle >= TURN_STALE_GRACE)
+
+    @property
+    def stall_source(self) -> str:
+        """Which signal said this agent's turn had ended. For the readouts, one phrase."""
+        return ("its turn-end hook fired" if self.turn is not None
+                else f"herdr says {self.herdr_state}")
 
     @property
     def at_prompt(self) -> bool:
@@ -356,9 +523,14 @@ class AgentStatus:
         it. Left out of this predicate it appeared only in the DRIFT block at the bottom
         of a full readout and in `--json`, so `sb status --needs-me` — the filter for
         "what wants me" — was the one view that dropped it.
+
+        `signal_drift` belongs here for exactly the same reason, one step further along:
+        its turn never ended as far as anything can tell, its pane is running no agent,
+        and there is no mechanism at all that will ever touch that row again. See that
+        property for why it is not simply reaped.
         """
         return (self.blocked or self.at_prompt or self.unread > 0
-                or self.waiting_to_be_rung or self.stalled)
+                or self.waiting_to_be_rung or self.stalled or self.signal_drift)
 
     @property
     def archived(self) -> bool:
@@ -393,7 +565,7 @@ class AgentStatus:
 
     def as_dict(self) -> dict:
         d = {f: getattr(self, f) for f in (
-            "name", "role", "parent", "depth", "state", "herdr_state", "alive",
+            "name", "role", "parent", "depth", "state", "herdr_state", "alive", "turn",
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer",
@@ -405,6 +577,8 @@ class AgentStatus:
                  finished=self.finished, needs_human=self.needs_human,
                  waiting_to_be_rung=self.waiting_to_be_rung,
                  ringable=self.ringable,
+                 signal_drift=self.signal_drift,
+                 turn_doubted=self.turn_doubted,
                  archived=self.archived)
         return d
 
@@ -521,6 +695,10 @@ def collect(
     # then degrades to what this file did before it existed, which is documented at
     # `_record_gone`.
     tracks_absence = bool(rows) and "absent_since" in rows[0].keys()
+    # And whether it can remember a doubt about a turn edge. Same defensive read, same
+    # degradation: a store too old for the column simply never repairs a stale edge, which
+    # is the behaviour that shipped before this existed.
+    tracks_doubt = bool(rows) and "turn_doubt_since" in rows[0].keys()
     # Parents with work still out, by exactly the rule the stop gate asks it by
     # (`hooks._has_live_child`: a child row still `working` or `blocked` and not ended).
     # Computed from the rows already in hand rather than re-queried, so this costs nothing
@@ -541,6 +719,7 @@ def collect(
                    if row["parent"] and row["state"] in ("working", "blocked")
                    and row["ended_at"] is None}
     absent_since: dict[str, Optional[int]] = {}
+    doubt_since: dict[str, Optional[int]] = {}
     agents = []
     for row, depth in ordered:
         name = row["name"]
@@ -580,6 +759,8 @@ def collect(
         # the only place that both can write and is running current code.
         if tracks_absence:
             absent_since[name] = row["absent_since"]
+        if tracks_doubt:
+            doubt_since[name] = row["turn_doubt_since"]
         last = max(row["created_at"], activity.get(name, 0))
         # An agent with no session id has never run an `sb` command, so nothing here has
         # ever seen it take a turn — and for `STALL_GRACE` after the last thing that
@@ -587,6 +768,21 @@ def collect(
         # saying anything". Calling that a stall is what pinged a two-second-old agent.
         # Once the session id is there the grace is over for good, whatever the clock says.
         starting = row["session_id"] is None and (now - last) < STALL_GRACE
+        # OUR signal, read defensively for the reason `awaiting_task` is: the board and
+        # the collector reach this on a READ-ONLY connection and cannot migrate a store
+        # older than the column. Missing reads as None, which is exactly what None means
+        # anyway — no turn edge has ever been recorded here — and every predicate below
+        # falls back to herdr for it.
+        turn = row["turn"] if "turn" in row.keys() else None
+        # Whether this agent's turn is OVER. The one question `stalled` and the reconciler
+        # actually ask, answered by our own signal where we have one and by herdr where we
+        # do not. Before the signal existed this line WAS the whole of it, and it is the
+        # line that broke: herdr infers a running turn from Claude's spinner glyphs in the
+        # terminal title, Claude Code 2.1.228 changed them, and every pane on the machine
+        # read idle — so every working agent was stalled, was pinged mid-tool-call, and
+        # had its held mail delivered into the turn it was still running.
+        turn_over = (turn == TURN_IDLE) if turn is not None else (
+            bool(alive) and hstate in IDLE_LIKE)
         agents.append(AgentStatus(
             name=name,
             role=row["role"],
@@ -595,11 +791,19 @@ def collect(
             state=row["state"],
             herdr_state=hstate,
             alive=alive,
-            # The join this file exists for. Both halves must be known: an unreachable
-            # herdr proves nothing, and neither does herdr's `unknown`.
-            # Idle with no excuse left: not awaiting a first task, not still starting,
-            # and with nothing of its own still running. See `live_parent` above.
-            stalled=bool(running and alive and hstate in IDLE_LIKE and not awaiting
+            turn=turn,
+            # The join this file exists for, now with a signal of our own on one side of
+            # it. Idle with no excuse left: its turn is over (`turn_over` above), it is
+            # not awaiting a first task, not still starting, and has nothing of its own
+            # still running. See `live_parent`.
+            #
+            # `alive is not False` rather than `alive`, and the change is deliberate. It
+            # used to require herdr to be reachable AND to be listing the agent, because
+            # herdr was the only thing that could say a turn had ended; with our own
+            # signal, a herdr outage no longer hides a stall. What the guard still does is
+            # keep STALLED and GONE mutually exclusive: an agent herdr answered about and
+            # did not list has no pane to be pinged in, and that row is GONE's to report.
+            stalled=bool(running and turn_over and alive is not False and not awaiting
                          and not starting and name not in live_parent),
             gone=bool(running and alive is False and not spawning),
             unread=unread.get(name, 0),
@@ -629,6 +833,15 @@ def collect(
         if tracks_absence:
             absent = _confirmed_gone(db, absent, absent_since, now)
         _record_gone(db, absent)
+        # The same debounce over a different disagreement, and the reason it is here rather
+        # than anywhere cheaper is the same: this is the one path that both reads herdr and
+        # is allowed to write. A store with nowhere to remember the doubt does nothing,
+        # which is what shipped before the column.
+        if tracks_doubt:
+            _forget_turn(db, _sustained(
+                db, "turn_doubt_since",
+                [a.name for a in agents if a.turn_doubted and a.name not in absent],
+                doubt_since, now, TURN_DOUBT_GRACE))
 
     kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine, tree=tree)
     hidden = len(agents) - len(kept)
@@ -661,22 +874,97 @@ def _confirmed_gone(db: sqlite3.Connection, absent: list[str],
     Every stamp is written and committed here rather than left for `_record_gone`, so a
     command that dies between the two still leaves the absence remembered. Callers MUST be
     in the reap path — this writes.
+
+    The mechanics are `_sustained`, which the stale-turn repair asks the same question of
+    against its own column. One debounce written twice is a debounce whose two copies end up
+    disagreeing about what "continuously" means.
     """
-    absent_set = set(absent)
-    confirmed = [n for n in absent
-                 if since.get(n) is not None and now - since[n] >= GONE_CONFIRM_GRACE]
-    fresh = [n for n in absent if since.get(n) is None]
+    return _sustained(db, "absent_since", absent, since, now, GONE_CONFIRM_GRACE)
+
+
+def _sustained(db: sqlite3.Connection, column: str, flagged: list[str],
+               since: dict[str, Optional[int]], now: int, grace: float) -> list[str]:
+    """Of the rows a reading flagged, the ones it has flagged CONTINUOUSLY for long enough.
+
+    The debounce itself, for both of the disagreements this file remembers between readings:
+    `absent_since` (herdr no longer lists the agent → `_confirmed_gone`) and
+    `turn_doubt_since` (our `working` edge has nothing behind it → `_forget_turn`). Both are
+    a single reading that must not be believed on its own, and both are read by processes
+    that live for one command, so the memory has to be a column.
+
+    Three moves, and the third is the one worth being careful about:
+
+    - flagged, nothing remembered → remember it, return nothing. This is the reading that
+      must never act alone.
+    - flagged, remembered, and continuously so past `grace` → hand it back to be acted on.
+    - not flagged this time → FORGET the earlier reading. Continuously is the word that
+      matters: a row that read clean once in between has not been in trouble the whole time,
+      and accumulating the gaps would confirm something that never happened. For the stale
+      turn this is the entire safety of it — one herdr `working`, or one `sb` command from
+      the agent, and the clock starts again from nothing.
+
+    A confirmed row is cleared too, so the stamp never outlives the verdict it was counting
+    towards.
+
+    Written and committed here rather than left to the caller, so a command that dies
+    between the two still leaves the reading remembered. Callers MUST be in the reap path —
+    this writes.
+    """
+    flagged_set = set(flagged)
+    confirmed = [n for n in flagged
+                 if since.get(n) is not None and now - since[n] >= grace]
+    fresh = [n for n in flagged if since.get(n) is None]
     back = [n for n, first in since.items()
-            if first is not None and n not in absent_set] + confirmed
+            if first is not None and n not in flagged_set] + confirmed
     if fresh:
-        db.executemany("UPDATE agents SET absent_since=? WHERE name=?",
+        db.executemany(f"UPDATE agents SET {column}=? WHERE name=?",
                        [(now, n) for n in fresh])
     if back:
-        db.executemany("UPDATE agents SET absent_since=NULL WHERE name=?",
+        db.executemany(f"UPDATE agents SET {column}=NULL WHERE name=?",
                        [(n,) for n in back])
     if fresh or back:
         db.commit()
     return confirmed
+
+
+def _forget_turn(db: sqlite3.Connection, names: list[str]) -> None:
+    """Drop a `working` edge nothing has stood behind for long enough. The repair.
+
+    What it writes is NULL, and that choice is the whole design. NULL is not a third word
+    and not an invented end: it is the value `agents.turn` already has for a row no hook has
+    ever fired for, and every reader in the package — `collect`'s `turn_over`,
+    `display_state`, `Broker._busy` — already treats it as "we have no signal here, ask
+    herdr", which is precisely how this row behaved before the activity signal existed. So
+    the worst case of being wrong about a live agent is that one row goes back to the
+    behaviour the whole fleet had last week, and it self-corrects at that agent's very next
+    turn edge or `sb` command, both of which write the column again. Nothing is lost, no
+    summary is fabricated, and no end is recorded — the row is still `working` and still its
+    agent's to finish (C9).
+
+    What it buys is everything the wedge took away, and none of it is new machinery: with
+    the edge gone the row is `idle` to the readouts, so it is STALLED and the reconciler
+    pings it; `_busy` reads herdr again, so its held mail is rung; and an agent that is
+    genuinely at its prompt answers that ping, reports, and is sweepable like any other.
+    A permanent wedge becomes a delay of TURN_STALE_GRACE + TURN_DOUBT_GRACE.
+
+    Logged against NO agent with the target in the payload, for `Broker._nudge`'s reason:
+    `_last_activity` counts every event that names an agent, and stamping this one on the
+    row would reset the idle clock of exactly the silent agent it was just written about —
+    both hiding the staleness from the next reading and delaying the stall it exists to
+    surface.
+
+    Callers MUST have consulted herdr and be in the reap path. See `collect`.
+    """
+    if not names:
+        return
+    from . import store                      # local: keeps this module importable alone
+
+    db.executemany("UPDATE agents SET turn=NULL, turn_doubt_since=NULL WHERE name=?",
+                   [(n,) for n in names])
+    db.commit()
+    for name in names:
+        store.log_event(db, kind="turn_forgotten", target=name,
+                        held=int(TURN_STALE_GRACE + TURN_DOUBT_GRACE))
 
 
 def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
@@ -1204,6 +1492,11 @@ def _flags(a: AgentStatus) -> str:
         f.append("<< STALLED")
     if a.gone:
         f.append("<< GONE")
+    if a.signal_drift:
+        # Same class as the two above — the board looks fine and something is silently not
+        # happening — and the one thing OUR signal cannot see for itself. See
+        # `AgentStatus.signal_drift`.
+        f.append("<< NO SESSION")
     if a.waiting_to_be_rung:
         # Flagged beside STALLED and GONE because it is the same class of problem: the
         # board looks fine and something is silently not happening.
@@ -1285,6 +1578,13 @@ def _attention(snap: Snapshot) -> list[str]:
                 out.append(f"  {a.name:<{w}}  stalled {fmt_age(a.idle)} — its turn ended "
                            f"without sb done  →  sb tell {a.name} "
                            f"\"wrap up and run sb done\"")
+            elif a.signal_drift:
+                # A different sentence from STALLED on purpose: that agent is there and
+                # not answering, this one's session is gone from a pane that is still
+                # open, so telling it anything reaches nobody. See `signal_drift`.
+                out.append(f"  {a.name:<{w}}  its session is gone but its turn never "
+                           f"ended — no hook can end it now"
+                           f"  →  sb inspect {a.name}, then sb restore {a.name}")
             else:
                 out.append(f"  {a.name:<{w}}  {a.unread} unread, not picked up"
                            f"  →  sb inspect {a.name}")
@@ -1317,7 +1617,7 @@ def _attention(snap: Snapshot) -> list[str]:
             out.append(f"  {'':<{w}}  →  for a blocked one, when the human answers: "
                        f"sb tell <name> \"...\"")
 
-    drift = [a for a in snap.agents if a.stalled or a.gone]
+    drift = [a for a in snap.agents if a.stalled or a.gone or a.signal_drift]
     if drift:
         w = max(len(a.name) for a in drift)
         out.append("")
@@ -1330,9 +1630,16 @@ def _attention(snap: Snapshot) -> list[str]:
         out.append("its pane is still there, and marking it done here would invent a")
         out.append("summary its parent never received.")
         for a in drift:
-            what = (f"GONE     no longer in herdr — its pane closed under it"
-                    if a.gone else
-                    f"STALLED  herdr says {a.herdr_state} — turn ended, `sb done` never called")
+            if a.gone:
+                what = "GONE     no longer in herdr — its pane closed under it"
+            elif a.signal_drift:
+                # The one row here our own signal did NOT find: it still says the turn is
+                # running, and herdr's independent look at the pane is what contradicts it.
+                what = ("NO SESSION  our signal still says working, but herdr sees no "
+                        "agent in that pane — the session died mid-turn")
+            else:
+                what = (f"STALLED  {a.stall_source} — turn ended, "
+                        f"`sb done` never called")
             out.append(f"  {a.name:<{w}}  {what}, quiet {fmt_age(a.idle)}")
         out.append(f"  {'':<{w}}  →  sb inspect <name>, then: "
                    f"sb tell <name> \"wrap up and run sb done\"")
@@ -1492,7 +1799,11 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
     head += f"  child of {a.parent}" if a.parent else "  (top level)"
     out.append(head)
     out.append(f"  task       {clip(a.task, 200) if a.task else '(none recorded)'}")
-    out.append(f"  state      {a.state}   herdr: {_herdr_cell(a)}{_flags(a)}")
+    # Both signals, side by side and labelled, because this is the one readout where the
+    # question "which of them said that?" is worth a column: `turn` is ours (the hooks in
+    # `hooks.py`), `herdr` is the pane's screen. `-` for a row no hook has fired for.
+    out.append(f"  state      {a.state}   turn: {a.turn or '-'}   "
+               f"herdr: {_herdr_cell(a)}{_flags(a)}")
     if a.blocked and a.blocked_why:
         out.append(f"  blocked    {a.blocked_why}")
     out.append(f"  age        {fmt_age(a.age)}   idle {fmt_age(a.idle)}")

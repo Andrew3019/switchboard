@@ -795,6 +795,22 @@ class BrokerTest(unittest.TestCase):
         self.b.tell(["kid"], "use main", me=HUMAN)          # the answer still lands
         self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
 
+    def test_hold_until_free_runs_on_our_own_signal_not_the_screen(self):
+        """Hold-until-free, with herdr reading exactly as it does today: idle for a pane
+        that is mid-tool-call. That reading alone delivered held mail into a running turn
+        (`audit/status-ground-truth.md`); `agents.turn` is the fact that stops it, and the
+        ring is released by the turn's own end rather than by anything on screen."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "idle"}              # herdr's broken reading
+        store.set_turn(self.db, "w", store.TURN_WORKING)   # what the hooks recorded
+        self.b.tell(["w"], "not urgent", me=HUMAN, mode=WHEN_IDLE)
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(len(store.undelivered(self.db)), 1)
+
+        store.set_turn(self.db, "w", store.TURN_IDLE)      # its `Stop` hook fired
+        self.assertEqual(self.b.flush_pending(), ["w"])
+        self.assertEqual(store.undelivered(self.db), [])
+
     def test_pending_mail_is_rung_once_the_target_goes_idle(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
