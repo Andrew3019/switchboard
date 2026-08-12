@@ -8,11 +8,11 @@ measurement and the wrong theories are the useful part.
 
 | # | Bug | Status |
 |---|---|---|
-| 1 | `Broker._adopt` races on `agents.name` | **FIXED** — 60/60 clean, was 2/25 failing |
+| 1 | `Broker._adopt` races on `agents.name` | **FIXED**, and the code is now DELETED — see the postscript |
 | 2 | `Herdr.wait` sends `--until idle,blocked` | **FIXED** in the adapter, not just around it |
 | 3 | `Herdr.wait` spins at 100% CPU | **FIXED** in the adapter, not just around it |
 | 4 | A schema change deadlocks every running agent | **FIXED** — the deadlock, and the wipe that adding a table used to cost |
-| 5 | `sb wait` returns success while still working | **NOT REPRODUCIBLE** — property pinned by tests |
+| 5 | `sb wait` returns success while still working | **NOT REPRODUCIBLE**, and the verb is now DELETED — see the postscript |
 
 ---
 
@@ -442,6 +442,13 @@ What is not a guess is that the property had no test. Two now exist
 `…_reports_failure_rather_than_success_on_a_failed_agent`), including the adversarial case
 where herdr transitions repeatedly while the store never moves. **If this recurs, it is a
 new bug and these tests will have something to say about where.**
+
+**Postscript, 2026-08-11.** The command this entry is about no longer exists: `sb wait`
+went in phase 3 — no agent waits on another agent — and `status.wait_for` and
+`status._next_transition` went with it. Nothing can recur, and the two tests named above
+are gone too. `Herdr.wait` survives (entries 2 and 3 are about it and are still live
+code); what is deleted is the verb that called it and the `--for done` store-state wait
+this entry describes.
 
 ---
 

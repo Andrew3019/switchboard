@@ -1653,9 +1653,8 @@ def _attention(snap: Snapshot) -> list[str]:
 # `sb status` answers "what is the board doing". This answers the next question, the one
 # that used to need hand-written python against the store: "what is going on with THIS
 # agent". It is the same join, plus the four things that only matter once you have picked
-# an agent — where it lives (workspace, pane, cwd, session, transcript), what is owed to
-# it or by it (mail, and any ask nobody has answered), what it last said, and what its
-# terminal actually printed.
+# an agent — where it lives (workspace, pane, cwd, session, transcript), what mail is owed
+# to it, what it last said, and what its terminal actually printed.
 #
 # The terminal tail comes from output.py unchanged — the reader that falls back from a
 # live pane to the on-disk transcript. That fallback is why this stays useful on an agent
@@ -1683,11 +1682,13 @@ class Detail:
     # module note gives: this agent has no way to know these exist, so they are not mail
     # it ignored.
     undelivered: list[dict] = field(default_factory=list)
-    # Asks with no reply, in both directions. Kept apart because they mean opposite
-    # things: one is somebody stuck on this agent, the other is this agent stuck on
-    # somebody. A single "pending" list would need the reader to work out which.
-    owed: list[dict] = field(default_factory=list)      # asks TO it, unanswered
-    waiting_on: list[dict] = field(default_factory=list)  # asks BY it, unanswered
+    # There were two more lists here — unanswered asks in each direction. They went with
+    # `sb ask`: no agent waits on another agent, so nothing has written `kind='ask'` since
+    # phase 3 and neither panel could fire for a row made after it. Old rows in a live
+    # store still carry that kind, and they are deliberately NOT given a panel of their
+    # own: the panel's whole content was an action ("X is blocked until you answer") that
+    # is false of every one of them, since nothing is blocked on an ask any more. They
+    # still show as ordinary mail in `unread` / `undelivered`, which is what they are.
     events: list[dict] = field(default_factory=list)
     output: Any = None                                  # output.Output, or None
 
@@ -1702,7 +1703,6 @@ class Detail:
             pane_id=self.pane_id, terminal_id=self.terminal_id, cwd=self.cwd,
             session_id=self.session_id, transcript=self.transcript,
             unread_mail=self.unread, undelivered_mail=self.undelivered,
-            owed=self.owed, waiting_on=self.waiting_on,
             events=self.events,
             output=({"source": self.output.source, "detail": self.output.detail,
                      "path": self.output.path, "text": self.output.text}
@@ -1750,8 +1750,6 @@ def inspect(
             "SELECT * FROM messages WHERE to_agent=? AND delivered_at IS NULL "
             "AND read_at IS NULL ORDER BY id",
             (name,))],
-        owed=[_msg(m) for m in _unanswered(db, name, mine=False)],
-        waiting_on=[_msg(m) for m in _unanswered(db, name, mine=True)],
         # Read BEFORE the output, so this call's own `read_output` event is not the first
         # thing an inspect reports back to you.
         events=[{"id": r["id"], "kind": r["kind"], "at": r["created_at"],
@@ -1761,24 +1759,6 @@ def inspect(
     if h is not None and lines:
         d.output = output_mod.read_output(db, h, name, lines=lines)
     return d
-
-
-def _unanswered(db: sqlite3.Connection, name: str, *, mine: bool) -> list:
-    """Asks with nothing pointing back at them.
-
-    Deliberately not restricted to *unread* asks: the one worth surfacing is the ask the
-    agent has already read and still not answered, because that is the one that looks
-    handled and is not. Same NOT EXISTS correlation `store.pending_ask` uses — a plain
-    `tell` answers an ask, so a reply is a row whose `reply_to` names it.
-    """
-    col = "from_agent" if mine else "to_agent"
-    return db.execute(
-        f"""SELECT m.* FROM messages m
-            WHERE m.{col}=? AND m.kind='ask'
-              AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)
-            ORDER BY m.id""",
-        (name,),
-    ).fetchall()
 
 
 def _msg(m) -> dict:
@@ -1811,25 +1791,6 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
     out.append(f"  cwd        {d.cwd or '-'}")
     out.append(f"  pane       {d.pane_id or '-'}   session {d.session_id or '-'}")
     out.append(f"  transcript {d.transcript or '-'}")
-
-    for m in d.owed:
-        out.append("")
-        out.append(f"UNANSWERED ASK from {m['from']} "
-                   f"({fmt_age(max(0, now - m['at']))} ago, "
-                   f"{'read' if m['read'] else 'not even read'})")
-        out.append(f"  {clip(m['body'], 200)}")
-        # Not `sb tell <asker>`: a reply only answers an ask when it runs the other way
-        # (see store.pending_ask), so answering on this agent's behalf is not a thing a
-        # third party can do. The action is to get THIS agent moving.
-        out.append(f"  →  {m['from']} is blocked until {a.name} answers: "
-                   f"sb tell {a.name} \"answer {m['from']}: ...\"")
-
-    if d.waiting_on:
-        out.append("")
-        out.append("IT IS WAITING ON")
-        for m in d.waiting_on:
-            out.append(f"  {m['to']:<12} {clip(m['body'], 90)}  "
-                       f"({fmt_age(max(0, now - m['at']))} ago)")
 
     if d.undelivered:
         out.append("")

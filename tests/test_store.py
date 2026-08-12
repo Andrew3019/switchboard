@@ -107,20 +107,13 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.put_message(self.db, from_agent="a", to_agent="b", kind="shout", body="x")
 
-    def test_pending_ask_correlation(self):
-        """A plain `tell` answers an `ask`; correlation is the tool's job, not the agent's."""
-        ask = store.put_message(self.db, from_agent="p", to_agent="c", kind="ask", body="q?")
-        self.assertEqual(store.pending_ask(self.db, asker="p", target="c")["id"], ask)
-
-        store.put_message(self.db, from_agent="c", to_agent="p", kind="tell",
-                          body="a!", reply_to=ask)
-        self.assertIsNone(store.pending_ask(self.db, asker="p", target="c"))
-        self.assertEqual(store.reply_to_ask(self.db, ask)["body"], "a!")
-
-    def test_pending_ask_picks_most_recent(self):
-        store.put_message(self.db, from_agent="p", to_agent="c", kind="ask", body="q1")
-        second = store.put_message(self.db, from_agent="p", to_agent="c", kind="ask", body="q2")
-        self.assertEqual(store.pending_ask(self.db, asker="p", target="c")["id"], second)
+    def test_the_ask_correlation_helpers_are_gone(self):
+        """`sb ask` is deleted, so nothing writes `kind='ask'` and nothing may grow a
+        reader for it again. An OLD row still reads back as ordinary mail."""
+        self.assertFalse(hasattr(store, "pending_ask"))
+        self.assertFalse(hasattr(store, "reply_to_ask"))
+        store.put_message(self.db, from_agent="p", to_agent="c", kind="ask", body="q?")
+        self.assertEqual(store.unread_for(self.db, "c")[0]["body"], "q?")
 
     # -- events ----------------------------------------------------------
 

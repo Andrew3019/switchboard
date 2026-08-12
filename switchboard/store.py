@@ -1565,25 +1565,10 @@ def get_message(db: sqlite3.Connection, mid: int) -> Optional[sqlite3.Row]:
     return db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
 
 
-def pending_ask(db: sqlite3.Connection, *, asker: str, target: str) -> Optional[sqlite3.Row]:
-    """The most recent unanswered `ask` from `asker` to `target`.
-
-    This is what lets a plain `tell` satisfy a blocking `ask` — correlation is the tool's
-    job, never the agent's (P0), which is why there is no `reply` verb.
-    """
-    return db.execute(
-        """SELECT m.* FROM messages m
-           WHERE m.from_agent=? AND m.to_agent=? AND m.kind='ask'
-             AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)
-           ORDER BY m.id DESC LIMIT 1""",
-        (asker, target),
-    ).fetchone()
-
-
-def reply_to_ask(db: sqlite3.Connection, ask_id: int) -> Optional[sqlite3.Row]:
-    return db.execute(
-        "SELECT * FROM messages WHERE reply_to=? ORDER BY id LIMIT 1", (ask_id,)
-    ).fetchone()
+# `pending_ask` and `reply_to_ask` were here — the correlation that let a plain `tell`
+# satisfy a blocking `ask`. They went with `sb ask`: nothing has written `kind='ask'` since
+# it was deleted, so both could only ever answer about rows older than that. `reply_to` and
+# the kind itself stay in the schema, because rows in a live store still carry them.
 
 
 # ---------------------------------------------------------------------------

@@ -44,7 +44,9 @@ work is judged on. Prove a fix in the smallest run that can tell fixed from brok
 
 - Isolate with `git clone` of this repo into a scratch directory — a clone gets its own
   state automatically, via git's common dir. Check out your branch there and drive that
-  clone's own `./bin/sb`. Agents you spawn there are invisible to the live fleet.
+  clone's own `./bin/sb`. Agents you spawn there are invisible to the live fleet's STORE,
+  not to herdr: herdr is machine-global, so they do appear in Andrew's spaces UI and you
+  must still tear them down.
 - Never run a clone's `sb` from outside the clone; that silently touches the live store.
 - No endurance testing unless the bug itself is endurance. Rare and slow-burn faults are
   accepted; they will surface in real use.

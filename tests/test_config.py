@@ -423,6 +423,16 @@ class NothingLeftInPythonTest(unittest.TestCase):
             with self.subTest(setting=key):
                 self.assertEqual(value, config.setting(key))
 
+    def test_inspect_shows_the_tail_the_record_asks_for(self):
+        """DESIGN-TRUTH: `sb inspect` "should show more tail — like 100 lines". It had
+        drifted to 40. All three readers take the one setting, so a bump anywhere else is
+        a second number that can disagree with this one."""
+        from switchboard import herdr, output, status
+        self.assertEqual(config.setting("display.output_lines"), 100)
+        self.assertEqual(status.DEFAULT_LINES, 100)
+        self.assertEqual(output.DEFAULT_LINES, 100)
+        self.assertEqual(herdr.READ_LINES, 100)
+
     def test_the_vocabulary_comes_from_settings(self):
         from switchboard import broker
         self.assertEqual(broker.HUMAN, config.setting("vocabulary.human"))

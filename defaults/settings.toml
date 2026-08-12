@@ -365,7 +365,13 @@ pin_attempts = 2
 # Defaults for the readouts. All of them are overridable per invocation by a flag.
 
 # Lines of terminal output `sb inspect` shows.
-output_lines = 40
+#
+# 100 because that is what the record asks for: `sb inspect` is how Andrew reads a blocked
+# agent's full message, "and it should show more tail — like 100 lines" (DESIGN-TRUTH.md).
+# It had drifted to 40, which is half a message. The same number is the default tail every
+# pane read takes (`herdr.READ_LINES`), and that is deliberate: the tail exists to be read
+# here, so one number is one decision rather than two that can disagree.
+output_lines = 100
 
 # Recent events `sb inspect` includes.
 events = 12

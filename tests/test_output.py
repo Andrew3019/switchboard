@@ -35,7 +35,7 @@ class FakePaneReader:
         self.text, self.error = text, error
         self.reads: list[tuple[str, int]] = []
 
-    def read_pane(self, pane_id: str, *, lines: int = 40) -> str:
+    def read_pane(self, pane_id: str, *, lines: int = 100) -> str:
         self.reads.append((pane_id, lines))
         if self.error:
             raise self.error
@@ -96,7 +96,7 @@ class LivePaneTest(OutputTestBase):
         out = self.read(herdr=h)
         self.assertEqual(out.source, PANE)
         self.assertIn("boom", out.text)
-        self.assertEqual(h.reads, [("w1:p9", 40)])   # name -> pane is the tool's job
+        self.assertEqual(h.reads, [("w1:p9", 100)])   # name -> pane is the tool's job
 
     def test_unknown_agent_is_loud(self):
         with self.assertRaises(KeyError):
