@@ -425,6 +425,55 @@ class StatusTest(unittest.TestCase):
         self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="w1")],
                          ["gone"])
 
+    def test_a_failure_puts_one_message_in_the_parents_mailbox(self):
+        """DESIGN-TRUTH's "telling the parent that it has failed", and Andrew's ruling that
+        it must act the way `sb done` does. The row on the board was passive: a parent that
+        ended its turn to wait for a poke never looks at a board. So the failure is a
+        `messages` row, undelivered, which is the same thing a `done` leaves behind for
+        `flush_pending` to ring when the parent is free.
+
+        It names the child and what it was doing — a bare "an agent failed" makes the
+        parent go digging — and it is NOT a `done`, so nothing is attributed to an agent
+        that never reported: `AgentStatus.summary` reads `done` rows only.
+        """
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", task="rewrite the parser")
+        self.confirm_gone(FakeHerdr([alive("lead")]))
+
+        [m] = store.unread_for(self.db, "lead", mark=False)
+        self.assertEqual((m["kind"], m["from_agent"]), ("failed", "w1"))
+        self.assertIsNone(m["delivered_at"])             # `flush_pending`'s work list
+        self.assertIn("w1", m["body"])
+        self.assertIn("rewrite the parser", m["body"])
+        self.assertEqual(len(m["body"].splitlines()), 1)  # a notification, not a report
+        self.assertIsNone(self.by_name(status.collect(self.db, FakeHerdr([alive("lead")])))
+                          ["w1"].summary)
+
+    def test_a_failure_pings_once_however_often_the_row_is_read(self):
+        """The row stays `failed` forever and every `sb status` reads it again. Once-only
+        is the state transition, not a memory: the UPDATE is conditional on the row still
+        being RUNNING, and only a row it actually changed gets a message."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", task="rewrite the parser")
+        h = FakeHerdr([alive("lead")])
+        self.confirm_gone(h)
+        for _ in range(3):
+            status.collect(self.db, h)
+        self.assertEqual(len(store.unread_for(self.db, "lead", mark=False)), 1)
+        self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="w1")],
+                         ["gone"])
+
+    def test_a_root_that_dies_pings_nobody_and_raises_nothing(self):
+        """No parent, and the human has no mailbox — so the failure stays a row and an
+        event, exactly as it was before the ping existed. The one case a person still has
+        to see on the board."""
+        store.create_agent(self.db, name="top", role="orchestrator", session_id="s1")
+        self.confirm_gone()
+        self.assertEqual(self.row("top")["state"], status.GONE_STATE)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+
     # -- the spawn grace: a claim is not evidence of a live agent ----------
 
     def test_a_fresh_session_less_row_is_a_claim_and_is_not_reaped(self):

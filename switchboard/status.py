@@ -990,6 +990,51 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     the behaviour that shipped before the column, and the reason it is that way round is
     that a row nothing can ever record as gone is a row `sb cleanup` can never reach.
 
+    **The parent is TOLD, and told the way a `done` tells it** (DESIGN-TRUTH.md: "we
+    should detect failures, and can start with just telling the parent that it has
+    failed"; Andrew: "needs to act same way as sb done. pings the parent when idle").
+    Recording the row was passive — the failure was on the board, and only an agent
+    already looking at the board learned of it, which for a parent that has ended its turn
+    to wait for a poke is never. So a row written here also puts a message in the parent's
+    mailbox, and that single message is the whole mechanism: it is a `messages` row with
+    `delivered_at` NULL, exactly like the one `Broker.done` writes, so
+    `Broker.flush_pending` — the thing that already rings a `done`'s deferred doorbell —
+    picks it up on the next `sb` command anyone runs and the collector's own `sb flush`
+    guarantees one within the tick. `_ring`'s when-idle guards then apply unchanged and
+    unduplicated: a parent mid-turn is not rung (`ring_deferred`), a BLOCKED parent is not
+    rung at all until its block is answered (`ring_held`), so a human's reply is never
+    buried under this. Nothing here rings anything itself, and that is deliberate — this
+    runs on a read path in whatever process happened to call `collect`, and a second
+    delivery mechanism is a second set of rules to keep in step with the first.
+
+    **Exactly once per failure, decided by the state column and not by a memory.** The
+    UPDATE is conditional on the row still being RUNNING and the message is written only
+    if it changed a row, so the transition — not the reading — is what pings. A row that
+    is already `failed` matches nothing, which is why every later `collect` that sees the
+    same dead agent is silent (`gone` needs `state in RUNNING` too, so such a row does not
+    even reach here). Both writes ride the same connection with one commit, so a process
+    that dies mid-way leaves neither the state nor the ping. And a second `sb` racing the
+    first loses the UPDATE rather than the message: SQLite serialises them, and the loser
+    matches zero rows.
+
+    The conditional UPDATE also stops something that was never intended: a row that
+    reported `done` in the gap between the herdr reading and this write is no longer
+    overwritten with `failed`. That is `broker._took_a_turn`'s rule, in the one place that
+    was still able to break it.
+
+    **The message invents nothing**, which is the point of it being a new kind rather than
+    a `done`: `status`'s summaries come from `kind='done'` rows, so a failure can never be
+    read back as something the agent said. It carries what we observed and what the row
+    already knew it was doing — a bare "an agent failed" makes the parent go digging — and
+    stops there. It is a notification, not a report.
+
+    **A parent that is itself gone costs nothing.** The row is written either way and no
+    delivery is attempted here, so nothing can raise; `flush_pending` finds the parent
+    finished-and-unreachable and writes the mail off through `_clear_unreadable_mail`,
+    which is the same path a `done` to a dead parent already takes. A ROOT agent has no
+    parent and the human has no mailbox, so its failure stays a row and an event — as it
+    was before this — and is the one case a person still has to see on the board.
+
     Callers MUST have consulted herdr. See `collect`.
     """
     if not names:
@@ -997,14 +1042,50 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     from . import store                      # local: keeps this module importable alone
 
     ts = store.now()
-    db.executemany(
-        f"UPDATE agents SET state='{GONE_STATE}', ended_at=COALESCE(ended_at, ?) "
-        f"WHERE name=?", [(ts, n) for n in names])
-    db.commit()
+    running = ",".join("?" * len(RUNNING))
     for name in names:
+        # Read BEFORE the write, because the write is what makes it `failed`: the parent
+        # and the task are what the message is made of.
+        row = store.get_agent(db, name)
+        changed = db.execute(
+            f"UPDATE agents SET state=?, ended_at=COALESCE(ended_at, ?) "
+            f"WHERE name=? AND state IN ({running})",
+            (GONE_STATE, ts, name, *RUNNING)).rowcount
+        if not changed:
+            db.commit()                  # nothing of ours to keep; do not hold the lock
+            continue
+        parent = row["parent"] if row else None
+        if parent:
+            # Same connection, so this call's own commit is what makes the state change
+            # durable too — the failure and the ping land together or not at all. Its
+            # `awaiting_task=0` on the parent is a side effect and a true one: an agent
+            # that has been told a child of its died has been given something, and an
+            # agent still awaiting its first instruction has no children to lose.
+            store.put_message(db, from_agent=name, to_agent=parent, kind="failed",
+                              body=_failure_note(name, row["task"]))
+        else:
+            db.commit()
         # The distinction the state column does not carry: this end was observed, not
-        # reported. See GONE_STATE.
-        store.log_event(db, kind="gone", agent=name, state=GONE_STATE)
+        # reported. See GONE_STATE. `told` is who the ping was written for, so the log
+        # says whether anybody was reachable at all.
+        store.log_event(db, kind="gone", agent=name, state=GONE_STATE, told=parent)
+
+
+def _failure_note(name: str, task: Optional[str]) -> str:
+    """The line a parent reads in `sb inbox` when a child of its died.
+
+    Written here rather than in `prompts.toml` for the reason every other sentence this
+    module composes is (`_drift` and its neighbours): `collect` is reached with no repo in
+    hand, so a prompts key would be one no repo could actually override — and this is not a
+    doorbell text but the content of a stored message, which `sb inspect` and `sb log`
+    replay verbatim long afterwards.
+
+    Both facts and no more: which child, and what it was doing. The task is clipped to the
+    width the board already clips it to, so the notification stays one line.
+    """
+    return (f"[failed] {name} stopped without reporting and its pane is gone, so nothing "
+            f"more is coming from it. "
+            + (f"It was: {clip(task)}" if task else "No task was ever recorded for it."))
 
 
 def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:

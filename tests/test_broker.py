@@ -840,6 +840,39 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
                          ["[done] shipped it"])
 
+    def test_a_dead_childs_ping_waits_for_a_busy_parent_and_for_a_blocked_one(self):
+        """A failure travels the same rails as a `done`, so it inherits both holds without
+        a line of its own: `status._record_gone` writes the message, `flush_pending` rings
+        it, and `_ring`'s when-idle guards decide when. Mid-turn is held; BLOCKED is held
+        too, because a blocked parent has stopped waiting on a person and a ring would
+        cancel that and bury the answer underneath it.
+        """
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1",
+                           session_id="s1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2", session_id="s2", task="rewrite the parser")
+        self.h.states_by_name = {"lead": "working"}                # kid's pane is gone
+        later = store.now() + int(status.GONE_CONFIRM_GRACE) + 1
+        status.collect(self.db, self.h)
+        status.collect(self.db, self.h, now=later)                 # the death is recorded
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
+
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), [])               # held: lead is mid-turn
+        self.assertEqual(self.h.prompts, [])
+
+        self.b.block("which branch?", me="lead")                   # it stops to ask a person
+        self.h.states_by_name = {"lead": "idle"}                   # its turn HAS ended
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), [])               # still held: not idle
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
+
+        self.b.tell(["lead"], "use main", me=HUMAN)                # the answer arrives
+        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
+        bodies = [m["body"] for m in self.b.inbox(me="lead")]
+        self.assertIn("rewrite the parser", bodies[0])
+        self.assertTrue(bodies[0].startswith("[failed] kid "), bodies[0])
+
     def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
         """A ring says "you have mail" — to an agent that has already got it, that is a
         whole turn spent discovering an empty inbox (C0).
