@@ -8,16 +8,27 @@ Built 2026-08-11 on branch `activity-signal`. The measurements it is built on ar
 
 Switchboard had no signal of its own for "is this agent working?". It asked herdr, which
 infers it by matching Claude's spinner glyphs in the terminal title — and Claude Code
-2.1.228 changed those glyphs, so herdr reported **idle** for every pane on the machine,
-including agents provably mid-tool-call. Hold-until-free delivery stopped holding, the
-reconciler pinged working agents, and the board said `idle` about agents that were running
-tool calls. Now switchboard records the fact itself, from Claude Code's own hooks:
+2.1.228 changed those glyphs, so herdr began reporting **idle** for panes that were
+provably mid-tool-call. Hold-until-free delivery stopped holding, the reconciler pinged
+working agents, and the board said `idle` about agents that were running tool calls. Now
+switchboard records the fact itself, from Claude Code's own hooks:
 
     UserPromptSubmit  ->  agents.turn = 'working'      a turn began
     Stop              ->  agents.turn = 'idle'         a turn ended
 
 `status.py` and `Broker._busy` read that first and herdr second. A row with no signal of
 ours behaves exactly as it did before.
+
+**Correction, and it changes how this whole document should be read.** An independent
+verifier (`audit/activity-signal-verification.md`) found that herdr's detector is
+**intermittent, not dead**: on the same machine minutes apart it called one agent
+mid-foreground-call `idle` and another one `working`. The sentence this document originally
+opened with — "herdr reported idle for every pane on the machine" — is too strong as a
+present-tense statement and has been struck above. The conclusion is unchanged, and if
+anything it is firmer: a busy detector that is right *sometimes* is a worse thing to gate
+mail delivery and the reconciler on than one that is never right, because its failures are
+invisible. Where the intermittency does earn its keep is as a cross-check, and the stale-edge
+repair below is built on exactly it.
 
 ## Why the edges, and not the two designs that were briefed
 
@@ -43,13 +54,13 @@ agent we spawn, so the idle edge is one extra `UPDATE` inside a process already 
 
 | file | change |
 |---|---|
-| `store.py` | `agents.turn` (TEXT, NULL-able), `store.set_turn`, `TURN_WORKING`/`TURN_IDLE` from `[states]` |
+| `store.py` | `agents.turn` (TEXT, NULL-able), `agents.turn_doubt_since`, `store.set_turn`, `TURN_WORKING`/`TURN_IDLE` from `[states]` |
 | `hooks.py` | `UserPromptSubmit` added to the same per-spawn settings file; `mark_turn`; `run()` writes idle **after** the gate decides |
 | `bin/sb-activity-hook` | new entry point, prints nothing on stdout, ever |
-| `status.py` | `turn` on `AgentStatus`; `display_state` and `stalled` read ours first; `signal_drift`; readouts |
+| `status.py` | `turn` on `AgentStatus`; `display_state` and `stalled` read ours first; `signal_drift`; `turn_doubted` and `_forget_turn`, on `_confirmed_gone`'s debounce factored out as `_sustained`; readouts |
 | `broker.py` | `_busy` reads ours first; `restore` clears the signal; `_revive` sets it |
 | `board.py` | one note and one glyph branch for `signal_drift` |
-| `defaults/settings.toml` | `states.turn_working` / `states.turn_idle` |
+| `defaults/settings.toml` | `states.turn_working` / `states.turn_idle`; `timeouts.turn_stale_grace` / `timeouts.turn_doubt_grace` |
 
 Coverage is exactly the Stop gate's, because it is the same settings file:
 `herdr.start_agent` hands `--settings` to every spawn and every restore, and to nothing
@@ -110,9 +121,78 @@ the fleet would ever move that row. Two things catch it:
    end here would be the same lie as fabricating a summary.
 
 Deliberately NOT drift: our `working` against herdr's *idle*. That is what a live agent
-mid-tool-call reads as today, so it would fire on every working agent in the fleet. When
-herdr's detector is fixed it becomes the stronger cross-check; it is a one-line change and
-it should not be made until then.
+mid-tool-call reads as today, so it would fire on every working agent in the fleet.
+
+**Neither of those two catches the case that actually matters, and that is the correction
+this document most needed.** A dead *session* is what they cover. The far more ordinary
+failure is a live session whose `Stop` hook simply never wrote — and there the pane is a
+perfectly healthy Claude sitting at its prompt, so `gone` is false (herdr lists it) and
+`signal_drift` is false (herdr says `idle`, not `unknown`). The verifier built that case
+live and confirmed both cross-checks miss it (`audit/activity-signal-verification.md` §7).
+What it costs is not one line on a board: the row says `working` for good, so the reconciler
+never pings it, `sb cleanup` refuses it, and its held mail is never rung. Three ordinary
+paths reach it and all three are silent — `store.set_turn` swallows `sqlite3
+.OperationalError`, which includes *database is locked* once the busy timeout is exhausted;
+`hooks.run` catches every exception and returns `{}`; and the `Stop` hook entry carries
+`"timeout": 10`, and a hook that times out fails open.
+
+That is what "our `working` against herdr's idle" is for after all — not as a drift flag,
+which would light up the whole fleet, but as a slow, corroborated **doubt**. See the next
+section.
+
+### The repair: a stale `working` edge is doubted, then dropped
+
+An edge is a fact with an age, and past a point it stops being evidence. Two windows, and
+the split between them is the design:
+
+| | what it asks | shipped |
+|---|---|---|
+| `turn_stale_grace` | has this row had NO event of its own for this long? | 30 min |
+| `turn_doubt_grace` | and has herdr said "no turn in that pane" at EVERY reading since? | 15 min |
+
+Past both, `status._forget_turn` sets `agents.turn` back to **NULL** — and NULL, not `idle`,
+is the whole of why this is safe. NULL is the value a row with no signal has always held;
+every reader in the package already treats it as "we have no signal here, ask herdr", which
+is exactly how the row behaved before the activity signal existed. So being wrong about a
+live agent costs that one row a week-old behaviour for one turn, and it self-corrects at the
+agent's very next turn edge or `sb` command, both of which write the column again. Nothing
+is lost, no summary is fabricated, no end is recorded: `state` is untouched and the row is
+still its agent's to finish.
+
+**The bound is not the rejected timeout.** The timestamp design was rejected because it
+forces you to pick an N that tells a long tool call from a finished turn, and no such N
+exists. This N decides nothing on its own; it only says when a row is worth asking herdr
+about. It is still set clear of the numbers that killed the other design: 2.18 % of this
+repo's tool calls run past 72 s and the longest ran 18 min, and measured across 406 real
+agent sessions here, the longest a live agent goes *inside one turn* without running an `sb`
+command is **20.6 min at the 99th percentile** (median 14 s, p90 3.4 min). 30 min clears
+both. The tail goes to 139 min at the 99.9th, which is precisely why the first window is not
+allowed to decide.
+
+**What decides is the second window, and it works because herdr is intermittent rather than
+dead.** A genuinely working agent reads `working` to herdr sooner or later — the verifier saw
+it do so — and ONE such reading anywhere in the 15 minutes clears the doubt and starts the
+clock from nothing. So does one `sb` command from the agent, which resets the staleness half.
+An agent that is quiet because its turn really ended produces neither, ever. A single
+disagreement can never move a row: the memory is a column (`agents.turn_doubt_since`) and the
+debounce is `_confirmed_gone`'s, factored out rather than written twice.
+
+Deliberately narrow, and each exclusion is load-bearing:
+
+- `alive is True` — a herdr outage observed nothing, and an agent herdr answered about and
+  did not list is `gone`'s case.
+- `herdr_state in IDLE_LIKE` and not `!= working` — `unknown` is `signal_drift`'s reading
+  (a pane with no agent in it has nothing to be pinged back to life), and `blocked` is a
+  person being asked something in the TUI, which is mid-turn and produces the longest
+  silences there are.
+- Only on the reap path, so a read-only reader — the board, the collector — never repairs.
+  Same property `gone` already has: with nothing looking, the row sits. Any `sb status` or
+  `sb inspect` is enough to move it.
+
+The wedge becomes a delay of at most 45 minutes, and everything that was unreachable is
+reachable again with no new machinery: the row is STALLED, so the reconciler pings it; the
+doorbell reads herdr again, so held mail is rung; and an agent that answers reports and is
+swept like any other.
 
 ## Live proof
 
@@ -207,6 +287,121 @@ herdr's pane exits with the process, so the crash showed up as an absence and th
 left on that row is inert: every reader gates on `state in RUNNING` first, and
 `flush_pending` checks `_finished_and_unreachable` before it asks `_busy` anything.
 
+## The stale edge, live — the wedge, and the same case repairing
+
+Two isolated `git clone`s of this repo, each driven only through **its own** `./bin/sb`,
+real herdr 0.8.0 and real Claude Code. `clone2` on `activity-signal` (the code as it stood),
+`clone` on this branch. Both agents were given one task — a single 150-second foreground
+`sleep`, then stop, and **run no `sb` command at all** — and in both the store was made
+unopenable (`chmod 000 state.db*`) across the moment their turn ended, which is the
+verifier's construction (`audit/activity-signal-verification.md` §7). Unix seconds are out of
+the store and `date +%s`. Everything was torn down; no unscoped `pkill`, and no process was
+killed at all.
+
+### The wedge, unfixed (`clone2`, branch `activity-signal`)
+
+`turn_start` at 1786496557, sealed 1786496617, unsealed 1786496787. The `Stop` hook fired
+inside that window and failed open in both halves: no `turn_end`, no `stop_gate_blocked`.
+
+```
+AGENT   ROLE          STATE     HERDR    MAIL     AGE    IDLE  WORKSPACE
+vstuck  orchestrator  working   idle        -      4m      3m  vstuck
+
+{'state':'working','turn':'working','herdr_state':'idle','stalled':False,
+ 'gone':False,'signal_drift':False,'display_state':'working','idle':239}
+
+sent to vstuck (vstuck mid-turn or blocked — will be rung when free)
+closed: (nothing)
+  refused vstuck: working, not finished — it has not reported an end
+```
+
+Every flag that could move this row is False. 783 seconds after the lost edge, unchanged:
+`stalled False, gone False, signal_drift False`, and `mail: [{'body':'held forever?',
+'delivered_at': None, 'read_at': None}]`.
+
+### The same case, repairing (`clone`, this branch)
+
+`rstuck`, wedged identically — `turn_start` 1786496862, sealed 1786496916, unsealed
+1786497056, no `turn_end` — then the held mail and a refused sweep, exactly as above:
+
+```
+rstuck  orchestrator  working   done        -      3m      3m  rstuck
+sent to rstuck (rstuck mid-turn or blocked — will be rung when free)
+  refused rstuck: working, not finished — it has not reported an end
+```
+
+**The shipped bound is real**, and this is the reading that shows it — the same row, quiet
+for 87 s, is not even doubted at 30 minutes:
+
+```
+shipped (1800/900):  {'turn':'working','turn_doubted':False,'idle':87}
+```
+
+The rest of the run used `SWITCHBOARD_DEFAULTS` pointing at a copy of `defaults/` with
+`turn_stale_grace = 60` and `turn_doubt_grace = 30` and **nothing else changed**, so a
+45-minute mechanism could be watched in 90 seconds. What that shortens is the two windows;
+the path below is the shipped one.
+
+```
+1786497162  {'turn':'working','turn_doubted':True, 'stalled':False,'idle':87, 'undelivered':1}
+            stored: turn='working', turn_doubt_since=1786497162      <- doubted, still believed
+1786497198  {'turn':'working','turn_doubted':True, 'stalled':False,'idle':123,'undelivered':1}
+            stored: turn=None, turn_doubt_since=None                 <- past the window: dropped
+            event  turn_forgotten {"target":"rstuck","held":90}
+1786497198  {'turn':None,     'turn_doubted':False,'stalled':True,  'display_state':'idle',
+                                                                     'undelivered':0}
+```
+
+One reading doubts and writes nothing. The next, past the window, drops the edge. The
+reading after that is a normal stalled row — and `undelivered` went 1 → 0 in the same
+command, because `flush_pending` reads herdr again the moment the edge is gone. What
+followed, from the store:
+
+```
+1786497198  turn_forgotten   {"target": "rstuck"}
+1786497198  delivered_at set                     the doorbell — held mail, finally rung
+1786497198  turn_start       {"target": "rstuck"}   the agent woke
+1786497204  read_at set                          it read the message
+1786497219  done             {"summary": "Ran the 150-second sleep command you asked for…"}
+1786497222  turn_end         {"target": "rstuck"}
+```
+
+`state=done, turn=idle, ended_at=1786497219` — and then `sb cleanup rstuck` → `closed:
+rstuck`. Pingable, cleanable, mail delivered.
+
+**And the reconciler's ping, with no mail in play.** A second agent, `rping`, wedged the same
+way and never sent anything, so the doorbell had nothing to ring:
+
+```
+1786497455  {'turn':'working','turn_doubted':True, 'stalled':False,'idle':173,'undelivered':0}
+1786497490  {'turn':'working','turn_doubted':True, 'stalled':False,'idle':208,'undelivered':0}
+            stored: turn=None
+1786497490  {'turn':None,     'turn_doubted':False,'stalled':True,  'display_state':'idle'}
+
+1786497490  turn_forgotten    {"target": "rping"}
+1786497490  reconcile_ping    {"target": "rping"}     <- the same second
+1786497491  turn_start        {"target": "rping"}     <- it woke
+1786497497  stop_gate_blocked
+1786497505  turn_end          {"target": "rping"}
+```
+
+### What this run does NOT prove
+
+- **The size of the bounds.** The mechanism ran on 60/30; 1800/900 is argued from measurement
+  (the section above) and from the rejected timeout's own numbers, not watched end to end.
+  A 45-minute wedge was not sat through.
+- **A live agent being spared by a herdr `working` reading.** The clearing path is unit-tested
+  and it is the same `_sustained` the `gone` debounce has used since it shipped, but no live
+  run drove a genuinely working agent past the staleness bound and watched herdr rescue it.
+  **This is the residual risk to know about**: if herdr's detector were dark for a whole
+  doubt window rather than intermittent, a live agent that runs no `sb` command for 45
+  minutes would have its edge dropped. What that costs is the row reading the way it did on
+  `main` for one turn — held mail delivered into a running turn, one reconciler nudge — and
+  it self-corrects at that agent's next edge. Nothing is written that a later edge cannot
+  overwrite.
+- **Lock contention as the cause**, rather than `chmod`. Consequence proved, frequency not —
+  same limit the verifier recorded.
+
 ## What is NOT proved
 
 - **`signal_drift` has no live proof.** Every way I could kill a session in this setup took
@@ -215,8 +410,12 @@ left on that row is inert: every reader gates on `state in RUNNING` first, and
   ever wrong it costs one line on the board, since nothing is written back. If you want it
   proved, the arrangement to build is a pane running a shell that runs `claude`, so the
   pane survives the process; that is not how `herdr agent start` sets one up today.
-- **The `Stop` hook failing to write** (store unreachable at that moment) leaves `working`
-  behind exactly like a crash, and reaches the same two cross-checks. Not exercised.
+- ~~**The `Stop` hook failing to write** (store unreachable at that moment) leaves `working`
+  behind exactly like a crash, and reaches the same two cross-checks. Not exercised.~~
+  **Exercised, and both halves of that sentence were wrong.** It does not reach either
+  cross-check, and it is not like a crash — a crash takes the pane and `gone` catches it,
+  while this leaves a live pane nothing will ever touch again. Reproduced live twice, once
+  unfixed and once repairing, in "The stale edge, live" below.
 - **No fleet-scale test.** One store, three agents, one machine. The per-firing cost was
   measured elsewhere (`audit/hook-signal-cost.md` §4 for contention) and nothing here adds
   a per-tool-call cost to contend with.
@@ -230,8 +429,8 @@ left on that row is inert: every reader gates on `state in RUNNING` first, and
 
 ## Tests
 
-`/Users/andrew/anaconda3/bin/python -m pytest tests` — **1142 passed** (1131 on `main`,
-11 new). The new ones pin the decision and the write, never the CLI's behaviour:
+`/Users/andrew/anaconda3/bin/python -m pytest tests` — **1145 passed** (1131 on `main`,
+14 new). The new ones pin the decision and the write, never the CLI's behaviour:
 
 - `test_hooks.py::ActivitySignalTest` — the two edges in order; **a turn the gate refuses
   is not recorded idle**; `blocked` ends a turn; a session that is not ours writes nothing;
@@ -240,6 +439,9 @@ left on that row is inert: every reader gates on `state in RUNNING` first, and
   idle; a row with no signal still reads herdr; a dead session is surfaced and not
   repaired; a momentary `unknown` is not a dead session.
 - `test_broker.py` — hold-until-free runs on our signal while herdr reads idle.
+- `test_status.py`, the repair — an edge nothing stands behind is dropped once the doubt has
+  held, and the row moves again; ONE disagreeing reading starts the clock over; a long tool
+  call is never doubted and neither is a pane with nobody in it.
 
 The fake herdr was not grown for any of this.
 
@@ -287,20 +489,35 @@ t+67   turn_start   {"target": "…-p"}          the parent wakes and reads it
 
 Note what herdr was saying about that parent throughout: `idle`.
 
-And that last sentence is not a hypothetical. The same check, same command, run against
-**`main`** immediately afterwards — verbatim:
+### The before/after this section used to claim — STRUCK
+
+A "before and after" ran here: the same check against **`main`** immediately afterwards,
+FAILing with `ring_deferred events for the parent: 0` and `lag 0s`, and the conclusion
+**"this branch is what makes acceptance check 2 pass again"**.
+
+**It does not reproduce, and it should not be relied on.** The verifier ran
+`./acceptance/accept.py main --only 2` twice in a row from a clean clone and `main` PASSED
+both times, by exactly the deferred-then-doorbell path the check exists to force — 48 s and
+46 s of hold (`audit/activity-signal-verification.md` §10). They also passed all four checks
+on this branch **in parallel** in 2m19s, against the 11m39s run above in which check 2
+failed; so check 2 is flaky under heavy load rather than reliably failing under parallel
+load, and that run shared the machine with this build's own three proof agents.
+
+Both sentences the claim rested on are withdrawn. What is left is the mechanism, which
+stands on its own and is watched live in the trace above: when herdr's detector is wrong
+about a parent, `main` delivers the child's report into the parent's running turn and this
+branch holds it. herdr's detector is wrong about a parent *sometimes* — that is the whole
+finding — so the before/after was a snapshot of one moment's intermittency, presented as if
+it were the difference between the two branches. It is not.
+
+Later runs of the full four checks on this branch, for the record — `./acceptance/accept.py
+repair-stuck`, all four in parallel:
 
 ```
-  2  a child's report wakes its parent        FAIL   the report was delivered directly, so the doorbell was never the thing that woke the parent — this run did not test it   [1m30s]
+  1  a cold fan-out of six starts six         PASS   6/6 took their task and reported into 6 new checkouts, 0 spawns misreported   [37s]
+  2  a child's report wakes its parent        PASS   deferred while the parent worked, then delivered by the doorbell 47s later; the parent woke and read it   [2m07s]
+  3  a block holds until the human answers    PASS   held 26s against a sibling, released by the human's answer and read it   [1m36s]
+  4  a sweep names what it refused            PASS   closed 1, refused 1 and said why: 'refused sbwlxwdp4-k: blocked, not finished — it has not reported an end'   [42s]
 
-      child reported at 1786493211, delivered_at=1786493211 (lag 0s)
-      ring_deferred events for the parent: 0
-      collector doorbells 0 -> 0, last at None, error=None
-
-1 of 1 FAILED — the fleet is not sound   (1m34s)
+all 4 pass — the fleet is sound   (2m14s)
 ```
-
-Zero `ring_deferred`, zero lag, zero doorbells: on `main` today the held mail goes straight
-into the parent's running turn, because `_busy` asked herdr and herdr said idle. **This
-branch is what makes acceptance check 2 pass again**, and the two runs above are the
-before and after of the same command.
