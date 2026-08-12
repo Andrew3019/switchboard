@@ -285,6 +285,22 @@ t+66   delivered_at set                        the collector's doorbell, 2s afte
 t+67   turn_start   {"target": "…-p"}          the parent wakes and reads it
 ```
 
-Note what herdr was saying about that parent throughout: `idle`. Before this change the
-ring would not have been deferred at all — it would have been delivered into the running
-turn, and the check would have passed by the wrong route.
+Note what herdr was saying about that parent throughout: `idle`.
+
+And that last sentence is not a hypothetical. The same check, same command, run against
+**`main`** immediately afterwards — verbatim:
+
+```
+  2  a child's report wakes its parent        FAIL   the report was delivered directly, so the doorbell was never the thing that woke the parent — this run did not test it   [1m30s]
+
+      child reported at 1786493211, delivered_at=1786493211 (lag 0s)
+      ring_deferred events for the parent: 0
+      collector doorbells 0 -> 0, last at None, error=None
+
+1 of 1 FAILED — the fleet is not sound   (1m34s)
+```
+
+Zero `ring_deferred`, zero lag, zero doorbells: on `main` today the held mail goes straight
+into the parent's running turn, because `_busy` asked herdr and herdr said idle. **This
+branch is what makes acceptance check 2 pass again**, and the two runs above are the
+before and after of the same command.
