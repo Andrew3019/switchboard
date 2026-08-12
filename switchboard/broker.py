@@ -159,7 +159,7 @@ SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # How long a spawn queues for its turn at creating a worktree. See `Broker._fork_lock`.
 FORK_LOCK_WAIT = config.setting("timeouts.fork_lock")
 FORK_LOCK_POLL = 0.05
-# Pointing a spawning pane's `sb` at its own checkout, and confirming it took. See `_pin_sb`.
+# Proving a spawning pane's shell answers, and pinning its `sb`. See `_ready_pane`.
 PIN_MS = config.setting("timeouts.pin_ms")
 PIN_ATTEMPTS = config.setting("retries.pin_attempts")
 PIN_BACKOFF = config.setting("retries.spawn_backoff")
@@ -306,7 +306,40 @@ class Undeliverable(HerdrError):
         )
 
 
-class SbUnpinned(HerdrError):
+class PaneUnusable(HerdrError):
+    """The pane a spawn was about to type into never answered, so the spawn is refused.
+
+    Two shapes, one rule (see `Broker._ready_pane`): a pane that cannot be pinned would
+    run the wrong build, and a pane that will not answer at all would take the provider
+    CLI's 12KB command line into a shell that is not reading it yet — which the tty
+    truncates at 1024 bytes, mid-quote. Callers that clean up after a refused spawn catch
+    this base; the two subclasses exist because the two reasons read differently to
+    whoever has to fix it.
+    """
+
+
+class PaneNotReady(PaneUnusable):
+    """The pane's shell never came back from one short command.
+
+    Nothing is asserted about `sb` here — this is any other project's checkout — so the
+    only claim is that the shell is at an interactive prompt. Until it is, the tty is in
+    canonical mode and drops everything past 1024 bytes of a typed line, which is how a
+    perfectly valid `--append-system-prompt` arrives with its quote unclosed.
+    """
+
+    def __init__(self, name: str, pane_id: str):
+        super().__init__(
+            "pane_not_ready",
+            f"{name}: the pane's shell never answered a one-line command, so the agent's "
+            f"command line — which carries the whole system prompt — would have been "
+            f"typed into a shell that is not reading yet and cut off mid-quote. Refused "
+            f"rather than spawned into a shell parse error. The pane is {pane_id}; "
+            f"`herdr pane read {pane_id}` shows what it did with the command.",
+            [name, pane_id],
+        )
+
+
+class SbUnpinned(PaneUnusable):
     """A pane's `sb` could not be pointed at the checkout the agent is about to work in.
 
     Refuses the spawn rather than starting the agent anyway, and the reason is the whole
@@ -2690,10 +2723,36 @@ class Broker:
                 workspace_id = ""
         return self.h.create_tab(cwd=str(cwd)), workspace_id
 
-    def _pin_sb(self, name: str, pane: str, cwd) -> None:
-        """Make `sb` in this pane mean the checkout this agent is standing in.
+    def _ready_pane(self, name: str, pane: str, cwd) -> None:
+        """Get one command through this pane's shell before `agent start` types into it —
+        and, in a checkout that ships its own `sb`, pin that `bin/` on the way past.
 
-        THE PROBLEM. `sb` on PATH is one symlink per machine, pointing into the main
+        THE PROBLEM THIS SOLVES FIRST. `agent start` types the provider CLI's entire
+        command line into the pane's shell, and that line carries the whole system prompt
+        as one single-quoted argument — 12KB of it. herdr accepts a pane as "an available
+        shell" while zsh is still running its startup files, before the line editor is up;
+        until then the tty is in CANONICAL mode, where the line discipline keeps 1024
+        bytes (Darwin's MAX_CANON) and drops the rest of the line. The command lands cut
+        mid-argument, inside the quote around the prompt, so the shell is left with an
+        unterminated quote: a continuation prompt, and then `parse error near ')'` on the
+        first parentheses in the protocol text. Nothing about the text is wrong — it is
+        the same text that works everywhere else.
+
+        Measured on a fresh non-switchboard repo, `agent start` issued at the earliest
+        moment herdr would accept it: 6 of 8 panes truncated at exactly 1024 bytes; 0 of 8
+        once this command had been run and confirmed first.
+
+        A command whose output comes back is the whole proof: the shell has finished
+        starting, read a line and printed an answer, so the line editor is up and the next
+        thing typed is read in raw mode however long it is.
+
+        WHY IT LOOKED REPO-SPECIFIC. This is where the `sb` pin already ran, and the pin
+        only ever ran for a checkout with its own `bin/sb`. Switchboard's own worktrees
+        were being warmed up by accident; every other repo took the full 12KB into a shell
+        that might not be ready, which is why `sb start` in another repo failed in the
+        shell before Claude ever ran.
+
+        THE PROBLEM IT ALSO SOLVES. `sb` on PATH is one symlink per machine, pointing into the main
         checkout, and `bin/sb` resolves its own real path to decide what to import. So
         every agent in every worktree ran the main checkout's code, whatever branch it had
         checked out — an agent could not exercise its own work, and a branch's fixes were
@@ -2719,23 +2778,34 @@ class Broker:
         WHERE IT SITS. Before the name is claimed, so the seconds it can cost stay out of
         the window `status.SPAWN_GRACE` covers, and a refusal leaves no row behind.
 
-        A checkout with no `bin/sb` — any other project — is left alone entirely: no
-        herdr calls, PATH untouched, exactly as before.
+        A checkout with no `bin/sb` — any other project — still gets the proof, with
+        nothing to assert about `sb` and PATH untouched: a pane that will not answer costs
+        the spawn (`PaneNotReady`) rather than taking 12KB into a shell that is not
+        listening.
         """
         bin_dir = _own_sb_bin(cwd)
-        if bin_dir is None:
-            return
-        quoted = shlex.quote(str(bin_dir))
-        # `command -v`, not `which`: it is the shell's own resolution, which is the thing
-        # being asserted. `"$PATH"` quoted, so a PATH with a space in it survives.
-        command = f'export PATH={quoted}:"$PATH"; echo "sb=$(command -v sb)"'
-        marker = f"sb={bin_dir}/sb"
+        if bin_dir is not None:
+            quoted = shlex.quote(str(bin_dir))
+            # `command -v`, not `which`: it is the shell's own resolution, which is the
+            # thing being asserted. `"$PATH"` quoted, so a PATH with a space in it
+            # survives.
+            command = f'export PATH={quoted}:"$PATH"; echo "sb=$(command -v sb)"'
+            marker = f"sb={bin_dir}/sb"
+        else:
+            # The same proof with nothing to claim. Split across two quoted halves for
+            # the same reason the pinned marker is a resolved path: what is typed is
+            # echoed back, and a marker present in the typed line would be matched off
+            # the echo — which is the pane saying nothing at all. Only the shell's own
+            # output joins the halves.
+            command = f'echo "sb-rea""dy={name}"'
+            marker = f"sb-ready={name}"
         for attempt in range(PIN_ATTEMPTS):
             try:
                 self.h.prompt_pane(pane, command)
                 if self.h.wait_output(pane, marker, timeout_ms=PIN_MS):
-                    store.log_event(self.db, kind="sb_pinned", agent=name,
-                                    pane_id=pane, path=str(bin_dir))
+                    store.log_event(self.db,
+                                    kind="sb_pinned" if bin_dir else "pane_ready",
+                                    agent=name, pane_id=pane, path=str(bin_dir or ""))
                     return
             except HerdrError as e:
                 store.log_event(self.db, kind="sb_pin_error", agent=name,
@@ -2744,6 +2814,9 @@ class Broker:
                 # The one failure worth retrying is a shell that had not reached its
                 # prompt when the text arrived, and waiting is the whole of that fix.
                 time.sleep(PIN_BACKOFF)
+        if bin_dir is None:
+            store.log_event(self.db, kind="pane_not_ready", agent=name, pane_id=pane)
+            raise PaneNotReady(name, pane)
         store.log_event(self.db, kind="sb_unpinned", agent=name, pane_id=pane,
                         path=str(bin_dir))
         raise SbUnpinned(name, pane, str(bin_dir))
@@ -3040,9 +3113,9 @@ class Broker:
         if not pane:
             pane, wsid = self._tab_for(wsid, where)
 
-        # Before the claim, so a pane that cannot be pinned costs no row and no name, and
+        # Before the claim, so a pane that will not answer costs no row and no name, and
         # so the wait stays outside the window `status.SPAWN_GRACE` covers.
-        self._pin_sb(name, pane, where)
+        self._ready_pane(name, pane, where)
 
         # Claim the name BEFORE herdr is asked to start anything. `agents.name` is a
         # PRIMARY KEY, and that index is the only arbiter two concurrent spawners share —
@@ -3815,13 +3888,13 @@ class Broker:
         # The corrected id is deliberately dropped: restore rewrites pane and state, never
         # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
         pane, _ = self._tab_for(wsid, where)
-        # A restored agent gets the same pinning a fresh one does — it comes back into the
-        # same checkout and would otherwise come back on the installed build. The tab is
-        # ours, so a refusal closes it rather than leaving an empty shell behind, exactly
-        # as a failed `agent start` does below.
+        # A restored agent gets the same proof a fresh one does — its pane is just as new,
+        # and it comes back into the same checkout it would otherwise come back on the
+        # installed build for. The tab is ours, so a refusal closes it rather than leaving
+        # an empty shell behind, exactly as a failed `agent start` does below.
         try:
-            self._pin_sb(name, pane, where)
-        except SbUnpinned:
+            self._ready_pane(name, pane, where)
+        except PaneUnusable:
             try:
                 self.h.close_pane(pane)
             except HerdrError as e:

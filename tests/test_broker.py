@@ -27,8 +27,8 @@ from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard import broker as broker_mod  # noqa: E402
 from switchboard.broker import (  # noqa: E402
-    HUMAN, INTERRUPT, MAIN, MAIN_NAME, NEXT_TURN, WHEN_IDLE, Broker, SbUnpinned,
-    TaskUndelivered, Undeliverable,
+    HUMAN, INTERRUPT, MAIN, MAIN_NAME, NEXT_TURN, WHEN_IDLE, Broker, PaneNotReady,
+    SbUnpinned, TaskUndelivered, Undeliverable,
 )
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
@@ -42,6 +42,7 @@ class FakeHerdrAPI:
         self.started: list[dict] = []
         self.keys: list[tuple] = []
         self.pane_prompts: list[tuple] = []
+        self.pane_waits: list[tuple] = []
         self.unreachable: set = set()
         self.undeliverable: set = set()   # started, but never takes a task
         self.proofs: list[tuple] = []     # (name, the delivery proof it was given)
@@ -93,6 +94,14 @@ class FakeHerdrAPI:
         self.prompt(name, text)
 
     def prompt_pane(self, pane, text): self.pane_prompts.append((pane, text))
+
+    def wait_output(self, pane_id, match, *, timeout_ms):
+        """A pane that answers. Every spawn now proves its pane before typing 12KB of
+        system prompt into it (`Broker._ready_pane`), so a fake that could not answer
+        would refuse every spawn in this file. The pane that will NOT answer is
+        `PinningHerdr`, below, which is where that half is tested."""
+        self.pane_waits.append((pane_id, match))
+        return True
 
     def list_agents(self):
         from switchboard.herdr import Agent as _A
@@ -2875,11 +2884,29 @@ class SbPinTest(unittest.TestCase):
 
     def test_a_checkout_without_its_own_sb_is_left_on_the_installed_build(self):
         """An agent sent into some other project has only one `sb` it could mean, and
-        touching PATH there would be a claim about a repo we know nothing about."""
+        touching PATH there would be a claim about a repo we know nothing about.
+
+        The pane is still made to answer first — that half is not about `sb` at all (see
+        the next test) — but nothing is exported into it."""
         (self.bin / "sb").unlink()
         self._spawn()
-        self.assertEqual(self.h.pane_prompts, [])
-        self.assertEqual(self.h.waits, [])
+        _, text = self.h.pane_prompts[0]
+        self.assertNotIn("PATH", text)
+
+    def test_a_pane_in_any_other_repo_still_has_to_answer_before_the_spawn(self):
+        """The 12KB command line `agent start` types is only safe once the shell is
+        reading in raw mode; before that the tty keeps 1024 bytes and drops the rest,
+        which cuts the system prompt mid-quote and leaves the shell in a parse error.
+        So a pane that will not answer costs the spawn here too, exactly as an unpinnable
+        one does — and the marker cannot be satisfied by the echo of the command."""
+        (self.bin / "sb").unlink()
+        self.h.confirms = False
+        with self.assertRaises(PaneNotReady):
+            self._spawn()
+        self.assertEqual(self.h.started, [])
+        _, typed = self.h.pane_prompts[0]
+        _, marker, _ = self.h.waits[0]
+        self.assertNotIn(marker, typed)
 
     def test_a_path_with_a_space_survives(self):
         space = (Path(self.tmp.name) / "two words")
