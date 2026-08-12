@@ -46,6 +46,9 @@ delegate is refused outright. That stamp, not the prompt, is what makes top and 
 orchestrators different; a top-only prompt fragment explains behaviour the code already
 guarantees. — confirmed 2026-08-09
 
+**Only a human may create a top orchestrator; `sb start` is refused for agents.** —
+confirmed 2026-08-11
+
 **A fork that fails refuses the spawn and tells the parent.** It never falls back to
 Andrew's own checkout. `sb start` run inside a worktree is refused too, naming the main
 checkout to run it from. — confirmed 2026-08-09
