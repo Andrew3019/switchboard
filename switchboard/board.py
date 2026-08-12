@@ -51,7 +51,8 @@ import sys
 import termios
 import time
 import tty
-from typing import Optional
+import unicodedata
+from typing import Iterator, Optional
 
 from . import config
 from . import panel
@@ -278,12 +279,15 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # its pane closed — and there is then no agent to measure a name or a
         # state against. Empty-sequence `max` raises, and a panel that raises at
         # the end of every session is worse than one with a narrow column.
-        w_name = max([0] + [len(("  " * a.depth) + a.name)
+        # Columns, not characters, in both column widths and in every pad and clip
+        # below — see `_visible_len`.
+        w_name = max([0] + [_visible_len(("  " * a.depth) + a.name)
                             for a in window if not _is_group(a)])
         # `display_state`, not the store's raw word: `working` drawn next to this row's
         # own `STALLED — idle …` note is the row contradicting itself, and the one thing
         # a glanceable view must never do. See `AgentStatus.display_state`.
-        w_state = max([0] + [len(a.display_state) for a in window if not _is_group(a)])
+        w_state = max([0] + [_visible_len(a.display_state)
+                             for a in window if not _is_group(a)])
         for a in window:
             if _is_group(a):
                 # No glyph, no state, no note. It is not an agent and must not
@@ -295,15 +299,15 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             label = ("  " * a.depth) + a.name
             # Measured plain and coloured in parallel: only the glyph is coloured,
             # so the two stay the same visible width.
-            left = (f" {g} {label:<{w_name}}  {a.display_state:<{w_state}}  "
+            left = (f" {g} {_pad(label, w_name)}  {_pad(a.display_state, w_state)}  "
                     f"{status_mod.fmt_age(a.idle):>5}  ")
-            line = (f" {_c(g, _GLYPH_COLOR.get(g, ''))} {label:<{w_name}}  "
-                    f"{a.display_state:<{w_state}}  {status_mod.fmt_age(a.idle):>5}  ")
+            line = (f" {_c(g, _GLYPH_COLOR.get(g, ''))} {_pad(label, w_name)}  "
+                    f"{_pad(a.display_state, w_state)}  {status_mod.fmt_age(a.idle):>5}  ")
             n = note(a)
             lead = "← " if wants_you(a) else "  "
-            room = width - len(left) - len(lead)
+            room = width - _visible_len(left) - _visible_len(lead)
             if n and room >= 6:
-                line += _c(lead + status_mod.clip(n, room), _note_color(a))
+                line += _c(lead + _clip(n, room), _note_color(a))
             rows.append((line, a))
 
     while len(rows) < height - 2:
@@ -319,7 +323,9 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
     # The one invariant this view rests on: no line may ever wrap. A wrapped line
     # pushes every row below it down by one, and the next click focuses the wrong
-    # agent — silently, and looking exactly like a correct click.
+    # agent — silently, and looking exactly like a correct click. `_fit` measures
+    # in columns, so this is now enforced rather than hoped for: it used to be
+    # asserted in characters, which one emoji in a task was enough to break.
     return [(_fit(text, width), a) for text, a in rows[:height]]
 
 
@@ -338,7 +344,20 @@ def agent_at(rows, row: int):
 
 
 def _visible_len(s: str) -> int:
-    return len(re.sub(r"\033\[[0-9;]*m", "", s))
+    """How many terminal COLUMNS `s` occupies once drawn.
+
+    Not `len()`. A character is not a column: one CJK ideograph or emoji is two
+    of them, a combining accent is none, and a family emoji is one glyph two
+    columns wide however many codepoints it is made of. Measuring in characters
+    is the bug this whole section exists to close — the row fits by `len()`, the
+    terminal wraps it anyway, and every click below lands one agent low.
+    """
+    return sum(w for _, w in _clusters(_ANSI.sub("", s)))
+
+
+def _pad(text: str, cols: int) -> str:
+    """Left-align to `cols` COLUMNS. What `f"{text:<{cols}}"` only does for ASCII."""
+    return text + " " * max(0, cols - _visible_len(text))
 
 
 def _fit(text: str, width: int) -> str:
@@ -346,11 +365,106 @@ def _fit(text: str, width: int) -> str:
 
     Slicing coloured text would cut an escape sequence in half, so an overlong
     line loses its colour rather than its correctness — this only happens in a
-    pane too narrow to be pretty anyway.
+    pane too narrow to be pretty anyway. The slice is by column and on cluster
+    boundaries: cutting a two-column glyph in half is how a "truncated" line
+    still wraps, and cutting a combining mark off its base is how it lands on
+    whatever character follows.
     """
     if _visible_len(text) <= width:
         return text
-    return re.sub(r"\033\[[0-9;]*m", "", text)[:width]
+    return _clip_cols(_ANSI.sub("", text), width)
+
+
+def _clip(text: str, cols: int) -> str:
+    """`status.clip`, measured in columns — flatten whitespace, then fit with an ellipsis.
+
+    A separate function rather than a change to `status.clip`, which every other
+    readout shares and whose budget is a character count its own tests state.
+    """
+    flat = " ".join((text or "").split())
+    if _visible_len(flat) <= cols:
+        return flat
+    return _clip_cols(flat, cols - 1) + "…"
+
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+_ZWJ = "‍"
+_VS16 = "️"        # emoji presentation
+_VS15 = "︎"        # text presentation
+_ZERO_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc"})
+
+
+def _is_zero(ch: str) -> bool:
+    """Occupies no column of its own: combining marks, joiners, selectors, controls."""
+    return unicodedata.combining(ch) != 0 or unicodedata.category(ch) in _ZERO_CATEGORIES
+
+
+def _is_regional(ch: str) -> bool:
+    return "\U0001f1e6" <= ch <= "\U0001f1ff"
+
+
+def _is_modifier(ch: str) -> bool:
+    """Skin tone. A wide symbol by `east_asian_width`, but it tints the glyph
+    before it rather than drawing one of its own."""
+    return "\U0001f3fb" <= ch <= "\U0001f3ff"
+
+
+def _base_width(ch: str) -> int:
+    if _is_zero(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _clusters(plain: str) -> Iterator[tuple[str, int]]:
+    """Split ANSI-free text into (glyph, columns) pairs.
+
+    A glyph, not a codepoint: everything a terminal draws in one place travels
+    together, so a truncation can never land inside one. `east_asian_width` from
+    the standard library carries the two-column cases — no `wcwidth` dependency —
+    and the rules it does not cover are here: a variation selector chooses
+    presentation and so chooses width, a regional-indicator pair is one flag, and
+    a ZWJ swallows whatever it joins because the result is a single glyph.
+    """
+    i, n = 0, len(plain)
+    while i < n:
+        j = i + 1
+        w = _base_width(plain[i])
+        if _is_regional(plain[i]) and j < n and _is_regional(plain[j]):
+            j += 1                                  # 🇯🇵 — two codepoints, one flag
+            w = 2
+        while j < n:
+            ch = plain[j]
+            if ch == _VS16:
+                w = 2                               # ✈️ — drawn as emoji, so two wide
+                j += 1
+            elif ch == _VS15:
+                w = 1                               # ✈︎ — drawn as text, so one
+                j += 1
+            elif ch == _ZWJ:
+                j += 2 if j + 1 < n else 1          # 👩‍👩‍👧 — still one glyph, still two wide
+                # and round the loop again: a longer chain is more of the same glyph.
+            elif _is_zero(ch) or _is_modifier(ch):
+                j += 1
+            else:
+                break
+        yield plain[i:j], w
+        i = j
+
+
+def _clip_cols(plain: str, cols: int) -> str:
+    """Longest prefix of ANSI-free `plain` that fits in `cols` columns.
+
+    Comes up short by one column rather than over by one when the next glyph is
+    two wide and only one column is left. Short is a cosmetic gap; over is a
+    wrapped line and a misdirected click.
+    """
+    out, used = [], 0
+    for glyph, w in _clusters(plain):
+        if used + w > cols:
+            break
+        out.append(glyph)
+        used += w
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
