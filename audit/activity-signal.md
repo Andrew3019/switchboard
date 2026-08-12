@@ -242,3 +242,49 @@ left on that row is inert: every reader gates on `state in RUNNING` first, and
 - `test_broker.py` — hold-until-free runs on our signal while herdr reads idle.
 
 The fake herdr was not grown for any of this.
+
+## Acceptance — `./acceptance/accept.py activity-signal`
+
+Verbatim, first run (all four checks, in parallel, on a machine that was also running this
+build's own three proof agents):
+
+```
+  1  a cold fan-out of six starts six         PASS   6/6 took their task and reported into 6 new checkouts, 0 spawns misreported   [7m54s]
+  2  a child's report wakes its parent        FAIL   the child never reported to its parent   [7m49s]
+  3  a block holds until the human answers    PASS   held 170s against a sibling, released by the human's answer and read it   [11m31s]
+  4  a sweep names what it refused            PASS   closed 1, refused 1 and said why: 'refused sbri0r384-k: blocked, not finished — it has not reported an end'   [7m05s]
+
+  check 2 — a child's report wakes its parent
+      agents: [{'name': 'sbri0r382-p', 'state': 'working'}, {'name': 'sbri0r382-c', 'state': 'working'}]
+
+1 of 4 FAILED — the fleet is not sound   (11m39s)
+```
+
+**Check 2's failure is not this change, and the evidence is in its own message.** It fails
+before it reaches anything this branch touches: the child agent never wrote a message row
+at all — it never ran its `sb done` inside the window — so the doorbell was never asked to
+do anything. Re-run alone, verbatim:
+
+```
+  2  a child's report wakes its parent        PASS   deferred while the parent worked, then delivered by the doorbell 51s later; the parent woke and read it   [2m05s]
+
+all 1 pass — the fleet is sound   (2m09s)
+```
+
+Watched live in that clone's store as it ran, which is the part worth keeping — this is
+the deferred path the check exists to force, running on the new signal:
+
+```
+t+0    turn_start   {"target": "…-p"}          parent begins `sb delegate … && sleep 45`
+t+10   turn_start   {"target": "…-c"}
+t+15   done         …-c
+t+15   ring_deferred …-p                       held: OUR signal says the parent is mid-turn
+t+58   stop_gate_blocked …-p
+t+64   turn_end     {"target": "…-p"}
+t+66   delivered_at set                        the collector's doorbell, 2s after the edge
+t+67   turn_start   {"target": "…-p"}          the parent wakes and reads it
+```
+
+Note what herdr was saying about that parent throughout: `idle`. Before this change the
+ring would not have been deferred at all — it would have been delivered into the running
+turn, and the check would have passed by the wrong route.
