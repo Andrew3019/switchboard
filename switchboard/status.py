@@ -32,6 +32,15 @@ for anything. STALLED there is false, and a warning that is routinely false is a
 nobody reads. So the flag is not computed for those rows at all until the first thing
 arrives for them (`agents.awaiting_task`); nothing about what gets swept changes.
 
+Owning the signal buys one new way to be wrong, and it is the expensive kind: an edge that
+fails to be written leaves `working` on a row for good, and a row that says `working` is one
+nothing pings, nothing sweeps and nothing delivers mail to. So an edge is treated as a fact
+with an age. A `working` edge with no event of the agent's own behind it, and herdr reading
+no turn in its pane at every reading for long enough, is dropped back to "no signal" and the
+row goes back to being read the way it was before the signal existed — `AgentStatus
+.turn_doubted` for the rule, `_forget_turn` for what it writes and why NULL is the only safe
+thing to write.
+
 Two other joins fall out of the same table:
 
     store: working        herdr: not listed  →  GONE     (pane closed under it)
@@ -216,6 +225,28 @@ STALL_GRACE = (
 # the bug this exists for.
 GONE_CONFIRM_GRACE = config.setting("timeouts.gone_confirm_grace")
 
+# The two halves of "this `working` edge is not to be trusted" — see `AgentStatus
+# .turn_doubted` for the rule and `_forget_turn` for what is done about it.
+#
+# TURN_STALE_GRACE is how long a `working` row must have no event of its own behind it
+# before the edge is even questioned. It is NOT the timeout the edge design exists to
+# avoid, and the difference is the whole of why this is safe: a timeout decides on its own
+# that a turn ended, and no N can do that (2.18% of this repo's tool calls run past 72 s and
+# the longest ran 18 min). This N decides nothing. It only says when a row is worth asking
+# herdr about, and it is set clear of both of those numbers — 30 min, against a measured
+# p99 of 20.6 min for how long a live agent goes inside one turn without touching `sb`
+# across 406 real sessions here.
+#
+# TURN_DOUBT_GRACE is how long the doubt must then hold CONTINUOUSLY, with herdr reporting
+# no turn in that pane at every reading in between. That is the half that decides, and what
+# makes it worth anything is the finding that herdr's busy detector is intermittent rather
+# than uniformly dead (`audit/activity-signal-verification.md` §2): a genuinely working
+# agent eventually reads `working` to it, and ONE such reading anywhere in the window clears
+# the doubt — as does one `sb` command from the agent, which resets the staleness half.
+# A row that is quiet because its turn really ended produces neither, ever.
+TURN_STALE_GRACE = config.setting("timeouts.turn_stale_grace")
+TURN_DOUBT_GRACE = config.setting("timeouts.turn_doubt_grace")
+
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
 # mailbox rather than something every reader has to know about.
@@ -366,10 +397,59 @@ class AgentStatus:
         pane to work in, and neither is a sixth word for the STATE column. Nothing is
         written back — surfacing beats guessing (C9) — and the row is left for a person,
         which is why `needs_human` counts it.
+
+        This is NOT the wedge `turn_doubted` repairs, and the two are deliberately disjoint
+        on `herdr_state`: here the pane runs nothing herdr recognises, there it runs a
+        perfectly healthy Claude that herdr reads as idle because the turn genuinely ended
+        and only the `Stop` hook's write was lost. The second is the ordinary one, and it is
+        the one with a repair; a pane with no agent in it has nothing to be pinged back to
+        life and stays a person's to decide about.
         """
         return (self.state in RUNNING and self.turn == TURN_WORKING
                 and self.alive is True and self.herdr_state == UNKNOWN
                 and self.idle >= STALL_GRACE)
+
+    @property
+    def turn_doubted(self) -> bool:
+        """Our signal says a turn is running, and nothing else agrees any more.
+
+        THE REPAIR PATH FOR A `working` EDGE THAT WAS NEVER CLOSED. `signal_drift` names
+        the case where the pane is running nothing recognisable; this names the far more
+        ordinary one, where the pane is a perfectly healthy Claude sitting at its prompt and
+        the `Stop` hook simply never wrote. Three real paths reach it and all three are
+        silent — `store.set_turn` swallows a locked database, `hooks.run` catches
+        everything, and the `Stop` entry has a 10-second timeout that fails open — and the
+        row it leaves behind is worse than anything this signal fixed: `stalled` is false so
+        the reconciler never pings it, `gone` is false because the pane is alive,
+        `signal_drift` is false because herdr answers `idle` rather than `unknown`, and
+        `sb cleanup` refuses a row that has not reported an end. Its `--when-idle` mail is
+        held for good. Constructed live and confirmed to behave exactly that way in
+        `audit/activity-signal-verification.md` §7.
+
+        So a `working` edge is a fact with an age, and past a point it stops being evidence.
+        Both halves have to hold, and neither is enough alone:
+
+            no event of its own for TURN_STALE_GRACE   — it has not run an `sb` command,
+                                                          sent mail or read any, for 30 min
+            herdr, asked and answering, says its pane   — `alive is True` and a state in
+            is running no turn                            IDLE_LIKE
+
+        `alive is True` and not merely truthy: a herdr outage (`alive is None`) observed
+        nothing, and an agent herdr answered about and did not list is GONE's case, not
+        this one. `herdr_state in IDLE_LIKE` and pointedly not `!= WORKING`, because
+        `unknown` is `signal_drift`'s reading and `blocked` is a person being asked
+        something in the TUI — an agent sitting on a permission prompt is mid-turn, and it
+        is the shape that produces the longest silences of all.
+
+        This is a doubt and not a verdict. It says a reading disagreed once; `_sustained`
+        is what requires the disagreement to hold, and `_forget_turn` is the only thing that
+        acts on it. Herdr's reading is intermittent, so one disagreement must never be
+        enough to move a row — that is the finding this design is built on rather than
+        around.
+        """
+        return (self.state in RUNNING and self.turn == TURN_WORKING
+                and self.alive is True and self.herdr_state in IDLE_LIKE
+                and self.idle >= TURN_STALE_GRACE)
 
     @property
     def stall_source(self) -> str:
@@ -498,6 +578,7 @@ class AgentStatus:
                  waiting_to_be_rung=self.waiting_to_be_rung,
                  ringable=self.ringable,
                  signal_drift=self.signal_drift,
+                 turn_doubted=self.turn_doubted,
                  archived=self.archived)
         return d
 
@@ -614,6 +695,10 @@ def collect(
     # then degrades to what this file did before it existed, which is documented at
     # `_record_gone`.
     tracks_absence = bool(rows) and "absent_since" in rows[0].keys()
+    # And whether it can remember a doubt about a turn edge. Same defensive read, same
+    # degradation: a store too old for the column simply never repairs a stale edge, which
+    # is the behaviour that shipped before this existed.
+    tracks_doubt = bool(rows) and "turn_doubt_since" in rows[0].keys()
     # Parents with work still out, by exactly the rule the stop gate asks it by
     # (`hooks._has_live_child`: a child row still `working` or `blocked` and not ended).
     # Computed from the rows already in hand rather than re-queried, so this costs nothing
@@ -634,6 +719,7 @@ def collect(
                    if row["parent"] and row["state"] in ("working", "blocked")
                    and row["ended_at"] is None}
     absent_since: dict[str, Optional[int]] = {}
+    doubt_since: dict[str, Optional[int]] = {}
     agents = []
     for row, depth in ordered:
         name = row["name"]
@@ -673,6 +759,8 @@ def collect(
         # the only place that both can write and is running current code.
         if tracks_absence:
             absent_since[name] = row["absent_since"]
+        if tracks_doubt:
+            doubt_since[name] = row["turn_doubt_since"]
         last = max(row["created_at"], activity.get(name, 0))
         # An agent with no session id has never run an `sb` command, so nothing here has
         # ever seen it take a turn — and for `STALL_GRACE` after the last thing that
@@ -745,6 +833,15 @@ def collect(
         if tracks_absence:
             absent = _confirmed_gone(db, absent, absent_since, now)
         _record_gone(db, absent)
+        # The same debounce over a different disagreement, and the reason it is here rather
+        # than anywhere cheaper is the same: this is the one path that both reads herdr and
+        # is allowed to write. A store with nowhere to remember the doubt does nothing,
+        # which is what shipped before the column.
+        if tracks_doubt:
+            _forget_turn(db, _sustained(
+                db, "turn_doubt_since",
+                [a.name for a in agents if a.turn_doubted and a.name not in absent],
+                doubt_since, now, TURN_DOUBT_GRACE))
 
     kept = _filter(agents, live_only=live_only, needs_me=needs_me, mine=mine, tree=tree)
     hidden = len(agents) - len(kept)
@@ -777,22 +874,97 @@ def _confirmed_gone(db: sqlite3.Connection, absent: list[str],
     Every stamp is written and committed here rather than left for `_record_gone`, so a
     command that dies between the two still leaves the absence remembered. Callers MUST be
     in the reap path — this writes.
+
+    The mechanics are `_sustained`, which the stale-turn repair asks the same question of
+    against its own column. One debounce written twice is a debounce whose two copies end up
+    disagreeing about what "continuously" means.
     """
-    absent_set = set(absent)
-    confirmed = [n for n in absent
-                 if since.get(n) is not None and now - since[n] >= GONE_CONFIRM_GRACE]
-    fresh = [n for n in absent if since.get(n) is None]
+    return _sustained(db, "absent_since", absent, since, now, GONE_CONFIRM_GRACE)
+
+
+def _sustained(db: sqlite3.Connection, column: str, flagged: list[str],
+               since: dict[str, Optional[int]], now: int, grace: float) -> list[str]:
+    """Of the rows a reading flagged, the ones it has flagged CONTINUOUSLY for long enough.
+
+    The debounce itself, for both of the disagreements this file remembers between readings:
+    `absent_since` (herdr no longer lists the agent → `_confirmed_gone`) and
+    `turn_doubt_since` (our `working` edge has nothing behind it → `_forget_turn`). Both are
+    a single reading that must not be believed on its own, and both are read by processes
+    that live for one command, so the memory has to be a column.
+
+    Three moves, and the third is the one worth being careful about:
+
+    - flagged, nothing remembered → remember it, return nothing. This is the reading that
+      must never act alone.
+    - flagged, remembered, and continuously so past `grace` → hand it back to be acted on.
+    - not flagged this time → FORGET the earlier reading. Continuously is the word that
+      matters: a row that read clean once in between has not been in trouble the whole time,
+      and accumulating the gaps would confirm something that never happened. For the stale
+      turn this is the entire safety of it — one herdr `working`, or one `sb` command from
+      the agent, and the clock starts again from nothing.
+
+    A confirmed row is cleared too, so the stamp never outlives the verdict it was counting
+    towards.
+
+    Written and committed here rather than left to the caller, so a command that dies
+    between the two still leaves the reading remembered. Callers MUST be in the reap path —
+    this writes.
+    """
+    flagged_set = set(flagged)
+    confirmed = [n for n in flagged
+                 if since.get(n) is not None and now - since[n] >= grace]
+    fresh = [n for n in flagged if since.get(n) is None]
     back = [n for n, first in since.items()
-            if first is not None and n not in absent_set] + confirmed
+            if first is not None and n not in flagged_set] + confirmed
     if fresh:
-        db.executemany("UPDATE agents SET absent_since=? WHERE name=?",
+        db.executemany(f"UPDATE agents SET {column}=? WHERE name=?",
                        [(now, n) for n in fresh])
     if back:
-        db.executemany("UPDATE agents SET absent_since=NULL WHERE name=?",
+        db.executemany(f"UPDATE agents SET {column}=NULL WHERE name=?",
                        [(n,) for n in back])
     if fresh or back:
         db.commit()
     return confirmed
+
+
+def _forget_turn(db: sqlite3.Connection, names: list[str]) -> None:
+    """Drop a `working` edge nothing has stood behind for long enough. The repair.
+
+    What it writes is NULL, and that choice is the whole design. NULL is not a third word
+    and not an invented end: it is the value `agents.turn` already has for a row no hook has
+    ever fired for, and every reader in the package — `collect`'s `turn_over`,
+    `display_state`, `Broker._busy` — already treats it as "we have no signal here, ask
+    herdr", which is precisely how this row behaved before the activity signal existed. So
+    the worst case of being wrong about a live agent is that one row goes back to the
+    behaviour the whole fleet had last week, and it self-corrects at that agent's very next
+    turn edge or `sb` command, both of which write the column again. Nothing is lost, no
+    summary is fabricated, and no end is recorded — the row is still `working` and still its
+    agent's to finish (C9).
+
+    What it buys is everything the wedge took away, and none of it is new machinery: with
+    the edge gone the row is `idle` to the readouts, so it is STALLED and the reconciler
+    pings it; `_busy` reads herdr again, so its held mail is rung; and an agent that is
+    genuinely at its prompt answers that ping, reports, and is sweepable like any other.
+    A permanent wedge becomes a delay of TURN_STALE_GRACE + TURN_DOUBT_GRACE.
+
+    Logged against NO agent with the target in the payload, for `Broker._nudge`'s reason:
+    `_last_activity` counts every event that names an agent, and stamping this one on the
+    row would reset the idle clock of exactly the silent agent it was just written about —
+    both hiding the staleness from the next reading and delaying the stall it exists to
+    surface.
+
+    Callers MUST have consulted herdr and be in the reap path. See `collect`.
+    """
+    if not names:
+        return
+    from . import store                      # local: keeps this module importable alone
+
+    db.executemany("UPDATE agents SET turn=NULL, turn_doubt_since=NULL WHERE name=?",
+                   [(n,) for n in names])
+    db.commit()
+    for name in names:
+        store.log_event(db, kind="turn_forgotten", target=name,
+                        held=int(TURN_STALE_GRACE + TURN_DOUBT_GRACE))
 
 
 def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:

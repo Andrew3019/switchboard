@@ -241,6 +241,26 @@ herdr_log_clip = 500
 # can be confirmed dead during its own spawn.
 gone_confirm_grace = 60.0
 
+# How long a `working` turn edge must have NOTHING behind it before that edge is doubted at
+# all (`status.TURN_STALE_GRACE`). Measured, not guessed: across 406 real agent sessions in
+# this repo, the longest a live agent goes inside one turn without running an `sb` command
+# is 20.6 min at the 99th percentile, and the longest single tool call ever recorded here
+# ran 18 min. 30 min clears both. The tail goes much further — 139 min at the 99.9th — so
+# this deliberately does NOT decide anything on its own; it only says when a row becomes
+# worth asking herdr about. See `turn_doubt_grace`, which is what decides.
+turn_stale_grace = 1800.0
+
+# How long that doubt must hold CONTINUOUSLY, with herdr reporting no turn in the pane at
+# every reading in between, before the edge is dropped (`status.TURN_DOUBT_GRACE`). This is
+# the half that carries the decision, and it works because herdr's busy detector is
+# intermittent rather than dead (`audit/activity-signal-verification.md` §2): a genuinely
+# working agent gets a `working` reading out of it sooner or later, and one such reading
+# anywhere in this window clears the doubt — as does one `sb` command from the agent. An
+# agent that is quiet because its turn really ended never produces either. 15 min is a long
+# run of readings to lose (the board looks every 2 s), and the whole delay from the lost
+# edge is this plus `turn_stale_grace`.
+turn_doubt_grace = 900.0
+
 # How long `sb tell --interrupt` lets the escape keypress land before sending the new instruction.
 # Without the pause the interrupt races the cancel and can be swallowed by the turn it was
 # meant to stop.

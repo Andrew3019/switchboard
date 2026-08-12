@@ -227,6 +227,21 @@ CREATE TABLE agents (
                                       -- reading there and behave exactly as they did
                                       -- before this column existed (`status.collect`,
                                       -- `Broker._busy`).
+    turn_doubt_since INTEGER,         -- epoch of the FIRST reading that found the `turn`
+                                      -- above saying 'working' with nothing behind it —
+                                      -- no event for TURN_STALE_GRACE and herdr reporting
+                                      -- no turn in that pane. Cleared the moment either
+                                      -- half stops holding. An edge that fails to be
+                                      -- written leaves 'working' there for good, and that
+                                      -- row is unpingable, unsweepable and holds its mail
+                                      -- forever; a doubt that survives TURN_DOUBT_GRACE is
+                                      -- what lets `status._forget_turn` drop the edge back
+                                      -- to NULL. Same shape and same reason as
+                                      -- `absent_since`: two readings minutes apart are two
+                                      -- short-lived `sb` processes, and a column is the
+                                      -- only thing they share. NULL means "no doubt as far
+                                      -- as anyone has looked", which is what rows predating
+                                      -- the column read as too.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );
