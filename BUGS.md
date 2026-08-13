@@ -620,3 +620,40 @@ direction, so that fix stays available and is two lines:
   runner's `timeout=` kwarg instead of `--timeout` out of argv. As written the test
   measures herdr's inner bound only, and so passes while this hole is open; its docstring
   says so.
+
+## A held message resets the idle clock of the agent it is held for
+
+**Found:** 2026-08-12, diagnosing why `main-7`'s mail was never announced
+(`audit/held-mail.md`). Not the cause of that, but the reason its designed repair could
+never fire.
+
+**What happens**
+
+`Broker._ring` logs the deferral against the RECIPIENT:
+
+```python
+store.log_event(self.db, kind="ring_deferred", agent=who)
+```
+
+`status._last_activity` counts every event that names an agent as that agent having done
+something. So a message *arriving* and being held advances the recipient's `idle` clock —
+which its own docstring rules out in as many words: "Mail *arriving* is pointedly not
+activity — that is somebody else acting, and counting it would reset the idle clock on
+exactly the silent agent you are trying to spot."
+
+**Consequence:** everything gated on `idle` is weakened for exactly the agents with a
+backlog. `status.turn_doubted` needs `idle >= TURN_STALE_GRACE` (30 min) before it will
+even doubt a stale `working` edge, so an agent receiving mail more often than every 30
+minutes can never be doubted, and `_forget_turn` can never repair it. `stalled` and the
+reconciler's ping read the same clock. Measured on `main-7`: nine deferrals between
+`08-11 19:08` and `08-12 21:11`, six of them less than 30 minutes apart.
+
+**The shape of the fix, not applied here:** `mark_turn`, `Broker._nudge` and
+`status._forget_turn` all already solve this the same way — log against no agent, with the
+target in the payload — and each says why in its docstring. `ring_deferred`, `ring_held`,
+`ring_failed` and `ring_skipped` are all writes about an agent rather than by it, and are
+the same case. Changing them is a change to what `sb log <agent>` shows, which is why it is
+reported rather than done inside a fix for something else.
+
+**STATUS: REPORTED, NOT FIXED.** Out of scope of the branch that found it (`held-mail`),
+which removes the wedge this would have had to repair.
