@@ -542,8 +542,11 @@ side effect is `herdr agent focus` when a human clicks an agent.
   with a board beside it. There is no declining it: `--no-board` is gone, and every
   sb-made view is split with the board. `_top` asks a second time, which is a no-op when
   the board is already up and is what covers a restored agent. The board is the SMALL pane
-  (`board.BOARD_SHARE`, a third of the width): what a human reads is the agent's own
-  session. Note herdr's `--ratio` is the share kept by the pane being split, so
+  (`board.BOARD_SHARE`, a third of the width) beside a delegated child: what a human reads
+  is the agent's own session. The one exception is the top orchestrator `sb start` makes,
+  whose board carries the whole fleet and is the one a human sits in front of — it opens at
+  `board.TOP_BOARD_SHARE` (0.45), picked by the `top=` flag on `_open_board` so the two
+  widths stay one code path. Note herdr's `--ratio` is the share kept by the pane being split, so
   `open_beside` passes `1 - share`. The pane switchboard opened is a pane switchboard takes
   away: `sb cleanup` closes it with the agent (`Broker._close_board`), which is what keeps
   a session from filling with empty tabs now that every agent has one. It is deliberately

@@ -80,6 +80,12 @@ _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # session. See `open_beside`, which inverts this into herdr's `--ratio`.
 BOARD_SHARE = 0.34
 
+# The top orchestrator's board, the one `sb start` opens, is the board a human
+# actually sits in front of and reads: it carries the whole fleet, not one
+# agent's children, so it gets more room than a child's does. Still under half —
+# it is a roomier side panel, not the main event.
+TOP_BOARD_SHARE = 0.45
+
 # Colour is a nicety, never load-bearing: every distinction below is also carried
 # by a glyph or a word, so NO_COLOR loses nothing but polish.
 _COLOR = os.environ.get("NO_COLOR") is None
