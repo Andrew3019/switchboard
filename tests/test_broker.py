@@ -820,6 +820,30 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
+    def test_reviving_a_hookless_agent_does_not_manufacture_a_turn_it_cannot_close(self):
+        """The wedge that held this repo's own top orchestrator's mail for a day.
+
+        An agent whose session predates the activity signal has neither hook, so nothing
+        can ever write its turn-END edge. `_revive` used to stamp `working` on it anyway
+        for running an `sb` command — true about the moment, unclosable forever after —
+        and `_busy` then deferred every `--when-idle` message to it for good. The column
+        must stay NULL for that row: no signal, ask herdr, exactly as before the signal
+        existed.
+        """
+        store.create_agent(self.db, name="top", role="orchestrator", pane_id="w1:p1")
+        store.set_state(self.db, "top", "done")
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True):
+            self.assertEqual(self.b.whoami(), "top")       # it ran an `sb` command
+        a = store.get_agent(self.db, "top")
+        self.assertEqual(a["state"], "working")            # revived, as before
+        self.assertIsNone(a["turn"])                       # but no edge invented
+
+        self.h.states_by_name = {"top": "idle"}
+        self.restart_sb()
+        self.b.tell(["top"], "your child reported", me=HUMAN, mode=WHEN_IDLE)
+        self.assertEqual([n for n, _ in self.h.prompts], ["top"])
+        self.assertEqual(store.undelivered(self.db), [])
+
     def test_pending_mail_is_rung_once_the_target_goes_idle(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}

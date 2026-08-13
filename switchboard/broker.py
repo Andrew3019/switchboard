@@ -630,15 +630,29 @@ class Broker:
         """
         name = row["name"]
         if row["ended_at"] is not None:
-            # `turn` too, and it is not decoration: an agent running an `sb` command is
-            # inside a turn by definition, which is the same fact this method exists to
-            # act on. The `UserPromptSubmit` hook has usually said so already — typing
-            # into a pane fires it exactly as a doorbell does — so this is corroboration
-            # for the one case it cannot cover, a row revived by an `sb` call in a session
-            # that started before this settings file carried the hook.
+            # `state` ONLY, and `turn` pointedly left alone. This used to stamp
+            # `turn='working'` as well, on the reasoning that an agent running an `sb`
+            # command is inside a turn — true, and the exact wrong thing to write down.
+            #
+            # An `sb` command proves a turn STARTED. Nothing in this process can promise
+            # the matching end will ever be recorded, because that end is the `Stop` hook's
+            # to write and the hook belongs to the agent's session, not to us. The case the
+            # old comment named as the one it was covering — "a session that started before
+            # this settings file carried the hook" — is precisely the session that has no
+            # `Stop` hook either. So the write manufactured an edge that nothing in the
+            # fleet could ever close: `_busy` reads `working` forever, every `--when-idle`
+            # message to that agent is deferred forever, and the row cannot be pinged,
+            # swept or doubted out of it. That is what wedged this repo's own top
+            # orchestrator for a day (`audit/held-mail.md`).
+            #
+            # For a session that DOES carry the hooks there is nothing here to corroborate:
+            # `UserPromptSubmit` fires when the prompt is submitted, which is before the
+            # agent can run any command at all, so `turn` already says `working` by the
+            # time this runs. For one that does not, leaving the column NULL is the whole
+            # fix — NULL means "no signal, ask herdr", which is how that row behaved before
+            # the activity signal existed and how it must keep behaving.
             self.db.execute(
-                "UPDATE agents SET ended_at=NULL, state='working', turn=? WHERE name=?",
-                (store.TURN_WORKING, name))
+                "UPDATE agents SET ended_at=NULL, state='working' WHERE name=?", (name,))
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
         elif "state" in row.keys() and row["state"] == "blocked":
