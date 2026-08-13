@@ -27,6 +27,17 @@ from switchboard.broker import HUMAN, Broker, ForkFailed  # noqa: E402
 from switchboard.herdr import Agent, HerdrError  # noqa: E402
 
 
+
+def _board_line(h) -> tuple[str, str]:
+    """The board's own `pane run`, picked out by what it says rather than by position.
+
+    Every spawn types a short command into its pane first and waits for the answer —
+    `Broker._ready_pane`, which is what keeps a 12KB `agent start` out of a shell that is
+    not reading yet — so the board is no longer the first thing in `pane_prompts`.
+    """
+    return next((pane, text) for pane, text in h.pane_prompts
+                if "switchboard.board" in text)
+
 class FakeHerdr:
     """A herdr that owns real workspace identity.
 
@@ -171,6 +182,11 @@ class FakeHerdr:
 
     def prompt_pane(self, pane, text):
         self.pane_prompts.append((pane, text))
+
+    def wait_output(self, pane_id, match, *, timeout_ms):
+        """Every spawn proves its pane answers before `agent start` types into it —
+        see `Broker._ready_pane`. Answering is the case this file is about."""
+        return True
 
     # -- agents ----------------------------------------------------------
 
@@ -628,7 +644,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         from_pane, direction, _ratio = self.h.splits[0]
         self.assertEqual(from_pane, lead["pane_id"])        # split the lead's own pane
         self.assertEqual(direction, "right")
-        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+        self.assertIn("switchboard.board", _board_line(self.h)[1])
 
     def test_the_board_reads_the_workspace_checkout_not_the_main_one(self):
         """A board pointed at the main checkout looks right and reports the wrong tree."""
@@ -667,7 +683,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         self._open("api")
         self.assertIn("api", self.h.live)
         self.assertEqual(len(self.h.splits), 1)
-        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+        self.assertIn("switchboard.board", _board_line(self.h)[1])
 
 
 class StartWorkspaceTest(Fixture, unittest.TestCase):
@@ -719,18 +735,18 @@ class StartWorkspaceTest(Fixture, unittest.TestCase):
         self.assertEqual(from_pane, agent["pane_id"])       # split the orchestrator's own
         self.assertEqual(direction, "right")
         # and the new pane was told to run the board, not left as a bare shell
-        self.assertEqual(len(self.h.pane_prompts), 1)
-        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+        self.assertEqual(sum("switchboard.board" in t for _p, t in self.h.pane_prompts), 1)
+        self.assertIn("switchboard.board", _board_line(self.h)[1])
 
     def test_the_board_cannot_be_declined(self):
         """`--no-board` is gone: every sb-made view is split with the board."""
         self.b.start()
         self.assertEqual(len(self.h.splits), 1)
-        self.assertIn("switchboard.board", self.h.pane_prompts[0][1])
+        self.assertIn("switchboard.board", _board_line(self.h)[1])
 
     def test_a_closed_board_is_reopened(self):
         name = self.b.start()
-        board_pane = self.h.splits[0][0] and self.h.pane_prompts[0][0]
+        board_pane = self.h.splits[0][0] and _board_line(self.h)[0]
         self.h.panes.discard(board_pane)                    # the human closed it
         self.b.start(name=name)
         self.assertEqual(len(self.h.splits), 2)

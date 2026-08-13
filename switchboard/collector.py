@@ -312,11 +312,11 @@ def doorbell_sb() -> Optional[str]:
     restarted by hand with the right `bin` on its PATH, after which everything landed in
     one tick (`audit/phase1-acceptance-3.md` §3.2-3.3).
 
-    `_pin_sb` already solves this shape for a spawned agent's pane, but a board pane is
+    `_ready_pane` already solves this shape for a spawned agent's pane, but a board pane is
     nobody's agent and nothing pins it. The fix does not need a pin at all: this process
     IS the build, launched with the checkout on `PYTHONPATH` by `panel.ensure_collector`,
     so its own `__file__` names the checkout, and that checkout's `bin/sb` is the same
-    file `_pin_sb` puts at the front of an agent's PATH. Naming it here removes the
+    file `_ready_pane` puts at the front of an agent's PATH. Naming it here removes the
     environment from the question entirely: no PATH, no symlink, no ordering, and a
     correct doorbell can no longer be defeated by an unrelated binary.
 
