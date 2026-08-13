@@ -168,6 +168,39 @@ class LayoutTest(unittest.TestCase):
         for text, _ in rows:
             self.assertLessEqual(board._visible_len(text), 40)
 
+    def test_a_wide_character_row_does_not_wrap_and_the_rows_below_it_still_map(self):
+        """The defect this file was short of: `len()` said the row fit, the terminal
+        disagreed, and every click below it landed one agent low. The task here is 30
+        characters and 60 columns — inside an ASCII budget of 40, twice over it in a
+        terminal — and the row after it is the one whose click has to survive."""
+        rows = board.layout(snap(agent("cjk", task="日本語の説明" * 5), agent("below")),
+                            top=0, height=10, width=40, msg="")
+        for text, _ in rows:
+            self.assertLessEqual(board._visible_len(text), 40)
+        row = next(i + 1 for i, (_, a) in enumerate(rows) if a is not None
+                   and not board._is_group(a) and a.name == "below")
+        self.assertEqual(board.agent_at(rows, row).name, "below")
+
+    def test_an_emoji_sequence_is_one_glyph_two_columns_wide(self):
+        """Zero-width joiners, skin tone and a flag are all one glyph each — measuring
+        their codepoints would over-count and truncate a row that fits."""
+        self.assertEqual(board._visible_len("👩‍👩‍👧‍👦"), 2)
+        self.assertEqual(board._visible_len("👨🏽‍💻"), 2)
+        self.assertEqual(board._visible_len("🇯🇵"), 2)
+        rows = board.layout(snap(agent("👩‍👩‍👧‍👦-team", task="🚀 " * 30), agent("plain")),
+                            top=0, height=10, width=40, msg="")
+        for text, _ in rows:
+            self.assertLessEqual(board._visible_len(text), 40)
+
+    def test_the_state_column_lines_up_under_a_wide_name(self):
+        """Padding in characters leaves the columns ragged, which is the same
+        mismeasurement seen before it becomes a wrap."""
+        rows = board.layout(snap(agent("日本語", state="working"),
+                                 agent("ascii", state="working")),
+                            top=0, height=10, width=200, msg="")
+        drawn = [t for t, a in rows if a is not None]
+        self.assertEqual(*[board._visible_len(t[:t.index("working")]) for t in drawn])
+
     def test_the_screen_is_exactly_the_height_it_was_given(self):
         for height in (6, 10, 24, 50):
             rows = board.layout(snap(agent("one"), agent("two")), top=0, height=height,
