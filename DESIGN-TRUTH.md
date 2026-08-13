@@ -62,9 +62,8 @@ confirmed 2026-08-09
 
 **A worktree belongs to a space, not to an agent.** Everything in a lead's space shares
 that lead's worktree, since a lead's spawns are tabs in it. A bare agent gets its own
-worktree because it gets its own space. The only time we do not use a worktree is a
-read-only task that is 100% clear we will not need a write for later on. — confirmed
-2026-08-09
+worktree because it gets its own space. — confirmed 2026-08-09, read-only exception
+dropped 2026-08-12
 
 **While the work runs.** The top orchestrator is just idle. It should not be monitoring.
 It persists until Andrew closes it. — confirmed 2026-08-09
@@ -76,7 +75,7 @@ fully complete: fully complete, report done; Andrew's input needed to finish it,
 Once that is done it reports done, and the top orchestrator blocks. A lead cleans up its
 children, pushes the PR if relevant, and summarizes — it does not close itself, since
 cleaning an orchestrator takes its children and it still has to report. A bare agent
-under the top pushes and opens its own PR; the top blocks for it. Once a block is
+under the top pushes and opens its own PR if the top said so; the top blocks for it. Once a block is
 resolved the agent finishes and reports done, and the parent cleans up. — confirmed
 2026-08-09
 
@@ -231,7 +230,9 @@ fires the moment the top is idle, so it is woken rather than monitoring. — con
 worktree if everything else is closed too.** Work is usually pushed before its worktree
 is deleted. — confirmed 2026-08-09
 
-**`sb status` is not for Andrew — only `sb board` is.** — confirmed 2026-08-09
+**`sb status` is for agents; `sb board` is Andrew's view of the tree.** A soft
+convention about what each is for, not an enforced gate. — confirmed 2026-08-09, soft
+rather than gated confirmed 2026-08-12
 
 **There is `tell` only. No agent ever waits on another agent.** `tell --needs-reply`
 inserts a static prompt saying you must reply to that agent at some point, since it is
@@ -282,16 +283,19 @@ be brought up again.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
-**Who merges depends, but merging needs explicit approval from Andrew.** A prompt rule
-for now: do not merge without asking first. The default shape of shipping work is branch
-named for the workspace, push, open the PR, and put its URL in the summary. — confirmed
-2026-08-09
+**Pushing and merging are decided by the parent, which may or may not be a human.** An
+agent can push if its parent says so; a lead can push if the top orchestrator says so;
+any agent can merge if Andrew tells some top orchestrator and it passes that instruction
+down. So it is never merge without asking your parent. The default shape of shipping work
+is branch named for the workspace, push, open the PR, and put its URL in the summary. —
+confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
+explicit approval and that no agent merges without asking first
 
 **`sb workspace new` is deleted, provided the other commands cover it fully and it is
 clear how to use them.** — confirmed 2026-08-09
 
-**`sb log` is not for Andrew either, but it stays — it could be useful.** — confirmed
-2026-08-09
+**`sb log` is likewise for agents rather than Andrew — also soft — but it stays, it
+could be useful.** — confirmed 2026-08-09, soft rather than gated confirmed 2026-08-12
 
 **`sb presets` needs a parameter to list, and one to apply the prompt to the current
 chat or just read it.** Picking a preset should inject a prompt: sb pastes it in, the

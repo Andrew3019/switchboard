@@ -16,8 +16,11 @@ WHAT IS DELIBERATELY ABSENT. Everything the protocol already says. "Fix only wha
 given, report the rest" is in `defaults/protocol.md` verbatim; so is "report in plain
 language what you were asked and what you found", and the worker role says it a second
 time on purpose. Repeating them here would be a third payment on every spawn. What survives
-from the landing-work rules is only the half nothing else says: commit on your own branch
-and never push, PR, merge or touch main.
+from the landing-work rules is only the half nothing else says: commit on your own branch,
+and this repo's default that the orchestrator integrates. That half was a flat prohibition
+until 2026-08-12, when DESIGN-TRUTH made push and merge the parent's call; it is now a
+default the parent can override, because agents given a brief that said push and a preset
+that said never were guessing which one won.
 
 The one clause that looks like a repeat and is not: "unproven and stated is fine, silent is
 not". The protocol says what a summary is FOR; it does not say that an unfinished proof
@@ -71,8 +74,9 @@ code.
 - `sb inspect`'s pane view is not a reliable liveness signal — it has repeatedly shown an
   empty pane or a shell error for an agent that was working fine. Use the agent tree.
 
-**Landing work.** Commit on your own branch. Never push, never open a pull request, never
-merge, never touch `main` — the orchestrator integrates.
+**Landing work.** Commit on your own branch. By default the orchestrator integrates: do not
+push, open a pull request, merge or touch `main` unless your parent told you to. If it did,
+that instruction is your authority — follow it.
 
 - Anything you left unproven belongs in your summary. Unproven and stated is fine; unproven
   and silent is not.

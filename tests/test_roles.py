@@ -101,14 +101,19 @@ class RolesTest(unittest.TestCase):
         alone — so it is asserted on the protocol, which is the only text all five share."""
         p = config.protocol(self.repo)
         for part in ("branch named for your workspace", "push", "pull request",
-                     "URL in your summary", "explicit approval"):
+                     "URL in your summary"):
             with self.subTest(part=part):
                 self.assertIn(part, p)
 
-    def test_no_shipped_prompt_lets_an_agent_merge_without_asking(self):
+    def test_no_shipped_prompt_lets_an_agent_merge_unasked(self):
+        """DESIGN-TRUTH.md, 2026-08-12: the parent decides, and the parent may be an
+        agent. So the prompt must name the parent as the source of the permission, not
+        Andrew alone — a brief saying "push" and a prompt saying "never" is the exact
+        contradiction four agents each resolved differently."""
         every = " ".join([config.protocol(self.repo)]
                          + [r.prompt for r in roles.load(self.repo).values()])
-        self.assertIn("no agent merges without asking", every)
+        self.assertIn("Never merge without that say-so", every)
+        self.assertIn("Pushing and merging are your parent's call", every)
 
     def test_the_protocol_asks_for_skimmable_human_facing_output(self):
         """DESIGN-TRUTH.md:135-140. The numbered-questions half was already taught; the
