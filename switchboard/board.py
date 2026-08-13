@@ -186,12 +186,16 @@ _GLYPH_COLOR = {"✗": RED, "◐": YELLOW, "◌": YELLOW, "○": DIM, "?": DIM, 
 
 
 def wants_you(a) -> bool:
-    """Whether this row is asking for something, as opposed to just reporting.
+    """Whether this ROW is asking for something, as opposed to just reporting.
 
-    Broader than `AgentStatus.needs_human`: a gone or stalled agent needs a
-    person too, it just does not know it.
+    Broader than `AgentStatus.needs_human` in one direction — a gone or stalled
+    agent needs a person too, it just does not know it — and narrower in
+    another: mail no longer counts here, because mail is no longer drawn here.
+    It has its own line under the row and that line carries its own marker, so
+    an agent with two unread messages and a task shows the task plainly and the
+    `←` sits next to the mail, which is the thing actually wanting an answer.
     """
-    return bool(a.needs_human or a.gone or a.stalled)
+    return bool(a.gone or a.stalled or a.signal_drift or a.blocked or a.at_prompt)
 
 
 def note(a) -> str:
@@ -199,7 +203,9 @@ def note(a) -> str:
 
     Strictly ranked, and only ever one: a board that shows an agent's task and
     its mail and its summary is a board nobody can scan. Whatever is most
-    actionable wins.
+    actionable wins. Mail is not in the ranking at all any more — see
+    `mail_note`, which draws it on its own line rather than competing for this
+    one.
     """
     if a.gone:
         return "GONE — herdr has no such agent"
@@ -210,22 +216,48 @@ def note(a) -> str:
     if a.stalled:
         return f"STALLED — idle {status_mod.fmt_age(a.idle)}"
     if a.signal_drift:
-        # Below STALLED because it is rarer, above mail because mail to an agent whose
-        # session is gone is going nowhere. See `status.AgentStatus.signal_drift`.
+        # Below STALLED because it is rarer. See `status.AgentStatus.signal_drift`.
         return "NO SESSION — died mid-turn, pane still open"
-    if a.unread:
-        return f"{a.unread} unread"
     if a.finished and a.summary:
         return f"done: {a.summary}"
+    if a.idle_excuse:
+        # THE OTHER HALF OF THE STALLED LINE, and the reason it is above the task.
+        # Two rows can both say `idle` and mean opposite things: a lead waiting on
+        # its children is doing exactly what the protocol asked of it, and an agent
+        # that quietly died looks identical. `stalled` above says "nothing explains
+        # this"; this says what does. A reader never has to infer either.
+        return a.idle_excuse
     if a.task:
         return a.task
     return ""
 
 
+def mail_note(a) -> str:
+    """The mail waiting here, or "". Its own line — see `layout`.
+
+    Undelivered first and named: unread means we rang and it has not looked, so
+    the agent knows; undelivered means it was never told and never will be
+    unless somebody notices. The remainder is counted the way `status._attention`
+    counts it, by subtraction, so the two never double-count the same message.
+
+    Words, no glyph. An envelope character is drawn one column wide by some
+    terminals and two by others, and a row that is one column wider than it
+    measured is the wrap this whole file is built to prevent.
+    """
+    bits = []
+    if a.waiting_to_be_rung:
+        bits.append(f"UNDELIVERED {a.undelivered}, "
+                    f"{status_mod.fmt_age(a.undelivered_age)}")
+    told = a.unread - a.undelivered
+    if told > 0:
+        bits.append(f"{told} unread")
+    return ("mail: " + " · ".join(bits)) if bits else ""
+
+
 def _note_color(a) -> str:
     if a.gone:
         return RED
-    if a.at_prompt or a.blocked or a.stalled or a.signal_drift or a.unread:
+    if a.at_prompt or a.blocked or a.stalled or a.signal_drift:
         return YELLOW
     return DIM
 
@@ -255,6 +287,14 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     an index, so a click can never resolve to a different agent than the one the
     human is looking at. Everything downstream just indexes this list.
 
+    That is also how a row is allowed to grow. An agent can occupy more than one
+    line — it occupies two when it has mail — and no caller had to learn that,
+    because nothing outside this function reasons about how many lines a row
+    takes. Every line is drawn by `emit`, which takes the owner alongside the
+    text; the two extra lines a click could land on (an agent's mail line, a
+    collapsed group) each carry their own owner and resolve to it. Adding
+    another line later is the same one-line change: `emit(text, the_agent)`.
+
     `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
     being the same thing when collapse landed: `display_rows` replaces whole
     archived subtrees with one `Collapsed`, so a window taken over `snap.agents`
@@ -265,20 +305,73 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     Returns at most `height` lines.
     """
     rows: list[tuple[str, Optional[object]]] = []
+
+    def emit(text: str, owner: Optional[object] = None) -> None:
+        """Draw one line, and say in the same breath what a click on it means.
+
+        THE ONLY WAY A LINE GETS ONTO THE SCREEN, and the reason adding a line
+        to a row is safe. Nothing anywhere computes "which agent is on screen
+        row N" — the answer is recorded here, as the line is built, and
+        `agent_at` does nothing but index what was recorded. So a new line under
+        an agent (the mail line below) needs no change to the click path at all,
+        and a future one will not either: pass the owner it belongs to, or None
+        for chrome, and the mapping is right by construction rather than by a
+        formula somebody has to remember to update.
+        """
+        rows.append((text, owner))
+
     if show_archived is None:                       # `display.show_archived`, via status,
         show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
     agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
     capacity = max(1, height - CHROME)
-    top = max(0, min(top, max(0, len(agents) - capacity)))
-    window = agents[top:top + capacity]
+    # How many SCREEN LINES each display row costs, which stopped being one apiece when
+    # mail moved onto its own line. Everything that windows or counts below reads this
+    # rather than assuming — the failure otherwise is a row pushed off the bottom by a
+    # neighbour's mail while the footer still claims it is on screen.
+    costs = [1 + (0 if _is_group(a) or not mail_note(a) else 1) for a in agents]
+    top = max(0, min(top, _max_top(costs, capacity)))
+    window: list[tuple[object, bool]] = []          # (row, draw its mail line)
+    used = 0
+    for i in range(top, len(agents)):
+        if used + costs[i] > capacity:
+            # One exception, and only for the first row: an agent whose mail line
+            # will not fit is still drawn, without it. A blank screen saying
+            # "+40 more below" is a worse answer than a row missing its second line.
+            if used == 0 and costs[i] > capacity:
+                window.append((agents[i], False))
+                used += 1
+            break
+        window.append((agents[i], costs[i] > 1))
+        used += costs[i]
 
-    head = _c("switchboard", BLUE) + _c("  ·  " + status_mod.summary_line(snap), DIM)
-    rows.append((head, None))
-    rows.append(("", None))
+    bits = status_mod.summary_bits(snap)
+    # The headline undimmed and the rest dim — the emphasis Andrew asked for, drawn
+    # rather than worded. `summary_bits` decides WHICH count leads; this only decides
+    # that the leading one is the one you see first. Joined here with the same
+    # separator `summary_line` uses, from the same list, so the board and `sb status`
+    # cannot come to show different counts.
+    # The product's own name is decoration and the headline count is not, so in a pane
+    # too narrow for both, the name is what goes.
+    brand = _visible_len("switchboard  ·  ") + _visible_len(bits[0]) <= width
+    head = (_c("switchboard", BLUE) + _c("  ·  ", DIM) if brand else "") + bits[0]
+    cols = _visible_len(("switchboard  ·  " if brand else "") + bits[0])
+    for b in bits[1:]:
+        # Whole counts or none, rather than letting `_fit` cut one in half. A 60-column
+        # board cannot hold every count, and what it drops is the tail of a list that is
+        # already ordered by how much it matters — so the totals go before the trouble
+        # does, and the headline never does. `sb status` and a wider board still show
+        # them all, and the archived total is on the screen anyway, in the tree's own
+        # `+N archived` footer.
+        if cols + 3 + _visible_len(b) > width:
+            break
+        head += _c(" · " + b, DIM)
+        cols += 3 + _visible_len(b)
+    emit(head)
+    emit("")
 
     if not agents:
         why = note_text or "nothing running — sb start"
-        rows.append((_c(f"  ({why})", DIM), None))
+        emit(_c(f"  ({why})", DIM))
     else:
         # Defaults, not `max(seq)`: a window can be nothing but collapsed rows —
         # which is the ORDINARY end-of-session state, every agent finished and
@@ -288,18 +381,18 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # Columns, not characters, in both column widths and in every pad and clip
         # below — see `_visible_len`.
         w_name = max([0] + [_visible_len(("  " * a.depth) + a.name)
-                            for a in window if not _is_group(a)])
+                            for a, _ in window if not _is_group(a)])
         # `display_state`, not the store's raw word: `working` drawn next to this row's
         # own `STALLED — idle …` note is the row contradicting itself, and the one thing
         # a glanceable view must never do. See `AgentStatus.display_state`.
         w_state = max([0] + [_visible_len(a.display_state)
-                             for a in window if not _is_group(a)])
-        for a in window:
+                             for a, _ in window if not _is_group(a)])
+        for a, with_mail in window:
             if _is_group(a):
                 # No glyph, no state, no note. It is not an agent and must not
                 # read as one — `agent_at` hands this very object to the click
                 # handler, which has to be able to tell them apart.
-                rows.append((_c("   " + status_mod.collapsed_label(a), DIM), a))
+                emit(_c("   " + status_mod.collapsed_label(a), DIM), a)
                 continue
             g = glyph(a)
             label = ("  " * a.depth) + a.name
@@ -314,18 +407,27 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             room = width - _visible_len(left) - _visible_len(lead)
             if n and room >= 6:
                 line += _c(lead + _clip(n, room), _note_color(a))
-            rows.append((line, a))
+            emit(line, a)
+            if with_mail:
+                # Its own line, indented under the agent's name the way a task
+                # line hangs under a row in `sb status` — and carrying the SAME
+                # agent, so a click on it focuses the agent it is about. Nothing
+                # about the click path knows this line exists.
+                pad = "   " + "  " * a.depth
+                emit(_c(pad + "← " + _clip(mail_note(a),
+                                           max(0, width - _visible_len(pad) - 2)),
+                        YELLOW), a)
 
     while len(rows) < height - 2:
-        rows.append(("", None))
+        emit("")
 
     hidden = len(agents) - (top + len(window)) if agents else 0
     tail = f"+{hidden} more below" if hidden > 0 else ("scroll ↑" if top else "")
     if note_text and agents:
         tail = note_text
-    rows.append((_c(tail, DIM), None))
-    rows.append((_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
-                 + ("   " + msg if msg else ""), None))
+    emit(_c(tail, DIM))
+    emit(_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
+         + ("   " + msg if msg else ""))
 
     # The one invariant this view rests on: no line may ever wrap. A wrapped line
     # pushes every row below it down by one, and the next click focuses the wrong
@@ -333,6 +435,22 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # in columns, so this is now enforced rather than hoped for: it used to be
     # asserted in characters, which one emoji in a task was enough to break.
     return [(_fit(text, width), a) for text, a in rows[:height]]
+
+
+def _max_top(costs: list[int], capacity: int) -> int:
+    """The furthest a scroll may go: the first row of the last full screenful.
+
+    In LINES, not in rows, which is the same number until a row costs two of
+    them. Counts backwards from the end and stops when the next row up would not
+    fit, so scrolling to the bottom lands on a full screen rather than on one
+    row with blank space under it. Never past the last row: with a capacity too
+    small for even that one, it is still the one to show.
+    """
+    total, t = 0, len(costs)
+    while t > 0 and total + costs[t - 1] <= capacity:
+        total += costs[t - 1]
+        t -= 1
+    return min(t, max(0, len(costs) - 1))
 
 
 def agent_at(rows, row: int):
