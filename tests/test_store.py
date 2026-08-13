@@ -1078,5 +1078,53 @@ class WorkspacesTableTest(unittest.TestCase):
         self.assertTrue(seen.get("timeout"), "the call runs with no timeout")
 
 
+class UnhookedTurnRepairTest(unittest.TestCase):
+    """The one-time repair of `agents.turn` values no hook ever wrote.
+
+    `Broker._revive` used to stamp `working` on any agent that ran an `sb` command after
+    reporting done. For a session that carries the hooks that was redundant; for one that
+    predates them it was permanent, because that session has no `Stop` hook to write the
+    matching end. The writer is gone — this is what it left behind, and the only thing
+    that tells a wedged edge from a live one is whether a hook was ever seen for that row.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = store.connect(path=Path(self.tmp.name) / "state.db")
+        self.addCleanup(self.db.close)
+        # `connect` has already run and recorded it; these rows are the ones an older
+        # checkout left, so put the store back to before it ran.
+        self.db.execute("DELETE FROM meta WHERE key=?",
+                        (f"backfill:{store._TURN_REPAIR_KEY}",))
+        self.db.commit()
+
+    def test_an_edge_no_hook_wrote_is_dropped_and_one_that_was_is_kept(self):
+        store.create_agent(self.db, name="top", role="orchestrator")
+        store.create_agent(self.db, name="kid", role="worker")
+        for name in ("top", "kid"):
+            store.set_turn(self.db, name, store.TURN_WORKING)
+        # Only `kid` has a hook behind its edge — `mark_turn` logs one beside every write.
+        store.log_event(self.db, kind="turn_start", target="kid")
+
+        store._repair_unhooked_turn(self.db)
+
+        self.assertIsNone(store.get_agent(self.db, "top")["turn"])
+        self.assertEqual(store.get_agent(self.db, "kid")["turn"], store.TURN_WORKING)
+
+    def test_it_runs_once_and_never_touches_a_later_edge(self):
+        """Recorded in `meta`, so an agent whose hooks write `working` after the repair has
+        run is not re-repaired on the next command — the mark is a fact about having run,
+        not an inference from the schema."""
+        store.create_agent(self.db, name="top", role="orchestrator")
+        store.set_turn(self.db, "top", store.TURN_WORKING)
+        store._repair_unhooked_turn(self.db)
+        self.assertIsNone(store.get_agent(self.db, "top")["turn"])
+
+        store.set_turn(self.db, "top", store.TURN_WORKING)   # a hook, later
+        store._repair_unhooked_turn(self.db)
+        self.assertEqual(store.get_agent(self.db, "top")["turn"], store.TURN_WORKING)
+
+
 if __name__ == "__main__":
     unittest.main()

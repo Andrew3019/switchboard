@@ -395,6 +395,7 @@ def connect(
         # column another checkout added, therefore costs one PRAGMA sweep and nothing else.
         # `cwd` goes along for the backfills, which need to know which checkout is asking.
         _reconcile(db, cwd)
+    _repair_unhooked_turn(db)
     return db
 
 
@@ -702,6 +703,71 @@ def _fill_table(db: sqlite3.Connection, table: str, cwd: Optional[Path]) -> None
     fill(db, cwd)
     _record_backfill(db, table)
     db.commit()
+
+
+_TURN_REPAIR_KEY = "repair-unhooked-turn"
+
+
+def _repair_unhooked_turn(db: sqlite3.Connection) -> None:
+    """Drop every `agents.turn` no hook of ours ever wrote. Once, for the rows that predate
+    the rule that only the hooks may write it.
+
+    THE INVARIANT THIS RESTORES, and it is the whole reason the column is trustworthy:
+    `agents.turn` is written by `set_turn` and by nothing else, and `set_turn` has exactly
+    two callers on the happy path, both in `hooks.py`, both firing from a per-spawn settings
+    file. So a non-NULL `turn` means "a hook belonging to this session recorded an edge",
+    and NULL means "we have no signal here, ask herdr" — the reading every consumer already
+    has (`status.collect`'s `turn_over`, `display_state`, `Broker._busy`).
+
+    `Broker._revive` used to break that invariant. It stamped `working` on any agent that
+    ran an `sb` command after reporting done, which is true — an agent running a command is
+    inside a turn — but unclosable for the one session it was written for: a session that
+    started before the settings file carried `UserPromptSubmit` has no `Stop` hook either,
+    so nothing in the fleet could ever write the matching `idle`. The row then said
+    `working` for good, `_busy` believed it, and every `--when-idle` message to that agent
+    was deferred forever. That is what happened to this repo's own top orchestrator
+    (`audit/held-mail.md`): one `revived` event, and 24 hours of held mail after it.
+
+    The writer is gone, so nothing can put a row back into that state; what is left is the
+    rows it already wrote, and they cannot be told apart by their value — a wedged
+    `working` and a live one are the same string. They are told apart by their HISTORY:
+    `hooks.mark_turn` logs a `turn_start`/`turn_end` event beside every write it makes, so
+    a row with a `turn` and no turn edge in the log is a row no hook has ever written.
+
+    NULL and never `idle`, for `status._forget_turn`'s reason: NULL is the value a row with
+    no signal has always held, so the worst case of being wrong about a live agent is that
+    one row behaves for one turn exactly as the whole fleet did before the signal existed,
+    and its next hook edge writes the column again. Nothing is lost and no end is invented.
+
+    Recorded in `meta` the way a backfill is, and for the same reason: this must not run on
+    every command for the life of the store, and "the schema hash is current" is not a
+    record of anything having run. Failing soft is deliberate — a store too old to have the
+    column has nothing to repair, and `connect()` may never raise over one.
+    """
+    if _backfill_recorded(db, _TURN_REPAIR_KEY):
+        return
+    try:
+        hooked = set()
+        for r in db.execute(
+            "SELECT payload FROM events WHERE kind IN ('turn_start', 'turn_end')"
+        ):
+            try:
+                target = (json.loads(r["payload"] or "{}") or {}).get("target")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if target:
+                hooked.add(target)
+        stale = [r["name"] for r in db.execute(
+            "SELECT name FROM agents WHERE turn IS NOT NULL"
+        ) if r["name"] not in hooked]
+        if stale:
+            db.executemany(
+                "UPDATE agents SET turn=NULL, turn_doubt_since=NULL WHERE name=?",
+                [(n,) for n in stale])
+        _record_backfill(db, _TURN_REPAIR_KEY)
+        db.commit()
+    except sqlite3.OperationalError:
+        db.rollback()
 
 
 def _table_ddl(table: str) -> list[str]:
