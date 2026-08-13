@@ -655,5 +655,29 @@ target in the payload — and each says why in its docstring. `ring_deferred`, `
 the same case. Changing them is a change to what `sb log <agent>` shows, which is why it is
 reported rather than done inside a fix for something else.
 
-**STATUS: REPORTED, NOT FIXED.** Out of scope of the branch that found it (`held-mail`),
-which removes the wedge this would have had to repair.
+**STATUS: FIXED** on `status-gaps`, and fixed on the reader's side rather than the writer's
+— `status.DONE_TO_THE_AGENT`, a list of event kinds that name an agent without being that
+agent acting, excluded in `_last_activity`. The shape proposed above (re-home the writes to
+`target=` in the payload) was not taken for the two costs it names and one it does not:
+`sb log <agent>` is `store.recent_events(agent=...)`, so re-homing empties the log of the
+delivery history this diagnosis was made from, and `Broker._delivery_failure` reads its own
+`ring_failed` rows back by that same column. The question is a reader's question, so it is
+answered where it is asked.
+
+Four other event kinds are in the same class and were fixed with it, being the same one
+line: `mail_unannounced` and `mail_cleared` (a sweep writing off an agent's mail),
+`notify_failed` (a desktop notification we could not raise about it), and `read_output` —
+`sb inspect`, which is what a person runs when they suspect an agent has gone quiet, and
+which was resetting that agent's idle clock as they looked at it.
+
+Three more are the same class and were deliberately LEFT, because the one-line change does
+not cover them:
+
+- `unblocked` is written by two different things under one name — `Broker._revive`, where
+  the agent itself ran an `sb` command, and `_unblock_if_needed`, where a human's answer
+  lifted the block. A denylist keyed on the kind cannot separate them.
+- `interrupt` is us, but it is a delivery that lands: the agent takes a turn on it, so
+  calling it activity is arguably true.
+- `task_unconfirmed` / `task_undelivered` are ours and name the child, but they are written
+  during the spawn window that `STALL_GRACE` already excuses, so nothing reads the clock
+  they move.

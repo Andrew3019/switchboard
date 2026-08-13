@@ -254,7 +254,8 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
 
 
 def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
-    """Run `sb reconcile` so that an agent which went quiet is told. -> whether one started.
+    """Run `sb reconcile` so an agent that went quiet — or died — is dealt with.
+    -> whether one started.
 
     The doorbell's twin, deliberately built to the same rule: this asks one question of the
     snapshot it already has — is anybody stalled? — and if so spawns one `sb` command,
@@ -276,13 +277,27 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
     In-process memory, like `last_doorbell`: a replacement collector re-spawning once for
     a stall it did not see happen costs one process, and `Broker.reconcile`'s own once-per-
     stall rule is what stops that becoming a second ping.
+
+    **A death fires it too, and on the doorbell's rule rather than the stall's.** `sb
+    reconcile` is the one unattended path that reaps (`cli.main` says why there and not in
+    `flush`), so an agent whose pane has gone has to be able to *start* one — otherwise the
+    reaping sits behind a stalled agent that may not exist, and a dead child is recorded
+    only when a person runs `sb status`. Gone names are deliberately kept OUT of the
+    `reconciled` memory: unlike a stall, this work list empties itself, exactly as the
+    doorbell's does. `_record_gone` writes `failed`, `gone` reads `state in REAPABLE`, and
+    the row drops out of the set for good — so the repeat is bounded by
+    `GONE_CONFIRM_GRACE` and is not waste but the debounce itself, which needs a second
+    reap-capable reading a minute after the first to confirm the absence at all. Deduping
+    them by name would suppress precisely that second reading and leave the death confirmed
+    only on the ten-minute sweep.
     """
     now = panel.now()
     stalled = sorted(a.name for a in snap.agents if a.stalled)
+    gone = sorted(a.name for a in snap.agents if a.gone)
     state.reconciled = [n for n in state.reconciled if n in stalled]
-    if not stalled:
+    if not stalled and not gone:
         return False
-    fresh = [n for n in stalled if n not in state.reconciled]
+    fresh = [n for n in stalled if n not in state.reconciled] + gone
     due = state.last_reconcile is None or now - state.last_reconcile >= RECONCILE_SWEEP
     if not fresh and not due:
         return False

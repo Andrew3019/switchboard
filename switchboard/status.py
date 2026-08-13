@@ -43,8 +43,13 @@ thing to write.
 
 Two other joins fall out of the same table:
 
-    store: working        herdr: not listed  →  GONE     (pane closed under it)
+    store: unended        herdr: not listed  →  GONE     (pane closed under it)
     store: anything       herdr: blocked     →  a human is being asked something in the TUI
+
+`unended` there is `working` OR `blocked` — `REAPABLE`, and pointedly not `RUNNING`. A
+blocked agent is not idle and must never be contradicted for looking idle, but a blocked
+agent whose pane has gone is as dead as any other, and its pane is the only thing that
+tells the two apart.
 
 Everything is computed from ONE `agent list` and one pass over the store. Per-agent herdr
 calls are what make a status command too slow to run reflexively, and a status command you
@@ -120,6 +125,24 @@ TURN_IDLE = config.setting("states.turn_idle")
 # Store states that claim the agent is still going, and so can be contradicted.
 RUNNING = tuple(config.setting("states.running"))
 FINISHED = tuple(config.setting("states.finished"))
+
+# Store states that have never reported an end, and so can be found DEAD — `working` plus
+# `blocked`. Deliberately a second list rather than a widening of `RUNNING`, because the two
+# answer different questions about the same row and only one of them may include `blocked`:
+#
+#     RUNNING   "is this row claiming to be busy?"  → contradicted by an idle pane.
+#     REAPABLE  "could this row still be alive?"    → contradicted by NO pane.
+#
+# A blocked agent is legitimately not working. It stopped to ask a person and stays stopped
+# until answered, so everything `RUNNING` gates — `stalled`, the reconciler's ping,
+# `display_state`, `turn_doubted` — must keep leaving it alone; putting `blocked` in that
+# list would ping every blocked agent in the fleet with "your turn ended without a report".
+# What `REAPABLE` gates is only `gone`, which needs `alive is False`: herdr answered and does
+# not have the pane. A blocked agent that is merely waiting is in that list like any other,
+# so it is untouched by this; one whose pane died is not, and before this it was the one
+# shape nothing in the fleet could ever notice — never reaped, never `failed`, its parent
+# never told, BLOCKED on the board forever.
+REAPABLE = tuple(config.setting("states.reapable"))
 
 # What a row becomes when herdr no longer has the agent (see `_record_gone`).
 #
@@ -260,6 +283,36 @@ TASK_CLIP = config.setting("limits.task_clip")
 # defaults — `board.layout` takes this one too. `config.flag`, not `config.setting`,
 # because a quoted "false" is a true string and would silently invert it.
 SHOW_ARCHIVED = config.flag("display.show_archived")
+
+# Event kinds that NAME an agent without being that agent acting — see `_last_activity`,
+# which is the only thing that reads this and the only place the distinction costs anything.
+#
+# The events table is written by whoever is doing the writing, and `agent=` on a row means
+# only "this row is about that name". For nearly every kind the two coincide: an agent's own
+# `sb` calls, its `done`, its `blocked`, its turn edges. These are the exceptions, and all of
+# them are one process acting ON an agent from outside it:
+#
+#     ring_*        the doorbell we tried to ring at it (`Broker._ring`)
+#     mail_*        mail of its own we gave up on delivering (`_clear_unreadable_mail`)
+#     notify_failed a desktop notification we failed to raise about it (`Broker._surface`)
+#     read_output   somebody ran `sb inspect` and read its terminal (`output.py`)
+#
+# A denylist here rather than moving those writes to `target=` in the payload, which is what
+# `_nudge`, `mark_turn` and `_forget_turn` do and what `BUGS.md` proposed. Two things pay for
+# the difference: `sb log <name>` is `store.recent_events(agent=...)`, so re-homing them
+# empties the log of exactly the delivery history the held-mail diagnosis was made from, and
+# `Broker._delivery_failure` reads its own `ring_failed` rows back by that same column. The
+# question being asked is a reader's question — "did this agent do anything" — so it is
+# answered where it is asked. The cost is that a new event kind about an agent has to be
+# added here, which is one line, and the same line either way.
+#
+# `read_output` is the one worth naming separately: `sb inspect` is what a person runs when
+# they suspect an agent has gone quiet, and it was resetting that agent's idle clock as they
+# looked at it.
+DONE_TO_THE_AGENT = (
+    "ring_deferred", "ring_held", "ring_failed", "ring_skipped",
+    "mail_unannounced", "mail_cleared", "notify_failed", "read_output",
+)
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
 # is still needed here because `--mine` accepts it — for a person, "my subtree" is every
@@ -727,6 +780,9 @@ def collect(
         hstate = agent.state if agent else None
         alive = (agent is not None) if consulted else None
         running = row["state"] in RUNNING and row["ended_at"] is None
+        # The wider half of the same question, and the ONLY thing `gone` is built on: a row
+        # that never reported an end, whether it is working or blocked. See REAPABLE.
+        unended = row["state"] in REAPABLE and row["ended_at"] is None
         # A row with no session id that is younger than the spawn window is a CLAIM, not a
         # live agent: `delegate` writes it before herdr is called, and herdr will not list
         # the name until `agent start` finally succeeds. Absence proves nothing yet, so it
@@ -805,7 +861,14 @@ def collect(
             # did not list has no pane to be pinged in, and that row is GONE's to report.
             stalled=bool(running and turn_over and alive is not False and not awaiting
                          and not starting and name not in live_parent),
-            gone=bool(running and alive is False and not spawning),
+            # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
+            # like any other. Nothing else about a blocked agent changes: it is still not
+            # `stalled` (that reads `running`), still not pinged, still waiting on its human
+            # — right up until herdr stops listing it, which is the only signal that tells a
+            # blocked agent waiting from a blocked agent gone. `alive is False` carries that
+            # on its own, and `_confirmed_gone` still makes it hold for GONE_CONFIRM_GRACE
+            # before anything is written.
+            gone=bool(unended and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),
             idle=max(0, now - last),
@@ -1008,11 +1071,15 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     delivery mechanism is a second set of rules to keep in step with the first.
 
     **Exactly once per failure, decided by the state column and not by a memory.** The
-    UPDATE is conditional on the row still being RUNNING and the message is written only
+    UPDATE is conditional on the row still being REAPABLE and the message is written only
     if it changed a row, so the transition — not the reading — is what pings. A row that
     is already `failed` matches nothing, which is why every later `collect` that sees the
-    same dead agent is silent (`gone` needs `state in RUNNING` too, so such a row does not
-    even reach here). Both writes ride the same connection with one commit, so a process
+    same dead agent is silent (`gone` needs `state in REAPABLE` too, so such a row does not
+    even reach here). The condition is REAPABLE and not RUNNING for the reason `gone` is:
+    a BLOCKED agent whose pane is gone arrives here now, and a guard that named only
+    `working` would silently match nothing and leave it exactly as stuck as before — the
+    state ends the same way regardless of which of the two it stopped in, because what is
+    being recorded is that its turn ended without it reporting success. Both writes ride the same connection with one commit, so a process
     that dies mid-way leaves neither the state nor the ping. And a second `sb` racing the
     first loses the UPDATE rather than the message: SQLite serialises them, and the loser
     matches zero rows.
@@ -1042,15 +1109,15 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     from . import store                      # local: keeps this module importable alone
 
     ts = store.now()
-    running = ",".join("?" * len(RUNNING))
+    reapable = ",".join("?" * len(REAPABLE))
     for name in names:
         # Read BEFORE the write, because the write is what makes it `failed`: the parent
         # and the task are what the message is made of.
         row = store.get_agent(db, name)
         changed = db.execute(
             f"UPDATE agents SET state=?, ended_at=COALESCE(ended_at, ?) "
-            f"WHERE name=? AND state IN ({running})",
-            (GONE_STATE, ts, name, *RUNNING)).rowcount
+            f"WHERE name=? AND state IN ({reapable})",
+            (GONE_STATE, ts, name, *REAPABLE)).rowcount
         if not changed:
             db.commit()                  # nothing of ours to keep; do not hold the lock
             continue
@@ -1160,16 +1227,29 @@ def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
     it makes lands there), messages it sent, and messages it read. Mail *arriving* is
     pointedly not activity — that is somebody else acting, and counting it would reset the
     idle clock on exactly the silent agent you are trying to spot.
+
+    `DONE_TO_THE_AGENT` is that same sentence applied to the events table, which until now
+    it was not: the rule here was "every event that NAMES an agent is that agent acting",
+    and a handful of writes name an agent because they are ABOUT it. The doorbell is the
+    expensive one — `_ring` logs `ring_deferred` against the recipient every time it holds
+    a message for a busy agent, so mail arriving advanced the recipient's clock through the
+    events table after being excluded from the messages half of it. Measured on `main-7`:
+    nine deferrals in a day, six less than thirty minutes apart, which is what kept
+    `turn_doubted` (30 min of quiet) from ever doubting a stale `working` edge and so kept
+    `_forget_turn` from ever repairing it. `stalled` and the reconciler read the same clock
+    (`BUGS.md`, "A held message resets the idle clock of the agent it is held for").
     """
     seen: dict[str, int] = {}
+    kinds = ",".join("?" * len(DONE_TO_THE_AGENT))
     for sql in (
         "SELECT agent a, MAX(created_at) t FROM events "
-        "  WHERE agent IS NOT NULL GROUP BY agent",
+        f"  WHERE agent IS NOT NULL AND kind NOT IN ({kinds}) GROUP BY agent",
         "SELECT from_agent a, MAX(created_at) t FROM messages GROUP BY from_agent",
         "SELECT to_agent a, MAX(read_at) t FROM messages "
         "  WHERE read_at IS NOT NULL GROUP BY to_agent",
     ):
-        for r in db.execute(sql):
+        params = DONE_TO_THE_AGENT if "events" in sql else ()
+        for r in db.execute(sql, params):
             if r["t"] and r["t"] > seen.get(r["a"], 0):
                 seen[r["a"]] = r["t"]
     return seen

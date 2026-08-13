@@ -474,6 +474,44 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.row("top")["state"], status.GONE_STATE)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
 
+    # -- a blocked agent: waiting, or gone? --------------------------------
+
+    def test_a_blocked_agent_whose_pane_died_is_recorded_failed_and_its_parent_told(self):
+        """`states.running` is `working` alone, so a blocked agent was never `gone`, never
+        reaped, never `failed` and its parent never told — it simply stayed BLOCKED on the
+        board for good. `states.reapable` is the wider list this one question asks."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", task="rewrite the parser")
+        store.set_state(self.db, "w1", "blocked")
+
+        self.confirm_gone(FakeHerdr([alive("lead")]))
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+        self.assertIsNotNone(self.row("w1")["ended_at"])
+        [m] = store.unread_for(self.db, "lead", mark=False)
+        self.assertEqual((m["kind"], m["from_agent"]), ("failed", "w1"))
+
+    def test_a_blocked_agent_that_is_merely_waiting_is_left_entirely_alone(self):
+        """The half that matters most: a block is SUPPOSED to sit there until a human
+        answers. Its pane is the only thing that separates the two, so an agent herdr still
+        lists is never gone however long it waits — and never stalled either, which is what
+        would put the reconciler's "your turn ended without a report" in front of an agent
+        that stopped on purpose."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2")
+        store.set_state(self.db, "w1", "blocked")
+        h = FakeHerdr([alive("lead"), alive("w1", "idle")])
+
+        at = store.now()
+        for step in (0, int(status.GONE_CONFIRM_GRACE) + 1, int(status.STALL_GRACE) + 1):
+            a = self.by_name(status.collect(self.db, h, now=at + step))["w1"]
+            self.assertFalse(a.gone)
+            self.assertFalse(a.stalled)
+        self.assertEqual(self.row("w1")["state"], "blocked")
+        self.assertIsNone(self.row("w1")["ended_at"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+
     # -- the spawn grace: a claim is not evidence of a live agent ----------
 
     def test_a_fresh_session_less_row_is_a_claim_and_is_not_reaped(self):
@@ -940,6 +978,37 @@ class StatusTest(unittest.TestCase):
         snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), now=t)
         self.assertEqual(self.by_name(snap)["w1"].idle, 3600)
 
+    def test_a_doorbell_held_for_a_busy_agent_is_not_that_agents_activity(self):
+        """The events half of the same rule, which is where it leaked. `_ring` logs
+        `ring_deferred` against the RECIPIENT, so mail arriving advanced the recipient's
+        idle clock through `events` after being excluded from `messages` — and an agent
+        with a backlog could therefore never look idle for the thirty minutes
+        `turn_doubted` needs, which is why the stale-turn repair could never fire for it.
+        """
+        store.create_agent(self.db, name="w1", role="worker")
+        t = store.now()
+        self.db.execute("UPDATE agents SET created_at=? WHERE name=?", (t - 3600, "w1"))
+        self.db.commit()
+        for kind in status.DONE_TO_THE_AGENT:
+            store.log_event(self.db, kind=kind, agent="w1")
+        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), now=t)
+        self.assertEqual(self.by_name(snap)["w1"].idle, 3600)
+
+    def test_the_agents_own_events_still_count(self):
+        """The denylist is narrow on purpose: everything else an event says about an agent
+        IS that agent acting, and reading its own `sb` calls as silence would be the same
+        bug pointing the other way."""
+        store.create_agent(self.db, name="w1", role="worker")
+        t = store.now()
+        self.db.execute("UPDATE agents SET created_at=? WHERE name=?", (t - 3600, "w1"))
+        self.db.commit()
+        for kind in ("done", "blocked", "delegate", "turn_end", "plugin"):
+            with self.subTest(kind=kind):
+                self.assertNotIn(kind, status.DONE_TO_THE_AGENT)
+        store.log_event(self.db, kind="blocked", agent="w1", why="ask")
+        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), now=t)
+        self.assertLess(self.by_name(snap)["w1"].idle, 10)
+
     def test_a_message_the_agent_sent_counts_as_activity(self):
         store.create_agent(self.db, name="w1", role="worker")
         t = store.now()
@@ -1261,6 +1330,79 @@ class StatusArchivedCliTest(unittest.TestCase):
         payload = json.loads(self.run_sb("status", "--json"))
         self.assertEqual(sorted(a["name"] for a in payload["agents"]), ["lead", "w1"])
         self.assertTrue(all(a["archived"] for a in payload["agents"]))
+
+
+class ReconcileReapsTest(unittest.TestCase):
+    """`sb reconcile` is where failure detection meets a path that runs by itself.
+
+    `collect(reap=True)` used to have exactly one caller — `sb status` — so a dead child
+    was recorded, and its parent pinged, only when somebody happened to look at the board.
+    The collector already spawns `sb reconcile` on its own loop, so that is the verb this
+    moved onto. End to end through `cli.main`, because the wiring is the whole claim.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(cmd, cwd=self.repo, capture_output=True)
+
+        db = store.connect(self.repo)
+        store.create_agent(db, name="lead", role="lead", session_id="s0")
+        store.create_agent(db, name="w1", role="worker", parent="lead", session_id="s1",
+                           task="rewrite the parser")
+        db.execute("UPDATE agents SET created_at = ?",
+                   (store.now() - int(status.SPAWN_GRACE) - 1,))
+        db.commit()
+        db.close()
+
+        cwd = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, cwd)
+        # herdr answers and has the lead but not w1 — the pane closed under it.
+        self.enterContext(mock.patch.object(
+            cli_mod, "Herdr", lambda *a, **k: self.FakeSb([alive("lead", "idle")])))
+        # The debounce is not what is under test here; two readings are.
+        self.enterContext(mock.patch.object(status, "GONE_CONFIRM_GRACE", 0))
+
+    class FakeSb(FakeHerdr):
+        def prompt(self, who, text):
+            return None
+
+    def run_sb(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli_mod.main(list(argv))
+        self.assertEqual(code, 0, err.getvalue())
+        return out.getvalue()
+
+    def state_of(self, name):
+        db = store.connect(self.repo)
+        try:
+            return store.get_agent(db, name)["state"]
+        finally:
+            db.close()
+
+    def test_sb_reconcile_records_the_death_and_tells_the_parent(self):
+        self.run_sb("reconcile")
+        self.run_sb("reconcile")            # the second reading is what confirms it
+        self.assertEqual(self.state_of("w1"), status.GONE_STATE)
+        db = store.connect(self.repo)
+        self.addCleanup(db.close)
+        [m] = store.unread_for(db, "lead", mark=False)
+        self.assertEqual((m["kind"], m["from_agent"]), ("failed", "w1"))
+
+    def test_the_other_unattended_verb_still_reaps_nothing(self):
+        """`sb flush` runs at the top of every `sb` command and asks herdr nothing when the
+        mailbox is quiet. Reaping there would buy an `agent list` subprocess for every
+        `sb log` in the fleet, so the placement is deliberate rather than incidental."""
+        for _ in range(3):
+            self.run_sb("flush")
+        self.assertEqual(self.state_of("w1"), "working")
 
 
 class ArchivedTest(unittest.TestCase):

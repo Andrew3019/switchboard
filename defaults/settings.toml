@@ -131,6 +131,16 @@ done_prefix = "[done] "
 # Still going, and therefore contradictable by what herdr says the pane is doing.
 running = ["working"]
 
+# Has never reported an end, and so a pane that disappears under it is a death worth
+# recording (`status.REAPABLE`). Wider than `running` by exactly one word, and the word is
+# the point: a blocked agent is legitimately not working — it has stopped to ask a person
+# and sits there until answered — so it must never be contradicted for being idle, which is
+# what `running` decides. But if its pane goes, nothing more is coming from it either, and
+# before this it was never reaped, never marked failed and never reported to its parent; it
+# stayed BLOCKED on the board for good. The signal that separates the two is the pane, not
+# the state, and only `gone` reads this list.
+reapable = ["working", "blocked"]
+
 # Will never move again. Waiting on one of these is waiting forever.
 finished = ["done", "failed"]
 
