@@ -4,8 +4,12 @@
 # after the protocol and before its role's own prompt. The `[notify]` lines are the
 # doorbell: what an agent is told when something is waiting for it in the store.
 #
-# All of it is flattened to one line before it is sent — herdr refuses any agent argument
-# containing a newline — so write these wrapped and readable.
+# All of it is flattened to one line before it is sent, so write these wrapped and
+# readable. For `[notify]` that is still herdr's rule: the doorbell text is an agent
+# argument (`agent prompt`), and herdr refuses any agent argument containing a newline.
+# For `[spawn]` the prompt now travels as a FILE (`--append-system-prompt-file`), which has
+# no line limit — the single-line rule there is switchboard's own, enforced in
+# `Herdr.start_agent`, and it stays until somebody decides to lift it.
 #
 # `{...}` placeholders are substituted at send time. Only the ones documented on each entry
 # exist; a placeholder nothing fills is a crash at spawn, so add fields to the code and the

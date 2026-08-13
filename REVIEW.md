@@ -2,6 +2,23 @@
 
 Whole-repo pass for consistency, redundancy, doc drift and open bugs.
 
+> **Reading this after the fact (checked against `main` @ `71bec8a`, 2026-08-12).** This is
+> a dated record of one pass and is not edited to match the code. Four things in it have
+> since been overtaken, and they recur throughout:
+>
+> - **`agent prompt` queues; it does not interleave.** The "interleaves" claim here and the
+>   deferred-doorbell reasoning built on it were re-measured and retracted — see
+>   `Herdr.prompt`'s docstring. Holding a ring is now the `--when-idle` mode, one of three,
+>   rather than what every message does.
+> - **`sb ask`, `sb wait` and `sb interrupt` (the verb) are deleted**, along with the human
+>   inbox. Every behaviour change below that names one describes code that is gone;
+>   `sb block` notifies and writes no mailbox row, because the human has no mailbox.
+> - **`--all-idle`/`--include-kept` are gone**, with the rest of the cleanup disposition
+>   flags.
+> - **"Nothing enforces `sb done`" is closed.** The `Stop` hook it calls still-unbuilt was
+>   built (`switchboard/hooks.py`, `bin/sb-stop-hook`), and a reconciler pings an agent that
+>   stayed silent anyway.
+
 **Suite:** 507 tests → **569**, green. The one test that was failing intermittently
 (`test_concurrent_openers_all_land_in_the_one_workspace`) was reproduced at **2 failures
 in 25 runs** before the fix and is **0 in 60** after it. No test was deleted.

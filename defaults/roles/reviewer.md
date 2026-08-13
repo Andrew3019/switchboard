@@ -35,8 +35,9 @@ by what each can actually guarantee:
 The role therefore does not mention PASS/REVISE — naming a preset that may not be loaded
 teaches half the fleet a format it was never given. It says instead that a stricter format,
 if you were given one, is additional. Note for whoever next edits the preset: "exactly one
-word on its own line" cannot survive a role prompt's flattening (herdr rejects multi-line
-agent arguments) and a one-line `sb done` summary has no lines to put it on, so that
+word on its own line" cannot survive a role prompt's flattening (`Herdr.start_agent`
+rejects a multi-line fragment — herdr's own rule about agent arguments originally, and
+switchboard's own since the prompt started travelling as a file) and a one-line `sb done` summary has no lines to put it on, so that
 instruction only really holds inside the report FILE. That is the preset's problem to fix,
 not this file's.
 

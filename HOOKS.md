@@ -17,6 +17,15 @@ worth repeating here because it is the easiest thing to get wrong: **the Stop ho
 `idle` only when the gate is letting the turn end.** A blocked stop continues the same
 turn.
 
+**A second file now rides beside the settings file, and it is not a hook.** Since
+2026-08-12 the system prompt is handed to the provider as `--append-system-prompt-file
+<path>` rather than as a typed argument (`herdr._prompt_flags`, `audit/prompt-via-file.md`):
+`agent start` types the whole command line into the pane's shell, and a shell still running
+its startup files keeps only `MAX_CANON` — 1024 — bytes of it. Both files live under the
+shared `.git` (`store.store_dir`), for the same reasons; the difference is that an
+unwritable settings file costs enforcement and merely returns `[]`, while an unwritable
+prompt file costs the agent its whole protocol and so fails the spawn.
+
 Two things the build learned that the notes below get wrong or do not say:
 
 - **The gate is not an `events` query.** It reads the agent's `state` — `done`, `blocked`
@@ -186,8 +195,18 @@ Exit 2 on a blocking hook (Stop, PreToolUse, etc.) is **"prevent this action"**.
 | **Trade-off** | Tiny cost for guaranteed early registration. Worth doing. |
 | **Recommendation** | ✅ Add after Stop hook is proven. Low risk, low cost, high safety. |
 
-### UserPromptSubmit
-**Purpose:** Flush pending mail rather than having it piggyback on any `sb` invocation.
+### UserPromptSubmit — ✅ BUILT, for a different purpose
+**Built 2026-08-12** as the activity signal's rising edge (`bin/sb-activity-hook`,
+`hooks.run_activity`) — see the note at the top of this file. It writes
+`agents.turn = 'working'` and prints **nothing**, because the CLI adds a
+`UserPromptSubmit` hook's stdout to the agent's context. It does **not** flush mail, which
+is what the row below proposed: the flush is still the piggyback on every `sb` invocation
+plus the collector's `sb flush` tick, and a hook that rang the doorbell at the exact moment
+a turn began would only be deferring the ring it had just fired. The table below is the
+pre-build estimate, kept for the cost line.
+
+**Purpose (as proposed):** Flush pending mail rather than having it piggyback on any `sb`
+invocation.
 
 | Aspect | Detail |
 |--------|--------|
