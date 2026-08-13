@@ -9,8 +9,8 @@ measurement and the wrong theories are the useful part.
 | # | Bug | Status |
 |---|---|---|
 | 1 | `Broker._adopt` races on `agents.name` | **FIXED**, and the code is now DELETED — see the postscript |
-| 2 | `Herdr.wait` sends `--until idle,blocked` | **FIXED** in the adapter, not just around it |
-| 3 | `Herdr.wait` spins at 100% CPU | **FIXED** in the adapter, not just around it |
+| 2 | `Herdr.wait` sends `--until idle,blocked` | **FIXED** in the adapter, not just around it — the method is now dead code, see entry 5's postscript |
+| 3 | `Herdr.wait` spins at 100% CPU | **FIXED** in the adapter, not just around it — the method is now dead code, see entry 5's postscript |
 | 4 | A schema change deadlocks every running agent | **FIXED** — the deadlock, and the wipe that adding a table used to cost |
 | 5 | `sb wait` returns success while still working | **NOT REPRODUCIBLE**, and the verb is now DELETED — see the postscript |
 
@@ -450,6 +450,15 @@ are gone too. `Herdr.wait` survives (entries 2 and 3 are about it and are still 
 code); what is deleted is the verb that called it and the `--for done` store-state wait
 this entry describes.
 
+**Postscript, 2026-08-12.** Correcting the postscript above: "still live code" was true of
+existence, not of reachability. `Herdr()` is constructed in three places
+(`switchboard/cli.py`, `switchboard/collector.py`, `scripts/06-board.py`), but `.wait(...)`
+is called nowhere among them or anywhere else in `switchboard/` — every call site left is
+in `tests/test_herdr.py`. Entries 2 and 3's fixes are real and are pinned by tests, but the
+method they fixed is currently dead code: no `sb` command reaches it. Not a bug, just a
+correction — nothing here needs Andrew's attention unless something starts calling
+`Herdr.wait` again.
+
 ---
 
 ## An agent that has called `sb done` becomes `human` — it then reads the human's mail
@@ -553,6 +562,20 @@ death — and the grace is floored at `status.SPAWN_GRACE` by an assertion, beca
 that is merely starting slowly is unlisted for that entire window. Two tests, including
 one asserting a single absence does **not** end the wait.
 
+**Postscript, 2026-08-12.** Both `ask` and `timeouts.gone_grace` are gone. `sb ask` was
+deleted along with `sb wait` in phase 3 (no agent waits on another agent), and
+`defaults/settings.toml` has no `gone_grace` key any more — only `gone_confirm_grace`
+(60 s, `switchboard/status.py:226`, `GONE_CONFIRM_GRACE`), which belongs to a different
+mechanism: `_confirmed_gone`/`_record_gone`, the general reconciliation `collect` runs on
+every `sb` call, not the deleted `ask`'s blocking wait. It answers a related but different
+question ("has `collect` seen this row absent long enough to call it dead") from the one
+this entry was about ("has a blocked `ask` waited long enough to stop waiting for an
+answer that will never come"), and it is not new — it predates this entry and was not
+touched by the fix described here. This entry's bug died with `ask`; nothing survived at
+the new name to inherit it. `REVIEW.md`'s "Still open" section repeats the stale
+`gone_grace`/300s reference (around line 328) — left as-is, since `REVIEW.md` is a dated
+snapshot of a past review pass, not a maintained document.
+
 ## `--permission-mode auto` is model-dependent — haiku blocks where opus does not
 
 **Found:** 2026-08-07, after `explore-hooks` (researcher role → `cheap` tier → haiku)
@@ -580,6 +603,14 @@ using it stops for a human on ordinary shell commands.
 `tiers.cheap` resolves to `sonnet` at `effort = "low"`. Cheapness comes from effort, not
 from a smaller model, because a model that blocks on ordinary commands costs a human's
 attention, which is the expensive thing.
+
+**Postscript, 2026-08-12.** The effort level drifted after this was written:
+`defaults/models.toml` now sets `tiers.cheap` to `effort = "medium"` (line 53), not `low`.
+The line above is stale on the number but not on the fix — no tier uses haiku, the tuning
+just moved since. `defaults/models.toml`'s own comments (around line 43) explain why: low
+effort was tried and was "the wrong place to save money" for the tier every other split
+depends on, so it was moved up a notch. Nothing for Andrew to decide here; this is a
+one-word correction (`low` → `medium`) to match the file that is now authoritative.
 
 ## `status.SPAWN_GRACE` is 25 s short of a spawn that outlives herdr's own deadline
 
