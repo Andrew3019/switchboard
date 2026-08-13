@@ -915,7 +915,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             # "(no new messages)", which reads as "nothing needs you" and is a different
             # claim entirely. The board, not `sb status`: `sb board` is the human's
             # surface (DESIGN-TRUTH.md), and a blocked agent is a marked row there
-            # carrying its reason (`board.wants_you`, `board.note`).
+            # carrying its reason (`board.wants_you`, `board.marker`).
             _emit(args,
                   "you have no inbox — agents that need you BLOCK, and a blocked agent "
                   "waits on `sb board` as a marked row with its reason (answer with "

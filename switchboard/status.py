@@ -393,7 +393,7 @@ class AgentStatus:
         row, and this reads the three together instead of one of them alone. `stalled`
         stays exactly what it is — idle with nothing to excuse it, no live child, no
         awaited first task, no startup grace — and it stays a QUALIFIER, drawn beside
-        this word by `_flags` and `board.note`, never instead of it.
+        this word by `_flags` and `board.marker`, never instead of it.
 
         Both halves must be known, the rule `stalled` and `gone` are already built on.
         With herdr unreachable (`alive is None`) nothing was observed, so the store's own
