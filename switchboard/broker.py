@@ -48,6 +48,7 @@ from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
 from . import validate
+from . import herdr as herdr_mod
 from .herdr import WORKING, Herdr, HerdrError
 from .status import GONE_STATE, fmt_age
 from . import live
@@ -3760,6 +3761,11 @@ class Broker:
             # closing an agent leaves an empty tab behind, once per agent. After the
             # skip above, so a close we abandoned leaves the board with its live pane.
             self._close_board(a["name"])
+            # Same rule for the file its system prompt was read from: it is this agent's
+            # state, written by the spawn, so it goes when the pane does rather than
+            # accumulating one file per agent ever spawned. After the skip above too — a
+            # close that did not happen leaves a live agent's prompt where it is.
+            herdr_mod.forget_prompt_file(a["name"], self.repo)
             store.set_state(self.db, a["name"], "done")
             # The pane is gone, so the row must stop claiming one: the "already gone"
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a
