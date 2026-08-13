@@ -57,8 +57,8 @@ checkout to run it from. — confirmed 2026-08-09
 bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
 Top spawns an orchestrator = same thing. An orchestrator spawning anything = new tab in
 the same exact space. So only the top ever creates a space: a sub-orchestrator a lead
-spawns is a tab in the lead's space, and its whole subtree stays in that one space.
-(This has not been the case.) — confirmed 2026-08-09
+spawns is a tab in the lead's space, and its whole subtree stays in that one space. —
+confirmed 2026-08-09
 
 **A worktree belongs to a space, not to an agent.** Everything in a lead's space shares
 that lead's worktree, since a lead's spawns are tabs in it. A bare agent gets its own
@@ -144,8 +144,9 @@ confirmed 2026-08-09
 
 **Agents should avoid blocking unless it is really needed** — a genuine, big,
 behaviour-changing design question; being blocked on running some command; being
-explicitly told to block; going back and forth with the agent itself; or finished work
-that needs Andrew's input or approval to complete. — confirmed 2026-08-09
+explicitly told to block; an ambiguous instruction; going back and forth with the agent
+itself; or finished work that needs Andrew's input or approval to complete. — confirmed
+2026-08-09, ambiguous instruction confirmed 2026-08-12
 
 ### Orchestrators
 
