@@ -190,22 +190,18 @@ def wants_you(a) -> bool:
 
     Broader than `AgentStatus.needs_human` in one direction — a gone or stalled
     agent needs a person too, it just does not know it — and narrower in
-    another: mail no longer counts here, because mail is no longer drawn here.
-    It has its own line under the row and that line carries its own marker, so
-    an agent with two unread messages and a task shows the task plainly and the
-    `←` sits next to the mail, which is the thing actually wanting an answer.
+    another: mail does not count here. Mail marks itself, inside the second
+    line, so an agent with two unread messages and a task is not dressed up as
+    an agent in trouble.
     """
     return bool(a.gone or a.stalled or a.signal_drift or a.blocked or a.at_prompt)
 
 
-def note(a) -> str:
-    """The one thing worth saying about this agent, right of its state.
+def marker(a) -> str:
+    """The trouble with this agent, or "". RANK ONE of the second line.
 
-    Strictly ranked, and only ever one: a board that shows an agent's task and
-    its mail and its summary is a board nobody can scan. Whatever is most
-    actionable wins. Mail is not in the ranking at all any more — see
-    `mail_note`, which draws it on its own line rather than competing for this
-    one.
+    Strictly ranked and only ever one: an agent that is both gone and blocked is
+    gone, and the row says the thing a human would act on first.
     """
     if a.gone:
         return "GONE — herdr has no such agent"
@@ -218,18 +214,27 @@ def note(a) -> str:
     if a.signal_drift:
         # Below STALLED because it is rarer. See `status.AgentStatus.signal_drift`.
         return "NO SESSION — died mid-turn, pane still open"
+    return ""
+
+
+def tail_note(a) -> str:
+    """What this agent is FOR, or what came of it, or "". RANK THREE.
+
+    Last because it is the least actionable thing on the line: a task head is
+    context a reader can also get from the agent's own pane, where a stuck
+    agent's marker and an unanswered message are things only this view will
+    tell them.
+    """
     if a.finished and a.summary:
         return f"done: {a.summary}"
     if a.idle_excuse:
         # THE OTHER HALF OF THE STALLED LINE, and the reason it is above the task.
         # Two rows can both say `idle` and mean opposite things: a lead waiting on
         # its children is doing exactly what the protocol asked of it, and an agent
-        # that quietly died looks identical. `stalled` above says "nothing explains
+        # that quietly died looks identical. `marker` above says "nothing explains
         # this"; this says what does. A reader never has to infer either.
         return a.idle_excuse
-    if a.task:
-        return a.task
-    return ""
+    return a.task or ""
 
 
 def mail_note(a) -> str:
@@ -262,6 +267,66 @@ def _note_color(a) -> str:
     return DIM
 
 
+# What the second line will not draw a piece of at all. Below this a clipped
+# phrase is an ellipsis with a word in front of it, which says less than the
+# space it costs.
+_MIN_BIT = 10
+# How much room a longer piece gives up so that MAIL can still be seen beside
+# it. Bounded rather than "whatever mail needs": a marker clipped to nothing to
+# make room for an unbounded count is the opposite trade.
+_MAIL_RESERVE = 22
+
+
+def detail_bits(a) -> list[tuple[str, str, str]]:
+    """The second line's contents as (text, colour, kind), HIGHEST PRIORITY FIRST.
+
+    Everything that is detail rather than identity is here, and the order is the
+    answer to the only hard question a two-line row asks: at sixty columns they
+    will not all fit, so what goes first and what goes at all?
+
+        1. `marker`     — GONE, AT PROMPT, BLOCKED, STALLED, NO SESSION.
+                          Something is wrong and a human is the only fix.
+        2. `mail_note`  — undelivered or unread. Often the thing that would
+                          unblock rank one, so it is never crowded out by it.
+        3. `tail_note`  — the done summary, the idle excuse, or the task head.
+                          Context. First to go.
+
+    Empty pieces are dropped, so an agent with nothing to say yields nothing and
+    still gets its (blank) second line — see `layout`.
+    """
+    bits = [(marker(a), _note_color(a), "marker"),
+            (mail_note(a), YELLOW, "mail"),
+            (tail_note(a), DIM, "tail")]
+    return [b for b in bits if b[0]]
+
+
+def _compose(bits, cols: int) -> str:
+    """Draw as much of `bits` as fits in `cols` columns, priority first.
+
+    Two rules beyond "fill until full". A piece is clipped rather than dropped
+    only while it can still say something (`_MIN_BIT`); below that it is not
+    drawn, because half a word is not worth a third of the line. And a piece
+    gives up room ahead of MAIL specifically, up to `_MAIL_RESERVE`, so that a
+    long BLOCKED reason cannot hide the answer that would end the block. Nothing
+    reserves for the tail: context is what this line sheds first.
+    """
+    out: list[str] = []
+    used = 0
+    for i, (text, colour, _kind) in enumerate(bits):
+        gap = 3 if out else 0                       # " · "
+        room = cols - used - gap
+        if i + 1 < len(bits) and bits[i + 1][2] == "mail":
+            keep = min(_visible_len(bits[i + 1][0]), _MAIL_RESERVE) + 3
+            if room - keep >= _MIN_BIT:
+                room -= keep
+        if room < _MIN_BIT:
+            break
+        piece = _clip(text, room)
+        out.append(_c(piece, colour))
+        used += gap + _visible_len(piece)
+    return _c(" · ", DIM).join(out)
+
+
 # ---------------------------------------------------------------------------
 # Pure: layout
 # ---------------------------------------------------------------------------
@@ -287,11 +352,15 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     an index, so a click can never resolve to a different agent than the one the
     human is looking at. Everything downstream just indexes this list.
 
-    That is also how a row is allowed to grow. An agent can occupy more than one
-    line — it occupies two when it has mail — and no caller had to learn that,
-    because nothing outside this function reasons about how many lines a row
-    takes. Every line is drawn by `emit`, which takes the owner alongside the
-    text; the two extra lines a click could land on (an agent's mail line, a
+    That is also how a row is allowed to grow. An agent occupies two lines,
+    always — identity on the first, detail indented on the second — and no
+    caller had to learn that, because nothing outside this function reasons
+    about how many lines a row takes. It grew from one line to two, and then
+    from "two when it has mail" to "two, uniformly", without a line of this
+    changing outside this function.
+
+    Every line is drawn by `emit`, which takes the owner alongside the
+    text; the extra lines a click could land on (an agent's detail line, a
     collapsed group) each carry their own owner and resolve to it. Adding
     another line later is the same one-line change: `emit(text, the_agent)`.
 
@@ -324,17 +393,18 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
     agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
     capacity = max(1, height - CHROME)
-    # How many SCREEN LINES each display row costs, which stopped being one apiece when
-    # mail moved onto its own line. Everything that windows or counts below reads this
-    # rather than assuming — the failure otherwise is a row pushed off the bottom by a
-    # neighbour's mail while the footer still claims it is on screen.
-    costs = [1 + (0 if _is_group(a) or not mail_note(a) else 1) for a in agents]
+    # How many SCREEN LINES each display row costs. Two for every agent and one for a
+    # collapsed group — uniform, which is the point of the shape: a reader learns the
+    # block once and every agent obeys it. Everything that windows or counts below reads
+    # this rather than assuming, the failure otherwise being a row pushed off the bottom
+    # while the footer still claims it is on screen.
+    costs = [1 if _is_group(a) else 2 for a in agents]
     top = max(0, min(top, _max_top(costs, capacity)))
-    window: list[tuple[object, bool]] = []          # (row, draw its mail line)
+    window: list[tuple[object, bool]] = []          # (row, draw its detail line)
     used = 0
     for i in range(top, len(agents)):
         if used + costs[i] > capacity:
-            # One exception, and only for the first row: an agent whose mail line
+            # One exception, and only for the first row: an agent whose second line
             # will not fit is still drawn, without it. A blank screen saying
             # "+40 more below" is a worse answer than a row missing its second line.
             if used == 0 and costs[i] > capacity:
@@ -387,7 +457,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # a glanceable view must never do. See `AgentStatus.display_state`.
         w_state = max([0] + [_visible_len(a.display_state)
                              for a, _ in window if not _is_group(a)])
-        for a, with_mail in window:
+        for a, with_detail in window:
             if _is_group(a):
                 # No glyph, no state, no note. It is not an agent and must not
                 # read as one — `agent_at` hands this very object to the click
@@ -396,27 +466,30 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 continue
             g = glyph(a)
             label = ("  " * a.depth) + a.name
-            # Measured plain and coloured in parallel: only the glyph is coloured,
-            # so the two stay the same visible width.
-            left = (f" {g} {_pad(label, w_name)}  {_pad(a.display_state, w_state)}  "
-                    f"{status_mod.fmt_age(a.idle):>5}  ")
-            line = (f" {_c(g, _GLYPH_COLOR.get(g, ''))} {_pad(label, w_name)}  "
-                    f"{_pad(a.display_state, w_state)}  {status_mod.fmt_age(a.idle):>5}  ")
-            n = note(a)
-            lead = "← " if wants_you(a) else "  "
-            room = width - _visible_len(left) - _visible_len(lead)
-            if n and room >= 6:
-                line += _c(lead + _clip(n, room), _note_color(a))
-            emit(line, a)
-            if with_mail:
-                # Its own line, indented under the agent's name the way a task
-                # line hangs under a row in `sb status` — and carrying the SAME
-                # agent, so a click on it focuses the agent it is about. Nothing
-                # about the click path knows this line exists.
+            # IDENTITY AND STATE ONLY: who this is, what it is doing, how long since it
+            # last did anything. Nothing that could grow lives here, which is why this
+            # line cannot push a row's shape around.
+            emit(f" {_c(g, _GLYPH_COLOR.get(g, ''))} {_pad(label, w_name)}  "
+                 f"{_pad(a.display_state, w_state)}  "
+                 f"{status_mod.fmt_age(a.idle):>5}", a)
+            if with_detail:
+                # EVERYTHING ELSE, indented under the agent's name the way a task line
+                # hangs under a row in `sb status` — and carrying the SAME agent, so a
+                # click on it focuses the agent it is about. Nothing about the click path
+                # knows this line exists. Drawn even when there is nothing to say: the
+                # block is two lines for every agent, and a shape that only sometimes
+                # holds is a shape a reader cannot use.
                 pad = "   " + "  " * a.depth
-                emit(_c(pad + "← " + _clip(mail_note(a),
-                                           max(0, width - _visible_len(pad) - 2)),
-                        YELLOW), a)
+                bits = detail_bits(a)
+                body = _compose(bits, max(0, width - _visible_len(pad) - 2))
+                if not body:
+                    emit("", a)                     # nothing to say, and still two lines
+                    continue
+                # The arrow belongs to whatever leads the line, and takes its colour, so
+                # it points at a reason rather than floating: trouble, or mail, and
+                # nothing at all when the line is only saying what the agent is up to.
+                lead = "← " if wants_you(a) or bits[0][2] == "mail" else "  "
+                emit(pad + _c(lead, bits[0][1]) + body, a)
 
     while len(rows) < height - 2:
         emit("")

@@ -47,6 +47,21 @@ def snap(*agents):
     return status.Snapshot(now=0, agents=list(agents))
 
 
+def blocks(rows):
+    """The display ROWS drawn, one entry each, in order.
+
+    An agent owns two screen lines and a collapsed group owns one, so "what is on
+    screen" and "how many lines is that" stopped being the same list. Consecutive lines
+    with the same owner are one block — which is exactly the invariant the mapping rests
+    on: a row's lines are adjacent and all carry it.
+    """
+    out = []
+    for _, a in rows:
+        if a is not None and (not out or a is not out[-1]):
+            out.append(a)
+    return out
+
+
 class ParseSgrTest(unittest.TestCase):
     def test_a_click_decodes_to_button_column_and_row(self):
         events, rest = board.parse_sgr("\033[<0;12;7M")
@@ -84,7 +99,7 @@ class GlyphTest(unittest.TestCase):
         must never tell, so `gone` wins even over a block."""
         a = agent("w", gone=True, state="blocked", unread=3)
         self.assertEqual(board.glyph(a), "✗")
-        self.assertEqual(board.note(a), "GONE — herdr has no such agent")
+        self.assertEqual(board.marker(a), "GONE — herdr has no such agent")
 
     def test_every_glyph_has_a_colour_and_they_are_all_distinct(self):
         kinds = [agent("a", gone=True), agent("b", state="blocked"),
@@ -95,10 +110,10 @@ class GlyphTest(unittest.TestCase):
         for g in glyphs:
             self.assertIn(g, board._GLYPH_COLOR)
 
-    def test_only_one_note_is_ever_shown_and_it_is_the_most_actionable(self):
+    def test_only_one_marker_is_ever_shown_and_it_is_the_most_actionable(self):
         a = agent("w", state="blocked", blocked_why="need a key", unread=2,
                   task="do the thing")
-        self.assertEqual(board.note(a), "BLOCKED — need a key")
+        self.assertEqual(board.marker(a), "BLOCKED — need a key")
 
 
 class RowSaysOneThingTest(unittest.TestCase):
@@ -112,8 +127,11 @@ class RowSaysOneThingTest(unittest.TestCase):
     """
 
     def line(self, a):
+        """BOTH of the agent's lines, joined. It is one block on screen and it is one
+        statement: the contradiction pinned here would be a contradiction wherever the
+        two halves of it were drawn."""
         rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
-        return next(t for t, row in rows if row is a)
+        return "\n".join(t for t, row in rows if row is a)
 
     def test_a_stalled_agent_reads_idle_and_never_working_as_well(self):
         line = self.line(agent("w", state="working", herdr_state="idle", stalled=True))
@@ -146,8 +164,11 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
     """
 
     def line(self, a):
+        """BOTH of the agent's lines, joined. It is one block on screen and it is one
+        statement: the contradiction pinned here would be a contradiction wherever the
+        two halves of it were drawn."""
         rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
-        return next(t for t, row in rows if row is a)
+        return "\n".join(t for t, row in rows if row is a)
 
     def test_an_explained_idle_row_says_what_explains_it(self):
         line = self.line(agent("lead", state="working", herdr_state="idle",
@@ -166,42 +187,71 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
 
     def test_mail_alone_no_longer_marks_the_agent_row(self):
         """It used to: unread mail took over the note and the `←`, so an agent with mail
-        looked like an agent in trouble. The mail has its own line now, with its own
-        marker, and the row goes back to saying what the agent is doing."""
+        looked like an agent in trouble. Mail marks itself, inside the second line, and
+        the row goes back to saying what the agent is doing."""
         a = agent("w", unread=2, task="fix the parser")
         self.assertFalse(board.wants_you(a))
-        self.assertEqual(board.note(a), "fix the parser")
+        self.assertEqual(board.tail_note(a), "fix the parser")
 
 
-class MailLineTest(unittest.TestCase):
-    """Mail on its own indented line — and the mapping it could break.
+class TwoLinesTest(unittest.TestCase):
+    """Every agent is exactly two lines: identity on the first, detail on the second.
 
-    A second line under an agent is exactly the change that shifts every row below it by
-    one. It is safe for one reason, pinned here: the owner of a line is recorded as the
-    line is drawn, so a click reads what was recorded rather than recomputing which agent
-    "should" be on row N.
+    Uniformly — an agent with no task, no mail and nothing to say gets its blank second
+    line too. A block that is sometimes one line and sometimes three is the shape Andrew
+    asked us to get rid of, and "sometimes" is the only part of it a test can catch.
     """
 
-    def rows(self, *agents, height=14, width=80):
+    def rows(self, *agents, height=20, width=80):
         return board.layout(snap(*agents), top=0, height=height, width=width, msg="")
 
-    def mail_lines(self, rows):
-        return [t for t, _ in rows if "mail:" in t]
+    def pair(self, rows, a):
+        return [board._ANSI.sub("", t) for t, row in rows if row is a]
 
-    def test_mail_is_not_on_the_agents_row(self):
-        rows = self.rows(agent("w", unread=2, task="fix the parser"))
-        row = next(t for t, a in rows if a is not None)
-        self.assertIn("fix the parser", row)
-        self.assertNotIn("unread", row)
+    def test_every_agent_costs_exactly_two_lines_whatever_it_has_to_say(self):
+        loud = agent("loud", state="blocked", blocked_why="need a key", unread=3,
+                     undelivered=1, undelivered_age=60, task="do the thing")
+        quiet = agent("quiet")
+        rows = self.rows(loud, quiet)
+        self.assertEqual(len(self.pair(rows, loud)), 2)
+        self.assertEqual(len(self.pair(rows, quiet)), 2)
+        self.assertEqual(self.pair(rows, quiet)[1], "")     # blank, and still a line
 
-    def test_mail_is_its_own_line_under_the_agent_and_indented(self):
-        rows = self.rows(agent("main"), agent("w", depth=1, parent="main", unread=2))
-        [line] = self.mail_lines(rows)
-        plain = board._ANSI.sub("", line)
-        self.assertIn("2 unread", plain)
-        self.assertTrue(plain.startswith("     "))          # under the name, not the glyph
-        i = [t for t, _ in rows].index(line)
-        self.assertIs(rows[i][1], rows[i - 1][1])           # directly under its own agent
+    def test_the_first_line_is_identity_and_the_second_is_everything_else(self):
+        a = agent("w", state="blocked", blocked_why="need a key", unread=2,
+                  task="fix the parser")
+        head, detail = self.pair(self.rows(a), a)
+        self.assertIn("w", head)
+        self.assertIn("blocked", head)                      # name, state, timing
+        for moved in ("BLOCKED", "need a key", "unread", "fix the parser"):
+            self.assertNotIn(moved, head)
+            self.assertIn(moved, detail)
+
+    def test_the_second_line_is_indented_under_the_name(self):
+        child = agent("w", depth=1, parent="main", unread=2)
+        head, detail = self.pair(self.rows(agent("main"), child), child)
+        self.assertEqual(head.index("w"), detail.index("←"))     # not under the glyph
+
+    def test_priority_is_trouble_then_mail_then_context(self):
+        a = agent("w", state="blocked", blocked_why="need a key", unread=2,
+                  task="fix the parser")
+        self.assertEqual([kind for _, _, kind in board.detail_bits(a)],
+                         ["marker", "mail", "tail"])
+        detail = self.pair(self.rows(a), a)[1]
+        self.assertLess(detail.index("BLOCKED"), detail.index("mail:"))
+        self.assertLess(detail.index("mail:"), detail.index("fix the parser"))
+
+    def test_context_is_dropped_first_and_mail_is_never_crowded_out(self):
+        """Sixty columns, a verbose block and mail waiting. The task head goes, because
+        it is the piece a reader can get elsewhere — and the mail stays, because it is
+        quite possibly the answer that ends the block."""
+        a = agent("w", state="blocked", unread=1, undelivered=1, undelivered_age=900,
+                  blocked_why="whether to merge #33 before or after the board work lands",
+                  task="make every agent two lines")
+        detail = self.pair(self.rows(a, width=60), a)[1]
+        self.assertIn("BLOCKED", detail)
+        self.assertIn("UNDELIVERED", detail)
+        self.assertNotIn("make every agent", detail)
 
     def test_undelivered_is_named_and_the_rest_counted_by_subtraction(self):
         """UNDELIVERED is the loud one: unread means we rang and it has not looked;
@@ -211,22 +261,22 @@ class MailLineTest(unittest.TestCase):
         self.assertEqual(board.mail_note(a), "mail: UNDELIVERED 1, 12m · 2 unread")
         self.assertEqual(board.mail_note(agent("q")), "")
 
-    def test_a_click_below_an_agent_with_mail_still_focuses_the_right_agent(self):
-        """THE PROOF. Three agents, the first with mail, so every row below it has moved
-        down by one. Every drawn line must resolve to the agent it is drawn for."""
+    def test_a_click_below_a_two_line_agent_still_focuses_the_right_agent(self):
+        """THE PROOF. Three agents, so every row below the first has moved down by two.
+        Every drawn line must resolve to the agent it is drawn for."""
         rows = self.rows(agent("one", unread=2), agent("two"), agent("three"))
         drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
         self.assertEqual([n for _, n in drawn],
-                         ["one", "one", "two", "three"])     # "one" owns its mail line too
+                         ["one", "one", "two", "two", "three", "three"])
         for row, name in drawn:
             self.assertEqual(board.agent_at(rows, row).name, name)
 
-    def test_a_click_on_the_mail_line_focuses_the_agent_it_is_about(self):
+    def test_a_click_on_the_second_line_focuses_the_agent_it_is_about(self):
         rows = self.rows(agent("one", unread=2), agent("two"))
-        i = [t for t, _ in rows].index(self.mail_lines(rows)[0])
+        i = next(i for i, (t, _) in enumerate(rows) if "mail:" in t)
         self.assertEqual(board.agent_at(rows, i + 1).name, "one")
 
-    def test_the_mail_line_costs_a_line_of_the_window_rather_than_overflowing_it(self):
+    def test_a_second_line_costs_a_line_of_the_window_rather_than_overflowing_it(self):
         """A row that grew has to be paid for out of the same screen, or the footer ends
         up claiming rows that were pushed off the bottom."""
         agents = [agent(f"a{i}", unread=1) for i in range(6)]
@@ -237,9 +287,19 @@ class MailLineTest(unittest.TestCase):
         self.assertEqual(names, {"a0", "a1"})
         self.assertIn("+4 more below", "\n".join(t for t, _ in rows))
 
-    def test_a_mail_line_never_widens_the_screen(self):
+    def test_a_screen_with_room_for_one_line_draws_the_identity_half(self):
+        """The one place the block is allowed to be one line: a pane too short for two.
+        A blank screen saying `+5 more below` is a worse answer than a name."""
+        agents = [agent(f"a{i}", task="x") for i in range(6)]
+        rows = board.layout(snap(*agents), top=0, height=board.CHROME + 1, width=80,
+                            msg="")
+        drawn = [a for _, a in rows if a is not None]
+        self.assertEqual([a.name for a in drawn], ["a0"])
+
+    def test_a_second_line_never_widens_the_screen(self):
         rows = board.layout(snap(agent("日本語", unread=99, undelivered=99,
-                                       undelivered_age=99999)),
+                                       undelivered_age=99999,
+                                       task="日本語の説明" * 20)),
                             top=0, height=10, width=40, msg="")
         for text, _ in rows:
             self.assertLessEqual(board._visible_len(text), 40)
@@ -250,7 +310,7 @@ class LayoutTest(unittest.TestCase):
         rows = board.layout(snap(agent("one"), agent("two", depth=1), agent("three")),
                             top=0, height=12, width=100, msg="")
         drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
-        self.assertEqual([n for _, n in drawn], ["one", "two", "three"])
+        self.assertEqual([a.name for a in blocks(rows)], ["one", "two", "three"])
         for row, name in drawn:
             self.assertEqual(board.agent_at(rows, row).name, name)
 
@@ -309,7 +369,7 @@ class LayoutTest(unittest.TestCase):
         rows = board.layout(snap(agent("日本語", state="working"),
                                  agent("ascii", state="working")),
                             top=0, height=10, width=200, msg="")
-        drawn = [t for t, a in rows if a is not None]
+        drawn = [t for t, a in rows if a is not None and "working" in t]
         self.assertEqual(*[board._visible_len(t[:t.index("working")]) for t in drawn])
 
     def test_the_screen_is_exactly_the_height_it_was_given(self):
@@ -430,7 +490,7 @@ class CollapseLayoutTest(unittest.TestCase):
     """
 
     def drawn(self, rows):
-        return [a for _, a in rows if a is not None]
+        return blocks(rows)
 
     def text(self, rows):
         return "\n".join(t for t, _ in rows)
@@ -485,7 +545,7 @@ class CollapseLayoutTest(unittest.TestCase):
         agents += [agent(f"live{i}", depth=1, parent="main") for i in range(3)]
         agents += [agent("dead", depth=1, parent="main", archived=True)]
         agents += [agent(f"d{i}", depth=2, parent="dead", archived=True) for i in range(29)]
-        height = board.CHROME + 3                       # capacity 3, 5 rows to show
+        height = board.CHROME + 6                       # capacity 3 rows, 5 to show
 
         rows = board.layout(snap(*agents), top=0, height=height, width=100, msg="")
         self.assertEqual([getattr(a, "name", "GROUP") for a in self.drawn(rows)],
@@ -505,8 +565,8 @@ class CollapseLayoutTest(unittest.TestCase):
         agents = [agent(f"live{i}") for i in range(6)]
         agents += [agent("dead", archived=True)]
         agents += [agent(f"d{i}", depth=1, parent="dead", archived=True) for i in range(40)]
-        # capacity = height - CHROME; small enough that something really is below.
-        height = board.CHROME + 3
+        # capacity = height - CHROME, in LINES; small enough that something is below.
+        height = board.CHROME + 6
         rows = board.layout(snap(*agents), top=0, height=height, width=100, msg="")
         self.assertEqual(len(self.drawn(rows)), 3)
         self.assertIn("+4 more below", self.text(rows))      # 7 drawn rows, 3 shown

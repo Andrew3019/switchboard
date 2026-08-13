@@ -226,7 +226,7 @@ class Reading:
     def note(self) -> str:
         """The one line the renderer puts on screen about the panel itself.
 
-        Ranked, and only ever one, for the same reason `board.note` is: whatever is most
+        Ranked, and only ever one, for the same reason `board.marker` is: whatever is most
         wrong wins. Staleness outranks a herdr hiccup because a stale snapshot means the
         herdr line itself may be describing a minute ago.
         """
