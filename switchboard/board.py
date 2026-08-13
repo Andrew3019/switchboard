@@ -354,9 +354,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
     That is also how a row is allowed to grow. An agent occupies two lines,
     always — identity on the first, detail indented on the second — and no
-    caller had to learn that,
-    because nothing outside this function reasons about how many lines a row
-    takes. Every line is drawn by `emit`, which takes the owner alongside the
+    caller had to learn that, because nothing outside this function reasons
+    about how many lines a row takes. It grew from one line to two, and then
+    from "two when it has mail" to "two, uniformly", without a line of this
+    changing outside this function.
+
+    Every line is drawn by `emit`, which takes the owner alongside the
     text; the extra lines a click could land on (an agent's detail line, a
     collapsed group) each carry their own owner and resolve to it. Adding
     another line later is the same one-line change: `emit(text, the_agent)`.
