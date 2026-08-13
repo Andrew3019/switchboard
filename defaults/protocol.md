@@ -94,7 +94,9 @@ something: it is the threshold that stops an agent retrying a broken tool foreve
 deleting it in favour of the general phrasing would lose the number. The last reason and
 the shipping rule above are deliberately joined — a pull request waiting on a merge is the
 canonical case of finished work needing approval, and an agent that has just been told it
-may not merge needs to be told in the same breath what it does instead.
+may not merge on its own needs to be told in the same breath what it does instead. The
+clause now says "only he can authorise", because since 2026-08-12 a merge may also be
+authorised down the tree and that case is a `tell`, not a `block`.
 
 Shipping (branch, push, PR, URL in the summary) sits with the `sb done` contract rather
 than in a role file, because Andrew's ruling was that it goes to every role: five copies of
@@ -103,6 +105,18 @@ DEFAULT shape, not a law — a repo that lands work differently overrides it wit
 which is exactly what this repo's own `house-rules` does. That is the layering working, not
 a contradiction: the protocol says what shipping normally looks like and a later fragment
 says what it looks like here.
+
+WHO AUTHORISES A PUSH OR A MERGE (2026-08-12). It used to be "merging needs Andrew's
+explicit approval ... no agent merges without asking first". DESIGN-TRUTH now says the
+parent decides, and the parent may be an agent: an agent can push if its parent says so, a
+lead if the top says so, and a merge travels down from Andrew through a top orchestrator.
+So the rule is stated as a permission with a named source rather than a prohibition. That
+is not cosmetic — four agents in one session were given a brief telling them to push while
+this file told them not to, and they resolved the contradiction differently, some pushing
+and some handing the work back. The instruction from the parent is now plainly the thing
+that decides it, and the inbox is named alongside the task because that is where a
+later-granted permission arrives. `house-rules` was loosened the same way; it still says
+this repo's default is that the orchestrator integrates.
 
 The formatting rule is stated once, at `block`, and phrased to cover anything a human
 reads — the `sb done` summary above included, since a parent may forward it. It cannot use
@@ -171,10 +185,11 @@ it never reads your transcript. Keep it to a line or two of plain, simple langua
 what you were asked, what you found or did, and what it means. Give file paths for
 the detail rather than pasting it.
 Work that ships has a default shape: a branch named for your workspace, push it,
-open the pull request, and put its URL in your summary. Merging is not part of it —
-merging needs Andrew's explicit approval, there is no merge verb, and no agent
-merges without asking first, so finished work waiting on that approval is finished
-work you stop and ask about.
+open the pull request, and put its URL in your summary. Pushing and merging are your
+parent's call, not yours — an explicit instruction from your parent, in your task or
+your inbox, is what authorises either, and your parent may be an agent or the human.
+Never merge without that say-so; there is no merge verb. If you have not been told,
+ask the parent that would have to decide it, and if that is the human, stop and ask.
 To delegate: `sb delegate "<task>" --role <role>` spawns a child that runs
 independently; do NOT wait for it, end your turn and you will be poked when it
 reports. `sb status` lists your children, and `sb cleanup [names]` closes finished
@@ -187,8 +202,8 @@ Stop and get a human if you hit a genuine, big, behaviour-changing design questi
 if you are blocked on running something, or a tool fails twice; if you were told to
 block; if an instruction is ambiguous; if the human is already going back and forth
 with you and this is the next turn of it; or if the work is finished and needs
-Andrew's input or approval to land — an open pull request waiting on a merge is
-exactly that case. Never work around a broken tool, and never do work you were told
+Andrew's input or approval to land — an open pull request waiting on a merge only he
+can authorise is exactly that case. Never work around a broken tool, and never do work you were told
 to delegate: get a human instead.
 `sb block "<why>"` is the ONLY way to reach a human — they have no inbox, and you
 never wait on one. Anything a human reads is concise and skimmable: prefer bullets,
