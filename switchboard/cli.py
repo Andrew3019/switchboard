@@ -636,8 +636,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Never fatal, for `flush`'s reason turned around: this one runs unattended on the
         # collector's timer, so a failure has nobody to read it and must not be a traceback
         # in a spawned process — it is a line in the log the next `sb log` shows.
+        #
+        # **`reap=True`, and this is the only unattended path that reaps.** `collect`'s
+        # writes end a dead agent's turn and ping its parent (`status._record_gone`), and
+        # until now `sb status` was the only caller that passed `reap=True` — so how soon a
+        # parent learned its child had died depended on somebody happening to look at the
+        # board. With the failure now arriving as mail, that latency is the difference
+        # between a notification and archaeology.
+        #
+        # Here rather than in `flush`, which is the other unattended path and the tempting
+        # one: `flush_pending` runs at the top of EVERY `sb` command and is free when the
+        # mailbox is quiet — it asks herdr nothing at all unless something is pending — so
+        # putting a `collect` in it would buy an `agent list` subprocess for every `sb log`,
+        # `sb tell` and `sb inbox` in the fleet. `reconcile` already collects a whole
+        # snapshot, already runs on the collector's timer, and is already the verb for "this
+        # agent's turn ended and nothing told anyone" — a death is that same sentence with a
+        # pane missing. It is also short-lived and running current code, which is the
+        # condition `collect` documents for reaping at all.
+        #
+        # Collected here rather than inside `Broker.reconcile` so the write stays visible at
+        # the process boundary that licenses it: the method keeps `reap=False` for any
+        # caller that is not this one.
         try:
-            pinged = b.reconcile()
+            snap = status_mod.collect(db, h, reap=True)
+            pinged = b.reconcile(snap=snap)
         except Exception as e:                   # noqa: BLE001 — best effort, always
             store.log_event(db, kind="reconcile_failed", error=str(e))
             print(f"sb: reconcile: {e}", file=sys.stderr)

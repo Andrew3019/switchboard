@@ -745,6 +745,39 @@ class TheReconcilerTrigger(PanelTest):
             a.stalled = True
         return snap
 
+    def _gone(self, *names):
+        snap = a_snapshot(*names)
+        for a in snap.agents:
+            a.gone = True
+        return snap
+
+    def test_a_death_spawns_sb_reconcile_with_nobody_stalled(self):
+        """`sb reconcile` is the one unattended path that reaps (`cli.main`), so a dead
+        agent has to be able to start one — otherwise the reaping waits behind a stalled
+        agent that may not exist, and a dead child is recorded only when a person runs
+        `sb status`.
+
+        Gone names are deliberately NOT held in the `reconciled` memory the way a stall is:
+        this work list empties itself the moment the row is written `failed`, and the
+        repeat inside `GONE_CONFIRM_GRACE` is the debounce — a second reap-capable reading
+        a minute after the first is what confirms the absence at all.
+        """
+        state = collector.State(pid=1, started_at=0.0)
+
+        self.assertTrue(collector.run_reconciler(self._gone("w1"), state, None))
+        self.assertEqual(self.sb_runs(), [["/bin/sb", "reconcile"]])
+        self.assertEqual(state.reconciled, [])          # not remembered, unlike a stall
+
+        state.last_reconcile -= collector.RECONCILE_GAP + 1
+        self.assertTrue(collector.run_reconciler(self._gone("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 2)
+
+        # And once the death is recorded the row is `failed`, so it is no longer gone and
+        # the trigger goes quiet on its own.
+        state.last_reconcile -= collector.RECONCILE_SWEEP
+        self.assertFalse(collector.run_reconciler(a_snapshot("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 2)
+
     def test_a_stall_spawns_sb_reconcile_once_and_a_new_name_within_one_cycle(self):
         """Three facts, one run of the trigger, because they are one behaviour.
 
