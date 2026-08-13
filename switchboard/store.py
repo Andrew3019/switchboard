@@ -252,7 +252,8 @@ CREATE TABLE messages (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     from_agent    TEXT NOT NULL,
     to_agent      TEXT NOT NULL,
-    kind          TEXT NOT NULL,      -- ask | tell | done
+    kind          TEXT NOT NULL,      -- ask | tell | done | failed (see `put_message`;
+                                      -- `failed` is written ABOUT an agent, not by one)
     body          TEXT NOT NULL,
     reply_to      INTEGER REFERENCES messages(id),
     needs_reply   INTEGER NOT NULL DEFAULT 0,  -- 1 = the sender said it is waiting for a
@@ -1396,7 +1397,12 @@ def put_message(
     reply_to: Optional[int] = None,
     needs_reply: bool = False,
 ) -> int:
-    if kind not in ("ask", "tell", "done"):
+    # `failed` is the one kind no agent writes: `status._record_gone` writes it about an
+    # agent that died, under that agent's name, so its parent hears about it through the
+    # mailbox a `done` would have used. It is a separate word from `done` on purpose —
+    # `status`'s summaries are the `done` rows, and a failure must never be readable as
+    # something the agent reported.
+    if kind not in ("ask", "tell", "done", "failed"):
         raise ValueError(f"bad message kind: {kind}")
     cur = db.execute(
         """INSERT INTO messages

@@ -145,10 +145,24 @@ never called — but never for an agent nobody has given work to yet, which is i
 only reason it could be; `agents.awaiting_task`, set at spawn and cleared by the first
 message), **GONE** (the pane closed under it — self-heals by writing `state=failed`, and
 only after herdr has failed to list the row continuously past
-`status.GONE_CONFIRM_GRACE`, so one short `agent list` cannot end a live agent),
+`status.GONE_CONFIRM_GRACE`, so one short `agent list` cannot end a live agent, **and its
+parent is told**, see below),
 **UNDELIVERED** (mail the target cannot know about — the doorbell never rang for it,
 usually because the target was mid-turn, and the target has not read it of its own accord
 either).
+- **A recorded failure pings the parent, the way `sb done` does.** Writing `state=failed`
+  also writes one message to the dead agent's parent — `kind='failed'`, from the child,
+  naming it and the task it was on — and nothing more: it is an undelivered `messages` row,
+  exactly what a `done` leaves behind, so `Broker.flush_pending` rings it and `_ring`'s
+  when-idle guards decide when. A parent mid-turn is not rung until its turn ends; a
+  **blocked** parent is not rung until its block is answered, so a human's reply is never
+  buried under it. Once only, and the state column is what makes it so: the write is
+  conditional on the row still being `working`, and only a row it changed is pinged — so
+  every later read of the same dead row is silent. A `failed` message is deliberately not a
+  `done` one, since `status`'s summaries are the `done` rows and a failure must never read
+  as something the agent reported. A parent that is itself finished never gets rung at all
+  (`_clear_unreadable_mail`); a **root** that dies has no parent and the human has no
+  mailbox, so that failure stays a row on the board and an event.
 - **Scoped to the caller's tree.** An agent sees its own top's whole tree — siblings
   included — and no other top's; the human is bounded by nothing (`cli._scope`,
   `Broker.tree_of`). `--mine` narrows further to the caller's own subtree; the flag can
