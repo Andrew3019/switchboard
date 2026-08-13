@@ -177,10 +177,13 @@ in one shipped system, and still unfixed in its successor. `[07]` `[10]`
 
 > **As built: no daemon exists, so there are no event subscriptions yet — and the polling
 > that replaces them is deliberately the free kind.** What the principle is actually about
-> is *token* cost, and nothing here spends a token to look: `sb ask` re-reads one indexed
-> SQLite row every two seconds inside a process that is already blocked, and the deferred
-> doorbell is flushed by whatever `sb` command runs next rather than by a timer. No agent
-> wakes up, so no context is paid. `sb wait` blocks server-side inside herdr.
+> is *token* cost, and nothing here spends a token to look: the deferred doorbell is
+> flushed by whatever `sb` command runs next, and otherwise by the one elected collector
+> process on a timer — one process per repo, no agent woken, no context paid. (This
+> paragraph used to cite `sb ask` polling one indexed SQLite row inside a process that was
+> already blocked, and `sb wait` blocking server-side inside herdr. Both verbs have since
+> been **deleted**: no agent waits on another agent at all, which is this principle taken
+> further than it was written.)
 >
 > The one place this was violated outright was `Herdr.wait`, which span at ~100% of a core
 > re-issuing `agent wait` with no backoff. Still zero tokens — and still exactly the shape

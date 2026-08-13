@@ -7,8 +7,12 @@ This text is injected as a system prompt at spawn time, not written to disk anyw
 not read by any agent. That is what stops it going stale, and what stops ordinary Claude
 sessions — in this repo or in any other — from ever seeing it.
 
-Headings are stripped and the remainder is flattened to ONE line: herdr refuses any agent
-argument containing a newline. Write it wrapped for humans; it arrives unwrapped. ORDER is
+Headings are stripped and the remainder is flattened to ONE line. That was herdr's rule —
+it refuses any agent argument holding a newline — and since 2026-08-12 it is switchboard's
+own: the system prompt now travels as a FILE (`--append-system-prompt-file`), which has no
+line limit, but `Herdr.start_agent` still rejects a multi-line fragment, every prompt in
+`defaults/` is written to satisfy it, and `sb presets` reads them back the same way. Write
+it wrapped for humans; it arrives unwrapped. ORDER is
 the only structure that survives, so nothing here may depend on layout, on a heading, or
 on being an item in a list — and the earliest sentences are the ones actually read.
 

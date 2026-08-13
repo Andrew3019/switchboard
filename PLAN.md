@@ -9,6 +9,16 @@ Companion to `braindump.md` (what) and `PRINCIPLES.md` (what not to do).
 > - **The command is `sb`.** `wf` was the placeholder this document itself flags as one.
 > - **D1 was decided against the recommendation: it is Python, stdlib only.** The
 >   reasoning is at D1 below.
+> - **`sb ask` and `sb wait` were built and have since been DELETED**, along with
+>   `sb interrupt` as a verb. No agent waits on another agent at any point: `sb tell
+>   --needs-reply` records that a sender wants an answer and returns immediately, and
+>   `--interrupt` is one of `tell`'s three delivery modes. Read the v0 CLI table below as
+>   the surface as it was frozen, not as the surface that exists.
+> - **`agent prompt` QUEUES; it does not interleave.** The "poked mid-session" correction
+>   below was itself wrong, and was re-measured against three 90-second single tool calls
+>   (`Herdr.prompt`'s docstring, `audit/phase3-delivery-primitive.md`): the text is handed
+>   to the model the instant the in-flight tool call returns. The doorbell is still held
+>   back in the *when-idle* mode, by choice rather than by necessity.
 >
 > Everything from M4 down is still unbuilt and this is still the plan for it.
 
@@ -320,6 +330,14 @@ finished at +63s). So the doorbell is held back while the target is working and 
 it is idle; `Broker.flush_pending` is that trigger, and it runs at the start of every `sb`
 command and on every pass of a blocked `ask`. When an events daemon exists it replaces the
 trigger, not the model.
+
+> **Both halves of that paragraph are now retracted.** `agent prompt` QUEUES — re-measured
+> against three 90-second single tool calls, which is the only shape that can tell queueing
+> from interleaving; a turn made of several short calls looks the same either way, which is
+> what the +13s/+63s reading actually showed. Holding the doorbell is therefore a choice,
+> and it is now one of three delivery modes rather than the only behaviour. `ask` is gone,
+> so nothing polls for it; `flush_pending` runs at the start of every `sb` command and on
+> the collector's timer.
 
 `--wait` therefore exists only on the ask side. Add a timeout so a dead child can't hang
 a parent forever; on timeout the asker gets `timed_out` and decides (C9: route to a gate).

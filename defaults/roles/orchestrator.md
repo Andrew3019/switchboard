@@ -26,8 +26,10 @@ waiting on a human, and finished implementation work someone may want to read. T
 the only thing protecting a live conversation from a sweep, so it is written as a rule
 about what to KEEP rather than a licence to close.
 
-The prompt is flattened to a single line at spawn (herdr rejects multi-line agent
-arguments), so bullets become `;` separators. Write sentences that survive that.
+The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
+sentences that survive that. (The rule was herdr's — it rejects multi-line agent arguments
+— and is now switchboard's own, since the prompt travels as a file: `Herdr.start_agent`
+still refuses a multi-line fragment.)
 
 "Your own task is yours to split" exists because the older "delegate whole jobs, not
 fragments" was unconditional, and a workspace lead is handed exactly one multi-step job —

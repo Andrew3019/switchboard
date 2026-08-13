@@ -6,15 +6,18 @@ at the rest, this works from a full conformance audit: `audit/design-truth-confo
 (branch `design-truth-audit`, `af01c42`), which checked every `DESIGN-TRUTH.md` entry
 against `main` @ `0a0fa4f` — 1148 tests passing. It found all seven explicitly-rejected
 items genuinely gone, most journeys and decisions honoured and pinned by tests, and about
-ten places where the code and the design record still disagree. Two of those ten have since
-been closed by `small-fixes` (PR #20), which landed after the audit was taken; they are
-recorded as finished below rather than listed as gaps. That leaves eight: one is a code
-defect, the rest are decisions only Andrew can make.
+ten places where the code and the design record still disagree. Four of those ten have
+since been closed by merges that landed after the audit was taken — two by `small-fixes`
+(PR #20), the board's wide-character bug by `board-widechar` (PR #22) and the failure ping
+by `failure-pings` (PR #24). They are recorded as finished below rather than listed as
+gaps. **That leaves six, and none of them is code:** every one is a decision only Andrew
+can make.
 
 **This file is derived and disposable.** It dies when the gaps close. `DESIGN-TRUTH.md` is
-the only thing that outlives it. Every claim here was true of `main` @ `0a0fa4f`, revised
-where `small-fixes` closed something and marked as such; correct this file in place when
-you find it wrong, and say which commit you checked against.
+the only thing that outlives it. Every claim here was true of `main` @ `0a0fa4f`; it was
+re-checked against `main` @ `71bec8a` (1157 tests passing) on 2026-08-12 and revised where
+a merge had closed something. Correct this file in place when you find it wrong, and say
+which commit you checked against.
 
 The audit is the source for everything below. Nothing here was re-derived from the code
 except where it says so.
@@ -49,7 +52,7 @@ Taken from the audit's own "fully true and pinned" list, compressed:
 - **`sb workspace new` deletion**, `sb restore`'s worktree-gone refusal, `sb inbox --peek`,
   `sb presets` list/read/apply.
 
-Three more items are closed, and these are the only claims here checked against the code
+Five more items are closed, and these are the only claims here checked against the code
 rather than taken from the audit:
 
 - **The reconciler no longer nudges a seconds-old agent before its task arrives** — the one
@@ -67,34 +70,29 @@ rather than taken from the audit:
   `output.py` — deliberately, so the tail that exists to be read and the tail that is read
   are one number rather than two that can disagree. Closed by `small-fixes` (PR #20); the
   audit had it as a code gap, and this also settles what was its open question 7.
+- **The board measures rows in terminal columns, not characters.** This was the audit's
+  last open code gap: one emoji or CJK sequence wrapped a row and shifted every click
+  below it. `board.py`'s `_visible_len`/`_pad`/`_fit`/`_clip` now measure and truncate in
+  columns, on glyph boundaries, from `unicodedata.east_asian_width` — no new dependency.
+  Closed by `board-widechar` (PR #22), pinned by
+  `LayoutTest.test_a_wide_character_row_does_not_wrap_and_the_rows_below_it_still_map`
+  and two neighbouring cases.
+- **A recorded failure actively pings the parent.** `status._record_gone` writes a
+  `kind='failed'` message to the dead agent's parent alongside `state='failed'`, and the
+  ordinary doorbell carries it — held while the parent is mid-turn, held while it is
+  blocked, and once per death, because the write is conditional on the row still being
+  `working`. Closed by `failure-pings` (PR #24), pinned in `tests/test_status.py` and
+  `tests/test_broker.py`. The audit had this as a decision, its question 5 ("passive board
+  visibility, or an active ping?"); the code has since answered *active*, so it is no
+  longer Andrew's to decide.
 
 ---
 
 ## Gaps that are code work
 
-One. It is a defect against `DESIGN-TRUTH.md`, not a future improvement. The audit found
-three; the other two were both `sb inspect` and are closed above.
-
-### 1. The board's click lands on the wrong agent when a row contains a wide character
-
-- **The record requires:** DESIGN-TRUTH diagnoses this itself — clicking a name focuses
-  that agent, and the known failure is character-count row measurement against terminal
-  column width, so one emoji or CJK sequence wraps a row and shifts every row below it.
-- **The code does:** exactly what the diagnosis says is wrong. `board.py:281-353`
-  (`layout`, `_visible_len`, `_fit`) pad and truncate on Python `len()`. There is no
-  `wcwidth` or `east_asian_width` anywhere in the repo. `_fit`'s own comment asserts the
-  invariant "no line may ever wrap", which it cannot actually guarantee.
-- **Pass condition:** an agent name or task containing wide characters, long enough that
-  its rendered width exceeds the terminal while `len()` stays inside budget, does not wrap
-  in a real terminal, and clicks below it resolve to the right agent.
-- **Size:** small-to-medium.
-- **Touches:** `board.py` (about five call sites), plus a wide-character case in
-  `tests/test_board.py`, which today only covers overlong ASCII.
-
-**Why it is the one left.** It is the only code gap the audit found that makes someone act
-on the wrong agent rather than merely see less than they should, and it fails silently — a
-mis-resolved click looks like a successful one. The other two only ever cost information,
-and both are closed.
+**None.** The audit found three. Two were `sb inspect` and were closed by `small-fixes`
+(PR #20); the last was the board's wide-character measurement, closed by `board-widechar`
+(PR #22). Everything below this line is a decision, not a build.
 
 ---
 
@@ -110,11 +108,11 @@ nobody mistakes them for a build queue.
   (`broker.py:2996`), and `--workspace` explicitly refuses to join the top's bare space
   (`broker.py:1203-1236`). Building it is a real feature (`delegate`, `join_workspace`,
   `_fork_for`, argparse, tests); dropping the exception is a one-line doc edit. Question 2.
-- **"The parent is told" about a failure is passive, not active.** A silent agent is set
-  to `state='failed'` (`status.py:970-1007`) and appears on the board; nothing pings the
-  parent. Question 5.
-- **"Not for Andrew" is a convention, not a gate.** Only `board` (hidden and refused for a
-  human) and `start`/`done`/`block` are actually enforced. `status`, `log`, `delegate`,
+- **"Not for Andrew" is a convention, not a gate.** Only four verbs are enforced at all,
+  and they point in both directions: `board` (hidden, and refused for an *agent*),
+  `sb start` (refused for an agent, and for a human typing from inside a Claude Code
+  session, since nothing there tells them apart), and `done`/`block` (refused for a
+  human). `status`, `log`, `delegate`,
   `tell` (sender side) and `cleanup` are all freely human-callable today — and `cleanup`
   branches deliberately on `me == HUMAN` to sweep the whole fleet. Either the doc names
   which verbs are really gated, or there is an enforcement pass. Question 6.
@@ -158,10 +156,12 @@ trust-the-system ones, and reading DESIGN-TRUTH without this note implies otherw
 
 ## Questions for Andrew
 
-Six, all from the audit, each with the audit's recommended answer. The audit raised a
-seventh — whether `display.output_lines` should move for all three of its readers or
-`sb inspect` should get its own knob — and `small-fixes` has since answered it by moving
-the shared knob, so it is not repeated here.
+Five, all from the audit, each with the audit's recommended answer. Two of the audit's
+seven have since been answered by code rather than by Andrew, and are not repeated here:
+whether `display.output_lines` should move for all three of its readers (`small-fixes`
+moved the shared knob), and whether a failure needs an active ping (`failure-pings` built
+one). The numbering below is the audit's, with 5 struck out, so a reference to "question
+6" still finds the same question.
 
 1. **The "(This has not been the case.)" parenthetical in the spawn-landing entry now
    describes a fixed, regression-tested bug. Drop it, or keep it as historical colour?**
@@ -176,10 +176,9 @@ the shared knob, so it is not repeated here.
 4. **Is the workspace-orchestrator-review entry superseded by the `adversarial` preset,
    now that there is only one orchestrator role?** *Recommended: yes, mark it superseded*
    — the thing it was waiting for exists, shaped differently than the entry implied.
-5. **Is "the parent is told" about a failure satisfied by passive board visibility, or
-   does it need an active ping?** *Recommended: passive, as originally scoped* ("we can
-   start with just telling the parent"), with a one-line clarification in the doc, since
-   the current wording implies more than what is built.
+5. ~~**Is "the parent is told" about a failure satisfied by passive board visibility, or
+   does it need an active ping?**~~ **Answered by code**, in the direction the audit did
+   not recommend: `failure-pings` (PR #24) built the active ping. Nothing to decide.
 6. **Should the "not for Andrew" claims (`status`, `log`, lifecycle verbs, `tell`'s sender
    side) become hard gates like `board`, or stay soft conventions?** *Recommended: soft
    conventions* — hard-gating `sb status` would remove a debugging tool you may want, and

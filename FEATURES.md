@@ -47,6 +47,19 @@ agent lands with the tree beside it (see **`sb board`**).
   `defaults/roles/orchestrator.md` sets it. The refusal names the roles that do have it,
   generated from the role table, and tells the caller to hand the job back with `sb done`
   instead of growing a tree under itself.
+- **The system prompt is handed over as a path, not as a typed argument.** `agent start`
+  types the provider's whole command line into the pane's shell, and a shell still running
+  its startup files leaves the tty in canonical mode, where the line discipline keeps
+  `MAX_CANON` bytes — 1024 here — and silently discards the rest. So the assembled prompt
+  is written to a file under the shared `.git`, beside the Stop gate's settings file and
+  keyed by agent name, and passed as `--append-system-prompt-file <path>`
+  (`herdr._prompt_flags`/`write_prompt_file`, `audit/prompt-via-file.md`). One flag, one
+  file, never one flag per fragment: `claude` honours only the last `--append-system-prompt`
+  it is given. The write is read back and a failure **fails the spawn**, because an agent
+  with no prompt is an agent that knows none of the protocol and does not complain.
+  Fragments are still single-line — that is now switchboard's own rule rather than herdr's,
+  since a file may hold anything — and `sb cleanup` takes the file away with the pane.
+  A pane is also proved to answer before anything is typed into it (`Broker._ready_pane`).
 - The spawn is not done until the task is confirmed to have landed in the child's own
   transcript (`herdr.deliver`, `output.task_arrived`). Unconfirmed is not failed: a name
   is still returned, with a caveat, when the child has plainly taken a turn
@@ -139,8 +152,10 @@ answerable by name.
 - Status: working
 
 ### `sb status [--active/--live] [--needs-me] [--mine] [--archived]`
-The whole agent tree as one join of store state against herdr's live pane state,
-flagging drift: **STALLED** (store says working, herdr says idle/done, and `sb done` was
+The whole agent tree as one join of store state against live pane state,
+flagging drift: **STALLED** (the row says working, the turn is over — by switchboard's own
+activity signal where there is one, by herdr's reading where there is not (see **The
+activity signal**) — and `sb done` was
 never called — but never for an agent nobody has given work to yet, which is idle for the
 only reason it could be; `agents.awaiting_task`, set at spawn and cleared by the first
 message), **GONE** (the pane closed under it — self-heals by writing `state=failed`, and
@@ -196,6 +211,12 @@ returns to that orchestrator, restoring it if its pane was closed, and hands it 
 - **This is the only path that creates a top orchestrator, and it stamps one:**
   `delegate(..., is_top=True)` is written here and nowhere else (`_top`), and the fork
   rule and the tree boundary both read that stamp rather than the prompt or the role.
+- **Refused for an agent** (`cli._agent_caller`), on two signals: `whoami()` resolving the
+  caller to an agent row, and either of the two environment variables a Claude Code session
+  sets — which is what closes the hole where an agent standing in a fresh clone drives that
+  clone's own store, has no row in it, and reads as the human. It fails closed, so a human
+  running `!sb start` from inside a Claude Code session is refused along with the agents;
+  their own terminal carries neither marker and is untouched.
 - **Refused from inside a worktree**, naming the main checkout to run it from: a top's
   space is laid over the checkout `sb` was run in, so starting one in somebody's worktree
   would put it, and everything it delegates that cannot fork, on that agent's branch.
@@ -252,8 +273,10 @@ is closed while a descendant is still `working` or `blocked`** — the invariant
 agent with no pane has no live children under it. Nothing lifts the last one, `--force`
 included, because it is a fact about agents the caller did not name; the way out is to
 close the subtree from the leaves up.
-Closing an agent also closes the **`sb board`** pane opened beside it
-(`Broker._close_board`), so no empty tab is left behind — never a board another live
+Closing an agent also takes away the two files the spawn wrote for it — the **`sb board`**
+pane opened beside it (`Broker._close_board`), so no empty tab is left behind, and the file
+its system prompt was read from (`herdr.forget_prompt_file`), so one file per agent ever
+spawned does not accumulate — never a board another live
 agent is on, and a board already closed by hand is not an error.
 - Entry point: `cli.py:982-1007` → `Broker.cleanup` (`broker.py:3485-3698`)
 - Status: working. The disposition flags are gone (`--keep`, `--ephemeral`,
@@ -570,8 +593,9 @@ silence a live fleet.
 
 ### The Stop gate — a turn cannot end without a report
 `switchboard/hooks.py` plus `bin/sb-stop-hook`. Every spawn and every restore is handed
-`--settings <file>` naming a per-repo JSON that installs a `Stop` hook; only agents
-switchboard spawns ever see it, and no file of the human's is written or read. The hook
+`--settings <file>` naming a per-repo JSON that installs **two** hooks — this gate on
+`Stop`, and the activity signal's `UserPromptSubmit` below; only agents switchboard spawns
+ever see it, and no file of the human's is written or read. The hook
 prints `{"decision": "block", …}` and the agent gets another turn with a reason telling it
 to call `sb done` or `sb block`.
 
@@ -587,10 +611,44 @@ starts a new one.
 - Entry point: `hooks.stop_gate`/`hooks.run`, `hooks.settings_file`/`stop_hook_args`,
   called from `Herdr.start_agent`
 
+### The activity signal — switchboard's own answer to "is this agent mid-turn?"
+The second hook in the same settings file, and the same two turn edges: `UserPromptSubmit`
+(`bin/sb-activity-hook`, `hooks.mark_turn`) writes `agents.turn = 'working'` when a turn
+begins, and the `Stop` hook writes `idle` when one ends — **only when the gate is letting
+the turn end**, since a blocked stop is the same turn continuing. The activity hook prints
+nothing on stdout ever, because the CLI feeds a `UserPromptSubmit` hook's stdout to the
+agent as though it were part of its task.
+
+It exists because the old answer was herdr's, and herdr infers a running turn by matching
+Claude's spinner glyphs in the terminal title: Claude Code 2.1.228 changed the glyphs, every
+pane on the machine read idle, and hold-until-free delivery, the reconciler and the board
+all broke at once. So `status` reads our signal where it has one and herdr's where it does
+not — with exactly one herdr reading still outranking ours, `alive is False`, because no
+turn can be running in a pane that is not there. Neither hook logs its event against the
+agent, so a turn edge cannot reset the idle clock the reconciler reads.
+
+A `working` edge that was never closed — a session killed mid-turn — is **doubted and then
+dropped**, never timed out: `TURN_STALE_GRACE` (30 min, set clear of the p99 of 20.6 min a
+live agent goes inside one turn without touching `sb`) says only when a quiet row is worth
+asking herdr about, and `TURN_DOUBT_GRACE` is how long herdr must report no turn in that
+pane *continuously* before the edge is forgotten. One `working` reading anywhere in the
+window clears the doubt, and so does one `sb` command from the agent — herdr's busy
+detector is intermittent rather than uniformly dead, so a genuinely working agent produces
+one of those and a genuinely ended turn produces neither
+(`status.turn_doubted`/`_forget_turn`).
+- Entry point: `hooks.mark_turn`/`hooks.run_activity`, `bin/sb-activity-hook`;
+  `store.set_turn`, `status.AgentStatus.turn`/`turn_over`
+- Measured rather than assumed (`audit/hook-signal-cost.md`): per-tool-call hooks cost
+  148 ms per call and a `PostToolUse` timestamp 19 ms, but the timestamp lost on
+  correctness — it cannot tell a long tool call from a finished turn, and 2.18 % of 15,000
+  real tool calls in this repo outran the old 72-second grace. The edges cost about 74 ms
+  once per turn and need no timeout at all.
+
 ### The reconciler — one ping to an agent that went quiet
 `Broker.reconcile` (`broker.py:4380`), triggered by the collector every `RECONCILE_GAP`
 seconds and swept every `RECONCILE_SWEEP`. It pings every agent `status` already calls
-`stalled` — row says `working`, herdr says alive and idle, not still awaiting its task —
+`stalled` — row says `working`, the agent is alive, its turn is over, and it is not still
+awaiting its task —
 with `[notify] stalled`: your turn ended without a report, run `sb done` or `sb block`, and
 this is asked once.
 

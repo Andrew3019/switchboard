@@ -98,7 +98,7 @@ suite; also the escape hatch for shipping a different baseline to a team.
 
 | file                | what it holds                                                      |
 | ------------------- | ------------------------------------------------------------------ |
-| `roles/*.md`        | one role each — `orchestrator`, `researcher`, `reviewer`, `qa`: TOML front matter for the fields, markdown for the prompt |
+| `roles/*.md`        | one role each — `orchestrator`, `worker`, `researcher`, `reviewer`, `qa`: TOML front matter for the fields, markdown for the prompt |
 | `models.toml`       | what `cheap`, `default`, `strong` mean — the only place model names appear |
 | `presets.toml`      | which presets and plugin fragments apply to which role — a bare name is a preset file, `@name` is a plugin's fragment |
 | `presets/*.md`      | one preset each: markdown flattened to a line and appended to a spawn's prompt, or a procedure read by name with `sb presets <name>` |

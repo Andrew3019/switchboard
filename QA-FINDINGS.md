@@ -30,6 +30,22 @@ spawned with `sb delegate` (`qa-ask1`, `qa-m1`, `qa-m2`, `qa-block`, `qa-int`).
 >
 > The protocol observation at the bottom was also acted on.
 
+> **Later still (checked against `main` @ `71bec8a`, 2026-08-12).** Much of what the
+> disposition pass above describes as fixed has since been *removed* rather than kept, so
+> those STATUS lines are a record of a fix, not a description of the code:
+>
+> - **`sb ask`, `sb interrupt` (the verb) and `sb wait` are deleted**, and so is the human
+>   inbox. B1/B4/B5 and half of B2 are about code that no longer exists. No agent waits on
+>   another agent at all now: `sb tell --needs-reply` records the want and returns.
+> - **`sb block` writes no mailbox row.** It records `blocked`, notifies, and shows up in
+>   `sb status --needs-me` and on the board; B2's "the block's reason now also goes into
+>   the human's mailbox" was true when written and is not now.
+> - **`--include-kept` and `--all-idle` are both gone**, with the whole cleanup disposition
+>   family (`--keep`, `--ephemeral`, `--leave-children`). B6's naming fix outlived neither.
+>   B7's `sb cleanup <name> --force` does still exist and works as described.
+> - **`agent prompt` queues rather than interleaving** — B3's parenthetical repeats a claim
+>   that was later re-measured and retracted (`Herdr.prompt`).
+
 > **Caveat — the code changed under me.** Sibling agents `build-workspace` and
 > `build-readout` were editing `switchboard/broker.py` while this run was in progress.
 > `interrupt` gained an `esc` pre-step and `cleanup` gained subtree scoping mid-run. Line

@@ -2728,8 +2728,13 @@ class Broker:
         """Get one command through this pane's shell before `agent start` types into it —
         and, in a checkout that ships its own `sb`, pin that `bin/` on the way past.
 
-        THE PROBLEM THIS SOLVES FIRST. `agent start` types the provider CLI's entire
-        command line into the pane's shell, and that line carries the whole system prompt
+        THE PROBLEM THIS SOLVES FIRST — and no longer solves alone. The system prompt now
+        goes down as a PATH (`herdr._prompt_flags`), so the line typed here is ~300 bytes
+        and this is insurance rather than the mechanism. What follows is why it was
+        written, and it is still what a pane that will not answer costs.
+
+        `agent start` types the provider CLI's entire
+        command line into the pane's shell, and that line carried the whole system prompt
         as one single-quoted argument — 12KB of it. herdr accepts a pane as "an available
         shell" while zsh is still running its startup files, before the line editor is up;
         until then the tty is in CANONICAL mode, where the line discipline keeps 1024
@@ -3091,8 +3096,10 @@ class Broker:
             # a repo's own `.switchboard/roles/*.md` shows up here with nothing edited.
             # Sorted for a stable prompt: the merge order is dict order, and a spawn prompt
             # that reshuffles between runs is a diff nobody can read. One flat clause because
-            # herdr refuses a newline in any agent argument — if a repo ever defines enough
-            # roles for this to run long, this is the line that needs a limit.
+            # `Herdr.start_agent` refuses a multi-line prompt fragment — herdr's rule about
+            # agent arguments originally, switchboard's own since the prompt began travelling
+            # as a file. If a repo ever defines enough roles for this to run long, this is
+            # the line that needs a limit.
             self._say("spawn.roles", roles=", ".join(sorted(self.roles))),
         ]
         if ws:
