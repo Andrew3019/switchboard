@@ -9,11 +9,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import herdr as herdr_mod  # noqa: E402
 from switchboard.herdr import (  # noqa: E402
     Agent, Herdr, HerdrError, StateWriteDropped, SOURCE,
 )
@@ -117,12 +120,41 @@ class SpawnTest(unittest.TestCase):
 
     def test_always_passes_permission_mode_auto(self):
         fake = FakeHerdr(ok({"agent": AGENT_JSON}))
-        Herdr("herdr", runner=fake).start_agent("w1", "w1:p9", prompts=["you are w1"])
-        argv = fake.argv()
-        self.assertIn("-- --permission-mode auto", argv)   # default is manual: agents stall
-        self.assertIn("--append-system-prompt you are w1", argv)
+        try:
+            Herdr("herdr", runner=fake).start_agent("w1", "w1:p9", prompts=["you are w1"])
+            argv = fake.argv()
+            self.assertIn("-- --permission-mode auto", argv)  # default manual: agents stall
+            self.assertIn("--append-system-prompt-file", argv)
+        finally:
+            herdr_mod.forget_prompt_file("w1")
 
-    def test_every_prompt_is_delivered_in_ONE_flag(self):
+    def test_the_prompt_goes_down_as_a_path_and_the_typed_line_stays_short(self):
+        """The MAX_CANON fix, pinned by the only number that decides it.
+
+        `agent start` types this whole command line into the pane's shell, and a shell
+        still running its startup files is in canonical mode, where the line discipline
+        keeps 1024 bytes and discards the rest. Measured on this machine: 8 of 8 fresh
+        panes given a 12,143-byte line delivered exactly 1024 bytes, and 8 of 8 given the
+        real prompt as a quoted argument were left on `dquote>` with the quote cut open.
+        8 of 8 given a ~300-byte line naming a file delivered all 12,078 bytes intact.
+
+        So the assertion is not "a file is used", it is that the LINE fits — and that the
+        prompt is whole in the file, because a command that parses while delivering half a
+        protocol is the worse failure of the two.
+        """
+        prompt = "PROTOCOL. " + "the whole of it, twice over. " * 430   # ~12KB, as shipped
+        self.assertGreater(len(prompt), 12000)
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        try:
+            Herdr("herdr", runner=fake).start_agent("w1", "w1:p9", prompts=[prompt])
+            argv = fake.argv()
+            self.assertLess(len(argv), 1024, "the typed line must fit inside MAX_CANON")
+            self.assertNotIn(prompt[:80], argv, "the prompt itself must not be typed")
+            self.assertEqual(herdr_mod.prompt_file_path("w1").read_text(), prompt)
+        finally:
+            herdr_mod.forget_prompt_file("w1")
+
+    def test_every_fragment_reaches_the_file_in_order(self):
         """The regression that made every prompt in `defaults/` a fiction.
 
         `claude` honours only the LAST `--append-system-prompt` it is given and silently
@@ -132,18 +164,38 @@ class SpawnTest(unittest.TestCase):
         order — so one flag per fragment meant every agent ever spawned received its last
         preset fragment and NOTHING else: no protocol, no role prompt.
 
-        Asserted two ways on purpose. Counting the flags is what actually pins the bug —
-        an assertion that each fragment merely APPEARS in argv passes happily while the
-        CLI throws all but the last away.
+        One file cannot repeat the bug the way repeated flags could, but the fragments can
+        still be dropped or reordered on the way into it, so the join is asserted whole.
         """
         fake = FakeHerdr(ok({"agent": AGENT_JSON}))
-        Herdr("herdr", runner=fake).start_agent(
-            "w1", "w1:p9", prompts=["PROTOCOL here", "you are w1", "role text", "a preset"])
-        argv = fake.argv()
-        self.assertEqual(argv.count("--append-system-prompt"), 1,
-                         "one flag per fragment: the CLI keeps only the last one")
-        self.assertIn("--append-system-prompt PROTOCOL here you are w1 role text a preset",
-                      argv)
+        try:
+            Herdr("herdr", runner=fake).start_agent(
+                "w1", "w1:p9",
+                prompts=["PROTOCOL here", "you are w1", "role text", "a preset"])
+            self.assertEqual(fake.argv().count("--append-system-prompt-file"), 1)
+            self.assertEqual(herdr_mod.prompt_file_path("w1").read_text(),
+                             "PROTOCOL here you are w1 role text a preset")
+        finally:
+            herdr_mod.forget_prompt_file("w1")
+
+    def test_a_prompt_file_that_cannot_be_written_fails_the_spawn_loudly(self):
+        """No file, no spawn — and herdr is never called.
+
+        The failure this replaces is the silent one: an agent that comes up with no
+        protocol looks exactly like an agent that ignored it, and nothing downstream
+        checks. `stop_hook_args` may degrade to [] because a missed nudge costs a stalled
+        row somebody can see; a missing system prompt costs every rule the agent has.
+        """
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "not-a-dir"
+            blocked.write_text("")            # its "parent" is a file: mkdir must fail
+            with mock.patch.object(herdr_mod, "prompt_file_path",
+                                   return_value=blocked / "w1.txt"):
+                with self.assertRaises(herdr_mod.PromptFileError):
+                    Herdr("herdr", runner=fake).start_agent(
+                        "w1", "w1:p9", prompts=["PROTOCOL here"])
+        self.assertEqual(fake.calls, [])
 
     def test_no_prompts_means_no_flag_at_all(self):
         """An empty join would hand the CLI an empty system prompt rather than none."""

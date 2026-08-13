@@ -13,6 +13,7 @@ binary; the comments cite what was learned so the reasoning survives.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-from . import config
+from . import config, validate
 
 # `[herdr]` in defaults/settings.toml — facts about the binary on your PATH, so changing one
 # is a claim about that binary rather than a preference.
@@ -98,6 +99,73 @@ class HerdrError(RuntimeError):
     def __init__(self, code: str, message: str, argv: Sequence[str] | None = None):
         self.code, self.message, self.argv = code, message, list(argv or [])
         super().__init__(f"[{code}] {message}")
+
+
+class PromptFileError(RuntimeError):
+    """This spawn's system prompt could not be put where the provider CLI will read it.
+
+    Fatal on purpose, and raised before `agent start` is called: the alternative is an
+    agent that comes up knowing none of the protocol and says nothing about it.
+    """
+
+
+# -- the prompt file -----------------------------------------------------
+#
+# Beside the report gate's settings file, under the shared `.git` (`store.store_dir`), for
+# the reasons that put THAT file there: never in a worktree, never near `~/.claude`, and
+# shared by every worktree of the repo. Keyed by agent name — one file per agent, rewritten
+# on a respawn of the same name — and taken away with the rest of that agent's state when
+# `sb cleanup` closes it.
+
+PROMPT_DIRNAME = "prompts"
+
+
+def prompt_file_path(name: str, cwd: Optional[Path] = None) -> Path:
+    """Where `name`'s system prompt lives. Never joins an unchecked name onto a path."""
+    if not validate.AGENT_NAME.fullmatch(name or ""):
+        raise PromptFileError(f"refusing to write a prompt file for {name!r}: not an agent name")
+    from . import store                       # see `start_agent` — the store stays off
+    return store.store_dir(cwd) / PROMPT_DIRNAME / f"{name}.txt"    # this module's import
+
+
+def write_prompt_file(name: str, text: str, cwd: Optional[Path] = None) -> Path:
+    """Write it, prove it reads back, and return the path. Raises rather than half-do it.
+
+    Tmp-then-rename, as the settings file does and for the same reason: spawns race here,
+    and a half-written file is a `claude` that either refuses to start or starts on half a
+    protocol. The read-back is not ceremony — the whole point of this file is that nothing
+    downstream checks it, so this is the only place the prompt's arrival can be asserted
+    at all. `agent start` will not tell us: a prompt file it cannot read is the provider's
+    problem, and the provider's answer is to come up anyway.
+    """
+    p = prompt_file_path(name, cwd)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(p)
+        got = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise PromptFileError(f"could not write {name}'s system prompt to {p}: {e}") from e
+    if got != text:
+        raise PromptFileError(
+            f"{name}'s system prompt did not survive being written to {p}: "
+            f"wrote {len(text)} characters, read back {len(got)}"
+        )
+    return p
+
+
+def forget_prompt_file(name: str, cwd: Optional[Path] = None) -> None:
+    """Take it away with the agent. Never raises — a close that half-happened is worse.
+
+    Called where the pane is closed, not after `agent start` returns: the file is the
+    agent's, for as long as the agent has a pane. Deleting it the moment the process was
+    up would save nothing and would bet on a provider that never re-reads it.
+    """
+    try:
+        prompt_file_path(name, cwd).unlink(missing_ok=True)
+    except Exception:                # noqa: BLE001 — not in a repo, gone already, bad name
+        pass
 
 
 @dataclass
@@ -402,6 +470,50 @@ class Herdr:
 
     # -- agents ----------------------------------------------------------
 
+    def _prompt_flags(self, name: str, prompts: Sequence[str]) -> list[str]:
+        """The system prompt, handed over as a PATH rather than as 12KB of typed argument.
+
+        WHY A FILE. `agent start` types the whole provider command line into the pane's
+        shell, and that line used to carry the entire system prompt as one quoted
+        argument. A shell that is still running its startup files leaves the tty in
+        CANONICAL mode, where the line discipline keeps `MAX_CANON` bytes of a typed line
+        and silently discards the rest — **1024 on this machine**, measured exactly:
+        8 of 8 fresh panes handed a 12,143-byte line delivered a 1024-byte prefix, and 8
+        of 8 handed the real quoted prompt were left sitting on `dquote>` with the quote
+        cut open mid-argument. That is the failure Andrew hit starting switchboard in
+        another repo.
+
+        The limit is on the CHARACTERS TYPED, not on the argument that results. So the
+        line naming a file is ~300 bytes and fits with two thirds to spare, while what
+        the process receives is bounded by `ARG_MAX` — 1,048,576 here, about 86× the
+        12KB prompt, against the 1024 that used to bound it.
+
+        WHY THE PROVIDER'S OWN FLAG AND NOT `"$(cat …)"`. The neutral form would be
+        better and does not survive the layer we spawn through: measured, `herdr agent
+        start … -- --append-system-prompt '$(cat <path>)'` shell-QUOTES each agent
+        argument, so the substitution never runs and the literal string `$(cat <path>)`
+        becomes the agent's system prompt — an agent with no protocol that does not
+        complain, which is the worst of the failures available. (Typed straight into a
+        shell with `pane run` it expands fine; spawns do not go that way.) Everything
+        else in `agent_args` is a Claude Code flag already, so this is no new coupling.
+
+        LOUD, NOT BEST-EFFORT — unlike `stop_hook_args`, which returns [] rather than
+        cost a spawn. An unwritable settings file costs enforcement; an unwritable prompt
+        file costs the agent its entire protocol, and an agent that does not know what
+        `sb done` is looks exactly like one that ignored it.
+        """
+        if not prompts:
+            return []
+        # Joined with a space and written whole. ONE source of the prompt, never one flag
+        # per fragment: `claude` honours only the LAST `--append-system-prompt` it is
+        # given and silently discards the rest — verified as `claude -p …
+        # --append-system-prompt "…ALPHA." --append-system-prompt "…BRAVO."
+        # --append-system-prompt "…CHARLIE."`, which answers "CHARLIE" and nothing else.
+        # That bug made every prompt in `defaults/` a fiction for a while: what each agent
+        # actually received was its last preset fragment, with no protocol and no role.
+        text = " ".join(prompts)
+        return ["--append-system-prompt-file", str(write_prompt_file(name, text))]
+
     def start_agent(
         self,
         name: str,
@@ -430,9 +542,14 @@ class Herdr:
         """
         for p in prompts:
             if "\n" in p:
-                # herdr rejects these outright: invalid_agent_argument, "agent arguments
-                # cannot be encoded safely for the target shell". Multi-line guidance
-                # belongs in CLAUDE.md, which costs nothing per agent anyway (C0).
+                # This was herdr's rule, not ours: a newline in an agent ARGUMENT is
+                # invalid_agent_argument, "cannot be encoded safely for the target shell".
+                # The prompt is no longer an argument — it is a file, and a file may hold
+                # anything — so the constraint is now ours alone, and it stays until
+                # somebody decides to lift it. Every prompt in `defaults/` is written
+                # single-line to satisfy it, `sb presets` reads them back the same way,
+                # and quietly allowing newlines here would let one arrive with no test and
+                # no reader expecting it. Multi-line guidance still belongs in CLAUDE.md.
                 raise ValueError(
                     "agent prompts must be single-line; put multi-line guidance in CLAUDE.md"
                 )
@@ -457,23 +574,10 @@ class Herdr:
         agent_args += list(model_args)
         if resume:
             agent_args += ["--resume", resume]
-        # ONE flag, joined — never one flag per fragment. `claude` honours only the LAST
-        # `--append-system-prompt` it is given and silently discards the rest: verified as
-        # `claude -p ... --append-system-prompt "…ALPHA." --append-system-prompt "…BRAVO."
-        # --append-system-prompt "…CHARLIE."`, which answers "CHARLIE" and nothing else.
-        #
-        # This is the bug that made every prompt in `defaults/` a fiction. Fragments are
-        # appended here in the order protocol, identity, workspace, role, presets — so what
-        # every agent actually received was its LAST preset fragment, with no protocol and
-        # no role prompt at all. Agents therefore never called `sb done`, never committed
-        # first, reached for their own question tool instead of `sb block`, and orchestrated
-        # nothing, because not one of those rules was ever delivered. The prompts were never
-        # the problem; the delivery was.
-        #
-        # Joined with a space, not a newline: herdr rejects any agent argument containing
-        # one, which is the same constraint that flattens each fragment in the first place.
-        if prompts:
-            agent_args += ["--append-system-prompt", " ".join(prompts)]
+        # The prompt goes down as a PATH, so the line typed into the pane's shell is ~300
+        # bytes rather than 12KB and cannot be cut by MAX_CANON. See `_prompt_flags` for
+        # the measurement and for why this raises rather than degrading.
+        agent_args += self._prompt_flags(name, prompts)
 
         last: Optional[HerdrError] = None
         for attempt in range(attempts):
