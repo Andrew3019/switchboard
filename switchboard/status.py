@@ -356,6 +356,17 @@ class AgentStatus:
     undelivered_age: int = 0        # seconds since the OLDEST one was written; 0 = none
     # Whether any of that mail came from the human — the one thing that lifts a block.
     undelivered_answer: bool = False
+    # WHY this agent is idle, when something excuses it — the other half of `stalled`,
+    # carried rather than left behind in `collect`. Three phrases, one of the exemptions
+    # `stalled` is already computed from (`awaiting_task`, a live child, a startup grace),
+    # and None when either the agent is not idle at all or nothing excuses it. No new
+    # predicate: `stalled` is exactly "idle and this is None", and the two are set from one
+    # expression in `collect` so they cannot drift apart.
+    #
+    # It exists because `idle` alone reads the same on a lead waiting on its children as on
+    # an agent that quietly died, and telling those two apart at a glance is the whole
+    # point of showing `idle` at all.
+    idle_excuse: Optional[str] = None
 
     @property
     def blocked(self) -> bool:
@@ -621,7 +632,7 @@ class AgentStatus:
             "name", "role", "parent", "depth", "state", "herdr_state", "alive", "turn",
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
-            "undelivered", "undelivered_age", "undelivered_answer",
+            "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -839,6 +850,18 @@ def collect(
         # had its held mail delivered into the turn it was still running.
         turn_over = (turn == TURN_IDLE) if turn is not None else (
             bool(alive) and hstate in IDLE_LIKE)
+        # The three exemptions, as one answer instead of three `not`s. `stalled` is
+        # unchanged — it was already `idle and none of these` — and this is the same test
+        # read the other way round, so the row can say WHICH excuse applies rather than
+        # only that one did. Ordered as the audit orders them (§2, "telling idle apart from
+        # stalled"): never given anything, still has work out, has not started yet.
+        # Phrases, not tokens, because two readouts want the same words and a second
+        # vocabulary is how they come to disagree.
+        excuse = ("awaiting first task" if awaiting
+                  else "waiting on children" if name in live_parent
+                  else "starting up" if starting
+                  else None)
+        idle = bool(running and turn_over and alive is not False)
         agents.append(AgentStatus(
             name=name,
             role=row["role"],
@@ -859,8 +882,11 @@ def collect(
             # signal, a herdr outage no longer hides a stall. What the guard still does is
             # keep STALLED and GONE mutually exclusive: an agent herdr answered about and
             # did not list has no pane to be pinged in, and that row is GONE's to report.
-            stalled=bool(running and turn_over and alive is not False and not awaiting
-                         and not starting and name not in live_parent),
+            stalled=idle and excuse is None,
+            # Only ever set on a row that IS idle: an excuse for something that is not
+            # happening would be a note about nothing, and a working agent that happens to
+            # have children is working, not waiting on them.
+            idle_excuse=excuse if idle else None,
             # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
             # like any other. Nothing else about a blocked agent changes: it is still not
             # `stalled` (that reads `running`), still not pinged, still waiting on its human
@@ -1669,12 +1695,19 @@ def _flags(a: AgentStatus) -> str:
     return ("  " + " ".join(f)) if f else ""
 
 
-def summary_line(snap: Snapshot) -> str:
-    """The one-line count. Public because the board shows the same line, and two
-    hand-maintained copies of "how many agents, and how many of them are trouble" is how
-    two readouts of one store come to disagree in front of you."""
+def summary_bits(snap: Snapshot) -> list[str]:
+    """`summary_line` in pieces, headline first, so a renderer can draw the first one
+    differently without parsing the joined string back apart. See `board.layout`.
+
+    ALIVE LEADS, and that is the whole ordering rule. It used to lead with a total that is
+    mostly history — `51 agents · 1 alive · 253 hidden` — so the number a person reads
+    first was the one that had least to do with what is happening now. Alive is what is
+    happening now; then whatever of it is trouble; then, last and secondary, the counts
+    that are there for scale rather than for action. Nothing is dropped: the total and the
+    hidden count still say how much history stands behind the fleet.
+    """
     c = snap.counts
-    bits = [f"{c['agents']} agents", f"{c['alive']} alive"]
+    bits = [f"{c['alive']} alive"]
     for key, word in (("stalled", "stalled"), ("gone", "gone"),
                       ("blocked", "blocked"), ("at_prompt", "at a prompt")):
         if c[key]:
@@ -1683,9 +1716,17 @@ def summary_line(snap: Snapshot) -> str:
         bits.append(f"{c['unread']} unread")
     if c["undelivered"]:
         bits.append(f"{c['undelivered']} undelivered")
+    bits.append(f"{c['agents']} agents")
     if c["hidden"]:
         bits.append(f"{c['hidden']} hidden")
-    return " · ".join(bits)
+    return bits
+
+
+def summary_line(snap: Snapshot) -> str:
+    """The one-line count. Public because the board shows the same line, and two
+    hand-maintained copies of "how many agents, and how many of them are trouble" is how
+    two readouts of one store come to disagree in front of you."""
+    return " · ".join(summary_bits(snap))
 
 
 def _attention(snap: Snapshot) -> list[str]:

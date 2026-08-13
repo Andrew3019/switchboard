@@ -25,7 +25,8 @@ from switchboard import board, panel, status  # noqa: E402
 
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
-          summary=None, parent=None, archived=False):
+          summary=None, parent=None, archived=False, undelivered=0, undelivered_age=0,
+          idle_excuse=None):
     """One agent. `archived=True` sets what being absent from herdr past the spawn
     grace actually looks like, so the real `AgentStatus.archived` decides — nothing
     here mocks the predicate."""
@@ -37,6 +38,8 @@ def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
         age=int(status.SPAWN_GRACE) + 1 if archived else 10,
         idle=5, last_activity=0, workspace="api", task=task,
         blocked_why=blocked_why, summary=summary,
+        undelivered=undelivered, undelivered_age=undelivered_age,
+        idle_excuse=idle_excuse,
     )
 
 
@@ -134,6 +137,114 @@ class RowSaysOneThingTest(unittest.TestCase):
         self.assertNotIn("idle", unreachable)
 
 
+class IdleReadsAsOneThingTest(unittest.TestCase):
+    """Idle told apart from stalled, which is the question Andrew asked of this row.
+
+    Both rows say `idle` and they mean opposite things: one is a lead doing exactly what
+    the protocol asked of it, the other quietly died. What is pinned here is that the row
+    says which, rather than leaving a reader to infer it from the tree.
+    """
+
+    def line(self, a):
+        rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
+        return next(t for t, row in rows if row is a)
+
+    def test_an_explained_idle_row_says_what_explains_it(self):
+        line = self.line(agent("lead", state="working", herdr_state="idle",
+                               idle_excuse="waiting on children", task="mind them"))
+        self.assertIn("idle", line)
+        self.assertIn("waiting on children", line)
+        self.assertNotIn("STALLED", line)
+
+    def test_an_unexplained_idle_row_reads_as_needing_attention(self):
+        a = agent("w", state="working", herdr_state="idle", stalled=True,
+                  task="fix the parser")
+        line = self.line(a)
+        self.assertIn("STALLED", line)
+        self.assertTrue(board.wants_you(a))       # the ← marker, and the ◌ glyph
+        self.assertEqual(board.glyph(a), "◌")
+
+    def test_mail_alone_no_longer_marks_the_agent_row(self):
+        """It used to: unread mail took over the note and the `←`, so an agent with mail
+        looked like an agent in trouble. The mail has its own line now, with its own
+        marker, and the row goes back to saying what the agent is doing."""
+        a = agent("w", unread=2, task="fix the parser")
+        self.assertFalse(board.wants_you(a))
+        self.assertEqual(board.note(a), "fix the parser")
+
+
+class MailLineTest(unittest.TestCase):
+    """Mail on its own indented line — and the mapping it could break.
+
+    A second line under an agent is exactly the change that shifts every row below it by
+    one. It is safe for one reason, pinned here: the owner of a line is recorded as the
+    line is drawn, so a click reads what was recorded rather than recomputing which agent
+    "should" be on row N.
+    """
+
+    def rows(self, *agents, height=14, width=80):
+        return board.layout(snap(*agents), top=0, height=height, width=width, msg="")
+
+    def mail_lines(self, rows):
+        return [t for t, _ in rows if "mail:" in t]
+
+    def test_mail_is_not_on_the_agents_row(self):
+        rows = self.rows(agent("w", unread=2, task="fix the parser"))
+        row = next(t for t, a in rows if a is not None)
+        self.assertIn("fix the parser", row)
+        self.assertNotIn("unread", row)
+
+    def test_mail_is_its_own_line_under_the_agent_and_indented(self):
+        rows = self.rows(agent("main"), agent("w", depth=1, parent="main", unread=2))
+        [line] = self.mail_lines(rows)
+        plain = board._ANSI.sub("", line)
+        self.assertIn("2 unread", plain)
+        self.assertTrue(plain.startswith("     "))          # under the name, not the glyph
+        i = [t for t, _ in rows].index(line)
+        self.assertIs(rows[i][1], rows[i - 1][1])           # directly under its own agent
+
+    def test_undelivered_is_named_and_the_rest_counted_by_subtraction(self):
+        """UNDELIVERED is the loud one: unread means we rang and it has not looked;
+        undelivered means it was never told. Never double-counted — undelivered is a
+        subset of unread."""
+        a = agent("w", unread=3, undelivered=1, undelivered_age=720)
+        self.assertEqual(board.mail_note(a), "mail: UNDELIVERED 1, 12m · 2 unread")
+        self.assertEqual(board.mail_note(agent("q")), "")
+
+    def test_a_click_below_an_agent_with_mail_still_focuses_the_right_agent(self):
+        """THE PROOF. Three agents, the first with mail, so every row below it has moved
+        down by one. Every drawn line must resolve to the agent it is drawn for."""
+        rows = self.rows(agent("one", unread=2), agent("two"), agent("three"))
+        drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
+        self.assertEqual([n for _, n in drawn],
+                         ["one", "one", "two", "three"])     # "one" owns its mail line too
+        for row, name in drawn:
+            self.assertEqual(board.agent_at(rows, row).name, name)
+
+    def test_a_click_on_the_mail_line_focuses_the_agent_it_is_about(self):
+        rows = self.rows(agent("one", unread=2), agent("two"))
+        i = [t for t, _ in rows].index(self.mail_lines(rows)[0])
+        self.assertEqual(board.agent_at(rows, i + 1).name, "one")
+
+    def test_the_mail_line_costs_a_line_of_the_window_rather_than_overflowing_it(self):
+        """A row that grew has to be paid for out of the same screen, or the footer ends
+        up claiming rows that were pushed off the bottom."""
+        agents = [agent(f"a{i}", unread=1) for i in range(6)]
+        height = board.CHROME + 4                   # capacity 4 lines = two agents
+        rows = board.layout(snap(*agents), top=0, height=height, width=80, msg="")
+        self.assertEqual(len(rows), height)
+        names = {a.name for _, a in rows if a is not None}
+        self.assertEqual(names, {"a0", "a1"})
+        self.assertIn("+4 more below", "\n".join(t for t, _ in rows))
+
+    def test_a_mail_line_never_widens_the_screen(self):
+        rows = board.layout(snap(agent("日本語", unread=99, undelivered=99,
+                                       undelivered_age=99999)),
+                            top=0, height=10, width=40, msg="")
+        for text, _ in rows:
+            self.assertLessEqual(board._visible_len(text), 40)
+
+
 class LayoutTest(unittest.TestCase):
     def test_a_click_resolves_to_the_agent_drawn_on_that_row(self):
         rows = board.layout(snap(agent("one"), agent("two", depth=1), agent("three")),
@@ -214,7 +325,35 @@ class LayoutTest(unittest.TestCase):
     def test_the_header_counts_come_from_status_so_the_two_readouts_cannot_disagree(self):
         s = snap(agent("a", stalled=True), agent("b", gone=True, alive=False))
         rows = board.layout(s, top=0, height=10, width=200, msg="")
-        self.assertIn(status.summary_line(s), rows[0][0])
+        self.assertIn(status.summary_line(s), board._ANSI.sub('', rows[0][0]))
+
+
+class HeadlineTest(unittest.TestCase):
+    """Alive is the number a person reads first, and at 60 columns it is the one that
+    survives. The rest are ordered by how much they matter and dropped whole from the
+    tail — a half-written `2 bloc` says nothing, and a dangling `·` says less."""
+
+    def head(self, s, width):
+        rows = board.layout(s, top=0, height=10, width=width, msg="")
+        return board._ANSI.sub("", rows[0][0])
+
+    def test_the_headline_is_alive_and_it_comes_first(self):
+        s = snap(agent("a"), agent("b", stalled=True), agent("c", archived=True))
+        head = self.head(s, 200)
+        self.assertIn("2 alive", head)
+        self.assertLess(head.index("alive"), head.index("agents"))
+        self.assertIn(status.summary_line(s), head)
+
+    def test_a_narrow_board_drops_whole_counts_from_the_least_important_end(self):
+        s = snap(agent("a"), agent("b", stalled=True))
+        head = self.head(s, 34)
+        self.assertIn("2 alive", head)
+        self.assertNotIn("agents", head)          # the total goes before the trouble does
+        self.assertFalse(head.rstrip().endswith("·"))
+
+    def test_the_headline_alone_is_never_dropped(self):
+        head = self.head(snap(agent("a")), 20)
+        self.assertIn("alive", head)
 
 
 class RefreshTest(unittest.TestCase):
@@ -418,7 +557,7 @@ class CollapseLayoutTest(unittest.TestCase):
         rows = board.layout(s, top=0, height=12, width=200, msg="")
         self.assertEqual(len(self.drawn(rows)), 2)
         self.assertIn("3 agents", rows[0][0])
-        self.assertIn(status.summary_line(s), rows[0][0])
+        self.assertIn(status.summary_line(s), board._ANSI.sub('', rows[0][0]))
 
 
 if __name__ == "__main__":

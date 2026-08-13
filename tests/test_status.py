@@ -372,6 +372,39 @@ class StatusTest(unittest.TestCase):
         self.assertTrue(self.by_name(
             status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"].stalled)
 
+    # -- the other half of the same test: WHY an idle agent is idle ------
+
+    def test_an_idle_agent_says_which_excuse_it_is_idle_on(self):
+        """A lead waiting on its children and an agent that quietly died are both `idle`
+        and are told apart by exactly one thing. `stalled` says nothing explains this;
+        this says what does, so a reader never has to infer either."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           task="mind the children")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", task="do it")
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("lead", "idle"), alive("w1", "working")])))["lead"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.idle_excuse, "waiting on children")
+
+    def test_idle_with_nothing_to_explain_it_carries_no_excuse(self):
+        """The pair the whole distinction rests on: `stalled` is idle and this is None."""
+        store.create_agent(self.db, name="w1", role="worker", task="fix the parser",
+                           session_id="s1")
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertTrue(a.stalled)
+        self.assertIsNone(a.idle_excuse)
+
+    def test_an_agent_that_is_not_idle_has_no_excuse_to_offer(self):
+        """A working parent with a live child is WORKING. An excuse for something that is
+        not happening would be a note about nothing."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2")
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("lead", "working"), alive("w1", "working")])))["lead"]
+        self.assertIsNone(a.idle_excuse)
+
     def test_a_store_without_the_column_still_reads(self):
         """The board and the collector hold a READ-ONLY connection and cannot migrate, so
         they meet a store an older `sb` last stamped. Missing reads as the label the row
@@ -1172,6 +1205,23 @@ class StatusTest(unittest.TestCase):
         root = next(l for l in out.splitlines() if l.startswith("root"))
         self.assertTrue(kid.startswith("  "))
         self.assertFalse(root.startswith(" "))
+
+    def test_the_summary_leads_with_alive_and_keeps_the_rest(self):
+        """The number a person reads first was the one with least to do with now: the
+        line opened `51 agents · 1 alive · 253 hidden`. Alive leads; nothing is dropped."""
+        snap = status.Snapshot(now=0, hidden=253, agents=[
+            status.AgentStatus(
+                name=f"a{i}", role="worker", parent=None, depth=0, state="working",
+                herdr_state="working", alive=(i == 0), stalled=False, gone=False,
+                unread=0, age=1, idle=1, last_activity=0, workspace=None, task=None,
+                blocked_why=None)
+            for i in range(51)])
+        line = status.summary_line(snap)
+        self.assertTrue(line.startswith("1 alive"), line)
+        self.assertIn("51 agents", line)
+        self.assertIn("253 hidden", line)
+        self.assertLess(line.index("51 agents"), line.index("253 hidden"))
+        self.assertGreater(line.index("51 agents"), line.index("1 alive"))
 
     def test_render_survives_an_empty_store(self):
         self.assertIn("no agents", status.render(status.collect(self.db, FakeHerdr())))
