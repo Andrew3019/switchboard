@@ -993,7 +993,7 @@ class Broker:
                 # else's; hand it the work rather than spawn a rival.
                 self.tell([name], task, me=HUMAN)
             store.log_event(self.db, kind="start", agent=name, created=False)
-            self._open_board(name, a["pane_id"])
+            self._open_board(name, a["pane_id"], top=True)
             self._focus(name)
             return name
 
@@ -1025,7 +1025,7 @@ class Broker:
         # create_workspace failed, `pane` here is None and `delegate` fell back to
         # a tab, whose pane only the row knows.
         row = store.get_agent(self.db, name)
-        self._open_board(name, row["pane_id"] if row else pane)
+        self._open_board(name, row["pane_id"] if row else pane, top=True)
         self._focus(name)
         return name
 
@@ -1111,7 +1111,8 @@ class Broker:
             store.record_workspace(self.db, name, path)
 
     def _open_board(self, name: str, pane: Optional[str], *,
-                    cwd: Optional[str] = None) -> None:
+                    cwd: Optional[str] = None,
+                    top: bool = False) -> None:
         """Open the board beside this agent, unless one is up already.
 
         Every agent, not only an orchestrator: `delegate` calls this, and every spawn
@@ -1132,6 +1133,12 @@ class Broker:
         reads the wrong checkout's `.switchboard` is worse than no board, because it
         looks right.
 
+        `top` picks the width and nothing else: the top orchestrator's board — the one
+        `sb start` opens, and the one a human actually reads — takes
+        `board.TOP_BOARD_SHARE`, every other agent's keeps the narrower
+        `board.BOARD_SHARE`. One parameter on one call: two widths must not become two
+        code paths.
+
         Never raises. A spawn must not fail because a view would not open.
         """
         if not pane:
@@ -1151,7 +1158,9 @@ class Broker:
             return
 
         try:
-            new = board_mod.open_beside(self.h, pane, cwd=cwd or str(self.repo))
+            new = board_mod.open_beside(
+                self.h, pane, cwd=cwd or str(self.repo),
+                share=board_mod.TOP_BOARD_SHARE if top else board_mod.BOARD_SHARE)
         except Exception as e:
             # This method promises `sb start` cannot fail because of the board, and
             # a promise enforced only for the errors we predicted is not one. An
@@ -3212,7 +3221,11 @@ class Broker:
         #
         # The pane herdr actually put the agent in, not the one we asked for — the
         # same value the row above was updated with.
-        self._open_board(name, agent.pane_id or pane, cwd=str(where))
+        #
+        # The top orchestrator's board is the wide one: `is_top` is stamped only by
+        # `_top`, so asking it here is asking "is this the `sb start` board?" without a
+        # second call to drift from this one.
+        self._open_board(name, agent.pane_id or pane, cwd=str(where), top=is_top)
         # THE SPAWN IS NOT DONE UNTIL THE TASK IS IN. `agent start` retries and raises
         # loudly, but the first task used to go down as a bare `agent prompt` — one
         # unverified call that can paste without submitting or never arrive, after which
