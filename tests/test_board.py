@@ -50,10 +50,10 @@ def snap(*agents):
 def blocks(rows):
     """The display ROWS drawn, one entry each, in order.
 
-    An agent owns two screen lines and a collapsed group owns one, so "what is on
-    screen" and "how many lines is that" stopped being the same list. Consecutive lines
-    with the same owner are one block — which is exactly the invariant the mapping rests
-    on: a row's lines are adjacent and all carry it.
+    An agent owns one screen line and a collapsed group one, but the breaks between
+    first-level groups own none, so "what is on screen" and "how many lines is that" are
+    not the same list. Consecutive lines with the same owner count once — which is the
+    invariant the mapping rests on: a row's lines are adjacent and all carry it.
     """
     out = []
     for _, a in rows:
@@ -127,9 +127,8 @@ class RowSaysOneThingTest(unittest.TestCase):
     """
 
     def line(self, a):
-        """BOTH of the agent's lines, joined. It is one block on screen and it is one
-        statement: the contradiction pinned here would be a contradiction wherever the
-        two halves of it were drawn."""
+        """The agent's row. One line now, and the contradiction pinned here would be a
+        contradiction wherever on it the two halves were drawn."""
         rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
         return "\n".join(t for t, row in rows if row is a)
 
@@ -164,9 +163,8 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
     """
 
     def line(self, a):
-        """BOTH of the agent's lines, joined. It is one block on screen and it is one
-        statement: the contradiction pinned here would be a contradiction wherever the
-        two halves of it were drawn."""
+        """The agent's row. One line now, and the contradiction pinned here would be a
+        contradiction wherever on it the two halves were drawn."""
         rows = board.layout(snap(a), top=0, height=10, width=200, msg="")
         return "\n".join(t for t, row in rows if row is a)
 
@@ -187,8 +185,8 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
 
     def test_mail_alone_no_longer_marks_the_agent_row(self):
         """It used to: unread mail took over the note and the `←`, so an agent with mail
-        looked like an agent in trouble. Mail marks itself, inside the second line, and
-        the row goes back to saying what the agent is doing."""
+        looked like an agent in trouble. Mail names itself where it is drawn, and the
+        row goes back to saying what the agent is doing."""
         a = agent("w", unread=2, task="fix the parser")
         self.assertFalse(board.wants_you(a))
         self.assertEqual(board.tail_note(a), "fix the parser")
