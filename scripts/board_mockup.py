@@ -516,6 +516,82 @@ def is_collapsed(row: Any) -> bool:
     return isinstance(row, dict) and row.get("collapsed") is True
 
 
+def row_depth(row: Any) -> int:
+    return int((row.get("depth", 0) if is_collapsed(row) else g(row, "depth", 0)) or 0)
+
+
+# ---------------------------------------------------------------------------
+# The workspace gutter: grouping without spending a blank line on it
+# ---------------------------------------------------------------------------
+
+# A workspace boundary is exactly "a top-level agent and its whole subtree", and the
+# board's row order is already contiguous by workspace — researcher-32 established both
+# from the store's full history (`notes/board-worktree-grouping.md`, branch
+# `researcher-32`). So the groups drawn here need no workspace lookup at all: a group
+# opens at every depth-0 agent and runs to the row before the next one.
+#
+# Three shapes to choose between, all in the same one-column rule plus one space. The
+# rule REPLACES the row's existing leading space, so the true cost is one column, not two.
+GUTTER_STYLES = ("bracket", "bar", "tick", "none")
+
+# Colours. `single` is one colour for every group; `rotate` gives each group its own.
+# Rotating is the tempting one and the wrong one — see the note in `gutter_column`.
+GUTTER_SINGLE = "grey42"
+GUTTER_ROTATE = ("cyan", "magenta", "green", "blue", "yellow", "red")
+
+
+def group_spans(rows: list[Any]) -> list[tuple[int, int]]:
+    """`(first, last)` row index for each workspace group, in screen order.
+
+    A depth-0 agent opens a group; everything below it until the next depth-0 agent is
+    inside it, collapsed-archive markers included. A depth-0 *collapsed* row belongs to
+    no group — it stands for archived top-level agents, which are whole workspaces of
+    their own that are not on screen to be bracketed.
+    """
+    spans: list[list[int]] = []
+    for i, row in enumerate(rows):
+        depth = row_depth(row)
+        if not is_collapsed(row) and depth == 0:
+            spans.append([i, i])
+        elif depth >= 1 and spans:
+            spans[-1][1] = i
+    return [(a, b) for a, b in spans]
+
+
+def gutter_column(rows: list[Any], style: str, colour: str) -> list[tuple[str, str]]:
+    """One `(char, style)` per row: the left rule that encloses each workspace group.
+
+    `bracket` is corner-rule-corner, a large left bracket around the group. `bar` is a
+    plain rule the group's full height, no corners. `tick` marks only the group's first
+    row — the cheapest thing that still says "a new workspace starts here".
+
+    On colour: `single` is the honest default. A terminal has a handful of reliably
+    distinct colours and this fleet has run ninety-odd workspaces, so `rotate` recycles
+    within one screen — and two groups sharing a colour reads as one group, which is
+    exactly the thing the gutter exists to deny. The bracket already says WHERE the
+    boundaries are; colour would only add WHICH group, and that is the part it does
+    badly. `rotate` is here so Andrew can see that for himself.
+    """
+    out = [(" ", "") for _ in rows]
+    if style not in GUTTER_STYLES or style == "none":
+        return out
+    for n, (first, last) in enumerate(group_spans(rows)):
+        tint = GUTTER_SINGLE if colour != "rotate" else \
+            GUTTER_ROTATE[n % len(GUTTER_ROTATE)]
+        for i in range(first, last + 1):
+            if style == "tick":
+                ch = "▌" if i == first else " "
+            elif style == "bar":
+                ch = "▌"
+            else:                           # bracket
+                # A one-row group has no room for two corners, and a stub corner would
+                # claim an extent it does not have — so it gets the plain rule.
+                ch = "│" if first == last else \
+                    "╭" if i == first else "╰" if i == last else "│"
+            out[i] = (ch, tint)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Drawing
 # ---------------------------------------------------------------------------
@@ -553,10 +629,13 @@ def summary_bits(agents: list[dict]) -> list[str]:
 
 
 def render(agents: list[dict], width: int, source_note: str,
-           *, show_archived: bool = False) -> Panel:
+           *, show_archived: bool = False, gutter: str = "bracket",
+           gutter_colour: str = "single") -> Panel:
     """One frame. `width` is the whole pane; the panel fits inside it exactly."""
     inner = max(10, width - 4)              # 2 border columns, 2 of padding
     rows = display_rows(agents, show_archived=show_archived)
+    rules = gutter_column(rows, gutter, gutter_colour)
+    has_gutter = gutter in GUTTER_STYLES and gutter != "none"
 
     live = [r for r in rows if not is_collapsed(r)]
     names = [("  " * int(g(a, "depth", 0))) + str(g(a, "name", "?")) for a in live]
@@ -579,7 +658,9 @@ def render(agents: list[dict], width: int, source_note: str,
     # case a pane too narrow for `BLOCKED · 2 unread` forces and nothing here can prevent.
     # (There used to be a rung between those two that dropped the state pill's side
     # padding. The pill is plain text now, so there is no padding left to give up.)
-    fixed = 3 + 2                           # " ● " and the gap before the state
+    # The gutter's rule takes over the row's existing leading space and adds one column
+    # of its own, so grouping costs ONE column, not two.
+    fixed = 3 + 2 + (1 if has_gutter else 0)
     for show_age in (True, False):
         w_name = w_name_full
         age_cols = 7 if show_age else 0
@@ -600,28 +681,44 @@ def render(agents: list[dict], width: int, source_note: str,
     # height, so Andrew had it removed outright — not swapped for a rule or padding.
     # The filled bars and the panel border are what separate the sections now. The board
     # draws exactly one blank line in total, above NEEDS YOU; see there for why.
-    for row in rows:
+    for i, row in enumerate(rows):
+        rule, rule_style = rules[i]
+        line = Text(no_wrap=True, overflow="crop")
+        if has_gutter:
+            line.append(rule, style=rule_style)
+
         if is_collapsed(row):
             label = ("  " * row["depth"]) + f"+ {row['count']} archived"
             if row["needs"]:
                 label += f" · {row['needs']} need you"
-            body.append(Text(clip("   " + label, inner), style=DIM, no_wrap=True,
-                             overflow="crop"))
+            line.append(clip("   " + label, inner - (1 if has_gutter else 0)),
+                        style=DIM)
+            body.append(line)
             continue
 
+        # A gone agent is one whose pane herdr no longer has. It is the row a future
+        # "clear them all" key would sweep, so it is drawn to be picked out without
+        # reading: red the whole way across, and the name struck through. The strike is
+        # decoration on top of the glyph, the red and the word GONE in the tail — a
+        # terminal that ignores it loses nothing that carries meaning.
+        doomed = bool(g(row, "gone"))
         gl = glyph(row)
-        line = Text(no_wrap=True, overflow="crop")
         line.append(" ")
         line.append(gl, style=GLYPH_STYLE.get(gl, ""))
         line.append(" ")
         indent = "  " * int(g(row, "depth", 0))
         line.append(pad(indent + clip_name(str(g(row, "name", "?")),
                                            max(1, w_name - vlen(indent))), w_name),
-                    style="bold" if wants_you(row) else "")
+                    style="bold red strike" if doomed
+                    else "bold" if wants_you(row) else "")
         line.append("  ")
-        line.append_text(state_word(display_state(row), w_state))
+        if doomed:
+            line.append(pad(clip(display_state(row), w_state), w_state), style="red")
+        else:
+            line.append_text(state_word(display_state(row), w_state))
         if show_age:
-            line.append("  " + f"{fmt_age(int(g(row, 'idle', 0))):>5}", style=DIM)
+            line.append("  " + f"{fmt_age(int(g(row, 'idle', 0))):>5}",
+                        style="red" if doomed else DIM)
 
         # The widest rung of this row's ladder that fits in the room the budget above
         # kept for it. Never dropped: a row with a tail always draws one, clipped only
@@ -633,7 +730,7 @@ def render(agents: list[dict], width: int, source_note: str,
             # has rather than falling back to a short rung and leaving space unused.
             text = forms[0] if vlen(forms[0]) <= room else squeeze(row, room)
             line.append("  " + clip(text, room),
-                        style="red" if g(row, "gone") else "yellow")
+                        style="bold red" if doomed else "yellow")
         body.append(line)
 
     # Two kinds only, blocked before idle, each named by a WORD and not just a colour —
@@ -667,8 +764,22 @@ def render(agents: list[dict], width: int, source_note: str,
             body.append(Text(clip(f"  + {len(wanted) - 6} more", inner), style=DIM,
                              no_wrap=True, overflow="crop"))
 
-    body.append(Text(clip(f"{source_note} · mockup, not the board", inner), style=DIM,
-                     no_wrap=True, overflow="crop"))
+    # The footer, with the gone-sweep affordance FIRST so a narrow pane clips the
+    # provenance note instead of the one actionable thing on the line. It is a sketch of
+    # a key, not a key: this mockup reads no input at all and clears nothing. What it
+    # shows is how the offer would read, and how many rows it would take.
+    doomed_n = sum(1 for a in agents if g(a, "gone"))
+    foot = Text(no_wrap=True, overflow="crop")
+    used = 0
+    if doomed_n:
+        offer = f" x  clear {doomed_n} gone "
+        foot.append(clip(offer, inner), style="bold white on red")
+        used = vlen(clip(offer, inner))
+        if inner - used > 3:
+            foot.append("  ")
+            used += 2
+    foot.append(clip(f"{source_note} · mockup, not the board", inner - used), style=DIM)
+    body.append(foot)
 
     return Panel(Group(*body), box=ROUNDED, border_style=BORDER_STYLE,
                  title="[bold]switchboard[/bold]", title_align="left",
@@ -698,6 +809,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="force a pane width, for testing narrow panes")
     p.add_argument("--source", choices=("auto", "live", "sample"), default="auto")
     p.add_argument("--archived", action="store_true", help="do not collapse archived")
+    p.add_argument("--gutter", choices=GUTTER_STYLES, default="bracket",
+                   help="how workspace groups are enclosed in the left gutter")
+    p.add_argument("--gutter-colour", choices=("single", "rotate"), default="single",
+                   help="one colour for every group, or one colour per group")
     p.add_argument("--refresh", type=float, default=REFRESH)
     args = p.parse_args(argv)
 
@@ -707,9 +822,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     def width() -> int:
         return args.width or max(20, console.width)
 
+    def frame(agents: list[dict], note: str) -> Panel:
+        return render(agents, width(), note, show_archived=args.archived,
+                      gutter=args.gutter, gutter_colour=args.gutter_colour)
+
     if args.once:
         agents, note = load(args.source)
-        console.print(render(agents, width(), note, show_archived=args.archived))
+        console.print(frame(agents, note))
         return 0
 
     resized = {"flag": False}
@@ -734,8 +853,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # resize needs nothing else — it would be picked up on the next tick
                 # anyway; this makes it immediate.
                 resized["flag"] = False
-                live.update(render(agents, width(), note,
-                                   show_archived=args.archived), refresh=True)
+                live.update(frame(agents, note), refresh=True)
                 deadline = time.time() + args.refresh
                 while time.time() < deadline and not resized["flag"]:
                     time.sleep(0.05)
