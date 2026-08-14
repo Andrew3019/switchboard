@@ -24,16 +24,18 @@ that exist. switchboard is that protocol, plus the plumbing to make it true.
 tabs and the git worktrees are managed by herdr, a terminal workspace manager for AI
 coding agents; switchboard drives it and adds the coordination layer above.
 
-**A human starts a top orchestrator with `sb start`, and that is the only way one is
-ever made.** Being a top is a stamp set at that moment, not something inferred later, and
+**A human starts a dispatcher with `sb start`, and that is the only way one is
+ever made.** A dispatcher is the top of a tree and holds no work of its own — it hands
+what it is given to a lead, which owns that piece end to end and runs it through its own
+children. Being a top is a stamp set at that moment, not something inferred later, and
 `sb delegate` branches on it: a top's spawn gets a fresh workspace with a git worktree of
 its own, anybody else's spawn gets a tab in the workspace the caller is already in. So
 only the top ever creates a workspace, and a lead's whole subtree shares one checkout —
 which is exactly why a lead has to hand its children disjoint files.
 
-**Orchestrators delegate rather than do.** The interesting agents in the tree mostly
-spawn other agents, watch nothing, and wait. `sb delegate` returns immediately; the parent
-ends its turn and is woken when a child reports. An orchestrator that decides to do its
+**Dispatchers and leads delegate rather than do.** The interesting agents in the tree
+mostly spawn other agents, watch nothing, and wait. `sb delegate` returns immediately; the
+parent ends its turn and is woken when a child reports. A parent that decides to do its
 child's work itself is the failure mode this design is arranged against, and the prompts
 say so in as many words.
 

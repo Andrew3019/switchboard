@@ -2282,12 +2282,16 @@ class BrokerTest(unittest.TestCase):
     # costs them the way back, which is why it still has these tests.
 
     def _dead_top(self, name, state="done"):
-        """A top-level orchestrator that ended and said so.
+        """A top that ended and said so.
 
-        MAIN is the ROLE every orchestrator has; MAIN_NAME is only the default NAME of
-        the top-level one. Passing either where the other belongs matches nothing.
+        `is_top=True` is what `_top` stamps and what `running_tops` now reads, so a
+        fixture that set only the role was modelling a top by the one property of it that
+        a rename can change — which is how a role rename made two live tops invisible.
+        MAIN is a ROLE and MAIN_NAME is only the default NAME of the top-level one; the
+        stamp is neither.
         """
-        store.create_agent(self.db, name=name, role=MAIN, pane_id=f"w1:{name}")
+        store.create_agent(self.db, name=name, role=MAIN, pane_id=f"w1:{name}",
+                           is_top=True)
         store.set_state(self.db, name, state)
 
     def test_finished_orchestrators_are_not_already_running(self):
@@ -2299,7 +2303,8 @@ class BrokerTest(unittest.TestCase):
         self.h.focus = lambda n: None
         for i, name in enumerate([MAIN_NAME, "main-2", "main-3", "main-4"]):
             self._dead_top(name, "failed" if i == 2 else "done")
-        store.create_agent(self.db, name="main-5", role=MAIN, pane_id="w1:p5")
+        store.create_agent(self.db, name="main-5", role=MAIN, pane_id="w1:p5",
+                           is_top=True)
         self.h.list_agents = lambda: [HAgent(name="main-5", pane_id="w1:p5")]
 
         self.assertEqual(self.b.running_tops(), ["main-5"])
@@ -2308,14 +2313,16 @@ class BrokerTest(unittest.TestCase):
         """Nothing writes a row back on an abnormal death — a crash, a pane closed from
         the outside, a herdr restart — so `working` alone proves nothing."""
         self.h.focus = lambda n: None
-        store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1")
+        store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1",
+                           is_top=True)
         self.h.list_agents = lambda: []
         self.assertEqual(self.b.running_tops(), [])
 
     def test_an_unreachable_herdr_leaves_the_list_alone(self):
         """Fails OPEN: herdr being down proves nothing about who is working."""
         self.h.focus = lambda n: None
-        store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1")
+        store.create_agent(self.db, name=MAIN_NAME, role=MAIN, pane_id="w1:p1",
+                           is_top=True)
 
         def down():
             raise HerdrError("no_server", "connection refused")

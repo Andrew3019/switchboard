@@ -64,29 +64,33 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(a["state"], "working")
         self.assertIsNone(a["ended_at"])
 
-    def test_live_roots_is_what_is_running_not_what_ever_ran(self):
-        """The store keeps every root ever created; without the filter this is history.
-
-        The argument is a ROLE. Agent names ('main', 'main-2') are not roles, and passing
-        one here matches nothing at all — the failure mode this filter exists to fix.
-        """
+    def test_live_tops_is_what_is_running_not_what_ever_ran(self):
+        """The store keeps every top ever created; without the filter this is history."""
         for name in ("main", "main-2", "main-3"):
-            store.create_agent(self.db, name=name, role="lead")
+            store.create_agent(self.db, name=name, role="dispatcher", is_top=True)
         store.create_agent(self.db, name="kid", role="lead", parent="main")
         store.set_state(self.db, "main", "done")
         store.set_state(self.db, "main-2", "failed")
-        store.create_agent(self.db, name="side", role="worker")
-        self.assertEqual([r["name"] for r in store.live_roots(self.db, "lead")],
-                         ["main-3"])            # not the ended ones, not a child, not
-                                                # another role
-        self.assertEqual(store.live_roots(self.db, "main"), [])     # a name is not a role
+        store.create_agent(self.db, name="side", role="worker")   # a root, but no stamp
+        self.assertEqual([r["name"] for r in store.live_tops(self.db)],
+                         ["main-3"])            # not the ended ones, not a child, not an
+                                                # unstamped root
 
-    def test_live_roots_keeps_a_blocked_one(self):
-        """Blocked is waiting on a person, not finished — it is still up."""
-        store.create_agent(self.db, name="main", role="lead")
+    def test_live_tops_finds_a_top_stamped_under_the_retired_role_name(self):
+        """The regression this function was rewritten for. It filtered on `role=?` against
+        `[vocabulary] main_role`, so renaming the top's role from `orchestrator` to
+        `dispatcher` hid every top already in the store — on the live store that afternoon,
+        both of them, one of them blocked and waiting on Andrew, and the next bare
+        `sb start` would have opened a third and said nothing about either."""
+        store.create_agent(self.db, name="main-15", role="orchestrator", is_top=True)
+        self.assertEqual([r["name"] for r in store.live_tops(self.db)], ["main-15"])
+
+    def test_live_tops_keeps_a_blocked_one(self):
+        """Blocked is waiting on a person, not finished — it is still up. It is also the
+        one a human most needs named back to them."""
+        store.create_agent(self.db, name="main", role="dispatcher", is_top=True)
         store.set_state(self.db, "main", "blocked")
-        self.assertEqual([r["name"] for r in store.live_roots(self.db, "lead")],
-                         ["main"])
+        self.assertEqual([r["name"] for r in store.live_tops(self.db)], ["main"])
 
     # -- messages --------------------------------------------------------
 

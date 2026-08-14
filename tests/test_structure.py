@@ -312,6 +312,24 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             self.b.delegate("t", role="worker", me="x")
 
+    def test_a_row_that_still_says_orchestrator_may_still_delegate(self):
+        """The rename reaches the role table, never the rows already written. Every agent
+        alive on the day this lands has `orchestrator` on its row, and the check above
+        reads that string off the store — so without the alias resolving on a STORED role,
+        and not only on a typed `--role`, the previous test is the one that would fire and
+        the whole running fleet would lose the right to spawn."""
+        store.create_agent(self.db, name="old", role="orchestrator",
+                           parent=self._top(), workspace="api", branch="api",
+                           cwd=str(self.repo))
+        self.assertTrue(self.b.delegate("t", role="worker", me="old"))
+
+    def test_delegating_with_the_retired_name_files_the_child_as_a_lead(self):
+        """The alias resolves all the way, so the row says what the agent actually is: it
+        is holding the lead prompt, and a row saying `orchestrator` would be a third answer
+        to a question that already has two."""
+        kid = self.b.delegate("t", role="orchestrator", me=self._top())
+        self.assertEqual(store.get_agent(self.db, kid)["role"], "lead")
+
 
 # ---------------------------------------------------------------------------
 # 5.4 — the tree boundary

@@ -925,9 +925,10 @@ class Broker:
         )
 
     def running_tops(self) -> list[str]:
-        """Top-level orchestrators that could still be going, oldest first.
+        """Tops that could still be going, oldest first — whatever role they were spawned
+        as, since the store answers this from the `is_top` stamp (`store.live_tops`).
 
-        Two filters, and the second is why this is not just a query. `live_roots` drops
+        Two filters, and the second is why this is not just a query. `live_tops` drops
         the ones that ended; herdr drops the ones that ended without saying so, which
         nothing else can — a row only leaves `working` when the agent itself reports it,
         so a crash, an externally closed pane or a herdr restart leaves one claiming to
@@ -935,11 +936,13 @@ class Broker:
 
         Fails OPEN: an unreachable herdr proves nothing, so a row claiming to work is
         left claiming it. Same rule as `status.collect`. Nothing
-        branches on this any more — `sb start` reads it only to tell the human which
-        orchestrators they already have, and naming a dead one there costs a line of
-        text, while omitting a live one costs them the way back to it.
+        branches on this any more — `sb start` reads it only to tell the human which tops
+        they already have, and naming a dead one there costs a line of text, while
+        omitting a live one costs them the way back to it. That second cost is why the
+        stamp and not the role decides: a rename of the top's role emptied this list
+        while two tops were running, one of them blocked and waiting on him.
         """
-        tops = [r["name"] for r in store.live_roots(self.db, MAIN)]
+        tops = [r["name"] for r in store.live_tops(self.db)]
         known = self._agent_states()
         return tops if known is None else [n for n in tops if n in known]
 

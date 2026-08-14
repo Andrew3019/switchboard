@@ -101,6 +101,14 @@ main_role = "dispatcher"
 # spawning an agent that cannot delegate at all. `orchestrator` maps to `lead` rather than
 # to `dispatcher` because that is what anyone typing it at `sb delegate` meant: an agent
 # that owns this piece of work and splits it. Empty it once nothing types the old name.
+#
+# What the rename does NOT reach, which matters on the day it lands. A running agent keeps
+# the prompt it was spawned with, so no top already up becomes a dispatcher — it goes on
+# being an orchestrator, holding context and doing its own planning, until it is restarted,
+# and every row already in the store goes on saying `orchestrator` forever. Both are
+# harmless because nothing decides anything from that string: `roles.get` resolves it here,
+# and everything structural reads the `is_top` stamp instead (`store.live_tops`, which
+# filtered on the role name until this rename made the running tops invisible).
 role_aliases = { orchestrator = "lead" }
 
 # The default NAME of the agent `sb start` spawns — separate from its role, so that

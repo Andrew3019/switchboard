@@ -1134,21 +1134,43 @@ def live_agents(db: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def live_roots(db: sqlite3.Connection, role: str) -> list[sqlite3.Row]:
-    """`live_agents`, narrowed to roots of one role and ordered oldest first.
+def live_tops(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    """`live_agents`, narrowed to the tops still up and ordered oldest first.
 
-    The store keeps every root ever created, so the same query without the state and
+    The store keeps every top ever created, so the same query without the state and
     `ended_at` filters is a *history* — which is how `sb start` came to announce five
-    finished orchestrators as already running.
+    finished tops as already running.
+
+    THE FILTER IS THE STAMP, not the role string, and that is the whole point of this
+    function. It asked for `role=?` until the day the top's role was renamed from
+    `orchestrator` to `dispatcher`, and every row already in the store still said the old
+    word — so the two tops running that afternoon went invisible, and the next bare `sb
+    start` would have opened a third without the line telling the human how to get back to
+    the one blocked and waiting on them. `is_top` is written by `_top` alone, backfilled
+    once for the rows that predate the column, and it cannot go stale when a role is
+    renamed, because it is not a name. DESIGN-TRUTH says the same thing about which of the
+    two facts decides anything: the stamp, not the prompt.
+
+    `parent IS NULL` stays alongside it. Every stamped row has always had it, so it selects
+    nothing extra; it costs a term and it means a row that somehow carried the stamp under
+    a parent cannot present itself as a top.
+
+    Deliberately NOT fixed by migrating the stored role strings, though the machinery for a
+    one-time fill is right there in `_BACKFILLS`. A running agent's row says the role it was
+    spawned as, and it is still holding that role's prompt — rewriting `orchestrator` to
+    `dispatcher` underneath it would make the board claim a relay-only agent where a
+    working orchestrator is actually sitting, and it would have to guess `lead` or
+    `dispatcher` for every historical row from a distinction nobody was recording. The role
+    string is history and is read as history; everything that must be true NOW reads the
+    stamp, or resolves the name through `[vocabulary] role_aliases` (`roles.get`).
 
     Still only the store's word. A row leaves `working` when the agent itself reports it,
     so a crashed one reads as live here forever; the caller is the one who has to ask
     herdr (see `Broker.running_tops`).
     """
     return db.execute(
-        f"SELECT * FROM agents WHERE parent IS NULL AND role=? "
-        f"AND state IN {LIVE_STATES} AND ended_at IS NULL ORDER BY created_at",
-        (role,),
+        f"SELECT * FROM agents WHERE parent IS NULL AND is_top=1 "
+        f"AND state IN {LIVE_STATES} AND ended_at IS NULL ORDER BY created_at"
     ).fetchall()
 
 

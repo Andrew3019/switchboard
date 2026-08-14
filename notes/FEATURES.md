@@ -223,7 +223,7 @@ returns to that orchestrator, restoring it if its pane was closed, and hands it 
 - It focuses the pane it started. Nothing else focuses on spawn, and nothing can ask for
   it — there is no focus flag. The board is opened beside it and cannot be declined.
 - Entry point: `cli.py:739-750` → `Broker.start`/`Broker._top` (`broker.py:825-975`)
-- Depends on: `store.live_roots`, `herdr.create_workspace`/`start_agent`,
+- Depends on: `store.live_tops`, `herdr.create_workspace`/`start_agent`,
   `board.open_beside` (auto-fires here — see **`sb board`**), `config.prompt`
   (`[spawn] start_task`)
 - Status: working, with detailed handling for concurrent `sb start` calls
