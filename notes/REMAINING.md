@@ -1,5 +1,9 @@
 # REMAINING.md — what is still untrue of `DESIGN-TRUTH.md`
 
+> **The audit this file is derived from is no longer in the tree.** `audit/` was removed
+> when the repo was made public; every claim below was taken from it and is reproduced
+> here in full, so nothing is lost, but the underlying write-up is only in git history.
+
 Every phase of the old `BUILD-PLAN.md` is built and merged, so that file has been deleted
 and this one replaces it. Where the plan worked from the phase-1 scoping pass and guessed
 at the rest, this works from a full conformance audit: `audit/design-truth-conformance.md`
