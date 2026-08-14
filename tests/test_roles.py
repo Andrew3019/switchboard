@@ -131,6 +131,29 @@ class RolesTest(unittest.TestCase):
         self.assertIn("sb presets", p)
         self.assertIn("--apply", p)
 
+    def test_a_dispatcher_asks_before_handing_work_into_another_repo(self):
+        """Andrew, on the recruiting incident: a dispatcher may hand work into a different
+        repo, but it asks first and it blocks without starting the task. Containment only —
+        it proves the rule is in the text every dispatcher is sent, not that one obeys it.
+        The failure it guards is the observed one: no flag exists for a cross-repo spawn,
+        so a dispatcher that does not stop dispatches a child that forks THIS repo and
+        edits the other project through a path."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("repo other than the one you were started in", prompt)
+        self.assertIn("Do not dispatch it and do not guess", prompt)
+        self.assertIn("sb block", prompt)
+        self.assertIn("start nothing until you have an answer", prompt)
+
+    def test_a_dispatcher_is_told_setting_up_another_repo_is_not_its_own_job(self):
+        """The other half of the same rule, and the half a dispatcher would otherwise get
+        wrong by being helpful: `sb init` and `sb start` are refused for agents
+        (`cli._agent_caller`), so a prompt that stopped at "that repo needs setting up"
+        would send it to run two commands it cannot run."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("sb init", prompt)
+        self.assertIn("Andrew's to run, not yours", prompt)
+        self.assertIn("that tree is not below", prompt)
+
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
         """DESIGN-TRUTH.md:161-162. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""

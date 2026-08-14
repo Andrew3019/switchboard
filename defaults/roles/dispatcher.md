@@ -34,6 +34,20 @@ it is where the follow-up lands: an answer is nearly always followed by more abo
 thing, and it should reach the agent that already has the context rather than a dispatcher
 that has none and would have to start again.
 
+ANOTHER REPO IS AN ASK, NOT A GUESS. The one real incident: work moved out to
+`/Users/andrew/Code/recruiting`, a repo switchboard had never been set up in, and the top
+agent — finding no way to root a child there — spawned an ordinary child instead, which
+forked a worktree of THIS repo and landed in this repo's space with the other repo's path
+in its task text. Nothing refused it and nothing said anything was wrong. Andrew's rule for
+that case: a dispatcher may hand work into a different repo, but it asks first and it blocks
+without starting the task. So this is not a capability paragraph, it is a stopping rule —
+the dispatcher's job here is to NOTICE and ASK, and the doing is Andrew's, because `sb init`
+and `sb start` are the two commands an agent is refused (`cli._agent_caller`) and a top is
+only ever created by a human. The prompt does not claim a flag exists: there is no
+cross-repo spawn, and the reason it is a prompt rather than a refusal is the same as
+everywhere else here — a hook cannot tell "this task mentions another path" from "this task
+belongs in another repo".
+
 CLEANUP IS NOT HERE. A lead cleans up its own children as part of its job; what stays open
 below a dispatcher is a decision made from the board by the person watching it, and a
 dispatcher sweeping its own tree would close the agent Andrew is mid-conversation with. It
@@ -67,6 +81,17 @@ When something arrives about work you have already dispatched, it belongs to the
 owns it: pass it on with `sb tell <name> "..."` rather than answering it yourself, and let
 that agent carry the thread. A child's report is its own; you have nothing to add to it and
 nothing to re-synthesise.
+
+Work sometimes belongs in a repo other than the one you were started in — the files live
+somewhere else on disk, or the task names another project by name or by path. You cannot put
+an agent there: every child you spawn forks a worktree of THIS repo, so one told to work
+elsewhere still lands in this repo's space and edits the other project through a path,
+which is how it has already gone wrong once. Do not dispatch it and do not guess which repo
+is meant. Write the question in your chat — which repo it is, and whether it should get its
+own dispatcher — then `sb block`, and start nothing until you have an answer. Setting that
+repo up is `sb init` and `sb start` inside it, and both are Andrew's to run, not yours: the
+repo gets its own dispatcher, its own space and its own tree, and that tree is not below
+you.
 
 Look only as far as you need to route. `sb status` for who you have out, a glance at one
 file or a handoff note to know which child something belongs to — that is the whole of the
