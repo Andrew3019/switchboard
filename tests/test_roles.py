@@ -223,6 +223,20 @@ class RolesTest(unittest.TestCase):
         self.assertTrue(got.delegate)
         self.assertEqual(got.prompt, r["lead"].prompt)
 
+    def test_a_repo_can_write_an_alias_of_its_own(self):
+        """The layering that `[vocabulary]` claims and that `roles.get` was not honouring:
+        both settings it reads are shipped-then-repo, and it was resolving them with no
+        repo at all, so a repo that retired a role of its own and wrote the alias for it got
+        silence — the name fell through to the fallback exactly as if nothing was written.
+        The shipped alias must survive the repo's, since appending is what every other layer
+        in this system does."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "settings.toml").write_text(
+            "[vocabulary]\nrole_aliases = { foreman = \"lead\" }\n")
+        r = roles.load(self.repo)
+        self.assertEqual(roles.get(r, "foreman", self.repo).name, "lead")
+        self.assertEqual(roles.get(r, "orchestrator", self.repo).name, "lead")
+
     def test_a_dispatcher_and_a_lead_are_given_different_jobs(self):
         """The one thing that justifies two prompts rather than one with a branch in it: a
         dispatcher is built to hold nothing and a lead to hold everything about its task.

@@ -79,12 +79,20 @@ def load(repo: Optional[Path] = None) -> dict[str, Role]:
     return {k: Role(name=k, tiers=tiers, **v) for k, v in merged.items()}
 
 
-def get(roles: dict[str, Role], name: str) -> Role:
+def get(roles: dict[str, Role], name: str, repo: Optional[Path] = None) -> Role:
     """Unknown roles are fine — they inherit the fallback role's fields but keep their own
     name, so `--as` and ad-hoc roles work without anyone editing a file first.
 
     Which role is the fallback is `[vocabulary] fallback_role`, not a literal here: what an
     undefined role behaves like is a decision a repo is allowed to make differently.
+
+    `repo` is what makes "a repo is allowed to decide differently" true rather than merely
+    stated. Both settings this reads are layered — shipped, then the repo's own — and both
+    were being read with no repo at all, which resolves the shipped layer and stops. A repo
+    that retired a role of its own and wrote the alias for it in `.switchboard/settings.toml`
+    got silence: the name fell through to the fallback exactly as if the alias had never
+    been written. Every caller in the broker has a repo and passes it; the default is for
+    the ad-hoc call and for tests that only care about the shipped table.
 
     A RETIRED name is a different case from a name nobody ever defined, and the fallback is
     the wrong answer for it: `orchestrator` used to mean "an agent that owns this and splits
@@ -97,10 +105,10 @@ def get(roles: dict[str, Role], name: str) -> Role:
     """
     if name in roles:
         return roles[name]
-    alias = config.setting("vocabulary.role_aliases").get(name)
+    alias = config.setting("vocabulary.role_aliases", repo=repo).get(name)
     if alias and alias in roles:
         return roles[alias]
-    fallback = config.setting("vocabulary.fallback_role")
+    fallback = config.setting("vocabulary.fallback_role", repo=repo)
     base = roles.get(fallback) or Role(fallback)
     return Role(name=name, model=base.model, prompt=base.prompt,
                 delegate=base.delegate, tiers=base.tiers)

@@ -708,7 +708,7 @@ class Broker:
         if row is None:
             return
         role = row["role"]
-        if roles_mod.get(self.roles, role).delegate:
+        if roles_mod.get(self.roles, role, self.repo).delegate:
             return
         raise ValueError(
             f"a {role} does not spawn agents — only a role with delegate rights does "
@@ -3053,7 +3053,7 @@ class Broker:
     ) -> str:
         me = me or self.whoami()
         self._refuse_bare_delegate(me)
-        r = roles_mod.get(self.roles, role)
+        r = roles_mod.get(self.roles, role, self.repo)
         # What was TYPED is not necessarily what this agent is: a retired name resolves
         # through `[vocabulary] role_aliases` to the role that replaced it, and `r.name` is
         # the answer. Taken here, once, so the identity fragment, the generated name, the
@@ -3953,7 +3953,7 @@ class Broker:
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with
         # its full context" must not quietly mean.
-        spec = roles_mod.get(self.roles, a["role"]).spec()
+        spec = roles_mod.get(self.roles, a["role"], self.repo).spec()
         try:
             agent = self.h.start_agent(name, pane, resume=a["session_id"],
                                        model_args=spec.cli_args())

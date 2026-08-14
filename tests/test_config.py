@@ -152,6 +152,14 @@ class ShippedDefaultsTest(_Layered):
         for key in ("default_role", "fallback_role"):
             with self.subTest(key=key):
                 self.assertTrue(config.setting(f"vocabulary.{key}"))
+        # An alias IS checked against the files, and strictly, because it is the one name
+        # here whose whole purpose is to not fall through: `roles.get` uses the alias only
+        # when its target exists and otherwise drops to the fallback, silently, which is the
+        # exact failure the alias was added to prevent. A retired name pointing at a
+        # misspelt replacement would spawn an agent that cannot delegate and say nothing.
+        for old, new in config.setting("vocabulary.role_aliases").items():
+            with self.subTest(alias=old):
+                self.assertIn(new, roles, f"alias {old!r} points at a role with no file")
 
     def test_the_protocol_is_a_single_line_and_names_the_verbs(self):
         line = config.protocol(None)
