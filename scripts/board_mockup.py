@@ -559,8 +559,13 @@ def render(agents: list[dict], width: int, source_note: str,
     body.append(Text(""))
 
     for i, row in enumerate(rows):
-        if i > 0 and int(g(row, "depth", 0)) <= 1:
-            body.append(Text(""))           # the group break: whitespace, not a rule
+        # The group break, and ONLY above a root. `board._starts_group` breaks above
+        # depth 0 and depth 1 alike, which is affordable when each agent already costs
+        # two lines — but with one line per agent it puts a blank between nearly every
+        # row and gives back the height the single line just bought. A root still gets
+        # its break, so whole trees stay told apart; a subtree is now contiguous.
+        if i > 0 and int(g(row, "depth", 0)) == 0:
+            body.append(Text(""))           # whitespace, not a rule
         if is_collapsed(row):
             label = ("  " * row["depth"]) + f"+ {row['count']} archived"
             if row["needs"]:

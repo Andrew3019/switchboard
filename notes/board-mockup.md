@@ -36,8 +36,13 @@ Nothing is wired into `sb` and `rich` is in no packaging file. That is a later s
 - **No second line.** It drew a dim `↳ task` / `✓ summary` line per agent until Andrew
   said he does not read those on a board. They are gone rather than demoted; `sb
   status` still prints both.
-- Group breaks as whitespace, and archived subtrees collapsed to `+ N archived ·
-  N need you` — the same rule as `status.display_rows`.
+- A blank line above each **root only** — not above its children, as
+  `board._starts_group` does. That rule breaks above depth 0 *and* depth 1, which is
+  affordable when a row costs two lines; with one line per agent it put a blank between
+  nearly every row and gave back the height the single line had just bought. Subtrees
+  are now contiguous and whole trees are still told apart.
+- Archived subtrees collapsed to `+ N archived · N need you` — the same rule as
+  `status.display_rows`.
 - A `NEEDS YOU` bar (black on yellow) with the agents asking for a person.
 - A dim footer saying which data source the frame came from.
 
@@ -100,18 +105,12 @@ pane in Andrew's focused tab), `NO_COLOR=1` so it pastes as text:
 │  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
 │                                                                 │
 │  ● board-fix         working      2s                            │
-│                                                                 │
 │  ◐   researcher-22   done         3m  AT PROMPT — w… · 1 unread │
-│                                                                 │
 │  ○   researcher-23   done         3m  mail: 1 unread            │
-│                                                                 │
 │  ●   researcher-26   working     15s                            │
-│                                                                 │
 │  ◐   worker-25       blocked      4m  BLOCKED — which pane sho… │
 │  ◌     qa-31         idle        12m  STALLED — idle… · UNDEL 2 │
-│                                                                 │
 │  ✗   worker-19       idle        31m  GONE — herdr has no such… │
-│                                                                 │
 │      + 1 archived                                               │
 │                                                                 │
 │  NEEDS YOU · 5                                                  │
@@ -130,16 +129,11 @@ keeps its numbers rather than its shared prefix:
 
 ```
 │  ● bo…fix  working                   │
-│                                      │
 │  ◐   …-22  done     AT P… · 1 unread │
-│                                      │
 │  ○   …-23  done     mail: 1 unread   │
-│                                      │
 │  ●   …-26  working                   │
-│                                      │
 │  ◐   …-25  blocked  BLOCKED — which… │
 │  ◌     q…  idle     STALL… · UNDEL 2 │
-│                                      │
 │  ✗   …-19  idle     GONE — herdr ha… │
 ```
 
@@ -158,18 +152,17 @@ layout gives up first:
 
 ```
 ╭─ switchboard ────────────────────────────────────────╮
-│  switchboard · 12 alive · 1 blocked · 12 unread      │
+│  switchboard · 17 alive · 12 unread                  │
 │                                                      │
 │  ○ main-3            failed                          │
-│                                                      │
 │  ○   split-fixer     failed    mail: 4 unread        │
 │  ○     worker-1      done                            │
-│                                                      │
 │      + 4 archived · 1 need you                       │
 │                                                      │
 │  ○ main-10           failed                          │
-│                                                      │
-│  ◌   worker-9        working   STALLED — idle 1d03h  │
+│  ◌   worker-9        working   STALLED — idle 1d04h  │
+│  ○   reviewer-14     done                            │
+│      + 10 archived                                   │
 ```
 
 ## Verification
