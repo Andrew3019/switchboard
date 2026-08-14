@@ -490,7 +490,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                              for a, _ in window if not _is_group(a)])
         for a, brk in window:
             if brk:
-                emit(_BREAK)                        # owned by nobody: a click here is a miss
+                emit(_BREAK)                # owned by nobody: a click here is a miss
             if _is_group(a):
                 # No glyph, no state, no note. It is not an agent and must not
                 # read as one — `agent_at` hands this very object to the click
