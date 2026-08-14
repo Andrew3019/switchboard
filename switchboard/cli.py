@@ -1063,8 +1063,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # A sweep that closed SOMETHING used to print no refusals at all, and that was
         # the same silence in a better disguise: `closed: five names` reads as "all
         # done", and twice in acceptance run 4 the row it left out was the one the human
-        # needed (`audit/phase1-acceptance-4.md` §5). The whole fleet is not the answer
-        # either — a sweep skips most of it by design, so listing every skip grows with
+        # needed. The whole fleet is not the answer either — a sweep skips most of it by
+        # design, so listing every skip grows with
         # the fleet and buries the line that matters. So it reports `refused.notable`:
         # rows already closed and agents merely working are the sweep working as intended
         # and stay quiet, everything else gets its name and its reason. `--json` is

@@ -262,7 +262,7 @@ class InspectTest(Base):
                    "prompt.\n\n"
                    "1. Fix spawn before the prompts? Recommended: yes.\n"
                    "2. Ship the prompt rewrite anyway? Recommended: no.\n\n"
-                   "Detail is in audit/2026-08-09/CONSOLIDATED.md.")
+                   "Detail is in the 2026-08-09 CONSOLIDATED.md write-up.")
         self.agent(pane_id="w1:p9")
         store.set_state(self.db, "w1", "blocked")
         store.log_event(self.db, kind="blocked", agent="w1", why="need a decision on spawn")

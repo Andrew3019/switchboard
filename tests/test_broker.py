@@ -776,8 +776,8 @@ class BrokerTest(unittest.TestCase):
 
     def test_the_default_mode_rings_a_busy_agent_and_cancels_nothing(self):
         """Item 3.1's pass line. `agent prompt` queues — the text lands at the target's
-        next tool-call boundary and the call in flight finishes (measured live in
-        `audit/phase3-delivery-primitive.md`), so the default no longer waits out a whole
+        next tool-call boundary and the call in flight finishes (measured live), so the
+        default no longer waits out a whole
         turn to say "you have mail". No `esc`: that is what separates this from interrupt,
         and a test that only checked the prompt would pass on a stealth interrupt."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
@@ -806,8 +806,8 @@ class BrokerTest(unittest.TestCase):
 
     def test_hold_until_free_runs_on_our_own_signal_not_the_screen(self):
         """Hold-until-free, with herdr reading exactly as it does today: idle for a pane
-        that is mid-tool-call. That reading alone delivered held mail into a running turn
-        (`audit/status-ground-truth.md`); `agents.turn` is the fact that stops it, and the
+        that is mid-tool-call. That reading alone delivered held mail into a running
+        turn; `agents.turn` is the fact that stops it, and the
         ring is released by the turn's own end rather than by anything on screen."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "idle"}              # herdr's broken reading
@@ -1239,7 +1239,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_mail_to_a_done_agent_is_not_retried_every_ten_seconds(self):
         """Measured at 21 failed rings in 71 seconds and rising, one doorbell tick each,
-        for a message that can never land (`audit/phase1-acceptance-3.md` §6.1). It stops
+        for a message that can never land. It stops
         being un-announced, so neither `flush_pending` nor the collector's doorbell — both
         of which chase exactly `unseen` — has anything left to chase."""
         self._evicted()
@@ -2591,8 +2591,8 @@ class BrokerTest(unittest.TestCase):
     def test_a_freshly_spawned_agent_is_not_pinged_inside_its_own_spawn_window(self):
         """The defect the integration found: a nudge that is false at the moment it lands.
 
-        The agent was pinged two seconds after its `delegate` event
-        (`audit/phase3-integration.md`) — herdr had not seen its first turn start, so it
+        The agent was pinged two seconds after its `delegate` event — herdr had not seen
+        its first turn start, so it
         read idle, and the ping told it its turn had ended. Nothing new is asked of the
         reconciler here: `status` no longer calls that a stall (`STALL_GRACE`), and this
         pins that the acting half agrees.

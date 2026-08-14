@@ -726,7 +726,7 @@ def _repair_unhooked_turn(db: sqlite3.Connection) -> None:
     so nothing in the fleet could ever write the matching `idle`. The row then said
     `working` for good, `_busy` believed it, and every `--when-idle` message to that agent
     was deferred forever. That is what happened to this repo's own top orchestrator
-    (`audit/held-mail.md`): one `revived` event, and 24 hours of held mail after it.
+    — one `revived` event, and 24 hours of held mail after it.
 
     The writer is gone, so nothing can put a row back into that state; what is left is the
     rows it already wrote, and they cannot be told apart by their value — a wedged
@@ -1042,7 +1042,7 @@ def claim_agent(
     openers of one workspace share. So the claim has to BE the insert: a
     `get_agent(...) or create_agent(...)` check-then-act is two statements with a race
     between them, and it lost that race about once in twenty-five workspace opens (both
-    faces — an IntegrityError and a lost `created` count — are written up in BUGS.md).
+    faces — an IntegrityError and a lost `created` count — are written up in `notes/BUGS.md`).
 
     False means join the winner rather than start a rival, which is the same "what is
     already there is somewhere to go" rule the rest of the workspace code follows.

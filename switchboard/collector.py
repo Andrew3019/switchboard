@@ -223,9 +223,9 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     a BLOCKED agent is undelivered and must stay that way — the agent is waiting on a
     person, not idle — so `flush_pending` looks at it, holds it, and changes nothing,
     every ten seconds, for as long as the human takes. Measured: 85 spawned processes for
-    one block held thirteen minutes, bounded by nothing but the person
-    (`audit/phase1-acceptance-4.md` §4). Nothing about the mail changes here — it stays
-    held, still counted, still on the board — and nothing needs this trigger to deliver
+    one block held thirteen minutes, bounded by nothing but the person. Nothing about the
+    mail changes here — it stays held, still counted, still on the board — and nothing
+    needs this trigger to deliver
     it, because the only thing that lifts a block is an `sb tell` from the human, which
     flushes in its own process. `AgentStatus.ringable` is the predicate and it lives in
     `status.py` beside the count it refines, so this and `flush_pending` cannot come to
@@ -325,7 +325,7 @@ def doorbell_sb() -> Optional[str]:
     needs is newer than the installed one, every ring dies in argparse. 55 doorbells in
     5.5 minutes, all failed, five reports left undelivered, until the collector was
     restarted by hand with the right `bin` on its PATH, after which everything landed in
-    one tick (`audit/phase1-acceptance-3.md` §3.2-3.3).
+    one tick.
 
     `_ready_pane` already solves this shape for a spawned agent's pane, but a board pane is
     nobody's agent and nothing pins it. The fix does not need a pin at all: this process
@@ -418,7 +418,7 @@ def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
     itself. `cli.main` calls `store.worktree_root()` for every verb and
     `git rev-parse --show-toplevel` fails inside a `.git` directory, so every doorbell
     since the mechanism was written died there before it did anything — one directory,
-    on every machine, whatever was on PATH (`audit/phase1-acceptance-2.md` §3.3).
+    on every machine, whatever was on PATH.
 
     The checkout is `.git`'s parent, except under `--separate-git-dir` or a relocated
     `.git`, where it is whatever `sb init` recorded — the same rule `store.main_checkout`

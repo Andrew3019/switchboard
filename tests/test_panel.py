@@ -821,7 +821,7 @@ class WhichSbTheDoorbellRuns(PanelTest):
     doorbell by running a DIFFERENT build, and when the verb it needs is newer than the
     installed one every ring dies in argparse: 55 doorbells in 5.5 minutes, all failed,
     five reports left undelivered, until the collector was restarted by hand with the right
-    `bin` in front (`audit/phase1-acceptance-3.md` §3.2-3.3). Nothing pins a board pane —
+    `bin` in front. Nothing pins a board pane —
     `_pin_sb` covers spawned agents only — so the fix is for the doorbell to name its own
     build rather than to arrange anybody's PATH.
     """
@@ -870,7 +870,7 @@ class TheDoorbellsWorkingDirectory(PanelTest):
     grandparent — the `.git` directory itself. `cli.main` resolves `store.worktree_root()`
     for every verb and `git rev-parse --show-toplevel` fails inside `.git`, so every
     doorbell ever rung died there before it delivered anything, on every machine, whatever
-    was on PATH (`audit/phase1-acceptance-2.md` §3.3). Real repositories here rather than
+    was on PATH. Real repositories here rather than
     mocked paths, because the thing that was wrong was a real path.
     """
 

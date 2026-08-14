@@ -1,7 +1,7 @@
 # switchboard's current plugin implementation — a survey
 
 Research only; nothing in this doc changes code. Every claim below cites `file:line` in
-this worktree (`/Users/andrew/.herdr/worktrees/switchboard/plugins-redesign`).
+this worktree (`~/.herdr/worktrees/switchboard/plugins-redesign`).
 
 ---
 
@@ -213,7 +213,7 @@ them in automatically.
 | `ask-dont-guess.md` (`defaults/plugins/ask-dont-guess.md:1-11`) | Stop-and-ask triggers: a tool/command failing twice, genuine task ambiguity, being about to do delegated work yourself, or an irreversible action (push/merge/delete/rewrite history). Tells the agent to use `sb ask human` — **note: this text is stale**, since `broker.py` refuses `ask` targeted at the human outright (`switchboard/broker.py:1027-1033`) and the correct verb is `sb block`; see "sharp edges" below. |
 | `evidence.md` (`defaults/plugins/evidence.md:1-7`) | Reporting discipline: every codebase claim must cite `file:line`; say "I did not check X" rather than imply verification; distinguish what was run from what was inferred. (This is, notably, close to the standing instruction this very investigation was run under.) |
 | `own-files.md` (`defaults/plugins/own-files.md:1-8`) | Multi-agent file-ownership discipline: edit only assigned files, never "while I'm here" a neighboring file, never revert/reformat another agent's work, re-read a file that changed under you. |
-| `report-bug.md` (`defaults/plugins/report-bug.md:1-9`) | If the agent hits a bug in switchboard itself, don't silently work around it: append an entry to `BUGS.md` (what ran, expected, actual, exact error), keep going with the real task, `sb ask human` only if fully blocked. |
+| `report-bug.md` (`defaults/plugins/report-bug.md:1-9`) | If the agent hits a bug in switchboard itself, don't silently work around it: append an entry to `notes/BUGS.md` (what ran, expected, actual, exact error), keep going with the real task, `sb ask human` only if fully blocked. |
 | `verify.md` (`defaults/plugins/verify.md:1-9`) | Pre-`sb done` checklist: run `python3 -m unittest discover -s tests` and confirm it passes; add a regression test for new behavior; report honestly if failures are pre-existing rather than silently fixing unrelated things. |
 
 ---
@@ -448,9 +448,9 @@ however many `--append-system-prompt` flags are passed.
 
 ### Hooks
 
-**Not implemented in code.** `HOOKS.md` at the repo root is a design/research note (not
+**Not implemented in code.** `notes/HOOKS.md` is a design/research note (not
 wired into `switchboard/`), and its own text flags itself as partially wrong and
-superseded (`HOOKS.md:1-26`) — it discusses using `claude --settings <file>` (not
+superseded (`notes/HOOKS.md:1-26`) — it discusses using `claude --settings <file>` (not
 `--bare`, which would skip hooks) to inject a session-scoped Stop hook, but this describes
 a *future, unimplemented* mechanism, not current behavior. `grep -rn hook
 switchboard/*.py` found no hits — confirmed no hook system exists in the shipped Python

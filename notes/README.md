@@ -46,5 +46,5 @@ public. Those citations are still accurate about what was measured; the files th
 are only in git history now.
 
 **Cross-references are by bare filename.** A note that says `PRINCIPLES.md` or `BUGS.md`
-means the file of that name in this directory. A few comments elsewhere in the codebase
-name them the same way.
+means the file of that name in this directory. Comments elsewhere in the codebase cite
+them with the `notes/` prefix.

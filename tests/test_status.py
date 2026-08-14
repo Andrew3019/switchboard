@@ -163,7 +163,7 @@ class StatusTest(unittest.TestCase):
     #
     # `agents.turn` is written by the hooks in `hooks.py` at the two edges of a turn. These
     # are the join, not the hooks: the write is pinned in `test_hooks.py` and the fact that
-    # Claude Code fires the events is proved live in `audit/activity-signal.md`.
+    # Claude Code fires the events is proved live, in an isolated clone.
 
     def test_our_signal_outranks_herdrs_reading_in_both_directions(self):
         """The bug this exists for, and its mirror.
@@ -243,8 +243,8 @@ class StatusTest(unittest.TestCase):
     # The cost of owning the signal, and the one thing about it that is worse than what it
     # replaced. A `Stop` that fails to write — a locked database, the blanket `except`, the
     # hook's own 10 s timeout, all silent — leaves `working` on a live pane for good, and
-    # that row is pinged by nothing, swept by nothing and holds its mail forever
-    # (`audit/activity-signal-verification.md` §7). These pin the way out.
+    # that row is pinged by nothing, swept by nothing and holds its mail forever.
+    # These pin the way out.
 
     def stale(self, name="w1", *, herdr="idle", at=None):
         """Collect twice over a doubt long enough to be confirmed. -> the second snapshot.
@@ -419,7 +419,7 @@ class StatusTest(unittest.TestCase):
         """The spurious nudge, from the other end. An agent two seconds out of `delegate`
         looks exactly like one whose turn ended and said nothing — its row is `working`,
         herdr says idle because no turn has started, and it holds no placeholder. It was
-        pinged in that window (`audit/phase3-integration.md`). No session id means it has
+        pinged in that window. No session id means it has
         never run an `sb` command, so nothing here has seen it take a turn; after
         `STALL_GRACE` the reading is trusted, because by then it should have."""
         store.create_agent(self.db, name="w1", role="worker", task="fix the parser")
@@ -589,7 +589,7 @@ class StatusTest(unittest.TestCase):
         worst case is 3 x 100 + 12 = 312 s, and `SPAWN_GRACE` is 287. So a spawn CAN
         outlive the grace by 25 s and be reaped mid-spawn, but only in the herdr-hung
         case the outer bound was added for. The grace stays derived from herdr's own
-        policy; see `BUGS.md` for the hole that leaves open.
+        policy; see `notes/BUGS.md` for the hole that leaves open.
 
         `**_` because the runner is the injected `_run`, and `_spawn` passes it the outer
         deadline as `timeout=`. Reading that kwarg here instead of `--timeout` is exactly

@@ -263,7 +263,7 @@ turn_stale_grace = 1800.0
 # How long that doubt must hold CONTINUOUSLY, with herdr reporting no turn in the pane at
 # every reading in between, before the edge is dropped (`status.TURN_DOUBT_GRACE`). This is
 # the half that carries the decision, and it works because herdr's busy detector is
-# intermittent rather than dead (`audit/activity-signal-verification.md` §2): a genuinely
+# intermittent rather than dead: a genuinely
 # working agent gets a `working` reading out of it sooner or later, and one such reading
 # anywhere in this window clears the doubt — as does one `sb` command from the agent. An
 # agent that is quiet because its turn really ended never produces either. 15 min is a long

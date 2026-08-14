@@ -123,11 +123,10 @@ INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
 #               message did before modes existed, and what `sb done` still uses.
 #   interrupt   cancel the turn with `esc` and put the instruction itself on the wire.
 #
-# That next-turn is reachable at all is a measured fact, not an assumption:
-# `audit/phase3-delivery-primitive.md` sent `agent prompt` into three genuine 90-second
-# single tool calls and all three ran to completion with the text delivered at the
-# boundary after them. The older note here — "`agent prompt` INTERLEAVES" — was wrong;
-# see `Herdr.prompt`.
+# That next-turn is reachable at all is a measured fact, not an assumption: `agent prompt`
+# was sent into three genuine 90-second single tool calls and all three ran to completion
+# with the text delivered at the boundary after them. The older note here — "`agent
+# prompt` INTERLEAVES" — was wrong; see `Herdr.prompt`.
 NEXT_TURN = "next-turn"
 WHEN_IDLE = "when-idle"
 INTERRUPT = "interrupt"
@@ -643,7 +642,7 @@ class Broker:
             # fleet could ever close: `_busy` reads `working` forever, every `--when-idle`
             # message to that agent is deferred forever, and the row cannot be pinged,
             # swept or doubted out of it. That is what wedged this repo's own top
-            # orchestrator for a day (`audit/held-mail.md`).
+            # orchestrator for a day.
             #
             # For a session that DOES carry the hooks there is nothing here to corroborate:
             # `UserPromptSubmit` fires when the prompt is submitted, which is before the
@@ -3079,9 +3078,9 @@ class Broker:
         # top is bare, everyone else forked), which is the only reason it looked right; but
         # `branch IS NULL` also means "deliberately bare read-only task", and such an agent
         # is not a top and must not mint a space. Proved live: a non-root worktree-less row
-        # delegated and its child forked a whole new space, exactly as a top's would
-        # (`audit/phase5-spawn-placement.md`). `mints_space` reads the `is_top` STAMP
-        # instead, which is written by `_top` and by nothing else.
+        # delegated and its child forked a whole new space, exactly as a top's would.
+        # `mints_space` reads the `is_top` STAMP instead, which is written by `_top` and by
+        # nothing else.
         #
         # The human answers True and so forks, which is the same rule and not an exception
         # to it — a child of a person is a child of somebody with no tree to lend, and the
@@ -3353,7 +3352,7 @@ class Broker:
         wire. Defaulting to *next-turn* rather than *when-idle* is the whole of item 3.1:
         the message a busy agent is sent now reaches it at its next tool-call boundary
         instead of sitting until its entire turn has ended, which measured five and a half
-        minutes the last time it was timed (`audit/delivery-modes.md`).
+        minutes the last time it was timed.
         """
         if mode not in TELL_MODES:
             raise ValueError(f"no such delivery mode: {mode} (one of {', '.join(TELL_MODES)})")
@@ -4056,8 +4055,8 @@ class Broker:
         """Does herdr still ANSWER TO this name? None if herdr could not be asked.
 
         Not the same question as "is this agent in `agent list`", and the difference is
-        the whole of `audit/phase1-acceptance-3.md` §6.1: `sb done` evicts the name binding, and the pane is
-        then listed under a row with no `name` field at all, which
+        the whole of this: `sb done` evicts the name binding, and the pane is then listed
+        under a row with no `name` field at all, which
         `Agent.from_json` fills in from `agent` — so membership in `_agent_states()` is
         true for exactly the agents whose names have been lost.
         """
@@ -4117,9 +4116,8 @@ class Broker:
         `{"agent": "<name>"}`, which `Agent.from_json` turns back into that same name. So
         the guard written to stop the loop read the fallback as proof the binding was
         intact, never fired once, and the loop it names in its own first paragraph ran
-        every ten seconds for as long as the row existed, measured at
-        `audit/phase1-acceptance-3.md` §6.1. `_name_bound` asks the question this
-        paragraph asks.
+        every ten seconds for as long as the row existed. `_name_bound` asks the question
+        this paragraph asks.
         """
         a = store.get_agent(self.db, who)
         if a is None or a["state"] not in FINISHED:
@@ -4137,7 +4135,7 @@ class Broker:
         on this answer, and `_nudge` refuses to ping on it. When herdr's busy detector
         went dark for every Claude pane on the machine, both of those inverted — held mail
         was delivered into turns that were still running, and the reconciler told working
-        agents their turn had ended (`audit/status-ground-truth.md`).
+        agents their turn had ended.
 
         Unknown still reads as not busy, and only the *unknown* case does: the doorbell
         this gates is held back for a busy agent, and holding it back on a hunch is how
@@ -4270,9 +4268,9 @@ class Broker:
         is what takes it out of `unseen()` and so out of both triggers. Without that the
         ring is skipped and nothing else changes — the rows stay un-announced forever,
         `flush_pending` re-derives them on every `sb` command, and the collector's doorbell
-        spawns an `sb flush` every ten seconds for the life of the row
-        (`audit/phase1-acceptance-3.md` §6.1, measured at 21 failed rings in 71 seconds).
-        Skipping a ring stops the herdr call; only this stops the retry.
+        spawns an `sb flush` every ten seconds for the life of the row (measured at 21
+        failed rings in 71 seconds). Skipping a ring stops the herdr call; only this stops
+        the retry.
 
         The written-off branch deliberately IGNORES `messages` and re-derives the whole
         unread backlog. Everything the callers can pass comes from `unseen()`, and mail
@@ -4316,8 +4314,8 @@ class Broker:
           when-idle by their nature (DESIGN-TRUTH.md:220-224 for `done`).
         - *next-turn* rings anyway. `agent prompt` queues rather than interleaves — three
           90-second single tool calls, none cut short, text delivered at the boundary
-          after each (`audit/phase3-delivery-primitive.md`) — so this is not a stealth
-          interrupt: the in-flight tool call finishes and the text is waiting when it does.
+          after each — so this is not a stealth interrupt: the in-flight tool call
+          finishes and the text is waiting when it does.
         - *interrupt* rings anyway too, and its caller has already sent `esc`.
 
         Held back while the target is BLOCKED in every mode but interrupt, and that is a
@@ -4584,10 +4582,9 @@ class Broker:
         `_ring`'s guards without `_ring`'s bookkeeping (see `reconcile`). Re-asking them is
         not redundancy: the snapshot is a few milliseconds old, and an agent that has
         started a turn since it was taken must not be pinged at all. `agent prompt` queues
-        at the tool-call boundary rather than interleaving
-        (`audit/phase3-delivery-primitive.md`), so the ping would not cut its work short —
-        but it would still arrive, and telling a working agent that its turn ended without
-        a report is false at the moment it reads it.
+        at the tool-call boundary rather than interleaving, so the ping would not cut its
+        work short — but it would still arrive, and telling a working agent that its turn
+        ended without a report is false at the moment it reads it.
 
         The event is logged against NO agent, with the target in its payload, and that is
         deliberate: `status._last_activity` counts every event that names an agent, so

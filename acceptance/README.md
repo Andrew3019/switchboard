@@ -19,15 +19,15 @@ The four criteria phase 1 was judged against — and the ones every later phase 
 
 | # | criterion | how it is decided |
 |---|---|---|
-| 1 | a cold fan-out of six really starts | six `sb delegate`s into six brand-new checkouts; each agent's own `sb done` carries a token only that agent was given, so "it took its task" is its own words. Then the two directions of misreport: a delegate that exited 0 for an agent that never took anything, and a delegate that exited non-zero for an agent that did the work (`audit/phase1-acceptance-4.md` §3) |
+| 1 | a cold fan-out of six really starts | six `sb delegate`s into six brand-new checkouts; each agent's own `sb done` carries a token only that agent was given, so "it took its task" is its own words. Then the two directions of misreport: a delegate that exited 0 for an agent that never took anything, and a delegate that exited non-zero for an agent that did the work |
 | 2 | a child's report wakes its parent by itself | the parent's delegate and a 45 s turn are ONE shell command, so the child reports while herdr has the parent `working` and the ring can only be **deferred**. From that moment the script runs no `sb` command in that clone at all — it reads the store with read-only sqlite — so the only thing that can deliver is the collector's doorbell. Passing needs all of: a `ring_deferred` event, `delivered_at` set afterwards, the collector's `doorbells` counter moving, and the parent finishing with its child's token in its own summary |
 | 3 | a blocked agent stays blocked until the human answers | a sibling agent mails the blocked one; the block must hold and the message must stay undelivered. Then the script — which has no agent row in that clone's store, so `sb` resolves it as HUMAN, the real answer path — answers, and the agent must unblock, read, and quote the answer back |
-| 4 | a sweep that refuses something says so | one finished agent and one blocked one, then a plain `sb cleanup`. It must both name what it closed and name the refusal with a reason. This is the case that stayed silent through runs 2, 3 and 4 (§5) |
+| 4 | a sweep that refuses something says so | one finished agent and one blocked one, then a plain `sb cleanup`. It must both name what it closed and name the refusal with a reason. This is the case that stayed silent through runs 2, 3 and 4 |
 
 Each check runs in its **own throwaway `git clone`** of the repo at the branch under test,
 driven through that clone's own `./bin/sb`. A clone has its own `.git`, so
 `git rev-parse --git-common-dir` finds its own `state.db` and the live fleet's store is
-never opened — the method written up in `audit/isolated-instance.md`, re-proven at the
+never opened — the method is re-proven at the
 start of every run (`sb doctor` must name the clone's store, and `sb status` must be
 empty). The four run at once, in four clones, because they cannot see each other's stores.
 
@@ -60,7 +60,7 @@ printed at the start and the end.
   a single run will still often miss it. (This was sequential for a while because six
   simultaneous delegates raced in `git worktree add`, `could not lock config file
   .git/config: File exists`, and one died `fork_failed`. That race is fixed — an flock
-  around worktree creation, see `audit/fork-race.md` — so the load is back.)
+  around worktree creation, `Broker._fork_lock` — so the load is back.)
 - **Agent kinds other than `claude`.** The delivery proof is Claude Code's transcript;
   another kind falls through to a weaker check.
 - **Anything about the WORDING of what an agent does with its instructions.** Each probe is
@@ -83,4 +83,4 @@ git commit -am "deliberate break"
 ./acceptance/accept.py broken --repo /tmp/broken-src --only 2
 ```
 
-Done for all four; the results are in `audit/acceptance-script.md`.
+Done for all four.

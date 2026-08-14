@@ -16,7 +16,7 @@ after a restart doesn't exist at all.** I read the handler, not just a
 docstring.
 
 `herdr agent list` → `Method::AgentList` → `handle_agent_list`
-(`src/app/api/agents.rs:16-23` in `/Users/andrew/Code/herdr`) →
+(`src/app/api/agents.rs:16-23` in `~/Code/herdr`) →
 `self.collect_agent_infos()` (`src/app/agents.rs:21-35`), which iterates
 `self.state.workspaces` — pure in-memory state, no persistence layer
 consulted, no error path. `encode_success` is called unconditionally. There
@@ -77,7 +77,7 @@ which needed explicit judgment about whether that was safe — it was, because
 it never touched the live production socket other agents in this workspace
 depend on. If a future builder wants to re-run or extend this experiment,
 reuse the same isolated-XDG-dir pattern (see `scripts/
-smoke_live_handoff_sessions.sh` in `/Users/andrew/Code/herdr` for the
+smoke_live_handoff_sessions.sh` in `~/Code/herdr` for the
 reference pattern); never point it at `$HOME/.config/herdr`.
 
 I did not test the graceful `herdr server stop` → restart path (only a hard
@@ -216,11 +216,11 @@ hypothetical
 `git worktree list` on this machine, right now:
 
 ```
-/Users/andrew/.herdr/worktrees/switchboard/fix-options      f1193d0 [fix-options]
-/Users/andrew/.herdr/worktrees/switchboard/fix-options-2    0a38fd4 [fix-options-2]
+~/.herdr/worktrees/switchboard/fix-options      f1193d0 [fix-options]
+~/.herdr/worktrees/switchboard/fix-options-2    0a38fd4 [fix-options-2]
 ```
 
-`"/Users/andrew/.herdr/worktrees/switchboard/fix-options-2/anything".startswith("/Users/andrew/.herdr/worktrees/switchboard/fix-options")`
+`"~/.herdr/worktrees/switchboard/fix-options-2/anything".startswith("~/.herdr/worktrees/switchboard/fix-options")`
 is `True` in Python — a plain `str.startswith` gate on `fix-options` would
 treat every process working inside the unrelated `fix-options-2` worktree as
 "under" `fix-options`, and `sb workspace close fix-options` would refuse (or

@@ -605,9 +605,9 @@ class Herdr:
         call returns — and the call itself runs to completion.
 
         Measured, three times, against the one test shape that can tell the two apart: a
-        single 90-second `Bash` call, prompted ~10s in, watched from outside the agent
-        (`audit/phase3-delivery-primitive.md`). All three loops wrote all 90 of their
-        lines; all three agents reported seeing the text attached to that call's result and
+        single 90-second `Bash` call, prompted ~10s in, watched from outside the agent.
+        All three loops wrote all 90 of their lines; all three agents reported seeing the
+        text attached to that call's result and
         having no awareness of it during. Literal keystrokes into the pane behaved
         identically, so there is no separate "human-typed" path to prefer.
 

@@ -16,7 +16,7 @@ corroboration for the one thing our signal cannot see — see `AgentStatus.signa
 That order is not a preference: herdr infers a running turn by matching Claude's spinner
 glyphs in the terminal title, and when Claude Code 2.1.228 changed those glyphs every pane
 on the machine read idle, so this file called every working agent STALLED and the
-reconciler pinged them mid-tool-call (`audit/status-ground-truth.md`).
+reconciler pinged them mid-tool-call.
 
 That agent finished its turn and never called `sb done`. It happens constantly and
 silently — nothing errors, nothing logs, the pane just goes quiet — and every readout
@@ -205,9 +205,9 @@ SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 # The one durable trace an agent leaves of having run is its `session_id`, claimed on its
 # first `sb` call — after which "idle" really does mean a turn that started and ended.
 # Before it, `idle` and `not started yet` are the same reading, and the reconciler pinged a
-# freshly delegated agent two seconds after its `delegate` event on the strength of it
-# (`audit/phase3-integration.md`) — a nudge that says "your turn ended without a report" to
-# an agent whose turn has not begun.
+# freshly delegated agent two seconds after its `delegate` event on the strength of it —
+# a nudge that says "your turn ended without a report" to an agent whose turn has not
+# begun.
 #
 # Sized as the delivery's OWN worst case, and derived from it rather than restated for the
 # reason `_SPAWN_WORST_CASE` is: nothing should be able to say "the agent never started"
@@ -263,7 +263,7 @@ GONE_CONFIRM_GRACE = config.setting("timeouts.gone_confirm_grace")
 # TURN_DOUBT_GRACE is how long the doubt must then hold CONTINUOUSLY, with herdr reporting
 # no turn in that pane at every reading in between. That is the half that decides, and what
 # makes it worth anything is the finding that herdr's busy detector is intermittent rather
-# than uniformly dead (`audit/activity-signal-verification.md` §2): a genuinely working
+# than uniformly dead: a genuinely working
 # agent eventually reads `working` to it, and ONE such reading anywhere in the window clears
 # the doubt — as does one `sb` command from the agent, which resets the staleness half.
 # A row that is quiet because its turn really ended produces neither, ever.
@@ -298,7 +298,7 @@ SHOW_ARCHIVED = config.flag("display.show_archived")
 #     read_output   somebody ran `sb inspect` and read its terminal (`output.py`)
 #
 # A denylist here rather than moving those writes to `target=` in the payload, which is what
-# `_nudge`, `mark_turn` and `_forget_turn` do and what `BUGS.md` proposed. Two things pay for
+# `_nudge`, `mark_turn` and `_forget_turn` do and what `notes/BUGS.md` proposed. Two things pay for
 # the difference: `sb log <name>` is `store.recent_events(agent=...)`, so re-homing them
 # empties the log of exactly the delivery history the held-mail diagnosis was made from, and
 # `Broker._delivery_failure` reads its own `ring_failed` rows back by that same column. The
@@ -380,7 +380,7 @@ class AgentStatus:
         terminal word the agent itself wrote. It is not an observation of the pane, and
         drawing it raw is what let a single row say `working` in its STATE column and
         `STALLED — idle 12m` beside it: two vocabularies, un-reconciled, on one line
-        (`audit/status-model-audit.md` §1.3, and the contradiction Andrew reported). So
+        (the contradiction Andrew reported). So
         the join this module already computes happens for the STATE column too, once,
         here, and every readout draws the result:
 
@@ -446,7 +446,7 @@ class AgentStatus:
         you would reach for first and is currently useless. herdr's `unknown` means "plain
         shell or unrecognised program" — no Claude rule matched anything — and it is
         produced by the ABSENCE of a match, so it survives the broken spinner regex that
-        took its `working` rule out (`audit/status-ground-truth.md` §4). Its `idle`, by
+        took its `working` rule out. Its `idle`, by
         contrast, is what a live agent mid-tool-call reads as today, so drifting on that
         would light up every genuinely working agent in the fleet.
 
@@ -487,8 +487,7 @@ class AgentStatus:
         the reconciler never pings it, `gone` is false because the pane is alive,
         `signal_drift` is false because herdr answers `idle` rather than `unknown`, and
         `sb cleanup` refuses a row that has not reported an end. Its `--when-idle` mail is
-        held for good. Constructed live and confirmed to behave exactly that way in
-        `audit/activity-signal-verification.md` §7.
+        held for good. Constructed live and confirmed to behave exactly that way.
 
         So a `working` edge is a fact with an age, and past a point it stops being evidence.
         Both halves have to hold, and neither is enough alone:
@@ -560,8 +559,7 @@ class AgentStatus:
         process before the collector's next tick could. So there is nothing here for a
         tick to discover, and a trigger that keeps looking pays a spawned process every
         ten seconds for as long as the person takes to answer: 85 of them for one block
-        held thirteen minutes (`audit/phase1-acceptance-4.md` §4). Idle costs nothing —
-        `PRINCIPLES.md` C10.
+        held thirteen minutes. Idle costs nothing — `notes/PRINCIPLES.md` C10.
 
         The held mail itself is untouched and still `undelivered`: the board still says
         `<< UNDELIVERED 2, 13m`, `--needs-me` still lists the agent, `flush_pending` still
@@ -1263,7 +1261,7 @@ def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
     nine deferrals in a day, six less than thirty minutes apart, which is what kept
     `turn_doubted` (30 min of quiet) from ever doubting a stale `working` edge and so kept
     `_forget_turn` from ever repairing it. `stalled` and the reconciler read the same clock
-    (`BUGS.md`, "A held message resets the idle clock of the agent it is held for").
+    (`notes/BUGS.md`, "A held message resets the idle clock of the agent it is held for").
     """
     seen: dict[str, int] = {}
     kinds = ",".join("?" * len(DONE_TO_THE_AGENT))
