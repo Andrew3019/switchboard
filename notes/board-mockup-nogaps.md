@@ -19,8 +19,9 @@ grouping variants, default `bracket`) and `--gutter-colour single|rotate` (defau
 > 1 and 2 removed every one; round 3 put a single one back, above the NEEDS YOU bar and
 > nowhere else. Round 4 added the workspace gutter and the gone-agent treatment; round 5
 > fixed the grouping rule, moved the gutter into the indentation and recoloured it;
-> round 6 marks one-row workspaces and moves `done` to dim.
-> **Only the round 6 frames show what the board currently looks like.**
+> round 6 marks one-row workspaces and moves `done` off yellow; round 7 takes tops out
+> of the gutter and settles `done` on a muted blue.
+> **Only the round 7 frames show what the board currently looks like.**
 
 ## Round 1 — no blank lines
 
@@ -742,6 +743,10 @@ more than one gone agent at once.
 
 ## Round 6 — every workspace marked, and `done` off the wants-you yellow
 
+> **Partly superseded by round 7**: top orchestrators are excluded from the gutter
+> entirely (so the depth-0 blemish below is gone, by deletion), and `done` moved from
+> dim to a muted blue.
+
 ### A mark for a workspace of one
 
 A run of one gets a standalone **`·`** (middle dot) in the same cyan as the rule, so every
@@ -935,3 +940,174 @@ fleet instead of 0, because every workspace is marked.
 
 Not verified: the colours by eye. The inventory is read from emitted SGR codes — what the
 terminal is told, not what it draws.
+
+## Round 7 — tops out of the gutter, `done` in blue, and the worktree fact checked
+
+### Tops are not marked at all
+
+A depth-0 run is a top orchestrator's own workspace and now gets **nothing** — no dot, no
+bracket. That also disposes of the round 6 blemish (a top's dot jammed against its glyph
+for want of an indent) by deletion rather than by indenting the board, which stays at zero
+cost. Everything else is unchanged: a dot for a workspace of one, a bracket for a run of
+two or more.
+
+The gutter now occupies one clean vertical column at depth 1, with the tops standing
+outside it:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 13 alive · 14 unread                             │
+│  ○ main-10          failed    3h04                              │
+│  ◌ · worker-9       working  1d05h  STALLED — idle 1d05h        │
+│  ○ · reviewer-14    done     16h25                              │
+│      + 10 archived                                              │
+│  ○ main-11          done      3h01                              │
+│      + 10 archived                                              │
+│  ● main-15          working     9s                              │
+│  ◌ · worker-24      working    29m  STALLED —… · mail: 2 unread │
+│  ◌ · researcher-20  working    29m  STALLED —… · mail: 2 unread │
+│  ◌ · worker-30      working     6m  STALLED — idle 6m           │
+│  ○ · worker-31      done        2s                              │
+│  ● · reviewer-18    working     1m                              │
+│      + 14 archived                                              │
+│  ◌ board-fix        working     3m  STALLED — idle 3m           │
+│  ○ · researcher-22  done      2h17  mail: 1 unread              │
+│  ○ · researcher-23  done       57m  mail: 1 unread              │
+│  ● · worker-28      working     3m                              │
+│      + 8 archived                                               │
+│  ○ main-16          done       11m                              │
+│      + 1 archived                                               │
+│    + 312 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 5                                                  │
+│   IDLE     worker-9       idle 1d05h, nothing running           │
+│   IDLE     worker-24      idle 29m, nothing running             │
+│   IDLE     researcher-20  idle 29m, nothing running             │
+│   IDLE     worker-30      idle 6m, nothing running              │
+│   IDLE     board-fix      idle 3m, nothing running              │
+│ live snapshot · mockup, not the board                           │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
+│  ● board-fix        working     2s                              │
+│  ◐ · researcher-22  done        3m  AT PROMPT — wai… · 1 unread │
+│  ○ · researcher-23  done        3m  mail: 1 unread              │
+│  ● · researcher-26  working    15s                              │
+│  ◐ ╭ worker-25      blocked     4m  BLOCKED — which pane shoul… │
+│  ◌ ╰   qa-31        idle       12m  STALLED — idle 1… · UNDEL 2 │
+│  ✗ · worker-19      idle       31m  GONE — herdr has no such a… │
+│      + 1 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 3                                                  │
+│   BLOCKED  researcher-22  at a prompt, waiting on you           │
+│   BLOCKED  worker-25      which pane should this render into?   │
+│   IDLE     qa-31          idle 12m, nothing running             │
+│  x  clear 1 gone   sample data — asked for · mockup, not the b… │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 13 alive · 14 unread                             │
+│  ○ main                       failed                            │
+│  ○ ╭ plugins-redesign-lead    done                              │
+│  ○ │   plugin-redesign        done                              │
+│  ○ │     plugins-investigate  done                              │
+│  ○ │     design-a             done                              │
+│  ○ │     design-b             done                              │
+│  ○ │     design-synth         done                              │
+│  ○ │     verify-design        done                              │
+│  ○ │     design-patch         done                              │
+│  ○ │     phase1-split         done                              │
+│  ○ │     phase2-loader        done                              │
+│  ○ │     phase3-prompts       done                              │
+│  ○ │     phase4-plugins       done                              │
+│  ○ │     land-redesign        done                              │
+│  ○ │     land-redesign-2      done                              │
+│  ○ │     land-rebase          done                              │
+│  ○ │     doc-reconcile        done                              │
+│  ○ ╰     doc-sweep            done                              │
+│  ○ · workspace-debug          failed                            │
+│  ○ ╭ workspace-model-lead     done                              │
+│  ○ │   wm-phase0              done                              │
+│  ○ │   wm-spawn-claim         done                              │
+│  … (the rest of 370 agents)                                     │
+```
+
+### `done` is `steel_blue`
+
+Andrew asked for blue. Plain `blue` is **SGR `34` — byte-identical to the panel border**,
+so a finished state word would render in exactly the colour of the frame around it.
+`bold blue` (`1;34`) is the panel title. Anything toward `sky_blue3` (`38;5;74`) leans
+into the gutter's `bold cyan` (`1;36`).
+
+**Chosen: `steel_blue` (`38;5;67`)** — a desaturated mid blue, roughly `#5f87af`. It is
+blue as asked, it collides with neither the border nor the gutter, and being desaturated
+it recedes, which is what "finished, nothing to do" should do. Where the palette now
+stands as a whole: green = running, bold yellow = wants you, red = trouble, dim =
+background information, blue = chrome (border, header), cyan = structure (the gutter), and
+`steel_blue` = finished.
+
+One caveat: `38;5;67` is a 256-colour. On a terminal that can only do 16 it degrades to
+the nearest standard colour, which is white — not blue. Every modern terminal does 256, so
+this is a footnote rather than a risk.
+
+If he dislikes it, one line in `STATE`:
+
+```python
+"done": "steel_blue",     # what it is now
+"done": "blue",           # what he asked for — same colour as the panel border
+"done": "cornflower_blue",# brighter, closer to the border's hue
+"done": "magenta",        # maximum separation from everything else on the board
+```
+
+### The worktree fact, checked against the store
+
+board-fix's reading was **correct**, and here is the count rather than the argument. Read
+straight off the live snapshot (370 agents) through the mockup's own `display_rows`:
+
+| | Visible (archived collapsed) | `--archived` (everything) |
+|---|---|---|
+| Rows drawn | 15 | 370 |
+| Distinct workspaces | **15** | 203 |
+| Workspaces holding more than one drawn row | **0** | 14 |
+| Rows in such a shared workspace | **0** | 181 |
+| Depth histogram | `{0: 5, 1: 10}` | `{0: 17, 1: 191, 2: 123, 3: 38, 4: 1}` |
+| Rows at depth ≥ 2 | **0** | 162 |
+
+So on the current board: **15 rows, 15 workspaces, no two rows sharing one.** Five of
+those rows are tops (`main-10`, `main-11`, `main-15`, `main-16`, `board-fix`) and are now
+unmarked; the other ten are direct children of a top, each genuinely in its own worktree,
+and each gets a dot. Nothing is visible at depth 2 or below at all, which is why no bracket
+appears — there is nothing on screen for a bracket to enclose.
+
+The shared worktrees are real and are all archived. The largest under `--archived`:
+
+```
+worker-2          37 rows      teardown-fix      29 rows
+status-board      22 rows      plugins-redesign  17 rows
+workspace-model   12 rows      prompts           12 rows
+accept-phase1     11 rows      fix-options-2     10 rows
+```
+
+One extra check worth having, over the whole 370-row history rather than the visible
+fifteen: **the number of rows whose workspace differs from their parent's where the parent
+is not a top is zero.** Every workspace fork in this store's entire history happens at a
+"child of a top" edge — which is researcher-32's finding, reproduced independently here by
+counting rather than by reading `broker.py`.
+
+### Verified
+
+64 combinations — `{live, sample}` × `{with, without `--archived`}` ×
+`{bracket, bar, tick, none}` × `{40, 56, 67, 100}` columns: every line exactly the
+requested width, exactly one blank line inside each panel. Gutter still costs **zero
+columns**: `--gutter none` versus `--gutter bracket` differs on exactly 10 rows on the live
+fleet — the ten depth-1 rows — each by exactly one character, in place. And a direct check
+that no depth-0 row carries a mark under `--archived`: zero.
+
+Not verified: the colours by eye. `steel_blue` in particular is a judgement I cannot make
+from escape codes — I can prove it is not the border's blue and not the gutter's cyan, not
+that it looks right.
