@@ -556,11 +556,14 @@ def render(agents: list[dict], width: int, source_note: str,
     body: list[Any] = []
     body.append(bar(" " + " · ".join(["switchboard"] + summary_bits(agents)), inner,
                     HEADER_STYLE))
-    body.append(Text(""))
 
-    for i, row in enumerate(rows):
-        if i > 0 and int(g(row, "depth", 0)) <= 1:
-            body.append(Text(""))           # the group break: whitespace, not a rule
+    # NO BLANK LINES ANYWHERE. Every row sits directly under the one above it and the
+    # indentation alone carries the tree. An earlier draft broke groups apart with a
+    # blank line above each top-level agent and its direct children; with one-line rows
+    # that put an empty line between nearly every pair and roughly doubled the board's
+    # height, so Andrew had it removed outright — not swapped for a rule or padding.
+    # The filled bars and the panel border are what separate the sections now.
+    for row in rows:
         if is_collapsed(row):
             label = ("  " * row["depth"]) + f"+ {row['count']} archived"
             if row["needs"]:
@@ -598,7 +601,6 @@ def render(agents: list[dict], width: int, source_note: str,
 
     wanted = [a for a in agents if needs_human(a)]
     if wanted:
-        body.append(Text(""))
         body.append(bar(f" NEEDS YOU · {len(wanted)}", inner, NEEDS_STYLE))
         w_want = min(max(vlen(str(g(a, "name", "?"))) for a in wanted[:6]), inner - 12)
         for a in wanted[:6]:
@@ -613,7 +615,6 @@ def render(agents: list[dict], width: int, source_note: str,
             body.append(Text(clip(f"  + {len(wanted) - 6} more", inner), style=DIM,
                              no_wrap=True, overflow="crop"))
 
-    body.append(Text(""))
     body.append(Text(clip(f"{source_note} · mockup, not the board", inner), style=DIM,
                      no_wrap=True, overflow="crop"))
 
