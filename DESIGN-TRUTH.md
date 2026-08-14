@@ -33,8 +33,11 @@ Entry format: one short claim, plus the date it was confirmed.
 
 **Starting work.** On some terminal in a repo, I call `sb start`. It makes a new bare
 space on main — bare meaning no worktree of its own; forking from `origin/main` is what
-a workspace does. This is a dispatcher, and its home is whatever directory `sb start` was
-run from. — confirmed 2026-08-09, the dispatcher's home confirmed 2026-08-14
+a workspace does. This is a dispatcher, and its home is the repo's main checkout: `sb
+start` lays the space over the directory it was run in, and it is refused anywhere but the
+main checkout, so in practice those are the same place. (The refusal is skipped, never
+guessed, when the main checkout cannot be established at all.) — confirmed 2026-08-09,
+the dispatcher's home confirmed 2026-08-14, corrected against the code 2026-08-14
 
 **Anything that might need code changes.** It gets a workspace/worktree, and a lead with
 it — which is also what such an agent was already being called, `<name>-lead`. Whether a
@@ -42,16 +45,28 @@ part of the work underneath is small and clear enough for one agent end to end i
 that lead's judgement to make. — confirmed 2026-08-09, the role named `lead` and the
 routing judgement moved to it 2026-08-14
 
-**Only `sb start` ever creates a dispatcher — that is the only path.** Being a top is
-stamped at that moment, and `sb delegate` branches on the stamp: a dispatcher's spawn gets
-a new space and worktree, anyone else's gets a tab in the caller's space. A bare agent's
-delegate is refused outright. That stamp, not the prompt, is what decides where an agent's
-children land. What an agent may do *itself* is a different question, and the answer to it
-is the role it was spawned as: dispatcher and lead are two roles with two prompts, not one
-role told its scope. — confirmed 2026-08-09, the second half confirmed 2026-08-14
+**Only `sb start` ever creates a TOP — that is the only path.** Being a top is stamped at
+that moment, and `sb delegate` branches on the stamp: a top's spawn gets a new space and
+worktree, anyone else's gets a tab in the caller's space. A bare agent's delegate is
+refused outright. That stamp, not the prompt, is what decides where an agent's children
+land. What an agent may do *itself* is a different question, and the answer to it is the
+role it was spawned as: dispatcher and lead are two roles with two prompts, not one role
+told its scope. — confirmed 2026-08-09, the second half confirmed 2026-08-14
 
-**Only a human may create a dispatcher; `sb start` is refused for agents.** —
-confirmed 2026-08-11
+**The dispatcher ROLE is not gated, and saying "only `sb start` makes a dispatcher" would
+be false.** `dispatcher` is a name `--role` takes like any other, the roles fragment every
+agent gets advertises it, and a lead that types it spawns a child holding the dispatcher
+prompt with no stamp and a parent above it — verified by running it. What stops that is
+the lead prompt saying it is not one of its options, which is the same answer given
+everywhere else here: enforcement of what a dispatcher is and does was rejected, so the
+prompt is the mechanism. The two halves are separate and both true — top-ness is stamped
+and ungettable any other way, and the role that goes with it is only asked for. —
+confirmed 2026-08-14
+
+**Only a human may create a top; `sb start` is refused for agents.** The refusal is on
+that one command, so what an agent cannot do is create a top — asking for the dispatcher
+role at `sb delegate` is a different act and is not refused, per the entry above. —
+confirmed 2026-08-11, narrowed to what the refusal actually covers 2026-08-14
 
 **A fork that fails refuses the spawn and tells the parent.** It never falls back to
 Andrew's own checkout. `sb start` run inside a worktree is refused too, naming the main
@@ -190,13 +205,16 @@ dispatching. — confirmed 2026-08-14, superseding the 2026-08-09 rules that the
 a small, clear task straight to a bare agent itself and that it spawns scout or research
 agents to improve its own decisions; both of those are a lead's judgement now
 
-**Work that belongs in another repo is a question, not a spawn.** A dispatcher may hand
-work into a different repo — but it asks first, and it blocks without starting the task.
-This is a separate thing from the grouping limitation above, and the two should not be run
-together: here the work was in a repo switchboard had never been set up in, and an agent
-with no way to root a child there forked a worktree of *this* repo instead and appeared in
-this repo's space. Nothing was adopted by anything; an agent was simply in the wrong repo.
-— confirmed 2026-08-14
+**Work that belongs in another repo is a question, not a spawn.** A dispatcher that
+notices it asks Andrew and starts nothing — it never puts an agent in that repo, because
+nothing can (see Open: real cross-repo dispatch does not exist). The handover, when there
+is one, runs through him and not through a spawn: he sets that repo up and starts its own
+dispatcher there, and that tree is not below this one. This is a separate thing from the
+grouping limitation above, and the two should not be run together: here the work was in a
+repo switchboard had never been set up in, and an agent with no way to root a child there
+forked a worktree of *this* repo instead and appeared in this repo's space. Nothing was
+adopted by anything; an agent was simply in the wrong repo. — confirmed 2026-08-14, the
+handover reworded 2026-08-14 so it cannot be read as a spawn the dispatcher performs
 
 **A lead's children share its worktree, so the lead assigns disjoint files and
 serialises anything that overlaps.** — confirmed 2026-08-09
@@ -408,3 +426,10 @@ child in another repo would have no parentage, no messaging, no status, no board
 no cleanup reaching it — that is a multi-store fleet, not a flag. What ships instead is a
 stopping rule: the dispatcher notices, asks, and starts nothing. Whether the missing thing
 is ever built is undecided. — open 2026-08-14
+
+**Whether every level really gets a worktree of its own.** Andrew described the hierarchy
+that way, and the code does not do it: only a dispatcher's children fork a worktree, and a
+lead's children are tabs sharing the lead's. This document was written to match the code —
+which is why the entries above say a lead's children share its worktree and assign disjoint
+files — so if the description is what he meant, several of those entries change and so does
+the code. His call, and with him now. — open 2026-08-14

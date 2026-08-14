@@ -150,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--needs-reply", action="store_true",
                    help="tell them you are waiting for a reply — they are asked to answer "
                         "at some point. You do not wait: this returns immediately")
-    # The three delivery modes (DESIGN-TRUTH.md:236-247). Mutually exclusive because they
+    # The three delivery modes (DESIGN-TRUTH.md:311-322). Mutually exclusive because they
     # are one choice with three answers, and argparse saying so beats the broker raising on
     # a combination that was never meant to exist. No `--next-turn` flag: the default is
     # the answer for almost every message, and a flag for it would only invite the reader
@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     # plugin import: safe for an agent to run mid-turn.
     pr = cmd("presets", help="list available presets, print one, or apply one to yourself")
     pr.add_argument("name", nargs="?", help="print this preset instead of listing")
-    # The third parameter DESIGN-TRUTH.md:292-295 asks for, next to list and read: applying
+    # The third parameter DESIGN-TRUTH.md:370-373 asks for, next to list and read: applying
     # pastes the preset into the caller's OWN session, the same path as any other message,
     # so it arrives tagged and durable rather than as command output. No confirmation step
     # and no dry run — an agent that types this has already decided.
@@ -543,7 +543,7 @@ def _scope(b: Broker, me: str, mine: bool) -> dict:
     """What `sb status` is allowed to show this caller, as `collect`'s two scope kwargs.
 
     `tree` is the boundary — the caller's own top's whole tree, siblings included, or
-    `None` for the human, who is bounded by nothing (DESIGN-TRUTH:180-181, "Only agents
+    `None` for the human, who is bounded by nothing (DESIGN-TRUTH:248-249, "Only agents
     have the scope constraints"). `mine` is the `--mine` flag and still means the caller's
     own subtree, which is narrower; the flag asks for less and cannot ask for more.
 
