@@ -194,52 +194,45 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
         self.assertEqual(board.tail_note(a), "fix the parser")
 
 
-class TwoLinesTest(unittest.TestCase):
-    """Every agent is exactly two lines: identity on the first, detail on the second.
+class OneLineTest(unittest.TestCase):
+    """Every agent is exactly one line, and everything it has to say is on it.
 
-    Uniformly — an agent with no task, no mail and nothing to say gets its blank second
-    line too. A block that is sometimes one line and sometimes three is the shape Andrew
-    asked us to get rid of, and "sometimes" is the only part of it a test can catch.
+    The row was split in two and Andrew did not like it, so it is back: identity, then
+    as much of `detail_bits` as the width allows, in priority order. What a test can
+    catch is the "exactly one" — a block that is sometimes one line and sometimes two
+    is a tree a reader cannot scan and a click path that has to be re-argued.
     """
 
     def rows(self, *agents, height=20, width=80):
         return board.layout(snap(*agents), top=0, height=height, width=width, msg="")
 
-    def pair(self, rows, a):
+    def lines(self, rows, a):
         return [board._ANSI.sub("", t) for t, row in rows if row is a]
 
-    def test_every_agent_costs_exactly_two_lines_whatever_it_has_to_say(self):
+    def test_every_agent_costs_exactly_one_line_whatever_it_has_to_say(self):
         loud = agent("loud", state="blocked", blocked_why="need a key", unread=3,
                      undelivered=1, undelivered_age=60, task="do the thing")
         quiet = agent("quiet")
         rows = self.rows(loud, quiet)
-        self.assertEqual(len(self.pair(rows, loud)), 2)
-        self.assertEqual(len(self.pair(rows, quiet)), 2)
-        self.assertEqual(self.pair(rows, quiet)[1], "")     # blank, and still a line
+        self.assertEqual(len(self.lines(rows, loud)), 1)
+        self.assertEqual(len(self.lines(rows, quiet)), 1)
 
-    def test_the_first_line_is_identity_and_the_second_is_everything_else(self):
+    def test_identity_and_detail_share_the_one_row(self):
         a = agent("w", state="blocked", blocked_why="need a key", unread=2,
                   task="fix the parser")
-        head, detail = self.pair(self.rows(a), a)
-        self.assertIn("w", head)
-        self.assertIn("blocked", head)                      # name, state, timing
-        for moved in ("BLOCKED", "need a key", "unread", "fix the parser"):
-            self.assertNotIn(moved, head)
-            self.assertIn(moved, detail)
-
-    def test_the_second_line_is_indented_under_the_name(self):
-        child = agent("w", depth=1, parent="main", unread=2)
-        head, detail = self.pair(self.rows(agent("main"), child), child)
-        self.assertEqual(head.index("w"), detail.index("←"))     # not under the glyph
+        [line] = self.lines(self.rows(a), a)
+        self.assertIn("blocked", line)                      # name, state, timing
+        for said in ("BLOCKED", "need a key", "unread", "fix the parser"):
+            self.assertIn(said, line)
 
     def test_priority_is_trouble_then_mail_then_context(self):
         a = agent("w", state="blocked", blocked_why="need a key", unread=2,
                   task="fix the parser")
         self.assertEqual([kind for _, _, kind in board.detail_bits(a)],
                          ["marker", "mail", "tail"])
-        detail = self.pair(self.rows(a), a)[1]
-        self.assertLess(detail.index("BLOCKED"), detail.index("mail:"))
-        self.assertLess(detail.index("mail:"), detail.index("fix the parser"))
+        [line] = self.lines(self.rows(a), a)
+        self.assertLess(line.index("BLOCKED"), line.index("mail:"))
+        self.assertLess(line.index("mail:"), line.index("fix the parser"))
 
     def test_context_is_dropped_first_and_mail_is_never_crowded_out(self):
         """Sixty columns, a verbose block and mail waiting. The task head goes, because
@@ -247,11 +240,22 @@ class TwoLinesTest(unittest.TestCase):
         quite possibly the answer that ends the block."""
         a = agent("w", state="blocked", unread=1, undelivered=1, undelivered_age=900,
                   blocked_why="whether to merge #33 before or after the board work lands",
-                  task="make every agent two lines")
-        detail = self.pair(self.rows(a, width=60), a)[1]
-        self.assertIn("BLOCKED", detail)
-        self.assertIn("UNDELIVERED", detail)
-        self.assertNotIn("make every agent", detail)
+                  task="put every agent back on one line")
+        [line] = self.lines(self.rows(a, width=60), a)
+        self.assertIn("BLOCKED", line)
+        self.assertIn("UNDELIVERED", line)
+        self.assertNotIn("put every agent", line)
+
+    def test_an_explained_idle_agent_shows_its_excuse_on_the_row(self):
+        """The distinction Andrew asked for survives the return to one line: the excuse
+        rides in rank three, and an agent with an excuse has no marker competing for the
+        room, so it is what the row shows."""
+        a = agent("lead", state="working", herdr_state="idle",
+                  idle_excuse="waiting on children", task="mind them")
+        [line] = self.lines(self.rows(a, width=60), a)
+        self.assertIn("idle", line)
+        self.assertIn("waiting on children", line)
+        self.assertNotIn("STALLED", line)
 
     def test_undelivered_is_named_and_the_rest_counted_by_subtraction(self):
         """UNDELIVERED is the loud one: unread means we rang and it has not looked;
@@ -261,48 +265,89 @@ class TwoLinesTest(unittest.TestCase):
         self.assertEqual(board.mail_note(a), "mail: UNDELIVERED 1, 12m · 2 unread")
         self.assertEqual(board.mail_note(agent("q")), "")
 
-    def test_a_click_below_a_two_line_agent_still_focuses_the_right_agent(self):
-        """THE PROOF. Three agents, so every row below the first has moved down by two.
-        Every drawn line must resolve to the agent it is drawn for."""
+    def test_a_click_resolves_to_the_agent_on_that_row(self):
+        """THE PROOF, at the shape the board is actually drawn in."""
         rows = self.rows(agent("one", unread=2), agent("two"), agent("three"))
         drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
-        self.assertEqual([n for _, n in drawn],
-                         ["one", "one", "two", "two", "three", "three"])
+        self.assertEqual([n for _, n in drawn], ["one", "two", "three"])
         for row, name in drawn:
             self.assertEqual(board.agent_at(rows, row).name, name)
 
-    def test_a_click_on_the_second_line_focuses_the_agent_it_is_about(self):
-        rows = self.rows(agent("one", unread=2), agent("two"))
-        i = next(i for i, (t, _) in enumerate(rows) if "mail:" in t)
-        self.assertEqual(board.agent_at(rows, i + 1).name, "one")
-
-    def test_a_second_line_costs_a_line_of_the_window_rather_than_overflowing_it(self):
-        """A row that grew has to be paid for out of the same screen, or the footer ends
-        up claiming rows that were pushed off the bottom."""
-        agents = [agent(f"a{i}", unread=1) for i in range(6)]
-        height = board.CHROME + 4                   # capacity 4 lines = two agents
-        rows = board.layout(snap(*agents), top=0, height=height, width=80, msg="")
-        self.assertEqual(len(rows), height)
-        names = {a.name for _, a in rows if a is not None}
-        self.assertEqual(names, {"a0", "a1"})
-        self.assertIn("+4 more below", "\n".join(t for t, _ in rows))
-
-    def test_a_screen_with_room_for_one_line_draws_the_identity_half(self):
-        """The one place the block is allowed to be one line: a pane too short for two.
-        A blank screen saying `+5 more below` is a worse answer than a name."""
-        agents = [agent(f"a{i}", task="x") for i in range(6)]
-        rows = board.layout(snap(*agents), top=0, height=board.CHROME + 1, width=80,
-                            msg="")
-        drawn = [a for _, a in rows if a is not None]
-        self.assertEqual([a.name for a in drawn], ["a0"])
-
-    def test_a_second_line_never_widens_the_screen(self):
+    def test_a_row_never_widens_the_screen(self):
         rows = board.layout(snap(agent("日本語", unread=99, undelivered=99,
                                        undelivered_age=99999,
                                        task="日本語の説明" * 20)),
                             top=0, height=10, width=40, msg="")
         for text, _ in rows:
             self.assertLessEqual(board._visible_len(text), 40)
+
+
+class GroupBreakTest(unittest.TestCase):
+    """A blank line between first-level groups, and nowhere else.
+
+    Each direct child of the top orchestrator usually bounds one task, along with its
+    whole subtree, and the tree is much easier to read in those blocks. Two things can go
+    wrong and both are pinned here: a break INSIDE a subtree, which splits one task in
+    half, and a break that belongs to an agent, which would make a click on empty space
+    focus somebody.
+    """
+
+    def tree(self, **kw):
+        """main, and two first-level groups, one of them two deep."""
+        return snap(agent("main"),
+                    agent("lead", depth=1, parent="main"),
+                    agent("w1", depth=2, parent="lead"),
+                    agent("w2", depth=2, parent="lead"),
+                    agent("solo", depth=1, parent="main"))
+
+    def shape(self, rows):
+        """The tree part of the screen as names and blanks, in order."""
+        out = []
+        for text, a in rows:
+            plain = board._ANSI.sub("", text).strip()
+            if a is not None:
+                out.append(getattr(a, "name", "GROUP"))
+            elif out and plain == "":
+                out.append("")
+        while out and out[-1] == "":
+            out.pop()
+        return out
+
+    def test_the_break_falls_between_groups_and_never_inside_one(self):
+        rows = board.layout(self.tree(), top=0, height=14, width=60, msg="")
+        self.assertEqual(self.shape(rows),
+                         ["main", "", "lead", "w1", "w2", "", "solo"])
+
+    def test_a_break_is_owned_by_nobody_so_clicking_it_does_nothing(self):
+        rows = board.layout(self.tree(), top=0, height=14, width=60, msg="")
+        blank = next(i for i, (t, _) in enumerate(rows)
+                     if board._ANSI.sub("", t).strip() == ""
+                     and any(a is not None for _, a in rows[:i]))
+        self.assertIsNone(board.agent_at(rows, blank + 1))
+
+    def test_every_other_row_still_resolves_to_the_agent_drawn_on_it(self):
+        rows = board.layout(self.tree(), top=0, height=14, width=60, msg="")
+        drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
+        self.assertEqual([n for _, n in drawn],
+                         ["main", "lead", "w1", "w2", "solo"])
+        for row, name in drawn:
+            self.assertEqual(board.agent_at(rows, row).name, name)
+
+    def test_a_break_costs_a_line_of_the_window_rather_than_overflowing_it(self):
+        """The break is paid for out of the same screen, or the footer ends up claiming
+        rows that were pushed off the bottom."""
+        height = board.CHROME + 4                   # main, break, lead, w1
+        rows = board.layout(self.tree(), top=0, height=height, width=60, msg="")
+        self.assertEqual(len(rows), height)
+        self.assertEqual(self.shape(rows), ["main", "", "lead", "w1"])
+        self.assertIn("+2 more below", "\n".join(t for t, _ in rows))
+
+    def test_a_group_at_the_top_of_the_window_is_not_pushed_down_by_its_break(self):
+        """Scrolled so a group starts the window: the top of the screen already says a
+        new group starts here, and a blank first line would only cost a row."""
+        rows = board.layout(self.tree(), top=1, height=board.CHROME + 4, width=60,
+                            msg="")
+        self.assertEqual(self.shape(rows), ["lead", "w1", "w2"])
 
 
 class LayoutTest(unittest.TestCase):
