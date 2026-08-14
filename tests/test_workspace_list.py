@@ -63,10 +63,10 @@ class Harness:
         """Open the workspace `name` the one way left: a top delegates, and the child's
         NAME is the workspace. Returns the child's row facts."""
         if store.get_agent(self.db, "root") is None:
-            store.create_agent(self.db, name="root", role="orchestrator",
+            store.create_agent(self.db, name="root", role="lead",
                                workspace="scratch", cwd=str(self.repo),
                                pane_id="w1:p1", is_top=True)
-        agent = self.b.delegate("t", role="orchestrator", name=name, me="root")
+        agent = self.b.delegate("t", role="lead", name=name, me="root")
         row = store.get_agent(self.db, agent)
         return {"workspace": row["workspace"], "path": row["cwd"], "agent": agent}
 

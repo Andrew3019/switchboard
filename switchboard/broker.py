@@ -54,13 +54,13 @@ from .status import GONE_STATE, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
-# addresses that are not agents, and the role a top-level orchestrator has (which is also
-# its default agent name — `sb start` with no arguments should land somewhere obvious).
+# addresses that are not agents, and the role the top-level agent has (today `dispatcher`;
+# everything nested is a `lead`).
 HUMAN = config.setting("vocabulary.human")
 PARENT = config.setting("vocabulary.parent")
 MAIN = config.setting("vocabulary.main_role")
-# The agent NAME `sb start` uses, which is not the same thing as its role: there is one
-# orchestrator role at every scope, but the top-level agent still wants an obvious name.
+# The agent NAME `sb start` uses, which is not the same thing as its role: the role says
+# what the top IS, and the top-level agent still wants an obvious name.
 MAIN_NAME = config.setting("vocabulary.main_name")
 
 # Config that must follow work into a worktree. Deliberately NOT committed: it is local
@@ -809,7 +809,7 @@ class Broker:
         if self.same_tree(me, target):
             return
         raise ValueError(
-            f"{target} is in another top orchestrator's tree, which is invisible from "
+            f"{target} is in another dispatcher's tree, which is invisible from "
             f"here — agents cannot reach across that boundary. Ask your own parent, or "
             f"`sb block` for a person, who can."
         )
@@ -917,11 +917,11 @@ class Broker:
         if self.repo.resolve() == main:
             return
         raise ValueError(
-            f"`sb start` starts a top-level orchestrator over the checkout it is run in, "
+            f"`sb start` starts a top-level dispatcher over the checkout it is run in, "
             f"and this is a worktree ({self.repo}) — starting one here would lay it over "
             f"somebody's working copy and their branch. Run it from the main checkout "
             f"instead: cd {main} && sb start. To get an agent working in THIS tree, "
-            f"delegate to one from the orchestrator that owns it."
+            f"delegate to one from the lead that owns it."
         )
 
     def running_tops(self) -> list[str]:
@@ -958,9 +958,9 @@ class Broker:
             # two directories — the exact confusion `agents.branch` exists to end.
             raise ValueError(
                 f"the name {name!r} already belongs to a workspace with a checkout of its "
-                f"own, and a top-level orchestrator's space has none — one name is one "
+                f"own, and a dispatcher's space has none — one name is one "
                 f"workspace. Work in that one with `sb delegate --workspace {name}`, or "
-                f"start this orchestrator under another name."
+                f"start this dispatcher under another name."
             )
         # A bare space is closeable too, and `sb start --name X` is a door into one:
         # without this the refusal would guard the spawn paths and leave a top-level
@@ -1286,8 +1286,8 @@ class Broker:
         except HerdrError as e:
             raise ValueError(
                 f"no workspace called {name!r} to join: --workspace joins one that "
-                f"already exists and never forks — a workspace is opened by a top "
-                f"orchestrator delegating into a fork of that name. Leave --workspace "
+                f"already exists and never forks — a workspace is opened by a "
+                f"dispatcher or lead delegating into a fork of that name. Leave --workspace "
                 f"off to work where you are ({e.message})"
             ) from e
         store.log_event(self.db, kind="workspace_join", workspace=name,
@@ -1674,7 +1674,7 @@ class Broker:
             raise ValueError(
                 f"cannot close {name!r}: its recorded checkout {checkout} IS this "
                 f"repository's primary working tree, which this command never removes. A "
-                f"record can legitimately point there — a top orchestrator's bare space "
+                f"record can legitimately point there — a dispatcher's bare space "
                 f"over the main clone records exactly that — so this is a rule of the "
                 f"gate rather "
                 f"than something git is left to catch after the panes are closed."
@@ -2936,7 +2936,7 @@ class Broker:
             # top-level orchestrator already holds over the main checkout would give one
             # record two checkouts — the confusion `agents.branch` exists to end.
             raise ValueError(
-                f"the name {name!r} already belongs to a top-level orchestrator's space "
+                f"the name {name!r} already belongs to a dispatcher's space "
                 f"over the main checkout, which has no checkout of its own — one name is "
                 f"one workspace. Spawn this agent under another name."
             )
@@ -3051,6 +3051,13 @@ class Broker:
         me = me or self.whoami()
         self._refuse_bare_delegate(me)
         r = roles_mod.get(self.roles, role)
+        # What was TYPED is not necessarily what this agent is: a retired name resolves
+        # through `[vocabulary] role_aliases` to the role that replaced it, and `r.name` is
+        # the answer. Taken here, once, so the identity fragment, the generated name, the
+        # preset bindings and the stored row all agree with the prompt the agent actually
+        # got — an agent told it is an `orchestrator`, given a lead's prompt and filed as
+        # neither is three answers to one question.
+        role = r.name
         name = name or self._unique_name(role)
         self.delivery_note = None       # this spawn's caveat, not the last one's
 

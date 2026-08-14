@@ -157,7 +157,7 @@ CREATE TABLE agents (
                                       -- one, with nothing to tell the two apart.
     is_top        INTEGER NOT NULL DEFAULT 0,
                                       -- 1 = created by `sb start`, the ONLY path that makes
-                                      -- a top orchestrator. This is a STAMP, not an
+                                      -- a top-level agent. This is a STAMP, not an
                                       -- inference: `sb delegate` branches on it (a top's
                                       -- spawn gets a new space and worktree, anyone else's
                                       -- gets a tab in the caller's space), and every fact

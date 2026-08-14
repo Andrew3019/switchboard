@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
             visible.append(name)
         return sub.add_parser(name, parents=[common], **kw)
 
-    st = cmd("start", help="start a top-level orchestrator in a workspace of its own")
+    st = cmd("start", help="start a top-level dispatcher in a workspace of its own")
     st.add_argument("task", nargs="?", help="optional first instruction")
     st.add_argument("--name", help="name it — and, if that name is already yours, "
                                    "return to it instead of starting another")
@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--name")
     d.add_argument("--workspace", metavar="NAME",
                    help="join this EXISTING workspace instead of working where you are "
-                        "(a workspace is opened by a top orchestrator delegating: the "
+                        "(a workspace is opened by a dispatcher delegating: the "
                         "child's --name is the workspace's name)")
     d.add_argument("--model", help=_tier_help())
 
@@ -517,7 +517,7 @@ def _agent_caller(me: str) -> Optional[str]:
     and an agent standing in a fresh `git clone` is driving that clone's own store, which
     has no rows at all — so it resolves to HUMAN. That clone is not a hypothetical: it is
     this repo's verification convention, and it is how an agent created three unwanted top
-    orchestrators in one afternoon.
+    agents in one afternoon.
 
     So the environment is the second signal, and it is the one that closes the clone: a
     Claude Code session marks the environment of every command it runs, wherever it is
@@ -799,13 +799,13 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return board_mod.main()
 
     if cmd == "start":
-        # Only a human creates a top orchestrator (DESIGN-TRUTH, confirmed 2026-08-11).
+        # Only a human creates a top dispatcher (DESIGN-TRUTH, confirmed 2026-08-11).
         # The worktree refusal in `Broker._refuse_outside_main_checkout` used to be the
         # nearest thing to this, and it does not reach: a clone is its own main checkout,
         # so the check passes and the agent gets its top. See `_agent_caller` for how the
         # caller is named and what happens when it cannot be.
         if (who := _agent_caller(me)) is not None:
-            print(f"sb: `sb start` creates a top-level orchestrator, and only a human "
+            print(f"sb: `sb start` creates a top-level dispatcher, and only a human "
                   f"does that — {who}.\n"
                   f"    An agent that needs another agent delegates one:\n"
                   f"      sb delegate \"<task>\" --role worker", file=sys.stderr)
@@ -817,7 +817,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         name = b.start(name=args.name, task=args.task)
         also = (f"\n  still running: {', '.join(others)}"
                 f" — back to one with: sb start --name {others[-1]}") if others else ""
-        _emit(args, f"orchestrator '{name}' ready in its own workspace — switch to it, "
+        _emit(args, f"dispatcher '{name}' ready in its own workspace — switch to it, "
                     f"or: sb tell {name} \"...\"{also}",
               {"name": name, "running": others})
         return 0

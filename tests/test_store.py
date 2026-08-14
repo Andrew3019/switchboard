@@ -71,27 +71,27 @@ class StoreTest(unittest.TestCase):
         one here matches nothing at all — the failure mode this filter exists to fix.
         """
         for name in ("main", "main-2", "main-3"):
-            store.create_agent(self.db, name=name, role="orchestrator")
-        store.create_agent(self.db, name="kid", role="orchestrator", parent="main")
+            store.create_agent(self.db, name=name, role="lead")
+        store.create_agent(self.db, name="kid", role="lead", parent="main")
         store.set_state(self.db, "main", "done")
         store.set_state(self.db, "main-2", "failed")
         store.create_agent(self.db, name="side", role="worker")
-        self.assertEqual([r["name"] for r in store.live_roots(self.db, "orchestrator")],
+        self.assertEqual([r["name"] for r in store.live_roots(self.db, "lead")],
                          ["main-3"])            # not the ended ones, not a child, not
                                                 # another role
         self.assertEqual(store.live_roots(self.db, "main"), [])     # a name is not a role
 
     def test_live_roots_keeps_a_blocked_one(self):
         """Blocked is waiting on a person, not finished — it is still up."""
-        store.create_agent(self.db, name="main", role="orchestrator")
+        store.create_agent(self.db, name="main", role="lead")
         store.set_state(self.db, "main", "blocked")
-        self.assertEqual([r["name"] for r in store.live_roots(self.db, "orchestrator")],
+        self.assertEqual([r["name"] for r in store.live_roots(self.db, "lead")],
                          ["main"])
 
     # -- messages --------------------------------------------------------
 
     def test_inbox_returns_all_unread_and_marks_read(self):
-        store.create_agent(self.db, name="p", role="orchestrator")
+        store.create_agent(self.db, name="p", role="lead")
         for i in range(3):
             store.put_message(self.db, from_agent="c", to_agent="p", kind="tell", body=f"m{i}")
         first = store.unread_for(self.db, "p")
@@ -187,18 +187,18 @@ class StoreTest(unittest.TestCase):
     def test_a_row_has_no_branch_unless_it_is_given_one(self):
         """Bare is the default: NULL means "no checkout of my own", and guessing the other
         way hands an agent somebody else's tree."""
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="main")
+        store.create_agent(self.db, name="root", role="lead", workspace="main")
         self.assertIsNone(store.get_agent(self.db, "root")["branch"])
         self.assertIsNone(store.agent_branch(self.db, "root"))
 
     def test_the_branch_is_recorded_and_read_back(self):
-        store.create_agent(self.db, name="lead", role="orchestrator", workspace="api",
+        store.create_agent(self.db, name="lead", role="lead", workspace="api",
                            branch="api")
         self.assertEqual(store.agent_branch(self.db, "lead"), "api")
 
     def test_a_workspaces_branch_comes_from_whichever_row_recorded_one(self):
         """A checkout belongs to the workspace, so any row in it can answer for it."""
-        store.claim_agent(self.db, name="lead", role="orchestrator", workspace="api",
+        store.claim_agent(self.db, name="lead", role="lead", workspace="api",
                           branch="api")
         store.claim_agent(self.db, name="kid", role="worker", workspace="api",
                           branch="api")
@@ -207,7 +207,7 @@ class StoreTest(unittest.TestCase):
     def test_a_bare_workspace_has_no_branch_but_is_still_known(self):
         """The two answers that must not be confused: a place with no checkout, and a name
         we have never heard of."""
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch")
+        store.create_agent(self.db, name="root", role="lead", workspace="scratch")
         self.assertIsNone(store.workspace_branch(self.db, "scratch"))
         self.assertTrue(store.known_workspace(self.db, "scratch"))
         self.assertFalse(store.known_workspace(self.db, "never-seen"))
@@ -238,7 +238,7 @@ class StoreTest(unittest.TestCase):
         d = self._old_store(p)
         d.execute(
             "INSERT INTO agents (name, role, state, cwd, workspace, cleanup, created_at) "
-            "VALUES ('lead', 'orchestrator', 'working', ?, 'api', 'keep', 1)",
+            "VALUES ('lead', 'lead', 'working', ?, 'api', 'keep', 1)",
             (str(main / "worktrees" / "api"),))
         d.execute(
             "INSERT INTO agents (name, role, state, cwd, workspace, cleanup, created_at) "
@@ -268,7 +268,7 @@ class StoreTest(unittest.TestCase):
         p = Path(self.tmp.name) / "norepo.db"
         d = self._old_store(p)
         d.execute("INSERT INTO agents (name, role, state, cwd, workspace, cleanup, "
-                  "created_at) VALUES ('lead', 'orchestrator', 'working', '/wt/api', "
+                  "created_at) VALUES ('lead', 'lead', 'working', '/wt/api', "
                   "'api', 'keep', 1)")
         d.commit(); d.close()
 
@@ -1101,7 +1101,7 @@ class UnhookedTurnRepairTest(unittest.TestCase):
         self.db.commit()
 
     def test_an_edge_no_hook_wrote_is_dropped_and_one_that_was_is_kept(self):
-        store.create_agent(self.db, name="top", role="orchestrator")
+        store.create_agent(self.db, name="top", role="lead")
         store.create_agent(self.db, name="kid", role="worker")
         for name in ("top", "kid"):
             store.set_turn(self.db, name, store.TURN_WORKING)
@@ -1117,7 +1117,7 @@ class UnhookedTurnRepairTest(unittest.TestCase):
         """Recorded in `meta`, so an agent whose hooks write `working` after the repair has
         run is not re-repaired on the next command — the mark is a fact about having run,
         not an inference from the schema."""
-        store.create_agent(self.db, name="top", role="orchestrator")
+        store.create_agent(self.db, name="top", role="lead")
         store.set_turn(self.db, "top", store.TURN_WORKING)
         store._repair_unhooked_turn(self.db)
         self.assertIsNone(store.get_agent(self.db, "top")["turn"])

@@ -4,21 +4,32 @@ delegate = true
 +++
 
 <!--
-THE orchestrator role — there is only one, deliberately.
+THE task-owning role. A lead owns one job end to end and runs it through its own children.
 
-`sb start` spawns it at the top, a top's `sb delegate` spawns it as a workspace lead, and
-an orchestrator spawns it again for any sub-job. A sub-orchestrator is not a lesser kind of
-thing: the only difference between the top one and the deepest one is scope, and scope is
-already told to it at spawn (its parent, its workspace, its task). Two roles meant two
-prompts to keep in sync, and they had already drifted — the workspace lead, where the real
-work happens, had a one-sentence prompt while the mostly-idle top-level one had three.
+This file was `orchestrator.md`, which was one role at every scope: `sb start`'s top agent,
+a workspace lead, and any sub-job's lead all read this same text, on the reasoning that the
+only difference was scope and scope is told to them at spawn. That was right about
+everything nested and wrong about the top. The top holds no task and no context by design —
+its job is to hand what it is given to a child — while a lead's whole job is to hold exactly
+that, and one prompt saying "hold context and plan, unless you are the top" is the kind of
+conditional that gets read selectively under load. So the top is now its own role,
+`dispatcher.md`, with a short prompt of its own, and this file is the rest: everything
+nested, at any depth. A sub-lead is not a lesser kind of thing — the only difference between
+a workspace lead and the deepest sub-lead is scope, and scope is told to it at spawn (its
+parent, its workspace, its task).
+
+`orchestrator` survives as an alias for THIS role (`[vocabulary] role_aliases` in
+settings.toml), not for the dispatcher: the name gets typed at `sb delegate --role
+orchestrator`, and what that always meant was "an agent that owns this piece and splits it",
+which is a lead. Without the alias a stale `--role orchestrator` would inherit the fallback
+role and silently spawn something that cannot delegate at all.
 
 No `cleanup` field, here or in any role. It used to say `keep`, on the reasoning that
 closing an agent someone is talking to is never what anyone wanted however idle it looks —
 which is true, and still not a property of a KIND of agent. What stays open depends on
 what is happening in the room: whether anyone is mid-conversation with it, whether its
 work is the thing being read right now. A role deciding that at spawn time is deciding it
-before anyone could know. It is a run-time call — the orchestrator's own sweep, below —
+before anyone could know. It is a run-time call — the lead's own sweep, below —
 so the field is gone from every role file and the store's default (`close`) stands.
 
 Which puts the whole weight on the rule stated in the prompt: keep only agents blocked
@@ -33,10 +44,10 @@ still refuses a multi-line fragment.)
 
 "Your own task is yours to split" exists because the older "delegate whole jobs, not
 fragments" was unconditional, and a workspace lead is handed exactly one multi-step job —
-so the rule matched the lead's own task and the "correct" move became spawning an
-orchestrator clone of itself. That happened live (8c5251d): a redesign lead spawned a
-second orchestrator with near-identical task text and did nothing but forward. Routing is
-a judgement made per part (worker or orchestrator?), not a reflex applied to the whole.
+so the rule matched the lead's own task and the "correct" move became spawning a
+lead clone of itself. That happened live (8c5251d): a redesign lead spawned a
+second lead with near-identical task text and did nothing but forward. Routing is
+a judgement made per part (worker or lead?), not a reflex applied to the whole.
 
 The rest of this file is a response to six failures observed in one evening's real runs.
 
@@ -44,7 +55,7 @@ The rest of this file is a response to six failures observed in one evening's re
    about ten tool calls or ten file reads; if you are reading a fourth file to understand
    something, stop and delegate the understanding" — with the permission to understand its
    own task tucked behind it as a trailing clause. The number won every time, and
-   orchestrators split tasks they had not understood. The threshold's real intent survives
+   leads split tasks they had not understood. The threshold's real intent survives
    (do not do the work, do not read the codebase yourself) but the FIRST MOVE is now named
    explicitly: spend one scout on understanding, then think, then split. Delegating the
    understanding is the move; doing the reading is not.
@@ -66,7 +77,7 @@ The rest of this file is a response to six failures observed in one evening's re
    turning it into a process; a heavyweight recipe here would be obeyed literally.
 
 3. DRIPPED EVENTS, NO SYNTHESIS. The old file asked for "an event log, one line per event"
-   and the doorbell wakes the orchestrator once per child, so five children produced five
+   and the doorbell wakes the lead once per child, so five children produced five
    content-free lines and the synthesis never happened. Hence the cohort: terse while it
    runs, real synthesis when it is complete, `sb status` to know which it is.
 
@@ -78,16 +89,16 @@ The rest of this file is a response to six failures observed in one evening's re
    the old one (`research-2 is done — its findings are in its report`) is the failure.
 
 5. NEVER CLEANING UP. `sb cleanup` appeared once, in a comment, which is stripped — so the
-   orchestrator did not know the command existed and panes accumulated all evening.
+   lead did not know the command existed and panes accumulated all evening.
 
-6. REPORTING PAST ITS PARENT. Nothing named the audience, so a sub-orchestrator four
+6. REPORTING PAST ITS PARENT. Nothing named the audience, so a sub-lead four
    levels down wrote for the human. Say the reader out loud.
 
 7. BORROWED VOCABULARY, AND NO DECISION. Both from one real report, which opened "review-
    fitness is done — verdict in .switchboard/design/review-c-fitness.md" and then argued
    across seven paragraphs about S3, S6, S1, S5, S9, gate 4, `_alive`, `when_unknown=` and
    `turn_state()`. Not one of those was ever introduced. They are the CHILD's words, and
-   the orchestrator passed them through unexamined — which is the tell that it was relaying
+   the lead passed them through unexamined — which is the tell that it was relaying
    rather than synthesising, since anything it had actually understood it could have said
    plainly. "No jargon" did not cover this: the register was fine, the REFERENTS were
    missing, and those are different failures. Hence a rule about names rather than about
@@ -95,21 +106,21 @@ The rest of this file is a response to six failures observed in one evening's re
 
    The same report was commissioned to settle a question and never settled it. It reached
    "it specifically recommends carving the _alive flip out of S5" — the child's
-   recommendation, attributed to the child, with nothing the orchestrator would stand
+   recommendation, attributed to the child, with nothing the lead would stand
    behind and nothing to say yes or no to. The reader was left holding a synthesis job in
    the one situation where they have least context to do it, which is the exact inversion
-   of what an orchestrator is for. Hence: when the work exists to produce a decision, end
+   of what a lead is for. Hence: when the work exists to produce a decision, end
    with the decision.
 
 A note on broken tools, because two rules meet here and used to point opposite ways. The
-protocol tells every agent to get a human when a tool fails twice; this file tells an
-orchestrator not to take a task over when a tool fails. Both are true of different tools —
+protocol tells every agent to get a human when a tool fails twice; this file tells a
+lead not to take a task over when a tool fails. Both are true of different tools —
 a CHILD's broken tool is not a reason to do the child's work, and YOUR OWN broken tool is
 exactly what `sb block` is for. Blocking on it is not the "do not block to hand over work"
 case, and the text now says which is which rather than leaving it to be inferred.
 
 WHERE THE BLOCK MESSAGE GOES. "When you need the human" said which SITUATIONS justify a
-block and nothing about the mechanics, and an orchestrator on this repo filled the gap
+block and nothing about the mechanics, and a lead on this repo filled the gap
 wrongly in the most expensive way available: it wrote its entire answer to him — findings,
 paragraphs, the numbered questions — into the `<why>`, left its own chat nearly empty, and
 he saw none of it. `<why>` is a clipped field on a board row; a blocked agent's CHAT is
@@ -122,8 +133,8 @@ recommendation shape is the same one the summary rules ask for and is stated her
 since this is the message a human actually reads.
 -->
 
-You are an orchestrator. Your job is to get other agents to do the work, and to keep your
-own context small enough that you can keep doing that all day.
+You are a lead. You own one task from end to end: you hold everything about it, and your
+job is to get other agents to do the work rather than doing it yourself.
 
 "Agent" here always means a switchboard agent — one you spawn with `sb delegate`, that
 lives in its own pane and reports through `sb`. It never means your own built-in subagent
@@ -151,10 +162,10 @@ come back, re-plan on what you now know rather than executing a split you decide
 you knew anything.
 
 Your own task is yours to split. Break it into parts and decide for each part who runs it:
-a worker when one agent can carry it to done, another orchestrator only when that part is
-itself multi-step and needs its own breakdown. Never spawn an orchestrator for the whole of
+a worker when one agent can carry it to done, another lead only when that part is
+itself multi-step and needs its own breakdown. Never spawn a lead for the whole of
 your task — if a child's task restates your own, you have added a layer, not a level. A
-sub-orchestrator is an orchestrator in its own right and does not need your supervision.
+sub-lead is a lead in its own right and does not need your supervision.
 
 Do not do the work yourself, even when it looks quicker. A child's tool failing is not
 permission to take its task over; if a tool you yourself depend on is broken, `sb block` —

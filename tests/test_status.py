@@ -502,7 +502,7 @@ class StatusTest(unittest.TestCase):
         """No parent, and the human has no mailbox — so the failure stays a row and an
         event, exactly as it was before the ping existed. The one case a person still has
         to see on the board."""
-        store.create_agent(self.db, name="top", role="orchestrator", session_id="s1")
+        store.create_agent(self.db, name="top", role="lead", session_id="s1")
         self.confirm_gone()
         self.assertEqual(self.row("top")["state"], status.GONE_STATE)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
@@ -783,7 +783,7 @@ class StatusTest(unittest.TestCase):
     # -- the tree ---------------------------------------------------------
 
     def test_roots_are_at_depth_zero_and_children_indent(self):
-        store.create_agent(self.db, name="root", role="orchestrator")
+        store.create_agent(self.db, name="root", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="root")
         store.create_agent(self.db, name="grandkid", role="worker", parent="kid")
         snap = status.collect(self.db, FakeHerdr())
@@ -791,8 +791,8 @@ class StatusTest(unittest.TestCase):
                          [("root", 0), ("kid", 1), ("grandkid", 2)])
 
     def test_a_parent_immediately_precedes_its_children(self):
-        store.create_agent(self.db, name="a", role="orchestrator")
-        store.create_agent(self.db, name="b", role="orchestrator")
+        store.create_agent(self.db, name="a", role="lead")
+        store.create_agent(self.db, name="b", role="lead")
         store.create_agent(self.db, name="a1", role="worker", parent="a")
         snap = status.collect(self.db, FakeHerdr())
         self.assertEqual([a.name for a in snap.agents], ["a", "a1", "b"])
@@ -1069,7 +1069,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual([a.name for a in snap.agents], ["w2"])
 
     def test_live_only_keeps_ancestors_so_the_tree_still_reads(self):
-        store.create_agent(self.db, name="root", role="orchestrator")
+        store.create_agent(self.db, name="root", role="lead")
         store.set_state(self.db, "root", "done")
         store.create_agent(self.db, name="kid", role="worker", parent="root")
         snap = status.collect(self.db, FakeHerdr([alive("kid")]), live_only=True)
@@ -1107,8 +1107,8 @@ class StatusTest(unittest.TestCase):
         self.assertNotIn("0 unread", out)
 
     def test_mine_is_the_callers_own_subtree(self):
-        store.create_agent(self.db, name="root", role="orchestrator")
-        store.create_agent(self.db, name="me", role="orchestrator", parent="root")
+        store.create_agent(self.db, name="root", role="lead")
+        store.create_agent(self.db, name="me", role="lead", parent="root")
         store.create_agent(self.db, name="kid", role="worker", parent="me")
         store.create_agent(self.db, name="grandkid", role="worker", parent="kid")
         store.create_agent(self.db, name="stranger", role="worker", parent="root")
@@ -1117,26 +1117,26 @@ class StatusTest(unittest.TestCase):
 
     def test_mine_never_climbs_back_out_to_a_parent(self):
         """Ancestors exist to keep the indentation honest, not to widen the scope."""
-        store.create_agent(self.db, name="root", role="orchestrator")
+        store.create_agent(self.db, name="root", role="lead")
         store.create_agent(self.db, name="me", role="worker", parent="root")
         snap = status.collect(self.db, FakeHerdr(), mine="me")
         self.assertEqual([a.name for a in snap.agents], ["me"])
 
     def test_mine_for_a_human_is_every_agent(self):
-        store.create_agent(self.db, name="root", role="orchestrator")
+        store.create_agent(self.db, name="root", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="root")
         snap = status.collect(self.db, FakeHerdr(), mine="human")
         self.assertEqual([a.name for a in snap.agents], ["root", "kid"])
         self.assertEqual(snap.hidden, 0)
 
     def test_mine_for_somebody_with_no_agents_is_empty_not_everything(self):
-        store.create_agent(self.db, name="root", role="orchestrator")
+        store.create_agent(self.db, name="root", role="lead")
         snap = status.collect(self.db, FakeHerdr(), mine="ghost")
         self.assertEqual(snap.agents, [])
         self.assertEqual(snap.hidden, 1)
 
     def test_filters_and_together(self):
-        store.create_agent(self.db, name="me", role="orchestrator")
+        store.create_agent(self.db, name="me", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="me")
         store.create_agent(self.db, name="stranger", role="worker")
         store.set_state(self.db, "kid", "done")
@@ -1198,7 +1198,7 @@ class StatusTest(unittest.TestCase):
         self.assertIn("sb done", out)             # says what was actually skipped
 
     def test_render_indents_children(self):
-        store.create_agent(self.db, name="root", role="orchestrator")
+        store.create_agent(self.db, name="root", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="root")
         out = status.render(status.collect(self.db, FakeHerdr()))
         kid = next(l for l in out.splitlines() if l.lstrip().startswith("kid"))
@@ -1227,7 +1227,7 @@ class StatusTest(unittest.TestCase):
         self.assertIn("no agents", status.render(status.collect(self.db, FakeHerdr())))
 
     def test_json_carries_the_same_facts(self):
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="main")
+        store.create_agent(self.db, name="root", role="lead", workspace="main")
         store.create_agent(self.db, name="kid", role="worker", parent="root",
                            session_id="s1")
         store.put_message(self.db, from_agent="x", to_agent="kid", kind="tell", body="a")

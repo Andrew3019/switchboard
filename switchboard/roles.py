@@ -85,9 +85,21 @@ def get(roles: dict[str, Role], name: str) -> Role:
 
     Which role is the fallback is `[vocabulary] fallback_role`, not a literal here: what an
     undefined role behaves like is a decision a repo is allowed to make differently.
+
+    A RETIRED name is a different case from a name nobody ever defined, and the fallback is
+    the wrong answer for it: `orchestrator` used to mean "an agent that owns this and splits
+    it", and falling through to `worker` would spawn something that cannot delegate at all,
+    silently, for a name that used to mean the opposite. So `[vocabulary] role_aliases` maps
+    an old name onto the role that replaced it, and the alias resolves ALL the way — the
+    returned Role carries the new name, so the board, the prompt and the stored row all say
+    what the agent actually is rather than what it was typed as. Data, not a literal here,
+    for the same reason every other name in this file is (C12).
     """
     if name in roles:
         return roles[name]
+    alias = config.setting("vocabulary.role_aliases").get(name)
+    if alias and alias in roles:
+        return roles[alias]
     fallback = config.setting("vocabulary.fallback_role")
     base = roles.get(fallback) or Role(fallback)
     return Role(name=name, model=base.model, prompt=base.prompt,

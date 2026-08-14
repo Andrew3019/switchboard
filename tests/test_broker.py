@@ -248,7 +248,7 @@ class BrokerTest(unittest.TestCase):
         root pane rather than a tab anywhere.
         """
         self.h.tabs = []
-        store.create_agent(self.db, name="lead", role="orchestrator", workspace="api",
+        store.create_agent(self.db, name="lead", role="lead", workspace="api",
                            branch="api", cwd=str(self.repo))
         with mock.patch.dict(os.environ, {"HERDR_WORKSPACE_ID": "w1"}, clear=False):
             self.b.delegate("t", role="worker", me="lead")
@@ -397,7 +397,7 @@ class BrokerTest(unittest.TestCase):
         """DESIGN-TRUTH.md:107-110 — knowing there are roles, and which."""
         self.b.delegate("t", role="worker", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
-        for role in ("orchestrator", "worker", "qa", "researcher", "reviewer"):
+        for role in ("dispatcher", "lead", "worker", "qa", "researcher", "reviewer"):
             with self.subTest(role=role):
                 self.assertIn(role, joined)
 
@@ -500,7 +500,7 @@ class BrokerTest(unittest.TestCase):
     # -- messaging -------------------------------------------------------
 
     def test_tell_rings_the_doorbell_without_the_payload(self):
-        store.create_agent(self.db, name="a", role="orchestrator")
+        store.create_agent(self.db, name="a", role="lead")
         store.create_agent(self.db, name="b", role="worker", parent="a")
         self.b.tell(["b"], "the actual secret payload", me="a")
         self.assertEqual(len(self.h.prompts), 1)
@@ -518,7 +518,7 @@ class BrokerTest(unittest.TestCase):
         """The flag is a claim on the RECIPIENT, and on nothing else. No agent ever waits
         on another agent (DESIGN-TRUTH.md:230-234), so `--needs-reply` must leave the
         sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
-        store.create_agent(self.db, name="a", role="orchestrator")
+        store.create_agent(self.db, name="a", role="lead")
         store.create_agent(self.db, name="b", role="worker", parent="a")
         (mid,) = self.b.tell(["b"], "what did you find?", me="a", needs_reply=True)
         self.assertEqual(store.get_message(self.db, mid)["needs_reply"], 1)
@@ -531,7 +531,7 @@ class BrokerTest(unittest.TestCase):
         nothing."""
         import argparse, contextlib, io
         from switchboard import cli
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         self.b.tell(["kid"], "which branch?", me="orch", needs_reply=True)
@@ -548,12 +548,12 @@ class BrokerTest(unittest.TestCase):
 
     def test_parent_resolves(self):
         store.create_agent(self.db, name="kid", role="worker", parent="mum")
-        store.create_agent(self.db, name="mum", role="orchestrator")
+        store.create_agent(self.db, name="mum", role="lead")
         self.b.tell(["parent"], "hi", me="kid")
         self.assertEqual(store.unread_for(self.db, "mum")[0]["body"], "hi")
 
     def test_done_notifies_the_parent_so_it_need_not_poll(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         self.b.done("computed 144", me="kid")
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
@@ -566,7 +566,7 @@ class BrokerTest(unittest.TestCase):
         The summary still has to reach a person, so it does — through the readouts, which
         take it from the event log: the done row on `sb status`, and `sb inspect` in full.
         """
-        store.create_agent(self.db, name="root", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="root", role="lead", pane_id="w1:p1")
         self.b.done("shipped the parser", me="root")
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"], 0)
@@ -578,7 +578,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_a_childs_summary_still_reaches_its_parent_as_mail(self):
         """Only the human lost a mailbox. Agent-to-agent handoff is untouched."""
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         self.b.done("counted 144", me="kid")
         [m] = store.unread_for(self.db, "orch", mark=False)
@@ -610,7 +610,7 @@ class BrokerTest(unittest.TestCase):
         """A root has no parent to poke and the human has no mailbox, so the notification
         is the delivery rather than a copy of one — and the end of the top of the tree is
         the end of the run. A child's done is not announced: its parent gets rung."""
-        store.create_agent(self.db, name="root", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="root", role="lead", pane_id="w1:p1")
         store.create_agent(self.db, name="kid", role="worker", parent="root", pane_id="w1:p2")
         self.b.done("counted 144", me="kid")
         self.assertEqual(self.h.notifications, [])
@@ -656,7 +656,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(self.b.unreachable("w"))                # and it never went lost
 
     def test_block_goes_to_the_human_not_the_parent(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         self.b.block("need a decision", me="kid")
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked")
@@ -690,7 +690,7 @@ class BrokerTest(unittest.TestCase):
         taking a turn again IS the answer having arrived: blocking ends a turn, so a
         blocked agent runs no commands until something restarts it.
         """
-        store.create_agent(self.db, name="orch", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p9")
         self.b.block("which branch?", me="kid")
@@ -750,7 +750,7 @@ class BrokerTest(unittest.TestCase):
         """They are one claim about one message and they used to disagree — `[3] from w1:`
         in the inbox, no sender at all in the pane. A reader cannot correlate two shapes."""
         import argparse
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="w", role="worker", parent="orch",
                            pane_id="w1:p1")
         self.b.tell(["w"], "the branch is ready", me="orch")
@@ -791,7 +791,7 @@ class BrokerTest(unittest.TestCase):
         """3.4, which modes must not regress: a blocked agent is not idle, it has STOPPED
         for a person, so "next turn" is the turn its block is answered on. Ringing it early
         would clear the block and bury the answer under mail it never asked for."""
-        store.create_agent(self.db, name="lead", role="orchestrator")
+        store.create_agent(self.db, name="lead", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="lead",
                            pane_id="w1:p1")
         store.create_agent(self.db, name="sibling", role="worker", parent="lead")
@@ -830,7 +830,7 @@ class BrokerTest(unittest.TestCase):
         must stay NULL for that row: no signal, ask herdr, exactly as before the signal
         existed.
         """
-        store.create_agent(self.db, name="top", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="top", role="lead", pane_id="w1:p1")
         store.set_state(self.db, "top", "done")
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True):
             self.assertEqual(self.b.whoami(), "top")       # it ran an `sb` command
@@ -1350,7 +1350,7 @@ class BrokerTest(unittest.TestCase):
         ordinary `tell` put the agent back to `working` and dropped it off the one readout
         that shows a person somebody needs them.
         """
-        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="w", role="worker", parent="lead",
                            pane_id="w1:p1")
         store.create_agent(self.db, name="sib", role="worker", parent="lead",
@@ -1385,7 +1385,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_held_mail_is_rung_once_the_human_answers_the_block(self):
         """Held, never dropped: the sibling's mail lands with the answer that released it."""
-        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="w", role="worker", parent="lead",
                            pane_id="w1:p1")
         store.create_agent(self.db, name="sib", role="worker", parent="lead",
@@ -1403,7 +1403,7 @@ class BrokerTest(unittest.TestCase):
     def test_a_flush_does_not_cancel_a_block_for_a_siblings_mail(self):
         """`flush_pending` runs at the start of every `sb` command, so this fires on any
         traffic anywhere in the fleet — the fastest way to lose a block."""
-        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p0")
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="w", role="worker", parent="lead",
                            pane_id="w1:p1")
         store.create_agent(self.db, name="sib", role="worker", parent="lead",
@@ -1445,7 +1445,7 @@ class BrokerTest(unittest.TestCase):
     # -- cleanup / restore -----------------------------------------------
 
     def test_cleanup_closes_finished_children(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
@@ -1456,7 +1456,7 @@ class BrokerTest(unittest.TestCase):
         """What reconciling drift buys. Every sweep gates on the row being finished, and
         a crashed agent's row never gets there on its own — so until `sb status` writes
         the death back, the one agent that most needs sweeping is the one nothing can."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         # `session_id` marks it as past its spawn — status holds off on reaping a
         # session-less row this young, since that is a claim mid-spawn.
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
@@ -1470,7 +1470,7 @@ class BrokerTest(unittest.TestCase):
         """The normal sweep, and the reason the liveness gate is scoped to `failed`: an
         agent that called `sb done` keeps a live idle pane, and herdr lists it. Gating
         every close on herdr's silence would leave nothing for `sb cleanup` to do."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         store.set_state(self.db, "kid", "done")
@@ -1483,7 +1483,7 @@ class BrokerTest(unittest.TestCase):
         to outlast the confirmation grace has it written about an agent that is very much
         alive. herdr still listing the name refutes the row, so a bare sweep must leave it
         alone."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}                     # a readout mid-spawn sees nothing
@@ -1499,7 +1499,7 @@ class BrokerTest(unittest.TestCase):
         because the cost is a doorbell or a duplicate root. Here it is a live pane, and
         for a row that never got a session id there is no `sb restore` to undo it — so
         an unreachable herdr must stop the sweep, not wave it through."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
@@ -1514,7 +1514,7 @@ class BrokerTest(unittest.TestCase):
     def test_cleanup_dry_run_does_not_offer_a_reaped_agent_herdr_still_has(self):
         """`--dry-run` is what a human reads before sweeping; listing a live agent there
         is how they learn to trust the sweep that kills it."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
@@ -1525,7 +1525,7 @@ class BrokerTest(unittest.TestCase):
     def test_cleanup_force_still_closes_a_named_agent_herdr_has(self):
         """The escape hatch has to survive the new gate, or an agent herdr has genuinely
         lost track of — listed but dead — becomes unreachable by any command."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
@@ -1534,13 +1534,13 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch", force=True), ["kid"])
 
     def test_cleanup_never_closes_a_blocked_agent(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         store.set_state(self.db, "kid", "blocked")
         self.assertEqual(self.b.cleanup(me="orch"), [])
 
     def test_cleanup_never_closes_an_agent_with_unread_mail(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
         # herdr still knows the name, so the doorbell can still ring and the mail is still
@@ -1557,7 +1557,7 @@ class BrokerTest(unittest.TestCase):
         it anyway, so the row was closable by neither a sweep nor anything but `--force`,
         for mail nobody could ever read.
         """
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
@@ -1575,7 +1575,7 @@ class BrokerTest(unittest.TestCase):
         every later sweep repeated the same doomed call, forever. It is the close having
         happened, so it is recorded as one.
         """
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
@@ -1596,7 +1596,7 @@ class BrokerTest(unittest.TestCase):
     def test_a_close_that_fails_for_any_other_reason_still_holds_the_row(self):
         """Only "the pane is gone" is a close. A herdr blip is not, and the row must stay
         closeable rather than be marked done on a failure."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
@@ -1612,10 +1612,10 @@ class BrokerTest(unittest.TestCase):
 
     def test_cleanup_never_escapes_the_callers_subtree(self):
         """A sweeping agent must not close a sibling's agents."""
-        store.create_agent(self.db, name="mine", role="orchestrator")
+        store.create_agent(self.db, name="mine", role="lead")
         store.create_agent(self.db, name="my-kid", role="worker", parent="mine",
                            pane_id="w1:p1")
-        store.create_agent(self.db, name="theirs", role="orchestrator")
+        store.create_agent(self.db, name="theirs", role="lead")
         store.create_agent(self.db, name="their-kid", role="worker", parent="theirs",
                            pane_id="w1:p2")
         for n in ("my-kid", "their-kid"):
@@ -1631,8 +1631,8 @@ class BrokerTest(unittest.TestCase):
 
     def _family(self, *, child_state: str = "working"):
         """orch → lead (done, pane w1:p1) → worker (still going, pane w1:p2)."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
-        store.create_agent(self.db, name="lead", role="orchestrator", parent="orch",
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="lead", role="lead", parent="orch",
                            pane_id="w1:p1")
         store.create_agent(self.db, name="worker", role="worker", parent="lead",
                            pane_id="w1:p2")
@@ -1810,14 +1810,14 @@ class BrokerTest(unittest.TestCase):
 
     def test_a_root_agents_tell_to_parent_is_refused_too(self):
         """`parent` resolves to the human for a root agent, and the human has no mailbox."""
-        store.create_agent(self.db, name="root", role="orchestrator", pane_id="w1:p1")
+        store.create_agent(self.db, name="root", role="lead", pane_id="w1:p1")
         with self.assertRaises(ValueError):
             self.b.tell(["parent"], "progress", me="root")
 
     def test_cleanup_can_be_forced_on_one_named_stuck_agent(self):
         """The escape hatch. An agent whose state never advanced, or that holds mail it
         can never read, is unreachable by every sweep — and there was no other way out."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="stuck", role="worker", parent="orch",
                            pane_id="w1:p1")
         self._legacy_keep("stuck")
@@ -1833,7 +1833,7 @@ class BrokerTest(unittest.TestCase):
         """`closed: (nothing)` is an outcome, never a reason. Naming an agent and getting
         a blank line back left `--force` — which lifts all five gates at once — as the
         only move, with no way to learn which one had fired."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         self.b.block("which branch?", me="kid")
@@ -1843,7 +1843,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("blocked", r.refused[0][1])
 
     def test_cleanup_names_the_unread_mail_that_holds_a_row(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         store.set_state(self.db, "kid", "done")
@@ -1864,7 +1864,7 @@ class BrokerTest(unittest.TestCase):
         """The one thing the removal must not break: an agent spawned `--keep` before the
         flag went keeps behaving exactly as it did — held by a sweep, closed when named.
         """
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="lead", parent="orch",
                            pane_id="w1:p1")
         self._legacy_keep("kid")
@@ -1876,7 +1876,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_nothing_spawned_now_is_ever_written_kept(self):
         """The write path is what went, not the column."""
-        name = self.b.delegate("t", role="orchestrator", me="orch")
+        name = self.b.delegate("t", role="lead", me="orch")
         self.assertEqual(store.get_agent(self.db, name)["cleanup"], "close")
 
     def test_cleanup_prints_the_refusals_it_collected(self):
@@ -1904,7 +1904,7 @@ class BrokerTest(unittest.TestCase):
         its job and stay out of the readout; a blocked agent is stopped, waiting on a
         person, and is precisely what that person must not walk away from.
         """
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         for n in ("done1", "blocked1", "busy1", "gone1"):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
                                pane_id=f"w1:{n}", session_id=f"s-{n}")
@@ -1927,7 +1927,7 @@ class BrokerTest(unittest.TestCase):
         `--json` is unchanged and still carries every refusal of either kind."""
         import argparse
         from switchboard import cli
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         for n in ("done1", "blocked1", "busy1"):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
                                pane_id=f"w1:{n}", session_id=f"s-{n}")
@@ -1958,7 +1958,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_a_long_sweep_of_refusals_ends_in_a_line_and_not_a_listing(self):
         """Past a handful the lines stop being a report and start being a listing."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="done1", role="worker", parent="orch",
                            pane_id="w1:done1", session_id="s-done1")
         store.set_state(self.db, "done1", "done")
@@ -1976,7 +1976,7 @@ class BrokerTest(unittest.TestCase):
         """`--force` skips the finished gate, so an agent mid-turn is closed exactly like
         a wedged one and the only trace was `cleanup(forced=True)`, which cannot tell the
         two apart. Nothing is refused and nothing is sent first — the event is the fix."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="busy", role="worker", parent="orch",
                            pane_id="w1:p1")                      # born working
         self.assertEqual(self.b.cleanup(["busy"], me="orch", force=True), ["busy"])
@@ -1988,7 +1988,7 @@ class BrokerTest(unittest.TestCase):
         always ends done, so the bookkeeping is committed even when the close itself
         failed — but committing it silently is the row asserting a pane is gone that
         nobody confirmed is gone, and the id it discards is the last handle on it."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
@@ -2010,12 +2010,12 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("w1:p1", unconfirmed["payload"])
 
     def test_force_refuses_to_be_a_sweep(self):
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         with self.assertRaises(ValueError):
             self.b.cleanup(me="orch", force=True)
 
     def test_cleanup_never_reaches_outside_the_callers_subtree_by_name_either(self):
-        store.create_agent(self.db, name="mine", role="orchestrator")
+        store.create_agent(self.db, name="mine", role="lead")
         store.create_agent(self.db, name="theirs", role="worker", pane_id="w1:p9")
         store.set_state(self.db, "theirs", "done")
         with self.assertRaises(KeyError):
@@ -2025,7 +2025,7 @@ class BrokerTest(unittest.TestCase):
     def test_cleanup_clears_the_pane_it_closed(self):
         """A row still claiming a closed pane defeats the 'already gone' guard, so every
         later sweep retries release/close against a dead pane and logs a failure."""
-        store.create_agent(self.db, name="orch", role="orchestrator")
+        store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         store.set_state(self.db, "kid", "done")
@@ -2580,7 +2580,7 @@ class BrokerTest(unittest.TestCase):
         """T1, second half. The stop hook exempts it deliberately — the protocol tells a
         delegating parent to end its turn and wait for the poke — so pinging it here would
         push it to report over work still running."""
-        store.create_agent(self.db, name="lead", role="orchestrator", pane_id="w1:p1",
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1",
                            session_id="s-lead")   # past its spawn: the exemption is what
         store.create_agent(self.db, name="kid", role="worker", parent="lead",
                            pane_id="w1:p2")       # has to do the work here, not the grace
@@ -2668,7 +2668,7 @@ class WorkspacePlacementTest(unittest.TestCase):
         # where it lands. A parent without one forks, and a fork that cannot happen now
         # refuses the spawn outright (`ForkFailed`), which is `test_workspace`'s subject.
         kw.setdefault("branch", "main")
-        store.create_agent(self.db, name="parent", role="orchestrator", workspace="main",
+        store.create_agent(self.db, name="parent", role="lead", workspace="main",
                            cwd=str(self.repo), pane_id="p-parent", **kw)
 
     def _live(self, wsid):
@@ -2742,7 +2742,7 @@ class WorkspacePlacementTest(unittest.TestCase):
 
     def test_a_grandchild_inherits_it_through_the_store(self):
         self._parent(workspace_id="wA")
-        _, child = self._spawn(role="orchestrator")
+        _, child = self._spawn(role="lead")
         self.derived.clear()
         self.b.delegate("t", role="worker", me=child)
         self.assertEqual(self.h.tabs[-1], "wA")

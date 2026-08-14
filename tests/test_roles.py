@@ -134,10 +134,46 @@ class RolesTest(unittest.TestCase):
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
         """DESIGN-TRUTH.md:161-162. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""
-        prompt = roles.load(self.repo)["orchestrator"].prompt
+        prompt = roles.load(self.repo)["lead"].prompt
         self.assertIn("disjoint", prompt)
         self.assertIn("share your worktree", prompt)
         self.assertIn("Serialise", prompt)      # and the half that was already right
+
+    # -- the dispatcher / lead split --------------------------------------
+
+    def test_both_halves_of_the_split_ship_and_may_delegate(self):
+        """One role became two: `dispatcher` at the top, `lead` everywhere nested. Both
+        spawn agents, which is the field that matters — a half of the split that cannot
+        delegate is a half that cannot do its job."""
+        r = roles.load(self.repo)
+        for name in ("dispatcher", "lead"):
+            with self.subTest(role=name):
+                self.assertIn(name, r)
+                self.assertTrue(r[name].delegate)
+                self.assertTrue(r[name].prompt)
+
+    def test_the_retired_name_resolves_to_the_lead_and_not_to_the_fallback(self):
+        """`--role orchestrator` gets typed out of muscle memory long after the rename.
+        Unaliased it would inherit `fallback_role` (`worker`), whose `delegate` is False —
+        so the one name that used to mean "an agent that splits work" would silently spawn
+        an agent that cannot spawn anything. The alias resolves it all the way: the Role
+        that comes back IS the lead, name included, so the board, the prompt and the
+        stored row agree."""
+        r = roles.load(self.repo)
+        got = roles.get(r, "orchestrator")
+        self.assertEqual(got.name, "lead")
+        self.assertTrue(got.delegate)
+        self.assertEqual(got.prompt, r["lead"].prompt)
+
+    def test_a_dispatcher_and_a_lead_are_given_different_jobs(self):
+        """The one thing that justifies two prompts rather than one with a branch in it: a
+        dispatcher is built to hold nothing and a lead to hold everything about its task.
+        Asserted on the sentence each one opens with, so a merge that quietly re-unified
+        the two texts fails here."""
+        r = roles.load(self.repo)
+        self.assertIn("hold no task", r["dispatcher"].prompt)
+        self.assertNotIn("hold no task", r["lead"].prompt)
+        self.assertIn("own one task from end to end", r["lead"].prompt)
 
     # -- model tiers -----------------------------------------------------
 
