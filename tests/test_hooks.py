@@ -186,6 +186,55 @@ class ActivitySignalTest(unittest.TestCase):
         self.assertIn("w1", rows[0]["payload"])
 
 
+class PreToolGateTest(unittest.TestCase):
+    """The top-orchestrator gate. What a test can pin is the DECISION; that Claude Code
+    honours the deny shape at all is proved live, in an isolated clone."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = store.connect(path=Path(self.tmp.name) / "state.db")
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def payload(self, **kw):
+        return {"session_id": "sess-1", "hook_event_name": "PreToolUse",
+                "tool_name": "Edit", **kw}
+
+    def test_a_top_is_refused_an_edit_and_an_ordinary_agent_is_not(self):
+        """The whole point, both directions in one test — a gate that denies everything
+        enforces nothing useful, and neither does one that denies nothing."""
+        store.create_agent(self.db, name="top-1", role="orchestrator",
+                           session_id="sess-1", is_top=True)
+        reason = hooks.pretool_gate(self.payload(), self.db)
+        self.assertIsNotNone(reason)
+        self.assertIn("sb delegate", reason)
+
+        # Only the file-mutating tools. The top's own job runs through Bash (`sb delegate`).
+        self.assertIsNone(hooks.pretool_gate(self.payload(tool_name="Bash"), self.db))
+
+        # The shape, in the same test because it is the same claim: `PreToolUse` does NOT
+        # use the Stop hook's `{"decision": …}` — its decision lives in `hookSpecificOutput`,
+        # and a deny in the wrong shape is a gate that looks installed and enforces nothing.
+        out = hooks.run_pretool(json.dumps(self.payload()),
+                                db_path=Path(self.tmp.name) / "state.db")
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PreToolUse")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+        self.db.execute("UPDATE agents SET is_top=0 WHERE name='top-1'")
+        self.assertIsNone(hooks.pretool_gate(self.payload(), self.db))
+
+    def test_an_unresolvable_caller_is_allowed(self):
+        """Fails open, like every other hook in this file: a session we cannot name is not
+        one of ours, and a false deny costs a whole agent where a missed one costs an edit
+        somebody can see in `git status`."""
+        store.create_agent(self.db, name="top-1", role="orchestrator",
+                           session_id="sess-1", is_top=True)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(
+                hooks.pretool_gate(self.payload(session_id="somebody-else"), self.db))
+
+
 class SpawnCarriesTheHookTest(unittest.TestCase):
     def test_every_spawn_passes_the_settings_file_and_it_holds_both_hooks(self):
         """Wiring, in the one place every spawn and restore passes through.

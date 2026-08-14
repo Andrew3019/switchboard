@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""The PreToolUse hook's entry point: may this agent make this tool call? Always exit 0.
+
+Payload on stdin, decision on stdout as JSON. Exit 0 whatever happens, for `bin/sb-stop-hook`'s
+reason inverted: a hook that fails must let the call through, and the one decision it does
+make travels in the JSON rather than in the exit code — a non-zero exit here is a blocked
+call the agent never asked for.
+
+Deliberately NOT a `sb` subcommand: every `sb` invocation ticks the doorbell
+(`cli.main` calls `flush_pending`), and this fires before an agent's tool call — ringing its
+doorbell there would inject a poke into the middle of the turn it is working through.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+
+
+def main() -> int:
+    db = None
+    argv = sys.argv[1:]
+    if "--db" in argv:
+        i = argv.index("--db")
+        if i + 1 < len(argv):
+            db = argv[i + 1]
+    try:
+        from switchboard import hooks
+        out = hooks.run_pretool(sys.stdin.read(), db_path=db)
+    except Exception as e:                       # noqa: BLE001 — never trap an agent
+        print(f"sb-pretool-hook: {e}", file=sys.stderr)
+        return 0
+    if out:
+        print(json.dumps(out))
+    return 0
+
+
+raise SystemExit(main())

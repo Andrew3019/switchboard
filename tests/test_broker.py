@@ -401,6 +401,15 @@ class BrokerTest(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertIn(role, joined)
 
+    def test_only_a_top_is_told_the_top_only_rule(self):
+        """The fragment half of the top-orchestrator restriction. Both directions, because
+        a fragment every agent gets says nothing about being top — and an ordinary worker
+        told never to edit a file is an agent that cannot do its job."""
+        self.b.delegate("t", role="orchestrator", me="orch", is_top=True)
+        self.assertIn("TOP orchestrator", " ".join(self.h.started[-1]["prompts"]))
+        self.b.delegate("t", role="worker", me="orch")
+        self.assertNotIn("TOP orchestrator", " ".join(self.h.started[-1]["prompts"]))
+
     def test_the_role_list_is_generated_from_the_roles_and_not_written_down(self):
         """The whole of the requirement, and the only test that can tell the two apart:
         a role this repo invented appears in the spawn prompt with no code or prompt text

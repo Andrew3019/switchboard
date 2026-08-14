@@ -3126,6 +3126,15 @@ class Broker:
         ]
         if ws:
             prompts.append(self._say("spawn.workspace", workspace=ws, path=where))
+        # Where the top's own scope is told to it: it delegates everything and writes
+        # nothing. Placed here, after the workspace fragment and before the role text, for
+        # the workspace fragment's reason — it is information the agent needs BEFORE it
+        # reads the role prompt that acts on it. The role file is deliberately one file at
+        # every depth (`defaults/roles/orchestrator.md`), so top-ness is told at spawn.
+        # This fragment is the understanding only; the rule is the `PreToolUse` gate in
+        # `hooks.py`, which does not depend on the agent having read this.
+        if is_top:
+            prompts.append(self._say("spawn.top"))
         if as_prompt:
             prompts.append(as_prompt)
         elif r.prompt:

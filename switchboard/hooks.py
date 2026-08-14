@@ -72,6 +72,24 @@ BLOCK_REASON = (
     "anyone. You will only be stopped once; if neither verb applies, say why and stop."
 )
 
+# The tools a top orchestrator is refused. Direct file mutation and nothing else: these
+# three have no legitimate top-orchestrator use and no false positives. Bash is deliberately
+# NOT here — it writes files too (`sed -i`, `cat >`), but it also carries the top's own
+# `sb delegate`, so a blanket deny would break the one job it does have. An allowlist for it
+# is a separate decision, deferred rather than guessed at.
+FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+
+# What a refused top is told. It names the way forward, not just the wall: an agent that is
+# only refused looks for another way to do the same edit (Bash can, today), whereas one told
+# that delegating IS the move delegates.
+DENY_REASON = (
+    "switchboard: you are a top orchestrator and top orchestrators do not edit files — "
+    "you stand in the human's own checkout, with no worktree of your own, so an edit here "
+    "lands uncommitted on his branch. Delegate this instead: "
+    '`sb delegate "<task>" --role <role>` gives it a child with its own worktree, and the '
+    "child does the edit. Do not route around this with Bash."
+)
+
 _SETTINGS_DIRNAME = "hooks"
 
 
@@ -102,6 +120,7 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
     """
     gate = _entry_point()
     activity = _entry_point("sb-activity-hook")
+    pretool = _entry_point("sb-pretool-hook")
     tag = hashlib.sha256(str(gate).encode()).hexdigest()[:8]
     d = store.store_dir(cwd) / _SETTINGS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
@@ -146,6 +165,26 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
                                 # is a non-blocking failure, so this only ever fails open.
                                 "timeout": 10,
                                 "statusMessage": "checking for a report…",
+                            }
+                        ]
+                    }
+                ],
+                # The top-orchestrator gate. Matched on the three file-mutating tools by
+                # name rather than fired on every call: a `PreToolUse` hook costs ~148 ms
+                # per matching call (measured for this file's original decision), and a top
+                # orchestrator's own traffic is `sb` over Bash, which must stay free — the
+                # matcher is what keeps the cost off the calls this never has an opinion on.
+                "PreToolUse": [
+                    {
+                        "matcher": "|".join(FILE_TOOLS),
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f"{shlex.quote(str(pretool))} --db {db}"
+                                ),
+                                "timeout": 10,
+                                "statusMessage": "checking write permission…",
                             }
                         ]
                     }
@@ -321,6 +360,42 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
     return BLOCK_REASON
 
 
+def pretool_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
+    """The reason to refuse this tool call, or None to allow it.
+
+    One rule: a TOP orchestrator does not mutate files. `is_top` is stamped by `Broker._top`
+    alone and means the agent Andrew started himself — the one standing in his own main
+    checkout, on his own branch, with no worktree between it and his work. That is the one
+    place in the system where a stray edit cannot be thrown away by deleting a worktree, and
+    "a top delegates instead of doing the work" had until now no mechanism behind it at all:
+    it was a preference in a prompt, and a preference is something a model talks itself out
+    of on the task that looks small enough.
+
+    Fails OPEN in every ambiguous direction, exactly like the Stop gate above and for the
+    same reason: an unresolvable caller is a session that is not ours, and a false deny is
+    an agent that cannot do its job at all. A missed deny costs an edit a person can see in
+    `git status`; a wrong deny costs a whole agent.
+
+    The tool name is re-checked here rather than trusted from the settings file's matcher.
+    The matcher is a performance decision (do not pay the hook's cost on calls we never have
+    an opinion on); the decision is this function's, and it must hold whatever fires it.
+    """
+    if payload.get("tool_name") not in FILE_TOOLS:
+        return None
+    a = _agent_row(db, payload)
+    if a is None:
+        return None
+    try:
+        top = bool(a["is_top"])
+    except (IndexError, KeyError):       # a row from before the column existed
+        return None
+    if not top:
+        return None
+    store.log_event(db, kind="pretool_denied", agent=a["name"],
+                    reason=str(payload.get("tool_name")))
+    return DENY_REASON
+
+
 def _open(stdin_text: str, db_path: Optional[Path]) -> tuple[dict, Optional[sqlite3.Connection]]:
     """Payload and store, or `(…, None)` if either is unusable. Shared by both hooks.
 
@@ -377,6 +452,38 @@ def run(stdin_text: str, db_path: Optional[Path] = None) -> dict[str, Any]:
     finally:
         db.close()
     return {"decision": "block", "reason": reason} if reason else {}
+
+
+def run_pretool(stdin_text: str, db_path: Optional[Path] = None) -> dict[str, Any]:
+    """The `PreToolUse` hook: payload in, hook response out. Never raises, never denies on error.
+
+    The response shape is Claude Code's current `PreToolUse` contract, which is NOT the
+    `{"decision": …}` shape the Stop hook above uses — a `PreToolUse` decision travels in a
+    `hookSpecificOutput` object naming its own event. Checked against Claude Code's hook
+    reference (2026-08-14) rather than assumed from the Stop hook's shape, and then proved
+    live in an isolated clone, because a deny that is silently the wrong shape is a gate
+    that enforces nothing and looks installed.
+
+    An empty object is "no opinion", which leaves the ordinary permission flow to decide.
+    """
+    payload, db = _open(stdin_text, db_path)
+    if db is None:
+        return {}
+    try:
+        reason = pretool_gate(payload, db)
+    except Exception:                            # noqa: BLE001 — never trap an agent
+        return {}
+    finally:
+        db.close()
+    if not reason:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def run_activity(stdin_text: str, db_path: Optional[Path] = None) -> None:

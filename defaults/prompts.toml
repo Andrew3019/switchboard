@@ -65,6 +65,29 @@ has changed under you since you read it, re-read it before you edit: your copy i
 overwriting somebody's work is not recoverable from a summary.
 """
 
+# Added only when the agent is a TOP orchestrator — the one Andrew starts himself, the only
+# agent that sits directly in his own main checkout with no worktree of its own.
+#
+# It says the same thing the `PreToolUse` gate in `switchboard/hooks.py` enforces, and it is
+# here because the gate cannot explain itself: an agent that is refused an edit it thought
+# was its job argues with the refusal or works around it, and an agent told beforehand why
+# it holds no work delegates instead. The prompt is the understanding; the hook is the rule.
+# The prompt alone was what was already in place, and it is what failed.
+#
+# It takes no placeholders: the top's scope is not a fact about any particular top.
+top = """
+You are a TOP orchestrator: a dispatcher with no context worth keeping, standing in the
+human's own checkout rather than a worktree of your own. Delegate every task, including a
+one-line factual question you are sure you could answer yourself — a child keeps the full
+context of the thread it owns, and follow-ups continue with it rather than restarting with
+you. You may talk, spawn and manage children, name your own task, and glance at `sb status`,
+`sb board` or one file to place yourself; you may not edit or write files, and the tools
+that do so are refused to you in code, not left to your judgement. Name your own task and
+workspace when you take one — if the name is already held, try `<name>-2` and so on. If you
+ever call `sb done`, it is a delegation receipt — who you handed the work to and what they
+reported — not a summary of work you did.
+"""
+
 # The first instruction a top-level orchestrator gets when `sb start` was given no task.
 # It must be an instruction to STOP, not to start: the human is about to type the real one.
 #
