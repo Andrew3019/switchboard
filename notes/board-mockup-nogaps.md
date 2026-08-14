@@ -13,6 +13,10 @@ Still a spike — nothing imports it, no product code touched.
 Add `--once` for a single frame, `--width N` to force a pane width, `--source sample`
 for the built-in fixture.
 
+> **Where the blank lines ended up:** rounds 1 and 2 removed every one of them; round 3
+> put a single one back, immediately above the NEEDS YOU bar and nowhere else. Read the
+> three rounds in order — the round 1 frames below are superseded by round 3's.
+
 ## Round 1 — no blank lines
 
 Four blank lines removed, all of them. Nothing put in their place — no rule, no
@@ -84,43 +88,56 @@ competing with the rows. When the pills were also filled, the bars were one of m
 coloured blocks and read as weaker. This is a judgement call on a mockup, though — if
 Andrew wants them plain too it is a two-line change to `HEADER_STYLE` and `NEEDS_STYLE`.
 
+## Round 3 — one blank line back, above NEEDS YOU
+
+Exactly one, and only that one: `render` emits a single empty line immediately above the
+NEEDS YOU bar, because that is the section Andrew acts on and he wants it to breathe.
+Nothing changed under the header, between agent rows, or above the footer — those stay
+gone. The line lives inside the `if wanted:` branch, so a board with nobody to summon has
+no blank line at all.
+
 ## Verification
 
-Real fleet data (the live collector snapshot), rendered at 67 columns:
+Real fleet data (the live collector snapshot), rendered at 67 columns. Note the single
+empty line above `NEEDS YOU` and nowhere else:
 
 ```
 ╭─ switchboard ───────────────────────────────────────────────────╮
-│  switchboard · 14 alive · 1 blocked · 13 unread                 │
+│  switchboard · 17 alive · 2 blocked · 13 unread                 │
 │  ○ main-3           failed   5d10h                              │
-│  ○   split-fixer    failed   4d09h  mail: 4 unread              │
+│  ○   split-fixer    failed   4d10h  mail: 4 unread              │
 │  ○     worker-1     done     5d13h                              │
 │      + 4 archived                                               │
-│  ○ main-10          failed    1h48                              │
+│  ○ main-10          failed    1h57                              │
 │  ◌   worker-9       working  1d04h  STALLED — idle 1d04h        │
-│  ○   reviewer-14    done     15h10                              │
+│  ○   reviewer-14    done     15h18                              │
 │      + 10 archived                                              │
-│  ○ main-11          done      1h46                              │
+│  ○ main-11          done      1h54                              │
 │      + 10 archived                                              │
-│  ◌ main-15          working    10m  STALLED — idle 10m          │
-│  ◌   worker-24      working    55m  STALLED —… · mail: 1 unread │
-│  ◌   researcher-20  working    55m  STALLED —… · mail: 1 unread │
-│  ○   worker-26      done       16m                              │
-│  ●   worker-27      working    10m                              │
+│  ◐ main-15          blocked     1m  BLOCKED — decision now thr… │
+│  ◌   worker-24      working   1h04  STALLED —… · mail: 1 unread │
+│  ◌   researcher-20  working   1h04  STALLED —… · mail: 1 unread │
+│  ○   worker-26      done       24m                              │
+│  ○   worker-27      done        6m                              │
+│  ●   worker-29      working     5m                              │
 │      + 7 archived                                               │
-│  ◌ board-fix        working     2m  STALLED — idle 2m           │
-│  ○   researcher-22  done      1h01  mail: 1 unread              │
-│  ○   researcher-23  done       26m  mail: 1 unread              │
-│  ◐   worker-25      blocked    12m  BLOCKED — closed… · UNDEL 1 │
-│  ●   worker-28      working     2m                              │
+│  ◌ board-fix        working    58s  STALLED — idle 58s          │
+│  ○   researcher-22  done      1h10  mail: 1 unread              │
+│  ○   researcher-23  done       34m  mail: 1 unread              │
+│  ◐   worker-25      blocked    20m  BLOCKED — closed… · UNDEL 1 │
+│  ●   worker-28      working     1m                              │
+│  ●   researcher-31  working     1m                              │
+│  ●   researcher-32  working     1m                              │
 │      + 5 archived                                               │
 │    + 305 archived                                               │
+│                                                                 │
 │  NEEDS YOU · 6                                                  │
+│   BLOCKED  main-15        decision now three ways on the dispa… │
 │   BLOCKED  worker-25      closed your right pane by accident; … │
 │   IDLE     worker-9       idle 1d04h, nothing running           │
-│   IDLE     main-15        idle 10m, nothing running             │
-│   IDLE     worker-24      idle 55m, nothing running             │
-│   IDLE     researcher-20  idle 55m, nothing running             │
-│   IDLE     board-fix      idle 2m, nothing running              │
+│   IDLE     worker-24      idle 1h04, nothing running            │
+│   IDLE     researcher-20  idle 1h04, nothing running            │
+│   IDLE     board-fix      idle 58s, nothing running             │
 │ live snapshot · mockup, not the board                           │
 ╰─────────────────────────────────────────────────────────────────╯
 ```
@@ -139,6 +156,7 @@ The built-in sample at 67 columns, which is the only fixture with an at-a-prompt
 │  ◌     qa-31        idle       12m  STALLED — idle 1… · UNDEL 2 │
 │  ✗   worker-19      idle       31m  GONE — herdr has no such a… │
 │      + 1 archived                                               │
+│                                                                 │
 │  NEEDS YOU · 3                                                  │
 │   BLOCKED  researcher-22  at a prompt, waiting on you           │
 │   BLOCKED  worker-25      which pane should this render into?   │
@@ -151,7 +169,7 @@ The same fleet at 40 columns — one line per agent, no wrap, reason column drop
 
 ```
 ╭─ switchboard ────────────────────────╮
-│  switchboard · 14 alive · 1 blocked… │
+│  switchboard · 17 alive · 2 blocked… │
 │  ○ main-3  failed                    │
 │  ○   …xer  failed   mail: 4 unread   │
 │  ○     w…  done                      │
@@ -162,23 +180,27 @@ The same fleet at 40 columns — one line per agent, no wrap, reason column drop
 │      + 10 archived                   │
 │  ○ ma…-11  done                      │
 │      + 10 archived                   │
-│  ◌ ma…-15  working  STALLED — idle … │
+│  ◐ ma…-15  blocked  BLOCKED — decis… │
 │  ◌   …-24  working  STAL… · 1 unread │
 │  ◌   …-20  working  STAL… · 1 unread │
 │  ○   …-26  done                      │
-│  ●   …-27  working                   │
+│  ○   …-27  done                      │
+│  ●   …-29  working                   │
 │      + 7 archived                    │
 │  ◌ bo…fix  working  STALLED — idle … │
 │  ○   …-22  done     mail: 1 unread   │
 │  ○   …-23  done     mail: 1 unread   │
 │  ◐   …-25  blocked  BLOCK… · UNDEL 1 │
 │  ●   …-28  working                   │
+│  ●   …-31  working                   │
+│  ●   …-32  working                   │
 │      + 5 archived                    │
 │    + 305 archived                    │
+│                                      │
 │  NEEDS YOU · 6                       │
+│   BLOCKED  main-15                   │
 │   BLOCKED  worker-25                 │
 │   IDLE     worker-9                  │
-│   IDLE     main-15                   │
 │   IDLE     worker-24                 │
 │   IDLE     researcher-20             │
 │   IDLE     board-fix                 │
@@ -188,11 +210,24 @@ The same fleet at 40 columns — one line per agent, no wrap, reason column drop
 
 Checked programmatically at 40, 56, 67 and 100 columns over both the live snapshot and
 the sample, measuring display columns the way the script's own `vlen` does: every line is
-exactly the requested width (so nothing wraps at any of them), and no line inside the
-panel is empty.
+exactly the requested width (so nothing wraps at any of them), and each frame contains
+exactly ONE empty line inside the panel — the one immediately above the NEEDS YOU bar.
 
-Not proven: only the live snapshot and the built-in sample were rendered. Fleet shapes
-neither contains — a very deep tree, a name far longer than any here, more than six
-agents wanting a person at once — were not exercised, and nothing here was checked in a
-real terminal; the frames above are piped output with `NO_COLOR` set, so the colours
-themselves are unverified by eye.
+The nobody-to-summon case, rendered from a two-agent snapshot in a scratch dir via
+`SB_PANEL_DIR` (both agents healthy, both holding unread mail). No NEEDS YOU section, and
+therefore no blank line anywhere — and mail alone does not summon:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 2 alive · 4 unread                               │
+│  ● main-1      working     5s  mail: 3 unread                   │
+│  ●   worker-2  working     2s  mail: 1 unread                   │
+│ live snapshot · mockup, not the board                           │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+Not proven: fleet shapes none of these three inputs contains — a very deep tree, a name
+far longer than any here, more than six agents wanting a person at once (the `+ N more`
+line) — were not exercised, and nothing here was checked in a real terminal; the frames
+above are piped output with `NO_COLOR` set, so the colours themselves are unverified by
+eye.

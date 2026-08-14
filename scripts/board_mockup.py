@@ -593,12 +593,13 @@ def render(agents: list[dict], width: int, source_note: str,
     body.append(bar(" " + " · ".join(["switchboard"] + summary_bits(agents)), inner,
                     HEADER_STYLE))
 
-    # NO BLANK LINES ANYWHERE. Every row sits directly under the one above it and the
-    # indentation alone carries the tree. An earlier draft broke groups apart with a
+    # NO BLANK LINES BETWEEN AGENTS. Every row sits directly under the one above it and
+    # the indentation alone carries the tree. An earlier draft broke groups apart with a
     # blank line above each top-level agent and its direct children; with one-line rows
     # that put an empty line between nearly every pair and roughly doubled the board's
     # height, so Andrew had it removed outright — not swapped for a rule or padding.
-    # The filled bars and the panel border are what separate the sections now.
+    # The filled bars and the panel border are what separate the sections now. The board
+    # draws exactly one blank line in total, above NEEDS YOU; see there for why.
     for row in rows:
         if is_collapsed(row):
             label = ("  " * row["depth"]) + f"+ {row['count']} archived"
@@ -640,6 +641,11 @@ def render(agents: list[dict], width: int, source_note: str,
     wanted = [a for a in agents if needs_kind(a) == "blocked"]
     wanted += [a for a in agents if needs_kind(a) == "idle"]
     if wanted:
+        # The ONLY blank line on the board. Every other gap went when Andrew asked for
+        # none; this one came back because NEEDS YOU is the part he acts on and it earns
+        # a breath above it. Not a precedent — nothing goes under the header, between
+        # agent rows or above the footer.
+        body.append(Text(""))
         body.append(bar(f" NEEDS YOU · {len(wanted)}", inner, NEEDS_STYLE))
         shown = wanted[:6]
         w_kind = 7                          # "BLOCKED", the longer of the two words
