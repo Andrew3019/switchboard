@@ -164,6 +164,19 @@ but stupid levels of it are not wanted and have not been observed. — confirmed
 show: a single space for each repo, a single space for each dispatcher, and everything
 else nested under a repo. — confirmed 2026-08-14
 
+**Where that model can bend, and it is deliberately left bending.** herdr picks one pane
+already sitting in a repo's folder to serve as that repo's group parent. A dispatcher's
+home is in that folder, so a dispatcher is a candidate like any other pane. In practice
+Andrew's own manually opened pane on the repo has always been picked first, so dispatchers
+have stayed separate — the other outcome has been seen once, in a throwaway clone, and
+never in the live fleet. If a dispatcher were picked, that repo's space would *be* the
+dispatcher, and every worktree agent for the repo, including other dispatchers' children,
+would nest inside it. Nothing breaks functionally; the view is muddled. The only real fix
+is a small flag in herdr, which Andrew has chosen not to take; the alternative of moving
+dispatchers outside the repo would mean separating a dispatcher's home from the repo it
+dispatches into, which `sb start` does not support today. So this is a known limitation,
+not pending work. — confirmed 2026-08-14
+
 **A dispatcher relays; it does not interpret.** Its job is basically to relay Andrew's
 words to new leads, and to orchestrate the creation of the worktrees, workspaces and leads
 that takes — without assuming too much, and without adding instructions of its own about
@@ -176,6 +189,10 @@ agents to improve its own decisions; both of those are a lead's judgement now
 
 **Work that belongs in another repo is a question, not a spawn.** A dispatcher may hand
 work into a different repo — but it asks first, and it blocks without starting the task.
+This is a separate thing from the grouping limitation above, and the two should not be run
+together: here the work was in a repo switchboard had never been set up in, and an agent
+with no way to root a child there forked a worktree of *this* repo instead and appeared in
+this repo's space. Nothing was adopted by anything; an agent was simply in the wrong repo.
 — confirmed 2026-08-14
 
 **A lead's children share its worktree, so the lead assigns disjoint files and
@@ -378,13 +395,6 @@ nested one — was answered on 2026-08-09 by the `is_top` stamp and moved to Pro
 decisions. That answer covered where an agent's children go; it never covered what an
 agent may do itself, which is now answered too, by the split into two roles with two
 prompts. Both are in Product decisions and neither is open. What follows is.*
-
-**A dispatcher can still be adopted by herdr as a repo group's permanent parent.** If a
-dispatcher's workspace is the first one open on a repo when that repo's first worktree
-child appears, herdr stamps the dispatcher as the group's parent, and one dispatcher ends
-up doing double duty as the repo's space — which is not the one-space-per-repo,
-one-space-per-dispatcher model above. The fix belongs in herdr, is not built, and there is
-nothing switchboard can pass to opt out. — open 2026-08-14
 
 **Real cross-repo dispatch does not exist and is not close.** The store is per repo, so a
 child in another repo would have no parentage, no messaging, no status, no board row and
