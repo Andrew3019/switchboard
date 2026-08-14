@@ -30,15 +30,43 @@ Nothing is wired into `sb` and `rich` is in no packaging file. That is a later s
 
 - A rounded bordered panel with a `switchboard` title.
 - A filled header bar (white on blue) carrying the counts.
-- One line per agent: glyph, indented name, the state as a small filled **pill**
-  (green `working`, yellow `done`, grey `idle`, red `blocked`/`failed`/`gone`), the
-  idle age, and then the trouble marker / mail note in the tail.
-- A second, **dim** line per agent: the done summary (`✓ …`), the idle excuse, or the
-  task head (`↳ …`).
+- **One line per agent, like the real board**: glyph, indented name, the state as a
+  small filled **pill** (green `working`, yellow `done`, grey `idle`, red
+  `blocked`/`failed`/`gone`), the idle age, then the trouble marker and the mail note.
+- **No second line.** It drew a dim `↳ task` / `✓ summary` line per agent until Andrew
+  said he does not read those on a board. They are gone rather than demoted; `sb
+  status` still prints both.
 - Group breaks as whitespace, and archived subtrees collapsed to `+ N archived ·
   N need you` — the same rule as `status.display_rows`.
 - A `NEEDS YOU` bar (black on yellow) with the agents asking for a person.
 - A dim footer saying which data source the frame came from.
+
+## BLOCKED and MAIL are what the row protects
+
+Andrew watches a board for two things — an agent that is BLOCKED, and mail nobody has
+picked up — so those two are the last thing the row gives up, not the first.
+
+- **The tail is budgeted first.** `render` reserves columns for the narrowest form of
+  every row's marker+mail *before* it spends any width on the name, the age or the
+  pill's padding. That is the reverse of `board._compose`, which fills left to right
+  and lets the tail have the remainder.
+- **The wording degrades before either piece is dropped** (`tail_forms`, widest rung
+  first): `BLOCKED — which pane should this render into? · mail: 1 unread` →
+  `BLOCKED — … · 1 unread` → `BLOCKED · 1 unread`. `mail: UNDELIVERED 2, 5m` shortens
+  to `UNDEL 2`.
+- **Below the ladder** (`squeeze`) the marker's word is clipped and the mail is kept
+  whole — the pill beside it already says `blocked` and NEEDS YOU names the agent
+  again, so an unanswered message is the thing a clip there would really lose. This is
+  the same trade `board._MAIL_RESERVE` makes.
+- **The name gives way first, and keeps its tail**: `researcher-22` clips to
+  `rese…-22`, not `res…`, because the head is the half every sibling shares
+  (`clip_name`).
+- Measured on the sample fleet: the marker word and the mail count both survive intact
+  down to **32 columns**; between 24 and 31 the pane is narrower than
+  `AT PROMPT · 1 unread` and something must be cut. Below 40 the name column is doing
+  most of the giving-up, which is the visible cost of this rule.
+
+The NEEDS YOU section is untouched — Andrew wants that revisited separately.
 
 Colour is decoration only: every distinction is also a word or a glyph, so `NO_COLOR`
 loses polish and no information. Tuned for a **dark terminal only** — no palette
@@ -72,24 +100,17 @@ pane in Andrew's focused tab), `NO_COLOR=1` so it pastes as text:
 │  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
 │                                                                 │
 │  ● board-fix         working      2s                            │
-│       ↳ Await my instructions.                                  │
 │                                                                 │
-│  ◐   researcher-22   done         3m  AT PROMPT — waiting on y… │
-│       ✓ that file does not exist on any branch — said so and s… │
+│  ◐   researcher-22   done         3m  AT PROMPT — w… · 1 unread │
 │                                                                 │
 │  ○   researcher-23   done         3m  mail: 1 unread            │
-│       ✓ task file missing — reported it and stopped, nothing c… │
 │                                                                 │
 │  ●   researcher-26   working     15s                            │
-│       ↳ Read notes/task-board-ui-deps.md and do exactly what i… │
 │                                                                 │
 │  ◐   worker-25       blocked      4m  BLOCKED — which pane sho… │
-│       ↳ Build a runnable mockup of a richer board.              │
-│  ◌     qa-31         idle        12m  STALLED — idle 12m        │
-│       ↳ Verify the mockup at 40/56/100 columns.                 │
+│  ◌     qa-31         idle        12m  STALLED — idle… · UNDEL 2 │
 │                                                                 │
 │  ✗   worker-19       idle        31m  GONE — herdr has no such… │
-│       ↳ Old pane, herdr has no such agent.                      │
 │                                                                 │
 │      + 1 archived                                               │
 │                                                                 │
@@ -104,31 +125,51 @@ pane in Andrew's focused tab), `NO_COLOR=1` so it pastes as text:
 ╰─────────────────────────────────────────────────────────────────╯
 ```
 
+The same fleet at **40 columns** — the name column is what pays for the tail, and it
+keeps its numbers rather than its shared prefix:
+
+```
+│  ● bo…fix  working                   │
+│                                      │
+│  ◐   …-22  done     AT P… · 1 unread │
+│                                      │
+│  ○   …-23  done     mail: 1 unread   │
+│                                      │
+│  ●   …-26  working                   │
+│                                      │
+│  ◐   …-25  blocked  BLOCKED — which… │
+│  ◌     q…  idle     STALL… · UNDEL 2 │
+│                                      │
+│  ✗   …-19  idle     GONE — herdr ha… │
+```
+
 The same frame with colour on, first rows through `cat -v`, as evidence the fills are
 real ANSI and not drawn characters — `1;37;44` header bar, `1;30;42` green `working`
 pill, `1;30;43` yellow `done` pill:
 
 ```
 ^[[34m│^[[0m ^[[1;37;44m switchboard · 6 alive · 1 at prompt · 1 blocked · …^[[0m ^[[34m│^[[0m
-^[[34m│^[[0m  ^[[1;32m●^[[0m board-fix        ^[[1;30;42m working ^[[0m^[[2m     2s^[[0m   ^[[34m│^[[0m
-^[[34m│^[[0m  ^[[1;33m◐^[[0m ^[[1m  researcher-22^[[0m  ^[[1;30;43m done    ^[[0m^[[2m     3m^[[0m^[[33m  AT PROMPT …^[[0m
+^[[34m│^[[0m  ^[[1;32m●^[[0m board-fix        ^[[1;30;42m working ^[[0m        ^[[34m│^[[0m
 ```
 
-And on real live data at 56 columns (trimmed):
+And on real live data at 56 columns (trimmed). Note the age column is gone: a live
+agent's `BLOCKED — …` reserve did not leave room for it, and the age is what this
+layout gives up first:
 
 ```
 ╭─ switchboard ────────────────────────────────────────╮
-│  switchboard · 13 alive · 12 unread                  │
+│  switchboard · 12 alive · 1 blocked · 12 unread      │
 │                                                      │
-│  ◌ main-15           working      1m  STALLED — idl… │
-│       ↳ Await my instructions.                       │
+│  ○ main-3            failed                          │
 │                                                      │
-│  ◌   worker-24       working     20m  STALLED — idl… │
-│       ↳ Read .switchboard/tasks/top-orchestrator-en… │
-│  ●   worker-26       working      1m                 │
-│       ↳ Read .switchboard/tasks/dispatcher-lead-spl… │
+│  ○   split-fixer     failed    mail: 4 unread        │
+│  ○     worker-1      done                            │
 │                                                      │
-│      + 6 archived                                    │
+│      + 4 archived · 1 need you                       │
+│                                                      │
+│  ○ main-10           failed                          │
+│                                                      │
+│  ◌   worker-9        working   STALLED — idle 1d03h  │
 ```
 
 ## Verification
@@ -137,13 +178,18 @@ And on real live data at 56 columns (trimmed):
   columns with the east-asian-width rule `board._visible_len` uses, for **widths 24
   through 120**, on both sample and live data, with colour forced on: all 97 × 2 frames
   had every line exactly the requested width. Narrowest-first the layout gives up the
-  pill's padding, then the name column, then the tail; the age column goes last.
+  age column, then the pill's padding, then the name (to six columns), and only then
+  starts cutting the marker/mail tail.
+- **BLOCKED and mail survive down to 32 columns.** Checked frame by frame over the same
+  24–120 sweep on the sample fleet: the `BLOCKED`/`GONE`/`AT PROMPT`/`STALLED` word and
+  the mail count are both present on their rows at every width ≥ 32 (`GONE` alone holds
+  to 28). Below that the pane is narrower than `AT PROMPT · 1 unread` and one of them
+  has to be cut — the marker's, by `squeeze`.
 - **The loop and resize work.** Run under a pty at 56 columns, resized to 100 columns
   mid-run with a `SIGWINCH`: it re-rendered at the new width immediately (the signal
   only cuts the 2-second sleep short; the width itself comes from `console.width`,
   re-read every render). `Ctrl-C` exits cleanly and restores the screen.
-- Read at 40, 56, 67 and 100 columns by eye. At 40 the trouble markers drop off the
-  row tail — they are still in NEEDS YOU, which is the point of that section.
+- Read at 40, 48, 56, 67 and 100 columns by eye, on both sample and live data.
 
 Unproven / not done:
 
@@ -159,11 +205,12 @@ Unproven / not done:
 
 Reported, not fixed — I changed no product code.
 
-1. **The second dim line per agent.** `board.layout` charges one screen line per agent
-   and `_starts_group`/`_max_top` count in those lines, so a two-line row means
-   `costs` becomes 2 (or 3 with a break) per agent and the scroll maths follows. The
-   click mapping itself is fine: `emit` records the owner per *line*, so both lines
-   would just carry the same agent.
+1. **Reserving for the tail first inverts `_compose`.** `board._compose` fills the row
+   left to right and gives the tail the remainder, with `_MAIL_RESERVE` as its one
+   concession; this mockup budgets the marker+mail first and lets the name, the age and
+   the pill's padding bid for what is left. That is a change to how the columns are
+   measured in `layout`, not a paint job — and it means a single agent with a long
+   `BLOCKED — …` costs every other row its age column.
 2. **Panel borders cost 4 columns** of the width budget (2 border, 2 padding) on every
    row, which at 40 columns is most of a name.
 3. **A background fill is an assertion about the terminal's background.** This mockup

@@ -8,9 +8,14 @@
 
 This is a spike so Andrew can look at the "bold + panelled" look in a real pane and
 say yes/no/other: a rounded bordered panel with a title, a filled header bar, each
-agent's state as a small colour-filled pill, dim secondary text for the task/summary,
-and a distinctly styled NEEDS YOU section. Sketch (c) from `notes/board-ui-looks.md`
-crossed with (b), rendered through `rich`.
+agent's state as a small colour-filled pill, and a distinctly styled NEEDS YOU section.
+Sketch (c) from `notes/board-ui-looks.md` crossed with (b), rendered through `rich`.
+
+ONE LINE PER AGENT, like the real board. It drew a second dim line with the task or the
+done summary until Andrew said he does not read those on a board; they are gone, not
+demoted, and `sb status` still shows both. What he does watch for is BLOCKED and MAIL,
+so the row reserves columns for those two BEFORE it spends any on the name, the age or
+the pill's padding — see `tail_forms` and the budget in `render`.
 
 Tuned for a DARK terminal only. Light-terminal support is explicitly out of scope, so
 there is no palette switch and no background detection here. Colour stays decorative —
@@ -22,11 +27,7 @@ snapshot.json`, the same file `switchboard/panel.py` reads) and falls back to bu
 sample data when there is none, so it runs anywhere. The footer says which it used.
 
 Three things it deliberately does NOT do, because they belong to the real board and
-this file must not pretend to be it: no mouse, no click-to-focus, no scrolling. It
-also draws a *second*, dim line per agent, which the real board cannot do without
-`layout()` charging two screen rows for that agent and `emit()` recording the owner on
-both — the row-to-agent mapping is per line already, so that is a layout change, not
-an impossible one. Noted in `notes/board-mockup.md`.
+this file must not pretend to be it: no mouse, no click-to-focus, no scrolling.
 
 Never imports `switchboard.*`. It reads the published JSON as plain dicts, so it runs
 from a venv with no repo on `sys.path` and cannot be the thing that opens the store.
@@ -109,6 +110,20 @@ def clip(s: str, cols: int) -> str:
         out += ch
         used += w
     return out + "…"
+
+
+def clip_name(s: str, cols: int) -> str:
+    """A name cut to `cols`, KEEPING ITS TAIL — `researcher-22` → `re…-22`.
+
+    Not `clip`, which keeps the head. Switchboard names are a role and a number, and at
+    the width the tail reserve leaves for this column the head is the half every sibling
+    shares: three rows reading `res…` are three rows a human cannot tell apart, where
+    `re…-22` and `re…-23` still name somebody.
+    """
+    if vlen(s) <= cols or cols < 4:
+        return clip(s, cols)
+    keep = 3                                # the number, near enough always
+    return clip(s, cols - keep) + s[-keep:]
 
 
 def pad(s: str, cols: int) -> str:
@@ -233,6 +248,7 @@ SAMPLE: list[dict] = [
          alive=True, turn="idle", stalled=True, gone=False, unread=2, age=1500,
          idle=760, workspace="qa-31", task="Verify the mockup at 40/56/100 columns.",
          blocked_why=None, summary=None, undelivered=2, undelivered_age=300,
+         waiting_to_be_rung=True,
          archived=False, at_prompt=False, blocked=False, finished=False),
     dict(name="worker-19", role="worker", parent="board-fix", depth=1, state="working",
          alive=False, turn="working", stalled=False, gone=True, unread=0, age=4300,
@@ -306,25 +322,95 @@ def marker(a: dict) -> str:
     return ""
 
 
-def mail_note(a: dict) -> str:
+def mail_note(a: dict, *, short: bool = False) -> str:
+    """The mail waiting here. `short` is the form that must survive a narrow pane.
+
+    Words, never a glyph, for `board.mail_note`'s reason: an envelope character is one
+    column wide in some terminals and two in others, and a row one column wider than it
+    measured is the wrap everything here is built to prevent.
+    """
     bits = []
     if g(a, "waiting_to_be_rung"):
-        bits.append(f"UNDELIVERED {g(a, 'undelivered', 0)}, "
-                    f"{fmt_age(int(g(a, 'undelivered_age', 0)))}")
+        n, age = g(a, "undelivered", 0), fmt_age(int(g(a, "undelivered_age", 0)))
+        bits.append(f"UNDEL {n}" if short else f"UNDELIVERED {n}, {age}")
     told = int(g(a, "unread", 0)) - int(g(a, "undelivered", 0))
     if told > 0:
         bits.append(f"{told} unread")
-    return ("mail: " + " · ".join(bits)) if bits else ""
+    if not bits:
+        return ""
+    joined = " · ".join(bits)
+    return joined if short else "mail: " + joined
 
 
-def secondary(a: dict) -> str:
-    """The dim line under the row: what this agent is for, or what came of it."""
-    if g(a, "finished") and g(a, "summary"):
-        return "✓ " + str(g(a, "summary"))
-    if g(a, "idle_excuse"):
-        return "· " + str(g(a, "idle_excuse"))
-    task = g(a, "task")
-    return "↳ " + str(task) if task else ""
+def marker_short(a: dict) -> str:
+    """The marker cut to its WORD — `BLOCKED`, `AT PROMPT`, `GONE`, `STALLED`.
+
+    The half of the marker that must never be the thing a narrow pane drops: the reason
+    after the dash is recoverable from the agent's own pane, the word is not.
+    """
+    m = marker(a)
+    return m.split(" — ")[0] if " — " in m else m
+
+
+def tail_forms(a: dict) -> list[str]:
+    """Everything the row's tail could say, WIDEST FIRST, narrowest last.
+
+    Andrew watches for two things — BLOCKED and MAIL — so those are what the row gives
+    up last. The ladder degrades the *wording* before it gives up either piece, and the
+    last rung (the word plus the count) is what `render` reserves columns for before it
+    spends any on the name, the age or the pill's padding. Only a pane too narrow for
+    even that rung clips this, which is the one case the layout cannot honour.
+
+    The task head and the done summary are not here at all. They were the dim second
+    line this mockup used to draw; Andrew asked for one line per agent and does not read
+    them on the board, so they are gone rather than demoted — `sb status` still has both.
+    """
+    full_m, short_m = marker(a), marker_short(a)
+    full_x, short_x = mail_note(a), mail_note(a, short=True)
+    if full_m and full_x:
+        forms = [f"{full_m} · {full_x}", f"{full_m} · {short_x}",
+                 f"{short_m} · {short_x}"]
+    elif full_m:
+        forms = [full_m, short_m]
+    elif full_x:
+        forms = [full_x, short_x]
+    else:
+        return []
+    out: list[str] = []
+    for f in forms:                         # the ladder, without repeated rungs
+        if f not in out:
+            out.append(f)
+    return out
+
+
+def squeeze(a: dict, room: int) -> str:
+    """The tail when no whole rung of the ladder fits: fill `room`, mail first.
+
+    Two jobs. It uses the room a rung would have left empty — a 25-column tail says
+    `BLOCKED — which pane s…`, not a bare `BLOCKED` with fifteen columns of nothing
+    after it — and it decides what gets cut when the pane is narrower than even the
+    bottom rung: the marker's REASON goes, then its word, and the mail is kept whole to
+    the last. Mail is the shorter of the two and the only one with no other
+    representation on the row — the pill beside it already says `blocked`, and NEEDS
+    YOU below names the agent again — so an unanswered message is what a clip here
+    would really lose. `board._MAIL_RESERVE` makes the same trade for the same reason.
+    """
+    full, word = marker(a), marker_short(a)
+    if not full:
+        return clip(mail_note(a) if vlen(mail_note(a)) <= room
+                    else mail_note(a, short=True), room)
+    for x in (mail_note(a), mail_note(a, short=True)):
+        if not x:
+            continue
+        gap = vlen(x) + 3
+        if room - gap >= vlen(word) + 2:    # the word survives, plus a hint of the why
+            return clip(full, room - gap) + " · " + x
+    x = mail_note(a, short=True)
+    if x:
+        if room - vlen(x) - 3 >= 1:
+            return clip(word, room - vlen(x) - 3) + " · " + x
+        return clip(x, room)                # the last thing standing
+    return clip(full if room >= vlen(word) + 2 else word, room)
 
 
 def wants_you(a: dict) -> bool:
@@ -440,18 +526,32 @@ def render(agents: list[dict], width: int, source_note: str,
     names = [("  " * int(g(a, "depth", 0))) + str(g(a, "name", "?")) for a in live]
     states = [display_state(a) for a in live]
 
-    # The column budget, narrowest-first. A 40-column pane cannot hold a padded pill,
-    # a full name and an age, so each is given up in turn — the age last, because two
-    # rows that both say `idle` are told apart by nothing else.
-    compact = False
-    w_state = max([0] + [vlen(s) for s in states]) + 2
-    w_name = max([0] + [vlen(n) for n in names])
-    fixed = 3 + 2 + 2 + 5                   # " ● ", gaps, age column
-    if fixed + w_name + w_state > inner:
-        compact, w_state = True, w_state - 2
-    if fixed + w_name + w_state > inner:
-        w_name = max(6, inner - fixed - w_state)
-    show_age = fixed + w_name + w_state <= inner
+    # THE TAIL IS RESERVED FIRST. Everything else on the row bids for what is left.
+    # BLOCKED and MAIL are what Andrew watches for, so the narrowest rung of every
+    # row's ladder (`tail_forms`) is charged to the budget before the name, the age or
+    # the pill's padding get any of it — the reverse of the usual "fill until full",
+    # and the whole point of the layout below.
+    reserve = max([0] + [vlen(f[-1]) for f in
+                         (tail_forms(a) for a in live) if f])
+    reserve += 2 if reserve else 0          # the two spaces before it
+    w_state_full = max([0] + [vlen(s) for s in states]) + 2
+    w_name_full = max([0] + [vlen(n) for n in names])
+
+    # Given up in this order as the pane narrows: the age first (the pill already says
+    # whether anything is running), then the pill's own padding, then the name — down to
+    # six columns, below which a name is not a name. Only after all three is the reserve
+    # itself cut, which is the one case a pane too narrow for `BLOCKED · 2 unread`
+    # forces and nothing here can prevent.
+    fixed = 3 + 2                           # " ● " and the gap before the pill
+    for show_age, compact in ((True, False), (False, False), (False, True)):
+        w_state = w_state_full - (2 if compact else 0)
+        w_name = w_name_full
+        age_cols = 7 if show_age else 0
+        if fixed + w_name + w_state + age_cols + reserve <= inner:
+            break
+    else:
+        w_name = max(6, inner - fixed - w_state - reserve)
+    left_used = fixed + w_name + w_state + (7 if show_age else 0)
 
     body: list[Any] = []
     body.append(bar(" " + " · ".join(["switchboard"] + summary_bits(agents)), inner,
@@ -474,35 +574,27 @@ def render(agents: list[dict], width: int, source_note: str,
         line.append(" ")
         line.append(gl, style=GLYPH_STYLE.get(gl, ""))
         line.append(" ")
-        line.append(pad(clip(("  " * int(g(row, "depth", 0))) + str(g(row, "name", "?")),
-                             w_name), w_name),
+        indent = "  " * int(g(row, "depth", 0))
+        line.append(pad(indent + clip_name(str(g(row, "name", "?")),
+                                           max(1, w_name - vlen(indent))), w_name),
                     style="bold" if wants_you(row) else "")
         line.append("  ")
         line.append_text(pill(display_state(row), w_state, compact))
-        used = 3 + w_name + 2 + w_state
         if show_age:
             line.append("  " + f"{fmt_age(int(g(row, 'idle', 0))):>5}", style=DIM)
-            used += 7
 
-        # The tail: the trouble first, then the mail. Same ranking as `detail_bits`,
-        # minus rank three — the task/summary has its own dim line below.
-        tail = marker(row) or ""
-        mail = mail_note(row)
-        if tail and mail and vlen(tail) + 3 + vlen(mail) > inner - used - 3:
-            tail = mail if wants_you(row) is False else tail
-        elif mail and tail:
-            tail = tail + " · " + mail
-        elif mail:
-            tail = mail
-        if tail and inner - used > 12:
-            style = "red" if g(row, "gone") else "yellow"
-            line.append("  " + clip(tail, inner - used - 2), style=style)
+        # The widest rung of this row's ladder that fits in the room the budget above
+        # kept for it. Never dropped: a row with a tail always draws one, clipped only
+        # when even the narrowest rung is wider than the pane.
+        forms = tail_forms(row)
+        if forms:
+            room = max(1, inner - left_used - 2)
+            # The whole tail if it fits; otherwise `squeeze`, which fills the room it
+            # has rather than falling back to a short rung and leaving space unused.
+            text = forms[0] if vlen(forms[0]) <= room else squeeze(row, room)
+            line.append("  " + clip(text, room),
+                        style="red" if g(row, "gone") else "yellow")
         body.append(line)
-
-        note = secondary(row)
-        if note:
-            body.append(Text(clip("      " + note, inner), style=DIM, no_wrap=True,
-                             overflow="crop"))
 
     wanted = [a for a in agents if needs_human(a)]
     if wanted:
