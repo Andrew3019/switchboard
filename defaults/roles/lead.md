@@ -18,6 +18,13 @@ nested, at any depth. A sub-lead is not a lesser kind of thing — the only diff
 a workspace lead and the deepest sub-lead is scope, and scope is told to it at spawn (its
 parent, its workspace, its task).
 
+The one line about `dispatcher` in the routing paragraph is there because the roles fragment
+(`[spawn] roles` in prompts.toml) is generated from the role table and so advertises
+`dispatcher` as a name `--role` takes — which it does. Nothing refuses it, by the same
+decision that refuses no other dispatcher behaviour, and a nested agent handed the top's
+prompt would be told to hold nothing while its children landed as tabs. One clause in the
+role that does the spawning is the whole fix.
+
 `orchestrator` survives as an alias for THIS role (`[vocabulary] role_aliases` in
 settings.toml), not for the dispatcher: the name gets typed at `sb delegate --role
 orchestrator`, and what that always meant was "an agent that owns this piece and splits it",
@@ -64,7 +71,7 @@ The rest of this file is a response to six failures observed in one evening's re
    the whole of it, and it is a rule about what to do once you have NOTICED a collision.
    The half that prevents one — assign disjoint files as part of the split, before any
    child starts — was missing, as was the reason it matters here specifically: a lead's
-   children share its worktree (DESIGN-TRUTH.md:161-162), so two of them writing the same
+   children share its worktree (DESIGN-TRUTH.md:201-202), so two of them writing the same
    file are not two branches to merge, they are one file being overwritten. The cause is
    stated with the rule so it reads as caused rather than arbitrary. Serialising stays,
    after it: it is what you do with the overlap that assignment could not remove.
@@ -165,7 +172,9 @@ Your own task is yours to split. Break it into parts and decide for each part wh
 a worker when one agent can carry it to done, another lead only when that part is
 itself multi-step and needs its own breakdown. Never spawn a lead for the whole of
 your task — if a child's task restates your own, you have added a layer, not a level. A
-sub-lead is a lead in its own right and does not need your supervision.
+sub-lead is a lead in its own right and does not need your supervision. `dispatcher` appears
+in the list of roles you were given and is not one of your options: there is one dispatcher,
+it is the top of the tree, and only a human starting one creates it.
 
 Do not do the work yourself, even when it looks quicker. A child's tool failing is not
 permission to take its task over; if a tool you yourself depend on is broken, `sb block` —

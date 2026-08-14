@@ -146,16 +146,51 @@ class RolesTest(unittest.TestCase):
 
     def test_a_dispatcher_is_told_setting_up_another_repo_is_not_its_own_job(self):
         """The other half of the same rule, and the half a dispatcher would otherwise get
-        wrong by being helpful: `sb init` and `sb start` are refused for agents
-        (`cli._agent_caller`), so a prompt that stopped at "that repo needs setting up"
-        would send it to run two commands it cannot run."""
+        wrong by being helpful. Note what is NOT behind it: `sb start` is refused to agents
+        (`cli._dispatch`), `sb init` is not — it runs before the caller is even resolved.
+        So this sentence is the only thing standing between a helpful dispatcher and a
+        pinned repo nobody asked for, which is why it is pinned here."""
         prompt = roles.load(self.repo)["dispatcher"].prompt
         self.assertIn("sb init", prompt)
         self.assertIn("Andrew's to run, not yours", prompt)
         self.assertIn("that tree is not below", prompt)
 
+    def test_a_dispatcher_is_told_flatly_that_it_does_none_of_the_work(self):
+        """The prompt is the only mechanism here, and it does not arrive alone: the
+        protocol comes first ("do the task you were given"), this repo's house-rules
+        preset comes last ("run the suite", "commit on your own branch"), and both are
+        written for an agent that works. A trailing "past that you are doing the work" was
+        the whole of the counterweight and it loses on position. So the flat statement and
+        the tie-break both have to be in the text."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("You do none of the work, and that is unconditional", prompt)
+        self.assertIn("this file wins", prompt)
+        # And the licence that used to undercut it is gone, not merely outweighed.
+        self.assertNotIn("a glance at one file", prompt)
+
+    def test_a_dispatcher_is_given_a_verb_for_a_finished_child_and_none_for_cleanup(self):
+        """Two gaps that were both filled by silence. DESIGN-TRUTH says the dispatcher
+        blocks when work is done, but the prompt only said what NOT to do with a child's
+        report — and a report the dispatcher merely notes to itself reaches nobody, since
+        Andrew sees an agent only when it blocks. Cleanup is the mirror image: the protocol
+        hands every agent `sb cleanup` and calls it cheap, so leaving the reason for the
+        dispatcher's abstinence in a stripped comment left it with the verb and no rule."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("When a child reports done", prompt)
+        self.assertIn("You do not close agents", prompt)
+
+    def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
+        """The roles fragment every agent gets is generated from the role table, so it
+        advertises `dispatcher` as a name `--role` takes — and it is one: nothing refuses
+        it, by the same decision that refuses no other dispatcher behaviour. A nested agent
+        given the top's prompt would be told to hold nothing while its children landed as
+        tabs, so the role that does the spawning is told not to."""
+        prompt = roles.load(self.repo)["lead"].prompt
+        self.assertIn("`dispatcher`", prompt)
+        self.assertIn("only a human starting one creates it", prompt)
+
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH.md:161-162. Serialising overlap was already taught; assigning
+        """DESIGN-TRUTH.md:201-202. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""
         prompt = roles.load(self.repo)["lead"].prompt
         self.assertIn("disjoint", prompt)

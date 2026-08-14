@@ -78,10 +78,12 @@ lead either reports done or blocks, depending on whether the task is fully compl
 fully complete, report done; Andrew's input needed to finish it, block. Once that is done
 it reports done, and the dispatcher blocks. A lead cleans up its children, pushes the PR
 if relevant, and summarizes — it does not close itself, since cleaning a lead takes its
-children and it still has to report. A bare agent under the dispatcher pushes and opens
-its own PR if the dispatcher said so; the dispatcher blocks for it. Once a block is
-resolved the agent finishes and reports done, and the parent cleans up. — confirmed
-2026-08-09
+children and it still has to report. A dispatcher hands work to a lead rather than to a
+bare agent, but where one is directly under it, that agent pushes and opens its own PR if
+it was told to; the dispatcher blocks for it either way, since being told his work has
+landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
+and reports done, and the parent cleans up. — confirmed 2026-08-09, the dispatcher's
+report restated 2026-08-14
 
 ---
 
@@ -155,10 +157,11 @@ itself; or finished work that needs Andrew's input or approval to complete. — 
 
 **The hierarchy, and what a dispatcher sits above.** A dispatcher is above spaces and
 worktrees and repos — its scope is the whole of its own tree — though in practice it is
-usually specific to one repo. Below it is a lead or a worker in a worktree of its own,
+usually specific to one repo. Below it is a lead in a worktree of its own,
 then another lead or worker below that, to no fixed depth: unlimited levels are allowed,
 but stupid levels of it are not wanted and have not been observed. — confirmed
-2026-08-09, hierarchy restated 2026-08-14
+2026-08-09, hierarchy restated 2026-08-14, everything a dispatcher spawns being a lead
+2026-08-14
 
 **One space per repo, and one space per dispatcher.** That is what the herdr UI should
 show: a single space for each repo, a single space for each dispatcher, and everything
@@ -257,8 +260,12 @@ later.) — confirmed 2026-08-09
 ### Commands
 
 **`sb delegate` figures out where a spawn lands rather than the caller passing flags for
-it.** The dispatcher can spawn a space with either a lead or a single worker. —
-confirmed 2026-08-09
+it.** A dispatcher's spawn gets a space and a worktree of its own whatever role it is
+given — the code branches on the `is_top` stamp, not on the role. What a dispatcher
+actually hands out is a lead, every time: choosing a single worker instead would mean
+judging the work small enough for one agent, and that judgement moved to the lead when the
+dispatcher stopped interpreting. So the mechanism takes either and the rule is one of
+them. — confirmed 2026-08-09, lead-every-time 2026-08-14
 
 **The lead handles cleanup itself, and it should do this aggressively** — probably
 literally every agent that is done. Cleaning up a lead always cleans its children. What
