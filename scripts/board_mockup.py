@@ -8,7 +8,8 @@
 
 This is a spike so Andrew can look at the "bold + panelled" look in a real pane and
 say yes/no/other: a rounded bordered panel with a title, a filled header bar, each
-agent's state as a small colour-filled pill, and a distinctly styled NEEDS YOU section.
+agent's state as one coloured word, and a distinctly styled NEEDS YOU section listing
+the two kinds of agent that want a person — BLOCKED and IDLE, named, not just coloured.
 Sketch (c) from `notes/board-ui-looks.md` crossed with (b), rendered through `rich`.
 
 ONE LINE PER AGENT, like the real board. It drew a second dim line with the task or the
@@ -59,17 +60,19 @@ SNAPSHOT_FORMAT = 1    # `panel.FORMAT`
 # The palette. Dark terminals only — see the module note.
 # ---------------------------------------------------------------------------
 
-# A state pill: the word, on a filled block. Colour is the second signal, never the
-# only one, so a NO_COLOR pane still reads the word.
-PILL = {
-    "working": "bold black on green",
-    "done": "bold black on yellow",
-    "idle": "bold white on grey35",
-    "blocked": "bold white on red",
-    "failed": "bold white on red",
-    "gone": "bold white on red",
+# The state word, as plain coloured text. It was a filled pill — the word on a block of
+# colour — until Andrew said the fill was ugly; the colour meanings are unchanged, only
+# the block is gone. Colour stays the second signal and never the only one, so a
+# NO_COLOR pane still reads the word.
+STATE = {
+    "working": "bold green",
+    "done": "bold yellow",
+    "idle": "dim",
+    "blocked": "bold red",
+    "failed": "bold red",
+    "gone": "bold red",
 }
-PILL_DEFAULT = "bold white on grey35"
+STATE_DEFAULT = "dim"
 
 GLYPH_STYLE = {"✗": "bold red", "◐": "bold yellow", "◌": "bold yellow",
                "○": "dim", "?": "dim", "●": "bold green"}
@@ -418,18 +421,48 @@ def wants_you(a: dict) -> bool:
                 or g(a, "blocked") or g(a, "at_prompt"))
 
 
+def needs_kind(a: dict) -> str:
+    """Which of NEEDS YOU's TWO kinds this agent is, or `""` for neither.
+
+    `"blocked"` — an agent waiting on a human, whether it called `sb block` or is simply
+    sitting at its prompt. `"idle"` — an agent with nothing running: stalled, or a
+    session that died mid-turn with the pane still open.
+
+    Nothing else qualifies. Unread mail used to put an agent in this list and no longer
+    does: Andrew does not treat a message as something the board should summon him for,
+    and the agent's own row still says `mail:` in its tail. `gone` is out too — a pane
+    herdr has no agent for is neither blocked nor idle, and its row already shouts GONE
+    in red. Both are still visible ON the rows; they are only out of the summons list.
+    """
+    if g(a, "blocked") or g(a, "at_prompt"):
+        return "blocked"
+    if g(a, "stalled") or g(a, "signal_drift"):
+        return "idle"
+    return ""
+
+
 def needs_human(a: dict) -> bool:
-    if "needs_human" in a:
-        return bool(a["needs_human"])
-    return bool(wants_you(a) or int(g(a, "unread", 0)) > 0)
+    """Same predicate the NEEDS YOU list uses, so `+ N need you` cannot disagree with it.
+
+    Deliberately ignores a snapshot's own `needs_human` key: the collector counts unread
+    mail in it, which is exactly what this list no longer summons anybody for.
+    """
+    return bool(needs_kind(a))
 
 
 def needs_reason(a: dict) -> str:
-    m = marker(a)
-    if m:
-        return m.split(" — ")[0].lower() if " — " in m else m.lower()
-    told = int(g(a, "unread", 0))
-    return f"{told} unread, not picked up" if told else "wants a person"
+    """Why this agent is in the list — the half after the kind word."""
+    if g(a, "at_prompt"):
+        return "at a prompt, waiting on you"
+    if g(a, "blocked"):
+        return g(a, "blocked_why") or "no reason recorded"
+    if g(a, "signal_drift"):
+        return "died mid-turn, pane still open"
+    if g(a, "stalled"):
+        # Age first: it is the half worth reading, and the half a clip would eat if the
+        # words came first.
+        return f"idle {fmt_age(int(g(a, 'idle', 0)))}, nothing running"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -494,10 +527,13 @@ def bar(text: str, width: int, style: str) -> Text:
                 overflow="crop")
 
 
-def pill(word: str, width: int, compact: bool) -> Text:
-    """The state, as a small filled block. `compact` drops the side padding."""
-    body = word if compact else f" {word} "
-    return Text(pad(clip(body, width), width), style=PILL.get(word, PILL_DEFAULT),
+def state_word(word: str, width: int) -> Text:
+    """The state, as plain coloured text padded to the column.
+
+    No fill and no side padding: with a background block gone, padding is invisible
+    anyway, so the column is exactly as wide as the widest state word on screen.
+    """
+    return Text(pad(clip(word, width), width), style=STATE.get(word, STATE_DEFAULT),
                 no_wrap=True, overflow="crop")
 
 
@@ -534,17 +570,17 @@ def render(agents: list[dict], width: int, source_note: str,
     reserve = max([0] + [vlen(f[-1]) for f in
                          (tail_forms(a) for a in live) if f])
     reserve += 2 if reserve else 0          # the two spaces before it
-    w_state_full = max([0] + [vlen(s) for s in states]) + 2
+    w_state = max([0] + [vlen(s) for s in states])
     w_name_full = max([0] + [vlen(n) for n in names])
 
-    # Given up in this order as the pane narrows: the age first (the pill already says
-    # whether anything is running), then the pill's own padding, then the name — down to
-    # six columns, below which a name is not a name. Only after all three is the reserve
-    # itself cut, which is the one case a pane too narrow for `BLOCKED · 2 unread`
-    # forces and nothing here can prevent.
-    fixed = 3 + 2                           # " ● " and the gap before the pill
-    for show_age, compact in ((True, False), (False, False), (False, True)):
-        w_state = w_state_full - (2 if compact else 0)
+    # Given up in this order as the pane narrows: the age first (the state word already
+    # says whether anything is running), then the name — down to six columns, below which
+    # a name is not a name. Only after both is the reserve itself cut, which is the one
+    # case a pane too narrow for `BLOCKED · 2 unread` forces and nothing here can prevent.
+    # (There used to be a rung between those two that dropped the state pill's side
+    # padding. The pill is plain text now, so there is no padding left to give up.)
+    fixed = 3 + 2                           # " ● " and the gap before the state
+    for show_age in (True, False):
         w_name = w_name_full
         age_cols = 7 if show_age else 0
         if fixed + w_name + w_state + age_cols + reserve <= inner:
@@ -582,7 +618,7 @@ def render(agents: list[dict], width: int, source_note: str,
                                            max(1, w_name - vlen(indent))), w_name),
                     style="bold" if wants_you(row) else "")
         line.append("  ")
-        line.append_text(pill(display_state(row), w_state, compact))
+        line.append_text(state_word(display_state(row), w_state))
         if show_age:
             line.append("  " + f"{fmt_age(int(g(row, 'idle', 0))):>5}", style=DIM)
 
@@ -599,16 +635,26 @@ def render(agents: list[dict], width: int, source_note: str,
                         style="red" if g(row, "gone") else "yellow")
         body.append(line)
 
-    wanted = [a for a in agents if needs_human(a)]
+    # Two kinds only, blocked before idle, each named by a WORD and not just a colour —
+    # `needs_kind` says which and why the rest are out.
+    wanted = [a for a in agents if needs_kind(a) == "blocked"]
+    wanted += [a for a in agents if needs_kind(a) == "idle"]
     if wanted:
         body.append(bar(f" NEEDS YOU · {len(wanted)}", inner, NEEDS_STYLE))
-        w_want = min(max(vlen(str(g(a, "name", "?"))) for a in wanted[:6]), inner - 12)
-        for a in wanted[:6]:
+        shown = wanted[:6]
+        w_kind = 7                          # "BLOCKED", the longer of the two words
+        w_want = min(max(vlen(str(g(a, "name", "?"))) for a in shown), inner - 12)
+        for a in shown:
+            kind = needs_kind(a)
             line = Text(no_wrap=True, overflow="crop")
-            name = pad(clip(str(g(a, "name", "?")), w_want), w_want)
-            line.append("  " + name, style="bold yellow")
-            room = inner - 2 - w_want - 2
-            if room > 8:
+            line.append("  " + pad(kind.upper(), w_kind),
+                        style="bold red" if kind == "blocked" else "bold yellow")
+            line.append("  " + pad(clip(str(g(a, "name", "?")), w_want), w_want),
+                        style="bold")
+            room = inner - 2 - w_kind - 2 - w_want - 2
+            # Below this the reason is all ellipsis and says less than the kind word
+            # already does, so a narrow pane gets KIND + name and nothing else.
+            if room >= 14:
                 line.append("  " + clip(needs_reason(a), room), style=DIM)
             body.append(line)
         if len(wanted) > 6:
