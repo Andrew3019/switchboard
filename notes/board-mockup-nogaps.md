@@ -10,8 +10,8 @@ Still a spike — nothing imports it, no product code touched.
   /Users/andrew/.herdr/worktrees/switchboard/worker-28/scripts/board_mockup.py
 ```
 
-Add `--once` for a single frame, `--width N` to force a pane width, `--source sample`
-for the built-in fixture. Round 4 adds `--gutter bracket|bar|tick|none` (the workspace
+Add `--once` for a single frame, `--width N` and `--height N` to force a pane size, and
+`--source sample` for the built-in fixture. Round 4 adds `--gutter bracket|bar|tick|none` (the workspace
 grouping variants, default `bracket`) and `--gutter-colour single|rotate` (default
 `single`).
 
@@ -20,8 +20,8 @@ grouping variants, default `bracket`) and `--gutter-colour single|rotate` (defau
 > nowhere else. Round 4 added the workspace gutter and the gone-agent treatment; round 5
 > fixed the grouping rule, moved the gutter into the indentation and recoloured it;
 > round 6 marks one-row workspaces and moves `done` off yellow; round 7 takes tops out
-> of the gutter and settles `done` on a muted blue.
-> **Only the round 7 frames show what the board currently looks like.**
+> of the gutter and settles `done` on a muted blue; round 8 makes the panel fill the
+> pane. **Only the round 8 frames show what the board currently looks like.**
 
 ## Round 1 — no blank lines
 
@@ -1111,3 +1111,201 @@ that no depth-0 row carries a mark under `--archived`: zero.
 Not verified: the colours by eye. `steel_blue` in particular is a judgement I cannot make
 from escape codes — I can prove it is not the border's blue and not the gutter's cyan, not
 that it looks right.
+
+## Round 8 — the board fills the pane
+
+The panel was sized to its content and stopped partway down the terminal. It now occupies
+the **full pane height**: agent rows at the top, the NEEDS YOU section and the footer
+pinned to the **bottom**, and all the slack in one run between them. Same shape as
+`board.layout`'s `while len(rows) < height - 2: emit("")`, arrived at the same way — the
+panel's two border lines are the `- 2`.
+
+`--height N` sits alongside `--width N`; both default to the real terminal, re-read on
+every frame, so a resize is picked up for free.
+
+### The blank line above NEEDS YOU is the slack's last line
+
+Not a separate line added on top of the padding — **there is only ever one gap**. It is
+exactly one line when the board is full, and it is the whole slack when it is not, so it
+cannot multiply. When there is no NEEDS YOU section the gap is zero at full height and
+pure slack above the footer otherwise, which is the same rule seen from the other side.
+
+All the frames below are one **frozen** copy of the live snapshot, so they are comparable
+with each other rather than each showing a slightly different fleet. That is why the footer
+says `STALE`: it is a copy rather than the live file, so its `collected_at` is old, and the
+board announcing that is the collector-staleness readout working — not a fault.
+
+Slack, at 44 rows:
+
+```
+╭─ switchboard ────────────────────────────────────────╮
+│  switchboard · 13 alive · 1 blocked · 14 unread      │
+│  ○ main-10          failed                           │
+│  ◌ · worker-9       working  STALLED — idle 1d05h    │
+│  ○ · reviewer-14    done                             │
+│      + 10 archived                                   │
+│  ○ main-11          done                             │
+│      + 10 archived                                   │
+│  ◌ main-15          working  STALLED — idle 1m       │
+│  ◌ · worker-24      working  STALLED — i… · 2 unread │
+│  ◌ · researcher-20  working  STALLED — i… · 2 unread │
+│  ● · worker-30      working                          │
+│      + 16 archived                                   │
+│  ◌ board-fix        working  STALLED — idle 4m       │
+│  ○ · researcher-22  done     mail: 1 unread          │
+│  ○ · researcher-23  done     mail: 1 unread          │
+│  ● · worker-28      working                          │
+│  ● · researcher-37  working                          │
+│      + 8 archived                                    │
+│  ◐ main-16          blocked  BLOCKED — decision on … │
+│      + 3 archived                                    │
+│    + 312 archived                                    │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│  NEEDS YOU · 6                                       │
+│   BLOCKED  main-16        decision on the message-l… │
+│   IDLE     worker-9       idle 1d05h, nothing runni… │
+│   IDLE     main-15        idle 1m, nothing running   │
+│   IDLE     worker-24      idle 39m, nothing running  │
+│   IDLE     researcher-20  idle 39m, nothing running  │
+│   IDLE     board-fix      idle 4m, nothing running   │
+│ live snapshot — STALE, 1h33 old · mockup, not the b… │
+╰──────────────────────────────────────────────────────╯
+```
+
+Exactly full, at 32 rows — the gap down to its single line:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 13 alive · 1 blocked · 14 unread                 │
+│  ○ main-10          failed    3h14                              │
+│  ◌ · worker-9       working  1d05h  STALLED — idle 1d05h        │
+│  ○ · reviewer-14    done     16h35                              │
+│      + 10 archived                                              │
+│  ○ main-11          done      3h12                              │
+│      + 10 archived                                              │
+│  ◌ main-15          working     1m  STALLED — idle 1m           │
+│  ◌ · worker-24      working    39m  STALLED —… · mail: 2 unread │
+│  ◌ · researcher-20  working    39m  STALLED —… · mail: 2 unread │
+│  ● · worker-30      working     1m                              │
+│      + 16 archived                                              │
+│  ◌ board-fix        working     4m  STALLED — idle 4m           │
+│  ○ · researcher-22  done      2h27  mail: 1 unread              │
+│  ○ · researcher-23  done      1h07  mail: 1 unread              │
+│  ● · worker-28      working     4m                              │
+│  ● · researcher-37  working     6m                              │
+│      + 8 archived                                               │
+│  ◐ main-16          blocked     1m  BLOCKED — decision on the … │
+│      + 3 archived                                               │
+│    + 312 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 6                                                  │
+│   BLOCKED  main-16        decision on the message-length fix    │
+│   IDLE     worker-9       idle 1d05h, nothing running           │
+│   IDLE     main-15        idle 1m, nothing running              │
+│   IDLE     worker-24      idle 39m, nothing running             │
+│   IDLE     researcher-20  idle 39m, nothing running             │
+│   IDLE     board-fix      idle 4m, nothing running              │
+│ live snapshot — STALE, 1h33 old · mockup, not the board         │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+### More rows than fit: the top of the list, and a count
+
+The real board scrolls and prints `+N more below`. **This has no scrolling and I did not
+build any.** What it does instead: keep the header, the NEEDS YOU block and the footer —
+none of which are ever sacrificed — clip the agent rows from the bottom, and spend the
+last agent-row line on `+N more below`, in the real board's own words. So the mockup always
+shows the *top* of the list and says exactly how much it is not showing. The difference
+from the real board is that here the rest is genuinely unreachable, which is the honest
+thing for a frame that reads no input.
+
+At 20 rows:
+
+```
+╭─ switchboard ────────────────────────────────────────╮
+│  switchboard · 13 alive · 1 blocked · 14 unread      │
+│  ○ main-10          failed                           │
+│  ◌ · worker-9       working  STALLED — idle 1d05h    │
+│  ○ · reviewer-14    done                             │
+│      + 10 archived                                   │
+│  ○ main-11          done                             │
+│      + 10 archived                                   │
+│  ◌ main-15          working  STALLED — idle 1m       │
+│   + 13 more below                                    │
+│                                                      │
+│  NEEDS YOU · 6                                       │
+│   BLOCKED  main-16        decision on the message-l… │
+│   IDLE     worker-9       idle 1d05h, nothing runni… │
+│   IDLE     main-15        idle 1m, nothing running   │
+│   IDLE     worker-24      idle 39m, nothing running  │
+│   IDLE     researcher-20  idle 39m, nothing running  │
+│   IDLE     board-fix      idle 4m, nothing running   │
+│ live snapshot — STALE, 1h33 old · mockup, not the b… │
+╰──────────────────────────────────────────────────────╯
+```
+
+Below that the NEEDS YOU list gives back one line at a time, its bar last — a count with
+no names still says somebody is waiting. At 12 rows it is down to five entries, and the
+agent list to nothing but its count:
+
+```
+╭─ switchboard ────────────────────────────────────────╮
+│  switchboard · 13 alive · 1 blocked · 14 unread      │
+│   + 20 more below                                    │
+│                                                      │
+│  NEEDS YOU · 6                                       │
+│   BLOCKED  main-16        decision on the message-l… │
+│   IDLE     worker-9       idle 1d05h, nothing runni… │
+│   IDLE     main-15        idle 1m, nothing running   │
+│   IDLE     worker-24      idle 39m, nothing running  │
+│   IDLE     researcher-20  idle 39m, nothing running  │
+│ live snapshot — STALE, 1h33 old · mockup, not the b… │
+╰──────────────────────────────────────────────────────╯
+```
+
+At 5 rows the section goes entirely, and the blank line goes with it, since the gap only
+exists to separate something:
+
+```
+╭─ switchboard ────────────────────────────────────────╮
+│  switchboard · 13 alive · 1 blocked · 14 unread      │
+│   + 20 more below                                    │
+│ live snapshot — STALE, 1h33 old · mockup, not the b… │
+╰──────────────────────────────────────────────────────╯
+```
+
+Priority order when the pane is too short, highest first: **footer, header, NEEDS YOU bar,
+NEEDS YOU entries, agent rows.** The agent list is what the real board scrolls, so it is
+what gives way here; NEEDS YOU is the part Andrew acts on, so it does not.
+
+### Verified
+
+**448 combinations** — {live, sample} x {with, without `--archived`} x
+{bracket, bar, tick, none} x {40, 56, 67, 100} columns x {5, 8, 12, 20, 34, 44, 60} rows.
+Every one: the frame is **exactly** the requested height, every line is **exactly** the
+requested width, and every blank line inside the panel belongs to **one contiguous run**
+that ends immediately above the NEEDS YOU bar (or above the footer when there is no such
+bar). Zero failures.
+
+The gutter still costs zero columns. Re-checked against a **frozen** copy of the live
+snapshot rather than the live file — the fleet changes between two subprocess calls, and an
+earlier run diffed two different fleets against each other and looked like a regression —
+at four widths x three heights: `--gutter none` versus `--gutter bracket` differs on 2-9
+rows, each by exactly one character, in place.
+
+Not verified: the colours by eye, as before. And the `Live` loop was not driven — only
+`--once` frames were rendered — so the full-height panel has not been watched redrawing
+through a real resize. `console.height` is re-read per frame exactly the way
+`console.width` already was, and that path was already exercised for width.

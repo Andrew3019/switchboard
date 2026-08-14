@@ -27,8 +27,13 @@ It reads the live snapshot the collector publishes (`<shared .git>/agentflow/pan
 snapshot.json`, the same file `switchboard/panel.py` reads) and falls back to built-in
 sample data when there is none, so it runs anywhere. The footer says which it used.
 
+It FILLS THE PANE, as `board.layout` does: agent rows at the top, NEEDS YOU and the
+footer pinned to the bottom, all the slack in one run between them.
+
 Three things it deliberately does NOT do, because they belong to the real board and
-this file must not pretend to be it: no mouse, no click-to-focus, no scrolling.
+this file must not pretend to be it: no mouse, no click-to-focus, no scrolling. Where
+the real board scrolls, this shows the top of the list and a `+N more below` count —
+the same readout, without the half nobody can reach here.
 
 Never imports `switchboard.*`. It reads the published JSON as plain dicts, so it runs
 from a venv with no repo on `sys.path` and cannot be the thing that opens the store.
@@ -678,9 +683,9 @@ def summary_bits(agents: list[dict]) -> list[str]:
 
 
 def render(agents: list[dict], width: int, source_note: str,
-           *, show_archived: bool = False, gutter: str = "bracket",
+           *, height: int = 24, show_archived: bool = False, gutter: str = "bracket",
            gutter_colour: str = "single") -> Panel:
-    """One frame. `width` is the whole pane; the panel fits inside it exactly."""
+    """One frame. `width` and `height` are the whole pane; the panel fills it exactly."""
     inner = max(10, width - 4)              # 2 border columns, 2 of padding
     rows = display_rows(agents, show_archived=show_archived)
     rules = gutter_column(rows, gutter, gutter_colour)
@@ -719,9 +724,9 @@ def render(agents: list[dict], width: int, source_note: str,
         w_name = max(6, inner - fixed - w_state - reserve)
     left_used = fixed + w_name + w_state + (7 if show_age else 0)
 
-    body: list[Any] = []
-    body.append(bar(" " + " · ".join(["switchboard"] + summary_bits(agents)), inner,
-                    HEADER_STYLE))
+    head: list[Any] = [bar(" " + " · ".join(["switchboard"] + summary_bits(agents)),
+                           inner, HEADER_STYLE)]
+    body: list[Any] = []                    # the agent rows, and only those
 
     # NO BLANK LINES BETWEEN AGENTS. Every row sits directly under the one above it and
     # the indentation alone carries the tree. An earlier draft broke groups apart with a
@@ -793,13 +798,9 @@ def render(agents: list[dict], width: int, source_note: str,
     # `needs_kind` says which and why the rest are out.
     wanted = [a for a in agents if needs_kind(a) == "blocked"]
     wanted += [a for a in agents if needs_kind(a) == "idle"]
+    needs: list[Any] = []                   # the NEEDS YOU block, pinned to the bottom
     if wanted:
-        # The ONLY blank line on the board. Every other gap went when Andrew asked for
-        # none; this one came back because NEEDS YOU is the part he acts on and it earns
-        # a breath above it. Not a precedent — nothing goes under the header, between
-        # agent rows or above the footer.
-        body.append(Text(""))
-        body.append(bar(f" NEEDS YOU · {len(wanted)}", inner, NEEDS_STYLE))
+        needs.append(bar(f" NEEDS YOU · {len(wanted)}", inner, NEEDS_STYLE))
         shown = wanted[:6]
         w_kind = 7                          # "BLOCKED", the longer of the two words
         w_want = min(max(vlen(str(g(a, "name", "?"))) for a in shown), inner - 12)
@@ -815,10 +816,10 @@ def render(agents: list[dict], width: int, source_note: str,
             # already does, so a narrow pane gets KIND + name and nothing else.
             if room >= 14:
                 line.append("  " + clip(needs_reason(a), room), style=DIM)
-            body.append(line)
+            needs.append(line)
         if len(wanted) > 6:
-            body.append(Text(clip(f"  + {len(wanted) - 6} more", inner), style=DIM,
-                             no_wrap=True, overflow="crop"))
+            needs.append(Text(clip(f"  + {len(wanted) - 6} more", inner), style=DIM,
+                              no_wrap=True, overflow="crop"))
 
     # The footer, with the gone-sweep affordance FIRST so a narrow pane clips the
     # provenance note instead of the one actionable thing on the line. It is a sketch of
@@ -835,9 +836,44 @@ def render(agents: list[dict], width: int, source_note: str,
             foot.append("  ")
             used += 2
     foot.append(clip(f"{source_note} · mockup, not the board", inner - used), style=DIM)
-    body.append(foot)
 
-    return Panel(Group(*body), box=ROUNDED, border_style=BORDER_STYLE,
+    # FILL THE PANE. The panel is exactly `height` lines: two of border and `capacity`
+    # of body. The agent rows sit at the top, NEEDS YOU and the footer are pinned to the
+    # bottom, and every spare line goes in one run between them — the same shape
+    # `board.layout` gets from `while len(rows) < height - 2: emit("")`.
+    #
+    # THE BLANK LINE ABOVE NEEDS YOU IS THAT RUN'S LAST LINE, not a separate line added
+    # on top of it. It is exactly one when the board is full and the slack when it is
+    # not; it never multiplies, because there is only ever one gap.
+    capacity = max(1, height - 2)
+    gap_min = 1 if needs else 0
+    room = capacity - len(head) - 1 - len(needs) - gap_min      # 1 = the footer
+    if room < 1 and needs:
+        # Too short even for one agent row: give the NEEDS YOU list back a line at a
+        # time, its bar last. The bar is the last thing to go because a count with no
+        # names still says somebody is waiting.
+        keep = max(1, len(needs) + room - 1)
+        needs = needs[:keep]
+        room = capacity - len(head) - 1 - len(needs) - gap_min
+        if room < 1:                        # still no room: the section goes entirely
+            needs, gap_min = [], 0
+            room = capacity - len(head) - 1
+    if room < len(body):
+        # NO SCROLLING — see the module note. The mockup shows the TOP of the list and
+        # says how much it is not showing, in the real board's own words. The real board
+        # scrolls to reach the rest; here the rest is simply not reachable, which is the
+        # honest thing for a mockup that reads no input.
+        keep = max(0, room - 1)
+        hidden = len(body) - keep
+        body = body[:keep]
+        if room >= 1:
+            body.append(Text(clip(f"  + {hidden} more below", inner), style=DIM,
+                             no_wrap=True, overflow="crop"))
+    gap = max(gap_min, capacity - len(head) - len(body) - len(needs) - 1)
+    lines = head + body + [Text("") for _ in range(gap)] + needs + [foot]
+
+    return Panel(Group(*lines[:capacity]), box=ROUNDED, border_style=BORDER_STYLE,
+                 height=height,
                  title="[bold]switchboard[/bold]", title_align="left",
                  padding=(0, 1), width=width, expand=False)
 
@@ -863,6 +899,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--once", action="store_true", help="render one frame and exit")
     p.add_argument("--width", type=int, default=None,
                    help="force a pane width, for testing narrow panes")
+    p.add_argument("--height", type=int, default=None,
+                   help="force a pane height, for testing short panes")
     p.add_argument("--source", choices=("auto", "live", "sample"), default="auto")
     p.add_argument("--archived", action="store_true", help="do not collapse archived")
     p.add_argument("--gutter", choices=GUTTER_STYLES, default="bracket",
@@ -878,8 +916,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     def width() -> int:
         return args.width or max(20, console.width)
 
+    def height() -> int:
+        # `console.height` re-reads the terminal on every call, so a resize is picked up
+        # here for free, exactly as the width already was.
+        return args.height or max(4, console.height)
+
     def frame(agents: list[dict], note: str) -> Panel:
-        return render(agents, width(), note, show_archived=args.archived,
+        return render(agents, width(), note, height=height(),
+                      show_archived=args.archived,
                       gutter=args.gutter, gutter_colour=args.gutter_colour)
 
     if args.once:
