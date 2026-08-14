@@ -190,15 +190,15 @@ def wants_you(a) -> bool:
 
     Broader than `AgentStatus.needs_human` in one direction — a gone or stalled
     agent needs a person too, it just does not know it — and narrower in
-    another: mail does not count here. Mail marks itself, inside the second
-    line, so an agent with two unread messages and a task is not dressed up as
-    an agent in trouble.
+    another: mail does not count here. Mail names itself where it is drawn, so
+    an agent with two unread messages and a task is not dressed up as an agent
+    in trouble.
     """
     return bool(a.gone or a.stalled or a.signal_drift or a.blocked or a.at_prompt)
 
 
 def marker(a) -> str:
-    """The trouble with this agent, or "". RANK ONE of the second line.
+    """The trouble with this agent, or "". RANK ONE of the row's tail.
 
     Strictly ranked and only ever one: an agent that is both gone and blocked is
     gone, and the row says the thing a human would act on first.
@@ -238,7 +238,7 @@ def tail_note(a) -> str:
 
 
 def mail_note(a) -> str:
-    """The mail waiting here, or "". Its own line — see `layout`.
+    """The mail waiting here, or "". RANK TWO — see `detail_bits`.
 
     Undelivered first and named: unread means we rang and it has not looked, so
     the agent knows; undelivered means it was never told and never will be
@@ -267,9 +267,10 @@ def _note_color(a) -> str:
     return DIM
 
 
-# What the second line will not draw a piece of at all. Below this a clipped
-# phrase is an ellipsis with a word in front of it, which says less than the
-# space it costs.
+# What the row will not draw a piece of at all. Below this a clipped phrase is
+# an ellipsis with a word in front of it, which says less than the space it
+# costs — and on a single row, where the name, state and age have already taken
+# their columns, this is what most often decides that only one piece is drawn.
 _MIN_BIT = 10
 # How much room a longer piece gives up so that MAIL can still be seen beside
 # it. Bounded rather than "whatever mail needs": a marker clipped to nothing to
@@ -278,11 +279,11 @@ _MAIL_RESERVE = 22
 
 
 def detail_bits(a) -> list[tuple[str, str, str]]:
-    """The second line's contents as (text, colour, kind), HIGHEST PRIORITY FIRST.
+    """The row's tail as (text, colour, kind), HIGHEST PRIORITY FIRST.
 
     Everything that is detail rather than identity is here, and the order is the
-    answer to the only hard question a two-line row asks: at sixty columns they
-    will not all fit, so what goes first and what goes at all?
+    answer to the only hard question the row asks: at sixty columns they will not
+    all fit, so what goes first and what goes at all?
 
         1. `marker`     — GONE, AT PROMPT, BLOCKED, STALLED, NO SESSION.
                           Something is wrong and a human is the only fix.
@@ -291,8 +292,13 @@ def detail_bits(a) -> list[tuple[str, str, str]]:
         3. `tail_note`  — the done summary, the idle excuse, or the task head.
                           Context. First to go.
 
+    The idle excuse rides in rank three rather than getting room of its own: it
+    is the calm half of the idle question ("waiting on children" against a bare
+    `STALLED`), and an agent that has an excuse has no marker to compete with,
+    so in practice it is what the row shows.
+
     Empty pieces are dropped, so an agent with nothing to say yields nothing and
-    still gets its (blank) second line — see `layout`.
+    its row simply ends after the age.
     """
     bits = [(marker(a), _note_color(a), "marker"),
             (mail_note(a), YELLOW, "mail"),
@@ -332,6 +338,31 @@ def _compose(bits, cols: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _starts_group(rows, i: int) -> bool:
+    """Does display row `i` begin a first-level group — so does a break go above it?
+
+    A direct child of the top orchestrator usually bounds one task, and its whole
+    subtree is that task's working-out; a root does the same at the level above.
+    So a break goes above every row at depth 0 or 1, and above nothing else,
+    which is what keeps a subtree contiguous: a depth-2 row can never open one.
+    Never above the very first row — a screen that opens with a blank line has
+    separated the tree from the header, which needs no separating.
+
+    Reads `.depth`, which a `Collapsed` carries as well as an agent, so a
+    collapsed group of first-level children is spaced off like the live ones.
+    """
+    return i > 0 and rows[i].depth <= 1
+
+
+# The break itself. A blank line, not a rule of dashes: at sixty columns a
+# full-width rule is the heaviest thing on the screen and it runs straight
+# across the indentation, so the eye reads the horizontal band before it reads
+# the tree — and depth is the thing this view is for. Whitespace separates
+# without drawing anything, which is the whole requirement. Owned by nobody, so
+# a click on it does nothing (see `layout`).
+_BREAK = ""
+
+
 def _is_group(row) -> bool:
     """Is this display row a collapsed group rather than an agent?
 
@@ -352,17 +383,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     an index, so a click can never resolve to a different agent than the one the
     human is looking at. Everything downstream just indexes this list.
 
-    That is also how a row is allowed to grow. An agent occupies two lines,
-    always — identity on the first, detail indented on the second — and no
-    caller had to learn that, because nothing outside this function reasons
-    about how many lines a row takes. It grew from one line to two, and then
-    from "two when it has mail" to "two, uniformly", without a line of this
-    changing outside this function.
+    That is also how the shape of a row is allowed to change. An agent is ONE
+    line — identity, then whatever of `detail_bits` fits after it — and the
+    breaks between first-level groups are lines belonging to nobody. Neither
+    fact is known outside this function. The row went one line → two → one
+    again, and a blank line appeared between the groups, without a line changing
+    anywhere else: no caller counts lines, and nothing computes which agent sits
+    on screen row N.
 
-    Every line is drawn by `emit`, which takes the owner alongside the
-    text; the extra lines a click could land on (an agent's detail line, a
-    collapsed group) each carry their own owner and resolve to it. Adding
-    another line later is the same one-line change: `emit(text, the_agent)`.
+    Every line is drawn by `emit`, which takes the owner alongside the text. A
+    collapsed group carries itself; a group break carries `None`, which is what
+    makes clicking it do nothing rather than focusing whatever is nearby.
 
     `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
     being the same thing when collapse landed: `display_rows` replaces whole
@@ -378,14 +409,14 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     def emit(text: str, owner: Optional[object] = None) -> None:
         """Draw one line, and say in the same breath what a click on it means.
 
-        THE ONLY WAY A LINE GETS ONTO THE SCREEN, and the reason adding a line
-        to a row is safe. Nothing anywhere computes "which agent is on screen
-        row N" — the answer is recorded here, as the line is built, and
-        `agent_at` does nothing but index what was recorded. So a new line under
-        an agent (the mail line below) needs no change to the click path at all,
-        and a future one will not either: pass the owner it belongs to, or None
-        for chrome, and the mapping is right by construction rather than by a
-        formula somebody has to remember to update.
+        THE ONLY WAY A LINE GETS ONTO THE SCREEN, and the reason adding or
+        removing a line is safe. Nothing anywhere computes "which agent is on
+        screen row N" — the answer is recorded here, as the line is built, and
+        `agent_at` does nothing but index what was recorded. So dropping an
+        agent's second line and inserting a blank between groups needed no
+        change to the click path at all: pass the owner it belongs to, or None
+        for chrome and for the breaks, and the mapping is right by construction
+        rather than by a formula somebody has to remember to update.
         """
         rows.append((text, owner))
 
@@ -393,26 +424,26 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
     agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
     capacity = max(1, height - CHROME)
-    # How many SCREEN LINES each display row costs. Two for every agent and one for a
-    # collapsed group — uniform, which is the point of the shape: a reader learns the
-    # block once and every agent obeys it. Everything that windows or counts below reads
-    # this rather than assuming, the failure otherwise being a row pushed off the bottom
-    # while the footer still claims it is on screen.
-    costs = [1 if _is_group(a) else 2 for a in agents]
+    # How many SCREEN LINES each display row costs: its own, plus the break above it if
+    # it opens a first-level group. Everything that windows or counts below reads this
+    # rather than assuming one line each, the failure otherwise being a row pushed off
+    # the bottom while the footer still claims it is on screen.
+    breaks = [_starts_group(agents, i) for i in range(len(agents))]
+    costs = [2 if b else 1 for b in breaks]
     top = max(0, min(top, _max_top(costs, capacity)))
-    window: list[tuple[object, bool]] = []          # (row, draw its detail line)
+    window: list[tuple[object, bool]] = []          # (row, draw a break above it)
     used = 0
     for i in range(top, len(agents)):
-        if used + costs[i] > capacity:
-            # One exception, and only for the first row: an agent whose second line
-            # will not fit is still drawn, without it. A blank screen saying
-            # "+40 more below" is a worse answer than a row missing its second line.
-            if used == 0 and costs[i] > capacity:
-                window.append((agents[i], False))
-                used += 1
+        # Never at the top of the window: a break says "a new group starts here", and
+        # the top of the screen says that already. `_max_top` still charges for it,
+        # which can leave one line spare at the very bottom of a scroll and never
+        # overfills — the direction that is only cosmetic.
+        brk = breaks[i] and used > 0
+        cost = 2 if brk else 1
+        if used + cost > capacity:
             break
-        window.append((agents[i], costs[i] > 1))
-        used += costs[i]
+        window.append((agents[i], brk))
+        used += cost
 
     bits = status_mod.summary_bits(snap)
     # The headline undimmed and the rest dim — the emphasis Andrew asked for, drawn
@@ -457,7 +488,9 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # a glanceable view must never do. See `AgentStatus.display_state`.
         w_state = max([0] + [_visible_len(a.display_state)
                              for a, _ in window if not _is_group(a)])
-        for a, with_detail in window:
+        for a, brk in window:
+            if brk:
+                emit(_BREAK)                # owned by nobody: a click here is a miss
             if _is_group(a):
                 # No glyph, no state, no note. It is not an agent and must not
                 # read as one — `agent_at` hands this very object to the click
@@ -466,30 +499,26 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 continue
             g = glyph(a)
             label = ("  " * a.depth) + a.name
-            # IDENTITY AND STATE ONLY: who this is, what it is doing, how long since it
-            # last did anything. Nothing that could grow lives here, which is why this
-            # line cannot push a row's shape around.
-            emit(f" {_c(g, _GLYPH_COLOR.get(g, ''))} {_pad(label, w_name)}  "
-                 f"{_pad(a.display_state, w_state)}  "
-                 f"{status_mod.fmt_age(a.idle):>5}", a)
-            if with_detail:
-                # EVERYTHING ELSE, indented under the agent's name the way a task line
-                # hangs under a row in `sb status` — and carrying the SAME agent, so a
-                # click on it focuses the agent it is about. Nothing about the click path
-                # knows this line exists. Drawn even when there is nothing to say: the
-                # block is two lines for every agent, and a shape that only sometimes
-                # holds is a shape a reader cannot use.
-                pad = "   " + "  " * a.depth
-                bits = detail_bits(a)
-                body = _compose(bits, max(0, width - _visible_len(pad) - 2))
-                if not body:
-                    emit("", a)                     # nothing to say, and still two lines
-                    continue
-                # The arrow belongs to whatever leads the line, and takes its colour, so
+            # ONE LINE, and everything on it. Identity, state and age take fixed columns;
+            # whatever is left goes to `detail_bits`, in priority order, and at sixty
+            # columns that is usually room for one piece — which is the whole difference
+            # between this and the two-line version, and why the priority matters more
+            # here than it did there.
+            left = (f" {g} {_pad(label, w_name)}  {_pad(a.display_state, w_state)}  "
+                    f"{status_mod.fmt_age(a.idle):>5}  ")
+            line = (f" {_c(g, _GLYPH_COLOR.get(g, ''))} {_pad(label, w_name)}  "
+                    f"{_pad(a.display_state, w_state)}  "
+                    f"{status_mod.fmt_age(a.idle):>5}  ")
+            bits = detail_bits(a)
+            if bits:
+                # The arrow belongs to whatever leads the tail, and takes its colour, so
                 # it points at a reason rather than floating: trouble, or mail, and
-                # nothing at all when the line is only saying what the agent is up to.
+                # nothing at all when the tail is only saying what the agent is up to.
                 lead = "← " if wants_you(a) or bits[0][2] == "mail" else "  "
-                emit(pad + _c(lead, bits[0][1]) + body, a)
+                body = _compose(bits, width - _visible_len(left) - _visible_len(lead))
+                if body:
+                    line += _c(lead, bits[0][1]) + body
+            emit(line, a)
 
     while len(rows) < height - 2:
         emit("")
@@ -513,11 +542,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 def _max_top(costs: list[int], capacity: int) -> int:
     """The furthest a scroll may go: the first row of the last full screenful.
 
-    In LINES, not in rows, which is the same number until a row costs two of
-    them. Counts backwards from the end and stops when the next row up would not
-    fit, so scrolling to the bottom lands on a full screen rather than on one
-    row with blank space under it. Never past the last row: with a capacity too
-    small for even that one, it is still the one to show.
+    In LINES, not in rows, which is the same number until a row is preceded by a
+    group break and so costs two. Counts backwards from the end and stops when
+    the next row up would not fit, so scrolling to the bottom lands on a full
+    screen rather than on one row with blank space under it. Never past the last
+    row: with a capacity too small for even that one, it is still the one to show.
     """
     total, t = 0, len(costs)
     while t > 0 and total + costs[t - 1] <= capacity:
