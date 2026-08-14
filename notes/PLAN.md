@@ -3,8 +3,8 @@
 Companion to `braindump.md` (what) and `PRINCIPLES.md` (what not to do).
 
 > **Written before v0 was built; v0 now exists.** What has actually shipped is M1 ∪ M2 ∪
-> M3 (+ the readouts) — see `POC.md` for the built design and `REVIEW.md` for what was
-> found reviewing it. Two things to know while reading:
+> M3 (+ the readouts) — see `POC.md` for the built design. Two things to know while
+> reading:
 >
 > - **The command is `sb`.** `wf` was the placeholder this document itself flags as one.
 > - **D1 was decided against the recommendation: it is Python, stdlib only.** The

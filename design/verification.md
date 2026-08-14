@@ -10,7 +10,7 @@ The one WRONG claim is a supporting sentence inside §5.4 reason 1. **It does no
 the code actually does. Details in "The WRONG claim" below.
 
 **Tree checked:** this worktree, `plugins-redesign` @ `86fac25`
-(`/Users/andrew/.herdr/worktrees/switchboard/plugins-redesign`), which is the initial
+(`~/.herdr/worktrees/switchboard/plugins-redesign`), which is the initial
 commit and is **behind** `main`. `main` moved twice *during* this verification
 (`5bb4b79` → `2637b5f`). Where main or `workspace-model` changes the substance, it is
 called out per row and in the two sections at the end. Line numbers below are this
@@ -43,16 +43,16 @@ Run from three checkouts of one clone:
 
 | standing in | `worktree_root()` | `repo_root()` |
 |---|---|---|
-| `~/Code/switchboard` | `~/Code/switchboard` | `/Users/andrew/Code/switchboard/.git` |
-| `~/.herdr/worktrees/switchboard/plugins-redesign` | `…/plugins-redesign` | `/Users/andrew/Code/switchboard/.git` |
-| `~/.herdr/worktrees/switchboard/acc-kid` | `…/acc-kid` | `/Users/andrew/Code/switchboard/.git` |
+| `~/Code/switchboard` | `~/Code/switchboard` | `~/Code/switchboard/.git` |
+| `~/.herdr/worktrees/switchboard/plugins-redesign` | `…/plugins-redesign` | `~/Code/switchboard/.git` |
+| `~/.herdr/worktrees/switchboard/acc-kid` | `…/acc-kid` | `~/Code/switchboard/.git` |
 
 Byte-identical: **true**. §5.1's table is reproduced exactly.
 
 The anchoring is load-bearing and I proved it rather than took the comment's word:
 `git rev-parse --git-common-dir` returns the **absolute** path from inside a worktree, but
 the bare relative `.git` from the main checkout. Called as `repo_root(Path("~/Code/switchboard"))`
-with the *process* cwd set to `/tmp`, it still returns `/Users/andrew/Code/switchboard/.git`;
+with the *process* cwd set to `/tmp`, it still returns `~/Code/switchboard/.git`;
 a plain `.resolve()` would have returned `/private/tmp/.git`. `store.py:54-59` is doing real
 work, exactly as its comment says.
 
@@ -69,7 +69,7 @@ All checked; all hold unless noted.
 | an unrecognised `--with` value is passed through verbatim as a literal instruction | §1, §3.3, §8.1 rows 3–4, §8.3.2 | **CONFIRMED** | `plugins.py:94-110`, the `else` at `:108-109` |
 | `plugins.toml` binds names to roles via `all` + `[roles]`; shipped bindings are empty | §1, §7.1, §8.1 row 5 | **CONFIRMED** | `defaults/plugins.toml` (`all = []`, empty `[roles]`); read at `config.py:414-425` |
 | `sb plugins` lists names with their bindings | §1 | **CONFIRMED** | `cli.py:556-566` |
-| the only occurrence of `"plugins"` as a payload key is the producer; nothing consumes it; `scripts/` never invokes `sb plugins` | **§3.2 (the fact-check)** | **CONFIRMED** | producer `cli.py:565`. Other `"plugins"` literals are `plugins.py:58` (a directory name), `cli.py:163` (the verb), `cli.py:556` (the dispatch branch). `scripts/`: zero hits. Only `FEATURES.md` mentions the verb, in prose |
+| the only occurrence of `"plugins"` as a payload key is the producer; nothing consumes it; `scripts/` never invokes `sb plugins` | **§3.2 (the fact-check)** | **CONFIRMED** | producer `cli.py:565`. Other `"plugins"` literals are `plugins.py:58` (a directory name), `cli.py:163` (the verb), `cli.py:556` (the dispatch branch). `scripts/`: zero hits. Only `notes/FEATURES.md` mentions the verb, in prose |
 | `plugins.py`'s module docstring says plugin files are not layered out of `defaults/`, and the survey's summary overstates the rule | §7.1 | **CONFIRMED, and sharper than stated** | module docstring `plugins.py:15-19` says "not layered out of `defaults/`"; `available()`'s **own** docstring at `plugins.py:52-53` says "Layered like everything else in `defaults/`". The file contradicts itself, and the code sides with §7.1. Survey text at `plugins-current-state.md:85` and `:91` |
 | `--with` values are validated by `validate.line()` after resolution | §6 | **CONFIRMED** | `cli.py:483-484` (this worktree); moved to `broker.py` on `workspace-model` — see §5 |
 | `cli.py`'s docstring is proud of naming the flag the caller typed | §4.3 | **CONFIRMED** (line-exact) | `cli.py:16-18` |
@@ -82,7 +82,7 @@ All checked; all hold unless noted.
 | `[limits] prompt = 8000` covers presets and role prompts | §6 (Budget) | **CONFIRMED** | `defaults/settings.toml` `[limits] prompt = 8000`, whose own comment names "plugin files after flattening" |
 | `protocol.md`'s header says its contents are "paid for on every single spawn, by every agent, forever" | §6 (Budget) | **CONFIRMED**, mild paraphrase | `defaults/protocol.md:2-4`. The file's exact sense is that HTML comments are *free* and "everything outside it is paid for on every single spawn, by every agent, forever." The design's rendering is substantively right |
 | `ask-dont-guess.md` tells agents to run `sb ask human` | §8.3.1, §8.1 row 7 | **CONFIRMED — and incomplete, see below** | `defaults/plugins/ask-dont-guess.md`, last paragraph |
-| `report-bug.md` currently tells agents to append to `BUGS.md` | §10 | **CONFIRMED** | `defaults/plugins/report-bug.md` |
+| `report-bug.md` currently tells agents to append to `notes/BUGS.md` | §10 | **CONFIRMED** | `defaults/plugins/report-bug.md` |
 | `store.transcript_path()` yields the full Claude Code transcript | §10 | **CONFIRMED** (line-exact) | `store.py:668-678` |
 | shipped plugins are testable today via the `sys.path` arrangement `bin/sb` uses | §11.13 | **CONFIRMED** | `bin/sb:3` |
 | §4.2's level-0 verb list is the real verb set minus `presets`/`delegate`/`doctor`/`plugin list` | §4.2 | **CONFIRMED** — 17 + 3 = the 20 verbs the parser actually has | `tests/test_status.py:747-756` enumerates all 20 and asserts the set |

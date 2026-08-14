@@ -13,8 +13,7 @@ phase needs too:
 
   1. A cold fan-out really starts. Six agents into six brand-new checkouts; all six take
      their task and report; and no spawn is misreported in EITHER direction — neither a
-     success for an agent that got nothing (`audit/spawn-delivery-proof.md`) nor a failure
-     for an agent that is working (`audit/phase1-acceptance-4.md` §3).
+     success for an agent that got nothing nor a failure for an agent that is working.
   2. A child's report wakes its parent by itself, delivered by the collector's doorbell,
      with no command run by anyone and no heartbeat. Forced onto the DEFERRED path on
      purpose: the child reports while the parent is mid-turn, so the direct ring cannot
@@ -25,12 +24,11 @@ phase needs too:
      something, which is the case that was silent through runs 2, 3 and 4 (§5).
 
 HOW IT STAYS OUT OF THE LIVE FLEET. Every check runs in its own throwaway `git clone` of
-the repo, checked out at the branch under test, driven through THAT clone's own `./bin/sb`
-(`audit/isolated-instance.md`): a clone has its own `.git`, so `git rev-parse
---git-common-dir` resolves to its own `state.db` and the live store is never opened. The
-sharp edge that clone does NOT fix is herdr: there is one herdr daemon per machine and
-agent names are global across otherwise-isolated stores, so every name here carries a
-random run id (`sba1b2c3-w1`) that cannot collide with a live agent.
+the repo, checked out at the branch under test, driven through THAT clone's own `./bin/sb`:
+a clone has its own `.git`, so `git rev-parse --git-common-dir` resolves to its own
+`state.db` and the live store is never opened. The sharp edge that clone does NOT fix is
+herdr: there is one herdr daemon per machine and agent names are global across
+otherwise-isolated stores, so every name here carries a random run id (`sba1b2c3-w1`) that cannot collide with a live agent.
 
 WHAT IT LEAVES BEHIND: nothing. Agents, herdr workspaces, worktrees and the clones are
 all torn down on success, on failure, and on Ctrl-C. Never an unscoped `pkill`: agents are
@@ -176,7 +174,7 @@ class Clone:
             raise RuntimeError(f"git checkout {self.branch} failed: {r.text}")
         self.head = sh(["git", "rev-parse", "--short", "HEAD"], cwd=self.path).out.strip()
         # Prove the isolation rather than assuming it: this clone's own store, and not one
-        # row in it. Both halves of `audit/isolated-instance.md`, re-checked every run.
+        # row in it. Both halves of the isolation method, re-checked every run.
         doctor = self.sb("doctor")
         store_line = next((l for l in doctor.text.splitlines() if l.startswith("store")), "")
         if str(self.path) not in store_line:
@@ -387,10 +385,10 @@ def check_fanout(clone: Clone, rid: str, log: Log) -> Check:
     # This was sequential for a while because six simultaneous `sb delegate`s in one
     # checkout raced in `git worktree add` ("could not lock config file .git/config: File
     # exists") and one of them died `fork_failed`. That race is fixed on main — an flock
-    # around worktree creation, `Broker._fork_lock`, see `audit/fork-race.md` — so the
-    # concurrent shape now measures the spawn path rather than that bug. The clone's store
-    # is already warm here (`create` runs `sb doctor` and `sb status`), which keeps this
-    # off the separate first-touch schema-creation collision that audit also notes.
+    # around worktree creation, `Broker._fork_lock` — so the concurrent shape now measures
+    # the spawn path rather than that bug. The clone's store is already warm here (`create`
+    # runs `sb doctor` and `sb status`), which keeps this off the separate first-touch
+    # schema-creation collision found alongside it.
     threads = [threading.Thread(target=spawn, args=(i, n))
                for i, n in enumerate(names, 1)]
     for t in threads:

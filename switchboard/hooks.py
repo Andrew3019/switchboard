@@ -9,14 +9,14 @@ The second thing this file does is answer "is this agent working right now?" fro
 two edges. Switchboard had no signal of its own for that: it asked herdr, which infers it
 by matching Claude's spinner glyphs in the terminal title, and Claude Code 2.1.228 changed
 those glyphs — so herdr reported idle for every pane on this machine, including agents
-provably mid-tool-call (`audit/status-ground-truth.md`). One cosmetic change upstream took
+provably mid-tool-call. One cosmetic change upstream took
 out hold-until-free delivery, made the reconciler ping working agents, and made the board
 lie. So we record the fact ourselves:
 
     UserPromptSubmit  ->  agents.turn = 'working'      a turn began
     Stop              ->  agents.turn = 'idle'         a turn ended
 
-Chosen over the two obvious alternatives on measured evidence (`audit/hook-signal-cost.md`):
+Chosen over the two obvious alternatives on measured evidence:
 per-tool-call hooks cost 148 ms per tool call, a `PostToolUse` timestamp cost 19 ms, and
 neither cost was the decider. The timestamp lost on correctness — it cannot tell a long
 tool call from a finished turn, 2.18 % of 15,000 real tool calls in this repo ran longer

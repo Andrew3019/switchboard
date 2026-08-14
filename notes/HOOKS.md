@@ -1,10 +1,26 @@
-# ✅ BUILT — the Stop hook exists (2026-08-11)
+# Hooks
+
+Two hooks are built and carry real load; a handful of others were costed and deferred.
+This file is in three parts, in descending order of how far you can trust it:
+
+1. **[What is built](#built--the-stop-hook-exists-2026-08-11)** — current, and the code is
+   the final word.
+2. **[Candidates to evaluate later](#candidates-to-evaluate-later)** — the unbuilt ones,
+   with the cost estimate and the recommendation for each. This is the part with future
+   direction in it.
+3. **[Pre-build design notes](#pre-build-design-notes-superseded)** — how the Stop hook was
+   reasoned about before it existed. Superseded, and wrong in specific named ways. Kept
+   because the correction that opens it is a verified fact about `claude --bare` that is
+   easy to rediscover the expensive way.
+
+---
+
+## ✅ BUILT — the Stop hook exists (2026-08-11)
 
 `switchboard/hooks.py` is the gate, `bin/sb-stop-hook` runs it, and
 `herdr.start_agent` passes `--settings <file>` on every spawn and every restore. The scope
-pass, the decision table and the live proof are in `audit/phase3.8-scope.md`. Read that and
-the code; everything below is design notes from before it was built, and the sections after
-the correction are still the unverified research the correction warns about.
+pass, the decision table and the live proof are in `audit/phase3.8-scope.md`. Read the code;
+it is the final word, and the pre-build design notes at the end of this file are not.
 
 **A second hook now rides in the same settings file: `UserPromptSubmit`, run by
 `bin/sb-activity-hook`.** The pair is switchboard's own activity signal — `working` when a
@@ -43,6 +59,136 @@ Two things the build learned that the notes below get wrong or do not say:
   `audit/phase3-edges-fix.md`).
 
 ---
+
+# Candidates to evaluate later
+
+None of the below is built. Each row is a pre-build cost estimate rather than a
+measurement, and the two that were built since — `UserPromptSubmit` and `Stop` — both
+landed near the estimate, so the numbers are worth something. `SessionStart` and
+`PreCompact` are the two that were recommended and never done.
+
+### SessionStart
+**Purpose:** Register identity eagerly instead of lazily on first `sb` call.
+
+| Aspect | Detail |
+|--------|--------|
+| **Blocking?** | No; non-blocking event |
+| **Cost** | ~10-50ms per session start (one subprocess) |
+| **Frequency** | Once per session (negligible) |
+| **Value** | Registers agent identity to store before agent does anything, simplifying race conditions in parent-child startup |
+| **Trade-off** | Tiny cost for guaranteed early registration. Worth doing. |
+| **Recommendation** | ✅ Add after Stop hook is proven. Low risk, low cost, high safety. |
+
+### UserPromptSubmit — ✅ BUILT, for a different purpose
+**Built 2026-08-12** as the activity signal's rising edge (`bin/sb-activity-hook`,
+`hooks.run_activity`) — see the note at the top of this file. It writes
+`agents.turn = 'working'` and prints **nothing**, because the CLI adds a
+`UserPromptSubmit` hook's stdout to the agent's context. It does **not** flush mail, which
+is what the row below proposed: the flush is still the piggyback on every `sb` invocation
+plus the collector's `sb flush` tick, and a hook that rang the doorbell at the exact moment
+a turn began would only be deferring the ring it had just fired. The table below is the
+pre-build estimate, kept for the cost line.
+
+**Purpose (as proposed):** Flush pending mail rather than having it piggyback on any `sb`
+invocation.
+
+| Aspect | Detail |
+|--------|--------|
+| **Blocking?** | Yes; can inspect/modify input before processing |
+| **Cost** | ~10-50ms per prompt (one subprocess) |
+| **Frequency** | Once per agent turn (moderate) |
+| **Value** | Replaces the piggyback flush in `Broker.flush_pending`; more deterministic delivery |
+| **Trade-off** | Small cost per turn; enables decoupling mail from `sb` calls. |
+| **Recommendation** | ⏸️ Build after Stop hook is stable. Optional; current piggyback is acceptable. |
+
+### PreToolUse
+**Purpose:** Enforce file ownership mechanically instead of by instruction. There is no
+longer a preset for it: the `own-files` preset was deleted and the scope half of it —
+edit only what you were assigned, report anything else rather than fixing it — moved into
+`defaults/protocol.md`, so every agent is told once. That makes the instruction universal;
+it does not make it enforced, which is what this hook would be for.
+
+| Aspect | Detail |
+|--------|--------|
+| **Blocking?** | Yes; can block tool execution |
+| **Cost** | ~10-50ms **per tool call** (high-frequency) |
+| **Frequency** | 10-100+ per agent per turn |
+| **Value** | Prevents tool calls to files not owned by the agent. Currently relies on a protocol sentence, which is forgotten under compaction or task depth. |
+| **Trade-off** | **High per-operation cost** (1-5 seconds added per turn if there are 100+ tool calls). Worth it *only if* file-ownership violations are common and serious. |
+| **Loop risk** | If agent keeps trying to call disallowed tools, it pays the hook cost on each retry. Acceptable; the friction discourages the mistake. |
+| **Recommendation** | ❌ Defer; measure first. Only add if file-ownership bugs are frequent. C6 says "enforce mechanically," but the cost has to justify the bug rate. Revisit after 10-20 real runs. |
+
+### PreCompact
+**Purpose:** Run validation or logging before context compaction.
+
+| Aspect | Detail |
+|--------|--------|
+| **Blocking?** | Yes; can block compaction |
+| **Cost** | ~10-50ms per compaction event (rare; ~1-2 per agent lifetime) |
+| **Frequency** | ~1-2 per agent per long run (negligible) |
+| **Value** | Emit events into the log before context is discarded; ensure agent has reported before compacting. Useful for observability. |
+| **Trade-off** | Negligible cost, useful signal. Worth doing for logging/observability hygiene. |
+| **Recommendation** | ⏸️ Build after Stop hook; lower priority than SessionStart. |
+
+### SubagentStop
+**Purpose:** Guard subagent completion (Codex only; Claude Code has no named subagents).
+
+| Aspect | Detail |
+|--------|--------|
+| **Blocking?** | Yes (Codex) |
+| **Cost** | ~10-50ms per subagent finish (depends on deployment topology) |
+| **Frequency** | Depends on agent tree depth |
+| **Value** | Enforce compliance on Codex subagents the same way Stop enforces it on parents. |
+| **Trade-off** | Symmetry with Stop hook. Only needed if Codex subagents are in scope. |
+| **Recommendation** | ⏸️ Design alongside Stop for Codex target if applicable, but defer implementation until Codex tests. |
+
+---
+
+## Hooks Explicitly NOT Recommended
+
+### Notification
+**Why skip:** Generates noise; better to let agents emit their own events via `wf__report`.
+
+### FileChanged, CwdChanged, DirectoryAdded
+**Why skip:** Observability only; add via PostToolUse or explicit events, not implicit hooks.
+
+### PostToolUse (async)
+**Why skip:** Use async only for observability/logging. If you're doing that, emit it explicitly via `wf__report(kind='tool_executed', ...)` instead. Explicit is cheaper than implicit hooks.
+
+---
+
+## Rejected Alternatives
+
+### Always-on LLM judge
+- Violates C8 (determinism first).
+- Costs tokens on every transition.
+- Unpredictable exactly when you need predictability.
+
+### Polling supervisor
+- Violates C10 (idle costs nothing).
+- 132M cache-read tokens in 3 hours is the historical failure here.
+
+### Shared status file / transcript parsing
+- Violates C7 (store is the only memory).
+- Couples agents to file-system timing.
+- No schema, no validation.
+
+### Prompt instruction "always call sb done"
+- Violates C6.
+- Agents forget under compaction, long task loops, task depth.
+- Unenforceable.
+
+---
+
+---
+
+# Pre-build design notes (superseded)
+
+Everything from here down was written before the Stop hook existed and is kept for the
+correction that opens it. The design itself was overtaken by the build — see the top of
+this file for the three things it gets wrong — and its "verified" claims are, as the
+note on method below says, verified against our own earlier notes rather than against
+the CLI. Treat every one of them as unverified.
 
 # ⚠️ CORRECTION — read before implementing (added 2026-08-07, verified against the CLI)
 
@@ -181,98 +327,6 @@ Exit 2 on a blocking hook (Stop, PreToolUse, etc.) is **"prevent this action"**.
 
 ---
 
-## Candidates to Evaluate Later
-
-### SessionStart
-**Purpose:** Register identity eagerly instead of lazily on first `sb` call.
-
-| Aspect | Detail |
-|--------|--------|
-| **Blocking?** | No; non-blocking event |
-| **Cost** | ~10-50ms per session start (one subprocess) |
-| **Frequency** | Once per session (negligible) |
-| **Value** | Registers agent identity to store before agent does anything, simplifying race conditions in parent-child startup |
-| **Trade-off** | Tiny cost for guaranteed early registration. Worth doing. |
-| **Recommendation** | ✅ Add after Stop hook is proven. Low risk, low cost, high safety. |
-
-### UserPromptSubmit — ✅ BUILT, for a different purpose
-**Built 2026-08-12** as the activity signal's rising edge (`bin/sb-activity-hook`,
-`hooks.run_activity`) — see the note at the top of this file. It writes
-`agents.turn = 'working'` and prints **nothing**, because the CLI adds a
-`UserPromptSubmit` hook's stdout to the agent's context. It does **not** flush mail, which
-is what the row below proposed: the flush is still the piggyback on every `sb` invocation
-plus the collector's `sb flush` tick, and a hook that rang the doorbell at the exact moment
-a turn began would only be deferring the ring it had just fired. The table below is the
-pre-build estimate, kept for the cost line.
-
-**Purpose (as proposed):** Flush pending mail rather than having it piggyback on any `sb`
-invocation.
-
-| Aspect | Detail |
-|--------|--------|
-| **Blocking?** | Yes; can inspect/modify input before processing |
-| **Cost** | ~10-50ms per prompt (one subprocess) |
-| **Frequency** | Once per agent turn (moderate) |
-| **Value** | Replaces the piggyback flush in `Broker.flush_pending`; more deterministic delivery |
-| **Trade-off** | Small cost per turn; enables decoupling mail from `sb` calls. |
-| **Recommendation** | ⏸️ Build after Stop hook is stable. Optional; current piggyback is acceptable. |
-
-### PreToolUse
-**Purpose:** Enforce file ownership mechanically instead of by instruction. There is no
-longer a preset for it: the `own-files` preset was deleted and the scope half of it —
-edit only what you were assigned, report anything else rather than fixing it — moved into
-`defaults/protocol.md`, so every agent is told once. That makes the instruction universal;
-it does not make it enforced, which is what this hook would be for.
-
-| Aspect | Detail |
-|--------|--------|
-| **Blocking?** | Yes; can block tool execution |
-| **Cost** | ~10-50ms **per tool call** (high-frequency) |
-| **Frequency** | 10-100+ per agent per turn |
-| **Value** | Prevents tool calls to files not owned by the agent. Currently relies on a protocol sentence, which is forgotten under compaction or task depth. |
-| **Trade-off** | **High per-operation cost** (1-5 seconds added per turn if there are 100+ tool calls). Worth it *only if* file-ownership violations are common and serious. |
-| **Loop risk** | If agent keeps trying to call disallowed tools, it pays the hook cost on each retry. Acceptable; the friction discourages the mistake. |
-| **Recommendation** | ❌ Defer; measure first. Only add if file-ownership bugs are frequent. C6 says "enforce mechanically," but the cost has to justify the bug rate. Revisit after 10-20 real runs. |
-
-### PreCompact
-**Purpose:** Run validation or logging before context compaction.
-
-| Aspect | Detail |
-|--------|--------|
-| **Blocking?** | Yes; can block compaction |
-| **Cost** | ~10-50ms per compaction event (rare; ~1-2 per agent lifetime) |
-| **Frequency** | ~1-2 per agent per long run (negligible) |
-| **Value** | Emit events into the log before context is discarded; ensure agent has reported before compacting. Useful for observability. |
-| **Trade-off** | Negligible cost, useful signal. Worth doing for logging/observability hygiene. |
-| **Recommendation** | ⏸️ Build after Stop hook; lower priority than SessionStart. |
-
-### SubagentStop
-**Purpose:** Guard subagent completion (Codex only; Claude Code has no named subagents).
-
-| Aspect | Detail |
-|--------|--------|
-| **Blocking?** | Yes (Codex) |
-| **Cost** | ~10-50ms per subagent finish (depends on deployment topology) |
-| **Frequency** | Depends on agent tree depth |
-| **Value** | Enforce compliance on Codex subagents the same way Stop enforces it on parents. |
-| **Trade-off** | Symmetry with Stop hook. Only needed if Codex subagents are in scope. |
-| **Recommendation** | ⏸️ Design alongside Stop for Codex target if applicable, but defer implementation until Codex tests. |
-
----
-
-## Hooks Explicitly NOT Recommended
-
-### Notification
-**Why skip:** Generates noise; better to let agents emit their own events via `wf__report`.
-
-### FileChanged, CwdChanged, DirectoryAdded
-**Why skip:** Observability only; add via PostToolUse or explicit events, not implicit hooks.
-
-### PostToolUse (async)
-**Why skip:** Use async only for observability/logging. If you're doing that, emit it explicitly via `wf__report(kind='tool_executed', ...)` instead. Explicit is cheaper than implicit hooks.
-
----
-
 ## Minimal Viable Set (v1)
 
 ```
@@ -312,29 +366,6 @@ it does not make it enforced, which is what this hook would be for.
 - [ ] **Verify store schema** includes session_id tracking and event logging sufficient for stop-gate to query.
 
 - [ ] **Deploy to v1 agents** as part of spawn flow (step 1 of agent initialization).
-
----
-
-## Rejected Alternatives
-
-### Always-on LLM judge
-- Violates C8 (determinism first).
-- Costs tokens on every transition.
-- Unpredictable exactly when you need predictability.
-
-### Polling supervisor
-- Violates C10 (idle costs nothing).
-- 132M cache-read tokens in 3 hours is the historical failure here.
-
-### Shared status file / transcript parsing
-- Violates C7 (store is the only memory).
-- Couples agents to file-system timing.
-- No schema, no validation.
-
-### Prompt instruction "always call sb done"
-- Violates C6.
-- Agents forget under compaction, long task loops, task depth.
-- Unenforceable.
 
 ---
 

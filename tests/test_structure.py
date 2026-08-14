@@ -9,8 +9,7 @@ happens to hold a worktree (5.2); a role without delegate rights is refused outr
 The bug all of this replaces is worth stating once. The fork rule used to read
 `has_worktree(me)` — worktree POSSESSION — which coincides with top-ness for every agent
 that happens to exist, and is not the same fact. `WorktreeIsNotTopnessTest` is the case
-where they come apart, proved live in `audit/phase5-spawn-placement.md` before it was
-proved here.
+where they come apart, proved live before it was proved here.
 """
 
 from __future__ import annotations
@@ -213,7 +212,7 @@ class TopStampMigrationTest(unittest.TestCase):
 class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
     """The phase-5 bug, pinned. A worktree-less agent that is NOT a top must not fork.
 
-    Reproduced live before it was fixed (`audit/phase5-spawn-placement.md`): a non-root row
+    Reproduced live before it was fixed: a non-root row
     with `branch IS NULL` delegated, and its child forked a brand-new space exactly as a
     top's would. `branch IS NULL` means "deliberately bare", which a read-only task deep in
     somebody's tree is too.

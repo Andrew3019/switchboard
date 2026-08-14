@@ -7,7 +7,7 @@ gate and the idle mark, which is the likeliest bug in it.
 What a test can pin here is the DECISION and the WRITE (a real store, real rows) and the
 fact that every spawn carries the settings file. What it cannot pin is that Claude honours
 the response or fires the events at all, so those halves are proved live, in an isolated
-clone — `audit/phase3.8-scope.md` for the gate, `audit/activity-signal.md` for the signal.
+clone — once for the gate, once for the signal.
 """
 
 from __future__ import annotations
@@ -69,8 +69,8 @@ class StopGateTest(unittest.TestCase):
 
         `stop_hook_active` is scoped to ONE stop-chain — one user prompt. A ring, a `tell`
         or the reconciler's own nudge starts a fresh chain with the flag false, and the
-        gate blocked the same agent a second time twelve seconds later
-        (`audit/phase3-integration.md`). The store is what outlives a chain, so one block
+        gate blocked the same agent a second time twelve seconds later. The store is what
+        outlives a chain, so one block
         per agent until it says something is asked of the event log.
         """
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
@@ -84,7 +84,7 @@ class StopGateTest(unittest.TestCase):
     def test_a_report_re_arms_the_gate(self):
         """Once per SILENCE, not once per lifetime. An agent that reported and was then
         spoken to in its pane is `working` again, and that next quiet turn-end is a new
-        silence — the case `audit/phase3.8-scope.md` deliberately does not exempt."""
+        silence — the case the scope decision deliberately does not exempt."""
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
         store.set_state(self.db, "w1", "done")
@@ -95,7 +95,7 @@ class StopGateTest(unittest.TestCase):
 
 class ActivitySignalTest(unittest.TestCase):
     """The two edges — `agents.turn`. What a test can pin is the WRITE; that Claude Code
-    fires the two events at all is proved live in `audit/activity-signal.md`."""
+    fires the two events at all is proved live, in an isolated clone."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

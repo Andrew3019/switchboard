@@ -1149,7 +1149,7 @@ The argument is not tidiness. It is that this exact duplication had already cost
 was the one actually being read. Phase 4 reproduced it immediately — repointing
 `defaults/presets/report-bug.md` at the plugin (§8.3.2) changed nothing at all in this repo,
 because `.switchboard/presets/report-bug.md` was still winning and still telling agents to
-append to `BUGS.md`. A silent second place for a bug to hide is not a backup; it is the
+append to `notes/BUGS.md`. A silent second place for a bug to hide is not a backup; it is the
 thing that makes the fix look applied when it is not.
 
 Nothing depended on them. `presets.available()` reads `defaults/presets/` on every call, so
@@ -1317,7 +1317,7 @@ default is a data-exfiltration shape even with no publishing step, and it is not
 make the simple thing work.
 
 This supersedes the `report-bug` preset, which currently tells agents to append to
-`BUGS.md`; per §8.3 the preset stays and its text is repointed.
+`notes/BUGS.md`; per §8.3 the preset stays and its text is repointed.
 
 ---
 

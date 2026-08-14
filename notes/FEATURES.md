@@ -254,8 +254,10 @@ counters.
   columns are ALTERed in and a whole missing table whose columns are all nullable is
   created and backfilled; only a gap no existing row can be given (a `NOT NULL` column
   with no literal default) forces the full drop/recreate, which is then deferred rather
-  than refused while agents are live (`store.connect`/`_reconcile`/`_deficit`). See
-  `BUGS.md` #4 for the case where this deadlocked running agents.
+  than refused while agents are live (`store.connect`/`_reconcile`/`_deficit`). That shape
+  was arrived at the hard way: the original wipe-on-hash-change deadlocked a live fleet
+  twice, because wiping is refused while agents are live and the only way to stop being
+  live went through `connect()`.
 - Not checked: whether a plugin imports `switchboard` internals. `design/PLUGIN-REDESIGN.md`
   §4.6 asserts this check; it is deliberately not built, and §4.6 says why.
 - Config: `settings.toml [herdr] min_version`
@@ -1004,13 +1006,18 @@ The flags that went with them are gone too: `--keep`, `--ephemeral`, `--include-
   once, and each waives a parent with live children.
 
 ## Known issues
-See `BUGS.md` for the full write-ups. As of the last entries there: `Broker._adopt`
-race (**FIXED**), herdr `wait` sending the wrong `--until` value and spinning CPU
-(**FIXED**, both in the adapter), a schema change that deadlocked running agents
-(**FIXED**, and adding a table no longer costs the store either — `BUGS.md` #4 says which
-narrower shape still forces a rebuild), and `sb wait` returning success early
-(**NOT REPRODUCIBLE** — and that verb has since been deleted, so #5 describes code that is
-no longer here).
+Bugs against switchboard go to the `report-bug` plugin — `sb plugin report-bug file …`,
+bound to every spawn — and `sb plugin report-bug list` is the current list. Two older
+findings are worth knowing about because the code carries them rather than a note:
+
+- **A spawn can outlive `status.SPAWN_GRACE` by 25 s** and be reaped mid-spawn, but only
+  in the case where herdr answers nothing at all. Known and accepted at merge time; the
+  arithmetic, the consequence and the two-line fix that stays available are in
+  `tests/test_status.py::test_the_grace_outlasts_herdrs_own_retry_loop`'s docstring.
+- **Events that name an agent without being that agent acting** used to reset its idle
+  clock, weakening everything gated on `idle` for exactly the agents with a backlog.
+  Fixed on the reader's side; `switchboard/status.py`'s `DONE_TO_THE_AGENT` comment says
+  which kinds were excluded and which three were deliberately left.
 
 ## Keeping this current
 The cheapest rule that will actually survive delegated agents who haven't read this

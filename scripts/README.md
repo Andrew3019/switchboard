@@ -13,7 +13,7 @@ Run in order. Each prints what it's doing and what it expects.
 | `03-talk.sh` | Doorbell + mailbox: agent A pokes agent B, B responds. Two live agents — **this one costs tokens.** |
 | `05-mouse.py` | Does a herdr pane forward **mouse clicks** to a TUI at all? Prints every event decoded and raw. Nothing on click = the clickable board dies here. |
 | `06-board.py` | Clickable agent tree: real agents from the store, redrawn every 2s, click a row → `herdr agent focus`. Human-only surface — no agent runs this, and it never becomes an `sb` verb. |
-| `wf-shim.sh` | The throwaway `wf` used to validate the verb surface before any of it existed: files instead of SQLite, four rounds against real agents. Findings 14–19 in `POC.md` came out of it. Superseded by `sb`; kept as the record. |
+| `wf-shim.sh` | The throwaway `wf` used to validate the verb surface before any of it existed: files instead of SQLite, four rounds against real agents. Findings 14–19 in `notes/POC.md` came out of it. Superseded by `sb`; kept as the record. |
 
 ## Notes
 

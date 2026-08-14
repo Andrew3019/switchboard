@@ -549,7 +549,7 @@ agent read, and hoovering that into a bug report by default is a data-exfiltrati
 even with no publishing step.
 
 This supersedes the existing `report-bug` *preset*, which currently tells agents to append
-to `BUGS.md`. The preset stays (deleting it would make an existing `--with report-bug`
+to `notes/BUGS.md`. The preset stays (deleting it would make an existing `--with report-bug`
 silently degrade into the literal instruction `"report-bug"` — a spawn that looks fine and
 ships a one-word prompt) but its text should point at the plugin.
 
@@ -574,7 +574,7 @@ Two shipped-content bugs to fix while in the area, flagged not fixed:
 1. `ask-dont-guess.md` tells agents to run `sb ask human`, which `Broker.ask()` refuses in
    favour of `sb block` (`broker.py:1026-1033`). Every agent that ever received this preset
    was told to run a command that errors.
-2. `report-bug.md` tells agents to append to `BUGS.md`; once the plugin exists the two will
+2. `report-bug.md` tells agents to append to `notes/BUGS.md`; once the plugin exists the two will
    disagree about where bugs live.
 
 ---

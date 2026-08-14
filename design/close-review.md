@@ -115,7 +115,7 @@ The `workspaces` backfill derives rows from `agents` only, so a registered check
 agent rows never gets one — and that is exactly the case the listing's three-source union was
 built to surface. `03d94c2`'s own commit message names it: "only git knows the orphan checkout
 with no rows (`fix-options`, on disk, zero rows)". I confirmed `fix-options` is a live entry in
-`git worktree list` in `/Users/andrew/Code/switchboard` with no `agents` rows.
+`git worktree list` in `~/Code/switchboard` with no `agents` rows.
 
 ```
 listed: {'main': ('ok', ['git']), 'orphan': ('ok', ['git'])}

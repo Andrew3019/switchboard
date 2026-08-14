@@ -782,11 +782,12 @@ class WorkspacesTableTest(unittest.TestCase):
     about `branch`, because that disagreement is where the rule was wrong.
     """
 
-    # Rows per bare orchestrator, and the primary clone they all share. Four of them over
+    # Rows per bare orchestrator, and the one checkout they all share — this suite's own,
+    # so the fixture carries a real path on whatever machine it runs on. Four of them over
     # one directory is why the key is the name: keyed on the path they would be one row,
     # and retiring any one of them would retire the other three.
     _BARE = ("main", "main-2", "main-3", "main-4")
-    _CLONE = "/Users/andrew/Code/switchboard"
+    _CLONE = str(Path(__file__).resolve().parent.parent)
 
     # The regression fixture, from the real store: one cwd, one workspace, genuinely
     # worktree-backed, and some rows whose `branch` was never written — the shape

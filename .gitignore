@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Local, per-machine switchboard config. `defaults/` ships the baseline; anything here is
 # this checkout's own override and is deliberately not shared. Worktrees get symlinks to
@@ -18,3 +19,9 @@ __pycache__/
 # Scratch
 *.tmp
 .DS_Store
+
+# Agent scratch that must never be committed. Each of these has been written into the
+# repo root by an agent at least once; ignoring them is cheaper than catching it in review.
+/.scout-*.md
+/.resume-review/
+/recruiting/

@@ -6,7 +6,7 @@ contract and shape, no implementation.
 **The claim.** switchboard is a single-user tool with no packaging and no daemon. A real
 extension system — manifest schema, subprocess protocol, registry, compat policy — is paid
 for on day one and repaid only by a second user (C15's own falsification test; F4/F5 in
-`PRINCIPLES.md` are what happens when you build for that user first). So: **a plugin is
+`notes/PRINCIPLES.md` are what happens when you build for that user first). So: **a plugin is
 Python that sb imports and calls two functions on.** Everything else is convention.
 
 The decisions changed four things from the first draft, and two of them made the design
@@ -287,7 +287,7 @@ consciously rather than by accident.
 ```
 
 For this repo, from any worktree:
-`/Users/andrew/Code/switchboard/.git/agentflow/plugins/todo/`
+`~/Code/switchboard/.git/agentflow/plugins/todo/`
 
 Beside the store and `config.json`: uncommitted, per-repo, visible from every worktree.
 A plugin that needs something else computes it — `ctx.state` is a default, not a cage
@@ -458,7 +458,7 @@ sb plugin bug list
 sb plugin bug show <name>
 ```
 
-A file per report rather than appending to the existing root `BUGS.md` for one reason:
+A file per report rather than appending to the existing `notes/BUGS.md` for one reason:
 concurrent appends from several agents lose reports, which is F10 in the failure table
 ("durable memory as Markdown — whole file read to use any of it, conflicts on write"). One
 file per report has no write contention at all, and `list` is a directory listing. Nothing

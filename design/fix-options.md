@@ -503,7 +503,7 @@ respects in `store.workspace_branch`, `Broker._recorded_path` and
 `_workspace_id`'s `workspace_bare` branch. This document previously spoke as
 though every workspace had a worktree; it does not, and on this machine four
 workspaces are bare — `main`, `main-2`, `main-3` and `main-4`, all NULL
-`branch`, all recording `/Users/andrew/Code/switchboard`. Four of the eight herdr
+`branch`, all recording `~/Code/switchboard`. Four of the eight herdr
 spaces open right now are exactly these, and `f1193d0` made them the
 fastest-accumulating kind in the system, since every bare `sb start` mints
 another one.
@@ -1222,7 +1222,7 @@ names in `agents`. Each source knows something the others do not.
 
 - Only git knows about a worktree no agent was ever recorded in, and reporting
   exactly that orphan is a large part of the command's purpose;
-  `/Users/andrew/.herdr/worktrees/switchboard/fix-options` is on disk right now
+  `~/.herdr/worktrees/switchboard/fix-options` is on disk right now
   with zero agent rows.
 - Only the table knows about a workspace with no worktree and no rows — including
   every retired one.
@@ -1426,7 +1426,7 @@ work either.
 
 **Why `workspace_id` does not work.** It is not a function of a checkout. On this
 machine `w16` is recorded against two different directories at once — `main-3` in
-`/Users/andrew/Code/switchboard`, the human's primary non-worktree clone, and
+`~/Code/switchboard`, the human's primary non-worktree clone, and
 `revise-design` in the `fix-options-2` worktree — so a table with one `checkout`
 column per id cannot represent it at all, and whichever path a backfill picked
 would be wrong for half its rows. In the other direction, `fix-options-2` itself
@@ -1441,7 +1441,7 @@ Round 2's fix was to key the table on the checkout path. That removed one
 collision and introduced a worse one, which nothing re-tested at the time: a bare
 workspace has no checkout of its own, so *all* bare workspaces over one clone
 share one path. There are four here — `main`, `main-2`, `main-3` and `main-4`,
-all recording `/Users/andrew/Code/switchboard` with a NULL branch. A table keyed
+all recording `~/Code/switchboard` with a NULL branch. A table keyed
 on the path holds one row for all four, and every consequence is fatal to the one
 operation the design grants a bare workspace:
 
@@ -2550,7 +2550,7 @@ visible accumulation. Disclosure is the answer, not reordering.
   worktree-backed space does not outlive its last tab. This is why no tab or
   space teardown code appears anywhere in this design.
 - **Four bare workspaces, one path.** `main`, `main-2`, `main-3`, `main-4` all
-  record `/Users/andrew/Code/switchboard` with a NULL branch.
+  record `~/Code/switchboard` with a NULL branch.
 - **The manual-close walkthrough.** A hand-closed pane, tab, window/space, whole
   terminal application, or raw `git worktree` removal each leave the design in a
   correct state — the pane and worktree cases being the two the person has
@@ -2666,7 +2666,7 @@ events, and concluded that every population figure in this document — 101 rows
 11752 events, 21 workspaces, 55 rows under removed worktrees, five orphan
 branches, eight unseen messages, four bare workspaces — no longer describes this
 machine. That is wrong, and it was checked. The path it read,
-`/Users/andrew/Code/switchboard/.switchboard/state.db`, is a decoy; the store
+`~/Code/switchboard/.switchboard/state.db`, is a decoy; the store
 `repo_root()` actually resolves to is `.git/agentflow/state.db`, which holds 107
 agents, 12359 events and 267 messages right now, all intact. Every figure this
 document argues from still stands, and the already-gone prune still clears what it
@@ -2749,7 +2749,7 @@ one. Everything here is a known hole, not a discovered one.
   met by code declaring a table it does not have — including the fixture this
   document demands, the two names whose rows disagree about `branch`. What is
   claimed rather than filed is the run against a *copy of the real database*:
-  `BUGS.md` records its result (117 agents, 284 messages, 13324 events preserved
+  `notes/BUGS.md` records its result (117 agents, 284 messages, 13324 events preserved
   where the old code took them to zero) and no artifact for it was checked into
   `design/` the way the lsof probe and the destructive review were. Run, not filed.
 - **The backfill's only input is `agents.cwd`, and it is not durable.** It runs
