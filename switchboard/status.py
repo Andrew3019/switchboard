@@ -298,8 +298,8 @@ SHOW_ARCHIVED = config.flag("display.show_archived")
 #     read_output   somebody ran `sb inspect` and read its terminal (`output.py`)
 #
 # A denylist here rather than moving those writes to `target=` in the payload, which is what
-# `_nudge`, `mark_turn` and `_forget_turn` do and what `notes/BUGS.md` proposed. Two things pay for
-# the difference: `sb log <name>` is `store.recent_events(agent=...)`, so re-homing them
+# `_nudge`, `mark_turn` and `_forget_turn` do. Two things pay for the difference:
+# `sb log <name>` is `store.recent_events(agent=...)`, so re-homing them
 # empties the log of exactly the delivery history the held-mail diagnosis was made from, and
 # `Broker._delivery_failure` reads its own `ring_failed` rows back by that same column. The
 # question being asked is a reader's question — "did this agent do anything" — so it is
@@ -1260,8 +1260,8 @@ def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
     events table after being excluded from the messages half of it. Measured on `main-7`:
     nine deferrals in a day, six less than thirty minutes apart, which is what kept
     `turn_doubted` (30 min of quiet) from ever doubting a stale `working` edge and so kept
-    `_forget_turn` from ever repairing it. `stalled` and the reconciler read the same clock
-    (`notes/BUGS.md`, "A held message resets the idle clock of the agent it is held for").
+    `_forget_turn` from ever repairing it. `stalled` and the reconciler read the same
+    clock, so a held message was resetting the idle clock of the agent it was held for.
     """
     seen: dict[str, int] = {}
     kinds = ",".join("?" * len(DONE_TO_THE_AGENT))

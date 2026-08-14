@@ -620,7 +620,6 @@ class WaitTest(unittest.TestCase):
 
         This is the test the method never had, which is how the DEFAULT argument of a
         public method stayed unusable — every call failed instantly and nothing waited.
-        See `notes/BUGS.md`.
         """
         fake = FakeHerdr(ok({}), ok({"agents": [AGENT_JSON]}))
         Herdr("herdr", runner=fake).wait("w1")
@@ -635,7 +634,7 @@ class WaitTest(unittest.TestCase):
     def test_a_stale_wait_backs_off_instead_of_spinning(self):
         """`agent wait` returns INSTANTLY when the agent is already in the state asked
         for, so the stale-seq retry has to sleep or it pins a core for the whole timeout —
-        measured at 77% of a core for a six-second wait. See `notes/BUGS.md`.
+        measured at 77% of a core for a six-second wait.
         """
         stale = ok({"agents": [dict(AGENT_JSON, state_change_seq=88)]})
         fresh = ok({"agents": [dict(AGENT_JSON, state_change_seq=99)]})

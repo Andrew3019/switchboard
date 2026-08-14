@@ -589,7 +589,7 @@ class StatusTest(unittest.TestCase):
         worst case is 3 x 100 + 12 = 312 s, and `SPAWN_GRACE` is 287. So a spawn CAN
         outlive the grace by 25 s and be reaped mid-spawn, but only in the herdr-hung
         case the outer bound was added for. The grace stays derived from herdr's own
-        policy; see `notes/BUGS.md` for the hole that leaves open.
+        policy, and that hole stays open.
 
         `**_` because the runner is the injected `_run`, and `_spawn` passes it the outer
         deadline as `timeout=`. Reading that kwarg here instead of `--timeout` is exactly

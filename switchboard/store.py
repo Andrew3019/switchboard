@@ -1041,8 +1041,8 @@ def claim_agent(
     `agents.name` is a PRIMARY KEY, and that index is the only arbiter two concurrent
     openers of one workspace share. So the claim has to BE the insert: a
     `get_agent(...) or create_agent(...)` check-then-act is two statements with a race
-    between them, and it lost that race about once in twenty-five workspace opens (both
-    faces — an IntegrityError and a lost `created` count — are written up in `notes/BUGS.md`).
+    between them, and it lost that race about once in twenty-five workspace opens, with
+    two faces: an IntegrityError, and a lost `created` count.
 
     False means join the winner rather than start a rival, which is the same "what is
     already there is somewhere to go" rule the rest of the workspace code follows.

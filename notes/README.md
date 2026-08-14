@@ -25,11 +25,7 @@ Each file below says what it is and how far you can trust it.
 | [HOOKS.md](HOOKS.md) | The Stop gate and the activity signal, which are built, and the hook candidates that are not. |
 | [braindump.md](braindump.md) | The original unfiltered thinking, before any research or code. Preserved as the starting point; nothing in it is a commitment. |
 
-## History
-
-| File | What it is |
-|---|---|
-| [bugs-writeup-stale-entries.md](bugs-writeup-stale-entries.md) | A later pass over `BUGS.md` itself, correcting entries that had gone stale. `BUGS.md` is gone (see below); this is the record of what those corrections were. |
+## Notes on reading these
 
 **`BUGS.md`, `QA-FINDINGS.md` and `REVIEW.md` are gone.** They were an August-2026 bug
 log, a live-agent QA run and a one-off review pass. Every finding in them was fixed, or
@@ -39,8 +35,6 @@ for the spawn-grace hole, `switchboard/status.py`'s `DONE_TO_THE_AGENT` comment 
 idle-clock one). Bugs against switchboard now go to the `report-bug` plugin
 (`sb plugin report-bug file …`), which is bound to every spawn. The files themselves are in
 git history.
-
-## Two notes on reading these
 
 **`audit/` is gone.** Several files below cite `audit/<something>.md` — a directory of
 per-phase build and verification write-ups that was removed when this repo was made
