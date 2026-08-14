@@ -484,8 +484,37 @@ class ReportBugTest(ShippedSandbox):
 # -- doctor --------------------------------------------------------------------
 
 
+class _HerdrInstalled:
+    """The two calls `sb doctor` makes on herdr, answered without a herdr on the machine.
+
+    Everything below is about plugins; the herdr line is plumbing the report happens to
+    print on the way. Left unfaked, `doctor` shells out to the herdr binary, so on a
+    machine that has none — anyone's clone, and CI — these twelve tests died on a
+    `FileNotFoundError` from `Herdr.version` before reaching a single plugin assertion.
+    Deliberately only two methods: this is not a herdr, and nothing here may start
+    depending on it being one.
+    """
+
+    def __init__(self, *a, **kw) -> None:
+        pass
+
+    def check(self, **kw) -> None:
+        pass
+
+    def version(self) -> str:
+        return "9.9.9"
+
+
 class DoctorTest(ShippedSandbox):
     """What `sb doctor` says about plugins, and what it does NOT do about it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # On `cli`, not on `herdr`: cli bound the name with `from .herdr import Herdr` at
+        # import time, so patching the herdr module leaves cli holding the real class.
+        patch = mock.patch.object(cli, "Herdr", _HerdrInstalled)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_a_healthy_repo_is_clean_and_exits_zero(self):
         code, out, _ = self.sb("doctor")

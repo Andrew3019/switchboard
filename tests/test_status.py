@@ -1344,7 +1344,10 @@ class StatusArchivedCliTest(unittest.TestCase):
         os.chdir(self.repo)
         self.addCleanup(os.chdir, cwd)
         # herdr answers, and lists nobody: `alive is False`, which is what archived needs.
-        h = mock.patch.object(herdr_mod, "Herdr", lambda *a, **k: FakeHerdr([]))
+        # Patched on `cli`, not on `herdr`: cli did `from .herdr import Herdr` at import
+        # time, so replacing the attribute on the herdr module leaves cli holding the real
+        # class and the run quietly shells out to a herdr binary instead of to this fake.
+        h = mock.patch.object(cli_mod, "Herdr", lambda *a, **k: FakeHerdr([]))
         h.start()
         self.addCleanup(h.stop)
 

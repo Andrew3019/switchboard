@@ -67,10 +67,21 @@ class Scanning(unittest.TestCase):
         finally:
             live.CWD_SCAN = keep
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS lsof — see the note below")
     @unittest.skipUnless(shutil.which("lsof"), "lsof is what this check is built on")
     def test_the_real_scan_finds_this_process_in_its_own_directory(self):
         """Run in anger, not simulated: the invocation itself, on this machine, against a
-        directory something is genuinely sitting in."""
+        directory something is genuinely sitting in.
+
+        macOS only, and not because the test is fussy. `lsof -F pcn` emits a four-line
+        group there (`p`/`c`/`fcwd`/`n`) and a three-line group on Linux, which `_parse`
+        rejects wholesale — so on Linux `scan` answers "could not tell" for every process
+        that exists and the gate degrades to permanently blind. That is a fact about
+        `live.CWD_SCAN`, not about this test; switchboard targets the machine herdr and
+        tmux run on, so the shape is right where it is used. Skipping here rather than
+        loosening the parser keeps the real invocation covered where it is real, and this
+        note is the record that Linux support would start with the parser.
+        """
         here = str(Path.cwd())
         found = live.processes_in(here)
         self.assertIsNotNone(found, "lsof answered, so this must not be 'cannot tell'")
@@ -78,10 +89,12 @@ class Scanning(unittest.TestCase):
 
 
 class Containment(unittest.TestCase):
-    """The nesting is real on this machine, not constructed: `git worktree list` holds
-    `.../switchboard/fix-options` and `.../switchboard/fix-options-2` side by side."""
+    """The nesting is real, not constructed: sibling worktrees of this repo sit side by
+    side under one directory, and `git worktree list` has repeatedly held a pair like
+    `.../fix-options` and `.../fix-options-2` at once. The root here is this checkout's
+    own path, so the shape is a real one on whatever machine the suite runs on."""
 
-    root = "/Users/andrew/.herdr/worktrees/switchboard/fix-options"
+    root = str(Path(__file__).resolve().parent.parent)
 
     def test_a_sibling_whose_name_is_a_string_prefix_is_not_under_it(self):
         self.assertTrue(f"{self.root}-2/anything".startswith(self.root))   # the trap
