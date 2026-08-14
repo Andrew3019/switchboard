@@ -27,16 +27,18 @@ Each file below says what it is and how far you can trust it.
 
 ## History
 
-Kept for the measurements and the wrong theories, which are the useful part. All three
-describe code as it stood in August 2026; much of what they discuss has since been fixed,
-renamed, or deleted outright, and each carries a preamble saying so.
-
 | File | What it is |
 |---|---|
-| [BUGS.md](BUGS.md) | One entry per bug: what was run, what was expected, what happened, and the exact error. Every entry carries a **STATUS** line. |
-| [QA-FINDINGS.md](QA-FINDINGS.md) | A live-agent exercise of the verbs that had unit tests but had never been run against real agents. Eleven findings, B1–B11. |
-| [REVIEW.md](REVIEW.md) | A whole-repo review pass, 2026-08-07: what was consolidated, what was deliberately not, and what was deleted as dead. |
-| [bugs-writeup-stale-entries.md](bugs-writeup-stale-entries.md) | A later pass over `BUGS.md` itself, correcting entries that had gone stale. |
+| [bugs-writeup-stale-entries.md](bugs-writeup-stale-entries.md) | A later pass over `BUGS.md` itself, correcting entries that had gone stale. `BUGS.md` is gone (see below); this is the record of what those corrections were. |
+
+**`BUGS.md`, `QA-FINDINGS.md` and `REVIEW.md` are gone.** They were an August-2026 bug
+log, a live-agent QA run and a one-off review pass. Every finding in them was fixed, or
+was about a verb that has since been deleted; the two facts still worth having are in the
+code that carries them (`tests/test_status.py::test_the_grace_outlasts_herdrs_own_retry_loop`
+for the spawn-grace hole, `switchboard/status.py`'s `DONE_TO_THE_AGENT` comment for the
+idle-clock one). Bugs against switchboard now go to the `report-bug` plugin
+(`sb plugin report-bug file …`), which is bound to every spawn. The files themselves are in
+git history.
 
 ## Two notes on reading these
 
@@ -45,6 +47,6 @@ per-phase build and verification write-ups that was removed when this repo was m
 public. Those citations are still accurate about what was measured; the files themselves
 are only in git history now.
 
-**Cross-references are by bare filename.** A note that says `PRINCIPLES.md` or `BUGS.md`
+**Cross-references are by bare filename.** A note that says `PRINCIPLES.md` or `POC.md`
 means the file of that name in this directory. Comments elsewhere in the codebase cite
 them with the `notes/` prefix.
