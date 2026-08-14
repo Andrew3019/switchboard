@@ -15,6 +15,7 @@ Each file below says what it is and how far you can trust it.
 | [FEATURES.md](FEATURES.md) | The maintained inventory of what `sb` actually does, verb by verb, derived by reading the code. **Start here** if you want to know what the system is. |
 | [PRINCIPLES.md](PRINCIPLES.md) | The fifteen engineering principles (C0–C15) the design is argued from, the failure evidence behind each, and what they rule out. Referenced by file and number throughout the codebase. |
 | [REMAINING.md](REMAINING.md) | Where the code and `DESIGN-TRUTH.md` still disagree. Six open questions, all of them decisions rather than code. |
+| [dispatcher-space-and-cross-repo.md](dispatcher-space-and-cross-repo.md) | Live proof that herdr adopts a dispatcher's workspace as a repo group's parent, why the fix belongs in herdr rather than here, and what cross-repo dispatch would actually cost. Holds one open decision for Andrew. |
 
 ## Design record — partly built, partly retracted
 
