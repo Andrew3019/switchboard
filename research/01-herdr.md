@@ -61,7 +61,7 @@ Several projects already use herdr **as a substrate for visible, persistent suba
 Newline-delimited JSON (JSON Lines) over a Unix domain socket. **Not** JSON-RPC 2.0 — no `jsonrpc` field.
 
 ```
-socket: /Users/andrew/.config/herdr/herdr.sock          (also $HERDR_SOCKET_PATH)
+socket: ~/.config/herdr/herdr.sock          (also $HERDR_SOCKET_PATH)
 named:  ~/.config/herdr/sessions/<name>/herdr.sock
 ```
 
@@ -208,7 +208,7 @@ Verified live — I registered a synthetic agent from a shell pane with no real 
 $ herdr pane report-agent w1:p5 --source myctl --agent testbot --state working --message "step 3/7" --seq 1
 $ herdr agent list
 {"agents":[ …,
- {"agent":"testbot","agent_status":"working","cwd":"/Users/andrew/Code/agent-workflows",
+ {"agent":"testbot","agent_status":"working","cwd":"~/Code/agent-workflows",
   "pane_id":"w1:p5","state_change_seq":26,"tab_id":"w1:t2","workspace_id":"w1"}]}
 ```
 
@@ -448,8 +448,8 @@ herdr worktree remove --workspace ID [--force]
 ```json
 {"type":"worktree_list",
  "source":{"repo_key":"…/agent-workflows/.git","repo_name":"agent-workflows",
-           "repo_root":"/Users/andrew/Code/agent-workflows",
-           "source_checkout_path":"/Users/andrew/Code/agent-workflows"},
+           "repo_root":"~/Code/agent-workflows",
+           "source_checkout_path":"~/Code/agent-workflows"},
  "worktrees":[{"path":"…/agent-workflows","branch":"main","is_bare":false,
                "is_detached":false,"is_prunable":false,"is_linked_worktree":false,
                "label":"agent-workflows"}]}
