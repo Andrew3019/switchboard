@@ -18,8 +18,9 @@ grouping variants, default `bracket`) and `--gutter-colour single|rotate` (defau
 > **Read the rounds in order — later ones supersede earlier frames.** Blank lines: rounds
 > 1 and 2 removed every one; round 3 put a single one back, above the NEEDS YOU bar and
 > nowhere else. Round 4 added the workspace gutter and the gone-agent treatment; round 5
-> fixed the grouping rule, moved the gutter into the indentation and recoloured it.
-> **Only the round 5 frames show what the board currently looks like.**
+> fixed the grouping rule, moved the gutter into the indentation and recoloured it;
+> round 6 marks one-row workspaces and moves `done` to dim.
+> **Only the round 6 frames show what the board currently looks like.**
 
 ## Round 1 — no blank lines
 
@@ -468,6 +469,10 @@ formatted from a real count, but only ever rendered as `1`).
 
 ## Round 5 — group on the workspace value, gutter into the indent, real colours
 
+> **Partly superseded by round 6**: one-row workspaces now get a mark instead of
+> nothing, and `done` is dim rather than bold yellow. The grouping rule, the
+> zero-cost geometry and the rest of the colour inventory below still stand.
+
 ### The groups were wrong
 
 Round 4 bracketed "a depth-0 agent and its whole subtree". That merges several worktrees
@@ -734,3 +739,199 @@ SGR codes, which is what the terminal is told, not what it draws — how `bold c
 `strike` actually look is Andrew's to judge. And no fleet shape beyond the live snapshot
 (both collapsed and `--archived`) and the sample: no `+ N more` in NEEDS YOU, and never
 more than one gone agent at once.
+
+## Round 6 — every workspace marked, and `done` off the wants-you yellow
+
+### A mark for a workspace of one
+
+A run of one gets a standalone **`·`** (middle dot) in the same cyan as the rule, so every
+workspace is visible and not just the ones that run deep. The dot rather than a bullet
+deliberately: `●` is already the healthy-agent glyph and `•` beside it would read as a
+second status glyph, whereas `·` cannot be mistaken for one. Brackets are unchanged — a
+run of two or more still gets `╭ │ ╰`.
+
+The live fleet, where before this every workspace held one visible agent and nothing at
+all was drawn:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 15 alive · 14 unread                             │
+│ ·○ main-10          failed    2h50                              │
+│  ◌ · worker-9       working  1d05h  STALLED — idle 1d05h        │
+│  ○ · reviewer-14    done     16h11                              │
+│      + 10 archived                                              │
+│ ·○ main-11          done      2h48                              │
+│      + 10 archived                                              │
+│ ·◌ main-15          working     8m  STALLED — idle 8m           │
+│  ◌ · worker-24      working    15m  STALLED —… · mail: 2 unread │
+│  ◌ · researcher-20  working    15m  STALLED —… · mail: 2 unread │
+│  ◌ · worker-30      working     9m  STALLED — idle 9m           │
+│  ● · researcher-33  working    12m                              │
+│  ● · reviewer-17    working     8m                              │
+│      + 12 archived                                              │
+│ ·◌ board-fix        working     3m  STALLED — idle 3m           │
+│  ○ · researcher-22  done      2h03  mail: 1 unread              │
+│  ○ · researcher-23  done       43m  mail: 1 unread              │
+│  ● · worker-28      working     3m                              │
+│      + 8 archived                                               │
+│ ·● main-16          working     4m                              │
+│  ● · researcher-34  working     1m                              │
+│    + 312 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 6                                                  │
+│   IDLE     worker-9       idle 1d05h, nothing running           │
+│   IDLE     main-15        idle 8m, nothing running              │
+│   IDLE     worker-24      idle 15m, nothing running             │
+│   IDLE     researcher-20  idle 15m, nothing running             │
+│   IDLE     worker-30      idle 9m, nothing running              │
+│   IDLE     board-fix      idle 3m, nothing running              │
+│ live snapshot · mockup, not the board                           │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+The sample fixture, which has the one multi-agent worktree (`worker-25` and its `qa-31`):
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
+│ ·● board-fix        working     2s                              │
+│  ◐ · researcher-22  done        3m  AT PROMPT — wai… · 1 unread │
+│  ○ · researcher-23  done        3m  mail: 1 unread              │
+│  ● · researcher-26  working    15s                              │
+│  ◐ ╭ worker-25      blocked     4m  BLOCKED — which pane shoul… │
+│  ◌ ╰   qa-31        idle       12m  STALLED — idle 1… · UNDEL 2 │
+│  ✗ · worker-19      idle       31m  GONE — herdr has no such a… │
+│      + 1 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 3                                                  │
+│   BLOCKED  researcher-22  at a prompt, waiting on you           │
+│   BLOCKED  worker-25      which pane should this render into?   │
+│   IDLE     qa-31          idle 12m, nothing running             │
+│  x  clear 1 gone   sample data — asked for · mockup, not the b… │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+The archived history, where the deep worktrees are, showing dots and brackets together:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 15 alive · 14 unread                             │
+│ ·○ main                       failed                            │
+│  ○ ╭ plugins-redesign-lead    done                              │
+│  ○ │   plugin-redesign        done                              │
+│  ○ │     plugins-investigate  done                              │
+│  ○ │     design-a             done                              │
+│  ○ │     design-b             done                              │
+│  ○ │     design-synth         done                              │
+│  ○ │     verify-design        done                              │
+│  ○ │     design-patch         done                              │
+│  ○ │     phase1-split         done                              │
+│  ○ │     phase2-loader        done                              │
+│  ○ │     phase3-prompts       done                              │
+│  ○ │     phase4-plugins       done                              │
+│  ○ │     land-redesign        done                              │
+│  ○ │     land-redesign-2      done                              │
+│  ○ │     land-rebase          done                              │
+│  ○ │     doc-reconcile        done                              │
+│  ○ ╰     doc-sweep            done                              │
+│  ○ · workspace-debug          failed                            │
+│  ○ ╭ workspace-model-lead     done                              │
+│  … (the rest of 364 archived agents)                            │
+```
+
+At 40 columns, unchanged in cost:
+
+```
+╭─ switchboard ────────────────────────╮
+│  switchboard · 15 alive · 14 unread  │
+│ ·○ ma…-10  failed                    │
+│  ◌ · …r-9  working  STALLED — idle … │
+│  ○ · …-14  done                      │
+│      + 10 archived                   │
+│ ·○ ma…-11  done                      │
+│      + 10 archived                   │
+│ ·◌ ma…-15  working  STALLED — idle … │
+│  ◌ · …-24  working  STAL… · 2 unread │
+│  ◌ · …-20  working  STAL… · 2 unread │
+│  ◌ · …-30  working  STALLED — idle … │
+│  ● · …-33  working                   │
+│  ● · …-17  working                   │
+│      + 12 archived                   │
+│ ·◌ bo…fix  working  STALLED — idle … │
+│  ○ · …-22  done     mail: 1 unread   │
+│  ○ · …-23  done     mail: 1 unread   │
+│  ● · …-28  working                   │
+│      + 8 archived                    │
+│ ·● ma…-16  working                   │
+│  ● · …-34  working                   │
+│    + 312 archived                    │
+│                                      │
+│  NEEDS YOU · 6                       │
+│   IDLE     worker-9                  │
+│   IDLE     main-15                   │
+│   IDLE     worker-24                 │
+│   IDLE     researcher-20             │
+│   IDLE     worker-30                 │
+│   IDLE     board-fix                 │
+│ live snapshot · mockup, not the boa… │
+╰──────────────────────────────────────╯
+```
+
+### The depth-0 mark: it can be drawn, and it is tighter than the rest
+
+The top orchestrator now gets a dot, as asked. It has no indentation of its own — its name
+starts immediately after the glyph — so its dot goes in the row's **leading space**, the
+only free column to the left of the glyph. Direction-wise that is right: the outermost
+group's mark sits outermost, and the tops' dots line up in their own column.
+
+**But it is the one mark with no space beside it**, so it reads tighter than every other:
+
+```
+│ ·○ main-10          failed    2h48       ← top: dot hard against the glyph
+│  ◌ · worker-9       working  1d05h       ← depth 1: a space either side
+```
+
+It is legible — the dot is small and low, the glyphs are rings and discs, and I do not
+think anyone misreads `·○` as one character — but it is a visible blemish and it is the
+honest answer to "check it does not look wrong". Two ways out if Andrew dislikes it:
+
+1. **Leave it.** Costs nothing, and the tops' dots form their own clean left column.
+2. **Indent the whole board by two columns**, giving depth 0 an indent to draw in like
+   every other level. That makes the top's dot identical to all the others and costs
+   **two columns on every row**, which comes off the tail — the opposite of the
+   zero-cost trade the gutter has made so far.
+
+I left it as (1) and did not force anything further; say the word for (2).
+
+### `done` is dim now
+
+`done` was `bold yellow` — the board's "this one wants you" colour — so a finished agent
+pulled the eye exactly like a stuck one. It is now `dim`, the same tier as ages, archived
+rows and reasons. It shares that tier with `idle`, which is fine: the two are told apart
+by the word, as everything here is.
+
+Re-read the inventory afterwards from the emitted codes. **Bold yellow (`1;33`) is now
+worn by exactly three things, all of which mean "wants you"**: the `◐` glyph (at a prompt
+or blocked), the `◌` glyph (stalled or no session), and the `IDLE` kind in NEEDS YOU.
+Nothing else lands on it. One caveat: `--gutter-colour rotate` includes bold yellow in its
+cycle, so under `rotate` one group's mark wears the wants-you colour — one more reason
+`single` is the default.
+
+Changed rows in the inventory table above:
+
+| Element | Was | Now | SGR |
+|---|---|---|---|
+| State `done` | `bold yellow` | `dim` | `2` |
+| Lone-workspace mark `·` | — | `bold cyan` | `1;36` |
+
+### Verified
+
+64 combinations — `{live, sample}` × `{with, without `--archived`}` ×
+`{bracket, bar, tick, none}` × `{40, 56, 67, 100}` columns: every line exactly the
+requested width, exactly one blank line inside each panel. The gutter still costs **zero
+columns**: diffing `--gutter none` against `--gutter bracket` at all four widths, every
+differing row differs by **exactly one character, in place** — now 16 such rows on the live
+fleet instead of 0, because every workspace is marked.
+
+Not verified: the colours by eye. The inventory is read from emitted SGR codes — what the
+terminal is told, not what it draws.

@@ -66,7 +66,12 @@ SNAPSHOT_FORMAT = 1    # `panel.FORMAT`
 # NO_COLOR pane still reads the word.
 STATE = {
     "working": "bold green",
-    "done": "bold yellow",
+    # `done` is dim, not yellow. It was bold yellow, which is the board's "this one wants
+    # you" colour — the `◐`/`◌` glyphs and NEEDS YOU's IDLE all wear it — so a finished
+    # agent pulled the eye like a stuck one. Finished is background information; it now
+    # reads like the ages and the archived rows. Same dim as `idle`, which is fine
+    # because the two are told apart by the word, as everything here is.
+    "done": "dim",
     "idle": "dim",
     "blocked": "bold red",
     "failed": "bold red",
@@ -544,6 +549,13 @@ def row_depth(row: Any) -> int:
 # row already has. Cost: nothing.
 GUTTER_STYLES = ("bracket", "bar", "tick", "none")
 
+# The mark for a workspace holding one visible agent — a middle dot, not a bullet: `●` is
+# already the healthy-agent glyph and `•` beside it would read as a second status glyph.
+LONE_MARK = "·"
+# `offset` sentinel: draw in the row's leading space, left of the glyph, for a depth-0
+# run that has no indentation of its own.
+LEADING_SLOT = -1
+
 # Colours. `single` is one colour for every group; `rotate` gives each group its own.
 # Rotating is the tempting one and the wrong one — see the note in `gutter_column`.
 # `single` was `grey42` and Andrew could not tell it had a colour at all; it is now cyan,
@@ -576,21 +588,27 @@ def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
 
 def gutter_column(rows: list[Any], style: str,
                   colour: str) -> list[Optional[tuple[str, str, int]]]:
-    """Per row: `(char, style, indent_offset)`, or `None` for rows with no rule.
+    """Per row: `(char, style, offset)`, or `None` for rows with no mark.
 
-    The rule lives in the INDENTATION, between the glyph and the name, at the column the
-    group's shallowest row indents to. Every row in a run is at least that deep, so the
-    rule always lands on a space and the name column never moves — the gutter costs zero
-    columns. Only a run whose shallowest row is at depth 0 has no indent to draw in; that
-    one is skipped rather than shifting the whole board one column right.
+    The mark lives in the INDENTATION, between the glyph and the name, at the column the
+    run's shallowest row indents to. Every row in a run is at least that deep, so the mark
+    always lands on a space and the name column never moves — the gutter costs zero
+    columns. `offset` is an index into the row's rendered name label, except for
+    `LEADING_SLOT`, which means the row's own leading space (see below).
 
     `bracket` is corner-rule-corner. `bar` is a plain rule the run's full height, no
     corners. `tick` marks only the run's first row.
 
-    A ONE-ROW RUN DRAWS NOTHING. A bracket around a single row says "these rows go
-    together" about one row, which is not information, and Andrew specifically does not
-    want the top orchestrator — alone in its own workspace, always — enclosed. So the
-    gutter only ever appears where a workspace actually holds more than one visible agent.
+    EVERY WORKSPACE GETS A MARK, including a workspace holding just one visible agent.
+    A bracket needs two rows to read as a bracket, so a run of one gets a standalone
+    `·` instead — small, and deliberately not from the status vocabulary, which is where
+    `●○◌◐✗` all live. A bullet would have been confusable with `●`; a middle dot cannot be.
+
+    A depth-0 run — always the top orchestrator, alone in its own workspace — has no
+    indentation to draw in, since its name starts immediately after the glyph. Its mark
+    goes in the row's leading space instead (`LEADING_SLOT`), the only free column to the
+    left of the glyph. That puts it one column further out than the formula would, which
+    is the right direction: the outermost group's mark sits outermost.
 
     On colour: `single` is the honest default. A terminal has a handful of reliably
     distinct colours and this fleet has run ninety-odd workspaces, so `rotate` recycles
@@ -604,15 +622,22 @@ def gutter_column(rows: list[Any], style: str,
         return out
     n = 0
     for first, last in group_runs(rows):
-        if first == last:                   # a workspace of one: nothing to enclose
-            continue
         depth = min(row_depth(rows[i]) for i in range(first, last + 1))
-        if depth < 1:                       # no indentation to live in
-            continue
-        off = 2 * (depth - 1)
+        off = LEADING_SLOT if depth < 1 else 2 * (depth - 1)
         tint = GUTTER_SINGLE if colour != "rotate" else \
             GUTTER_ROTATE[n % len(GUTTER_ROTATE)]
         n += 1
+        if first == last:                   # a workspace of one: a mark, not a bracket
+            out[first] = (LONE_MARK, tint, off)
+            continue
+        if off is LEADING_SLOT:
+            # A multi-row run rooted at depth 0 would need a full-height rule in the one
+            # column the lone mark borrows, which is also where the next row's own mark
+            # would go. Never seen in real data — every workspace with more than one agent
+            # is rooted at depth >= 1 — so it is marked like a run of one rather than
+            # shifting the whole board right to make room.
+            out[first] = (LONE_MARK, tint, off)
+            continue
         for i in range(first, last + 1):
             if style == "tick":
                 ch = "▌" if i == first else " "
@@ -731,7 +756,12 @@ def render(agents: list[dict], width: int, source_note: str,
         # terminal that ignores it loses nothing that carries meaning.
         doomed = bool(g(row, "gone"))
         gl = glyph(row)
-        line.append(" ")
+        rule = rules[i]
+        # A depth-0 run has no indent to draw in, so its mark takes the leading space.
+        if rule is not None and rule[2] == LEADING_SLOT:
+            line.append(rule[0], style=rule[1])
+        else:
+            line.append(" ")
         line.append(gl, style=GLYPH_STYLE.get(gl, ""))
         line.append(" ")
         indent = "  " * int(g(row, "depth", 0))
@@ -739,11 +769,10 @@ def render(agents: list[dict], width: int, source_note: str,
                                        max(1, w_name - vlen(indent))), w_name)
         name_style = ("bold red strike" if doomed
                       else "bold" if wants_you(row) else "")
-        # The workspace rule, drawn INTO the indent rather than in front of it. `off` is
+        # The workspace mark, drawn INTO the indent rather than in front of it. `off` is
         # always inside this row's indentation, so the character it replaces is a space
         # and the name column stays exactly where it was.
-        rule = rules[i]
-        if rule is not None and rule[2] < vlen(indent):
+        if rule is not None and rule[2] != LEADING_SLOT and rule[2] < vlen(indent):
             ch, tint, off = rule
             line.append(label[:off], style=name_style)
             line.append(ch, style=tint)
