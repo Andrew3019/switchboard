@@ -70,6 +70,30 @@ That is the whole agent-facing vocabulary: `delegate`, `tell`, `inbox`, `done`, 
 calling and refuses an agent, because a screen made for a person is not a place an agent
 should be reading its own state from.
 
+## Why build this
+
+Before building this, the landscape got a real look — a couple hundred multi-agent
+orchestrators, Gas Town, Firstmate, AO, Claude Code's own Agent Teams. Most of what
+switchboard prioritizes exists somewhere in that list, piece by piece.
+
+What switchboard actually wants, together: several unrelated efforts running at once,
+each its own tree and worktree, one command each, with no single orchestrator to funnel
+through. An agent that is still an ordinary Claude Code session — no DSL, no graph to
+declare — superpowered by default rather than assembled. Multi-agent procedures like
+adversarial review written down as a single reusable file instead of re-explained by hand
+each time. A Stop gate that mechanically refuses a turn nobody reported, not an advisory
+rule. One honest channel to a human — a board and `sb block`, no inbox nobody reads.
+Plugins that own a verb and durable state. All of it built on herdr rather than
+reimplementing panes and worktrees.
+
+Coverage exists in pieces: Firstmate has real typed human gates and lets a captain type
+straight into any crewmate's pane; Agent Teams gives teammates persistent, addressable
+identities. Nobody covers that whole set at once, which is the actual reason to build it.
+
+It is also built for myself — my own workflow and thought process. For a personal tool
+the question is not whether something similar exists, but whether anything existing fits
+well enough to adopt instead.
+
 ## Architecture
 
 About sixteen thousand lines of Python, standard library only — no third-party runtime
