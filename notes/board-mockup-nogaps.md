@@ -17,9 +17,9 @@ grouping variants, default `bracket`) and `--gutter-colour single|rotate` (defau
 
 > **Read the rounds in order — later ones supersede earlier frames.** Blank lines: rounds
 > 1 and 2 removed every one; round 3 put a single one back, above the NEEDS YOU bar and
-> nowhere else. Round 4 adds the workspace gutter and the gone-agent treatment, so the
-> frames under "Verification (rounds 1–3)" no longer show what the board looks like — the
-> round 4 frames do.
+> nowhere else. Round 4 added the workspace gutter and the gone-agent treatment; round 5
+> fixed the grouping rule, moved the gutter into the indentation and recoloured it.
+> **Only the round 5 frames show what the board currently looks like.**
 
 ## Round 1 — no blank lines
 
@@ -238,6 +238,10 @@ above are piped output with `NO_COLOR` set, so the colours themselves are unveri
 eye.
 
 ## Round 4 — workspace grouping in a left gutter, and gone agents
+
+> **Superseded by round 5**, which fixes the grouping rule (it merged
+> worktrees), moves the gutter into the indentation, and recolours it. The
+> variant frames below still show the round 4 geometry.
 
 Two things, neither of them wired into the real board. This is still only
 `scripts/board_mockup.py`.
@@ -461,3 +465,272 @@ struck-through name renders at all depends on the terminal. And no fleet shape b
 live snapshot and the sample: no very deep tree, no name longer than these, no `+ N more`
 in NEEDS YOU, and no fleet with two or more gone agents at once (the footer count is
 formatted from a real count, but only ever rendered as `1`).
+
+## Round 5 — group on the workspace value, gutter into the indent, real colours
+
+### The groups were wrong
+
+Round 4 bracketed "a depth-0 agent and its whole subtree". That merges several worktrees
+into one: a new workspace opens when a **top** delegates, so each direct child of a top
+starts its own workspace and the top sits alone in its own. The gutter now reads the
+`workspace` field and a group is simply **a run of consecutive rows sharing a workspace**
+(`group_runs`). No fork rule is encoded here at all, so it stays right whichever way that
+rule goes later.
+
+The live store settles it with a case depth cannot see: `workspace-debug`, a depth-1 child
+of `main`, has `workspace == "main"` — the same as its parent, unlike every one of its
+siblings. Under the old rule it was swallowed into `main`'s bracket along with fifteen
+other worktrees. Now it is correctly its own thing. Full archived history at 67 columns:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 11 alive · 14 unread                             │
+│  ○ main                       failed                            │
+│  ○ ╭ plugins-redesign-lead    done                              │
+│  ○ │   plugin-redesign        done                              │
+│  ○ │     plugins-investigate  done                              │
+│  ○ │     design-a             done                              │
+│  ○ │     design-b             done                              │
+│  ○ │     design-synth         done                              │
+│  ○ │     verify-design        done                              │
+│  ○ │     design-patch         done                              │
+│  ○ │     phase1-split         done                              │
+│  ○ │     phase2-loader        done                              │
+│  ○ │     phase3-prompts       done                              │
+│  ○ │     phase4-plugins       done                              │
+│  ○ │     land-redesign        done                              │
+│  ○ │     land-redesign-2      done                              │
+│  ○ │     land-rebase          done                              │
+│  ○ │     doc-reconcile        done                              │
+│  ○ ╰     doc-sweep            done                              │
+│  ○   workspace-debug          failed                            │
+│  ○ ╭ workspace-model-lead     done                              │
+│  ○ │   wm-phase0              done                              │
+│  ○ │   wm-spawn-claim         done                              │
+│  ○ │   wm-board               done                              │
+│  ○ │   wm-plugins             done                              │
+│  ○ │   wm-claim-fix           done                              │
+│  ○ │   wm-model               done                              │
+│  ○ │     store-split          done                              │
+│  ○ │     fork-rule            done                              │
+│  ○ │     join-workspace       done                              │
+│  ○ │     phase2-integrate     done                              │
+│  ○ ╰   wm-land                done                              │
+│  ○   sb-guard                 done                              │
+│  … (the rest of 364 archived agents)                            │
+```
+
+`main` alone, unbracketed. `plugins-redesign-lead` and its whole subtree in one bracket —
+one worktree, correctly. `workspace-debug` and `sb-guard` (both `workspace == "main"`)
+standing apart, each a run of one.
+
+**A one-row group draws no bracket, in general.** Enclosing a single row says "these rows
+go together" about one row, which is not information — and the top orchestrator, always
+alone in its own workspace, is exactly the case Andrew said he does not want enclosed.
+
+**The consequence, which is worth a look before you accept it:** on the *current* live
+fleet nothing is bracketed at all, because every visible agent happens to be alone in its
+worktree — the multi-agent worktrees are all in the archived history.
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 11 alive · 14 unread                             │
+│  ○ main-10          failed    2h37                              │
+│  ◌   worker-9       working  1d04h  STALLED — idle 1d04h        │
+│  ○   reviewer-14    done     15h58                              │
+│      + 10 archived                                              │
+│  ○ main-11          done      2h34                              │
+│      + 10 archived                                              │
+│  ● main-15          working     1m                              │
+│  ◌   worker-24      working     2m  STALLED —… · mail: 2 unread │
+│  ◌   researcher-20  working     2m  STALLED —… · mail: 2 unread │
+│  ●   worker-30      working     5m                              │
+│      + 12 archived                                              │
+│  ◌ board-fix        working     4m  STALLED — idle 4m           │
+│  ○   researcher-22  done      1h50  mail: 1 unread              │
+│  ○   researcher-23  done       30m  mail: 1 unread              │
+│  ●   worker-28      working     4m                              │
+│      + 8 archived                                               │
+│    + 312 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 4                                                  │
+│   IDLE     worker-9       idle 1d04h, nothing running           │
+│   IDLE     worker-24      idle 2m, nothing running              │
+│   IDLE     researcher-20  idle 2m, nothing running              │
+│   IDLE     board-fix      idle 4m, nothing running              │
+│ live snapshot · mockup, not the board                           │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+That is the honest rendering of this fleet, not a bug. But if Andrew wants to *see* his
+worktrees rather than only see where they run deep, the alternative is to bracket one-row
+groups too, which puts a rule beside nearly every row on this board. Say which he prefers.
+
+Two other rules I had to pick, both stated rather than hidden:
+
+- A **collapsed** `+ N archived` row carries no workspace of its own — the agents behind
+  it may be several — so it belongs to no run and ends whichever run it follows. In
+  practice these sit at the end of a subtree, so nothing real is split; a collapsed row
+  landing mid-run would cut that group's rule in two.
+- A run whose shallowest row is at **depth 0** is skipped: there is no indentation to draw
+  in, and shifting the whole board one column right to accommodate it is a worse trade.
+  Not observed in any real data — every workspace with more than one agent is rooted at
+  depth ≥ 1.
+
+I also corrected the built-in sample fixture: `qa-31`, a child of `worker-25`, had
+`workspace="qa-31"`. Only a top's delegate mints a workspace, so it is `worker-25`. The
+fixture had been wrong since it was written; reading the field is what exposed it.
+
+### The gutter moved into the indent — and now costs nothing
+
+It was a rule in the leading space at the far left, costing one column. It now sits
+**between the glyph and the name**, inside the indentation the row already carries, at the
+column its group's shallowest row indents to. Every row in a run is at least that deep, so
+the rule always lands on a space that was already there.
+
+**Cost: zero columns.** `fixed` is back to 5, the same as with no gutter at all. Proved
+rather than asserted: rendering the same data with `--gutter none` and `--gutter bracket`
+at 40, 56, 67 and 100 columns, the frames differ **only** in the rule characters
+themselves — every row is the same length and differs by at most one character, in place.
+Names, states, ages and tails are byte-identical. At 40 columns:
+
+```
+│  ◐   …-25  blocked  BLOCKED — which… │      ← --gutter none
+│  ◐ ╭ …-25  blocked  BLOCKED — which… │      ← --gutter bracket
+│  ◌     q…  idle     STALL… · UNDEL 2 │      ← --gutter none
+│  ◌ ╰   q…  idle     STALL… · UNDEL 2 │      ← --gutter bracket
+```
+
+All three variants, on the sample fixture at 67 columns:
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
+│  ● board-fix        working     2s                              │
+│  ◐   researcher-22  done        3m  AT PROMPT — wai… · 1 unread │
+│  ○   researcher-23  done        3m  mail: 1 unread              │
+│  ●   researcher-26  working    15s                              │
+│  ◐ ╭ worker-25      blocked     4m  BLOCKED — which pane shoul… │
+│  ◌ ╰   qa-31        idle       12m  STALLED — idle 1… · UNDEL 2 │
+│  ✗   worker-19      idle       31m  GONE — herdr has no such a… │
+│      + 1 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 3                                                  │
+│   BLOCKED  researcher-22  at a prompt, waiting on you           │
+│   BLOCKED  worker-25      which pane should this render into?   │
+│   IDLE     qa-31          idle 12m, nothing running             │
+│  x  clear 1 gone   sample data — asked for · mockup, not the b… │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
+│  ● board-fix        working     2s                              │
+│  ◐   researcher-22  done        3m  AT PROMPT — wai… · 1 unread │
+│  ○   researcher-23  done        3m  mail: 1 unread              │
+│  ●   researcher-26  working    15s                              │
+│  ◐ ▌ worker-25      blocked     4m  BLOCKED — which pane shoul… │
+│  ◌ ▌   qa-31        idle       12m  STALLED — idle 1… · UNDEL 2 │
+│  ✗   worker-19      idle       31m  GONE — herdr has no such a… │
+│      + 1 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 3                                                  │
+│   BLOCKED  researcher-22  at a prompt, waiting on you           │
+│   BLOCKED  worker-25      which pane should this render into?   │
+│   IDLE     qa-31          idle 12m, nothing running             │
+│  x  clear 1 gone   sample data — asked for · mockup, not the b… │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+```
+╭─ switchboard ───────────────────────────────────────────────────╮
+│  switchboard · 6 alive · 1 at prompt · 1 blocked · 4 unread     │
+│  ● board-fix        working     2s                              │
+│  ◐   researcher-22  done        3m  AT PROMPT — wai… · 1 unread │
+│  ○   researcher-23  done        3m  mail: 1 unread              │
+│  ●   researcher-26  working    15s                              │
+│  ◐ ▌ worker-25      blocked     4m  BLOCKED — which pane shoul… │
+│  ◌     qa-31        idle       12m  STALLED — idle 1… · UNDEL 2 │
+│  ✗   worker-19      idle       31m  GONE — herdr has no such a… │
+│      + 1 archived                                               │
+│                                                                 │
+│  NEEDS YOU · 3                                                  │
+│   BLOCKED  researcher-22  at a prompt, waiting on you           │
+│   BLOCKED  worker-25      which pane should this render into?   │
+│   IDLE     qa-31          idle 12m, nothing running             │
+│  x  clear 1 gone   sample data — asked for · mockup, not the b… │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+My pick is unchanged: **`bracket`, single colour**. With one-row groups now drawing
+nothing, `bar` and `bracket` differ only at the two ends of a run, and `bar`'s ambiguity
+from round 4 is gone — but the corners still say where a group starts and stops without
+asking colour to carry it, and `tick` still leaves a group's end implied.
+
+### Colours
+
+**The gutter was `grey42` — a mid grey, and effectively invisible. That is what Andrew was
+seeing.** It is now `bold cyan` (SGR `1;36`), which is outside the board's status
+vocabulary of green/yellow/red and distinct from the panel border's blue (`34`).
+
+Full inventory below. Every entry was read off the emitted escape codes, not from the
+style strings, so it is what the terminal is actually told.
+
+| Element | Style | SGR | Reads as |
+|---|---|---|---|
+| Panel border and rule | `blue` | `34` | blue |
+| Panel title `switchboard` | `bold blue` | `1;34` | bright blue |
+| Header bar | `bold white on blue` | `1;37;44` | white on blue |
+| **Workspace gutter rule** (single) | `bold cyan` | `1;36` | **bright cyan** |
+| Workspace gutter rule (`rotate`) | cyan/magenta/green/blue/yellow/red | `1;36` `1;35` `1;32` `1;34` `1;33` `1;31` | cycles per group |
+| Glyph `●` healthy | `bold green` | `1;32` | bright green |
+| Glyph `◐` at prompt / blocked | `bold yellow` | `1;33` | bright yellow |
+| Glyph `◌` stalled / no session | `bold yellow` | `1;33` | bright yellow |
+| Glyph `○` finished | `dim` | `2` | dim default |
+| Glyph `?` herdr unreachable | `dim` | `2` | dim default |
+| Glyph `✗` gone | `bold red` | `1;31` | bright red |
+| Agent name, ordinary | none | — | terminal default |
+| Agent name, wants a person | `bold` | `1` | bold default |
+| Agent name, **gone** | `bold red strike` | `1;9;31` | bright red, struck through |
+| State `working` | `bold green` | `1;32` | bright green |
+| State `done` | `bold yellow` | `1;33` | bright yellow |
+| State `idle` | `dim` | `2` | dim default |
+| State `blocked` / `failed` / `gone` | `bold red` | `1;31` | bright red |
+| State on a gone row (override) | `red` | `31` | red |
+| Idle age | `dim` | `2` | dim default |
+| Idle age on a gone row | `red` | `31` | red |
+| Row tail (`BLOCKED …`, `mail: …`) | `yellow` | `33` | yellow |
+| Row tail on a gone row | `bold red` | `1;31` | bright red |
+| `+ N archived` collapsed row | `dim` | `2` | dim default |
+| NEEDS YOU bar | `bold black on yellow` | `1;30;43` | black on yellow |
+| NEEDS YOU kind `BLOCKED` | `bold red` | `1;31` | bright red |
+| NEEDS YOU kind `IDLE` | `bold yellow` | `1;33` | bright yellow |
+| NEEDS YOU name | `bold` | `1` | bold default |
+| NEEDS YOU reason | `dim` | `2` | dim default |
+| NEEDS YOU `+ N more` | `dim` | `2` | dim default |
+| Footer `x  clear N gone` | `bold white on red` | `1;37;41` | white on red |
+| Footer provenance note | `dim` | `2` | dim default |
+
+Two things that fall out of the list, reported and not changed:
+
+- **`bold yellow` (`1;33`) is doing four jobs**: the `◐` and `◌` glyphs, the `done` state,
+  and the `IDLE` kind in NEEDS YOU. So a finished agent's state word is the same colour as
+  the glyph that means "this one wants you". Every one of those also carries a word or a
+  distinct glyph, so nothing is lost — but if Andrew wants `done` to recede, moving it to
+  plain (non-bold) yellow or to dim would separate them.
+- **`dim` (`2`) is the other overloaded one**: `idle`, ages, collapsed rows, reasons and
+  the footer. That one seems right — it is the "background information" tier throughout.
+
+### Verified
+
+128 combinations — `{live, sample}` × `{with, without `--archived`}` ×
+`{bracket, bar, tick, none}` × `{40, 56, 67, 100}` columns: every line exactly the
+requested width so nothing wraps, and exactly one blank line inside each panel (still the
+one above NEEDS YOU). Plus the zero-cost diff above at all four widths.
+
+Not verified: the colours by eye in a real terminal. The inventory is read from emitted
+SGR codes, which is what the terminal is told, not what it draws — how `bold cyan` and
+`strike` actually look is Andrew's to judge. And no fleet shape beyond the live snapshot
+(both collapsed and `--archived`) and the sample: no `+ N more` in NEEDS YOU, and never
+more than one gone agent at once.

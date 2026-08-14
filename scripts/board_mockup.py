@@ -247,9 +247,13 @@ SAMPLE: list[dict] = [
          blocked_why="which pane should this render into?", summary=None,
          undelivered=0, undelivered_age=0, archived=False, at_prompt=False,
          blocked=True, finished=False),
+    # `workspace="worker-25"`, not `"qa-31"`: only a TOP's delegate mints a new
+    # workspace, so a worker's child is a tab in the worker's own worktree. The fixture
+    # said `qa-31` until the gutter started reading this field and made the error visible.
     dict(name="qa-31", role="qa", parent="worker-25", depth=2, state="working",
          alive=True, turn="idle", stalled=True, gone=False, unread=2, age=1500,
-         idle=760, workspace="qa-31", task="Verify the mockup at 40/56/100 columns.",
+         idle=760, workspace="worker-25",
+         task="Verify the mockup at 40/56/100 columns.",
          blocked_why=None, summary=None, undelivered=2, undelivered_age=300,
          waiting_to_be_rung=True,
          archived=False, at_prompt=False, blocked=False, finished=False),
@@ -524,71 +528,99 @@ def row_depth(row: Any) -> int:
 # The workspace gutter: grouping without spending a blank line on it
 # ---------------------------------------------------------------------------
 
-# A workspace boundary is exactly "a top-level agent and its whole subtree", and the
-# board's row order is already contiguous by workspace — researcher-32 established both
-# from the store's full history (`notes/board-worktree-grouping.md`, branch
-# `researcher-32`). So the groups drawn here need no workspace lookup at all: a group
-# opens at every depth-0 agent and runs to the row before the next one.
+# A group is a RUN OF CONSECUTIVE ROWS SHARING A WORKSPACE — read from the data, not
+# inferred from depth. An earlier draft bracketed "a depth-0 agent and its whole subtree",
+# which merges several worktrees into one: researcher-32's finding
+# (`notes/board-worktree-grouping.md`, branch `researcher-32`) is that a new workspace
+# opens when a TOP delegates, so each direct child of a top starts its own workspace and
+# the top sits alone in its own. Reading `workspace` gets that right without encoding the
+# fork rule here at all, and stays right whichever way that rule goes later.
 #
-# Three shapes to choose between, all in the same one-column rule plus one space. The
-# rule REPLACES the row's existing leading space, so the true cost is one column, not two.
+# The live store has a case that settles it: `workspace-debug`, a depth-1 child of `main`,
+# has `workspace == "main"` — same as its parent, unlike every one of its siblings. Depth
+# cannot tell that row from the ones around it; the workspace value can.
+#
+# Three shapes to choose between, all one rule character drawn INSIDE the indentation the
+# row already has. Cost: nothing.
 GUTTER_STYLES = ("bracket", "bar", "tick", "none")
 
 # Colours. `single` is one colour for every group; `rotate` gives each group its own.
 # Rotating is the tempting one and the wrong one — see the note in `gutter_column`.
-GUTTER_SINGLE = "grey42"
-GUTTER_ROTATE = ("cyan", "magenta", "green", "blue", "yellow", "red")
+# `single` was `grey42` and Andrew could not tell it had a colour at all; it is now cyan,
+# which is outside the board's status vocabulary (green/yellow/red) and not the panel
+# border's blue.
+GUTTER_SINGLE = "bold cyan"
+GUTTER_ROTATE = ("bold cyan", "bold magenta", "bold green", "bold blue",
+                 "bold yellow", "bold red")
 
 
-def group_spans(rows: list[Any]) -> list[tuple[int, int]]:
-    """`(first, last)` row index for each workspace group, in screen order.
+def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
+    """`(first, last)` row index for each run of consecutive rows sharing a workspace.
 
-    A depth-0 agent opens a group; everything below it until the next depth-0 agent is
-    inside it, collapsed-archive markers included. A depth-0 *collapsed* row belongs to
-    no group — it stands for archived top-level agents, which are whole workspaces of
-    their own that are not on screen to be bracketed.
+    Collapsed-archive markers carry no workspace of their own — the agents they stand for
+    may be several workspaces — so they belong to no run and end whichever run they
+    follow. In practice a collapsed row sits at the end of a subtree, so this splits
+    nothing real; a collapsed row landing mid-run would cut that group's rule in two.
     """
-    spans: list[list[int]] = []
+    runs: list[list[int]] = []
+    current: Optional[str] = None
     for i, row in enumerate(rows):
-        depth = row_depth(row)
-        if not is_collapsed(row) and depth == 0:
-            spans.append([i, i])
-        elif depth >= 1 and spans:
-            spans[-1][1] = i
-    return [(a, b) for a, b in spans]
+        ws = None if is_collapsed(row) else g(row, "workspace")
+        if ws is not None and ws == current:
+            runs[-1][1] = i
+        elif ws is not None:
+            runs.append([i, i])
+        current = ws
+    return [(a, b) for a, b in runs]
 
 
-def gutter_column(rows: list[Any], style: str, colour: str) -> list[tuple[str, str]]:
-    """One `(char, style)` per row: the left rule that encloses each workspace group.
+def gutter_column(rows: list[Any], style: str,
+                  colour: str) -> list[Optional[tuple[str, str, int]]]:
+    """Per row: `(char, style, indent_offset)`, or `None` for rows with no rule.
 
-    `bracket` is corner-rule-corner, a large left bracket around the group. `bar` is a
-    plain rule the group's full height, no corners. `tick` marks only the group's first
-    row — the cheapest thing that still says "a new workspace starts here".
+    The rule lives in the INDENTATION, between the glyph and the name, at the column the
+    group's shallowest row indents to. Every row in a run is at least that deep, so the
+    rule always lands on a space and the name column never moves — the gutter costs zero
+    columns. Only a run whose shallowest row is at depth 0 has no indent to draw in; that
+    one is skipped rather than shifting the whole board one column right.
+
+    `bracket` is corner-rule-corner. `bar` is a plain rule the run's full height, no
+    corners. `tick` marks only the run's first row.
+
+    A ONE-ROW RUN DRAWS NOTHING. A bracket around a single row says "these rows go
+    together" about one row, which is not information, and Andrew specifically does not
+    want the top orchestrator — alone in its own workspace, always — enclosed. So the
+    gutter only ever appears where a workspace actually holds more than one visible agent.
 
     On colour: `single` is the honest default. A terminal has a handful of reliably
     distinct colours and this fleet has run ninety-odd workspaces, so `rotate` recycles
-    within one screen — and two groups sharing a colour reads as one group, which is
-    exactly the thing the gutter exists to deny. The bracket already says WHERE the
-    boundaries are; colour would only add WHICH group, and that is the part it does
-    badly. `rotate` is here so Andrew can see that for himself.
+    within one screen — and two runs sharing a colour reads as one run, which is exactly
+    the thing the gutter exists to deny. The bracket already says WHERE the boundaries
+    are; colour would only add WHICH group, and that is the part it does badly. `rotate`
+    is here so Andrew can see that for himself.
     """
-    out = [(" ", "") for _ in rows]
+    out: list[Optional[tuple[str, str, int]]] = [None for _ in rows]
     if style not in GUTTER_STYLES or style == "none":
         return out
-    for n, (first, last) in enumerate(group_spans(rows)):
+    n = 0
+    for first, last in group_runs(rows):
+        if first == last:                   # a workspace of one: nothing to enclose
+            continue
+        depth = min(row_depth(rows[i]) for i in range(first, last + 1))
+        if depth < 1:                       # no indentation to live in
+            continue
+        off = 2 * (depth - 1)
         tint = GUTTER_SINGLE if colour != "rotate" else \
             GUTTER_ROTATE[n % len(GUTTER_ROTATE)]
+        n += 1
         for i in range(first, last + 1):
             if style == "tick":
                 ch = "▌" if i == first else " "
             elif style == "bar":
                 ch = "▌"
             else:                           # bracket
-                # A one-row group has no room for two corners, and a stub corner would
-                # claim an extent it does not have — so it gets the plain rule.
-                ch = "│" if first == last else \
-                    "╭" if i == first else "╰" if i == last else "│"
-            out[i] = (ch, tint)
+                ch = "╭" if i == first else "╰" if i == last else "│"
+            out[i] = (ch, tint, off)
     return out
 
 
@@ -635,7 +667,6 @@ def render(agents: list[dict], width: int, source_note: str,
     inner = max(10, width - 4)              # 2 border columns, 2 of padding
     rows = display_rows(agents, show_archived=show_archived)
     rules = gutter_column(rows, gutter, gutter_colour)
-    has_gutter = gutter in GUTTER_STYLES and gutter != "none"
 
     live = [r for r in rows if not is_collapsed(r)]
     names = [("  " * int(g(a, "depth", 0))) + str(g(a, "name", "?")) for a in live]
@@ -658,9 +689,10 @@ def render(agents: list[dict], width: int, source_note: str,
     # case a pane too narrow for `BLOCKED · 2 unread` forces and nothing here can prevent.
     # (There used to be a rung between those two that dropped the state pill's side
     # padding. The pill is plain text now, so there is no padding left to give up.)
-    # The gutter's rule takes over the row's existing leading space and adds one column
-    # of its own, so grouping costs ONE column, not two.
-    fixed = 3 + 2 + (1 if has_gutter else 0)
+    # The gutter is NOT in here. Its rule is drawn inside the indentation the name column
+    # already carries, so grouping costs nothing and this budget is the same with it on
+    # or off.
+    fixed = 3 + 2                           # " ● " and the gap before the state
     for show_age in (True, False):
         w_name = w_name_full
         age_cols = 7 if show_age else 0
@@ -682,17 +714,13 @@ def render(agents: list[dict], width: int, source_note: str,
     # The filled bars and the panel border are what separate the sections now. The board
     # draws exactly one blank line in total, above NEEDS YOU; see there for why.
     for i, row in enumerate(rows):
-        rule, rule_style = rules[i]
         line = Text(no_wrap=True, overflow="crop")
-        if has_gutter:
-            line.append(rule, style=rule_style)
 
         if is_collapsed(row):
             label = ("  " * row["depth"]) + f"+ {row['count']} archived"
             if row["needs"]:
                 label += f" · {row['needs']} need you"
-            line.append(clip("   " + label, inner - (1 if has_gutter else 0)),
-                        style=DIM)
+            line.append(clip("   " + label, inner), style=DIM)
             body.append(line)
             continue
 
@@ -707,10 +735,21 @@ def render(agents: list[dict], width: int, source_note: str,
         line.append(gl, style=GLYPH_STYLE.get(gl, ""))
         line.append(" ")
         indent = "  " * int(g(row, "depth", 0))
-        line.append(pad(indent + clip_name(str(g(row, "name", "?")),
-                                           max(1, w_name - vlen(indent))), w_name),
-                    style="bold red strike" if doomed
-                    else "bold" if wants_you(row) else "")
+        label = pad(indent + clip_name(str(g(row, "name", "?")),
+                                       max(1, w_name - vlen(indent))), w_name)
+        name_style = ("bold red strike" if doomed
+                      else "bold" if wants_you(row) else "")
+        # The workspace rule, drawn INTO the indent rather than in front of it. `off` is
+        # always inside this row's indentation, so the character it replaces is a space
+        # and the name column stays exactly where it was.
+        rule = rules[i]
+        if rule is not None and rule[2] < vlen(indent):
+            ch, tint, off = rule
+            line.append(label[:off], style=name_style)
+            line.append(ch, style=tint)
+            line.append(label[off + 1:], style=name_style)
+        else:
+            line.append(label, style=name_style)
         line.append("  ")
         if doomed:
             line.append(pad(clip(display_state(row), w_state), w_state), style="red")
