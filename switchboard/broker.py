@@ -35,6 +35,7 @@ import inspect
 import json
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -530,6 +531,11 @@ class Broker:
         # `delegate` that returned a name plus a warning object would change three call
         # sites and every test that spawns. Read by `cli` immediately after the call.
         self.delivery_note: Optional[str] = None
+        # Set by `done` when the call was a REPEAT — the row was already `done` on entry,
+        # so nothing was mailed or rung. Same shape and same reason as `delivery_note`
+        # above: the CLI has to tell the caller what happened, and the return value of
+        # `done` is already the live-children list. Read by `cli` right after the call.
+        self.done_repeat = False
 
     def _protocol(self) -> str:
         return config.flatten(self._protocol_override) if self._protocol_override \
@@ -628,9 +634,21 @@ class Broker:
         done` is STALLED, which `needs_human` covers, so the row comes back to NEEDS YOU
         under a different heading rather than dropping off the human's list. The event log
         keeps both the `blocked` and the `unblocked` rows, with the reason on the second.
+
+        THAT NARROW COST WAS THE BUG, and `_turn_passed_since` is the whole of the fix. The
+        paragraph above is still the design — a restarted pane is an answered block — but
+        "the next `sb` command from inside that pane" was never the same claim as "a turn
+        boundary passed". An agent that runs `sb block "..."` and then any other command in
+        the SAME turn — `sb status`, `sb inbox`, `sb plugin report-bug file` — reached here
+        and cleared its own block while it was still stopped waiting on a person. Nobody was
+        coming for it, because the one signal that says so had been erased by the agent
+        itself. So both branches now ask for the turn edge before they act; everything else
+        here is unchanged, including the no-hooks case, which still revives on the spot.
         """
         name = row["name"]
         if row["ended_at"] is not None:
+            if not self._turn_passed_since(name, ("done", "failed")):
+                return name
             # `state` ONLY, and `turn` pointedly left alone. This used to stamp
             # `turn='working'` as well, on the reasoning that an agent running an `sb`
             # command is inside a turn — true, and the exact wrong thing to write down.
@@ -657,6 +675,12 @@ class Broker:
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
         elif "state" in row.keys() and row["state"] == "blocked":
+            if not self._turn_passed_since(name, ("blocked",)):
+                # Still inside the turn that called `sb block`. The row stays blocked, no
+                # `unblocked` event is written, and the command the caller is running goes
+                # ahead exactly as it would have — resolving a name must not have effects,
+                # least of all on a read-only verb.
+                return name
             store.set_state(self.db, name, "working")
             # The same event `_unblock_if_needed` writes, because it is the same fact and
             # `sb log` should not need two words for it. The reason is what tells the two
@@ -664,6 +688,130 @@ class Broker:
             # the pane and the agent getting on with it.
             store.log_event(self.db, kind="unblocked", agent=name, reason="answered_in_pane")
         return name
+
+    def _turn_passed_since(self, name: str, kinds: tuple[str, ...]) -> bool:
+        """Has a real turn boundary passed since this agent reported? FAILS OPEN.
+
+        This is what tells the human answering apart from the agent itself, and it is one
+        fact: a `turn_end` event for this agent with an id after the id of the report it is
+        being asked about (`blocked`, or `done`/`failed`).
+
+        Why that is the discriminator. `sb block` and `sb done` both put the agent in
+        REPORTED, which is exactly the state `hooks.stop_gate` lets a turn end in — so a
+        genuine boundary writes `turn_end`, and whatever started the next turn (a human
+        typing into the pane, a doorbell, `sb tell`) happened after it. An agent's own next
+        command in the SAME turn has no `turn_end` between, because `Stop` has not fired
+        yet. The bare `turn` column cannot say this: `UserPromptSubmit` fires before the
+        agent can run anything, so `turn` reads `working` in both cases.
+
+        The `turn_end` rows are logged against NO agent, with the name in the payload's
+        `target` — `hooks.mark_turn` explains why (an event that names an agent resets its
+        idle clock), and `store._repair_unhooked_turn` reads them the same way. So the
+        match is on `json_extract(payload,'$.target')`, not on `events.agent`.
+
+        FAILS OPEN, in three places, all of them to today's behaviour — revive:
+        - a session carrying no hooks can never produce the edge, so demanding one would
+          wedge it blocked for good. This is the same case `hooks.py` and the docstring
+          above already fail open for, and it must stay open. It is read off the `turn`
+          column: `mark_turn` writes the column and the event together, so a NULL `turn` is
+          a row no hook has ever written (`store._repair_unhooked_turn` restores that
+          invariant for rows an older `_revive` stamped). Note what this does NOT cover — an
+          agent that HAD hooks and lost them keeps a stale `turn`, stays gated, and can then
+          only be answered with `sb tell`. Narrow, recoverable, and not fixed here.
+        - no report event to anchor on (a row put into `done`/`blocked` by something other
+          than the verbs — `store.set_state` direct, an old store, a repair).
+        - the query itself failing: a degraded store, or a sqlite without JSON1.
+
+        This is the FAIL-OPEN half of the pair, and it is the right half for `_revive`: the
+        cost of being wrong is one row un-blocking itself, which is where we started.
+        `done`'s repeat guard takes the other half — see `_reported_done_and_stayed_there`,
+        which asks the same question and counts "cannot tell" as a repeat, because the cost
+        of being wrong there is a parent that gets two reports for one piece of work.
+
+        KNOWN RESIDUAL HOLE, deliberately left. If a blocked agent's turn genuinely ends
+        and a LATER turn is started by something that is not a person answering — a
+        doorbell delivery from a child, a sibling's `sb tell` — the `turn_end` exists and
+        the block clears with nobody having answered. That is strictly narrower than the
+        behaviour this replaces (which cleared on any command at all, in the same turn), and
+        it is consistent with the docstring above: a turn that starts for any reason is the
+        agent working again. Closing it needs a signal that says WHO started the turn, and
+        nothing in the fleet has one. Left as is, on purpose.
+        """
+        try:
+            anchor = self._last_report(name, kinds)
+            if anchor is None:
+                return True
+            if self._turn_ended_after(name, anchor):
+                return True
+            turn = self.db.execute(
+                "SELECT turn FROM agents WHERE name=?", (name,)).fetchone()
+            return turn is None or turn["turn"] is None          # no hooks, ever
+        except sqlite3.OperationalError:
+            return True
+
+    def _last_report(self, name: str, kinds: tuple[str, ...]) -> Optional[int]:
+        """The id of this agent's most recent `blocked`/`done`/`failed` event, or None.
+
+        Indexed: `idx_events_agent` is `(agent, id)`, and these rows DO name their agent.
+        """
+        row = self.db.execute(
+            "SELECT id FROM events WHERE agent=? AND kind IN (%s) "
+            "ORDER BY id DESC LIMIT 1" % ",".join("?" * len(kinds)),
+            (name, *kinds)).fetchone()
+        return None if row is None else row["id"]
+
+    def _turn_ended_after(self, name: str, event_id: int) -> bool:
+        """Did a turn of this agent's end after that event?
+
+        BOUNDED ON PURPOSE. `id > ?` first, because `events.id` is the rowid and the log is
+        append-only, so this reads only the events written since the report — a handful —
+        rather than the whole table. The obvious spelling (`MAX(id) … GROUP BY kind`) has no
+        usable index for these rows: a turn edge names no agent, so `idx_events_agent` does
+        not apply and `json_extract` cannot be indexed either. It measured 5.4ms per `sb`
+        command against a 28k-event store, and that store only grows.
+        """
+        return self.db.execute(
+            "SELECT 1 FROM events WHERE id>? AND kind='turn_end' "
+            "AND json_extract(payload,'$.target')=? LIMIT 1",
+            (event_id, name)).fetchone() is not None
+
+    def _reported_done_and_stayed_there(self, name: str) -> bool:
+        """Has this agent already reported done, with nothing since to make it new work?
+
+        `done`'s repeat guard, and the FAIL-CLOSED twin of `_turn_passed_since`. Same
+        question — is there a turn boundary after the report — and the opposite answer when
+        the store cannot tell, because the two are protecting different things. `_revive`
+        guesses in favour of the agent, and the worst case is a row that un-blocks itself.
+        Here the worst case is a parent holding two reports for one piece of work, unable to
+        tell which is the real one, with the board showing the second. So: no boundary
+        recorded, no session that could have recorded one — still a repeat.
+
+        The cost of that choice, stated rather than hidden: on a session with NO hooks a
+        genuine second `done` — a follow-up question, answered, then finished again — is
+        recorded as a repeat and its summary is not mailed. Nothing is lost (it is in the
+        log, and the caller is told plainly), and every session `sb` spawns or restores
+        carries the hooks (`hooks.stop_hook_args`, added on every spawn and every restore),
+        so this is the hand-started session only. It is the deliberate direction to be
+        wrong in.
+
+        `restore` counts as the boundary too, and must: it is the verb for "this agent is
+        being given new work", it writes `state='working', ended_at=NULL, turn=NULL`, and a
+        restored agent's next report is a first report, not a repeat.
+        """
+        try:
+            anchor = self._last_report(name, ("done",))
+            if anchor is None:
+                return False                                 # never reported: not a repeat
+            if self._turn_ended_after(name, anchor):
+                return False
+            return self.db.execute(
+                "SELECT 1 FROM events WHERE id>? AND agent=? AND kind='restore' LIMIT 1",
+                (anchor, name)).fetchone() is None
+        except sqlite3.OperationalError:
+            # A store too degraded to answer must not swallow a report — that is the one
+            # message in the protocol a parent is waiting on. Same direction as everywhere
+            # else the log cannot be read: the verb does its work.
+            return False
 
     def _claim_session(self, name: str) -> None:
         """Register this agent's own session id, once.
@@ -3523,11 +3671,48 @@ class Broker:
 
         So it is surfaced, not blocked: the names come back for the CLI to print, and
         `done_with_live_children` goes in the log.
+
+        **A REPEAT IS RECORDED, NOT RE-DELIVERED.** A second `sb done` used to write a
+        second `[done]` message and ring the parent again, and because `sb status` reads
+        the LAST `done` event, the second summary — in the wild, a content-free "as I
+        said" — replaced the real one on the board. A parent then could not tell "my child
+        has not finished" from "my child finished and then said something else". So a
+        repeat logs `done_repeated` instead: the text is kept, nothing is mailed, nothing
+        rings, and the FIRST summary stays what the board and the parent's mailbox show.
+
+        The guard stands on the EVENT LOG, not on the state column, and that is the whole
+        of `_reported_done_and_stayed_there`. Reading `state == 'done'` made this guard a
+        passenger of `_revive`: on a session with no hooks `_revive` fails open and puts the
+        row back to `working` first, so the guard never saw it and both reports went out —
+        bug 4 fixed only where the gate happened to hold. A `done` event with no turn
+        boundary after it is durable, is written by this method itself, and says the same
+        thing wherever the hooks are.
+
+        Recorded rather than refused, deliberately. Nothing guarantees a second summary is
+        junk — only that the observed one was — so it must not be dropped, and it must be
+        findable in `sb log`/`sb inspect`. And a `done` that fails loudly invites exactly
+        what `hooks.BLOCK_REASON` already worries about: an agent that believes it will be
+        nagged forever starts inventing reports to escape. The caller is told plainly what
+        happened (`done_repeat`, read by the CLI) and its command still succeeds.
+
+        A genuine second `done` — a follow-up question, answered, then finished again — is
+        NOT this case: a real turn boundary passed, so `_revive` put the row back to
+        `working` on the way in, and the full path below runs unchanged.
         """
         me = me or self.whoami()
         if me == HUMAN:
             raise ValueError("`sb done` is for agents")
         a = store.get_agent(self.db, me)
+        if self._reported_done_and_stayed_there(me):
+            # The report STANDS — only its delivery is skipped. Re-asserted rather than
+            # assumed: on a no-hooks session `_revive` has just failed open and put this
+            # row back to `working`, so leaving it alone would end the call with an agent
+            # that has reported done twice and a board that says it is still going.
+            store.set_state(self.db, me, "done")
+            store.log_event(self.db, kind="done_repeated", agent=me,
+                            summary=summary[:EVENT_CLIP])
+            self.done_repeat = True
+            return self.live_descendants(me)
         parent = a["parent"] if a else None
         if parent:
             store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",

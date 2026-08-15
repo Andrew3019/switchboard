@@ -953,7 +953,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             "done — still working underneath you: " + ", ".join(still)
             + ". Their summaries will reach you here, and nothing will close your pane "
               "while they run.")
-        _emit(args, note, {"agent": me, "live_children": still})
+        if b.done_repeat:
+            # Not a failure — exit 0, and the text says what was and was not done. An
+            # agent told only "already done" reaches for a way to make it stick; an agent
+            # told its report is recorded and its parent already has the first one has
+            # nothing left to do.
+            note = ("already reported — you called `sb done` before, and your parent has "
+                    "that summary. This one is recorded in the log, but it is not sent "
+                    "again and the first summary stays on the board. Nothing to redo.")
+        _emit(args, note, {"agent": me, "live_children": still,
+                           "repeat": b.done_repeat})
         return 0
 
     if cmd == "block":
