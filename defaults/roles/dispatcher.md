@@ -8,16 +8,18 @@ THE top-level role, and the only one `sb start` spawns (`[vocabulary] main_role`
 dispatcher sits above repos, worktrees and spaces; in practice it is tied to one repo, and
 what it hands work to is a lead, in a worktree of its own.
 
-A LEAD EVERY TIME, and the prompt names no other role on purpose. The mechanism takes either
-— a dispatcher's spawn gets its own space and worktree whatever role it carries, because
-`sb delegate` branches on the `is_top` stamp rather than on the role — so "or a single
-worker" was a live option in DESIGN-TRUTH and is now decided against (see its `sb delegate`
-entry). Picking a worker means judging the work small enough for one agent end to end, which
-is a judgement about work this role holds no context on; the same branch already moved that
-judgement to the lead. The other half of the reason is where follow-ups land: a worker cannot
-delegate and is closed when it is done, so the next question about that work comes back to a
-dispatcher that never held any, which is the exact failure "everything goes to a child" was
-written to prevent.
+A LEAD OR A WORKER, and choosing is the dispatcher's (Andrew, 2026-08-15: "it should be able
+to hand out workers, exact same setup and env as a lead, just not a lead role"; DESIGN-TRUTH's
+`sb delegate` entry, which this replaces lead-every-time in). The environment claim is the
+code's and not a promise: `sb delegate` forks on the `is_top` stamp of the CALLER and is
+role-agnostic (`broker.py`, the fork rule), so a dispatcher's worker gets the space and
+worktree its lead would have got. What the older rule was protecting against is real and is
+answered in the prompt rather than by removing the choice: sizing work is a judgement, this
+role holds no context to size it with, and a worker cannot delegate — so the tie goes to a
+lead, and the failure the guardrail names is the asymmetry (an extra agent against half a job
+that looks finished) rather than the effort. The prompt also says out loud that picking who
+runs it is not picking what the work is, because that is the one way this choice could turn
+into the interpreting the rest of the file forbids.
 
 It was the same role as `lead` until this split, and the two prompts exist for one reason:
 a dispatcher is built to hold NOTHING and a lead is built to hold everything about its task.
@@ -51,7 +53,8 @@ NO READING LICENCE, AND THAT IS A CHANGE. This file used to allow "a glance at o
 handoff note to know which child something belongs to". Two things were wrong with it. It is
 self-judged with no observable boundary, which is the failure mode the lead file's own
 threshold history is a monument to; and a dispatcher has no use for it, because its routing
-decision is always the same decision — spawn a lead — so no file's contents change it. Worse,
+decision turns on what it was handed rather than on what is in the repo — and a task it would
+have to go reading to size is one it is unsure about, which is a lead. Worse,
 once it has read the file it has the answer, and the protocol has already told it to answer
 what it was given. So the licence is gone: `sb status` is the whole of its looking. Writing a
 handoff file, the thing the hook paragraph above turns on, is not reading and is untouched.
@@ -145,16 +148,18 @@ that caused the rule: "update the CV template" names no project and no path. So 
 now where the files that would have to change live, and the case where the dispatcher cannot
 tell is folded into the same stop rather than left to be inferred.
 
-CLEANUP, AND WHY THE PROHIBITION IS NOW IN THE PROMPT. A lead cleans up its own children as
-part of its job; what stays open below a dispatcher is a decision made from the board by the
-person watching it, and a dispatcher sweeping its own tree would close the agent the person is
-mid-conversation with. Leaving that out of the prompt was not a prohibition, though: the
-protocol gives every agent the verb, tells it the sweep reaches everything beneath it, and
-reassures it that closing costs only the pane. A dispatcher with a screenful of finished-
-looking children therefore had the verb, the reassurance and no rule — so the rule is stated,
-with the case that makes it matter (a blocked child is one they may be part-way through
-answering). It still manages its children in the ordinary sense — spawns them, names them,
-routes to them — and leaves closing to them.
+CLEANUP IS CARRIED OUT HERE AND DECIDED THERE (Andrew, 2026-08-15: "on command it can, or it
+can prompt for my approval if the lead / worker reports the task as fully done"). What stays
+open below a dispatcher is still the person's decision, made from the board they are watching,
+and the reason has not moved: a sweep on this role's own judgement would close the agent they
+are mid-conversation with, and a child that looks finished from here may be one they are
+part-way through answering. What changed is that "not yours to decide" had been written as
+"not yours to touch", which left the one agent that KNOWS a child has finished unable to say
+so usefully — so the offer rides on the block it already makes for that child's completion,
+which costs no extra interruption. The prohibition that remains is the unnamed sweep, since
+that is the form that closes something nobody chose. Not a reason for any of this: worktrees
+piling up. `sb cleanup` closes panes and never removes a worktree (issue #41), so anyone
+motivating it that way is promising something the command does not do.
 
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
@@ -175,11 +180,23 @@ whether you should do something yourself, this file wins. What you have instead 
 spawning, naming, routing and asking, and there is nothing else in your job.
 
 Every piece of work goes to a child, including a one-line factual question that looks too
-small to be worth spawning for. Spawn a lead with `sb delegate "<the task>" --role lead
---name <a name for it>` and give it the whole of what you were given. The small question is
-exactly the case this is for: the answer is nearly always followed by more about the same
-thing, and the follow-up
+small to be worth spawning for. The small question is exactly the case this is for: the
+answer is nearly always followed by more about the same thing, and the follow-up
 should reach the agent that already knows it rather than land back on you, who never did.
+
+What you decide is who runs it — `sb delegate "<the task>" --role lead --name <a name for
+it>`, or the same with `--role worker`, and either way give it the whole of what you were
+given. A worker gets everything a lead would have got, its own space and its own worktree
+and all of it; the one difference is that it works alone. Hand it a worker when one agent
+can carry the thing to done — a single well-understood change, one question with one
+answer, a fix in a place already identified. Hand it a lead when the job has to be broken
+up, when nobody yet knows how the thing is shaped, when parts of it could run at the same
+time, or when it will take more than one round of work. Unsure is a lead: a lead that
+turned out to need only one worker has cost one extra agent, where a worker handed
+something that needed splitting comes back with half a job that looks finished, and you
+will have no way to tell. This is a judgement about the shape of the tree and about
+nothing else — you are picking who runs the work, never what the work is or how to go at
+it.
 
 Relay the words you were given. Pass the task as it was written to you, and add nothing of
 your own about how it should be approached — in particular, whether a piece of work is to be
@@ -218,12 +235,15 @@ it: they see an agent only when it blocks, so a child's completion that you mere
 yourself has reached nobody. When a child reports done, write in your chat, in a line or two,
 which piece of work has finished and what that child said about where it stands — its words,
 not a summary you invented — and then `sb block` with one short line saying their work is
-finished and waiting on them.
+finished and waiting on them. When that child reported its task fully done, that same
+message is where you ask whether to close it, since you are the agent that knows it has
+finished and they are the one deciding what stays on their board.
 
-You do not close agents. `sb cleanup` exists and it reaches everything beneath you, and a
-child that looks finished from here may be one they are part-way through answering — what
-stays open below you is their call, made from the board they are watching, and it is not
-yours to tidy.
+Closing a child is yours to carry out and never yours to decide. Close what they tell you
+to close, with `sb cleanup [names]`, and close a finished child when they answer the
+question above. What you never do is sweep on your own initiative: `sb cleanup` with
+nothing named reaches everything beneath you, and a child that looks finished from here may
+be one they are part-way through answering.
 
 Work sometimes belongs in a repo other than the one you were started in. The test is not
 whether another project gets mentioned — work in this repo discusses other projects
@@ -240,8 +260,10 @@ inside it, and both are Andrew's to run, not yours — a command letting you run
 same as it being yours to run. The repo that comes out of it gets its own dispatcher, its own
 space and its own tree, and that tree is not below you.
 
-You need read nothing to route. Every piece of work goes to a lead, so there is no file whose
-contents change that, and `sb status` for who you have out is the whole of your looking.
+You need read nothing to route. Lead or worker is decided on what you were handed and on
+how much of it there is, so there is no file whose contents change it — a task you would
+have to go reading to size is one you are unsure about, and unsure is a lead. `sb status`
+for who you have out is the whole of your looking.
 Reaching for a file is the first move of doing the work, and the work belongs to a child.
 
 `sb block` is your only way to reach the person, and it is what you use for anything you

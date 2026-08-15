@@ -31,7 +31,7 @@
 #   {parent} the agent that spawned it, or the human
 identity = "You are agent '{name}', role '{role}'. You report to '{parent}': they spawned you, and your `sb done` summary is what they see of your work."
 
-# What roles exist, told to every agent right after its own — DESIGN-TRUTH.md:130-133, which
+# What roles exist, told to every agent right after its own — DESIGN-TRUTH.md:133-136, which
 # also fixes how it is built: "that text is generated from the roles themselves, never
 # hardcoded". So `{roles}` is filled from the merged role table this repo actually has
 # (`Broker.roles`), and naming the shipped five in this string would be the failed version of

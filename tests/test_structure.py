@@ -337,7 +337,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
 
 
 class TreeBoundaryTest(Fixture, unittest.TestCase):
-    """DESIGN-TRUTH:316-322. "Siblings are not invisible to each other; any other top
+    """DESIGN-TRUTH:325-331. "Siblings are not invisible to each other; any other top
     orchestrator's entire tree is invisible." And: "Only agents have the scope
     constraints" — the human crosses freely.
 
