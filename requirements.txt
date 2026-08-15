@@ -1,0 +1,19 @@
+# switchboard's only third-party dependency, and it is OPTIONAL.
+#
+# There is no pyproject.toml and no setup.py, deliberately: switchboard is not installed,
+# it is run in place — `bin/sb` puts the checkout on sys.path and executes it under
+# whatever `python3` is on PATH. Nothing consumes this file automatically. It exists so
+# that "which third-party packages may this repo import, and at what version" has one
+# machine-readable answer, and so that getting them is one command:
+#
+#     python3 -m pip install -r requirements.txt
+#
+# Install it into the SAME interpreter `bin/sb` resolves to (`python3 -V; which python3`),
+# not into whichever one happens to be handy — a board opened by `sb start` runs under
+# `sys.executable` of the process that spawned it.
+#
+# rich draws `sb board`'s panelled view (switchboard/richboard.py). Without it the board
+# falls back to the plain ANSI renderer in switchboard/board.py and loses nothing but
+# polish: same rows, same clicks, same scrolling, same words. Nothing else in switchboard
+# imports it, and the test suite passes with it absent.
+rich>=13.0

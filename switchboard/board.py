@@ -237,7 +237,7 @@ def tail_note(a) -> str:
     return a.task or ""
 
 
-def mail_note(a) -> str:
+def mail_note(a, *, short: bool = False) -> str:
     """The mail waiting here, or "". RANK TWO — see `detail_bits`.
 
     Undelivered first and named: unread means we rang and it has not looked, so
@@ -248,15 +248,24 @@ def mail_note(a) -> str:
     Words, no glyph. An envelope character is drawn one column wide by some
     terminals and two by others, and a row that is one column wider than it
     measured is the wrap this whole file is built to prevent.
+
+    `short` is the same fact in the fewest columns it can be said in, for a
+    renderer that reserves room for mail before it spends any on the name
+    (`richboard.tail_forms`). Same pieces, same order, same rule about which of
+    them is named and which is counted — only the wording gives.
     """
     bits = []
     if a.waiting_to_be_rung:
-        bits.append(f"UNDELIVERED {a.undelivered}, "
+        bits.append(f"UNDEL {a.undelivered}" if short else
+                    f"UNDELIVERED {a.undelivered}, "
                     f"{status_mod.fmt_age(a.undelivered_age)}")
     told = a.unread - a.undelivered
     if told > 0:
         bits.append(f"{told} unread")
-    return ("mail: " + " · ".join(bits)) if bits else ""
+    if not bits:
+        return ""
+    joined = " · ".join(bits)
+    return joined if short else "mail: " + joined
 
 
 def _note_color(a) -> str:
@@ -528,8 +537,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     if note_text and agents:
         tail = note_text
     emit(_c(tail, DIM))
-    emit(_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
-         + ("   " + msg if msg else ""))
+    # Last on the line and dim, and only when it is true: this renderer is the FALLBACK
+    # now, and a human looking at it has no other way to find out that the panelled board
+    # exists and that one install away is all it is. Said here rather than in a warning
+    # somewhere, because this screen is the only place the fact is relevant — and clipped
+    # first, because it is the least useful thing on the line to somebody who already
+    # knows. See `_frame`.
+    hints = "click a row to focus it · scroll to pan · a archived · q quits"
+    from . import richboard
+    if not richboard.available():
+        hints += " · plain: pip install rich"
+    emit(_c(hints, DIM) + ("   " + msg if msg else ""))
 
     # The one invariant this view rests on: no line may ever wrap. A wrapped line
     # pushes every row below it down by one, and the next click focuses the wrong
@@ -777,9 +795,42 @@ def _size() -> tuple[int, int]:
         return 24, 80
 
 
+def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
+           show_archived: bool) -> list[tuple[str, Optional[object]]]:
+    """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
+
+    `richboard` is the look Andrew approved and it needs `rich`, which is
+    switchboard's first ever runtime dependency and an OPTIONAL one: there is no
+    packaging file, `bin/sb` runs the checkout under whatever `python3` is on
+    PATH, and on the same machine one interpreter has `rich` and the next does
+    not. So the board must not become unrunnable because it is missing — it
+    falls back to `layout` above, which is the board this repo has always drawn
+    and is missing nothing but the polish.
+
+    The fallback is per FRAME, not per process, because `richboard.layout`
+    declines a pane too small to be a panel and declines a frame whose line
+    count did not come back the way it was built. Both are conditions that clear
+    on their own, and either way the caller gets the same `[(text, owner)]` list
+    and indexes it the same way.
+    """
+    # Imported here rather than at the top of the file, and it is not laziness:
+    # `richboard` imports THIS module for the rules a row is drawn by, so an
+    # import at the top would run it against a half-built `board`. It pulls in
+    # no `rich` of its own — every one of those imports is inside a function —
+    # so this costs a dictionary lookup per frame.
+    from . import richboard
+
+    rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
+                            note_text=note_text, show_archived=show_archived)
+    if rows is not None:
+        return rows
+    return layout(snap, top=top, height=height, width=width, msg=msg,
+                  note_text=note_text, show_archived=show_archived)
+
+
 def draw(snap, top: int, msg: str, note_text: str, show_archived: bool) -> list:
     height, width = _size()
-    rows = layout(snap, top=top, height=height, width=width, msg=msg,
+    rows = _frame(snap, top=top, height=height, width=width, msg=msg,
                   note_text=note_text, show_archived=show_archived)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))

@@ -96,9 +96,17 @@ well enough to adopt instead.
 
 ## Architecture
 
-About sixteen thousand lines of Python, standard library only — no third-party runtime
-dependency. `tomllib` and `sqlite3` do the work a config parser and a database would
-otherwise be pulled in for.
+About sixteen thousand lines of Python, standard library only — with one optional
+exception. `tomllib` and `sqlite3` do the work a config parser and a database would
+otherwise be pulled in for, and nothing switchboard *does* needs anything installed.
+
+The exception is the board's appearance. `sb board` draws its panelled view with
+[rich](https://pypi.org/project/rich/) when `rich` is importable and falls back to its
+own plain ANSI renderer when it is not, so the tree, the clicks, the scrolling and every
+word on the screen are the same either way — a missing dependency costs polish and
+nothing else. There is no packaging file and nothing to install switchboard *as*:
+`bin/sb` runs the checkout in place, under whatever `python3` is on PATH, so the way to
+get the panelled board is `pip install -r requirements.txt` into that interpreter.
 
 The modules meet at the store and not at each other:
 
@@ -116,9 +124,11 @@ The modules meet at the store and not at each other:
   that each answer a slightly different question, and names the disagreement rather than
   picking a winner.
 - [`switchboard/collector.py`](switchboard/collector.py),
-  [`panel.py`](switchboard/panel.py), [`board.py`](switchboard/board.py) — one process
-  collects the tree and publishes a snapshot; every pane's panel renders that file. Forty
-  panes, one database handle.
+  [`panel.py`](switchboard/panel.py), [`board.py`](switchboard/board.py),
+  [`richboard.py`](switchboard/richboard.py) — one process collects the tree and
+  publishes a snapshot; every pane's panel renders that file. Forty panes, one database
+  handle. Two renderers, one contract: both hand back a line and its owner, so a click
+  resolves the same way whichever drew the screen.
 - [`switchboard/config.py`](switchboard/config.py) — everything shipped as default
   behaviour lives in `defaults/` as TOML and markdown: roles, model tiers, the
   agent protocol, every tunable number. A repo adds `.switchboard/` for its differences
