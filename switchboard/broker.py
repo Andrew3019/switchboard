@@ -442,14 +442,26 @@ class CleanupResult(list):
     underneath — and those are news whatever else the sweep did. `refused` keeps every
     one of them and `--json` reports every one of them; `expected` only says which are
     not worth a line on their own.
+
+    `spaces` and `spaces_refused` are the same two halves one level up: the workspaces
+    this cleanup closed once nothing was left in them, and the ones it looked at and left
+    standing, with the gate's own words for why. They are separate lists rather than more
+    names in `closed` because closing an agent costs a pane and closing a space deletes a
+    directory — a caller reading "closed: three names" must not have to wonder which of
+    the two happened.
     """
 
     def __init__(self, closed: Sequence[str] = (),
                  refused: Optional[list[tuple[str, str]]] = None,
-                 expected: Optional[set[str]] = None):
+                 expected: Optional[set[str]] = None,
+                 spaces: Optional[list[str]] = None,
+                 spaces_refused: Optional[list[tuple[str, str]]] = None):
         super().__init__(closed)
         self.refused: list[tuple[str, str]] = [] if refused is None else refused
         self.expected: set[str] = set() if expected is None else expected
+        self.spaces: list[str] = [] if spaces is None else spaces
+        self.spaces_refused: list[tuple[str, str]] = (
+            [] if spaces_refused is None else spaces_refused)
 
     @property
     def notable(self) -> list[tuple[str, str]]:
@@ -4173,7 +4185,140 @@ class Broker:
             self._clear_unreadable_mail(a["name"])
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             closed.append(a["name"])
+        self._close_empty_spaces(candidates, closed, me=me, dry_run=dry_run)
         return closed
+
+    # -- the space, once the agents in it are gone --------------------------------------
+
+    def _close_empty_spaces(self, candidates: Sequence, closed: "CleanupResult", *,
+                            me: str, dry_run: bool) -> None:
+        """The second half of cleanup: close the space too, once nothing is left in it.
+
+        > **Cleanup closes the agents, closes the tab, and closes the entire space and
+        > deletes the worktree if everything else is closed too.** (DESIGN-TRUTH.md)
+
+        The code had only the first two halves, and had never once had the third: not one
+        workspace in this repo's history carried `retired_at`, because `workspace_close`'s
+        only caller in the package was the CLI verb a person types by hand. This is the
+        missing trigger, and deliberately nothing else — every gate, every inventory and
+        every deletion below it is `workspace_close`'s, unchanged, because a second
+        implementation of "is it safe to delete this directory" is the one thing this
+        change must not add.
+
+        Which spaces are looked at: the ones the candidate agents worked in. That is the
+        caller's own scope already — an agent may only clean up its own subtree, so it can
+        only ever reach spaces its own descendants opened — and for the human sweeping the
+        whole fleet it is every space with a row, which is exactly the accumulation this
+        closes.
+
+        Three kinds of space are skipped in silence rather than refused, because none of
+        them is news: one already retired, a **bare** one (no checkout of its own, so the
+        close would delete nothing and would retire an orchestrator's space out from under
+        a sweep aimed at agents), and **the space the caller is standing in**. That last
+        one is a rule this level has to keep on its own: `workspace_close`'s gates
+        deliberately excuse the caller — its row, its process tree — so that an agent told
+        to close its own workspace can, and a sweep inheriting that excusal would delete
+        the directory it is running in. Asked for by name that is a legitimate command;
+        arrived at by a sweep it is never what anybody meant.
+
+        A refusal from a gate is recorded and never raised: the agents are already closed
+        by the time this runs, and a space that will not close is not a reason to fail the
+        cleanup that did.
+        """
+        seen = []
+        my_names, my_dirs = self._my_spaces(me)
+        for a in candidates:
+            w = a["workspace"]
+            if w and w not in seen and w not in my_names:
+                seen.append(w)
+        for name in seen:
+            row = store.get_workspace(self.db, name)
+            if row is None or row["retired_at"] or row["checkout"] is None:
+                continue                       # unrecorded, done already, or nothing to delete
+            if any(live.is_under(d, row["checkout"]) for d in my_dirs):
+                continue                       # the caller's own directory under another name
+            why = self._space_ready(name, row, me=me)
+            if why is None and not dry_run:
+                try:
+                    self.workspace_close(name, me=me)
+                except ValueError as e:        # whatever arrived while we were looking
+                    why = str(e)
+            if why is None:
+                closed.spaces.append(name)
+                continue
+            closed.spaces_refused.append((name, why))
+            if not dry_run:
+                store.log_event(self.db, kind="cleanup_space_held", workspace=name,
+                                reason=why[:EVENT_CLIP])
+
+    def _my_spaces(self, me: str) -> tuple[set, set]:
+        """What the caller must never sweep away: its own workspace, and its own directory.
+
+        Both, and by two different keys, because either alone misses a real case. The name
+        misses an agent working in a checkout recorded under a different workspace name —
+        two names over one directory is a shape `workspace list` exists to show. The
+        directory misses the human, who has no row at all: `os.getcwd()` is the only thing
+        that says where `sb cleanup` was typed, and a human standing in a worktree whose
+        agents have all finished would otherwise have it deleted underneath them.
+        """
+        names, dirs = set(), set()
+        try:
+            dirs.add(os.getcwd())
+        except OSError:                        # our own cwd was deleted under us
+            pass
+        row = store.get_agent(self.db, me) if me != HUMAN else None
+        if row is not None:
+            if row["workspace"]:
+                names.add(row["workspace"])
+            if row["cwd"]:
+                dirs.add(row["cwd"])
+        return names, dirs
+
+    def _space_ready(self, name: str, row, *, me: str) -> Optional[str]:
+        """None if this space would close unattended, else the gate's own reason it stays.
+
+        `workspace_close`'s own checks, run read-only and in the cheap-first order a sweep
+        needs: the records and the git status before the process scan, because the scan is
+        an `lsof` per space and most spaces are held back by something a query already
+        knows. It is not a second gate — every one of these runs again inside the close
+        that follows, which is what actually authorises the deletion; this only decides
+        whether to spend the destructive command on it at all, and gives a dry run
+        something true to print.
+
+        `confirm=False` throughout, which is the policy decision this fix makes explicit:
+        **a sweep never answers a question that was put to a person.** Ignored content
+        nobody has looked at holds the space for `sb workspace close <name> --yes`. Work
+        git can see holds it too. What a clean, committed, *unmerged* branch does NOT do
+        is hold it — DESIGN-TRUTH is explicit that aggressive cleanup destroys `sb
+        restore` and that this is accepted, and `_finish` deletes the branch with `-d`,
+        so an unmerged branch simply stays behind with every commit on it.
+        """
+        checkout = row["checkout"]
+        verdict = store.checkout_verdict(checkout, cwd=self.repo)
+        if verdict == store.CHECKOUT_ABSENT:
+            # Nothing is there, so nothing there can be lost: the records are the only
+            # thing that can hold it back.
+            try:
+                self._records_gate(name, checkout, me=me)
+            except ValueError as e:
+                return str(e)
+            return None
+        if verdict != store.CHECKOUT_OK:
+            return (f"{checkout} is not a worktree of this repo, and unknown is not "
+                    f"empty")
+        primary = self._primary_checkout()
+        if primary is None:
+            return "git would not say where this repository's own checkout is"
+        if _same_dir(checkout, primary):
+            return "its checkout IS this repository's primary working tree"
+        try:
+            self._records_gate(name, checkout, me=me)
+            self._filed_gate(name, me=me)
+            self._inventory_gate(name, checkout, confirm=False)
+            self._gate(name, checkout, me=me)
+        except ValueError as e:
+            return str(e)
+        return None
 
     def live_descendants(self, name: str) -> list[str]:
         """Descendants of `name` whose work is still going. The invariant's one predicate.
