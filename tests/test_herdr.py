@@ -288,6 +288,36 @@ class DeliverTest(unittest.TestCase):
         self.assertEqual(len(self.sends(calls)), 1)
         self.assertIn("do the thing", self.sends(calls)[0])
 
+    def test_the_first_send_presses_nothing(self):
+        """A delivery that lands is one `agent prompt` and no keys at all.
+
+        The rescue below is for a box that already holds text. On the first attempt
+        nothing has been pasted yet, and an enter into a pane that may still be showing
+        the workspace-trust dialog answers the dialog — the exact way a prompt gets
+        eaten. So it is spent only on a retry.
+        """
+        h, calls = self.herdr(takes_on=1)
+        h.deliver("w1", "do the thing")
+        self.assertEqual([c for c in calls if c[1:3] == ["agent", "send-keys"]], [])
+
+    def test_a_retry_presses_enter_before_it_types_anything_again(self):
+        """The duplicate this fix exists to stop, asserted as a call ORDER.
+
+        The retry used to be `agent prompt` verbatim — a second paste into a box already
+        holding the first. Filed live, both ways round: one agent submitted the two
+        copies together as a single message, another submitted neither and never started
+        a session. The rescue has to come first, because if the text is in the box an
+        enter is the whole fix, and if it is not, this re-send still happens.
+        """
+        h, calls = self.herdr(takes_on=2)
+        h.deliver("w1", "task", timeout_ms=1)
+        kinds = [c[1:3] for c in calls if c[1:3] in (["agent", "prompt"],
+                                                     ["agent", "send-keys"])]
+        self.assertEqual(kinds, [["agent", "prompt"], ["agent", "send-keys"],
+                                 ["agent", "prompt"]])
+        keys = next(c for c in calls if c[1:3] == ["agent", "send-keys"])
+        self.assertEqual(keys[3:], ["w1", "enter"])
+
     def test_a_prompt_that_never_started_a_turn_is_re_sent(self):
         """Pasted without submitting: herdr took the call and the agent never moved.
 

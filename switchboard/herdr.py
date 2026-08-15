@@ -676,16 +676,26 @@ class Herdr:
         before the first, so by a third attempt any unrelated change in the intervening
         minute counted as confirmation of a prompt sent seconds ago.
 
-        A prompt that was not taken is RE-SENT, which is the documented recovery for the
-        paste-without-submit mode: the second prompt types and presses enter, carrying the
-        stuck text in with it. The cost when the first prompt did land but we could not
-        see it is the task arriving twice — a duplicate is recoverable and a silence is
-        not. On a cold checkout the first send is lost far more often than not, so a spawn
-        routinely pays a full `timeout_ms` before the send that works. That is the price
-        of the guarantee, and it is the right way round.
+        A prompt that was not taken is RESCUED FIRST and only then re-sent — see
+        `_rescue`. This used to say the re-send "types and presses enter, carrying the
+        stuck text in with it", and that was never true of any code here: the retry was
+        `prompt` again, verbatim, which is a second paste into a box that already holds
+        the first. Both of the outcomes that produces were filed from one incident — the
+        two copies submitted together as a single message, and neither submitted at all
+        with the agent sitting forever on a box holding its own instructions twice. So a
+        retry now presses enter on what is already there before it considers typing
+        anything else, and re-sends only when that produced nothing (the box really was
+        empty, or herdr has lost the pane). On a cold checkout the first send is lost far
+        more often than not, so a spawn routinely pays a full `timeout_ms` before the
+        send — or now, often, the keypress — that works.
         """
         last = "nothing in the agent's own record ever held the text"
         for attempt in range(attempts):
+            # Not on the first attempt: there is nothing stuck in the box yet, and an
+            # enter into a fresh pane can only answer a dialog we would rather leave up.
+            if attempt and self._rescue(name, timeout_ms, proof=proof,
+                                        working_ms=working_ms):
+                return
             before = self._peek(name)
             sent = time.time()
             try:
@@ -711,6 +721,51 @@ class Herdr:
             f"be sitting on a dialog that ate it, or hold nothing at all",
             [name],
         )
+
+    def _rescue(
+        self,
+        name: str,
+        timeout_ms: int,
+        *,
+        proof: Optional[Callable[[float], bool]] = None,
+        working_ms: int = DELIVER_WORKING_MS,
+    ) -> bool:
+        """Submit whatever is already sitting in the prompt box. Did that deliver it?
+
+        The recovery for the paste-without-submit mode, and it has to come BEFORE the
+        re-send rather than instead of it: if the text is in the box, an enter is the
+        whole fix and a second `prompt` is what duplicates it; if the box is empty, the
+        enter does nothing at all and the re-send below is right. That ordering is the
+        entire point — it is what makes the common case stop double-submitting without
+        giving up the case where the paste never landed.
+
+        WHY ENTER AND NOT CLEAR-THEN-RESEND. Clearing first would be the cleaner design,
+        and herdr has no key for it: `agent send-keys` takes free-form key names with no
+        enumeration anywhere in its CLI help, its bundled API schema (`AgentSendKeysParams`
+        is `keys: [string]`, unconstrained) or its binary, and the only naming it does
+        document is "use esc as the canonical Escape key name; escape is also accepted".
+        Nothing attests a select-all or a kill-line, and guessing one costs a real
+        keystroke into a real agent's pane. So: submit what is there, re-send only if
+        nothing came of it.
+
+        The window is a quarter of a send's, because this is not waiting for an agent to
+        start from cold — the text was already pasted and Claude Code appends a submitted
+        prompt to its transcript about a second later. `working_ms` is passed through
+        unchanged all the same: an agent that is visibly running a turn has taken
+        something, and re-sending on top of that is exactly the duplicate this exists to
+        prevent, so a late-flushing proof still gets its stretch.
+
+        A herdr that refuses the keys proves nothing, so it reads as "not rescued" and
+        the caller falls through to the re-send it would have done anyway.
+        """
+        before = self._peek(name)
+        sent = time.time()
+        try:
+            self.send_keys(name, "enter")
+        except HerdrError:
+            return False
+        return self._took_prompt(name, before, max(1, timeout_ms // 4), sent=sent,
+                                 proof=proof, working_ms=working_ms)
 
     def _peek(self, name: str) -> Optional[Agent]:
         """The agent as herdr has it right now, or None if it cannot be asked.

@@ -360,6 +360,57 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(store.get_agent(self.db, "ghost")["state"], "done")
         self.assertIn("reported done", self.b.delivery_note)
 
+    def test_a_task_that_landed_just_too_late_is_not_a_failed_spawn(self):
+        """The 0.9-second false negative: proof on disk, deadline already past.
+
+        `deliver` polls for the task in the child's transcript and gives up on a clock;
+        herdr's own state lags a prompt submitted a second ago and the row is not yet
+        `done`. So both of the safety net's old questions answer no while the words are
+        sitting in the child's transcript — measured, written at 00:16:32.619Z with the
+        spawn giving up at 00:16:33.475Z. The safety net has to read the same evidence
+        `deliver`'s proof reads, or a running agent is stamped gone.
+        """
+        home = Path(self.tmp.name) / "latehome"
+
+        class WritesTheTranscriptTooLate(FakeHerdrAPI):
+            """The child, not herdr: it submits the task while delivery is timing out,
+            which is the whole of the race."""
+
+            def deliver(self, name, text, *, proof=None, **kw):
+                cwd = store.get_agent(broker_self.db, name)["cwd"]
+                d = home / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "sess.jsonl").write_text(json.dumps({
+                    "type": "user",
+                    "message": {"role": "user", "content": text},
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }) + "\n")
+                super().deliver(name, text, proof=proof, **kw)
+
+        broker_self = self
+        self.h = WritesTheTranscriptTooLate()
+        self.h.undeliverable.add("ghost")          # every send timed out
+        self.b = Broker(self.db, self.h, repo=self.repo)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            name = self.b.delegate("do the thing", role="worker", name="ghost", me="orch")
+        self.assertEqual(name, "ghost")
+        a = store.get_agent(self.db, "ghost")
+        self.assertEqual(a["state"], "working")    # never stamped gone
+        self.assertIn("transcript", self.b.delivery_note)
+        kinds = [e["kind"] for e in store.recent_events(self.db, limit=50)]
+        self.assertIn("task_unconfirmed", kinds)
+        self.assertNotIn("task_undelivered", kinds)
+
+    def test_a_transcript_that_holds_nothing_still_fails_the_spawn(self):
+        """The other side of the same line: a real transcript directory, and no task in
+        it, is still a lost task. The new check must not be a way to pass by existing."""
+        home = Path(self.tmp.name) / "emptyhome"
+        self.h.undeliverable.add("ghost")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            with self.assertRaises(TaskUndelivered):
+                self.b.delegate("do the thing", role="worker", name="ghost", me="orch")
+        self.assertEqual(store.get_agent(self.db, "ghost")["state"], "failed")
+
     def test_delivery_is_confirmed_against_the_childs_own_transcript(self):
         """The wiring only the broker can get right: WHOSE record proves the delivery.
 
