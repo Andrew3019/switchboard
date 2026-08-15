@@ -173,8 +173,8 @@ class FooterTest(unittest.TestCase):
                  agent("ghost", depth=1, parent="top", workspace="ws",
                        gone=True, alive=False))
 
-    def _footer_line(self, **kw):
-        rows = frame(self.FLEET, width=80, height=20, **kw)
+    def _footer_line(self, width=80, **kw):
+        rows = frame(self.FLEET, width=width, height=20, **kw)
         return board._ANSI.sub("", rows[-2][0])
 
     def test_a_gone_agent_does_not_buy_a_clear_offer(self):
@@ -186,6 +186,19 @@ class FooterTest(unittest.TestCase):
     def test_a_stale_note_still_outranks_the_hints(self):
         line = self._footer_line(note_text="snapshot is 40s old")
         self.assertTrue(line.strip("│ ").startswith("snapshot is 40s old"), repr(line))
+
+    def test_the_note_and_the_hints_do_not_run_together(self):
+        # They used to: the separator was built into the piece, and `board._clip` flattens
+        # whitespace, so it never reached the screen — "40s oldclick a row to focus it".
+        line = self._footer_line(note_text="snapshot is 40s old")
+        self.assertIn("snapshot is 40s old · click a row to focus it", line)
+
+    def test_a_narrow_footer_still_fits_its_pane_exactly(self):
+        # The no-wrap invariant: the separator is width like anything else, and a pane too
+        # narrow for the hints drops them rather than spilling over.
+        for width in (46, 40, 34, 30):
+            line = self._footer_line(width=width, note_text="snapshot is 40s old")
+            self.assertEqual(board._visible_len(line), width, repr(line))
 
 
 class FallbackTest(unittest.TestCase):

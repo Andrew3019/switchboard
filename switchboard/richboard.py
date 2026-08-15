@@ -254,6 +254,8 @@ _vlen = board._visible_len
 _clip = board._clip
 _pad = board._pad
 
+SEP = " · "                                  # between footer pieces, as inside the hints
+
 
 def _clipw(s: str, cols: int) -> str:
     """`_clip` for text whose SPACES ARE THE POINT — a filled bar's left inset.
@@ -637,6 +639,12 @@ def _footer(inner: int, msg: str, note_text: str):
     A stale snapshot first (the board saying its own data is old outranks everything,
     because every other line on the screen is that data), then the answer to whatever the
     human last clicked, then the hints.
+
+    The separator is drawn as its own append and never handed to `_clip`, which flattens
+    whitespace and so ate a separator built into the piece: the note and the hints ran
+    together into one string. Same shape as `board._compose`, which reserves the gap out
+    of the room and clips only the piece — and the same separator, so the seam between
+    two footer pieces reads like the seams inside the hint line itself.
     """
     from rich.text import Text
 
@@ -646,12 +654,15 @@ def _footer(inner: int, msg: str, note_text: str):
                         "click a row to focus it · scroll to pan · a archived · q quits")
             if b]
     for b in bits:
-        room = inner - used
+        gap = _vlen(SEP) if used else 0
+        room = inner - used - gap
         if room < 6:
             break
-        piece = ("  " if used and not foot.plain.endswith(" ") else "") + b
-        foot.append(_clip(piece, room), style=DIM)
-        used += _vlen(_clip(piece, room))
+        piece = _clip(b, room)
+        if gap:
+            foot.append(SEP, style=DIM)
+        foot.append(piece, style=DIM)
+        used += gap + _vlen(piece)
     return foot
 
 
