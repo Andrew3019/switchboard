@@ -44,4 +44,4 @@
 # fragments. `enabled = ["!reset"]` here turns the commands off; `all = ["!reset"]` in a
 # repo's presets.toml keeps the commands and stops the per-spawn tax. They are different
 # levers because they are different costs.
-enabled = ["report-bug"]
+enabled = ["report-bug", "suggestions"]

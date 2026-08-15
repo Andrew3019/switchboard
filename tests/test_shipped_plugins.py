@@ -84,24 +84,31 @@ class ShippedSandbox(Sandbox):
 
 
 class ShippedDefaultsTest(ShippedSandbox):
-    """Both plugins ship enabled AND bound, and both escape hatches still work.
+    """What ships enabled, what ships bound, and both escape hatches still working.
 
     §7.4 flipped the default and kept the mechanism, which is only true if the two levers
     are still separately pullable. Testing that they are is what stops "enabled" and
     "bound" quietly collapsing into one state the next time somebody simplifies.
     """
 
-    def test_both_plugins_are_available_out_of_the_box(self):
-        self.assertEqual(sorted(plugins.available(self.repo)), ["report-bug", "todo"])
+    def test_every_shipped_plugin_is_available_out_of_the_box(self):
+        self.assertEqual(sorted(plugins.available(self.repo)),
+                         ["report-bug", "suggestions", "todo"])
 
-    def test_only_report_bug_ships_enabled(self):
+    def test_only_todo_ships_disabled(self):
         """`todo` is available but off. The three states are the point: it stays on disk and
         `sb plugin list` still describes it, so turning it on is one line rather than an
         install."""
-        self.assertEqual(sorted(plugins.enabled(self.repo)), ["report-bug"])
+        self.assertEqual(sorted(plugins.enabled(self.repo)),
+                         ["report-bug", "suggestions"])
 
-    def test_only_report_bug_ships_bound_to_every_agent(self):
-        self.assertEqual(plugins.bound(self.repo), {"report-bug": ["every agent"]})
+    def test_the_two_enabled_plugins_ship_bound_to_every_agent(self):
+        """Both fragments are paid on every spawn forever, which is the bar `all` sets. They
+        clear it for the same reason from two directions: an agent that works around an sb
+        bug silently, or eats the same friction silently, costs everyone after it more than
+        it cost itself, and nothing else catches either."""
+        self.assertEqual(plugins.bound(self.repo),
+                         {"report-bug": ["every agent"], "suggestions": ["every agent"]})
 
     def test_every_shipped_binding_actually_resolves(self):
         """A bound name that resolves to nothing is a fragment silently missing from every

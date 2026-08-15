@@ -67,7 +67,7 @@
 # keeps `sb plugin todo` working for the human and stops it being told to every spawn —
 # which is the one thing collapsing "enabled" and "bound" into one state would have made
 # impossible to say.
-all = ["@report-bug"]
+all = ["@report-bug", "@suggestions"]
 
 # Per-role additions, appended to `all`.
 #
