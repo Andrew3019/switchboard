@@ -3241,6 +3241,10 @@ class Broker:
         # the prompt and changes state anyway, which passed the previous confirmation for
         # three of four agents in one cold fan-out. `where`, not the row's cwd — the row
         # has only just been written and this is the same value that went into it.
+        # The clock the except path's transcript check reads from. Taken here, before the
+        # first send, because `deliver`'s own `sent` is private to it and this is within
+        # a hair of it — well inside `task_arrived`'s clock slop.
+        sent = time.time()
         try:
             self.h.deliver(
                 name, task,
@@ -3255,12 +3259,13 @@ class Broker:
             # the agent wrote `done` into it, and to tell its caller to respawn the work
             # and force-close the pane.
             #
-            # So ask the two questions that CAN separate them, both cheap and both about
-            # what the agent has actually done: has it reported anything, and is it running
-            # a turn. Either one is an agent that took something — a spawn's pane has
-            # nothing else to be doing — and neither is proof the TEXT arrived, which is
-            # why this is a caveat on a returned name and not a success.
-            alive = self._took_a_turn(name)
+            # So ask the questions that CAN separate them, all cheap and all about what
+            # the agent has actually done: is the task in its transcript, has it reported
+            # anything, is it running a turn. Any one of them is an agent that took
+            # something — a spawn's pane has nothing else to be doing — and this stays a
+            # caveat on a returned name rather than a success, because what it says is
+            # that no SEND could be confirmed in time, which is still true.
+            alive = self._took_a_turn(name, task=task, cwd=str(where), since=sent)
             if alive:
                 store.log_event(self.db, kind="task_unconfirmed", agent=name, parent=me,
                                 role=role, pane_id=agent.pane_id or pane, alive=alive,
@@ -3285,13 +3290,22 @@ class Broker:
             raise TaskUndelivered(name, e) from None
         return name
 
-    def _took_a_turn(self, name: str) -> Optional[str]:
+    def _took_a_turn(self, name: str, *, task: Optional[str] = None,
+                     cwd: Optional[str] = None,
+                     since: Optional[float] = None) -> Optional[str]:
         """Has this freshly spawned agent done anything at all? -> why we think so.
 
         The question that separates a lost task from an unflushed transcript, and it is
         asked of the agent's own actions rather than of any clock. A spawn's pane has one
         thing in it and nothing to do but the task it was sent, so:
 
+        - the task text in the child's own transcript, written since the send, is the
+          agent having taken the words themselves. Asked FIRST because it is the
+          strongest of the three and the same evidence `deliver`'s own proof trusts —
+          the delivery deadline expiring means only that nobody was looking at the
+          moment it landed. Measured in the incident this exists for: the proof hit
+          disk at 00:16:32.619Z and the spawn gave up at 00:16:33.475Z, 0.9 s later,
+          over an agent that was working.
         - a row that says `done` or `blocked` was written BY THE AGENT, through `sb` — it
           cannot have reported an end it never ran to. This is the case that mattered
           most: the row that was overwritten with `failed` had a `done` on it, one second
@@ -3300,10 +3314,13 @@ class Broker:
           arrived (a startup dialog can move an agent without it), which is exactly why
           the caller keeps this as a caveat rather than a confirmation.
 
-        `failed` is deliberately NOT in the first list: `status._record_gone` writes it
+        `failed` is deliberately NOT in the second list: `status._record_gone` writes it
         for an agent that vanished, so it is a verdict about the agent, not a report from
-        it. None means neither holds — nobody is doing that work as far as we can tell.
+        it. None means none of them holds — nobody is doing that work as far as we can
+        tell.
         """
+        if task and since is not None and output.task_arrived(cwd, task, since=since):
+            return "the task is in its own transcript, it just landed late"
         a = store.get_agent(self.db, name)
         if a is not None and a["state"] in ("done", "blocked"):
             return f"it has since reported {a['state']} itself"
