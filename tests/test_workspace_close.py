@@ -839,5 +839,59 @@ class OrphanTest(CloseHarness, unittest.TestCase):
         self.assertIn("nothing here to close", str(e.exception))
 
 
+class CleanupClosesTheSpaceTest(CloseHarness, unittest.TestCase):
+    """`sb cleanup` closing the space too, which is the half DESIGN-TRUTH describes and
+    the code never had: `workspace_close` had no caller in the package at all, and not one
+    workspace in this repo's history carried `retired_at`.
+
+    Three tests, for the three things this trigger decides: that it fires at all, what it
+    does about a clean but UNMERGED branch, and the one gate it has to keep itself —
+    `workspace_close` excuses the caller by design, so a sweep inheriting that excusal
+    would delete the directory it is running in.
+    """
+
+    def test_the_space_goes_when_its_last_agent_is_closed(self):
+        path = self.space("api", commit=True)
+        self.agent("worker", workspace="api", cwd=path, pane="w2:p1")
+        r = self.b.cleanup(me=HUMAN)
+        self.assertEqual(list(r), ["worker"])
+        self.assertEqual(r.spaces, ["api"])
+        self.assertFalse(Path(path).is_dir())
+        self.assertNotIn(path, self.registered())
+        self.assertIsNotNone(store.get_workspace(self.db, "api")["retired_at"])
+        # The policy this fix pins: a clean but unmerged branch does not hold the
+        # worktree — DESIGN-TRUTH accepts that aggressive cleanup destroys `sb restore` —
+        # and `git branch -d` leaves the branch, with every commit on it, standing.
+        self.assertIn("api", self.git("branch", "--list", "api").stdout)
+
+    def test_work_git_can_see_keeps_the_space_and_says_so(self):
+        """The gate is `workspace_close`'s, unchanged: the point of the trigger is that
+        it adds no second opinion about when a directory is safe to delete."""
+        path = self.space("api")
+        Path(path, "notes.txt").write_text("half an edit")
+        self.agent("worker", workspace="api", cwd=path, pane="w2:p1")
+        r = self.b.cleanup(me=HUMAN)
+        self.assertEqual(list(r), ["worker"])            # the agent still closed
+        self.assertEqual(r.spaces, [])
+        self.assertIn("modified or untracked", dict(r.spaces_refused)["api"])
+        self.assertTrue(Path(path).is_dir())
+
+    def test_the_space_the_caller_is_standing_in_is_never_swept(self):
+        """Asked for by name, an agent closing its own workspace is legitimate and the
+        gates excuse its row and its process tree to allow it. Arrived at by a sweep it is
+        the command deleting the directory it is running in, which is never what anybody
+        meant — so this level keeps the rule the gates below it deliberately do not."""
+        path = self.space("api")
+        self.agent("api-lead", workspace="api", cwd=path, state="working")
+        self.agent("worker", workspace="api", cwd=path, pane="w2:p1")
+        self.db.execute("UPDATE agents SET parent='api-lead' WHERE name='worker'")
+        r = self.b.cleanup(me="api-lead")
+        self.assertEqual(list(r), ["worker"])
+        self.assertEqual(r.spaces, [])
+        self.assertEqual(r.spaces_refused, [])           # skipped in silence, not refused
+        self.assertTrue(Path(path).is_dir())
+        self.assertIn(path, self.registered())
+
+
 if __name__ == "__main__":
     unittest.main()

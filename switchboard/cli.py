@@ -248,13 +248,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="with --reset-store: do it even though agents are running")
 
     c = cmd(
-        "cleanup", help="close finished agents, and ones switchboard gave up on",
+        "cleanup", help="close finished agents, ones switchboard gave up on, and the "
+                        "spaces they leave empty",
         description="With no name, closes every finished agent in your subtree (for a "
                     "human: all of them), plus any whose turn switchboard itself gave up "
                     "on — a crashed session nobody reported an end for, as long as "
                     "sb restore can still bring it back. Naming agents "
                     "closes those instead, at the same bar; --force is what closes one "
-                    "whatever state it is in.")
+                    "whatever state it is in. A space whose agents have all finished is "
+                    "then closed too — its worktree deleted, on the same gates as "
+                    "`sb workspace close`, which keep anything dirty or still busy. "
+                    "Never the space you are standing in.")
     c.add_argument("name", nargs="*", help="specific agents to close")
     c.add_argument("--force", action="store_true",
                    help="close a NAMED agent whatever state it is in, unread mail and all "
@@ -1087,10 +1091,25 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             text += "\n" + "\n".join(f"  refused {n}: {why}" for n, why in names.refused)
         elif names.notable:
             text += "\n" + _sweep_refusals(names.notable)
+        # A deleted worktree is always news, so closed spaces get a line whenever there
+        # are any. The spaces left standing are not: a sweep looks at every space its
+        # scope touches and most of them are held back by an agent still working in them,
+        # which the lines above already said. So they go to `--json` always, and to the
+        # text only when the caller named agents outright — the shape where they asked
+        # about something in particular and silence would be a lie.
+        if names.spaces:
+            verb = "would close" if args.dry_run else "closed"
+            text += f"\n  {verb} space(s): {', '.join(names.spaces)}"
+        if names.spaces_refused and args.name:
+            text += "\n" + "\n".join(f"  kept space {n}: {why}"
+                                     for n, why in names.spaces_refused)
         _emit(args, text,
               {"closed": list(names),
                "refused": [{"name": n, "reason": why} for n, why in names.refused],
-               "expected": sorted(names.expected)})
+               "expected": sorted(names.expected),
+               "spaces": list(names.spaces),
+               "spaces_refused": [{"name": n, "reason": why}
+                                  for n, why in names.spaces_refused]})
         return 0
 
     if cmd == "workspace" and args.wcmd == "list":
