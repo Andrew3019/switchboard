@@ -296,6 +296,7 @@ SHOW_ARCHIVED = config.flag("display.show_archived")
 #     mail_*        mail of its own we gave up on delivering (`_clear_unreadable_mail`)
 #     notify_failed a desktop notification we failed to raise about it (`Broker._surface`)
 #     read_output   somebody ran `sb inspect` and read its terminal (`output.py`)
+#     cleanup_*     a sweep looked at it and left it alone (`Broker.cleanup`'s gates)
 #
 # A denylist here rather than moving those writes to `target=` in the payload, which is what
 # `_nudge`, `mark_turn` and `_forget_turn` do. Two things pay for the difference:
@@ -309,9 +310,19 @@ SHOW_ARCHIVED = config.flag("display.show_archived")
 # `read_output` is the one worth naming separately: `sb inspect` is what a person runs when
 # they suspect an agent has gone quiet, and it was resetting that agent's idle clock as they
 # looked at it.
+#
+# The `cleanup_*` refusals are that same sentence with teeth. A sweep that refuses a row
+# writes `cleanup_refused` (or `cleanup_held`) against it, and every refusal was resetting
+# the idle clock of the row it had just declined to touch — observed live going from 45s
+# back to 1s. `turn_doubted` needs that clock to reach `turn_stale_grace` before anything
+# doubts the edge, so a lead sweeping constantly, which the protocol tells leads to do, could
+# keep the very rows it kept refusing from ever reaching the repair — and `Broker.cleanup`'s
+# own stalled-row gate is built on that repair having fired. The refusals still name the
+# agent in `agent=`, because `sb log <name>` is where somebody asks why a row was left.
 DONE_TO_THE_AGENT = (
     "ring_deferred", "ring_held", "ring_failed", "ring_skipped",
     "mail_unannounced", "mail_cleared", "notify_failed", "read_output",
+    "cleanup_refused", "cleanup_held",
 )
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name

@@ -2024,10 +2024,11 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(r, [])
         self.assertIn("unread mail", r.refused[0][1])
 
-    # -- cleanup reaches a stall ------------------------------------------
+    # -- cleanup reaches a row whose turn edge we gave up on ---------------
 
-    def _stalled_kid(self, *, turn: Optional[str] = None, idle_for: int = 0) -> None:
-        """A `working` row whose turn ended with nothing reported. The whole shape.
+    def _quiet_kid(self, *, turn: Optional[str] = None, idle_for: int = 0,
+                   session: Optional[str] = "s-kid") -> None:
+        """A `working` row under `orch` that is not doing anything visible.
 
         `session_id` puts it past the spawn grace, herdr answering `idle` is the pane
         signal, and `created_at` is the idle clock — nothing has ever logged an event for
@@ -2035,7 +2036,7 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p1", session_id="s-kid")
+                           pane_id="w1:p1", session_id=session)
         if turn is not None:
             store.set_turn(self.db, "kid", turn)
         if idle_for:
@@ -2044,56 +2045,126 @@ class BrokerTest(unittest.TestCase):
             self.db.commit()
         self.h.states_by_name = {"kid": "idle"}
 
-    def test_a_sweep_closes_a_row_whose_turn_ended_without_a_report(self):
-        """The six-and-a-half-hour row. Its session died mid-turn, so nothing ever wrote
-        `done` and nothing ever will — and the sweep used to refuse it forever on the
-        strength of a `state` column that only the agent itself could advance. `stalled`
-        is switchboard's own verdict that this one stopped, and the sweep takes it."""
-        self._stalled_kid()
-        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+    def _forget_kid_turn(self) -> None:
+        """Drive the real repair until `_forget_turn` throws the stuck edge away.
+
+        Two readings a `turn_doubt_grace` apart, through `status.collect` itself rather
+        than by writing the outcome — the point of the gate is that it acts on THAT
+        verdict, so a test that stamped the event by hand would pin nothing about how the
+        verdict is reached. Same shape as `reap_gone` above, for the sibling debounce.
+        """
+        status.collect(self.db, self.h)
+        status.collect(self.db, self.h,
+                       now=store.now() + int(status.TURN_DOUBT_GRACE) + 1)
+        self.assertIsNone(store.get_agent(self.db, "kid")["turn"])
+
+    def test_a_sweep_closes_the_row_whose_turn_edge_we_gave_up_on(self):
+        """The six-and-a-half-hour row, and the only one this lifts the gate for. Its
+        session died mid-turn, so the `working` edge was never closed and nothing ever
+        wrote `done`; `_forget_turn` threw the edge away after the full doubt window and
+        the sweep used to go on refusing the row anyway, on the strength of a `state`
+        column only the agent itself could advance."""
+        self._quiet_kid(turn=store.TURN_WORKING,
+                        idle_for=int(status.TURN_STALE_GRACE) + 60)
+        self._forget_kid_turn()
+
+        # The live re-check first: a verdict up to a doubt window old does not outrank
+        # herdr saying the pane is busy right now.
+        self.h.states_by_name = {"kid": "working"}
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
+        self.assertEqual(self.h.closed, [])
+
+        self.h.states_by_name = {"kid": "idle"}
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), ["kid"])
         self.assertIn("w1:p1", self.h.closed)
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
 
-    def test_a_sweep_still_refuses_a_working_agent_and_names_the_way_through(self):
-        """The other half, and the one that must not regress: an agent herdr says is
-        mid-turn is not a stall, whatever its silence looks like. Naming it gets told
-        about `--force`; a sweep is not, because `--force` is illegal on a sweep."""
-        self._stalled_kid()
-        self.h.states_by_name = {"kid": "working"}
-        r = self.b.cleanup(["kid"], me="orch")
+    def test_a_child_that_ended_its_turn_to_wait_is_not_swept(self):
+        """The cost of getting this bar wrong, and the reason it is not `status.stalled`.
+
+        `stalled` has no idle floor in it at all: the `Stop` hook writing `turn='idle'` is
+        the ORDINARY end of a turn, so a child that ran `sb tell --needs-reply` and
+        stopped to wait for the answer is `stalled` at zero seconds — and leads are told
+        to sweep constantly. Neither a sweep nor naming it may take that row; `--force`
+        is what a person who means it types.
+        """
+        self._quiet_kid(turn=store.TURN_IDLE)
+        self.assertEqual(self.b.cleanup(me="orch"), [])
+        r = self.restart_sb().cleanup(["kid"], me="orch")
         self.assertEqual(r, [])
         self.assertIn("--force", r.refused[0][1])
         self.assertEqual(self.h.closed, [])
-        self.assertNotIn("--force", self.restart_sb().cleanup(me="orch").refused[0][1])
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch", force=True),
+                         ["kid"])
 
-    def test_a_named_cleanup_takes_a_doubted_turn_that_a_sweep_will_not(self):
-        """The lower bar for a deliberate act. A stuck `working` edge means `stalled`
-        reads False until the 45-minute repair clears it; `turn_doubted` is the earlier,
-        undebounced doubt, and a parent naming the agent has already looked at the
-        board.
+    def test_a_doubted_turn_is_not_enough_to_close_a_row_named_or_swept(self):
+        """One herdr reading must never cost a pane. `turn_doubted` is a single reading
+        past 30 minutes of quiet, and a live agent goes 139 minutes without an `sb` call
+        at p99.9 while herdr reads a mid-tool-call pane as idle — which is why
+        `turn_doubt_grace` exists and why only its verdict opens this gate."""
+        self._quiet_kid(turn=store.TURN_WORKING,
+                        idle_for=int(status.TURN_STALE_GRACE) + 60)
+        snap = status.collect(self.db, self.h, reap=False)
+        self.assertTrue(next(a for a in snap.agents if a.name == "kid").turn_doubted)
+        self.assertEqual(self.b.cleanup(me="orch"), [])
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), [])
 
-        The sweep half is a dry run on purpose: a live refusal logs `cleanup_refused`
-        against the agent, which `status._last_activity` counts as the agent having done
-        something and which therefore resets the very idle clock `turn_doubted` is built
-        on. That is this file's subject nowhere — see the report — but a live sweep here
-        would be measuring it instead of the gate.
+    def test_refusing_a_row_does_not_reset_the_clock_that_would_free_it(self):
+        """The sweep must not be able to starve its own gate.
+
+        A refusal is `cleanup` acting ON a row, not the row acting, but it is logged with
+        `agent=<name>` — so `status._last_activity` counted it and every refusal reset the
+        idle clock of the row it had just declined to touch (observed live going 45s back
+        to 1s). `turn_doubted` needs that clock to climb past `turn_stale_grace` before
+        anything doubts the edge, `_forget_turn` needs the doubt sustained after that, and
+        the gate above needs `_forget_turn` to have fired — so a lead sweeping constantly,
+        which the protocol tells leads to do, could keep the rows it kept refusing from
+        ever becoming sweepable at all. Fixed in `status.DONE_TO_THE_AGENT`.
         """
-        self._stalled_kid(turn=store.TURN_WORKING,
-                          idle_for=int(status.TURN_STALE_GRACE) + 60)
-        self.assertEqual(self.b.cleanup(me="orch", dry_run=True), [])   # a sweep waits
-        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), ["kid"])
+        self._quiet_kid(turn=store.TURN_WORKING,
+                        idle_for=int(status.TURN_STALE_GRACE) + 60)
+        self.assertEqual(self.b.cleanup(me="orch"), [])            # refused, and logged
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), [])
+        kid = next(a for a in status.collect(self.db, self.h, reap=False).agents
+                   if a.name == "kid")
+        self.assertGreaterEqual(kid.idle, status.TURN_STALE_GRACE)
+        self.assertTrue(kid.turn_doubted)   # still on its way to the repair
 
-    def test_a_stalled_row_holding_mail_is_still_refused_and_says_so(self):
+    def test_a_newcomer_with_no_session_id_is_never_swept(self):
+        """The one close that is NOT free. `restore` refuses a row with no session id, so
+        an agent still reading its way into its first task — no `sb` call yet, so no
+        session id and no turn edge of ours — is the row where a wrong sweep cannot be
+        undone. No turn edge was ever recorded, so there is none to have given up on."""
+        self._quiet_kid(session=None, idle_for=int(status.STALL_GRACE) + 60)
+        self.assertEqual(self.b.cleanup(me="orch"), [])
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), [])
+        self.assertEqual(self.h.closed, [])
+
+    def test_sweeping_a_forgotten_row_does_not_unwind_the_parent_above_it(self):
+        """A parent is swept on its OWN verdict and on nothing else. Its excuse for being
+        idle is that it has live children, and closing the last of them takes that excuse
+        away — under a bar built on `stalled` that made every sweep walk a live branch
+        upward one level at a time."""
+        self._quiet_kid(turn=store.TURN_WORKING,
+                        idle_for=int(status.TURN_STALE_GRACE) + 60)
+        self._forget_kid_turn()
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), ["kid"])
+        self.assertEqual(self.restart_sb().cleanup(me=HUMAN), [])   # orch stays
+        self.assertEqual(store.get_agent(self.db, "orch")["state"], "working")
+
+    def test_a_forgotten_row_holding_mail_is_still_refused_and_says_so(self):
         """The mail gate stands on its own. Mail is cleared by the close and by nothing
-        else, so letting the stall through the finished gate must not read as the stall
+        else, so letting the row through the finished gate must not read as the stall
         having been missed — the refusal names the gate that actually holds it."""
-        self._stalled_kid()
+        self._quiet_kid(turn=store.TURN_WORKING,
+                        idle_for=int(status.TURN_STALE_GRACE) + 60)
+        self._forget_kid_turn()
         store.put_message(self.db, from_agent="orch", to_agent="kid",
                           kind="tell", body="one more thing")
-        r = self.b.cleanup(["kid"], me="orch")
+        r = self.restart_sb().cleanup(["kid"], me="orch")
         self.assertEqual(r, [])
-        self.assertIn("stalled", r.refused[0][1])
         self.assertIn("unread mail", r.refused[0][1])
+        self.assertIn("giving up on its turn", r.refused[0][1])
         self.assertEqual(self.h.closed, [])
 
     def _legacy_keep(self, name: str) -> None:

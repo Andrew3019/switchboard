@@ -51,7 +51,7 @@ from . import store
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Herdr, HerdrError
-from .status import GONE_STATE, fmt_age
+from .status import GONE_STATE, RUNNING, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -3825,14 +3825,14 @@ class Broker:
           exception, because it is not mail anybody is going to read either way — see the
           gate itself.
 
-          "Finished" means the agent said so, OR switchboard has already decided it
-          stopped: a row `status` calls `stalled` is one whose turn ended with nothing
-          reported, and refusing to sweep it forever is how a crashed session came to sit
-          at `working` for six and a half hours. A sweep takes only `stalled` — the
-          debounced verdict the reconciler already trusts — and an agent named outright
-          also gets `turn_doubted`, which fires sooner. See `given_up_on`. The mail gate
-          is NOT lifted with it: mail is cleared by the close and by nothing else, so a
-          stalled row holding mail is still refused, and still needs `--force`.
+          "Finished" means the agent said so, OR switchboard gave up on its turn edge:
+          `status._forget_turn` fired for it and no turn has been taken since. Refusing
+          that row forever is how a crashed session came to sit at `working` for six and
+          a half hours holding mail. One bar, the same named or swept — see `given_up_on`
+          for why it is that one and not `stalled`, which is also true of every agent
+          that ended a turn one second ago. The mail gate is NOT lifted with it: mail is
+          cleared by the close and by nothing else, so such a row holding mail is still
+          refused, and still needs `--force`.
         - **an end nobody reported is re-checked against herdr.** `done` is the agent's
           own word; `failed` is `status._record_gone`'s inference from one `agent list`,
           and that call can be taken mid-spawn or against a herdr that hiccupped. So for
@@ -3919,51 +3919,71 @@ class Broker:
                 store.log_event(self.db, kind="cleanup_refused", agent=a["name"],
                                 reason=reason[:EVENT_CLIP])
 
-        snap: list = []                        # one element once collected; [] until then
+        forgotten: list = []                   # one element once read; [] until then
 
-        def given_up_on(name: str) -> bool:
-            """Has switchboard itself already decided this unfinished row has stopped?
+        def given_up_on(a) -> bool:
+            """Is this the row whose turn edge switchboard itself gave up on?
 
-            The exemption gate 4a is built on, and it asks `status.py` rather than
-            answering for itself: `stalled` and `turn_doubted` are a join of our own turn
-            edge, herdr's live read and the idle clock, and none of those three is on the
-            `agents` row this loop works from. A second notion of "stalled" in here would
-            be a second thing to keep in agreement with the board and the reconciler.
+            The exemption gate 4a is built on, and the bar is ONE thing, the same for a
+            sweep and for an agent named outright: `status._forget_turn` has fired for
+            this row, and it has not taken a turn since.
 
-            Two bars, and the difference is who is asking:
+            NOT `status.stalled`, which is the predicate this gate first shipped with and
+            was wrong to. `stalled` is `idle and no excuse`, with no idle-duration term in
+            it anywhere — the 45-minute debounce lives only on the path where the turn
+            edge is STUCK at `working`. The ordinary end of a turn (the `Stop` hook
+            writing `turn='idle'`) makes it true at zero seconds, so a child that ran
+            `sb tell --needs-reply` and ended its turn to wait for the answer is `stalled`
+            while it waits, and a bare sweep — which leads are told to run constantly —
+            closed its pane. Nor `turn_doubted`, which is a SINGLE herdr reading past 30
+            minutes: its own docstring is that one disagreement must never move a row, and
+            a live agent goes 139 minutes without an `sb` call at p99.9.
 
-            - a SWEEP gets `stalled` alone — the debounced one, true only after
-              `_forget_turn` has cleared the stuck edge, i.e. after the full
-              `turn_stale_grace + turn_doubt_grace` window. It is the same predicate
-              `reconcile` already trusts to decide these rows are worth pinging, and
-              keeping "safe to sweep" and "safe to ping" in agreement is the point.
-            - a NAMED agent also gets `turn_doubted`, the undebounced single reading
-              that fires earlier — the doubt, before `_sustained` has confirmed it. Naming an agent is a parent or a person who has already
-              looked at the board, so the bar is lower than for an unattended sweep.
+            `_forget_turn` is the debounced verdict underneath both: `turn_doubted` held
+            continuously across the whole `turn_doubt_grace`, every reading in between
+            agreeing, with any one disagreeing reading resetting the clock to nothing. It
+            is switchboard saying, on its own evidence, that it no longer believes this
+            row's turn edge. That is the row the filed incident is about — `turn_forgotten`
+            fired at 14:01, `state` sat at `working` until a human forced it at 19:05 —
+            and it is the only row this lifts the gate for. Everything below the bar is
+            `--force`, which the refusal now names.
 
-            `--force` remains the escape for everything below even that. And this lifts
-            gate 4a only: live descendants, an unconfirmed end and unread mail all still
-            apply on top.
+            Three reads, in cost order, and no `status.collect` at all:
 
-            One `collect` per `cleanup`, taken lazily: a sweep whose candidates are all
-            finished never asks herdr at all, and a sweep over a hundred of them asks
-            exactly once — `collect` is one `agent list` plus one pass over the store,
-            priced by the size of the fleet and not by the number of candidates.
+            - `state` must be RUNNING. A `blocked` row is stopped waiting on a PERSON, and
+              a sweep must never take that; it is also the one state gate 4a reports as
+              unexpected, which would be a strange thing to then close.
+            - `turn` must still be NULL. `_forget_turn` writes NULL, and the only writers
+              of anything else are the two hooks at the edges of a turn — so a non-NULL
+              edge is the agent having come back, and the verdict is spent. NULL alone is
+              NOT the test (it is also every row no hook ever fired for), which is why the
+              event has to be there too.
+            - `turn_forgotten` in the log, read like `_last_pings` reads `reconcile_ping`:
+              out of the append-only log rather than a new column to migrate onto every
+              existing store. Bounded the same way, and a row whose verdict has fallen off
+              the end of that window is simply refused — the failure is a refusal, and
+              `--force` is still there.
 
-            `reap=False` for the reason `reconcile` passes it: this reading is taken to
-            decide one command's behaviour, and letting it also write `failed` rows and
-            clear turn edges halfway through would have the gate deciding against a store
-            the gate itself had just moved.
+            Then one live re-check: `_busy`. The three reads above are the store's memory
+            of a decision taken up to a whole `turn_doubt_grace` ago, and the act here is
+            destructive rather than a ping — `_nudge` re-asks `_busy` before something as
+            small as a prompt, for the smaller version of this reason. With `turn` NULL
+            `_busy` is herdr's own reading of the pane, so an agent that came back without
+            its hooks writing is still seen. It fails open on an unreachable herdr, so it
+            is a veto and not a guarantee.
+
+            Deliberately NOT also gated on herdr having been reachable at all
+            (`Snapshot.herdr_error`): the verdict this reads was itself produced from
+            herdr, sustained across the full window, and `_sustained` resets on any
+            reading that does not flag the row — so a herdr outage cannot accumulate
+            toward it. The gate has evidence behind it that `live_descendants`, which is
+            store-only for exactly that argument, does not.
             """
-            from . import status as status_mod
-
-            if not snap:
-                snap.append({s.name: s for s in
-                             status_mod.collect(self.db, self.h, reap=False).agents})
-            s = snap[0].get(name)
-            if s is None:
+            if a["state"] not in RUNNING or _column(a, "turn"):
                 return False
-            return s.stalled or (bool(names) and s.turn_doubted)
+            if not forgotten:
+                forgotten.append(self._turns_forgotten())
+            return a["name"] in forgotten[0] and not self._busy(a["name"])
 
         for a in candidates:
             if a["name"] == me:
@@ -3981,10 +4001,10 @@ class Broker:
                 refuse(a, "still working underneath: " + ", ".join(held[a["name"]]),
                        log=False)
                 continue                      # the invariant; see the docstring
-            stalled = False        # per candidate; only ever asked of an unfinished row
+            gave_up = False        # per candidate; only ever asked of an unfinished row
             if not force:
-                stalled = a["state"] not in FINISHED and given_up_on(a["name"])
-                if a["state"] not in FINISHED and not stalled:
+                gave_up = a["state"] not in FINISHED and given_up_on(a)
+                if a["state"] not in FINISHED and not gave_up:
                     # only finished agents, or ones switchboard has given up on
                     #
                     # A row nothing has reported the end of used to sit here forever: the
@@ -4021,17 +4041,17 @@ class Broker:
                     # having been meant. Closing loses nothing; the message survives, and
                     # `sb restore` brings back an inbox that still holds it.
                     #
-                    # A stalled row reaches this gate now that the one above lets it
+                    # A row we gave up on reaches this gate now that the one above lets it
                     # through, and it is the gate that holds it: mail is cleared by the
                     # close (`_clear_unreadable_mail`, below) and by nothing else, so
                     # there is no path where the mail goes and the row stays. Saying only
-                    # "unread mail" to somebody looking at a row the board calls STALLED
-                    # reads as the stall not having been noticed at all, so say which gate
-                    # this is — and what it costs to lift, since nothing is lost: the
-                    # message survives in the inbox and `sb restore` brings it back.
-                    refuse(a, "unread mail it could still read" if not stalled else
-                              "stalled, but holding unread mail — that gate stands on its "
-                              "own, and only closing the row clears the mail"
+                    # "unread mail it could still read" about a row whose turn edge we
+                    # threw away reads as the stall not having been noticed at all, so say
+                    # which gate this is — and what lifting it costs, since nothing is
+                    # lost: the message survives and `sb restore` brings back the inbox.
+                    refuse(a, "unread mail it could still read" if not gave_up else
+                              "unread mail, and giving up on its turn does not lift that "
+                              "gate — only closing the row clears the mail"
                               + (". --force closes it: the message survives in its inbox"
                                  if names else ""))
                     continue
@@ -4053,13 +4073,14 @@ class Broker:
                 # the escape hatch, and naming the agent is the confirmation.
                 store.log_event(self.db, kind="cleanup_forced_live", agent=a["name"],
                                 state=a["state"])
-            if stalled:
+            if gave_up:
                 # The other way a row that never reported an end gets closed, and the one
                 # nobody typed `--force` for. `cleanup_forced_live` says a person overrode
-                # the gate; this says the gate opened by itself, and which reading opened
-                # it — otherwise the only trace of a sweep taking a `working` row is a
-                # `cleanup` event that looks exactly like closing a finished one.
-                store.log_event(self.db, kind="cleanup_stalled", agent=a["name"],
+                # the gate; this says the gate opened by itself, on a turn edge we had
+                # already thrown away — otherwise the only trace of a sweep taking a
+                # `working` row is a `cleanup` event that looks exactly like closing a
+                # finished one.
+                store.log_event(self.db, kind="cleanup_given_up", agent=a["name"],
                                 state=a["state"], named=bool(names))
             try:
                 if a["pane_id"]:
@@ -4928,6 +4949,39 @@ class Broker:
                 continue
             if who and who not in out:
                 out[who] = r["created_at"]
+        return out
+
+    def _turns_forgotten(self) -> set[str]:
+        """Every agent whose turn edge `status._forget_turn` threw away. -> their names.
+
+        Read out of the event log for `_last_pings`' reasons, and it is the same query in
+        the same shape: a column would be a second home for a fact the log already keeps,
+        and it would have to be migrated onto every store that exists. `turn_forgotten` is
+        logged against NO agent with the name in the payload — deliberately, so that
+        recording a stall does not reset the idle clock of the silent agent it is about
+        (`_forget_turn`) — so the name comes out of the payload, exactly as `reconcile_ping`'s
+        target does.
+
+        Bounded for the same reason too, and rarer than a ping: one per stall repaired,
+        against one per stall pinged. A verdict old enough to have fallen off the end of
+        the window reads as absent, so the gate that consults this refuses — a stale read
+        costs a refusal, never a close, and `--force` is still the way through.
+
+        A name in here is NOT on its own the fact `cleanup` acts on: the verdict is spent
+        the moment the agent takes another turn, which is `agents.turn` going non-NULL
+        again. See `given_up_on`, which reads both.
+        """
+        out: set[str] = set()
+        rows = self.db.execute(
+            "SELECT payload FROM events WHERE kind='turn_forgotten' "
+            "ORDER BY id DESC LIMIT 500").fetchall()
+        for r in rows:
+            try:
+                who = json.loads(r["payload"] or "{}").get("target")
+            except json.JSONDecodeError:
+                continue
+            if who:
+                out.add(who)
         return out
 
     def _has_live_child(self, name: str) -> bool:
