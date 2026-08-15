@@ -121,10 +121,22 @@ class ReasonTest(unittest.TestCase):
             with self.assertRaises(validate.Invalid) as e:
                 validate.reason(bad)
             msg = str(e.exception)
-            self.assertIn("chat", msg)
-            self.assertIn("sb block", msg)          # the shape of the right call
+            self.assertIn("chat", msg)              # where the message actually goes
+            self.assertIn("shorten", msg)           # and the wrong way out of the refusal
             self.assertNotIn("invalid_agent_argument", msg)
             self.assertNotIn("herdr", msg)
+
+    def test_the_refusal_does_not_hand_back_a_shape_to_copy(self):
+        """Read at the moment the agent is composing for a human, so anything copyable in
+        it anchors harder than the protocol does (DESIGN-TRUTH 2026-08-14: none of the
+        human-facing rules may become something to copy). It says where the message goes,
+        never what is in it, and offers no specimen call to imitate."""
+        with self.assertRaises(validate.Invalid) as e:
+            validate.reason("x" * (validate.MAX_BLOCK_REASON + 1))
+        msg = str(e.exception)
+        for shape in ("numbered", "findings", "recommend", "options"):
+            self.assertNotIn(shape, msg.lower())
+        self.assertNotIn('"', msg)                  # no worked example of the call
 
 class RefNameTest(unittest.TestCase):
 

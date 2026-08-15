@@ -17,6 +17,19 @@ Each file below says what it is and how far you can trust it.
 | [REMAINING.md](REMAINING.md) | Where the code and `DESIGN-TRUTH.md` still disagree. Six open questions, all of them decisions rather than code. |
 | [dispatcher-space-and-cross-repo.md](dispatcher-space-and-cross-repo.md) | Live proof that herdr adopts a dispatcher's workspace as a repo group's parent, why the fix belongs in herdr rather than here, and what cross-repo dispatch would actually cost. Holds one open decision for Andrew. |
 
+## The human-facing-output investigation — 2026-08-14
+
+The evidence behind the "Human-facing output" section of `../DESIGN-TRUTH.md`. Read as a
+record of one afternoon's argument, not as standing guidance: where one of these and the
+trusted document disagree, the document won.
+
+| File | What it is |
+|---|---|
+| [block-message-bloat.md](block-message-bloat.md) | Diagnosis of why the messages written before `sb block` came out bloated on the happy path, measured against real ones. |
+| [block-guidelines-audit.md](block-guidelines-audit.md) | An audit of our own shipped prompts for the instructions that were causing the bloat. |
+| [info-design-research.md](info-design-research.md) | Outside research on presenting a decision request to a human, and what of it applies here. |
+| [rewrite-critique.md](rewrite-critique.md) | A hostile critique of the three rewritten block messages, written to find what the rewrite broke. |
+
 ## Design record — partly built, partly retracted
 
 | File | What it is |

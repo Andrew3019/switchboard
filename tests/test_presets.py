@@ -246,7 +246,7 @@ class ReadingAPresetTest(unittest.TestCase):
         self.assertEqual(parser.parse_args(["presets", "adversarial"]).name, "adversarial")
 
     def test_the_third_parameter_is_apply(self):
-        """List, read, apply — the three DESIGN-TRUTH.md:387-390 asks for, on one verb."""
+        """List, read, apply — the three DESIGN-TRUTH.md:445-448 asks for, on one verb."""
         from switchboard import cli
 
         parser = cli.build_parser()
