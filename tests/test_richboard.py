@@ -285,3 +285,59 @@ class GutterTest(unittest.TestCase):
                      agent("debug", depth=1, parent="main", workspace="main"))
         self.assertEqual(self._marks(frame(fleet, width=80, height=20)),
                          [None, "╭", "╰"])
+
+
+class NeedsYouTest(unittest.TestCase):
+    """WHO THE BOARD SUMMONS ANDREW FOR — the one list he acts on.
+
+    Pure (`needs_list` takes rows, not a frame), so it runs with or without `rich`: the
+    membership rule is not a drawing decision and must not be provable only when the
+    panelled renderer is installed.
+
+    An idle agent with live work beneath it is not the human's problem — it is waiting, the
+    same as it would be with a direct child, and the summons is a false one. Three cases,
+    each a shape that reached the list before: a working grandchild, a subtree that has
+    finished, and a blocked one two levels down.
+    """
+
+    def _names(self, *agents):
+        return [a.name for a in richboard.needs_list(list(agents))]
+
+    def test_idle_with_a_working_descendant_is_not_summoned(self):
+        # `lead` is idle, its child is idle, and the GRANDCHILD is working. The one-
+        # generation excuse `stalled` carries never reached `lead`.
+        names = self._names(
+            agent("lead", stalled=True, turn="idle", idle=900),
+            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900),
+            agent("kid", depth=2, parent="mid"),
+        )
+        self.assertEqual(names, [])
+
+    def test_idle_with_only_finished_children_is_summoned(self):
+        # Nothing is coming from a subtree that is over, so this row IS a person's.
+        names = self._names(
+            agent("lead", stalled=True, turn="idle", idle=900),
+            agent("done-1", depth=1, parent="lead", state="done", turn="idle"),
+            agent("gone-1", depth=1, parent="lead", gone=True, alive=False, turn="idle"),
+        )
+        self.assertEqual(names, ["lead"])
+
+    def test_a_blocked_grandchild_hides_the_idle_top_and_is_itself_listed(self):
+        # Both halves in one: the blocked agent is still summoned — nothing under it can
+        # answer its question — and its idle ancestors are not, because it IS live work.
+        names = self._names(
+            agent("lead", stalled=True, turn="idle", idle=900),
+            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900),
+            agent("kid", depth=2, parent="mid", state="blocked", turn="idle",
+                  blocked_why="which branch?"),
+        )
+        self.assertEqual(names, ["kid"])
+
+    def test_a_cycle_or_a_missing_parent_does_not_hang_the_board(self):
+        # Snapshot data, not a validated tree: a parent may be archived out of the fleet,
+        # and a row may name itself. Neither may cost the human the whole list.
+        names = self._names(
+            agent("orphan", depth=1, parent="swept-away", stalled=True, turn="idle"),
+            agent("loop", parent="loop", stalled=True, turn="idle"),
+        )
+        self.assertEqual(names, ["orphan", "loop"])
