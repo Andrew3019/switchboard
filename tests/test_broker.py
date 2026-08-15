@@ -671,6 +671,31 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(len(self.h.notifications), 1)
         self.assertIn("shipped the parser", self.h.notifications[0])
 
+    def test_a_repeat_done_is_recorded_and_neither_mails_nor_rings_the_parent_again(self):
+        """One piece of work, one report. The wild case: a child called `sb done` twice
+        and its parent got two notifications and two `[done]` messages, while the board
+        showed only the SECOND — a content-free rewrite silently replacing the real
+        summary. The repeat is kept in the log, under its own kind, and goes nowhere else.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1")
+        self.b.done("counted 144, the parser is fine", me="kid")
+        self.h.prompts.clear()
+
+        self.b.done("as I said", me="kid")
+
+        self.assertTrue(self.b.done_repeat)
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] counted 144, the parser is fine"])
+        self.assertEqual(self.h.prompts, [])              # the parent is not rung twice
+        kinds = [e["kind"] for e in store.recent_events(self.db, agent="kid")]
+        self.assertEqual(kinds.count("done"), 1)
+        self.assertIn("done_repeated", kinds)             # kept, not dropped
+        # and the board still shows the first summary, which is the harm being fixed
+        [kid] = [a for a in status.collect(self.db, self.h).agents if a.name == "kid"]
+        self.assertEqual(kid.summary, "counted 144, the parser is fine")
+
     def test_block_reports_no_state_to_herdr_at_all(self):
         """The one thing that makes a block answerable.
 

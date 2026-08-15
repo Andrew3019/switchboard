@@ -531,6 +531,11 @@ class Broker:
         # `delegate` that returned a name plus a warning object would change three call
         # sites and every test that spawns. Read by `cli` immediately after the call.
         self.delivery_note: Optional[str] = None
+        # Set by `done` when the call was a REPEAT — the row was already `done` on entry,
+        # so nothing was mailed or rung. Same shape and same reason as `delivery_note`
+        # above: the CLI has to tell the caller what happened, and the return value of
+        # `done` is already the live-children list. Read by `cli` right after the call.
+        self.done_repeat = False
 
     def _protocol(self) -> str:
         return config.flatten(self._protocol_override) if self._protocol_override \
@@ -3601,11 +3606,36 @@ class Broker:
 
         So it is surfaced, not blocked: the names come back for the CLI to print, and
         `done_with_live_children` goes in the log.
+
+        **A REPEAT IS RECORDED, NOT RE-DELIVERED.** A second `sb done` used to write a
+        second `[done]` message and ring the parent again, and because `sb status` reads
+        the LAST `done` event, the second summary — in the wild, a content-free "as I
+        said" — replaced the real one on the board. A parent then could not tell "my child
+        has not finished" from "my child finished and then said something else". So a call
+        that arrives with the row already `done` logs `done_repeated` instead: the text is
+        kept, nothing is mailed, nothing rings, and the FIRST summary stays what the board
+        and the parent's mailbox both show.
+
+        Recorded rather than refused, deliberately. Nothing guarantees a second summary is
+        junk — only that the observed one was — so it must not be dropped, and it must be
+        findable in `sb log`/`sb inspect`. And a `done` that fails loudly invites exactly
+        what `hooks.BLOCK_REASON` already worries about: an agent that believes it will be
+        nagged forever starts inventing reports to escape. The caller is told plainly what
+        happened (`done_repeat`, read by the CLI) and its command still succeeds.
+
+        A genuine second `done` — a follow-up question, answered, then finished again — is
+        NOT this case: a real turn boundary passed, so `_revive` put the row back to
+        `working` on the way in, and the full path below runs unchanged.
         """
         me = me or self.whoami()
         if me == HUMAN:
             raise ValueError("`sb done` is for agents")
         a = store.get_agent(self.db, me)
+        if a is not None and a["state"] == "done":
+            store.log_event(self.db, kind="done_repeated", agent=me,
+                            summary=summary[:EVENT_CLIP])
+            self.done_repeat = True
+            return self.live_descendants(me)
         parent = a["parent"] if a else None
         if parent:
             store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",
