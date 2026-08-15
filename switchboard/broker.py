@@ -4237,6 +4237,24 @@ class Broker:
             # `_clear_unreadable_mail`.
             self._clear_unreadable_mail(a["name"])
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
+            # This close just created the shape the board draws as a dead parent over
+            # live children: the row's pane is gone and a descendant's is not, so the
+            # subtree stays drawn with nothing left in it that anybody is typing into.
+            # The gate above is `live_descendants`, which is state-only by design — a
+            # descendant that reported `done` and has not been cleaned up yet does not
+            # hold it, and must not (a stale-open pane would jam its parent forever). So
+            # this is not a gate and closes nothing: it is the same fact the `already
+            # closed` refusal spells out, said at the moment it is created rather than
+            # the next time somebody trips over it. Asked AFTER the close, which costs
+            # nothing — closing this pane does not touch a descendant's — and is what
+            # makes `--force` silent here: `_leaves_up` closed the subtree first, so the
+            # set is empty by the time the parent is reached, correctly.
+            if still := self.pane_holding_descendants(a["name"]):
+                store.log_event(self.db, kind="cleanup_still_drawn", agent=a["name"],
+                                descendants=",".join(still))
+                print(f"sb: closed {a['name']} — still drawn on the board because these "
+                      f"below it still hold a pane: {', '.join(still)}. Close them and "
+                      f"the row goes with them.", file=sys.stderr)
             closed.append(a["name"])
         # One event per row the operator actually typed, naming what went with it. The
         # per-descendant `cleanup` events say each pane closed and `cleanup_forced_live`
@@ -4474,6 +4492,11 @@ class Broker:
         descendant that has reported `done` and not yet been closed is dead to the first
         and alive to the second, and that gap is the whole of the disagreement an operator
         sees when `sb cleanup` says `already closed` about a row `sb status` lists.
+
+        Two callers, both after the fact and neither a gate: the `already closed` refusal,
+        which explains a disagreement somebody has already tripped over, and the close
+        itself (`cleanup_still_drawn`), which says the same thing at the moment it is
+        created so the shape is countable instead of only reconstructable.
 
         THE STORE ONLY, for the same reason `live_descendants` is — an absence from
         `agent list` reads identically whether the pane went or herdr hiccupped. The risk

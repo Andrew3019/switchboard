@@ -2447,6 +2447,56 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.cleanup(["orch"], me=HUMAN).refused,
                          [("orch", "already closed")])
 
+    def test_closing_over_a_pane_holding_child_is_logged_and_said_out_loud(self):
+        """The same fact as the refusal above, said when it is created, not days later.
+
+        `live_descendants` is state-only, so a `done`-but-uncleaned child does not hold
+        the gate and the parent closes over it — from that moment the board draws a dead
+        parent with children herdr still lists. That was only ever reconstructable by
+        archaeology afterwards; now the close names it and logs it. It still CLOSES: this
+        is not a gate, and turning it into one would jam a parent behind a stale pane.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:orch")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:kid", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")     # ended, but the pane is still open
+        store.set_state(self.db, "orch", "done")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(list(self.b.cleanup(["orch"], me=HUMAN)), ["orch"])
+        self.assertIn("kid", err.getvalue())
+        self.assertIn("still hold a pane", err.getvalue())
+        drawn = [e for e in store.recent_events(self.db, agent="orch")
+                 if e["kind"] == "cleanup_still_drawn"]
+        self.assertEqual(len(drawn), 1)
+        self.assertEqual(json.loads(drawn[0]["payload"])["descendants"], "kid")
+
+    def test_no_such_event_when_the_subtree_went_first(self):
+        """The leaves-up order is the whole point: closed that way, nothing is left drawn.
+
+        Covers both halves — a child cleaned up before its parent, and `--force`, which
+        does that same walk itself, so the set is empty by the time the parent is reached.
+        """
+        self._family(child_state="done")            # orch → lead → worker, all paned
+        store.create_agent(self.db, name="lead2", role="lead", parent="orch",
+                           pane_id="w1:p3")
+        store.create_agent(self.db, name="worker2", role="worker", parent="lead2",
+                           pane_id="w1:p4")
+        store.set_state(self.db, "lead2", "done")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            # by hand, leaves up
+            self.assertEqual(list(self.b.cleanup(["worker", "lead"], me="orch")),
+                             ["worker", "lead"])
+            # and --force, which does that same walk itself
+            self.assertEqual(list(self.b.cleanup(["lead2"], me="orch", force=True)),
+                             ["worker2", "lead2"])
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual([e for e in store.recent_events(self.db)
+                          if e["kind"] == "cleanup_still_drawn"], [])
+
     def test_already_closed_stays_bare_when_nothing_below_holds_a_pane(self):
         """The sentence is an explanation of a disagreement, not decoration."""
         store.create_agent(self.db, name="solo", role="worker", pane_id="w1:solo")
