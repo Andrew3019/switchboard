@@ -71,7 +71,7 @@ The rest of this file is a response to six failures observed in one evening's re
    the whole of it, and it is a rule about what to do once you have NOTICED a collision.
    The half that prevents one — assign disjoint files as part of the split, before any
    child starts — was missing, as was the reason it matters here specifically: a lead's
-   children share its worktree (DESIGN-TRUTH.md:219-220), so two of them writing the same
+   children share its worktree (DESIGN-TRUTH.md:275-276), so two of them writing the same
    file are not two branches to merge, they are one file being overwritten. The cause is
    stated with the rule so it reads as caused rather than arbitrary. Serialising stays,
    after it: it is what you do with the overlap that assignment could not remove.

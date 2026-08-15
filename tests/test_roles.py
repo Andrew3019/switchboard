@@ -82,7 +82,7 @@ class RolesTest(unittest.TestCase):
     # prompt and silently dropped from the one that ships.
 
     def test_the_protocol_names_every_sanctioned_reason_to_block(self):
-        """DESIGN-TRUTH.md:165-169's five, three of which reached no prompt at all. Each is
+        """DESIGN-TRUTH.md:158-162's five, three of which reached no prompt at all. Each is
         checked by a phrase only that reason would produce, so a rewrite that drops one
         fails here rather than passing on the word "block"."""
         p = config.protocol(self.repo)
@@ -97,7 +97,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(phrase, p)
 
     def test_the_protocol_states_the_default_shape_of_shipping_work(self):
-        """DESIGN-TRUTH.md:356-362, and it goes to every role rather than to orchestrators
+        """DESIGN-TRUTH.md:414-420, and it goes to every role rather than to orchestrators
         alone — so it is asserted on the protocol, which is the only text all five share."""
         p = config.protocol(self.repo)
         for part in ("branch named for your workspace", "push", "pull request",
@@ -172,7 +172,7 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(0, sum(t.count("Restate in one line") for t in texts))
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
-        """"This must be known to all sessions" (DESIGN-TRUTH.md:370-373) — it used to be
+        """"This must be known to all sessions" (DESIGN-TRUTH.md:428-431) — it used to be
         known to orchestrators only, so the protocol is where it has to be."""
         p = config.protocol(self.repo)
         self.assertIn("sb presets", p)
@@ -237,7 +237,7 @@ class RolesTest(unittest.TestCase):
         self.assertIn("only a human starting one creates it", prompt)
 
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH.md:219-220. Serialising overlap was already taught; assigning
+        """DESIGN-TRUTH.md:275-276. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""
         prompt = roles.load(self.repo)["lead"].prompt
         self.assertIn("disjoint", prompt)
