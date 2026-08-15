@@ -104,7 +104,6 @@ GLYPH_STYLE = {"✗": "bold red", "◐": "bold yellow", "◌": "bold yellow",
 HEADER_STYLE = "bold white on blue"
 NEEDS_STYLE = "bold black on yellow"
 BORDER_STYLE = "blue"
-GONE_STYLE = "bold white on red"
 GUTTER_STYLE = "bold cyan"
 DIM = "dim"
 
@@ -257,8 +256,8 @@ _pad = board._pad
 
 
 def _clipw(s: str, cols: int) -> str:
-    """`_clip` for text whose SPACES ARE THE POINT — a filled bar's left inset, the gone
-    chip's padding. `board._clip` flattens runs of whitespace, which is right for a task
+    """`_clip` for text whose SPACES ARE THE POINT — a filled bar's left inset.
+    `board._clip` flattens runs of whitespace, which is right for a task
     head or a blocked reason and wrong for a string whose leading space is a column of
     colour.
     """
@@ -424,7 +423,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     wanted = [a for a in snap.agents if needs_kind(a) == "blocked"]
     wanted += [a for a in snap.agents if needs_kind(a) == "idle"]
     needs = _needs_block(wanted, inner)
-    foot = _footer(snap, inner, msg, note_text)
+    foot = _footer(inner, msg, note_text)
 
     gap_min = 1 if needs else 0
     room = capacity - 1 - 1 - len(needs) - gap_min          # head, footer
@@ -632,29 +631,17 @@ def _needs_block(wanted: list[Any], inner: int) -> list[tuple[Any, Optional[obje
     return out
 
 
-def _footer(snap, inner: int, msg: str, note_text: str):
-    """The last line: the gone-sweep affordance, then whatever else fits.
+def _footer(inner: int, msg: str, note_text: str):
+    """The last line: whatever fits, in the order a narrow pane keeps them.
 
-    The affordance is FIRST so that a narrow pane clips the words instead of the one
-    actionable thing on the line. It is VISUAL ONLY — nothing here reads a key and nothing
-    clears anything; what it shows is how the offer would read and how many rows it costs.
-
-    After it, in the order a narrow pane keeps them: a stale snapshot (the board saying
-    its own data is old outranks everything, because every other line on the screen is
-    that data), then the answer to whatever the human last clicked, then the hints.
+    A stale snapshot first (the board saying its own data is old outranks everything,
+    because every other line on the screen is that data), then the answer to whatever the
+    human last clicked, then the hints.
     """
     from rich.text import Text
 
     foot = Text(no_wrap=True, overflow="crop")
     used = 0
-    doomed = sum(1 for a in snap.agents if a.gone)
-    if doomed:
-        offer = _clipw(f" x  clear {doomed} gone ", inner)
-        foot.append(offer, style=GONE_STYLE)
-        used = _vlen(offer)
-        if inner - used > 3:
-            foot.append("  ")
-            used += 2
     bits = [b for b in (note_text, msg,
                         "click a row to focus it · scroll to pan · a archived · q quits")
             if b]

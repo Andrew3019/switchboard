@@ -161,6 +161,33 @@ class ClickMappingTest(unittest.TestCase):
         self.assertTrue(blanks and all(o is None for o in blanks))
 
 
+@unittest.skipUnless(HAVE_RICH, "rich is not installed here")
+class FooterTest(unittest.TestCase):
+    """The footer offers only what the board actually does.
+
+    It used to draw `x  clear N gone`, which no key ever read. An offer nothing answers is
+    worse than no offer, so it is gone and stays gone until something implements it.
+    """
+
+    FLEET = snap(agent("top", workspace="top"),
+                 agent("ghost", depth=1, parent="top", workspace="ws",
+                       gone=True, alive=False))
+
+    def _footer_line(self, **kw):
+        rows = frame(self.FLEET, width=80, height=20, **kw)
+        return board._ANSI.sub("", rows[-2][0])
+
+    def test_a_gone_agent_does_not_buy_a_clear_offer(self):
+        self.assertNotIn("clear", self._footer_line())
+
+    def test_the_hint_line_still_reads(self):
+        self.assertIn("q quits", self._footer_line())
+
+    def test_a_stale_note_still_outranks_the_hints(self):
+        line = self._footer_line(note_text="snapshot is 40s old")
+        self.assertTrue(line.strip("│ ").startswith("snapshot is 40s old"), repr(line))
+
+
 class FallbackTest(unittest.TestCase):
     """A MISSING DEPENDENCY IS A CHANGE OF APPEARANCE AND NOTHING ELSE.
 
