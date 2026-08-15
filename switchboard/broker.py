@@ -4522,7 +4522,9 @@ class Broker:
         interrupt: the work you are trying to stop would finish first.
 
         The message still goes in the store, and once delivery is confirmed it is marked
-        read: the instruction is durable and shows up in `sb inspect` alongside everything
+        read — and delivery here means PROVED, by the agent's own transcript, not by
+        `agent prompt` having returned (`_ring`'s interrupt mode, `_deliver_interrupt`):
+        the instruction is durable and shows up in `sb inspect` alongside everything
         else the agent was told, and having travelled inline there is nothing left to
         announce. Marked only THEN, though — marking it up front made a failed interrupt
         indistinguishable from one the agent had already read, which is the worst possible
@@ -4852,7 +4854,9 @@ class Broker:
           90-second single tool calls, none cut short, text delivered at the boundary
           after each — so this is not a stealth interrupt: the in-flight tool call
           finishes and the text is waiting when it does.
-        - *interrupt* rings anyway too, and its caller has already sent `esc`.
+        - *interrupt* rings anyway too, and its caller has already sent `esc`. It is also
+          the one mode whose send is CONFIRMED rather than fired and hoped for — see
+          `_deliver_interrupt` — because it is the one mode whose text is the message.
 
         Held back while the target is BLOCKED in every mode but interrupt, and that is a
         deliberate widening of the old rule rather than a hole in the new one: a blocked
@@ -4921,7 +4925,10 @@ class Broker:
         if answer:
             self._unblock_if_needed(who)
         try:
-            self.h.prompt(who, text)
+            if mode == INTERRUPT:
+                self._deliver_interrupt(who, text)
+            else:
+                self.h.prompt(who, text)
         except HerdrError as e:
             store.log_event(self.db, kind="ring_failed", agent=who, error=str(e),
                             reason=("name_binding_lost" if self._binding_lost(who, e)
@@ -4931,6 +4938,42 @@ class Broker:
             return False
         store.mark_delivered(self.db, who)
         return True
+
+    def _deliver_interrupt(self, who: str, text: str) -> None:
+        """Put an interrupt's text in the pane, CONFIRMED — or raise `HerdrError`.
+
+        The one ring that carries its payload is the one ring a bare `agent prompt`
+        cannot be trusted with. `prompt` returns nothing worth reading and has two
+        observed silent failures — pasted but never submitted, or never arrived at all —
+        and the case this exists for is the loudest of them: a Claude Code sitting on its
+        first-run auto-mode dialog eats the text whole and changes state anyway, so the
+        interrupt is thrown away while the send reports success. Every other mode can
+        afford that, because the doorbell carries nothing and `flush_pending` re-rings it
+        from the store on the next `sb` command anyone runs. An interrupt cannot: its
+        text IS the message, it has already cancelled the agent's turn with `esc`, and
+        "later" is precisely what it was refusing.
+
+        So this is `Herdr.deliver` — the same retry-until-proved path `_spawn` uses, and
+        for the same reason — with the same proof: the text in the agent's OWN
+        transcript, written since the send (`output.task_arrived`). Nothing herdr says
+        about its terminal can fake that, and a prompt a dialog swallowed leaves no
+        record because it never happened. Without a recorded cwd there is no transcript
+        to read, so `deliver` falls back to its own weaker test rather than to a proof
+        that can only ever answer no.
+
+        UNCONFIRMED IS NOT FAILED here either (see `deliver`), and the caller's handling
+        of that is deliberately the strict one: an interrupt nobody could confirm raises
+        `Undeliverable` and leaves the store row unread, so it stays in the agent's inbox
+        and `sb inspect` shows it queued. The cost is a text that did land being read
+        twice; the alternative is the failure this issue was filed for — an interrupt
+        recorded as delivered that the agent never saw.
+        """
+        a = store.get_agent(self.db, who)
+        cwd = a["cwd"] if a is not None else None
+        proof = None
+        if cwd:
+            proof = lambda since: output.task_arrived(cwd, text, since=since)  # noqa: E731
+        self.h.deliver(who, text, proof=proof)
 
     def _binding_lost(self, who: str, e: HerdrError) -> bool:
         """Did that ring fail because herdr has lost the agent's NAME, not the agent?
