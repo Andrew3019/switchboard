@@ -696,6 +696,8 @@ class BrokerTest(unittest.TestCase):
             self.restart_sb().done("as I said")
 
         self.assertTrue(self.b.done_repeat)
+        # the report stands: the row says done even though `_revive` revived it on the way
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
         self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
                          ["[done] counted 144, the parser is fine"])
         self.assertEqual(self.h.prompts, [])              # the parent is not rung twice

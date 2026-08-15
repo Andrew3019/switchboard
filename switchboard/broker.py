@@ -3704,6 +3704,11 @@ class Broker:
             raise ValueError("`sb done` is for agents")
         a = store.get_agent(self.db, me)
         if self._reported_done_and_stayed_there(me):
+            # The report STANDS — only its delivery is skipped. Re-asserted rather than
+            # assumed: on a no-hooks session `_revive` has just failed open and put this
+            # row back to `working`, so leaving it alone would end the call with an agent
+            # that has reported done twice and a board that says it is still going.
+            store.set_state(self.db, me, "done")
             store.log_event(self.db, kind="done_repeated", agent=me,
                             summary=summary[:EVENT_CLIP])
             self.done_repeat = True
