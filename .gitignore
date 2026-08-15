@@ -13,8 +13,11 @@ __pycache__/
 /.switchboard/
 /CLAUDE.md
 
-# Claude Code's per-machine permission grants
-/.claude/
+# Claude Code's per-machine permission grants. `settings.json` is the exception: it is the
+# shared, checked-in half of that directory, and it has to travel — every worktree and clone
+# is its own project root, so a setting that is not committed reaches none of them.
+/.claude/*
+!/.claude/settings.json
 
 # Scratch
 *.tmp
