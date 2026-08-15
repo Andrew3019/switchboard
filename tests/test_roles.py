@@ -118,7 +118,7 @@ class RolesTest(unittest.TestCase):
         self.assertIn("Pushing and merging are your parent's call", every)
 
     def test_the_protocol_asks_for_skimmable_human_facing_output(self):
-        """DESIGN-TRUTH.md's "Human-facing output" rules, 2026-08-14. Skimming is the test
+        """DESIGN-TRUTH.md's "Skimming it is the test." rules, 2026-08-14. Skimming is what
         everything else serves, and the rules say out loud which traffic they govern —
         an unscoped version of them was being applied to `sb tell` and to summaries a
         parent reads."""

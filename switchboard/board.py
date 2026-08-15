@@ -37,7 +37,7 @@ stay as the record of what was proven; this is the version that is maintained.
 turn before anything called it. It is now called from `broker._open_board`, which
 every spawn reaches through `broker.delegate` — so every agent, not only a
 top-level orchestrator, opens with a board beside it. There is no declining it:
-every sb-made view is split with the board (DESIGN-TRUTH.md's "`--no-board`").
+every sb-made view is split with the board (DESIGN-TRUTH.md's "`--no-board`.").
 """
 
 from __future__ import annotations
