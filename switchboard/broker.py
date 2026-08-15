@@ -35,6 +35,7 @@ import inspect
 import json
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -628,9 +629,21 @@ class Broker:
         done` is STALLED, which `needs_human` covers, so the row comes back to NEEDS YOU
         under a different heading rather than dropping off the human's list. The event log
         keeps both the `blocked` and the `unblocked` rows, with the reason on the second.
+
+        THAT NARROW COST WAS THE BUG, and `_turn_passed_since` is the whole of the fix. The
+        paragraph above is still the design — a restarted pane is an answered block — but
+        "the next `sb` command from inside that pane" was never the same claim as "a turn
+        boundary passed". An agent that runs `sb block "..."` and then any other command in
+        the SAME turn — `sb status`, `sb inbox`, `sb plugin report-bug file` — reached here
+        and cleared its own block while it was still stopped waiting on a person. Nobody was
+        coming for it, because the one signal that says so had been erased by the agent
+        itself. So both branches now ask for the turn edge before they act; everything else
+        here is unchanged, including the no-hooks case, which still revives on the spot.
         """
         name = row["name"]
         if row["ended_at"] is not None:
+            if not self._turn_passed_since(name, ("done", "failed")):
+                return name
             # `state` ONLY, and `turn` pointedly left alone. This used to stamp
             # `turn='working'` as well, on the reasoning that an agent running an `sb`
             # command is inside a turn — true, and the exact wrong thing to write down.
@@ -657,6 +670,12 @@ class Broker:
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
         elif "state" in row.keys() and row["state"] == "blocked":
+            if not self._turn_passed_since(name, ("blocked",)):
+                # Still inside the turn that called `sb block`. The row stays blocked, no
+                # `unblocked` event is written, and the command the caller is running goes
+                # ahead exactly as it would have — resolving a name must not have effects,
+                # least of all on a read-only verb.
+                return name
             store.set_state(self.db, name, "working")
             # The same event `_unblock_if_needed` writes, because it is the same fact and
             # `sb log` should not need two words for it. The reason is what tells the two
@@ -664,6 +683,65 @@ class Broker:
             # the pane and the agent getting on with it.
             store.log_event(self.db, kind="unblocked", agent=name, reason="answered_in_pane")
         return name
+
+    def _turn_passed_since(self, name: str, kinds: tuple[str, ...]) -> bool:
+        """Has a real turn boundary passed since this agent reported? FAILS OPEN.
+
+        This is what tells the human answering apart from the agent itself, and it is one
+        fact: a `turn_end` event for this agent with an id after the id of the report it is
+        being asked about (`blocked`, or `done`/`failed`).
+
+        Why that is the discriminator. `sb block` and `sb done` both put the agent in
+        REPORTED, which is exactly the state `hooks.stop_gate` lets a turn end in — so a
+        genuine boundary writes `turn_end`, and whatever started the next turn (a human
+        typing into the pane, a doorbell, `sb tell`) happened after it. An agent's own next
+        command in the SAME turn has no `turn_end` between, because `Stop` has not fired
+        yet. The bare `turn` column cannot say this: `UserPromptSubmit` fires before the
+        agent can run anything, so `turn` reads `working` in both cases.
+
+        The `turn_end` rows are logged against NO agent, with the name in the payload's
+        `target` — `hooks.mark_turn` explains why (an event that names an agent resets its
+        idle clock), and `store._repair_turn_without_hooks` reads them the same way. So the
+        match is on `json_extract(payload,'$.target')`, not on `events.agent`.
+
+        FAILS OPEN, in three places, all of them to today's behaviour — revive:
+        - a session carrying no hooks has no `turn_*` events for this agent EVER and a NULL
+          `turn`. It can never produce the edge, so demanding one would wedge it blocked for
+          good. This is the same case `hooks.py` and the docstring above already fail open
+          for, and it must stay open.
+        - no report event to anchor on (a row put into `done`/`blocked` by something other
+          than the verbs — `store.set_state` direct, an old store, a repair).
+        - the query itself failing: a degraded store, or a sqlite without JSON1.
+
+        KNOWN RESIDUAL HOLE, deliberately left. If a blocked agent's turn genuinely ends
+        and a LATER turn is started by something that is not a person answering — a
+        doorbell delivery from a child, a sibling's `sb tell` — the `turn_end` exists and
+        the block clears with nobody having answered. That is strictly narrower than the
+        behaviour this replaces (which cleared on any command at all, in the same turn), and
+        it is consistent with the docstring above: a turn that starts for any reason is the
+        agent working again. Closing it needs a signal that says WHO started the turn, and
+        nothing in the fleet has one. Left as is, on purpose.
+        """
+        try:
+            anchor = self.db.execute(
+                "SELECT id FROM events WHERE agent=? AND kind IN (%s) "
+                "ORDER BY id DESC LIMIT 1" % ",".join("?" * len(kinds)),
+                (name, *kinds)).fetchone()
+            if anchor is None:
+                return True
+            edges = self.db.execute(
+                "SELECT kind, MAX(id) AS last FROM events "
+                "WHERE kind IN ('turn_start','turn_end') "
+                "AND json_extract(payload,'$.target')=? GROUP BY kind", (name,)).fetchall()
+            turn = self.db.execute(
+                "SELECT turn FROM agents WHERE name=?", (name,)).fetchone()
+            hooked = bool(edges) or (turn is not None and turn["turn"] is not None)
+            if not hooked:
+                return True
+            last_end = next((e["last"] for e in edges if e["kind"] == "turn_end"), None)
+            return last_end is not None and last_end > anchor["id"]
+        except sqlite3.OperationalError:
+            return True
 
     def _claim_session(self, name: str) -> None:
         """Register this agent's own session id, once.

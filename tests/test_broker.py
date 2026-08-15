@@ -734,6 +734,63 @@ class BrokerTest(unittest.TestCase):
         [needs] = status.collect(self.db, self.h, needs_me=True).agents
         self.assertEqual((needs.name, needs.blocked_why), ("kid", "which branch?"))
 
+    def _hooked(self, name, sid):
+        """An agent whose session carries the two hooks, mid-turn. `hooks.mark_turn` is
+        called rather than imitated: the edge this gate reads is the one that hook writes,
+        and a hand-rolled copy would stop proving that."""
+        from switchboard import hooks
+        store.create_agent(self.db, name=name, role="worker", parent="orch",
+                           pane_id="w1:p9", session_id=sid)
+        hooks.mark_turn({"session_id": sid}, self.db, store.TURN_WORKING)
+        return hooks
+
+    def test_a_blocked_agent_does_not_unblock_itself_by_running_a_command(self):
+        """The bug: `sb block "..."` and then any other `sb` command in the SAME turn.
+
+        Every verb resolves its caller through `whoami`, so a blocked agent that ran `sb
+        status` — or, in the wild, `sb plugin report-bug file` — flipped its own row back
+        to `working` and erased the one signal that says a person is needed. Nobody was
+        coming for it. `Stop` has not fired between the two commands, so no `turn_end`
+        edge exists after the block, and that is what this now asks for.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        self._hooked("kid", "sess-kid")
+        self.b.block("which branch?", me="kid")
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-kid"},
+                             clear=True):
+            self.assertEqual(self.restart_sb().whoami(), "kid")   # the read-only command
+
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked")
+        self.assertEqual([e for e in store.recent_events(self.db, agent="kid")
+                          if e["kind"] == "unblocked"], [])
+        # and the question is still on the human's board, which is the point
+        [needs] = [a for a in status.collect(self.db, self.h, needs_me=True).agents
+                   if a.name == "kid"]
+        self.assertEqual(needs.blocked_why, "which branch?")
+
+    def test_a_human_answering_in_the_pane_still_clears_the_block_with_hooks_live(self):
+        """The regression that matters most: the behaviour above must survive.
+
+        A person typing into a stopped agent's pane is a real turn boundary — `Stop` fired
+        on the blocked turn (`turn_end`), then `UserPromptSubmit` started a new one — and
+        the agent's next command clears the block exactly as it always has.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        hooks = self._hooked("kid", "sess-kid")
+        self.b.block("which branch?", me="kid")
+        hooks.mark_turn({"session_id": "sess-kid"}, self.db, store.TURN_IDLE)   # Stop
+        hooks.mark_turn({"session_id": "sess-kid"}, self.db, store.TURN_WORKING)  # typed
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-kid"},
+                             clear=True):
+            self.assertEqual(self.restart_sb().whoami(), "kid")
+
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "working")
+        [e] = [e for e in store.recent_events(self.db, agent="kid")
+               if e["kind"] == "unblocked"]
+        self.assertIn("answered_in_pane", e["payload"])
+
     def test_answering_in_the_pane_clears_the_block_and_releases_its_mail(self):
         """The way a person actually answers a question: they type into the pane.
 
