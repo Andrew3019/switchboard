@@ -124,6 +124,10 @@ suite: `1275 passed` (`/Users/andrew/anaconda3/bin/python -m pytest tests`).
 
 ## 5. Not touched, and what is unproven
 
+> Since taken up by `notes/close-paths-resolved-by-terminal-id.md`: the two closes below
+> now route through `_close_target` too, and the pane-moved case has live proof. What
+> stayed unfixed is listed there.
+
 - **`_close_workspace`** (`broker.py:~2331`) closes every pane of a workspace's rows by the
   same untrusted `pane_id`, with no identity check. Same hazard, different verb, out of
   scope here — reported, not fixed.

@@ -815,6 +815,19 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
         self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
         self.assertIsNone(self._board_pane(kid))
 
+    def test_a_board_pane_an_agent_now_holds_is_not_closed(self):
+        """A board pane id is recycled like any other, and herdr is machine-global — so
+        the id we wrote down can be a stranger's agent pane by the time we close. A board
+        carries no terminal id, so the rule is `_close_target`'s no-identity one: an empty
+        pane may be closed, an occupied one may not. The record still goes, or the next
+        `_open_board` under this name would believe a stranger's pane is our board."""
+        kid, board, _pane = self._finished_kid()
+        self.h.live["stranger"] = Agent(name="stranger", pane_id=board,
+                                        terminal_id="term-theirs", state="working")
+        self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
+        self.assertNotIn(board, self.h.closed)
+        self.assertIsNone(self._board_pane(kid))
+
     def test_a_pane_that_would_not_close_keeps_its_board(self):
         """The agent is still in that pane, so the board beside it is still its view."""
         kid, board, _pane = self._finished_kid()

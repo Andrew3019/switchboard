@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import broker, cli, live, store  # noqa: E402
 from switchboard.broker import HUMAN  # noqa: E402
-from switchboard.herdr import HerdrError  # noqa: E402
+from switchboard.herdr import Agent, HerdrError  # noqa: E402
 from test_workspace_list import Harness  # noqa: E402
 
 REAL_RUN = subprocess.run                   # before anything here can have replaced it
@@ -383,6 +383,63 @@ class OrderingTest(CloseHarness, unittest.TestCase):
         self.h.close_pane = gone
         r = self.b.workspace_close("api", me=HUMAN)
         self.assertEqual(r["closed"], ["api-lead"])
+        self.assertNotIn(path, self.registered())
+
+
+class PaneIdentityTest(CloseHarness, unittest.TestCase):
+    """This close takes a pane per row, so it resolves each one the way `cleanup` does.
+
+    A `pane_id` is not an identity — herdr recycles it the moment a pane closes, and herdr
+    is machine-global, so a finished row here can name a pane another clone's live agent
+    is sitting in. `cleanup` was fixed for that first; the same untrusted id was still the
+    target on this path, where a single command closes every pane in the workspace.
+    """
+
+    def stranger_in(self, pane: str):
+        """Somebody else's live agent, in the pane our row still names."""
+        self.h.live["worker-1"] = Agent(name="worker-1", pane_id=pane,
+                                        terminal_id="term-theirs", state="working")
+
+    def test_a_recycled_pane_stops_the_close_before_anything_is_deleted(self):
+        """The near-miss, under the other verb. Nothing is closed and nothing is deleted:
+        this step exists to confirm the panes are stopped, and a pane we may not touch is
+        not confirmed stopped."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        store.update_agent(self.db, "api-lead", terminal_id="term-ours")
+        self.stranger_in("w9:p1")
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("w9:p1", str(e.exception))
+        self.assertEqual(self.h.closed, [])                 # the stranger keeps its pane
+        self.assertIn(path, self.registered())              # and nothing was deleted
+        self.assertIsNone(self.mark("api"))
+
+    def test_confirm_does_not_lift_it(self):
+        """`--confirm` is intent — "yes, destroy this" — and this is identity. The same
+        line `--force` is held to in `cleanup`."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        store.update_agent(self.db, "api-lead", terminal_id="term-ours")
+        self.stranger_in("w9:p1")
+        with self.assertRaises(ValueError):
+            self.b.workspace_close("api", me=HUMAN, confirm=True)
+        self.assertEqual(self.h.closed, [])
+
+    def test_the_close_follows_the_terminal_id_when_the_pane_has_moved(self):
+        """Resolved, not trusted, in the direction that is not a refusal: a pane that
+        moved changes id, herdr says where the terminal is now, and the close goes
+        there rather than at whatever inherited the recorded id."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        store.update_agent(self.db, "api-lead", terminal_id="term-ours")
+        self.h.panes.add("w9:p7")
+        self.h.live["api-lead"] = Agent(name="api-lead", pane_id="w9:p7",
+                                        terminal_id="term-ours", state="idle")
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(r["closed"], ["api-lead"])
+        self.assertEqual(self.h.closed, ["w9:p7"])
+        self.assertIn("w9:p1", self.h.panes)                # the stale id is left alone
         self.assertNotIn(path, self.registered())
 
 
