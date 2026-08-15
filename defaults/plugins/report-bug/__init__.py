@@ -99,8 +99,13 @@ def register(reg):
     reg.command(
         "show", show, audience="both", help="one report in full",
         args=[reg.arg("id", help="a report id, or enough of one to be unambiguous")])
+    # `both`, unlike `todo drop` next door, which stays the human's. An agent that files a
+    # report is the one that knows a minute later it filed the wrong thing, and making it
+    # `sb block` for a deletion spends a human interrupt on tidying. The cost is real and
+    # is not undone by the audience: this `drop` unlinks the file, so a report an agent
+    # deletes is gone, and duplicate reports are the reproduction signal (see above).
     reg.command(
-        "drop", drop, audience="human", help="delete a report outright",
+        "drop", drop, audience="both", help="delete a report outright",
         args=[reg.arg("id", help="a report id")])
 
 

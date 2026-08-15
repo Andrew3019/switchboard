@@ -459,13 +459,13 @@ class ReportBugTest(ShippedSandbox):
         self.ok("plugin", "report-bug", "drop", r["id"])
         self.assertEqual(list(self._dir().glob("*.md")), [])
 
-    def test_drop_is_for_the_human(self):
+    def test_an_agent_can_drop_a_report(self):
+        """`drop` is `both`. An agent that filed the wrong report withdraws it itself
+        rather than spending a `sb block` on it; same argument, same deletion."""
         self.as_agent("w1")
         r = self.data("plugin", "report-bug", "file", "x")
-        code, _, err = self.sb("plugin", "report-bug", "drop", r["id"])
-        self.assertEqual(code, 1)
-        self.assertIn("for the human", err)
-        self.assertEqual(len(list(self._dir().glob("*.md"))), 1)
+        self.ok("plugin", "report-bug", "drop", r["id"])
+        self.assertEqual(list(self._dir().glob("*.md")), [])
 
     def test_no_github_is_involved(self):
         source = (config.defaults_dir() / "plugins" / "report-bug"
