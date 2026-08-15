@@ -1,20 +1,23 @@
-# Filing the two worktree issues
+# Filing the two worktree issues — DONE
 
-The two issue bodies are ready in this branch:
+**Filed 2026-08-14, once Andrew granted permission:**
+
+- **#40 — https://github.com/Andrew3019/switchboard/issues/40** (`bug`) — worktrees are
+  never deleted
+- **#41 — https://github.com/Andrew3019/switchboard/issues/41** (`question`) — is one
+  worktree per top-level delegate the right granularity
+
+Each carries a comment pointing at the other. The bodies as filed are in this branch:
 
 - `notes/issue-worktrees-never-deleted.md` — issue A, the bug
 - `notes/issue-worktree-granularity.md` — issue B, the design question
 
-I could not run `gh issue create`: the permission classifier blocked it, and filing a
-public issue is outward-facing enough that working around the block would have been the
-wrong move. Everything else is done — both bodies are written, and every code reference and
-DESIGN-TRUTH quote in them was re-checked against the files rather than taken from the
-investigation notes.
+Every code reference and DESIGN-TRUTH quote in them was re-checked against the files
+rather than taken from the investigation notes.
 
-## Run this from the primary checkout
-
-It files both and cross-links them, so the two issue numbers do not have to be known in
-advance:
+The first attempt was refused by the permission classifier; filing a public issue is
+outward-facing enough that routing around the block would have been the wrong move, so I
+stopped and asked. Kept below is the command block used, in case either needs refiling:
 
 ```bash
 cd /Users/andrew/Code/switchboard
