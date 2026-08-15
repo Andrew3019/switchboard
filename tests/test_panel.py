@@ -41,7 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Every module a panel process loads on the way to drawing a screen. `board` is the UI and
 # `panel` is its data path; if either can reach the store, forty panes can.
-RENDERER_MODULES = ("switchboard/panel.py", "switchboard/board.py")
+RENDERER_MODULES = ("switchboard/panel.py", "switchboard/board.py",
+                    "switchboard/richboard.py")
 
 
 def a_snapshot(*names, herdr_error=None, hidden=0, now=1000):
@@ -102,7 +103,8 @@ class RendererImports(unittest.TestCase):
         A fresh interpreter, because this test's own process has imported the store to run
         the rest of the file.
         """
-        for module in ("switchboard.panel", "switchboard.board"):
+        for module in ("switchboard.panel", "switchboard.board",
+                       "switchboard.richboard"):
             with self.subTest(module=module):
                 out = subprocess.run(
                     [sys.executable, "-c",
