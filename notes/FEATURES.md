@@ -495,8 +495,9 @@ per plugin, so a broken one is a row saying so rather than a traceback; `SB_DEBU
 the tracebacks after the table.
 - Entry point: `cli.py` `plugin` branch → `_plugin_list` → `plugins.load_all`
 - Config: `defaults/plugins.toml`, repo's `.switchboard/plugins.toml`, both plugin roots
-- Note: two plugins ship — `report-bug` (enabled and bound to every agent) and `todo`
-  (present but **not enabled**, the shipped example of available-without-being-enabled).
+- Note: three plugins ship — `report-bug` and `suggestions` (both enabled and bound to
+  every agent) and `todo` (present but **not enabled**, the shipped example of
+  available-without-being-enabled).
 
 ### `sb plugin <name> <verb> …`
 Runs a command a plugin declared. The top-level parser takes the rest as `REMAINDER`; the
@@ -507,9 +508,10 @@ state directory, takes an exclusive `flock` around the handler, enforces the com
 - Entry point: `cli.py` `_validate_plugin` (resolve, import, parse) → `_plugin_run`
 - Depends on: `plugins.must_load`/`build_parser`/`state_dir`/`locked`/`run`,
   `store.repo_root` (repo identity), `store.log_event`
-- Status: working — `sb plugin report-bug …` dispatches out of the box; `sb plugin todo …`
-  does not until the repo enables it. `tests/test_plugins.py` exercises the contract and
-  `tests/test_shipped_plugins.py` the two that ship
+- Status: working — `sb plugin report-bug …` and `sb plugin suggestions …` dispatch out of
+  the box; `sb plugin todo …` does not until the repo enables it. `tests/test_plugins.py`
+  exercises the contract, `tests/test_shipped_plugins.py` the shipped plugins and the
+  shipped enablement, and `tests/test_suggestions_plugin.py` the `suggestions` bar
 - Config: `settings.toml [paths] plugins_dir/plugins_file/user_state/store_dirname`
 
 ### `sb plugins` — retired
@@ -802,7 +804,8 @@ bindings for them:
 | `verify` | `qa` | find how *this* repo runs its checks and run them before reporting done — it deliberately names no command |
 | `adversarial` | **nothing** | a procedure an orchestrator runs: one long-lived proposer, a fresh reviewer with an unrepeated lens each round, sequentially until nothing changes or four rounds are up |
 
-Plus `all = ["@report-bug"]`, the one fragment every agent carries whatever its role.
+Plus `all = ["@report-bug", "@suggestions"]`, the two fragments every agent carries
+whatever its role.
 
 Shipping a file only makes a preset available; a binding is what makes it applied. The
 mechanism (`presets.available`/`bindings`/`for_role`/`resolve`/`text`) is wired into
@@ -851,16 +854,17 @@ A plugin is a Python package sb imports — `defaults/plugins/<name>/` or a repo
 `.switchboard/plugins/<name>/`, holding an `__init__.py` that defines `register(reg)`. It
 owns a CLI verb and a directory of durable state.
 
-**Two plugins ship**, and `defaults/plugins.toml` is `enabled = ["report-bug"]` — one on,
-one off. `todo` is present and available but not enabled and not bound: it is the shipped
-example of the three states being separately settable, and turning it on is one line.
-Default-on for `report-bug` is the single-user assumption spent deliberately, not an
-oversight; the reasoning and the trigger to reverse it are in `design/PLUGIN-REDESIGN.md`
-§11 item 8.
+**Three plugins ship**, and `defaults/plugins.toml` is
+`enabled = ["report-bug", "suggestions"]` — two on, one off. `todo` is present and
+available but not enabled and not bound: it is the shipped example of the three states
+being separately settable, and turning it on is one line. Default-on for the other two is
+the single-user assumption spent deliberately, not an oversight; the reasoning and the
+trigger to reverse it are in `design/PLUGIN-REDESIGN.md` §11 item 8.
 
 | plugin | `SCOPE` | ships | what it is |
 |---|---|---|---|
 | `report-bug` | `user` | enabled, bound to every agent | files a markdown bug report per machine rather than per repo, so it is findable from anywhere. Carries a bounded tail of the filing agent's session. |
+| `suggestions` | `user` | enabled, bound to every agent | the same store shape for friction that is not a bug: sb worked and cost you anyway. `--friction`, `--cost` and `--recurs` are all required and a suggestion short of any of them is refused rather than filed empty. Reuses `report-bug`'s helpers rather than copying them. |
 | `todo` | `repo` | available only | a deliberately dumb shared list, per repo identity, shared across worktrees. Humans and agents use the same CLI. |
 
 Three states, separately settable: **available** (present in either root), **enabled**
@@ -868,11 +872,12 @@ Three states, separately settable: **available** (present in either root), **ena
 (`@<name>` listed in `presets.toml` — its `agent.md` is flattened and appended to the spawn,
 riding the existing `with_` list in resolution order with no slot of its own).
 
-Two plugins ship, and between them they demonstrate all three states:
+Three plugins ship, and between them they demonstrate all three states:
 
 | plugin | scope | state |
 |---|---|---|
-| `report-bug` | `user` (`LOCK = False`) | enabled in `plugins.toml`, and bound to every agent by `all = ["@report-bug"]` — an agent that works around an sb bug silently costs everyone after it more than the bug did |
+| `report-bug` | `user` (`LOCK = False`) | enabled in `plugins.toml`, and bound to every agent by `all` — an agent that works around an sb bug silently costs everyone after it more than the bug did |
+| `suggestions` | `user` (`LOCK = False`) | enabled and bound to every agent for the mirror-image reason: an agent that eats the same recurring friction silently pays it again on every spawn after it, and nothing else catches that either |
 | `todo` | `repo` (`LOCK = True`) | available only. It was enabled and bound and came off both: the fragment is paid on every spawn forever and a shared list repays that only if somebody is actually working from it. One line in either file turns each half back on |
 
 Enabling and binding stay separate precisely so "use `sb plugin todo` myself without taxing
