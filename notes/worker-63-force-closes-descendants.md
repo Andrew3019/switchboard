@@ -83,3 +83,42 @@ Suite: 1262 passed.
 Built on `fix-cleanup-aliveness` (b93a0aa, the refusal-wording half of #53) as instructed,
 with `origin/main` merged in first — the stalled-agent cleanup work from PR #54 landed on
 main and touches the same sweep. The merge was clean.
+
+## Integration onto current main
+
+Cut before PRs #54, #56 and #57 landed. Merged `main` (f881131) in on
+`integrate-force-cleanup`; three conflicts, all where the worktree-leak/space-close work
+touches the same lines:
+
+- the `sb cleanup` help text — both sides extended the `--force` sentence; both halves kept
+- the `already closed` refusal — main's wording is this branch's own b93a0aa under a
+  different sha (PR #56 rebased it), so the two patches are the same content at different
+  offsets. Took the branch side, which is a superset: it adds the "or --force this row"
+  pointer.
+- the tail of `cleanup()` — main added `_close_empty_spaces` and its helpers, this branch
+  added the `cleanup_forced_subtree` log and `_leaves_up`. Both kept, subtree log first so
+  the space close still runs last over the same candidate list.
+
+Suite on the integrated result: **1268 passed**.
+
+### The second live proof — the interaction the merge creates
+
+`_leaves_up` rebuilds the candidate list and `_close_empty_spaces` runs over that same
+list afterwards; neither had ever been run against the other. One throwaway clone at the
+merged branch, run `sb0ddnnc`, 2026-08-15, all 15 checks pass — the same shape as the
+first run (a lead whose delegate and a `sleep 900` are one shell command, so both rows are
+unambiguously mid-turn), with three checks added for the space half:
+
+- `sb cleanup <lead> --force` still returns `[kid, lead]`, refuses nothing, and leaves
+  herdr holding neither pane; both store rows survive at `done` with `pane_id` NULL
+- one `cleanup_forced_subtree` on the lead, naming the child
+- the space half ran over the rebuilt candidate list and gave the subtree's space a
+  verdict rather than skipping it or crashing
+
+Teardown verified: no agents, no herdr workspace, no worktree, no clone left.
+
+**Unproven live:** the space was *held*, not closed — the agent left `switchboard/__pycache__/`
+behind and the ignored-content gate kept the checkout, which is that gate working as
+designed and is the same outcome on main without this branch. So the merged
+force-a-subtree-then-delete-its-worktree path is exercised only as far as the gate; the
+deletion itself is covered by main's own tests, not by this run.
