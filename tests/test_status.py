@@ -42,8 +42,9 @@ class FakeHerdr:
         return list(self.agents)
 
 
-def alive(name, state="working"):
-    return Agent(name=name, pane_id=f"w1:{name}", state=state)
+def alive(name, state="working", session="", terminal=""):
+    return Agent(name=name, pane_id=f"w1:{name}", state=state, session_id=session,
+                 terminal_id=terminal)
 
 
 class StatusTest(unittest.TestCase):
@@ -699,6 +700,54 @@ class StatusTest(unittest.TestCase):
         self.db.commit()
         status.collect(self.db, FakeHerdr([]))
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
+    # -- a name is not an identity: herdr's list is machine-global ----------
+    #
+    # Every store on a machine mints the same `<role>-<n>` names independently, so a name
+    # match alone reads a stranger's live agent as our own dead one. Reproduced live: a row
+    # dead four days came back onto its own board as an ordinary live agent the moment an
+    # unrelated clone started an agent of the same name (`notes/qa-ghost-repro-isolated.md`).
+
+    def test_a_stranger_wearing_our_name_is_not_our_agent(self):
+        """Terminal id and not session id is what catches it in the field: herdr's
+        `agent list` reports no `agent_session` at all today, so the session half of the
+        guard can never fire on its own."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="ours",
+                           terminal_id="term_ours")
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", terminal="term_theirs")])))["w1"]
+        self.assertFalse(a.alive)          # not resurrected by somebody else's fleet
+        self.assertIsNone(a.herdr_state)   # and no state borrowed from it either
+
+    def test_a_stranger_does_not_clear_the_gone_debounce(self):
+        """The second half of the same bug, and the reason it never healed: the false
+        "present again" forgot the remembered absence, so the row could never accumulate a
+        confirmation window and sat `working` for as long as the stranger ran."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="ours",
+                           terminal_id="term_ours")
+        self.confirm_gone(FakeHerdr([alive("w1", terminal="term_theirs")]))
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
+    def test_a_match_stands_when_the_ids_agree_or_are_unknown(self):
+        """The guard fires on DISAGREEMENT only. Our own agent still matches, and so does
+        one where either side has nothing to compare — a row mid-spawn has neither id yet,
+        and that window is covered by the spawn grace, not by this."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="ours",
+                           terminal_id="term_ours")
+        store.create_agent(self.db, name="w2", role="worker", session_id="ours2")
+        by = self.by_name(status.collect(self.db, FakeHerdr(
+            [alive("w1", terminal="term_ours"), alive("w2")])))
+        self.assertTrue(by["w1"].alive)
+        self.assertTrue(by["w2"].alive)    # no terminal id on either side: the name stands
+
+    def test_a_session_id_that_disagrees_is_enough_on_its_own(self):
+        """Nothing catches this today — herdr reports no session id — and it is here for
+        the day it does: the session id is the stronger identity, so a disagreement there
+        stands alone rather than waiting on the terminal id."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="ours")
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", session="theirs")])))["w1"]
+        self.assertFalse(a.alive)
 
     # -- reap=False: a reader that outlives its own code ------------------
 

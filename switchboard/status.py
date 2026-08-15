@@ -773,6 +773,10 @@ def collect(
     # degradation: a store too old for the column simply never repairs a stale edge, which
     # is the behaviour that shipped before this existed.
     tracks_doubt = bool(rows) and "turn_doubt_since" in rows[0].keys()
+    # And whether it can tell one agent from another at all — see the identity guard in the
+    # loop. Same defensive read for the same reason: a reader cannot migrate the store, and
+    # a store too old for the column degrades to the bare-name match that shipped.
+    tracks_terminal = bool(rows) and "terminal_id" in rows[0].keys()
     # Parents with work still out, by exactly the rule the stop gate asks it by
     # (`hooks._has_live_child`: a child row still `working` or `blocked` and not ended).
     # Computed from the rows already in hand rather than re-queried, so this costs nothing
@@ -798,6 +802,40 @@ def collect(
     for row, depth in ordered:
         name = row["name"]
         agent = live.get(name)
+        # A NAME IS NOT AN IDENTITY. herdr's `agent list` is machine-global and every
+        # switchboard store mints the same small `<role>-<n>` vocabulary independently
+        # (`broker._next_name`), so a row that died days ago in this store matches a live
+        # agent belonging to a fleet in some other checkout — and is then drawn as alive,
+        # a different ghost each time, on nothing but a shared name. Worse, the false
+        # "present again" clears the gone debounce below (`_confirmed_gone`), so the row
+        # can never be confirmed dead for as long as the stranger runs.
+        #
+        # Both sides already carry identifiers this store never compared. When one is
+        # known on both sides and the two DISAGREE, this is somebody else's agent wearing
+        # our name — not found, exactly as if herdr had never listed it. When either side
+        # is blank the question cannot be asked and the name match stands, which is the
+        # behaviour that shipped: a row mid-spawn has neither id yet (see `spawning`
+        # below), and that window is covered by grace, not by this.
+        #
+        # TERMINAL ID is the one that does the work, and the choice is measured rather
+        # than preferred. herdr's `agent list` carries no `agent_session` at all on 0.8.x
+        # — every `Agent.session_id` off that path is `""` (checked against every agent
+        # herdr listed on this machine), so a session-id comparison alone would be a
+        # guard that can never fire. `terminal_id` is on every listed agent, is unique per
+        # agent, and is the handle herdr itself documents as STABLE (`herdr.Agent`); our
+        # side writes it at the only two moments a row can acquire a pane, spawn and
+        # restore (`broker._spawn`, `broker.restore`), and 459 of this store's 463 rows
+        # carry one. `pane_id` is deliberately NOT used: herdr changes it on a pane move,
+        # so a live agent could disagree with its own row and be read as dead.
+        #
+        # The session id is compared too, for nothing it catches today: should herdr start
+        # reporting `agent_session`, it is the stronger identity and this already uses it.
+        if agent is not None and (
+                (tracks_terminal and row["terminal_id"] and agent.terminal_id
+                 and agent.terminal_id != row["terminal_id"])
+                or (row["session_id"] and agent.session_id
+                    and agent.session_id != row["session_id"])):
+            agent = None
         hstate = agent.state if agent else None
         alive = (agent is not None) if consulted else None
         running = row["state"] in RUNNING and row["ended_at"] is None
