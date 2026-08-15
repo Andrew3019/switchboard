@@ -2146,6 +2146,30 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), [])
         self.assertEqual(self.h.closed, [])
 
+    def test_a_forgotten_row_restore_cannot_reach_is_refused_and_says_why(self):
+        """The verdict is not enough on its own: the close has to stay free.
+
+        A turn edge is written by the hooks, which resolve their caller by pane id when
+        the store has no session id yet — so an agent that never ran a single `sb` command
+        still gets one, and switchboard can give up on it. Swept, that row is gone for
+        good: `restore` refuses a row with no session id. Verified live before this gate
+        existed. The refusal names the session id rather than the state, because the state
+        is not what holds it, and `--force` still closes it.
+        """
+        self._quiet_kid(session=None, turn=store.TURN_WORKING,
+                        idle_for=int(status.TURN_STALE_GRACE) + 60)
+        self._forget_kid_turn()
+        r = self.restart_sb().cleanup(me="orch")
+        self.assertEqual(r, [])
+        self.assertEqual(self.h.closed, [])
+        self.assertIn("session id", r.refused[0][1])
+        self.assertEqual(r.notable, r.refused)      # a sweep must not swallow this one
+        r = self.restart_sb().cleanup(["kid"], me="orch")
+        self.assertEqual(r, [])
+        self.assertIn("--force", r.refused[0][1])
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch", force=True),
+                         ["kid"])
+
     def test_sweeping_a_forgotten_row_does_not_unwind_the_parent_above_it(self):
         """A parent is swept on its OWN verdict and on nothing else. Its excuse for being
         idle is that it has live children, and closing the last of them takes that excuse

@@ -251,7 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
         "cleanup", help="close finished agents, and ones switchboard gave up on",
         description="With no name, closes every finished agent in your subtree (for a "
                     "human: all of them), plus any whose turn switchboard itself gave up "
-                    "on — a crashed session nobody reported an end for. Naming agents "
+                    "on — a crashed session nobody reported an end for, as long as "
+                    "sb restore can still bring it back. Naming agents "
                     "closes those instead, at the same bar; --force is what closes one "
                     "whatever state it is in.")
     c.add_argument("name", nargs="*", help="specific agents to close")

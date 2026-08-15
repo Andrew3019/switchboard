@@ -3826,7 +3826,10 @@ class Broker:
           gate itself.
 
           "Finished" means the agent said so, OR switchboard gave up on its turn edge:
-          `status._forget_turn` fired for it and no turn has been taken since. Refusing
+          `status._forget_turn` fired for it and no turn has been taken since — and it
+          has a session id, because a row `restore` cannot bring back is the one close
+          that costs more than the pane, and turn edges are written for agents that never
+          ran `sb` and so have no session id at all. Refusing
           that row forever is how a crashed session came to sit at `working` for six and
           a half hours holding mail. One bar, the same named or swept — see `given_up_on`
           for why it is that one and not `stalled`, which is also true of every agent
@@ -3920,13 +3923,16 @@ class Broker:
                                 reason=reason[:EVENT_CLIP])
 
         forgotten: list = []                   # one element once read; [] until then
+        unrestorable: set = set()              # over the bar, with no session to come back to
 
         def given_up_on(a) -> bool:
             """Is this the row whose turn edge switchboard itself gave up on?
 
-            The exemption gate 4a is built on, and the bar is ONE thing, the same for a
-            sweep and for an agent named outright: `status._forget_turn` has fired for
-            this row, and it has not taken a turn since.
+            The exemption gate 4a is built on, and the verdict is ONE thing, the same for
+            a sweep and for an agent named outright: `status._forget_turn` has fired for
+            this row, and it has not taken a turn since. One guard sits on top of it and
+            is not part of the verdict at all — a row with no session id, which `restore`
+            cannot bring back, is refused however sure we are (see below).
 
             NOT `status.stalled`, which is the predicate this gate first shipped with and
             was wrong to. `stalled` is `idle and no excuse`, with no idle-duration term in
@@ -3978,12 +3984,30 @@ class Broker:
             reading that does not flag the row — so a herdr outage cannot accumulate
             toward it. The gate has evidence behind it that `live_descendants`, which is
             store-only for exactly that argument, does not.
+
+            Last, and NOT part of the verdict: a row with no `session_id` is refused. The
+            promise this whole gate rests on is `cleanup`'s own — closing costs only the
+            pane, because `restore` brings the agent back — and `restore` refuses a row
+            with no session id outright. The store learns one from the agent's FIRST `sb`
+            call, and until then `hooks._agent_row` resolves the caller by
+            `HERDR_PANE_ID` instead, so turn edges — and verdicts about them — are
+            written for agents that have never run `sb` at all. Verified live: such a row
+            reached `session_id=None`, `turn=None`, `turn_forgotten` in the log, a bare
+            sweep took it, and `sb restore` then refused it. It is also the class this
+            verdict has the thinnest evidence behind, having never heard from the agent
+            itself. `--force` on a named row is still the way through, as everywhere else
+            on this gate.
             """
             if a["state"] not in RUNNING or _column(a, "turn"):
                 return False
             if not forgotten:
                 forgotten.append(self._turns_forgotten())
-            return a["name"] in forgotten[0] and not self._busy(a["name"])
+            if a["name"] not in forgotten[0] or self._busy(a["name"]):
+                return False
+            if not a["session_id"]:
+                unrestorable.add(a["name"])   # for the refusal; see above
+                return False
+            return True
 
         for a in candidates:
             if a["name"] == me:
@@ -4004,6 +4028,18 @@ class Broker:
             gave_up = False        # per candidate; only ever asked of an unfinished row
             if not force:
                 gave_up = a["state"] not in FINISHED and given_up_on(a)
+                if a["name"] in unrestorable:
+                    # Over the bar and refused anyway, which is the one refusal here that
+                    # would otherwise read as the stall not having been noticed. Say what
+                    # actually holds it: no session id, so this is the one close that is
+                    # not free. Never `expected` — a sweep is FOR skipping rows that are
+                    # merely still working, and this is not one of those: nothing in the
+                    # fleet will ever move it, so the person sweeping is the only one who
+                    # can, and they learn nothing from a line they never see.
+                    refuse(a, "its turn edge was given up on, but it never ran sb — no "
+                              "session id, so sb restore could not bring it back"
+                              + (". --force closes it anyway" if names else ""))
+                    continue
                 if a["state"] not in FINISHED and not gave_up:
                     # only finished agents, or ones switchboard has given up on
                     #
