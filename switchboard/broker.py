@@ -1361,6 +1361,23 @@ class Broker:
         creates today, but a pane id outliving the pane that had it is, and closing a
         board somebody is still using is not undoable by the person watching it vanish.
 
+        Two guards, and they answer different questions. `_board_is_only_for` asks the
+        STORE whether another live agent's board is recorded on the same pane.
+        `_close_target` asks HERDR whether anybody is in that pane now — the recycle
+        hazard `cleanup` was fixed for, which the store cannot see at all: a board pane id
+        is handed straight back out when the pane closes, herdr is machine-global, and the
+        agent that inherits it can be a stranger from another clone. A board carries no
+        `terminal_id` of its own — nothing records one, and herdr lists agents rather than
+        panes — so this is `_close_target`'s no-identity case, which allows only a pane
+        herdr says is empty. That catches a board id recycled onto an AGENT's pane, which
+        is what herdr can be asked about; a board id recycled onto another board is
+        invisible to it, and left unproven rather than claimed.
+
+        A refusal leaves the pane alone and still drops the meta row, like every other
+        path out of here: the record is of a pane we have just failed to prove is ours,
+        and keeping it would have the next `_open_board` — or a `restore` under this same
+        name — believe a stranger's pane is our board.
+
         Tolerates a board that is already gone — closed by hand, crashed, never opened —
         because all three are ordinary. The meta row is dropped either way: it is a
         record of a pane we no longer own, and leaving it would make the next
@@ -1379,8 +1396,14 @@ class Broker:
         if not self._board_is_only_for(name, pane):
             self._forget_board(key)
             return
+        target, wrong = self._close_target({"pane_id": pane, "terminal_id": None})
+        if wrong is not None:
+            store.log_event(self.db, kind="board_close_refused", agent=name,
+                            pane=pane, error=wrong)
+            self._forget_board(key)
+            return
         try:
-            self.h.close_pane(pane)
+            self.h.close_pane(target)
         except Exception as e:
             # Including a pane herdr no longer has: "already closed" and "would not
             # close" arrive the same way, and neither is worth failing a cleanup over.
@@ -2324,6 +2347,20 @@ class Broker:
         a directory about to be deleted is the whole reason "confirm them stopped" is a
         step rather than a hope. The caller's own pane is never closed, here as in
         `cleanup`.
+
+        The pane is RESOLVED through `_close_target` rather than taken off the row, for
+        the reason that method exists: a `pane_id` is not an identity, it is recycled the
+        moment a pane closes, and herdr is machine-global — so a finished row can name a
+        pane another clone's live agent now holds. `cleanup` learned that first; this is
+        the same close under a different verb, and it closes MORE panes per command than
+        `cleanup` does, one per row in the workspace.
+
+        A row whose pane cannot be proved its own stops the whole command, in the same
+        voice as a pane that would not close and for the same reason: this step exists to
+        confirm the panes are stopped, and a pane we may not touch is not confirmed
+        stopped. Nothing is deleted. That refusal is not permanent — it lifts when the
+        stranger holding the recycled id goes — and `--confirm` does not lift it, because
+        `--confirm` is intent and this is identity, exactly as `--force` is in `cleanup`.
         """
         closed = []
         for a in self.db.execute(
@@ -2331,10 +2368,20 @@ class Broker:
         ).fetchall():
             if a["name"] == me:
                 continue
+            target, wrong = self._close_target(a)
+            if wrong is not None:
+                store.log_event(self.db, kind="cleanup_wrong_pane", agent=a["name"],
+                                pane=a["pane_id"], error=wrong)
+                raise ValueError(
+                    f"cannot close {name!r}: {a['name']}'s recorded pane cannot be "
+                    f"confirmed as its own — {wrong}. Nothing here is confirmed stopped, "
+                    f"so nothing is deleted"
+                )
             try:
-                self.h.release_agent(a["pane_id"], a["name"],
-                                     store.next_seq(self.db, a["name"]))
-                self.h.close_pane(a["pane_id"])
+                if target:
+                    self.h.release_agent(target, a["name"],
+                                         store.next_seq(self.db, a["name"]))
+                    self.h.close_pane(target)
             except HerdrError as e:
                 if e.code != "pane_not_found":
                     store.log_event(self.db, kind="cleanup_failed", agent=a["name"],
@@ -4764,6 +4811,13 @@ class Broker:
         Fails CLOSED, for `_end_still_holds`'s reasons and one more — since `--force` takes
         live descendants with the row, a wrong close now takes a stranger's whole subtree,
         and no part of that is undoable. A wrong refusal costs one retry.
+
+        Every close in this file comes through here: `cleanup`, `_stop_panes` (which is
+        `sb workspace close` taking a whole workspace's panes at once), and `_close_board`
+        (a pane with no identity of its own, so the last case below). One resolution
+        rather than three checks — a second mechanism would be a second thing to keep
+        right, and the two paths that had no check at all are exactly how that goes.
+        Neither `--force` nor `--confirm` lifts it: those are intent, this is identity.
 
         The cases, in the order they are asked:
 
