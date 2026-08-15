@@ -995,7 +995,7 @@ class Broker:
                 # else's; hand it the work rather than spawn a rival.
                 self.tell([name], task, me=HUMAN)
             store.log_event(self.db, kind="start", agent=name, created=False)
-            self._open_board(name, a["pane_id"], top=True)
+            self._open_board(name, a["pane_id"])
             self._focus(name)
             return name
 
@@ -1027,7 +1027,7 @@ class Broker:
         # create_workspace failed, `pane` here is None and `delegate` fell back to
         # a tab, whose pane only the row knows.
         row = store.get_agent(self.db, name)
-        self._open_board(name, row["pane_id"] if row else pane, top=True)
+        self._open_board(name, row["pane_id"] if row else pane)
         self._focus(name)
         return name
 
@@ -1113,8 +1113,7 @@ class Broker:
             store.record_workspace(self.db, name, path)
 
     def _open_board(self, name: str, pane: Optional[str], *,
-                    cwd: Optional[str] = None,
-                    top: bool = False) -> None:
+                    cwd: Optional[str] = None) -> None:
         """Open the board beside this agent, unless one is up already.
 
         Every agent, not only an orchestrator: `delegate` calls this, and every spawn
@@ -1135,11 +1134,11 @@ class Broker:
         reads the wrong checkout's `.switchboard` is worse than no board, because it
         looks right.
 
-        `top` picks the width and nothing else: the top orchestrator's board — the one
-        `sb start` opens, and the one a human actually reads — takes
-        `board.TOP_BOARD_SHARE`, every other agent's keeps the narrower
-        `board.BOARD_SHARE`. One parameter on one call: two widths must not become two
-        code paths.
+        The width is not this method's business and there is no flag for it: every board
+        pane is `board.BOARD_SHARE` wide, the width `sb start` gives its own. There used
+        to be a `top=` parameter here choosing between two constants, and the result was
+        one view that came out two sizes depending on which verb had opened it. One
+        number, in `board.py`, read by the one call below.
 
         Never raises. A spawn must not fail because a view would not open.
         """
@@ -1160,9 +1159,7 @@ class Broker:
             return
 
         try:
-            new = board_mod.open_beside(
-                self.h, pane, cwd=cwd or str(self.repo),
-                share=board_mod.TOP_BOARD_SHARE if top else board_mod.BOARD_SHARE)
+            new = board_mod.open_beside(self.h, pane, cwd=cwd or str(self.repo))
         except Exception as e:
             # This method promises `sb start` cannot fail because of the board, and
             # a promise enforced only for the errors we predicted is not one. An
@@ -3226,15 +3223,12 @@ class Broker:
         # orchestrator `sb start` makes: `delegate` is the one place every spawn
         # passes through, so this is the one place the board can be opened without
         # a second path to drift from the first. Split before the task is delivered,
-        # so the agent's first draw is already at its final width.
+        # so the agent's first draw is already at its final width — the same width
+        # `sb start`'s board gets, because there is only one.
         #
         # The pane herdr actually put the agent in, not the one we asked for — the
         # same value the row above was updated with.
-        #
-        # The top orchestrator's board is the wide one: `is_top` is stamped only by
-        # `_top`, so asking it here is asking "is this the `sb start` board?" without a
-        # second call to drift from this one.
-        self._open_board(name, agent.pane_id or pane, cwd=str(where), top=is_top)
+        self._open_board(name, agent.pane_id or pane, cwd=str(where))
         # THE SPAWN IS NOT DONE UNTIL THE TASK IS IN. `agent start` retries and raises
         # loudly, but the first task used to go down as a bare `agent prompt` — one
         # unverified call that can paste without submitting or never arrive, after which

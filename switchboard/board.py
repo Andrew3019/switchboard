@@ -75,16 +75,19 @@ CHROME = config.setting("display.board_chrome")       # header, blank, blank, st
                                                      # lines not available to agents
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 
-# How much of the width the board takes when it opens beside an agent. A third:
-# the tree is a glance, and the pane a human actually reads is the agent's own
-# session. See `open_beside`, which inverts this into herdr's `--ratio`.
-BOARD_SHARE = 0.34
-
-# The top orchestrator's board, the one `sb start` opens, is the board a human
-# actually sits in front of and reads: it carries the whole fleet, not one
-# agent's children, so it gets more room than a child's does. Still under half —
-# it is a roomier side panel, not the main event.
-TOP_BOARD_SHARE = 0.45
+# How much of the width the board takes when it opens beside an agent — THE ONLY
+# board width there is. Every board pane is the same board showing the same fleet,
+# so a human should not have to work out which spawn made the one in front of them
+# from how wide it came out. The number is `sb start`'s: that board is the one a
+# human sits in front of and reads, so it is the one that was tuned. Still under
+# half — a roomier side panel, not the main event: the pane a human actually reads
+# is the agent's own session. See `open_beside`, which inverts this into herdr's
+# `--ratio`.
+#
+# It used to be two numbers (0.34 for a delegated child, 0.45 for the top
+# orchestrator, picked by a `top=` flag on `broker._open_board`), which is exactly
+# how the same view came out two sizes.
+BOARD_SHARE = 0.45
 
 # Colour is a nicety, never load-bearing: every distinction below is also carried
 # by a glyph or a word, so NO_COLOR loses nothing but polish.
@@ -753,17 +756,20 @@ def focus(name: str) -> str:
     return f"→ {name}"
 
 
-def open_beside(h, pane_id: str, *, cwd: str, share: float = BOARD_SHARE) -> Optional[str]:
+def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:
     """Split `pane_id` and run the board in the new pane. -> new pane id, or None.
 
     Called by `broker._open_board`, so every agent lands with the tree up beside
-    it — `sb start`'s orchestrator and every `sb delegate` child alike.
+    it — `sb start`'s orchestrator and every `sb delegate` child alike, at the same
+    width: the share is `BOARD_SHARE` and there is no parameter to pass a different
+    one, which is what makes "every board pane is the size `sb start` gives it" a
+    property of the code rather than of the callers agreeing.
 
-    `share` is the BOARD's share of the width, which is the number a reader wants
-    to reason about; herdr's `--ratio` is the *other* number — what the pane being
-    split keeps — so it is inverted on the way out. The board is the small pane:
-    the agent's own session is the thing being read, and the tree beside it is a
-    glance.
+    `BOARD_SHARE` is the BOARD's share of the width, which is the number a reader
+    wants to reason about; herdr's `--ratio` is the *other* number — what the pane
+    being split keeps — so it is inverted on the way out. The board is the small
+    pane: the agent's own session is the thing being read, and the tree beside it
+    is a glance.
 
     Returns None rather than raising on any herdr failure, and callers ignore the
     result: a spawn failing because a *view* would not open is a far worse bug
@@ -776,7 +782,7 @@ def open_beside(h, pane_id: str, *, cwd: str, share: float = BOARD_SHARE) -> Opt
     from .herdr import HerdrError
 
     try:
-        pane = h.split_pane(pane_id, direction="right", ratio=1 - share, cwd=cwd)
+        pane = h.split_pane(pane_id, direction="right", ratio=1 - BOARD_SHARE, cwd=cwd)
     except (HerdrError, OSError):
         return None
     try:

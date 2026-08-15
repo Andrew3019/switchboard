@@ -744,24 +744,22 @@ class StartWorkspaceTest(Fixture, unittest.TestCase):
         self.assertEqual(len(self.h.splits), 1)
         self.assertIn("switchboard.board", _board_line(self.h)[1])
 
-    def test_the_top_board_is_wider_than_a_delegated_child_s(self):
-        """The board `sb start` opens is the one a human reads, so it gets more width.
-        Children keep the narrow default: two numbers, one call, no second code path."""
+    def test_a_delegated_child_s_board_is_the_size_sb_start_s_is(self):
+        """One board, one width. It used to be two constants picked by a `top=` flag,
+        so the same view came out one size from `sb start` and another from `delegate`."""
         from switchboard import board as board_mod
         self.b.start()
         _pane, _dir, top_ratio = self.h.splits[0]
         self.b.delegate("t", role="worker", me=HUMAN)
         _pane, _dir, kid_ratio = self.h.splits[1]
         # herdr's ratio is what the SPLIT pane keeps, so a wider board is a smaller one.
-        self.assertAlmostEqual(top_ratio, 1 - board_mod.TOP_BOARD_SHARE)
-        self.assertAlmostEqual(kid_ratio, 1 - board_mod.BOARD_SHARE)
-        self.assertLess(top_ratio, kid_ratio)
+        self.assertAlmostEqual(top_ratio, 1 - board_mod.BOARD_SHARE)
+        self.assertAlmostEqual(kid_ratio, top_ratio)
 
-    def test_the_top_board_is_still_the_side_panel(self):
-        """Roomier, not the main event: the orchestrator's own session keeps the majority."""
+    def test_the_board_is_still_the_side_panel(self):
+        """Roomier, not the main event: the agent's own session keeps the majority."""
         from switchboard import board as board_mod
-        self.assertLess(board_mod.TOP_BOARD_SHARE, 0.5)
-        self.assertGreater(board_mod.TOP_BOARD_SHARE, board_mod.BOARD_SHARE)
+        self.assertLess(board_mod.BOARD_SHARE, 0.5)
 
     def test_a_closed_board_is_reopened(self):
         name = self.b.start()
