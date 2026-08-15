@@ -1077,9 +1077,9 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     the behaviour that shipped before the column, and the reason it is that way round is
     that a row nothing can ever record as gone is a row `sb cleanup` can never reach.
 
-    **The parent is TOLD, and told the way a `done` tells it** (DESIGN-TRUTH.md: "we
+    **The parent is TOLD, and told the way a `done` tells it** (DESIGN-TRUTH.md: "We
     should detect failures, and can start with just telling the parent that it has
-    failed"; Andrew: "needs to act same way as sb done. pings the parent when idle").
+    failed."; Andrew: "needs to act same way as sb done. pings the parent when idle").
     Recording the row was passive — the failure was on the board, and only an agent
     already looking at the board learned of it, which for a parent that has ended its turn
     to wait for a poke is never. So a row written here also puts a message in the parent's
@@ -1738,9 +1738,10 @@ def _attention(snap: Snapshot) -> list[str]:
     needs = snap.needs_human
     if needs:
         # Not the human's inbox — `sb board` is what Andrew watches, and a blocked agent
-        # is a marked row there (DESIGN-TRUTH.md: "`sb status` is not for Andrew — only
-        # `sb board` is"). This list is for an agent reading its own cohort, which is why
-        # the rows name the agent rather than addressing the reader as the one who answers.
+        # is a marked row there (DESIGN-TRUTH.md: "`sb status` is for agents; `sb board`
+        # is Andrew's view of the tree."). This list is for an agent reading its own
+        # cohort, which is why the rows name the agent rather than addressing the reader
+        # as the one who answers.
         w = max(len(a.name) for a in needs)
         out.append("")
         out.append("NEEDS YOU")

@@ -879,8 +879,8 @@ class Broker:
     def top_of(self, name: str) -> str:
         """Which tree this agent stands in, named by its top. The unit of scope.
 
-        DESIGN-TRUTH: "Siblings are not invisible to each other; any other top
-        orchestrator's entire tree is invisible." That is a whole tree, so the question is
+        DESIGN-TRUTH: "Siblings are not invisible to each other; any other dispatcher's
+        entire tree is invisible." That is a whole tree, so the question is
         about roots, not about descendants — `_descendants(me)`, which `cleanup` correctly
         uses for its own tighter rule, would hide a sibling from a sibling.
 
@@ -1399,7 +1399,7 @@ class Broker:
 
     def _focus(self, name: str) -> None:
         """`sb start` focuses what it started. Nothing else focuses, and nothing can ask
-        for it (DESIGN-TRUTH.md's "Focus as a flag")."""
+        for it (DESIGN-TRUTH.md's "Focus as a flag.")."""
         try:
             self.h.focus(name)
         except HerdrError as e:
@@ -3140,8 +3140,8 @@ class Broker:
           - the checkout is on `main` already, where inheriting means `origin/main` —
             except we take the REMOTE one, freshly fetched, rather than however stale the
             local `main` is. A top orchestrator starting fresh work therefore forks from
-            today's main exactly as it always has, which is what DESIGN-TRUTH's "a
-            workspace forks from `origin/main` by default" describes.
+            today's main exactly as it always has, which is what DESIGN-TRUTH's "A
+            workspace forks from `origin/main` by default." describes.
           - a detached HEAD, which has no branch to inherit and nothing to name.
 
         Nothing overrides this any more: the `--base` flag went when `sb workspace new`

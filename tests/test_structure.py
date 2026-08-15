@@ -242,8 +242,8 @@ class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
         self.assertEqual(self.h.calls_of("create_worktree"), [kid])
 
     def test_a_sub_orchestrators_whole_subtree_stays_in_one_space(self):
-        """Three deep. DESIGN-TRUTH: "a sub-orchestrator a lead spawns is a tab in the
-        lead's space, and its whole subtree stays in that one space"."""
+        """Three deep. DESIGN-TRUTH: "a sub-lead a lead spawns is a tab in the lead's
+        space, and its whole subtree stays in that one space"."""
         lead = self.b.delegate("t", role="lead", me=self._top())
         sub = self.b.delegate("t", role="lead", me=lead)
         kid = self.b.delegate("t", role="worker", me=sub)

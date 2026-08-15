@@ -9,12 +9,22 @@ those lines. That is exactly what happened when the document was rewritten for t
 dispatcher/lead split — about ten ended up on unrelated entries, and one had been wrong for
 long enough that nobody could say when.
 
-WHAT A CITATION LOOKS LIKE. `DESIGN-TRUTH:` (or `DESIGN-TRUTH.md:`) followed by one or more
-double-quoted strings, joined by `+` when one point needs two entries. The whole citation
-lives on one line, because this reads a file a line at a time. The normal quote is the
-entry's bold lead-in, which is what makes it a pointer at an entry rather than at a sentence;
-quoting a sentence from inside the entry instead is equally valid and is what about two dozen
-older citations already do, deliberately, to point at the exact claim they lean on.
+WHAT A CITATION LOOKS LIKE. The name — `DESIGN-TRUTH`, `DESIGN-TRUTH.md`, or either in the
+possessive — followed by one or more double-quoted strings, joined by `+` when one point
+needs two entries. A short run of prose may sit between the name and the quote, because that
+is how these are actually written ("DESIGN-TRUTH rules out in as many words (...)"), and the
+quote may wrap onto the next line, because comments and docstrings wrap. The normal quote is
+the entry's bold lead-in, which is what makes it a pointer at an entry rather than at a
+sentence; quoting a sentence from inside the entry instead is equally valid and is what about
+two dozen older citations already do, deliberately, to point at the exact claim they lean on.
+
+THE PARSER READS WHOLE FILES, NOT LINES. It used to read a line at a time, and everything
+that did not open and close on that one line was skipped in silence — the possessive form and
+every wrapped quote, about half of them. A skipped citation is the worst failure this file
+has, because it reads as a pass. So the file is flattened first (indentation and comment
+hashes dropped, blank lines and `\"\"\"` left as hard boundaries a quote may not cross), and an
+opening quote that never closes before such a boundary is reported as a failure rather than
+dropped.
 
 THE RULE ENFORCED. Each quoted string must appear verbatim inside a SINGLE entry — matched
 against each entry's own text, never against the whole document, so a quote that only exists
@@ -51,9 +61,21 @@ DOC = ROOT / "DESIGN-TRUTH.md"
 SEARCHED = ("switchboard", "tests", "defaults", "acceptance")
 SUFFIXES = (".py", ".md", ".toml")
 
-# `DESIGN-TRUTH:` then one or more quoted keys, `+`-joined, all on one line.
-CITE = re.compile(r'DESIGN-TRUTH(?:\.md)?:\s*((?:"[^"]+"\s*\+\s*)*"[^"]+")')
-QUOTE = re.compile(r'"([^"]+)"')
+# The name, in any of the four forms it is written in. Everything after it is prose until a
+# quote opens.
+MARK = re.compile(r"DESIGN-TRUTH(?:\.md)?(?:'s)?")
+# A quoted key, and the `+` that joins a second one to it. `BREAK` is a boundary no quote may
+# cross: a blank line, or a `"""` that is a docstring's edge rather than anybody's quote.
+BREAK = "\x00"
+QUOTE = re.compile(f'"([^"{BREAK}]+)"')
+JOIN = re.compile(r'\s*\+\s*(?=")')
+# Indentation and the comment hash in front of it, dropped so wrapped lines join cleanly.
+INDENT = re.compile(r"^\s*(?:#+ ?)?\s*")
+
+# How far past the name the first quote may sit. Long enough for the lead-in clauses actually
+# written ("asks only that it is known", "rules out in as many words"), short enough that an
+# unrelated string later in the paragraph is not swept in.
+LEDE = 40
 
 # Short enough to be a real lead-in, long enough that a fragment cannot match by luck.
 MIN_QUOTE = 24
@@ -92,7 +114,46 @@ def words(text: str) -> str:
     return text.replace("**", "")
 
 
-def _citations():
+def flatten(text: str) -> tuple[str, list[int]]:
+    """The file as one string a quote can be matched across, and the line each character came
+    from. Indentation and comment hashes go, so a wrapped quote reads as the sentence it is;
+    blank lines and `\"\"\"` become `BREAK`, so a quote that never closes stops there instead of
+    swallowing the code below it."""
+    flat, at = [], []
+    for n, line in enumerate(text.splitlines(), 1):
+        piece = INDENT.sub("", line).rstrip().replace('"""', BREAK) or BREAK
+        flat.append(piece + " ")
+        at.extend([n] * (len(piece) + 1))
+    return "".join(flat), at
+
+
+def parse(text: str) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """Every citation in one file, as (line, quoted words), and separately every opening quote
+    that runs off the end of its paragraph — reported, never dropped."""
+    flat, at = flatten(text)
+    found, broken = [], []
+    for m in MARK.finditer(flat):
+        pos = m.end()
+        while True:
+            edge = flat.find(BREAK, pos)
+            lede = pos + LEDE if edge == -1 else min(pos + LEDE, edge)
+            q = QUOTE.search(flat, pos)
+            opening = flat.find('"', pos, lede)
+            if opening == -1:
+                break  # prose reference, or the paragraph moved on: nothing quoted
+            if q is None or q.start() != opening:
+                stop = flat.find(BREAK, opening)
+                broken.append((at[opening], flat[opening:stop if stop != -1 else None][:60]))
+                break
+            found.append((at[q.start()], _flat(q.group(1))))
+            j = JOIN.match(flat, q.end())
+            if not j:
+                break
+            pos = j.end()
+    return found, broken
+
+
+def _files():
     for top in SEARCHED:
         root = ROOT / top
         if not root.exists():
@@ -102,10 +163,21 @@ def _citations():
                 continue
             if path.resolve() == Path(__file__).resolve():
                 continue  # this file's own docstring examples are prose, not citations
-            for n, line in enumerate(path.read_text().splitlines(), 1):
-                for m in CITE.finditer(line):
-                    for q in QUOTE.finditer(m.group(1)):
-                        yield path.relative_to(ROOT), n, _flat(q.group(1))
+            yield path
+
+
+def _citations():
+    for path in _files():
+        found, _ = parse(path.read_text())
+        for n, quoted in found:
+            yield path.relative_to(ROOT), n, quoted
+
+
+def _unterminated():
+    for path in _files():
+        _, broken = parse(path.read_text())
+        for n, text in broken:
+            yield path.relative_to(ROOT), n, text
 
 
 class DesignTruthCitationsTest(unittest.TestCase):
@@ -115,9 +187,19 @@ class DesignTruthCitationsTest(unittest.TestCase):
         self.cites = list(_citations())
 
     def test_there_are_citations_to_check(self):
-        """Guards the guard: a regex that matches nothing passes everything."""
-        self.assertGreater(len(self.cites), 10)
+        """Guards the guard: a regex that matches nothing passes everything. The floor is set
+        near the count the widened parser finds, because the failure this file is most
+        vulnerable to is a narrowing that quietly stops looking at half of them."""
+        self.assertGreater(len(self.cites), 40)
         self.assertGreater(len(self.entries), 10)
+
+    def test_no_citation_is_left_half_read(self):
+        """The other half of the same guard. A quote that opens next to the name and never
+        closes before its paragraph ends is a citation this file cannot check — which is a
+        failure to report, not a line to skip."""
+        for where, line_no, text in _unterminated():
+            self.fail(f"{where}:{line_no} opens a quote next to DESIGN-TRUTH that never "
+                      f"closes: {text!r}")
 
     def test_entry_lead_ins_are_unique(self):
         """The key space itself. Two entries opening the same way makes a citation ambiguous
@@ -143,6 +225,52 @@ class DesignTruthCitationsTest(unittest.TestCase):
                     f"{where}:{line_no} cites {quoted!r}, which is not the wording of any "
                     f"single entry of DESIGN-TRUTH.md — the entry was reworded, or the "
                     f"quote runs across two entries")
+
+
+class ParserTest(unittest.TestCase):
+    """The two forms the line-at-a-time parser used to drop, and the one it must not start
+    dropping instead."""
+
+    def quotes(self, text):
+        found, broken = parse(text)
+        self.assertEqual(broken, [], "nothing here should be unterminated")
+        return [q for _, q in found]
+
+    def test_the_possessive_form_is_a_citation(self):
+        """`DESIGN-TRUTH's "..."` and `DESIGN-TRUTH.md's "..."`. Only `DESIGN-TRUTH:` was
+        recognised before, so every possessive citation passed unread."""
+        self.assertEqual(self.quotes('# see DESIGN-TRUTH\'s "Focus as a flag" for it'),
+                         ["Focus as a flag"])
+        self.assertEqual(self.quotes('(DESIGN-TRUTH.md\'s "`--no-board`").'), ["`--no-board`"])
+
+    def test_a_quote_may_wrap_and_may_follow_a_clause(self):
+        """A quote that opens on one line and closes on the next is one quote, with the
+        indentation and comment hash of the second line gone. A short clause between the name
+        and the quote is prose, not a reason to stop looking."""
+        self.assertEqual(
+            self.quotes('    # DESIGN-TRUTH: "A fork that fails\n'
+                        '    # refuses the spawn."\n'),
+            ["A fork that fails refuses the spawn."])
+        self.assertEqual(
+            self.quotes('DESIGN-TRUTH rules out in as many words ("It never falls back").'),
+            ["It never falls back"])
+
+    def test_a_quote_that_never_closes_is_reported(self):
+        """The widened parser reads across lines, so it must say when it has run out of
+        paragraph — the silent skip is the bug being fixed, and a new one would be the same
+        bug. The `+` join, and a quote belonging to somebody other than the document, are
+        checked here too: they are the two ways the wider window could over-reach."""
+        found, broken = parse('DESIGN-TRUTH: "A fork that fails\n\nsomething else"\n')
+        self.assertEqual(found, [])
+        self.assertEqual([n for n, _ in broken], [1])
+
+        self.assertEqual(self.quotes('DESIGN-TRUTH: "Siblings are not invisible"\n'
+                                     '+ "Only agents have the scope constraints."'),
+                         ["Siblings are not invisible",
+                          "Only agents have the scope constraints."])
+        self.assertEqual(self.quotes('DESIGN-TRUTH.md: "we should detect failures"; '
+                                     'Andrew: "needs to act same way as sb done"'),
+                         ["we should detect failures"])
 
 
 if __name__ == "__main__":
