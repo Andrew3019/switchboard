@@ -3917,7 +3917,20 @@ class Broker:
                 continue
             if a["ended_at"] and not a["pane_id"]:
                 # Nothing was held back — this row was closed before the sweep started.
-                refuse(a, "already closed", expected=True)
+                # But a closed row is not necessarily an absent one: the board draws a
+                # subtree while ANY of it still has a pane, so a descendant that reported
+                # an end and still holds its pane keeps this row on the board with
+                # `already closed` as the only account of it. That reads as the store and
+                # the board contradicting each other, and the way out — close the
+                # descendant — is exactly what the bare refusal fails to name. So name it.
+                # See `pane_holding_descendants`.
+                still = self.pane_holding_descendants(a["name"])
+                refuse(a, "already closed" + (
+                    "" if not still else
+                    " — still drawn on the board because these below it still hold a "
+                    "pane: " + ", ".join(still)
+                    + ". Close them, leaves up, and this row goes with them."),
+                    expected=True)
                 continue
             if a["name"] in held:
                 if not dry_run:               # a dry run reads; it never writes
@@ -4067,6 +4080,25 @@ class Broker:
         """
         return [a["name"] for a in self._descendants(name)
                 if a["state"] in store.LIVE_STATES and not a["ended_at"]]
+
+    def pane_holding_descendants(self, name: str) -> list[str]:
+        """Descendants that still hold a pane — why a closed row is still on the board.
+
+        The wider question than `live_descendants`, and a different one: that predicate is
+        "still working" and gates a close; this is "still drawn" and gates nothing. A
+        descendant that has reported `done` and not yet been closed is dead to the first
+        and alive to the second, and that gap is the whole of the disagreement an operator
+        sees when `sb cleanup` says `already closed` about a row `sb status` lists.
+
+        THE STORE ONLY, for the same reason `live_descendants` is — an absence from
+        `agent list` reads identically whether the pane went or herdr hiccupped. The risk
+        is the opposite way round here, though: this decides nothing, so a stale
+        `pane_id` costs one over-helpful sentence and never a close that should not have
+        happened. `pane_id` is switchboard's own record of a pane it opened and has not
+        closed (the close path clears it), which is as close to "what the board is
+        drawing" as anything the store can answer.
+        """
+        return [a["name"] for a in self._descendants(name) if a["pane_id"]]
 
     def _descendants(self, name: str) -> list:
         out, frontier = [], [name]
