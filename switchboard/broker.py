@@ -706,17 +706,27 @@ class Broker:
 
         The `turn_end` rows are logged against NO agent, with the name in the payload's
         `target` — `hooks.mark_turn` explains why (an event that names an agent resets its
-        idle clock), and `store._repair_turn_without_hooks` reads them the same way. So the
+        idle clock), and `store._repair_unhooked_turn` reads them the same way. So the
         match is on `json_extract(payload,'$.target')`, not on `events.agent`.
 
         FAILS OPEN, in three places, all of them to today's behaviour — revive:
-        - a session carrying no hooks has no `turn_*` events for this agent EVER and a NULL
-          `turn`. It can never produce the edge, so demanding one would wedge it blocked for
-          good. This is the same case `hooks.py` and the docstring above already fail open
-          for, and it must stay open.
+        - a session carrying no hooks can never produce the edge, so demanding one would
+          wedge it blocked for good. This is the same case `hooks.py` and the docstring
+          above already fail open for, and it must stay open. It is read off the `turn`
+          column: `mark_turn` writes the column and the event together, so a NULL `turn` is
+          a row no hook has ever written (`store._repair_unhooked_turn` restores that
+          invariant for rows an older `_revive` stamped). Note what this does NOT cover — an
+          agent that HAD hooks and lost them keeps a stale `turn`, stays gated, and can then
+          only be answered with `sb tell`. Narrow, recoverable, and not fixed here.
         - no report event to anchor on (a row put into `done`/`blocked` by something other
           than the verbs — `store.set_state` direct, an old store, a repair).
         - the query itself failing: a degraded store, or a sqlite without JSON1.
+
+        This is the FAIL-OPEN half of the pair, and it is the right half for `_revive`: the
+        cost of being wrong is one row un-blocking itself, which is where we started.
+        `done`'s repeat guard takes the other half — see `_reported_done_and_stayed_there`,
+        which asks the same question and counts "cannot tell" as a repeat, because the cost
+        of being wrong there is a parent that gets two reports for one piece of work.
 
         KNOWN RESIDUAL HOLE, deliberately left. If a blocked agent's turn genuinely ends
         and a LATER turn is started by something that is not a person answering — a
@@ -728,25 +738,80 @@ class Broker:
         nothing in the fleet has one. Left as is, on purpose.
         """
         try:
-            anchor = self.db.execute(
-                "SELECT id FROM events WHERE agent=? AND kind IN (%s) "
-                "ORDER BY id DESC LIMIT 1" % ",".join("?" * len(kinds)),
-                (name, *kinds)).fetchone()
+            anchor = self._last_report(name, kinds)
             if anchor is None:
                 return True
-            edges = self.db.execute(
-                "SELECT kind, MAX(id) AS last FROM events "
-                "WHERE kind IN ('turn_start','turn_end') "
-                "AND json_extract(payload,'$.target')=? GROUP BY kind", (name,)).fetchall()
+            if self._turn_ended_after(name, anchor):
+                return True
             turn = self.db.execute(
                 "SELECT turn FROM agents WHERE name=?", (name,)).fetchone()
-            hooked = bool(edges) or (turn is not None and turn["turn"] is not None)
-            if not hooked:
-                return True
-            last_end = next((e["last"] for e in edges if e["kind"] == "turn_end"), None)
-            return last_end is not None and last_end > anchor["id"]
+            return turn is None or turn["turn"] is None          # no hooks, ever
         except sqlite3.OperationalError:
             return True
+
+    def _last_report(self, name: str, kinds: tuple[str, ...]) -> Optional[int]:
+        """The id of this agent's most recent `blocked`/`done`/`failed` event, or None.
+
+        Indexed: `idx_events_agent` is `(agent, id)`, and these rows DO name their agent.
+        """
+        row = self.db.execute(
+            "SELECT id FROM events WHERE agent=? AND kind IN (%s) "
+            "ORDER BY id DESC LIMIT 1" % ",".join("?" * len(kinds)),
+            (name, *kinds)).fetchone()
+        return None if row is None else row["id"]
+
+    def _turn_ended_after(self, name: str, event_id: int) -> bool:
+        """Did a turn of this agent's end after that event?
+
+        BOUNDED ON PURPOSE. `id > ?` first, because `events.id` is the rowid and the log is
+        append-only, so this reads only the events written since the report — a handful —
+        rather than the whole table. The obvious spelling (`MAX(id) … GROUP BY kind`) has no
+        usable index for these rows: a turn edge names no agent, so `idx_events_agent` does
+        not apply and `json_extract` cannot be indexed either. It measured 5.4ms per `sb`
+        command against a 28k-event store, and that store only grows.
+        """
+        return self.db.execute(
+            "SELECT 1 FROM events WHERE id>? AND kind='turn_end' "
+            "AND json_extract(payload,'$.target')=? LIMIT 1",
+            (event_id, name)).fetchone() is not None
+
+    def _reported_done_and_stayed_there(self, name: str) -> bool:
+        """Has this agent already reported done, with nothing since to make it new work?
+
+        `done`'s repeat guard, and the FAIL-CLOSED twin of `_turn_passed_since`. Same
+        question — is there a turn boundary after the report — and the opposite answer when
+        the store cannot tell, because the two are protecting different things. `_revive`
+        guesses in favour of the agent, and the worst case is a row that un-blocks itself.
+        Here the worst case is a parent holding two reports for one piece of work, unable to
+        tell which is the real one, with the board showing the second. So: no boundary
+        recorded, no session that could have recorded one — still a repeat.
+
+        The cost of that choice, stated rather than hidden: on a session with NO hooks a
+        genuine second `done` — a follow-up question, answered, then finished again — is
+        recorded as a repeat and its summary is not mailed. Nothing is lost (it is in the
+        log, and the caller is told plainly), and every session `sb` spawns or restores
+        carries the hooks (`hooks.stop_hook_args`, added on every spawn and every restore),
+        so this is the hand-started session only. It is the deliberate direction to be
+        wrong in.
+
+        `restore` counts as the boundary too, and must: it is the verb for "this agent is
+        being given new work", it writes `state='working', ended_at=NULL, turn=NULL`, and a
+        restored agent's next report is a first report, not a repeat.
+        """
+        try:
+            anchor = self._last_report(name, ("done",))
+            if anchor is None:
+                return False                                 # never reported: not a repeat
+            if self._turn_ended_after(name, anchor):
+                return False
+            return self.db.execute(
+                "SELECT 1 FROM events WHERE id>? AND agent=? AND kind='restore' LIMIT 1",
+                (anchor, name)).fetchone() is None
+        except sqlite3.OperationalError:
+            # A store too degraded to answer must not swallow a report — that is the one
+            # message in the protocol a parent is waiting on. Same direction as everywhere
+            # else the log cannot be read: the verb does its work.
+            return False
 
     def _claim_session(self, name: str) -> None:
         """Register this agent's own session id, once.
@@ -3611,10 +3676,17 @@ class Broker:
         second `[done]` message and ring the parent again, and because `sb status` reads
         the LAST `done` event, the second summary — in the wild, a content-free "as I
         said" — replaced the real one on the board. A parent then could not tell "my child
-        has not finished" from "my child finished and then said something else". So a call
-        that arrives with the row already `done` logs `done_repeated` instead: the text is
-        kept, nothing is mailed, nothing rings, and the FIRST summary stays what the board
-        and the parent's mailbox both show.
+        has not finished" from "my child finished and then said something else". So a
+        repeat logs `done_repeated` instead: the text is kept, nothing is mailed, nothing
+        rings, and the FIRST summary stays what the board and the parent's mailbox show.
+
+        The guard stands on the EVENT LOG, not on the state column, and that is the whole
+        of `_reported_done_and_stayed_there`. Reading `state == 'done'` made this guard a
+        passenger of `_revive`: on a session with no hooks `_revive` fails open and puts the
+        row back to `working` first, so the guard never saw it and both reports went out —
+        bug 4 fixed only where the gate happened to hold. A `done` event with no turn
+        boundary after it is durable, is written by this method itself, and says the same
+        thing wherever the hooks are.
 
         Recorded rather than refused, deliberately. Nothing guarantees a second summary is
         junk — only that the observed one was — so it must not be dropped, and it must be
@@ -3631,7 +3703,7 @@ class Broker:
         if me == HUMAN:
             raise ValueError("`sb done` is for agents")
         a = store.get_agent(self.db, me)
-        if a is not None and a["state"] == "done":
+        if self._reported_done_and_stayed_there(me):
             store.log_event(self.db, kind="done_repeated", agent=me,
                             summary=summary[:EVENT_CLIP])
             self.done_repeat = True

@@ -676,14 +676,24 @@ class BrokerTest(unittest.TestCase):
         and its parent got two notifications and two `[done]` messages, while the board
         showed only the SECOND — a content-free rewrite silently replacing the real
         summary. The repeat is kept in the log, under its own kind, and goes nowhere else.
+
+        Both calls go through `whoami` the way production does, on a session with NO hooks
+        — the shape that a guard reading `state` rather than the log gets wrong. There,
+        `_revive` fails open and puts the row back to `working` before `done` ever runs, so
+        a state-based guard sees a working agent and mails the parent a second time. That
+        is not a hypothetical: it is how this test's first version passed while the bug it
+        names was still live, because it passed `me=` and never resolved anybody.
         """
         store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
-        self.b.done("counted 144, the parser is fine", me="kid")
+        env = {"HERDR_PANE_ID": "w1:p1"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.restart_sb().done("counted 144, the parser is fine")
         self.h.prompts.clear()
 
-        self.b.done("as I said", me="kid")
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.restart_sb().done("as I said")
 
         self.assertTrue(self.b.done_repeat)
         self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
@@ -695,6 +705,29 @@ class BrokerTest(unittest.TestCase):
         # and the board still shows the first summary, which is the harm being fixed
         [kid] = [a for a in status.collect(self.db, self.h).agents if a.name == "kid"]
         self.assertEqual(kid.summary, "counted 144, the parser is fine")
+
+    def test_a_genuine_second_done_after_a_real_turn_still_reaches_the_parent(self):
+        """The other half of the guard, and the one it must not break: a follow-up task,
+        done, is a second piece of work and gets its own report. The boundary is what says
+        so — the `Stop` that ended the first report's turn, and the prompt that began the
+        next.
+        """
+        from switchboard import hooks
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="sess-kid")
+        p = {"session_id": "sess-kid"}
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+        self.b.done("counted 144", me="kid")
+        hooks.mark_turn(p, self.db, store.TURN_IDLE)         # its turn really ended
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)      # a follow-up arrived
+
+        self.restart_sb().done("and the second thing is done too", me="kid")
+
+        self.assertFalse(self.b.done_repeat)
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] counted 144",
+                          "[done] and the second thing is done too"])
 
     def test_block_reports_no_state_to_herdr_at_all(self):
         """The one thing that makes a block answerable.
