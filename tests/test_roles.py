@@ -97,7 +97,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(phrase, p)
 
     def test_the_protocol_states_the_default_shape_of_shipping_work(self):
-        """DESIGN-TRUTH.md:356-362, and it goes to every role rather than to orchestrators
+        """DESIGN-TRUTH.md:373-379, and it goes to every role rather than to orchestrators
         alone — so it is asserted on the protocol, which is the only text all five share."""
         p = config.protocol(self.repo)
         for part in ("branch named for your workspace", "push", "pull request",
@@ -125,7 +125,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(part, p)
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
-        """"This must be known to all sessions" (DESIGN-TRUTH.md:370-373) — it used to be
+        """"This must be known to all sessions" (DESIGN-TRUTH.md:387-390) — it used to be
         known to orchestrators only, so the protocol is where it has to be."""
         p = config.protocol(self.repo)
         self.assertIn("sb presets", p)
