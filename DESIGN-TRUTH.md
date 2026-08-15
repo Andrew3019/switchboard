@@ -219,6 +219,23 @@ handover reworded 2026-08-14 so it cannot be read as a spawn the dispatcher perf
 **A lead's children share its worktree, so the lead assigns disjoint files and
 serialises anything that overlaps.** — confirmed 2026-08-09
 
+**Not every level gets a worktree of its own — the shared model is the one Andrew
+means, and it is what the code already does.** A dispatcher's children each get a
+worktree and a space of their own; below that, a lead's children are tabs sharing the
+lead's worktree and branch, and so is everything under them. He had earlier described
+every level as isolated, and has said plainly that he meant the code's way. Proved live
+and not merely read: a top-level agent spawned a lead, that lead spawned two workers,
+and the lead and both workers ended up with the same workspace, branch and directory —
+one worktree for the whole subtree, differing only by pane. It was ever in doubt because
+everything Andrew had watched was spawned by a top, which forks a worktree per child
+under either model, so observation alone could not tell the two apart. What stays
+genuinely unknown: no collision between siblings editing the same file has ever been
+observed in this repo, and nothing prevents one — that is the record's silence, not a
+failed attempt to provoke one. If it ever happens, the fallback named is letting a lead
+choose isolated worktrees for a particular fan-out, an occasional escape hatch rather
+than an isolated-by-default rebuild; it is not built and is not proposed. — confirmed
+2026-08-14
+
 **A lead's job is to orchestrate other agents and stuff.** Review is coordinated by it.
 — confirmed 2026-08-09
 
@@ -426,10 +443,3 @@ child in another repo would have no parentage, no messaging, no status, no board
 no cleanup reaching it — that is a multi-store fleet, not a flag. What ships instead is a
 stopping rule: the dispatcher notices, asks, and starts nothing. Whether the missing thing
 is ever built is undecided. — open 2026-08-14
-
-**Whether every level really gets a worktree of its own.** Andrew described the hierarchy
-that way, and the code does not do it: only a dispatcher's children fork a worktree, and a
-lead's children are tabs sharing the lead's. This document was written to match the code —
-which is why the entries above say a lead's children share its worktree and assign disjoint
-files — so if the description is what he meant, several of those entries change and so does
-the code. His call, and with him now. — open 2026-08-14

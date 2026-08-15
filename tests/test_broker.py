@@ -508,7 +508,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_the_flag_is_spelled_needs_reply_on_sb_tell(self):
         """The one thing an agent types. `sb tell w "..." --needs-reply` is the spelling
-        DESIGN-TRUTH.md:307-309 names, and it defaults off."""
+        DESIGN-TRUTH.md:324-326 names, and it defaults off."""
         from switchboard.cli import build_parser
         self.assertTrue(
             build_parser().parse_args(["tell", "w", "hi", "--needs-reply"]).needs_reply)
@@ -516,7 +516,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_needs_reply_is_recorded_and_still_nobody_waits(self):
         """The flag is a claim on the RECIPIENT, and on nothing else. No agent ever waits
-        on another agent (DESIGN-TRUTH.md:307-309), so `--needs-reply` must leave the
+        on another agent (DESIGN-TRUTH.md:324-326), so `--needs-reply` must leave the
         sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
         store.create_agent(self.db, name="a", role="lead")
         store.create_agent(self.db, name="b", role="worker", parent="a")

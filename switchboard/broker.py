@@ -113,7 +113,7 @@ PROTOCOL_LINE = config.protocol()
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
 
-# `sb tell`'s three delivery modes (DESIGN-TRUTH.md:311-322). They differ only in WHEN the
+# `sb tell`'s three delivery modes (DESIGN-TRUTH.md:328-339). They differ only in WHEN the
 # doorbell is allowed to ring and whether the turn in progress survives it:
 #
 #   next-turn   ring now. `agent prompt` queues the text and the agent's own system hands
@@ -785,7 +785,7 @@ class Broker:
     def same_tree(self, me: str, target: str) -> bool:
         """May `me` see `target` at all?
 
-        The human crosses freely into any tree — DESIGN-TRUTH:248-249, "Only agents have
+        The human crosses freely into any tree — DESIGN-TRUTH:265-266, "Only agents have
         the scope constraints" — and so does anything addressed to the human.
         """
         if me == HUMAN or target == HUMAN or me == target:
@@ -3352,7 +3352,7 @@ class Broker:
 
         It records that the sender is waiting for an answer, so the recipient's `sb inbox`
         tells it to reply at some point. It does not make the sender wait, poll or block —
-        no agent ever waits on another agent (DESIGN-TRUTH.md:307-309), which is why this
+        no agent ever waits on another agent (DESIGN-TRUTH.md:324-326), which is why this
         is a flag on a fire-and-forget verb rather than a verb that waits. There used to
         be one of those, `sb ask`, and it is gone for exactly this reason.
 
@@ -3416,7 +3416,7 @@ class Broker:
     def apply_preset(self, name: str, *, me: Optional[str] = None) -> int:
         """Paste a preset into the caller's own session — `sb presets <name> --apply`.
 
-        DESIGN-TRUTH.md:370-373: "Picking a preset should inject a prompt: sb pastes it in,
+        DESIGN-TRUTH.md:387-390: "Picking a preset should inject a prompt: sb pastes it in,
         the same path as any other message." So it IS a message: a row in the store, the
         `[sb: from <name>]` tag, and `_ring` putting it in the pane. Printing the text
         instead would have been the easy version and a different thing — command output is
@@ -3529,7 +3529,7 @@ class Broker:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
             #
-            # WHEN IDLE, explicitly and not by default — DESIGN-TRUTH.md:293-297 names the
+            # WHEN IDLE, explicitly and not by default — DESIGN-TRUTH.md:310-314 names the
             # mode for `done` by name. A parent that is mid-turn is already working; a
             # child finishing is not news worth reaching it before its own next boundary,
             # and a fan-out of five would otherwise poke it five times in one turn.
@@ -4321,7 +4321,7 @@ class Broker:
         - *when-idle* holds the ring — `ring_deferred` — and `flush_pending` rings it once
           the turn has ended. The default, because most callers here are not a `tell` at
           all: `done`'s poke to a parent, and `flush_pending`'s own re-ring, are both
-          when-idle by their nature (DESIGN-TRUTH.md:293-297 for `done`).
+          when-idle by their nature (DESIGN-TRUTH.md:310-314 for `done`).
         - *next-turn* rings anyway. `agent prompt` queues rather than interleaves — three
           90-second single tool calls, none cut short, text delivered at the boundary
           after each — so this is not a stealth interrupt: the in-flight tool call
