@@ -2101,13 +2101,19 @@ class BrokerTest(unittest.TestCase):
         """One herdr reading must never cost a pane. `turn_doubted` is a single reading
         past 30 minutes of quiet, and a live agent goes 139 minutes without an `sb` call
         at p99.9 while herdr reads a mid-tool-call pane as idle — which is why
-        `turn_doubt_grace` exists and why only its verdict opens this gate."""
+        `turn_doubt_grace` exists and why only its verdict opens this gate.
+
+        The NAMED call goes first, and the order is what makes this test pin anything: a
+        sweep's refusal used to reset the row's idle clock, which put `turn_doubted` back
+        to False on its own — so sweeping first left the named call nothing to be wrong
+        about, and the test passed against the bar it was written to rule out.
+        """
         self._quiet_kid(turn=store.TURN_WORKING,
                         idle_for=int(status.TURN_STALE_GRACE) + 60)
         snap = status.collect(self.db, self.h, reap=False)
         self.assertTrue(next(a for a in snap.agents if a.name == "kid").turn_doubted)
-        self.assertEqual(self.b.cleanup(me="orch"), [])
-        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), [])
+        self.assertEqual(self.b.cleanup(["kid"], me="orch"), [])
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
 
     def test_refusing_a_row_does_not_reset_the_clock_that_would_free_it(self):
         """The sweep must not be able to starve its own gate.
