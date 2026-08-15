@@ -337,9 +337,9 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
 
 
 class TreeBoundaryTest(Fixture, unittest.TestCase):
-    """DESIGN-TRUTH:325-331. "Siblings are not invisible to each other; any other top
-    orchestrator's entire tree is invisible." And: "Only agents have the scope
-    constraints" — the human crosses freely.
+    """Two entries, one boundary. Any other dispatcher's whole tree is invisible, and the
+    human crosses freely —
+    DESIGN-TRUTH: "Siblings are not invisible" + "Only agents have the scope constraints."
 
     The boundary is a TOP's whole tree, not the caller's descendants. `cleanup` scopes to
     `_descendants(me)`, which is a tighter rule that belongs to that one verb; copying it

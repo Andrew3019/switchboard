@@ -1,29 +1,37 @@
-"""The line-range citations into `DESIGN-TRUTH.md`, checked against the document.
+"""The citations into `DESIGN-TRUTH.md`, checked against the words they quote.
 
-Code, prompts and tests cite the trusted document by line range — `DESIGN-TRUTH.md:133-136`
-— because a claim about what the design says is worth being able to open. The citations rot
-silently: nothing reads them, so an edit to the document moves every entry below it and the
-references keep pointing confidently at whatever now occupies those lines. That is exactly
-what happened when the document was rewritten for the dispatcher/lead split — about ten of
-them ended up on unrelated entries, and one had been wrong for long enough that nobody could
-say when.
+Code, prompts and tests cite the trusted document by quoting it — `DESIGN-TRUTH: "The role
+list is lightly audited and fine as it is"` — because a claim about what the design says is
+worth being able to open, and because the entry's own words do not move when the document is
+edited. They used to be cited by line range, and the ranges rotted silently: an edit moved
+every entry below it and the references kept pointing confidently at whatever now occupied
+those lines. That is exactly what happened when the document was rewritten for the
+dispatcher/lead split — about ten ended up on unrelated entries, and one had been wrong for
+long enough that nobody could say when.
 
-The check is structural: an entry in that document begins with `**` and ends where a blank
-line follows, so a citation must start on the first line of an entry and end on the last
-line of one. Both ends, because checking only the start was measured against a five-line
-insertion and let four citations in thirteen pass while pointing at the wrong entry — a
-shift that lands on any `**` at all satisfied it. Requiring the far end to land on a
-boundary too means a wrong range has to coincide with two boundaries at once.
+WHAT A CITATION LOOKS LIKE. `DESIGN-TRUTH:` (or `DESIGN-TRUTH.md:`) followed by one or more
+double-quoted strings, joined by `+` when one point needs two entries. The whole citation
+lives on one line, because this reads a file a line at a time. The normal quote is the
+entry's bold lead-in, which is what makes it a pointer at an entry rather than at a sentence;
+quoting a sentence from inside the entry instead is equally valid and is what about two dozen
+older citations already do, deliberately, to point at the exact claim they lean on.
 
-WHAT IT STILL CANNOT DO, written here rather than left to be discovered: it cannot tell a
-right entry from a wrong one. A shift that happens to align at both ends passes, and so does
-a citation that was aimed at the wrong entry the day it was written. The durable fix is not
-a cleverer test — it is to stop citing by line number and cite by the entry's own opening
-words, which do not move. That is a change to a convention used at two dozen sites and to
-how everyone writes the next one, so it is a decision for Andrew rather than something to
-slip into a review branch. Until then: this catches the rot that has actually happened here,
-and a reader who follows a citation and lands somewhere surprising should trust their eyes
-over the suite.
+THE RULE ENFORCED. Each quoted string must appear verbatim inside a SINGLE entry — matched
+against each entry's own text, never against the whole document, so a quote that only exists
+because it runs across an entry boundary is a broken citation rather than a passing one.
+Whitespace is normalised on both sides, so the document may wrap a sentence wherever it likes.
+A quote must also be `MIN_QUOTE` characters or longer, unless it is exactly some entry's
+lead-in: a three-word fragment matches by accident and proves nothing, while a genuinely short
+lead-in ("`sb wait`.") is still a precise pointer because lead-ins are checked for uniqueness.
+
+WHAT IT STILL CANNOT DO, written here rather than left to be discovered: it cannot tell
+whether the prose around a citation characterises the entry correctly. A citation may quote
+the right entry and then say something the entry does not support, and that passes — it is a
+semantic judgement, not a structural one. What it CAN now catch, and the line-range check
+could not, is content drift: reword an entry and every citation to it fails at once, loudly
+and by name, instead of quietly following a line number onto a different entry. The cost of
+that is real and intended — deleting or renaming a widely-cited entry now breaks every
+citation to it in one go, which is the point, not new flakiness.
 """
 
 from __future__ import annotations
@@ -38,52 +46,103 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "DESIGN-TRUTH.md"
 
-# Where citations are allowed to live. `research/` is a frozen record of what was read
-# before any of this was built and is not maintained against the document.
+# Where citations are allowed to live. `notes/` and `learnings/` are a frozen record of what
+# was read and decided at the time and are not maintained against the document.
 SEARCHED = ("switchboard", "tests", "defaults", "acceptance")
 SUFFIXES = (".py", ".md", ".toml")
 
-CITE = re.compile(r"DESIGN-TRUTH(?:\.md)?:(\d+)(?:-(\d+))?")
+# `DESIGN-TRUTH:` then one or more quoted keys, `+`-joined, all on one line.
+CITE = re.compile(r'DESIGN-TRUTH(?:\.md)?:\s*((?:"[^"]+"\s*\+\s*)*"[^"]+")')
+QUOTE = re.compile(r'"([^"]+)"')
+
+# Short enough to be a real lead-in, long enough that a fragment cannot match by luck.
+MIN_QUOTE = 24
+
+
+def _flat(text: str) -> str:
+    """One line, single-spaced — the document wraps where it likes and citations do too."""
+    return " ".join(text.split())
+
+
+def entries(lines: list[str]) -> list[str]:
+    """Each entry's text, flattened. An entry starts on a `**` line and ends at a blank one."""
+    out, i = [], 0
+    while i < len(lines):
+        if lines[i].startswith("**"):
+            j = i
+            while j < len(lines) and lines[j].strip():
+                j += 1
+            out.append(_flat(" ".join(lines[i:j])))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def lead_in(entry: str) -> str:
+    """The bold phrase an entry opens with — its name, and the normal thing to cite."""
+    m = re.match(r"\*\*(.+?)\*\*", entry)
+    return m.group(1) if m else ""
+
+
+def words(text: str) -> str:
+    """Emphasis markers dropped, on both sides of the comparison: a citation quotes words,
+    not markdown, so a quote may run from the bold lead-in into the sentence after it, and
+    may keep or drop the `**` around a phrase the document emphasises."""
+    return text.replace("**", "")
 
 
 def _citations():
     for top in SEARCHED:
-        for path in sorted((ROOT / top).rglob("*")):
+        root = ROOT / top
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
             if path.suffix not in SUFFIXES or "__pycache__" in path.parts:
                 continue
+            if path.resolve() == Path(__file__).resolve():
+                continue  # this file's own docstring examples are prose, not citations
             for n, line in enumerate(path.read_text().splitlines(), 1):
                 for m in CITE.finditer(line):
-                    start = int(m.group(1))
-                    yield path.relative_to(ROOT), n, start, int(m.group(2) or start)
+                    for q in QUOTE.finditer(m.group(1)):
+                        yield path.relative_to(ROOT), n, _flat(q.group(1))
 
 
 class DesignTruthCitationsTest(unittest.TestCase):
     def setUp(self):
-        self.lines = DOC.read_text().splitlines()
+        self.entries = entries(DOC.read_text().splitlines())
+        self.lead_ins = [lead_in(e) for e in self.entries]
         self.cites = list(_citations())
 
     def test_there_are_citations_to_check(self):
         """Guards the guard: a regex that matches nothing passes everything."""
         self.assertGreater(len(self.cites), 10)
+        self.assertGreater(len(self.entries), 10)
 
-    def _ends_a_block(self, n: int) -> bool:
-        """Line `n` (1-based) is the last line before a blank one, or the last line."""
-        return n == len(self.lines) or not self.lines[n].strip()
+    def test_entry_lead_ins_are_unique(self):
+        """The key space itself. Two entries opening the same way makes a citation ambiguous
+        even when it matches, and it would make a short lead-in unsafe to cite at all."""
+        seen = set()
+        for name in self.lead_ins:
+            self.assertTrue(name, "an entry has no bold lead-in to cite it by")
+            self.assertTrue(name not in seen, f"two entries open with {name!r}")
+            seen.add(name)
 
-    def test_every_cited_range_starts_on_an_entry_and_is_inside_the_document(self):
-        for where, line_no, start, end in self.cites:
+    def test_every_citation_quotes_one_entry_verbatim(self):
+        for where, line_no, quoted in self.cites:
             with self.subTest(f"{where}:{line_no}"):
-                self.assertLessEqual(end, len(self.lines),
-                                     "citation runs past the end of DESIGN-TRUTH.md")
-                self.assertLessEqual(start, end)
+                exact = quoted in self.lead_ins
+                quoted = words(quoted)
                 self.assertTrue(
-                    self.lines[start - 1].startswith("**"),
-                    f"DESIGN-TRUTH.md:{start} is not the start of an entry — it reads "
-                    f"{self.lines[start - 1][:60]!r}")
+                    exact or len(quoted) >= MIN_QUOTE,
+                    f"{where}:{line_no} cites {quoted!r}, which is shorter than "
+                    f"{MIN_QUOTE} characters and is not an entry's lead-in — too short to "
+                    f"prove it points anywhere")
                 self.assertTrue(
-                    self._ends_a_block(end),
-                    f"DESIGN-TRUTH.md:{end} is not the end of one — it reads "
-                    f"{self.lines[end - 1][:60]!r} with more of the same block after it")
+                    any(quoted in words(e) for e in self.entries),
+                    f"{where}:{line_no} cites {quoted!r}, which is not the wording of any "
+                    f"single entry of DESIGN-TRUTH.md — the entry was reworded, or the "
+                    f"quote runs across two entries")
 
 
 if __name__ == "__main__":

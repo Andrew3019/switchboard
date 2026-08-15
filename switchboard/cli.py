@@ -150,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--needs-reply", action="store_true",
                    help="tell them you are waiting for a reply — they are asked to answer "
                         "at some point. You do not wait: this returns immediately")
-    # The three delivery modes (DESIGN-TRUTH.md:399-410). Mutually exclusive because they
+    # DESIGN-TRUTH: "`sb tell` has three delivery modes." Mutually exclusive because they
     # are one choice with three answers, and argparse saying so beats the broker raising on
     # a combination that was never meant to exist. No `--next-turn` flag: the default is
     # the answer for almost every message, and a flag for it would only invite the reader
@@ -209,8 +209,9 @@ def build_parser() -> argparse.ArgumentParser:
     # plugin import: safe for an agent to run mid-turn.
     pr = cmd("presets", help="list available presets, print one, or apply one to yourself")
     pr.add_argument("name", nargs="?", help="print this preset instead of listing")
-    # The third parameter DESIGN-TRUTH.md:460-463 asks for, next to list and read: applying
-    # pastes the preset into the caller's OWN session, the same path as any other message,
+    # The third parameter asked for, next to list and read —
+    # DESIGN-TRUTH: "`sb presets` needs a parameter to list, and one to apply the prompt"
+    # — and applying pastes it into the caller's OWN session, the same path as any message,
     # so it arrives tagged and durable rather than as command output. No confirmation step
     # and no dry run — an agent that types this has already decided.
     pr.add_argument("--apply", action="store_true",
@@ -543,9 +544,10 @@ def _scope(b: Broker, me: str, mine: bool) -> dict:
     """What `sb status` is allowed to show this caller, as `collect`'s two scope kwargs.
 
     `tree` is the boundary — the caller's own top's whole tree, siblings included, or
-    `None` for the human, who is bounded by nothing (DESIGN-TRUTH:330-331, "Only agents
-    have the scope constraints"). `mine` is the `--mine` flag and still means the caller's
-    own subtree, which is narrower; the flag asks for less and cannot ask for more.
+    `None` for the human, who is bounded by nothing —
+    DESIGN-TRUTH: "Only agents have the scope constraints."
+    `mine` is the `--mine` flag and still means the caller's own subtree, which is
+    narrower; the flag asks for less and cannot ask for more.
 
     Before this, both were off by default, which is why any agent could read every other
     tree's state by typing the command with no flags at all.

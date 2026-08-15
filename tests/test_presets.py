@@ -246,7 +246,8 @@ class ReadingAPresetTest(unittest.TestCase):
         self.assertEqual(parser.parse_args(["presets", "adversarial"]).name, "adversarial")
 
     def test_the_third_parameter_is_apply(self):
-        """List, read, apply — the three DESIGN-TRUTH.md:460-463 asks for, on one verb."""
+        """List, read, apply on one verb —
+        DESIGN-TRUTH: "`sb presets` needs a parameter to list, and one to apply the prompt"."""
         from switchboard import cli
 
         parser = cli.build_parser()

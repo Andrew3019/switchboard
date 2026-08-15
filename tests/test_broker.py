@@ -394,7 +394,8 @@ class BrokerTest(unittest.TestCase):
     # -- what a spawn is told exists ---------------------------------------
 
     def test_every_spawn_is_told_what_roles_exist(self):
-        """DESIGN-TRUTH.md:133-136 — knowing there are roles, and which."""
+        """DESIGN-TRUTH: "The role list is lightly audited and fine as it is" — knowing
+        there are roles, and which."""
         self.b.delegate("t", role="worker", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
         for role in ("dispatcher", "lead", "worker", "qa", "researcher", "reviewer"):
@@ -508,16 +509,17 @@ class BrokerTest(unittest.TestCase):
 
     def test_the_flag_is_spelled_needs_reply_on_sb_tell(self):
         """The one thing an agent types. `sb tell w "..." --needs-reply` is the spelling
-        DESIGN-TRUTH.md:395-397 names, and it defaults off."""
+        DESIGN-TRUTH: "There is `tell` only. No agent ever waits" names, and it defaults
+        off."""
         from switchboard.cli import build_parser
         self.assertTrue(
             build_parser().parse_args(["tell", "w", "hi", "--needs-reply"]).needs_reply)
         self.assertFalse(build_parser().parse_args(["tell", "w", "hi"]).needs_reply)
 
     def test_needs_reply_is_recorded_and_still_nobody_waits(self):
-        """The flag is a claim on the RECIPIENT, and on nothing else. No agent ever waits
-        on another agent (DESIGN-TRUTH.md:395-397), so `--needs-reply` must leave the
-        sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
+        """The flag is a claim on the RECIPIENT, and on nothing else.
+        DESIGN-TRUTH: "No agent ever waits on another agent." So `--needs-reply` must leave
+        the sender's path identical to a plain `tell`: one doorbell, no payload, no poll."""
         store.create_agent(self.db, name="a", role="lead")
         store.create_agent(self.db, name="b", role="worker", parent="a")
         (mid,) = self.b.tell(["b"], "what did you find?", me="a", needs_reply=True)
