@@ -192,9 +192,11 @@ adversarial` is the procedure for it and you run it yourself.
 
 ## Close what is finished
 
-`sb cleanup [names]` closes finished agents in your subtree. Use it constantly, as part of
-the job rather than a tidy-up at the end: closing costs only the pane, and the session,
-summary, messages and transcript all survive — `sb restore` brings an agent back. Two
+`sb cleanup [names]` closes finished agents in your subtree, and any whose turn
+switchboard gave up on — a crashed session nobody reported an end for. Use it constantly,
+as part of the job rather than a tidy-up at the end: closing costs only the pane, and the
+session, summary, messages and transcript all survive — `sb restore` brings an agent
+back. Two
 things stay open, and nothing else does: an agent blocked waiting on a human, and finished
 implementation work someone may actually want to open. Everything else you have already
 summarised, so its pane is noise on a screen somebody has to read. No role decides this

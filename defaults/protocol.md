@@ -217,8 +217,9 @@ ask the parent that would have to decide it, and if that is the human, stop and 
 To delegate: `sb delegate "<task>" --role <role>` spawns a child that runs
 independently; do NOT wait for it, end your turn and you will be poked when it
 reports. `sb status` lists your children, and `sb cleanup [names]` closes finished
-ones beneath you — closing costs only the pane: session, summary, messages and
-transcript survive, and `sb restore` brings an agent back.
+ones beneath you, plus any whose turn switchboard gave up on — closing costs
+only the pane: session, summary, messages and transcript survive, and
+`sb restore` brings an agent back.
 Some ways of working are written down rather than left to you: `sb presets` lists
 them, `sb presets <name>` prints one, and `sb presets <name> --apply` pastes it into
 your own session to work from. Read one before improvising something similar.
