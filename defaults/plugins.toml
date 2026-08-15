@@ -23,7 +23,11 @@
 #
 #     enabled = ["!reset"]
 #
-# `report-bug` ships ON and bound. `todo` ships OFF — present on disk, so `sb plugin list`
+# `report-bug` and `suggestions` ship ON and bound — the two halves of the same job, one
+# for sb being broken and one for sb working and costing you anyway, and an agent that
+# swallows either silently makes every agent after it pay for it again.
+#
+# `todo` ships OFF — present on disk, so `sb plugin list`
 # still describes it and one line here turns it back on, but its commands do not dispatch,
 # it gets no state directory, and no spawn carries its fragment. It was on by default and
 # came off because nobody could say what it was doing for them: an agent told to consult a
@@ -40,8 +44,8 @@
 # not a redesign.
 #
 # The cost, stated rather than discovered: any repo where `sb plugin todo` is run grows
-# `<shared .git>/agentflow/plugins/todo/`, and every spawn everywhere carries both
-# fragments. `enabled = ["!reset"]` here turns the commands off; `all = ["!reset"]` in a
+# `<shared .git>/agentflow/plugins/todo/`, and every spawn everywhere carries every bound
+# fragment. `enabled = ["!reset"]` here turns the commands off; `all = ["!reset"]` in a
 # repo's presets.toml keeps the commands and stops the per-spawn tax. They are different
 # levers because they are different costs.
-enabled = ["report-bug"]
+enabled = ["report-bug", "suggestions"]
