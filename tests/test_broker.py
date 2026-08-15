@@ -2265,6 +2265,42 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("blocked", r.notable[0][1])
         self.assertEqual(r.expected, {"busy1", "gone1"})
 
+    def test_already_closed_names_the_descendant_still_holding_a_pane(self):
+        """Issue #53: the store said closed while the board drew it, and nothing said why.
+
+        A child that reported `done` and still holds its pane is dead to
+        `live_descendants` and alive to the board, so the "still working underneath"
+        error never fires and the operator gets a bare `already closed` about a row
+        `sb status` plainly lists. The way out — close the child — has to be in the
+        refusal, because it is the only thing the operator is shown.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:orch")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:kid", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")     # ended, but the pane is still open
+        store.set_state(self.db, "orch", "done")
+
+        self.assertEqual(list(self.b.cleanup(["orch"], me=HUMAN)), ["orch"])
+        r = self.b.cleanup(["orch"], me=HUMAN)      # the operator's second try
+        self.assertEqual(list(r), [])
+        name, why = r.refused[0]
+        self.assertEqual(name, "orch")
+        self.assertIn("already closed", why)
+        self.assertIn("kid", why)
+        self.assertIn("leaves up", why)
+        # And closing the child is what actually clears the board, as the issue found.
+        self.assertEqual(list(self.b.cleanup(["kid"], me=HUMAN)), ["kid"])
+        self.assertEqual(self.b.cleanup(["orch"], me=HUMAN).refused,
+                         [("orch", "already closed")])
+
+    def test_already_closed_stays_bare_when_nothing_below_holds_a_pane(self):
+        """The sentence is an explanation of a disagreement, not decoration."""
+        store.create_agent(self.db, name="solo", role="worker", pane_id="w1:solo")
+        store.set_state(self.db, "solo", "done")
+        self.assertEqual(list(self.b.cleanup(["solo"], me=HUMAN)), ["solo"])
+        self.assertEqual(self.b.cleanup(["solo"], me=HUMAN).refused,
+                         [("solo", "already closed")])
+
     def test_a_sweep_prints_the_row_it_left_behind(self):
         """The cut is only worth anything if it reaches the person who typed the command.
         `--json` is unchanged and still carries every refusal of either kind."""
