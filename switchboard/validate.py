@@ -137,6 +137,13 @@ def reason(value: Optional[str], field: str = "reason") -> str:
     flattens six paragraphs into one line, and gets through — which is exactly what
     happened, and it filed a bug against the refusal afterwards. The cap is what closes
     that door, so the two checks are one message with one fix in it.
+
+    What the refusal does NOT do is say what the chat message should contain. It used to
+    name the parts ("the findings, the options, the numbered questions") and close with a
+    specimen block call, and it is read at exactly the moment the agent is composing for a
+    human — so it anchored harder than any prompt text could. DESIGN-TRUTH 2026-08-14:
+    nothing may be turned into something to copy. It names the field's job, the mistake,
+    and where the message goes; shape is the protocol's business, not an error string's.
     """
     v = _require_str(value, field).strip()
     if not v:
@@ -149,10 +156,9 @@ def reason(value: Optional[str], field: str = "reason") -> str:
         raise Invalid(
             f"{field} {problem}. It is bookkeeping on a board row, NOT the message the "
             f"human reads — they read your own chat, and nothing you put here. So do not "
-            f"shorten or flatten the long version into it: write the full thing — the "
-            f"findings, the options, the numbered questions — as the last message in your "
-            f"chat, where they will read it, and then block with one line naming what you "
-            f"are waiting for, like `sb block \"need a decision on the auth split\"`."
+            f"shorten or flatten your message to fit: leave it whole, as the last thing "
+            f"in your chat, where they will read it, and keep this field to one line "
+            f"naming what you are waiting for."
         )
     return v
 
