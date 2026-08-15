@@ -1837,14 +1837,24 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.closed, [])
         self.assertEqual(store.get_agent(self.db, "lead")["pane_id"], "w1:p1")
 
-    def test_force_does_not_close_a_parent_over_its_live_child(self):
-        """The decision: `--force` overrides facts about the agent you NAMED — its state,
-        its mail, its role. A live child is a fact about an agent you did not name, and no
-        flag about the parent gets to end its work."""
+    def test_force_takes_the_live_child_with_the_parent_leaves_first(self):
+        """Issue #53's decision, reversing the one this test used to pin.
+
+        `--force` used to stop dead at a live child, on the argument that a flag about the
+        parent must not decide the fate of an agent nobody named. What that left was a row
+        the board draws, refused by name and refused under force, with no command that
+        could clear it. So force now does the leaves-up walk itself — and the INVARIANT is
+        never broken on the way, because the child's pane is closed before the parent's.
+        """
         self._family()
-        with self.assertRaises(ValueError):
-            self.b.cleanup(["lead"], me="orch", force=True)
-        self.assertEqual(self.h.closed, [])
+        r = self.b.cleanup(["lead"], me="orch", force=True)
+        self.assertEqual(list(r), ["worker", "lead"])   # leaves first, in that order
+        self.assertEqual(self.h.closed, ["w1:p2", "w1:p1"])
+        # and the log says these came down because somebody forced their parent
+        sub = [e for e in store.recent_events(self.db, agent="lead")
+               if e["kind"] == "cleanup_forced_subtree"]
+        self.assertEqual(len(sub), 1)
+        self.assertEqual(json.loads(sub[0]["payload"])["descendants"], "worker")
 
     def test_one_held_parent_stops_the_whole_named_cleanup(self):
         """Refused before anything is closed. Half of `sb cleanup a b` is worse than none:
@@ -1872,16 +1882,57 @@ class BrokerTest(unittest.TestCase):
         self.b.cleanup(["lead"], me="orch")
         self.assertIn("w1:p1", self.h.closed)
 
-    def test_nothing_at_all_closes_over_a_live_child(self):
-        """`--leave-children` was the one way through this gate, and it is gone
-        (DESIGN-TRUTH.md's "`--include-kept`, `--leave-children`"). Force does not lift
-        it — it never did — so now nothing does."""
+    def test_only_force_closes_over_a_live_child_and_a_sweep_never_can(self):
+        """What survived issue #53's decision. `--leave-children` was the one way through
+        this gate and it is gone (DESIGN-TRUTH.md's "`--include-kept`,
+        `--leave-children`"); `--force` is now the other, and it is illegal on a sweep. So
+        nothing ever closes an unnamed subtree on its own judgement, which was the part of
+        the old argument that was actually about safety."""
         self._family()
-        for kw in ({}, {"force": True}):
-            with self.assertRaises(ValueError):
-                self.b.cleanup(["lead"], me="orch", **kw)
+        with self.assertRaises(ValueError):
+            self.b.cleanup(["lead"], me="orch")         # named, no force: still refused
+        with self.assertRaises(ValueError):
+            self.b.cleanup(me="orch", force=True)       # and force is not a sweep
         self.assertNotIn("w1:p1", self.h.closed)        # the parent's pane stays up
         self.assertNotIn("w1:p2", self.h.closed)        # and so does the child's
+        self.assertEqual(self.b.cleanup(me="orch"), [])  # a plain sweep takes neither
+
+    def test_force_clears_an_already_closed_row_the_board_still_draws(self):
+        """Issue #53 end to end, in the shape it was actually filed in.
+
+        The parent was closed; a descendant still held a pane, so the board kept drawing
+        the parent; and every `sb cleanup <parent>` — with or without `--force` — answered
+        `already closed` about a row `sb status` plainly listed. Net effect as filed: the
+        agent could not be cleared from the board by name at all. Now it can, by the one
+        command the operator already reached for, and the `already closed` refusal is gone
+        with it: it would be a gate reported against a command that did the job.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:orch")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:kid", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")     # reported an end, pane still open
+        store.set_state(self.db, "orch", "done")
+        self.assertEqual(list(self.b.cleanup(["orch"], me=HUMAN)), ["orch"])
+        self.h.closed.clear()
+
+        r = self.b.cleanup(["orch"], me=HUMAN, force=True)
+        self.assertEqual(list(r), ["kid"])              # the row itself was already gone
+        self.assertEqual(r.refused, [])                 # and is not refused for being so
+        self.assertEqual(self.h.closed, ["w1:kid"])
+        self.assertIsNone(store.get_agent(self.db, "kid")["pane_id"])
+
+    def test_force_walks_a_deep_subtree_from_the_deepest_row_up(self):
+        """The invariant is kept by ORDER, so the order is the thing to pin: a row is only
+        ever closed once everything beneath it already is. Three levels, because two
+        cannot tell depth-ordering from parent-last."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="a", role="lead", parent="orch", pane_id="p-a")
+        store.create_agent(self.db, name="b", role="lead", parent="a", pane_id="p-b")
+        store.create_agent(self.db, name="c", role="worker", parent="b", pane_id="p-c")
+        store.set_state(self.db, "a", "done")           # b and c are still born-working
+        self.assertEqual(list(self.b.cleanup(["a"], me="orch", force=True)),
+                         ["c", "b", "a"])
+        self.assertEqual(self.h.closed, ["p-c", "p-b", "p-a"])
 
     def test_a_fully_finished_subtree_still_sweeps(self):
         """The gate must not cost the normal sweep. A finished child is not live work."""

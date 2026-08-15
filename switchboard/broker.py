@@ -3845,13 +3845,19 @@ class Broker:
           state never advanced, its name was lost by herdr, it holds mail it can never
           read) and that no sweep can therefore ever reach. Naming it IS the confirmation.
 
-        - **live descendants**, and nothing lifts this one — `force` does not, and there
-          is no flag that does. See `live_descendants` for the invariant. Every other
-          gate is a fact about the agent you named — its state, its mail — and `--force`
-          is you saying you know that fact and mean it anyway. Live children are facts
-          about agents you did NOT name, and no flag about this agent gets to decide
-          their fate. The way out is to close the subtree from the leaves up, which never
-          breaks the invariant at all.
+        - **live descendants**, lifted by `force` and by nothing else. See
+          `live_descendants` for the invariant. This gate was once documented as liftable
+          by nothing at all, on the argument that live children are facts about agents you
+          did NOT name and no flag about this agent gets to decide their fate. What that
+          argument left the operator with was issue #53: a row the board plainly draws,
+          refused by name, refused under `--force`, with the only way out being to work
+          out for yourself which descendant is holding it and close the subtree by hand.
+          `--force` does that by hand-work for you now — it takes the whole subtree, leaves
+          first, then the row you named — so the invariant is never broken at any point in
+          the sweep, which is the same reason closing from the leaves up was always the
+          answer. The argument survives where it is still true: a SWEEP still never lifts
+          this, and `--force` is illegal on a sweep, so nothing closes an unnamed subtree
+          on its own judgement.
 
           Named agents get a refusal before anything is closed, rather than a skip: you
           asked for this agent by name, so silence would be a lie. A sweep skips it the
@@ -3869,6 +3875,7 @@ class Broker:
         For every agent spawned since, it is `close` and the gate never fires.
         """
         me = me or self.whoami()
+        under: dict[str, list[str]] = {}      # named row → the subtree --force takes with it
         if me == HUMAN:
             scope = self.db.execute("SELECT * FROM agents").fetchall()
         else:
@@ -3882,6 +3889,8 @@ class Broker:
                 raise KeyError("not yours to clean up, or no such agent: "
                                + ", ".join(missing))
             candidates = [by_name[n] for n in names]
+            if force:
+                candidates, under = self._leaves_up(candidates)
         else:
             if force:
                 raise ValueError("--force needs the name of the agent to close: "
@@ -3890,7 +3899,11 @@ class Broker:
 
         # Computed for every candidate up front, so a named agent is refused before
         # anything at all has been closed: half a `sb cleanup a b` is worse than none.
-        held = {
+        # Not computed under force at all: `_leaves_up` has already put every one of those
+        # live children in `candidates` ahead of their parent, so by the time the parent is
+        # reached the answer would be "none" anyway — and asking now, before any of them
+        # have been closed, would hold back the very sweep that empties it.
+        held = {} if force else {
             a["name"]: kids for a in candidates
             if a["name"] != me and (kids := self.live_descendants(a["name"]))
         }
@@ -3898,7 +3911,8 @@ class Broker:
             raise ValueError(
                 "still working underneath: "
                 + "; ".join(f"{p} → {', '.join(kids)}" for p, kids in held.items())
-                + ". Close them first: the subtree closes from the leaves up."
+                + ". Close them first: the subtree closes from the leaves up — or "
+                  "--force, which does that same walk for you."
             )
 
         closed = CleanupResult()
@@ -4015,6 +4029,13 @@ class Broker:
                 refuse(a, "that is you — an agent cannot close its own pane")
                 continue
             if a["ended_at"] and not a["pane_id"]:
+                if set(under.get(a["name"], ())) & set(closed):
+                    # `--force` on a row that was already closed, and whose subtree was
+                    # still holding it on the board — issue #53's exact repro. The subtree
+                    # has just gone, leaves first, which is the whole of what the operator
+                    # asked for and got. Refusing "already closed" now would be reporting a
+                    # gate against a command that did its job.
+                    continue
                 # Nothing was held back — this row was closed before the sweep started.
                 # But a closed row is not necessarily an absent one: the board draws a
                 # subtree while ANY of it still has a pane, so a descendant that reported
@@ -4028,7 +4049,9 @@ class Broker:
                     "" if not still else
                     " — still drawn on the board because these below it still hold a "
                     "pane: " + ", ".join(still)
-                    + ". Close them, leaves up, and this row goes with them."),
+                    + ". Close them, leaves up, and this row goes with them"
+                    + (" — or --force this row, which takes them for you."
+                       if names and not force else ".")),
                     expected=True)
                 continue
             if a["name"] in held:
@@ -4186,7 +4209,60 @@ class Broker:
             self._clear_unreadable_mail(a["name"])
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             closed.append(a["name"])
+        # One event per row the operator actually typed, naming what went with it. The
+        # per-descendant `cleanup` events say each pane closed and `cleanup_forced_live`
+        # says which were mid-turn; neither says "these came down because somebody forced
+        # their parent", and that is the question the log gets asked after a subtree
+        # disappears. Written from `closed` rather than from `under`, so it lists what was
+        # taken and not what was aimed at.
+        done_now = set(closed)
+        for named, kids in under.items():
+            if not dry_run and (taken := [k for k in kids if k in done_now]):
+                store.log_event(self.db, kind="cleanup_forced_subtree", agent=named,
+                                descendants=",".join(taken))
         return closed
+
+    def _leaves_up(self, named: list) -> tuple[list, dict[str, list[str]]]:
+        """What `--force <name>` closes: the subtree under it, deepest first, then it.
+
+        The live-descendants gate is lifted by ordering and not by exemption. Every gate in
+        `cleanup` is checked per row as the loop reaches it, so putting a parent's
+        descendants ahead of it means that by the time the parent is considered they are
+        closed, `live_descendants` is empty, and the invariant in it was true at every
+        single step — which is exactly what "close the subtree from the leaves up" always
+        asked the operator to do by hand. Nothing here decides to close anything; it
+        decides the order in which `cleanup` asks.
+
+        Reverse breadth-first is enough for "deepest first": `_descendants` yields by
+        increasing depth, and every descendant of a row is deeper than it, so reversing
+        puts each row after everything beneath it. A cycle in `parent` would not terminate
+        `_descendants` in the first place, so this inherits whatever that does.
+
+        Rows that are already closed — ended, no pane — are left out unless the operator
+        typed them: there is nothing to take, and including them would turn one `--force`
+        into a page of `already closed` about rows nobody mentioned. A row the operator DID
+        name stays in whatever state it is in, because it still owes them an answer.
+
+        Returns the candidates in order, and a map from each named row to the descendants
+        added under it — which is what the caller reports and logs against.
+        """
+        out: list = []
+        seen: set[str] = set()
+        under: dict[str, list[str]] = {}
+        for a in named:
+            kids: list[str] = []
+            for d in list(reversed(self._descendants(a["name"]))) + [a]:
+                mine = d["name"] != a["name"]
+                if mine and d["ended_at"] and not d["pane_id"]:
+                    continue                        # nothing left to take; see above
+                if mine:
+                    kids.append(d["name"])
+                if d["name"] in seen:
+                    continue                        # named twice, or two named rows overlap
+                seen.add(d["name"])
+                out.append(d)
+            under[a["name"]] = kids
+        return out, under
 
     def live_descendants(self, name: str) -> list[str]:
         """Descendants of `name` whose work is still going. The invariant's one predicate.

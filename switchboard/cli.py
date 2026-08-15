@@ -254,11 +254,12 @@ def build_parser() -> argparse.ArgumentParser:
                     "on — a crashed session nobody reported an end for, as long as "
                     "sb restore can still bring it back. Naming agents "
                     "closes those instead, at the same bar; --force is what closes one "
-                    "whatever state it is in.")
+                    "whatever state it is in, and everything still open under it.")
     c.add_argument("name", nargs="*", help="specific agents to close")
     c.add_argument("--force", action="store_true",
-                   help="close a NAMED agent whatever state it is in, unread mail and all "
-                        "(the escape hatch for one that is genuinely stuck)")
+                   help="close a NAMED agent whatever state it is in, unread mail and all, "
+                        "and its whole subtree with it, leaves first (the escape hatch for "
+                        "one that is genuinely stuck)")
     c.add_argument("--dry-run", action="store_true")
 
     # No `new` here. A space is minted by ONE path — a top's `sb delegate` — and this verb
