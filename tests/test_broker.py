@@ -1221,6 +1221,60 @@ class BrokerTest(unittest.TestCase):
         [m] = store.undelivered(self.db)                         # queued, not read
         self.assertIsNone(m["read_at"])
 
+    def test_an_interrupt_is_delivered_confirmed_and_a_doorbell_is_not(self):
+        """The interrupt is the one ring whose TEXT is the message, so it is the one ring
+        a bare `agent prompt` cannot be trusted with: a first-run dialog eats the text and
+        moves the agent's state anyway, and the send reports success over a wedged agent.
+        Every other mode carries no payload and is re-rung from the store, so it stays a
+        plain prompt — this asserts the split, not just the interrupt half."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1",
+                           cwd=str(self.repo))
+        self.b.tell(["w"], "you have mail", me=HUMAN)
+        self.assertEqual(self.h.proofs, [])                # doorbell: fire and forget
+        self.b.tell(["w"], "stop and do this instead", me=HUMAN, mode=INTERRUPT)
+        self.assertEqual([n for n, _ in self.h.proofs], ["w"])
+        self.assertIn("stop and do this instead", self.h.prompts[-1][1])
+
+    def test_the_interrupts_proof_is_the_targets_own_transcript(self):
+        """Which agent's record answers "did it land" is the one thing only the broker
+        can get right, so the proof is run here rather than assumed: it must say no to a
+        pane that swallowed the text and yes once the words are in that agent's own
+        transcript. Anything read off herdr's terminal state would say yes to both."""
+        home = Path(self.tmp.name) / "home"
+        cwd = str(self.repo / "ws")
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1", cwd=cwd)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.b.tell(["w"], "stop and do this instead", me=HUMAN, mode=INTERRUPT)
+            [(_, proof)] = self.h.proofs
+            since = time.time() - 1
+            self.assertFalse(proof(since))             # nothing in its record yet
+            body = self.h.prompts[-1][1]
+            d = home / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "sess.jsonl").write_text(json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": body},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }) + "\n")
+            self.assertTrue(proof(since))              # the agent itself now holds it
+
+    def test_an_interrupt_no_send_could_confirm_stays_queued_and_unread(self):
+        """The failure this fix is for: herdr's `agent prompt` returned fine and the agent
+        never got the text. Now that the send must be PROVED, that is an undeliverable
+        interrupt — loud, and left in the inbox for the agent to find — rather than a
+        message recorded as read by an agent that never saw it."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1",
+                           cwd=str(self.repo))
+        self.h.undeliverable.add("w")          # prompt "works", nothing ever confirms it
+        with self.assertRaises(Undeliverable) as cm:
+            self.b.tell(["w"], "stop and do this instead", me=HUMAN, mode=INTERRUPT)
+        self.assertEqual(cm.exception.who, "w")
+        self.assertIn("not_delivered", cm.exception.message)
+        self.assertEqual(self.h.prompts, [])                     # never sent, unconfirmed
+        [m] = store.undelivered(self.db)
+        self.assertIsNone(m["read_at"])
+        self.assertIn("stop and do this instead", m["body"])
+
     # -- applying a preset to your own session (6.4) -----------------------
 
     def _preset(self, name: str, text: str) -> None:
