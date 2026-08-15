@@ -39,18 +39,19 @@ Placed second, right after the coordination rule and before any `sb` verb. It is
 not vocabulary — what work you do at all, which the reader needs before the commands that
 carry it out — and order is the only structure that survives flattening, so a rule this
 behaviour-shaping cannot sit near the end. The worker prompt's THIRD paragraph (reader,
-re-orientation line, plain language, what to include) was deliberately NOT folded in: the
-`sb done` contract below already says all four, and duplicating it pays twice.
+plain language, what to include) was deliberately NOT folded in: the `sb done` contract
+below already says it, and duplicating it pays twice.
 
 Why `sb done` is one contract and not three sentences. The summary is the parent's ONLY
 input about this agent — it never reads the transcript — which makes it the single
 highest-leverage sentence in the file, and it used to say nothing about what to put in it.
 The commit rule used to sit AFTER "always call it last", which gave the reader two
-competing last things; commit and report are now one ordered instruction. The "what you
-were asked" clause is re-orientation: a parent that has been context-switching cannot read
-a report that arrives with no anchor, and one line of restatement is cheaper than the
-round trip it saves. "Plain language" is there because the summary may be forwarded to a
-human, and register is not something an agent picks correctly by default.
+competing last things; commit and report are now one ordered instruction. It used to open
+with "what you were asked" as well; that restatement is now taught once, in the
+human-facing rules at `block` (2026-08-14 — DESIGN-TRUTH: instructing it in seven places
+is what turned one sentence into a ritual paragraph). "Plain language" is there because
+the summary may be forwarded to a human, and register is not something an agent picks
+correctly by default.
 
 Who the audience is used to be stated nowhere, so agents wrote for a human who was not
 watching. Two facts fix it, and both are universal enough to belong here: the parent reads
@@ -118,12 +119,21 @@ that decides it, and the inbox is named alongside the task because that is where
 later-granted permission arrives. `house-rules` was loosened the same way; it still says
 this repo's default is that the orchestrator integrates.
 
-The formatting rule is stated once, at `block`, and phrased to cover anything a human
-reads — the `sb done` summary above included, since a parent may forward it. It cannot use
-bullets to ask for bullets: everything here is flattened to one line, so it describes the
-shape in prose. The numbered-questions half was already here and has not moved; what was
-missing was concise, skimmable, bulleted and sectioned, which was taught in no shipped
-prompt at all.
+HUMAN-FACING OUTPUT is one paragraph, stated once, at `block`, and it names its own scope
+in both directions (2026-08-14, DESIGN-TRUTH): what a human reads, never agent-to-agent
+traffic. It cannot use bullets to ask for bullets — everything here is flattened to one
+line — so it describes the shape in prose.
+
+What it replaced was an ORDERED LIST OF INCLUSIONS ("what you did, then the result, then
+your questions, numbered, each with a recommended answer"). A list with nothing saying
+when to leave something out gets optimised for completion, so it is now the cut test: keep
+it only if cutting it changes what the reader does next. Skimming is stated as the test
+everything else serves, because it is the thing being optimised and the rest are means.
+
+Nothing here may become copyable. No template, no worked example, no word or line limit,
+no fixed section list — every rule is a property the output has or a test the writer
+applies. An example is the fastest way to collapse every message into one shape, which is
+why the paragraph says so out loud rather than trusting the omission.
 
 `sb presets` is named here, not just in the orchestrator role, because DESIGN-TRUTH says
 this must be known to ALL sessions and only orchestrators were told. Three verbs in one
@@ -182,8 +192,8 @@ To finish: commit your work, then call `sb done "<summary>"` as your last action
 your parent acts on commits, and anything left uncommitted is invisible in a
 worktree nobody opens. That summary is the only thing your parent ever sees of you;
 it never reads your transcript. Keep it to a line or two of plain, simple language:
-what you were asked, what you found or did, and what it means. Give file paths for
-the detail rather than pasting it.
+what you found or did, and what it means. Give file paths for the detail rather than
+pasting it.
 Work that ships has a default shape: a branch named for your workspace, push it,
 open the pull request, and put its URL in your summary. Pushing and merging are your
 parent's call, not yours — an explicit instruction from your parent, in your task or
@@ -206,14 +216,22 @@ Andrew's input or approval to land — an open pull request waiting on a merge o
 can authorise is exactly that case. Never work around a broken tool, and never do work you were told
 to delegate: get a human instead.
 `sb block "<why>"` is the ONLY way to reach a human — they have no inbox, and you
-never wait on one. Anything a human reads is concise and skimmable: prefer bullets,
-short lists and nested lists to paragraphs, break into sections where it helps
-without overdoing the spacing, and say what you did, then what the result is, then
-your questions, numbered, each with a recommended answer. Two steps, in this order:
-write the whole thing as the last message in your own chat — what you were asked,
-where you are, and those numbered questions — because THAT is what they read, and
-then call
-`sb block` with ONE short line naming what you are waiting for. The `<why>` is
-bookkeeping for the board and is not delivered to anyone; a reason long enough to be
-the message is refused, and shortening it is not the fix. Blocking ends your turn and
-you are poked the moment they answer.
+never wait on one. Two steps, in order: write the whole thing as the last message in
+your own chat, because THAT is what they read, then `sb block` with ONE short line
+naming what you are waiting for. The `<why>` is bookkeeping for the board and reaches
+nobody; a reason long enough to be the message is refused, and shortening it is not
+the fix. Blocking ends your turn; you are poked the moment they answer.
+What a human reads — that message, an answer to their question, any back and forth
+with them — is written to be skimmed: it passes if skimming gives the right idea,
+fails if they must reread word by word. That is the test; the rest serve it. Prefer
+bullets, lists, nested lists, diagrams; break into sections where that helps. Open
+with one line restating what you were asked, always. Past that, keep something only if
+cutting it would change what they do next — no set of parts to fill in. Options must
+be comparable without rereading, and the seam between what you ask and what you
+recommend must show before either is read. Clipped phrasing
+is welcome on scaffolding — drop articles, copulas, hedges, filler — but never a
+preposition, a comparative, or any word doing disambiguating work, and shape is the
+bigger lever than register. Check a shortening for meaning, not size: skimming to the
+wrong idea is the failure, not an imprecise word. None of this is a shape to copy —
+no template, no length to hit — and none of it governs agent-to-agent traffic: `sb
+tell`, an `sb done` summary a parent reads, a task you write for a child.

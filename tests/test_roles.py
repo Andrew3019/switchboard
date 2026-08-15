@@ -116,13 +116,37 @@ class RolesTest(unittest.TestCase):
         self.assertIn("Pushing and merging are your parent's call", every)
 
     def test_the_protocol_asks_for_skimmable_human_facing_output(self):
-        """DESIGN-TRUTH.md:135-140. The numbered-questions half was already taught; the
-        formatting half was in no shipped prompt anywhere."""
+        """DESIGN-TRUTH.md's "Human-facing output" rules, 2026-08-14. Skimming is the test
+        everything else serves, and the rules say out loud which traffic they govern —
+        an unscoped version of them was being applied to `sb tell` and to summaries a
+        parent reads."""
         p = config.protocol(self.repo)
-        for part in ("concise and skimmable", "bullets", "sections",
-                     "numbered", "recommended answer"):
+        for part in ("skimmed", "bullets", "sections", "agent-to-agent"):
             with self.subTest(part=part):
                 self.assertIn(part, p)
+
+    def test_no_shipped_prompt_hands_a_human_message_a_list_of_parts(self):
+        """What replaced the old ordered checklist ("what you did, then the result, then
+        your questions, numbered, each with a recommended answer"): a list of inclusions
+        with no rule for leaving something out gets optimised for completion, so the
+        protocol asks the cut test instead. Both halves are asserted — the test is
+        present, and the checklist has not grown back anywhere."""
+        p = config.protocol(self.repo)
+        self.assertIn("cutting it would change what they do next", p)
+        every = " ".join([p] + [r.prompt for r in roles.load(self.repo).values()])
+        for gone in ("recommended answer", "questions numbered", "questions, numbered"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, every)
+
+    def test_the_restatement_instruction_is_taught_exactly_once(self):
+        """It was instructed in seven places across the protocol and the role files, which
+        is what turned one sentence into a ritual paragraph (DESIGN-TRUTH, 2026-08-14). It
+        is unconditional and it survives once; counted over every shipped prompt, because
+        the failure is a role file quietly teaching it a second time."""
+        texts = [config.protocol(self.repo)]
+        texts += [r.prompt for r in roles.load(self.repo).values()]
+        self.assertEqual(1, sum(t.count("restating what you were asked") for t in texts))
+        self.assertEqual(0, sum(t.count("Restate in one line") for t in texts))
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
         """"This must be known to all sessions" (DESIGN-TRUTH.md:292-295) — it used to be
