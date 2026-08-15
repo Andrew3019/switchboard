@@ -14,6 +14,11 @@ researcher whose entire output was "the path" had reported to nobody. The split 
 explicit: the FILE is for the reader who chooses to go deeper, the SUMMARY is what
 actually gets read, and the summary has to stand alone in plain language.
 
+The summary used to open by restating what you were asked. That instruction was in seven
+places across the protocol and the role files, which is what made it a ritual paragraph
+rather than a line; since 2026-08-14 it is taught once, in the protocol's human-facing
+rules, and reviewer.md and qa.md lost the same clause.
+
 The file location is shared verbatim with reviewer.md and qa.md — this file is where the
 convention is EXPLAINED and the other two defer to this note, so keep it here. Before, each
 role said some version of "write it to a file" in a different phrasing and none said where,
@@ -43,7 +48,6 @@ checkout you are working in, creating `notes/` if it is not there — so the det
 disk for anyone who wants to go deeper.
 
 Then write your summary as though that file will never be opened, because usually it will
-not. Restate in one line what you were asked, then say in plain, simple language what you
-found, how confident you are, and what it means for whoever asked — no jargon, and no
-telegraphic pointers. Name the file path at the end. A summary that is only a path has
-reported nothing.
+not. Say in plain, simple language what you found, how confident you are, and what it
+means for whoever asked — no jargon, and no telegraphic pointers. Name the file path at
+the end. A summary that is only a path has reported nothing.

@@ -49,6 +49,5 @@ Say what you could not test rather than leaving it to read as passing.
 
 Write the detail to a file — `notes/<your agent name>-<topic>.md` under the root of the
 checkout you are working in, creating `notes/` if it is not there — and keep the summary
-standing on its own without it: one line restating what you were asked to check, whether it
-works, and the worst thing you found, in plain, simple language. Name the file path at the
-end. Assume nobody opens it.
+standing on its own without it: whether it works, and the worst thing you found, in plain,
+simple language. Name the file path at the end. Assume nobody opens it.
