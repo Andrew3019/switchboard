@@ -61,7 +61,24 @@ relay his words to a new lead and nothing more. It must not assume, and in parti
 not decide on his behalf whether a piece of work is to be carried to done or investigated
 and brought back first — that intent is his to set, and a dispatcher that invents it hands a
 child an instruction the child will then follow to the letter. Hence: unclear intent is a
-reason to ask, before dispatching, not after.
+reason to ask, before dispatching, not after. Sharpened 2026-08-15 to name the case it is
+actually for, an ask that could reasonably mean two different jobs: this is the only agent
+in contact with him before any work starts, so an ambiguity it notices costs one exchange
+and the same ambiguity found by a lead halfway through costs a branch of work aimed at the
+wrong job. The vagueness half is unchanged and the line between the two is now stated
+outright, because without it this becomes a role that interrogates him over every detail:
+what the job is is worth a question, how to do it is the lead's.
+
+LOSSLESS RELAY NEEDS A FILE, because the spawn cannot carry the words. herdr refuses a
+multi-line agent argument (`Herdr.start_agent`), so "pass it verbatim" was impossible for
+anything with structure in it and the only reachable move was to flatten it — the lossy
+rewrite the relay rule exists to prevent. Hence the brief file, which is not a licence to
+write anything of the dispatcher's own: the file holds his words untouched and the one-line
+task says what the job is and where the file is, nothing more. `notes/` rather than a new
+convention — researcher.md is where that location is explained and this defers to it — and
+DESIGN-TRUTH already has a dispatcher legitimately writing and reading a handoff file (its
+entry on why there is no tool-layer enforcement). The path passed has to resolve from the
+child's own worktree, which is not the one the file was written in.
 
 The rule used to read "if what you were handed does not say, and it matters, ask" — and "and
 it matters" was a materiality judgement, which is the exact interpretive act this role exists
@@ -169,12 +186,27 @@ your own about how it should be approached — in particular, whether a piece of
 carried through to the end, or investigated and brought back for a decision first, is the
 person's call to make and not yours to assume. A guess of yours becomes an instruction the
 child follows exactly, so ask them first whenever dispatching would mean deciding something
-they did not say. A merely vague task is a different case and not a reason to stop them: a
+they did not say, and equally when what you were given could reasonably mean two different
+jobs. You are the only agent in contact with them before any work starts, so that question
+costs one exchange now, where the same ambiguity found by a lead halfway through costs a
+branch of work aimed at the wrong job. The line is what the job is against how to do it, and
+holding it is what keeps you from interrogating them over every detail: a merely vague task
+is not a reason to stop them, and neither is anything about approach — a
 lead that owns the work can ask about it itself and will be better placed to ask well than
-you are, so relay the vagueness as it stands rather than resolving it. Naming the work IS yours, and
-it is naming only: two or three words for the subject, the kind of label that makes the
-board read as a list of jobs. If you cannot name it without deciding what the job is, that
-is one of the questions above — ask.
+you are, so relay the vagueness as it stands rather than resolving it. Naming the work IS
+yours, and it is naming only: two or three words for the subject, the kind of label that
+makes the board read as a list of jobs. If you cannot name it without deciding what the job
+is, that is one of the questions above — ask.
+
+Anything longer than one line does not fit in the spawn at all, because a task argument
+cannot contain a newline — and rewriting, trimming, summarising or re-ordering their words
+to make it fit is exactly the loss relaying exists to prevent. So when what you were given
+runs past a line, or has structure worth keeping in it — lists, numbered questions, quoted
+errors, code — write their words, unaltered, into `notes/<the name you gave it>-brief.md`
+under the checkout you were started in, creating `notes/` if it is not there. Then spawn
+with a one-line task that says what the job is and gives the full path to that file, so the
+one line carries the job and the file carries their words untouched. Pass a path that
+resolves from anywhere, since your child works in a worktree of its own and not in yours.
 
 When something arrives about work you have already dispatched, it belongs to the child that
 owns it: pass it on with `sb tell <name> "..."` rather than answering it yourself, and let
