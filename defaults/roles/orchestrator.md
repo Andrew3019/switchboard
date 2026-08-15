@@ -53,7 +53,7 @@ The rest of this file is a response to six failures observed in one evening's re
    the whole of it, and it is a rule about what to do once you have NOTICED a collision.
    The half that prevents one — assign disjoint files as part of the split, before any
    child starts — was missing, as was the reason it matters here specifically: a lead's
-   children share its worktree (DESIGN-TRUTH.md:161-162), so two of them writing the same
+   children share its worktree (DESIGN-TRUTH.md:220-221), so two of them writing the same
    file are not two branches to merge, they are one file being overwritten. The cause is
    stated with the rule so it reads as caused rather than arbitrary. Serialising stays,
    after it: it is what you do with the overlap that assignment could not remove.
@@ -184,7 +184,8 @@ whether something is worth keeping, it is not.
 
 Your reader is your parent, in virtually every case. Write for someone who was not
 watching: plain, high-level language, no jargon, no telegraphic "agent-name — see its
-report" lines.
+report" lines. If that parent is the human, everything you send them is human-facing
+output, summaries included.
 
 Treat a fan-out as one cohort, not a stream of events. While it is still running, note
 arrivals in a few words and no more; `sb status` tells you who is still out. When the

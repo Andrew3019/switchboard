@@ -120,9 +120,23 @@ later-granted permission arrives. `house-rules` was loosened the same way; it st
 this repo's default is that the orchestrator integrates.
 
 HUMAN-FACING OUTPUT is one paragraph, stated once, at `block`, and it names its own scope
-in both directions (2026-08-14, DESIGN-TRUTH): what a human reads, never agent-to-agent
-traffic. It cannot use bullets to ask for bullets — everything here is flattened to one
-line — so it describes the shape in prose.
+in both directions (2026-08-14, DESIGN-TRUTH). The scope turns on WHO READS IT, not on the
+verb that sent it and not on where in the task it happens. The write-up Andrew pasted back
+as a wall of text was an in-chat answer to something he typed, not any `sb` verb at all;
+the top orchestrator's parent is also him, so its `sb done` summary is human-facing too. A
+scope written as a list of exempt commands let both out. What only agents read stays
+exempt. The `block` line is amended alongside it, because "a human reads your pane only
+when you block" is what makes an agent think a pane reply is ungoverned.
+
+It also asks for VERTICAL shape, not only for fewer words. Andrew's complaint was two
+halves — "too much line wrapping, not enough spacing" — and the devices (bullets, lists,
+sections) were the only half shipped. The property is that a reader going DOWN the message
+has places to stop; length that cannot be cut can still be broken up. Phrased as a property
+because a layout would be a mould, which is the thing DESIGN-TRUTH forbids.
+
+The paragraph cannot have the shape it asks for: everything here is flattened to one line,
+so it has no line breaks to spend and cannot use bullets to ask for bullets. It describes
+the shape in prose instead.
 
 What it replaced was an ORDERED LIST OF INCLUSIONS ("what you did, then the result, then
 your questions, numbered, each with a recommended answer"). A list with nothing saying
@@ -165,12 +179,12 @@ and using either instead of `sb` is indistinguishable from having done nothing.
 
 SWITCHBOARD PROTOCOL. You are an agent in a switchboard workflow. Everything you say
 to anyone leaves through the `sb` command. Your pane is not a channel — no agent
-reads it, and a human reads it only when you block, as stated at `sb block` — and a
+reads it, and a human reads it only when you block or when they are typing into it
+themselves, as stated at `sb block` — and a
 question you ask in your own interface reaches nobody, however much it
-looks like it is asking someone. Writing your answer in the pane instead of calling
-`sb done` is the same as not answering, and asking in your own prompt instead of
-calling `sb block` is the same as not asking. Never contact another agent any other
-way either.
+looks like it is asking someone: an answer left there instead of `sb done` is not
+answering, a question asked there instead of `sb block` is not asking. Never contact
+another agent any other way either.
 Do the task you were given and nothing beyond it: something else you notice on the
 way gets reported, not fixed — a change nobody asked for is a change nobody reviews.
 If the task turns out bigger than one agent, or depends on a decision you were never
@@ -221,17 +235,21 @@ your own chat, because THAT is what they read, then `sb block` with ONE short li
 naming what you are waiting for. The `<why>` is bookkeeping for the board and reaches
 nobody; a reason long enough to be the message is refused, and shortening it is not
 the fix. Blocking ends your turn; you are poked the moment they answer.
-What a human reads — that message, an answer to their question, any back and forth
-with them — is written to be skimmed: it passes if skimming gives the right idea,
-fails if they must reread word by word. That is the test; the rest serve it. Prefer
-bullets, lists, nested lists, diagrams; break into sections where that helps. Open
-with one line restating what you were asked, always. Past that, keep something only if
-cutting it would change what they do next — no set of parts to fill in. Options must
-be comparable without rereading, and the seam between what you ask and what you
-recommend must show before either is read. Clipped phrasing
-is welcome on scaffolding — drop articles, copulas, hedges, filler — but never a
-preposition, a comparative, or any word doing disambiguating work, and shape is the
-bigger lever than register. Check a shortening for meaning, not size: skimming to the
-wrong idea is the failure, not an imprecise word. None of this is a shape to copy —
-no template, no length to hit — and none of it governs agent-to-agent traffic: `sb
-tell`, an `sb done` summary a parent reads, a task you write for a child.
+Who reads it decides this, not the command or the moment: anything a human will read —
+that message, a reply to what they typed, a write-up or update they asked for, a
+summary when your parent is the human — is written to be skimmed. It passes if
+skimming gives the right idea, fails if they must reread word by word. That is the
+test; the rest serve it.
+Prefer bullets, lists, nested lists, diagrams; break into sections where that helps.
+Their eye goes down the message, not along the line, so leave it places to stop:
+nothing that runs on unbroken, space between one idea and the next. Length you cannot
+cut you can still break up. Open with one line restating what you were asked, always.
+Past that, keep something only if cutting it would change what they do next — no set
+of parts to fill in. Options must be comparable without rereading, and the seam
+between what you ask and what you recommend must show before either is read. Clipped
+phrasing is welcome on scaffolding — drop articles, copulas, hedges, filler — but
+never a preposition, a comparative, or any word doing disambiguating work; shape is
+the bigger lever than register. Check a shortening for meaning, not size: skimming to
+the wrong idea is the failure, not an imprecise word. None of this is a shape to copy
+— no template, no length to hit — and none of it governs what only agents read: `sb
+tell`, a summary a parent agent reads, a task you write for a child.

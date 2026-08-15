@@ -82,7 +82,7 @@ class RolesTest(unittest.TestCase):
     # prompt and silently dropped from the one that ships.
 
     def test_the_protocol_names_every_sanctioned_reason_to_block(self):
-        """DESIGN-TRUTH.md:142-145's five, three of which reached no prompt at all. Each is
+        """DESIGN-TRUTH.md:137-141's five, three of which reached no prompt at all. Each is
         checked by a phrase only that reason would produce, so a rewrite that drops one
         fails here rather than passing on the word "block"."""
         p = config.protocol(self.repo)
@@ -97,7 +97,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(phrase, p)
 
     def test_the_protocol_states_the_default_shape_of_shipping_work(self):
-        """DESIGN-TRUTH.md:281-284, and it goes to every role rather than to orchestrators
+        """DESIGN-TRUTH.md:344-352, and it goes to every role rather than to orchestrators
         alone — so it is asserted on the protocol, which is the only text all five share."""
         p = config.protocol(self.repo)
         for part in ("branch named for your workspace", "push", "pull request",
@@ -121,9 +121,32 @@ class RolesTest(unittest.TestCase):
         an unscoped version of them was being applied to `sb tell` and to summaries a
         parent reads."""
         p = config.protocol(self.repo)
-        for part in ("skimmed", "bullets", "sections", "agent-to-agent"):
+        for part in ("skimmed", "bullets", "sections", "only agents read"):
             with self.subTest(part=part):
                 self.assertIn(part, p)
+
+    def test_the_human_facing_scope_turns_on_the_reader_not_on_the_verb(self):
+        """DESIGN-TRUTH, 2026-08-14: who reads it decides. Keyed on the verb instead, the
+        rules exempted the two messages Andrew actually complained about — a session
+        write-up answered in the pane, and a top orchestrator's `sb done` summary, whose
+        parent is him. The genuine agent-to-agent exemption has to survive that."""
+        p = config.protocol(self.repo)
+        self.assertIn("Who reads it decides", p)
+        self.assertIn("summary when your parent is the human", p)
+        self.assertNotIn("summary a parent reads, a task you write for a child", p)
+        self.assertIn("`sb tell`", p)               # still exempt: only agents read it
+
+    def test_the_protocol_asks_for_vertical_shape_not_only_for_fewer_words(self):
+        """The other half of "too much line wrapping, not enough spacing" — the shipped
+        rules named devices (bullets, lists, sections) and never the property they serve.
+        A skimming reader moves DOWN the message, so it needs places to stop, and length
+        that cannot be cut can still be broken up. "Without overdoing the spacing" pulled
+        against that and is gone from every shipped prompt."""
+        every = " ".join([config.protocol(self.repo)]
+                         + [r.prompt for r in roles.load(self.repo).values()])
+        self.assertIn("down the message, not along the line", every)
+        self.assertIn("break up", every)
+        self.assertNotIn("overdoing the spacing", every)
 
     def test_no_shipped_prompt_hands_a_human_message_a_list_of_parts(self):
         """What replaced the old ordered checklist ("what you did, then the result, then
@@ -149,14 +172,14 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(0, sum(t.count("Restate in one line") for t in texts))
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
-        """"This must be known to all sessions" (DESIGN-TRUTH.md:292-295) — it used to be
+        """"This must be known to all sessions" (DESIGN-TRUTH.md:358-361) — it used to be
         known to orchestrators only, so the protocol is where it has to be."""
         p = config.protocol(self.repo)
         self.assertIn("sb presets", p)
         self.assertIn("--apply", p)
 
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH.md:161-162. Serialising overlap was already taught; assigning
+        """DESIGN-TRUTH.md:220-221. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""
         prompt = roles.load(self.repo)["orchestrator"].prompt
         self.assertIn("disjoint", prompt)

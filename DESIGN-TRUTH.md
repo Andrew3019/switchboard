@@ -142,18 +142,30 @@ itself; or finished work that needs Andrew's input or approval to complete. — 
 
 ### Human-facing output
 
-*These rules cover only what a human reads: the message written before `sb block`,
-anything answering a human's question, any back and forth with one. They do not govern
-agent-to-agent traffic — `sb tell`, an `sb done` summary a parent agent reads, or task
-text sent to a child. — confirmed 2026-08-14*
+*Who reads it decides whether these rules apply — not which command carried it, and not
+where in a task it happens. Covered: the message written before `sb block`, a reply to
+something Andrew typed, a write-up or progress update he asked for in the pane, any back
+and forth with him, and an `sb done` summary whose parent is him — a top orchestrator's
+always is. His words on the session write-up that prompted this: "that was just a summary
+i asked for the entire session, not sb done, but same should apply". Not covered: what
+only another agent reads — `sb tell`, a summary a parent agent reads, task text sent to a
+child. — confirmed 2026-08-14*
 
 **Skimming it is the test.** Andrew skims. He is not fixating word by word checking that
 each claim is correct; he is trying to get the idea. So a message passes if skimming it
 conveys the right idea, and fails if he has to reread it word by word to get there —
 however accurate it is. This is the primary rule and the rest serve it. Prefer bullets,
 lists, nested lists and diagrams — things that can be visually skimmed — and break into
-sections where it helps without overdoing the spacing. — confirmed 2026-08-14,
-superseding the 2026-08-09 rule that listed what a message must say
+sections where it helps. — confirmed 2026-08-14, superseding the 2026-08-09 rule that
+listed what a message must say
+
+**Skimming happens down the message, not along the line, so the message needs places for
+the eye to stop.** The complaint was two halves — "too much line wrapping, not enough
+spacing" — and devices are only the first. What is wrong with a wall is the wall: runs
+that never break, paragraphs that wrap into a slab, one idea running into the next with
+no gap. Length that cannot be cut can still be broken up, and whitespace is what makes a
+long message survivable rather than decoration. A property the message has to have, never
+a layout — which supersedes "without overdoing the spacing". — confirmed 2026-08-14
 
 **What goes in is decided by the reader's next move, not by a checklist.** If removing
 something would not change what he does next, cut it. There is no ordered list of things
