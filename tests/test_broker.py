@@ -1757,6 +1757,55 @@ class BrokerTest(unittest.TestCase):
         self.h.states_by_name = {"kid": "working"}
         self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch", force=True), ["kid"])
 
+    # -- whose pane is it (the ghost-name problem's close half) -----------
+
+    def test_force_will_not_close_a_pane_a_stranger_now_holds(self):
+        """The near-miss this exists for. Pane ids are recycled, herdr is machine-global,
+        and two clones name their workers the same way — so a dead row's `pane_id` can
+        come to mean somebody else's live agent, under the very same name. `--force`
+        overrides intent, not identity: the terminal ids disagree, so nothing is closed.
+
+        It matters most here because `--force` takes live descendants with the row, so a
+        wrong close is a stranger's whole subtree and none of it comes back."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="worker-1", role="worker", parent="orch",
+                           pane_id="w9:p1", session_id="s-ours", terminal_id="term-ours")
+        store.set_state(self.db, "worker-1", "done")
+        self.h.list_agents = lambda: [
+            Agent(name="worker-1", pane_id="w9:p1", terminal_id="term-theirs",
+                  state="working")]                    # the other clone's, same name
+        got = self.restart_sb().cleanup(["worker-1"], me="orch", force=True)
+        self.assertEqual(got, [])
+        self.assertNotIn("w9:p1", self.h.closed)
+
+    def test_the_close_follows_the_terminal_id_when_the_pane_has_moved(self):
+        """Resolved, not trusted. A pane that moved changes id — herdr says so itself —
+        and the recorded one is then either nothing or somebody else. The terminal id
+        still names one agent, so the close goes where that agent actually is."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w9:p1", session_id="s-kid", terminal_id="term-ours")
+        store.set_state(self.db, "kid", "done")
+        self.h.list_agents = lambda: [
+            Agent(name="kid", pane_id="w9:p7", terminal_id="term-ours", state="idle")]
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), ["kid"])
+        self.assertIn("w9:p7", self.h.closed)
+        self.assertNotIn("w9:p1", self.h.closed)
+
+    def test_a_row_with_no_terminal_id_will_not_take_an_occupied_pane(self):
+        """Identity unavailable is a refusal, not a guess. Rows written before the column
+        existed, and rows still mid-spawn, have nothing to prove ownership with — so they
+        may close an empty pane and never one somebody is sitting in."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w9:p1", session_id="s-kid")     # no terminal id
+        store.set_state(self.db, "kid", "done")
+        self.h.list_agents = lambda: [
+            Agent(name="stranger", pane_id="w9:p1", terminal_id="term-theirs",
+                  state="working")]
+        self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
+        self.assertNotIn("w9:p1", self.h.closed)
+
     def test_cleanup_never_closes_a_blocked_agent(self):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")

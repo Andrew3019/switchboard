@@ -50,7 +50,7 @@ from . import roles as roles_mod
 from . import store
 from . import validate
 from . import herdr as herdr_mod
-from .herdr import WORKING, Herdr, HerdrError
+from .herdr import WORKING, Agent, Herdr, HerdrError
 from .status import GONE_STATE, RUNNING, fmt_age
 from . import live
 
@@ -528,6 +528,10 @@ class Broker:
         # The subset of the above whose names herdr is actually BOUND to, filled by the
         # same `agent list` — see `Agent.bound` and `_finished_and_unreachable`.
         self._bound_cache: set[str] = set()
+        # Who herdr currently has in each pane, from the same `agent list`. Keyed by PANE
+        # and not by name on purpose: it is what `_pane_still_theirs` checks a close
+        # against, and a name is the one thing that cannot be trusted there.
+        self._pane_cache: dict[str, Agent] = {}
         # Set once herdr has been asked and refused to answer. Distinct from an empty
         # cache, which means herdr answered and is running nothing — see `_agent_states`.
         self._alive_unknown = False
@@ -4146,6 +4150,16 @@ class Broker:
                 if a["cleanup"] != "close" and not names:
                     refuse(a, f"{a['name']} was spawned to be kept — name it to close it")
                     continue
+            # Below `--force` and above the dry run, and both are the point. This is not a
+            # policy gate about whether the operator meant it — every gate above is — it is
+            # the check that the thing about to be destroyed is the thing they named, and
+            # `--force` overrides intent, not identity. A dry run must report it for the
+            # same reason: it is asked what a real run would do, and a real run would
+            # refuse. See `_pane_still_theirs`.
+            target, wrong = self._close_target(a)
+            if wrong is not None:
+                refuse(a, wrong)
+                continue
             if dry_run:
                 closed.append(a["name"]); continue
             if force and a["state"] == WORKING:
@@ -4167,9 +4181,12 @@ class Broker:
                 store.log_event(self.db, kind="cleanup_given_up", agent=a["name"],
                                 state=a["state"], named=bool(names))
             try:
-                if a["pane_id"]:
-                    self.h.release_agent(a["pane_id"], a["name"], store.next_seq(self.db, a["name"]))
-                    self.h.close_pane(a["pane_id"])
+                if target:
+                    # `target`, not `a["pane_id"]`: the pane herdr says this agent's
+                    # terminal is in right now, which is the recorded one except where the
+                    # recorded one has gone stale. See `_close_target`.
+                    self.h.release_agent(target, a["name"], store.next_seq(self.db, a["name"]))
+                    self.h.close_pane(target)
             except HerdrError as e:
                 if e.code == "pane_not_found":
                     # The pane is already gone — a human closed it by hand, or herdr lost
@@ -4193,8 +4210,8 @@ class Broker:
                     # into the event: the next line discards the only reference to it, and
                     # a still-live pane is then unreachable through the store forever.
                     store.log_event(self.db, kind="cleanup_forced_unconfirmed",
-                                    agent=a["name"], pane_id=a["pane_id"], error=str(e))
-                    print(f"sb: {a['name']}: pane {a['pane_id']} could not be closed "
+                                    agent=a["name"], pane_id=target, error=str(e))
+                    print(f"sb: {a['name']}: pane {target} could not be closed "
                           f"({e}) — forcing it done anyway, so the pane may still be "
                           f"open with nothing left pointing at it", file=sys.stderr)
             # The board went up beside this agent, so it comes down with it — otherwise
@@ -4664,6 +4681,10 @@ class Broker:
         """
         self._alive_cache = {a.name: a.state for a in listed}
         self._bound_cache = {a.name for a in listed if a.bound}
+        # Last one wins if herdr ever reports two agents in one pane; it cannot today, and
+        # either of them disagreeing with our row is a refusal, so which one is kept only
+        # changes the name in the message.
+        self._pane_cache = {a.pane_id: a for a in listed if a.pane_id}
 
     def _name_bound(self, who: str) -> Optional[bool]:
         """Does herdr still ANSWER TO this name? None if herdr could not be asked.
@@ -4699,6 +4720,70 @@ class Broker:
         """
         states = self._agent_states()
         return states is not None and name not in states
+
+    def _close_target(self, a) -> tuple[Optional[str], Optional[str]]:
+        """Which pane this row's close may take — `(pane, reason it may take none)`.
+
+        The other half of the ghost-name problem (`notes/ghost-sessions-name-vs-identity.md`).
+        The board stopped matching a row to a stranger by name; the CLOSE never had that
+        guard at all. It took `a["pane_id"]` on trust, and a pane id is NOT an identity:
+        herdr documents `terminal_id` as the stable handle, a `pane_id` moves with its
+        pane, and ids are RECYCLED the moment a pane closes
+        (`test_session_id_wins_over_a_recycled_pane`). So a row whose agent died can go on
+        naming a pane somebody else's agent now holds — a stranger from another clone
+        driving the same machine-global herdr, quite possibly under the same name. That is
+        how this arrived: a `--force` that nearly took another clone's live `worker-1`.
+
+        So the target is RESOLVED, not merely trusted, and resolved by the identity the
+        board now uses. Never by name: asking herdr "where is worker-1" is the one question
+        with two answers, while "where is term_6591c642…" has one.
+
+        Fails CLOSED, for `_end_still_holds`'s reasons and one more — since `--force` takes
+        live descendants with the row, a wrong close now takes a stranger's whole subtree,
+        and no part of that is undoable. A wrong refusal costs one retry.
+
+        The cases, in the order they are asked:
+
+        - **herdr cannot be asked** → refuse. Nothing can be resolved, and the close would
+          most likely fail at `pane close` anyway — but under `--force` that failure is
+          committed rather than raised, so it must not get that far.
+        - **we hold a `terminal_id` and herdr still lists it** → close THAT agent's pane,
+          whatever pane id it is sitting in now. This is the fix: a pane that moved is
+          followed rather than lost, and a pane id that was recycled under us is not
+          followed anywhere.
+        - **we hold one and herdr does not list it** → the agent is gone. Its recorded pane
+          may be taken; if anybody is in it, refuse, and if nobody is, close it — that is
+          the ordinary "already closed by hand" path, which still lands on the
+          `pane_not_found` handler.
+        - **we hold none** (the 4-in-463 rows older than the column, and a row mid-spawn) →
+          allow only an empty pane. A blank id is NOT agreement here, unlike
+          `status.collect`'s guard, which fires on disagreement only: that one is a readout
+          and errs toward drawing a row, this one is irreversible. A mid-spawn row is a
+          retry once its spawn writes an id.
+        """
+        pane = a["pane_id"]
+        if not pane:
+            return None, None                # nothing to close; the caller skips herdr
+        if self._agent_states() is None:
+            return None, "herdr could not be asked whose pane that is"
+        mine = _column(a, "terminal_id")
+        if mine:
+            live = next((x for x in self._pane_cache.values()
+                         if x.terminal_id == mine), None)
+            if live is not None:
+                return live.pane_id, None
+        here = self._pane_cache.get(pane)
+        if here is None:
+            return pane, None                # nobody there; nobody's to take
+        who = here.name or "an agent"
+        if not mine or not here.terminal_id:
+            return None, (
+                f"pane {pane} holds {who}, and there is no terminal id on "
+                f"{'that agent' if mine else 'this row'} to prove it is the same one — "
+                f"refusing rather than closing a stranger's pane")
+        return None, (
+            f"pane {pane} is now {who}'s ({here.terminal_id}), not this row's ({mine}) — "
+            f"its own pane is gone and the id was recycled under it")
 
     def _finished_and_unreachable(self, who: str) -> bool:
         """Has this agent ended its turn for good, with no pane left to ring?
@@ -4802,6 +4887,7 @@ class Broker:
         if refresh:
             self._alive_cache = None
             self._bound_cache = set()
+            self._pane_cache = {}
             self._alive_unknown = False
         rung = []
         for who in dict.fromkeys(m["to_agent"] for m in pending):
@@ -5086,6 +5172,7 @@ class Broker:
             return False
         self._alive_cache = None            # ask again, now: the failure is the news
         self._bound_cache = set()
+        self._pane_cache = {}
         self._alive_unknown = False
         states = self._agent_states()
         return states is not None and who in states
