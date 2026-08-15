@@ -1,6 +1,6 @@
 """The line-range citations into `DESIGN-TRUTH.md`, checked against the document.
 
-Code, prompts and tests cite the trusted document by line range — `DESIGN-TRUTH.md:130-133`
+Code, prompts and tests cite the trusted document by line range — `DESIGN-TRUTH.md:133-136`
 — because a claim about what the design says is worth being able to open. The citations rot
 silently: nothing reads them, so an edit to the document moves every entry below it and the
 references keep pointing confidently at whatever now occupies those lines. That is exactly

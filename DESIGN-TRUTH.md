@@ -40,10 +40,12 @@ guessed, when the main checkout cannot be established at all.) — confirmed 202
 the dispatcher's home confirmed 2026-08-14, corrected against the code 2026-08-14
 
 **Anything that might need code changes.** It gets a workspace/worktree, and a lead with
-it — which is also what such an agent was already being called, `<name>-lead`. Whether a
-part of the work underneath is small and clear enough for one agent end to end is then
-that lead's judgement to make. — confirmed 2026-08-09, the role named `lead` and the
-routing judgement moved to it 2026-08-14
+it — which is also what such an agent was already being called, `<name>-lead` — unless the
+whole of it plainly fits one agent, in which case the dispatcher may hand it to a single
+worker in the same setup instead. Whether a part of the work underneath a lead is small
+and clear enough for one agent end to end stays that lead's judgement to make. — confirmed
+2026-08-09, the role named `lead` and the routing judgement below it moved to it
+2026-08-14, the dispatcher's own lead-or-worker choice 2026-08-15
 
 **Only `sb start` ever creates a TOP — that is the only path.** Being a top is stamped at
 that moment, and `sb delegate` branches on the stamp: a top's spawn gets a new space and
@@ -93,12 +95,13 @@ lead either reports done or blocks, depending on whether the task is fully compl
 fully complete, report done; Andrew's input needed to finish it, block. Once that is done
 it reports done, and the dispatcher blocks. A lead cleans up its children, pushes the PR
 if relevant, and summarizes — it does not close itself, since cleaning a lead takes its
-children and it still has to report. A dispatcher hands work to a lead rather than to a
-bare agent, but where one is directly under it, that agent pushes and opens its own PR if
+children and it still has to report. A dispatcher hands work to a lead or to a single
+worker, and where a worker is directly under it, that agent pushes and opens its own PR if
 it was told to; the dispatcher blocks for it either way, since being told his work has
 landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
-and reports done, and the parent cleans up. — confirmed 2026-08-09, the dispatcher's
-report restated 2026-08-14
+and reports done, and the parent cleans up — a lead on its own judgement, a dispatcher on
+Andrew's. — confirmed 2026-08-09, the dispatcher's report restated 2026-08-14, the
+lead-or-worker spawn and the dispatcher's cleanup 2026-08-15
 
 ---
 
@@ -228,11 +231,12 @@ and gets gamed on length instead of judgement. — confirmed 2026-08-14
 
 **The hierarchy, and what a dispatcher sits above.** A dispatcher is above spaces and
 worktrees and repos — its scope is the whole of its own tree — though in practice it is
-usually specific to one repo. Below it is a lead in a worktree of its own,
-then another lead or worker below that, to no fixed depth: unlimited levels are allowed,
+usually specific to one repo. Below it is a lead in a worktree of its own — or a single
+worker in that same worktree of its own, where the whole job fits one agent — then another
+lead or worker below that, to no fixed depth: unlimited levels are allowed,
 but stupid levels of it are not wanted and have not been observed. — confirmed
-2026-08-09, hierarchy restated 2026-08-14, everything a dispatcher spawns being a lead
-2026-08-14
+2026-08-09, hierarchy restated 2026-08-14, what a dispatcher spawns being a lead or a
+worker 2026-08-15
 
 **One space per repo, and one space per dispatcher.** That is what the herdr UI should
 show: a single space for each repo, a single space for each dispatcher, and everything
@@ -252,14 +256,19 @@ dispatches into, which `sb start` does not support today. So this is a known lim
 not pending work. — confirmed 2026-08-14
 
 **A dispatcher relays; it does not interpret.** Its job is basically to relay Andrew's
-words to new leads, and to orchestrate the creation of the worktrees, workspaces and leads
-that takes — without assuming too much, and without adding instructions of its own about
+words to the new agent that will own them, and to orchestrate the creation of the
+worktrees, workspaces and agents that takes — without assuming too much, and without adding
+instructions of its own about
 how the work should be approached. Whether a piece of work is to be carried end to end, or
 investigated with the questions brought back first, is his to say and not the dispatcher's
 to guess. If that is unclear, it does not start: it asks him to clarify intent before
-dispatching. — confirmed 2026-08-14, superseding the 2026-08-09 rules that the top routes
-a small, clear task straight to a bare agent itself and that it spawns scout or research
-agents to improve its own decisions; both of those are a lead's judgement now
+dispatching. Choosing a lead or a worker is a judgement about the shape of the tree and is
+no licence to interpret: it picks who runs the work, never what the work is. — confirmed
+2026-08-14, widened from leads to whichever agent it hands the work to 2026-08-15; it still
+supersedes the 2026-08-09 rule that the top spawns scout or research agents to improve its
+own decisions, which is a lead's judgement now, while the other rule it superseded —
+routing a small, clear task straight to a single agent — is back on the terms of the `sb
+delegate` entry
 
 **Work that belongs in another repo is a question, not a spawn.** A dispatcher that
 notices it asks Andrew and starts nothing — it never puts an agent in that repo, because
@@ -352,16 +361,22 @@ later.) — confirmed 2026-08-09
 
 **`sb delegate` figures out where a spawn lands rather than the caller passing flags for
 it.** A dispatcher's spawn gets a space and a worktree of its own whatever role it is
-given — the code branches on the `is_top` stamp, not on the role. What a dispatcher
-actually hands out is a lead, every time: choosing a single worker instead would mean
-judging the work small enough for one agent, and that judgement moved to the lead when the
-dispatcher stopped interpreting. So the mechanism takes either and the rule is one of
-them. — confirmed 2026-08-09, lead-every-time 2026-08-14
+given — the code branches on the `is_top` stamp, not on the role. What a dispatcher hands
+out is a lead or a single worker, and it chooses: a worker when one agent can carry the
+whole thing to done, a lead otherwise and whenever it is unsure. A worker it hands out
+gets exactly the same setup and environment a lead would have got — its own space, its own
+worktree, all of it — and the only difference is the role it runs as. — confirmed
+2026-08-09, lead-or-worker 2026-08-15, superseding the 2026-08-14 rule that a dispatcher
+hands out a lead every time
 
 **The lead handles cleanup itself, and it should do this aggressively** — probably
 literally every agent that is done. Cleaning up a lead always cleans its children. What
-stays open below a dispatcher is not the dispatcher's call: it is decided from the board
-by the person watching it. — confirmed 2026-08-09, the dispatcher half 2026-08-14
+stays open below a dispatcher is still decided by the person watching the board, and never
+by the dispatcher sweeping on its own judgement — what changes is that the dispatcher
+carries that decision out. It closes children when Andrew tells it to, and when a child
+reports its task fully done it may ask him to approve closing it. — confirmed 2026-08-09,
+the dispatcher half 2026-08-15, superseding the 2026-08-14 wording that left closing
+below a dispatcher entirely off it
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 parent, which then decides whether to close it. It always uses the **when idle**
@@ -470,8 +485,9 @@ decisions; this is the list of what no longer exists.*
 **`sb interrupt` as a verb.** Interrupting is a delivery mode of `tell`. — confirmed
 2026-08-09
 
-**`--keep`, `--ephemeral`, `--include-kept`, `--leave-children`.** Cleanup is the lead's,
-and it always takes the children. — confirmed 2026-08-09
+**`--keep`, `--ephemeral`, `--include-kept`, `--leave-children`.** Cleanup is the parent's,
+and it always takes the children. — confirmed 2026-08-09, worded as the parent's rather
+than the lead's 2026-08-15, since a dispatcher now closes on Andrew's say-so
 
 **Hard tool-layer enforcement of what a dispatcher may do.** No gate, no blocked verbs: a
 dispatcher legitimately writes a handoff file and legitimately reads one, and a rule that

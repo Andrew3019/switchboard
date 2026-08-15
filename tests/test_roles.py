@@ -82,7 +82,7 @@ class RolesTest(unittest.TestCase):
     # prompt and silently dropped from the one that ships.
 
     def test_the_protocol_names_every_sanctioned_reason_to_block(self):
-        """DESIGN-TRUTH.md:158-162's five, three of which reached no prompt at all. Each is
+        """DESIGN-TRUTH.md:161-165's five, three of which reached no prompt at all. Each is
         checked by a phrase only that reason would produce, so a rewrite that drops one
         fails here rather than passing on the word "block"."""
         p = config.protocol(self.repo)
@@ -97,7 +97,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(phrase, p)
 
     def test_the_protocol_states_the_default_shape_of_shipping_work(self):
-        """DESIGN-TRUTH.md:431-437, and it goes to every role rather than to orchestrators
+        """DESIGN-TRUTH.md:446-452, and it goes to every role rather than to orchestrators
         alone — so it is asserted on the protocol, which is the only text all five share."""
         p = config.protocol(self.repo)
         for part in ("branch named for your workspace", "push", "pull request",
@@ -172,7 +172,7 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(0, sum(t.count("Restate in one line") for t in texts))
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
-        """"This must be known to all sessions" (DESIGN-TRUTH.md:445-448) — it used to be
+        """"This must be known to all sessions" (DESIGN-TRUTH.md:460-463) — it used to be
         known to orchestrators only, so the protocol is where it has to be."""
         p = config.protocol(self.repo)
         self.assertIn("sb presets", p)
@@ -215,16 +215,39 @@ class RolesTest(unittest.TestCase):
         # And the licence that used to undercut it is gone, not merely outweighed.
         self.assertNotIn("a glance at one file", prompt)
 
-    def test_a_dispatcher_is_given_a_verb_for_a_finished_child_and_none_for_cleanup(self):
+    def test_a_dispatcher_is_given_a_verb_for_a_finished_child_and_for_closing_it(self):
         """Two gaps that were both filled by silence. DESIGN-TRUTH says the dispatcher
         blocks when work is done, but the prompt only said what NOT to do with a child's
         report — and a report the dispatcher merely notes to itself reaches nobody, since
-        Andrew sees an agent only when it blocks. Cleanup is the mirror image: the protocol
-        hands every agent `sb cleanup` and calls it cheap, so leaving the reason for the
-        dispatcher's abstinence in a stripped comment left it with the verb and no rule."""
+        Andrew sees an agent only when it blocks. Cleanup was the mirror image and is now
+        the other half of the same block: "not the dispatcher's decision" had been written
+        as "not the dispatcher's to touch", which left the one agent that knows a child has
+        finished unable to say so usefully. Since 2026-08-15 it closes on his command and
+        offers when a child reports fully done — the sweep on its own judgement is what
+        stays forbidden, because that is the form that closes something nobody chose."""
         prompt = roles.load(self.repo)["dispatcher"].prompt
         self.assertIn("When a child reports done", prompt)
-        self.assertIn("You do not close agents", prompt)
+        self.assertIn("yours to carry out and never yours to decide", prompt)
+        self.assertIn("never do is sweep on your own initiative", prompt)
+
+    def test_a_dispatcher_may_hand_out_a_worker_and_defaults_to_a_lead(self):
+        """Andrew, 2026-08-15, replacing lead-every-time: it hands out workers too, on the
+        same setup and environment. The guardrail is the half worth pinning — the choice is
+        asymmetric (an extra agent against half a job that looks finished), so an unsure
+        dispatcher spawns a lead, and nothing here licenses it to size the work by going
+        and reading."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("--role worker", prompt)
+        self.assertIn("Unsure is a lead", prompt)
+        self.assertIn("picking who runs the work, never what the work is", prompt)
+
+    def test_a_dispatcher_puts_a_multi_line_ask_in_a_file_rather_than_flattening_it(self):
+        """herdr refuses a multi-line agent argument, so "relay it verbatim" and "pass it
+        in the task" cannot both hold for anything with structure in it. The reachable move
+        was to flatten, which is the lossy rewrite relaying exists to prevent."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("-brief.md", prompt)
+        self.assertIn("write their words, unaltered", prompt)
 
     def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
         """The roles fragment every agent gets is generated from the role table, so it
@@ -237,7 +260,7 @@ class RolesTest(unittest.TestCase):
         self.assertIn("only a human starting one creates it", prompt)
 
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH.md:275-276. Serialising overlap was already taught; assigning
+        """DESIGN-TRUTH.md:284-285. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""
         prompt = roles.load(self.repo)["lead"].prompt
         self.assertIn("disjoint", prompt)
