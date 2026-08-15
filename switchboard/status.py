@@ -296,6 +296,7 @@ SHOW_ARCHIVED = config.flag("display.show_archived")
 #     mail_*        mail of its own we gave up on delivering (`_clear_unreadable_mail`)
 #     notify_failed a desktop notification we failed to raise about it (`Broker._surface`)
 #     read_output   somebody ran `sb inspect` and read its terminal (`output.py`)
+#     cleanup_*     a sweep looked at it and left it alone (`Broker.cleanup`'s gates)
 #
 # A denylist here rather than moving those writes to `target=` in the payload, which is what
 # `_nudge`, `mark_turn` and `_forget_turn` do. Two things pay for the difference:
@@ -309,9 +310,19 @@ SHOW_ARCHIVED = config.flag("display.show_archived")
 # `read_output` is the one worth naming separately: `sb inspect` is what a person runs when
 # they suspect an agent has gone quiet, and it was resetting that agent's idle clock as they
 # looked at it.
+#
+# The `cleanup_*` refusals are that same sentence with teeth. A sweep that refuses a row
+# writes `cleanup_refused` (or `cleanup_held`) against it, and every refusal was resetting
+# the idle clock of the row it had just declined to touch — observed live going from 45s
+# back to 1s. `turn_doubted` needs that clock to reach `turn_stale_grace` before anything
+# doubts the edge, so a lead sweeping constantly, which the protocol tells leads to do, could
+# keep the very rows it kept refusing from ever reaching the repair — and `Broker.cleanup`'s
+# own stalled-row gate is built on that repair having fired. The refusals still name the
+# agent in `agent=`, because `sb log <name>` is where somebody asks why a row was left.
 DONE_TO_THE_AGENT = (
     "ring_deferred", "ring_held", "ring_failed", "ring_skipped",
     "mail_unannounced", "mail_cleared", "notify_failed", "read_output",
+    "cleanup_refused", "cleanup_held",
 )
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
@@ -581,8 +592,9 @@ class AgentStatus:
         `stalled` belongs here for the same reason the other three do, even though the
         agent is not asking: its turn ended without `sb done` or `sb block`, so the store
         will say `working` about it forever, no doorbell will ever ring it again, and
-        `sb cleanup` will not touch a row that is not finished. Nothing in the fleet moves
-        it. Left out of this predicate it appeared only in the DRIFT block at the bottom
+        `sb cleanup` will not touch it — its turn edge ended cleanly, so it is not a row
+        switchboard ever gave up on, which is the only unfinished row a sweep takes.
+        Nothing in the fleet moves it. Left out of this predicate it appeared only in the DRIFT block at the bottom
         of a full readout and in `--json`, so `sb status --needs-me` — the filter for
         "what wants me" — was the one view that dropped it.
 
@@ -1060,8 +1072,10 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     The one write on the read path, and it is here because this is the only place that
     ever learns it. Nothing else closes a row that died abnormally — a crash, a pane
     closed from the outside, a herdr restart, a reboot — because the only writers of an
-    end are the agent's own `sb done` and a `sb cleanup` that already gates on the row
-    being finished. So the row claims `working` forever, `sb cleanup` cannot reach it,
+    end are the agent's own `sb done` and a `sb cleanup` that gates on the row being
+    finished, or on a turn edge switchboard gave up on — which a row whose turn ended
+    cleanly does not have. So the row claims `working` forever, `sb cleanup` cannot
+    reach it,
     and `sb start` counts it as an orchestrator that is still up. Recording it here is
     what unsticks all three.
 
