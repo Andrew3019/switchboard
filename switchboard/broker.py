@@ -54,13 +54,13 @@ from .status import GONE_STATE, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
-# addresses that are not agents, and the role a top-level orchestrator has (which is also
-# its default agent name — `sb start` with no arguments should land somewhere obvious).
+# addresses that are not agents, and the role the top-level agent has (today `dispatcher`;
+# everything nested is a `lead`).
 HUMAN = config.setting("vocabulary.human")
 PARENT = config.setting("vocabulary.parent")
 MAIN = config.setting("vocabulary.main_role")
-# The agent NAME `sb start` uses, which is not the same thing as its role: there is one
-# orchestrator role at every scope, but the top-level agent still wants an obvious name.
+# The agent NAME `sb start` uses, which is not the same thing as its role: the role says
+# what the top IS, and the top-level agent still wants an obvious name.
 MAIN_NAME = config.setting("vocabulary.main_name")
 
 # Config that must follow work into a worktree. Deliberately NOT committed: it is local
@@ -113,7 +113,7 @@ PROTOCOL_LINE = config.protocol()
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
 
-# `sb tell`'s three delivery modes (DESIGN-TRUTH.md:236-247). They differ only in WHEN the
+# `sb tell`'s three delivery modes (DESIGN-TRUTH.md:311-322). They differ only in WHEN the
 # doorbell is allowed to ring and whether the turn in progress survives it:
 #
 #   next-turn   ring now. `agent prompt` queues the text and the agent's own system hands
@@ -138,7 +138,7 @@ def tag(sender: str) -> str:
 
     Two questions, one mark. *Did a person type this, or did the tooling?* — a doorbell
     arrives in the pane looking exactly like Andrew's own typing, and an agent that cannot
-    tell them apart cannot weigh them (DESIGN-TRUTH.md:93-95). And *who is this from?*,
+    tell them apart cannot weigh them (DESIGN-TRUTH.md:124-126). And *who is this from?*,
     which the doorbell could not answer at all before: it carries no payload, so an agent
     read "You have mail" with no idea whether its parent had redirected it or a sibling had
     said hello, and had to spend the turn on `sb inbox` to find out.
@@ -708,7 +708,7 @@ class Broker:
         if row is None:
             return
         role = row["role"]
-        if roles_mod.get(self.roles, role).delegate:
+        if roles_mod.get(self.roles, role, self.repo).delegate:
             return
         raise ValueError(
             f"a {role} does not spawn agents — only a role with delegate rights does "
@@ -785,7 +785,7 @@ class Broker:
     def same_tree(self, me: str, target: str) -> bool:
         """May `me` see `target` at all?
 
-        The human crosses freely into any tree — DESIGN-TRUTH:180-181, "Only agents have
+        The human crosses freely into any tree — DESIGN-TRUTH:248-249, "Only agents have
         the scope constraints" — and so does anything addressed to the human.
         """
         if me == HUMAN or target == HUMAN or me == target:
@@ -809,7 +809,7 @@ class Broker:
         if self.same_tree(me, target):
             return
         raise ValueError(
-            f"{target} is in another top orchestrator's tree, which is invisible from "
+            f"{target} is in another dispatcher's tree, which is invisible from "
             f"here — agents cannot reach across that boundary. Ask your own parent, or "
             f"`sb block` for a person, who can."
         )
@@ -917,17 +917,18 @@ class Broker:
         if self.repo.resolve() == main:
             return
         raise ValueError(
-            f"`sb start` starts a top-level orchestrator over the checkout it is run in, "
+            f"`sb start` starts a top-level dispatcher over the checkout it is run in, "
             f"and this is a worktree ({self.repo}) — starting one here would lay it over "
             f"somebody's working copy and their branch. Run it from the main checkout "
             f"instead: cd {main} && sb start. To get an agent working in THIS tree, "
-            f"delegate to one from the orchestrator that owns it."
+            f"delegate to one from the lead that owns it."
         )
 
     def running_tops(self) -> list[str]:
-        """Top-level orchestrators that could still be going, oldest first.
+        """Tops that could still be going, oldest first — whatever role they were spawned
+        as, since the store answers this from the `is_top` stamp (`store.live_tops`).
 
-        Two filters, and the second is why this is not just a query. `live_roots` drops
+        Two filters, and the second is why this is not just a query. `live_tops` drops
         the ones that ended; herdr drops the ones that ended without saying so, which
         nothing else can — a row only leaves `working` when the agent itself reports it,
         so a crash, an externally closed pane or a herdr restart leaves one claiming to
@@ -935,11 +936,13 @@ class Broker:
 
         Fails OPEN: an unreachable herdr proves nothing, so a row claiming to work is
         left claiming it. Same rule as `status.collect`. Nothing
-        branches on this any more — `sb start` reads it only to tell the human which
-        orchestrators they already have, and naming a dead one there costs a line of
-        text, while omitting a live one costs them the way back to it.
+        branches on this any more — `sb start` reads it only to tell the human which tops
+        they already have, and naming a dead one there costs a line of text, while
+        omitting a live one costs them the way back to it. That second cost is why the
+        stamp and not the role decides: a rename of the top's role emptied this list
+        while two tops were running, one of them blocked and waiting on him.
         """
-        tops = [r["name"] for r in store.live_roots(self.db, MAIN)]
+        tops = [r["name"] for r in store.live_tops(self.db)]
         known = self._agent_states()
         return tops if known is None else [n for n in tops if n in known]
 
@@ -958,9 +961,9 @@ class Broker:
             # two directories — the exact confusion `agents.branch` exists to end.
             raise ValueError(
                 f"the name {name!r} already belongs to a workspace with a checkout of its "
-                f"own, and a top-level orchestrator's space has none — one name is one "
+                f"own, and a dispatcher's space has none — one name is one "
                 f"workspace. Work in that one with `sb delegate --workspace {name}`, or "
-                f"start this orchestrator under another name."
+                f"start this dispatcher under another name."
             )
         # A bare space is closeable too, and `sb start --name X` is a door into one:
         # without this the refusal would guard the spawn paths and leave a top-level
@@ -1286,8 +1289,8 @@ class Broker:
         except HerdrError as e:
             raise ValueError(
                 f"no workspace called {name!r} to join: --workspace joins one that "
-                f"already exists and never forks — a workspace is opened by a top "
-                f"orchestrator delegating into a fork of that name. Leave --workspace "
+                f"already exists and never forks — a workspace is opened by a "
+                f"dispatcher or lead delegating into a fork of that name. Leave --workspace "
                 f"off to work where you are ({e.message})"
             ) from e
         store.log_event(self.db, kind="workspace_join", workspace=name,
@@ -1674,7 +1677,7 @@ class Broker:
             raise ValueError(
                 f"cannot close {name!r}: its recorded checkout {checkout} IS this "
                 f"repository's primary working tree, which this command never removes. A "
-                f"record can legitimately point there — a top orchestrator's bare space "
+                f"record can legitimately point there — a dispatcher's bare space "
                 f"over the main clone records exactly that — so this is a rule of the "
                 f"gate rather "
                 f"than something git is left to catch after the panes are closed."
@@ -2936,7 +2939,7 @@ class Broker:
             # top-level orchestrator already holds over the main checkout would give one
             # record two checkouts — the confusion `agents.branch` exists to end.
             raise ValueError(
-                f"the name {name!r} already belongs to a top-level orchestrator's space "
+                f"the name {name!r} already belongs to a dispatcher's space "
                 f"over the main checkout, which has no checkout of its own — one name is "
                 f"one workspace. Spawn this agent under another name."
             )
@@ -3050,7 +3053,14 @@ class Broker:
     ) -> str:
         me = me or self.whoami()
         self._refuse_bare_delegate(me)
-        r = roles_mod.get(self.roles, role)
+        r = roles_mod.get(self.roles, role, self.repo)
+        # What was TYPED is not necessarily what this agent is: a retired name resolves
+        # through `[vocabulary] role_aliases` to the role that replaced it, and `r.name` is
+        # the answer. Taken here, once, so the identity fragment, the generated name, the
+        # preset bindings and the stored row all agree with the prompt the agent actually
+        # got — an agent told it is an `orchestrator`, given a lead's prompt and filed as
+        # neither is three answers to one question.
+        role = r.name
         name = name or self._unique_name(role)
         self.delivery_note = None       # this spawn's caveat, not the last one's
 
@@ -3113,7 +3123,7 @@ class Broker:
         prompts = [
             self._protocol(),
             self._say("spawn.identity", name=name, role=role, parent=me),
-            # Generated from the role table, never a literal list (DESIGN-TRUTH.md:107-110).
+            # Generated from the role table, never a literal list (DESIGN-TRUTH.md:130-133).
             # `self.roles` is already the merged shipped + repo set, read once per broker, so
             # a repo's own `.switchboard/roles/*.md` shows up here with nothing edited.
             # Sorted for a stable prompt: the merge order is dict order, and a spawn prompt
@@ -3342,7 +3352,7 @@ class Broker:
 
         It records that the sender is waiting for an answer, so the recipient's `sb inbox`
         tells it to reply at some point. It does not make the sender wait, poll or block —
-        no agent ever waits on another agent (DESIGN-TRUTH.md:230-234), which is why this
+        no agent ever waits on another agent (DESIGN-TRUTH.md:307-309), which is why this
         is a flag on a fire-and-forget verb rather than a verb that waits. There used to
         be one of those, `sb ask`, and it is gone for exactly this reason.
 
@@ -3406,7 +3416,7 @@ class Broker:
     def apply_preset(self, name: str, *, me: Optional[str] = None) -> int:
         """Paste a preset into the caller's own session — `sb presets <name> --apply`.
 
-        DESIGN-TRUTH.md:292-295: "Picking a preset should inject a prompt: sb pastes it in,
+        DESIGN-TRUTH.md:370-373: "Picking a preset should inject a prompt: sb pastes it in,
         the same path as any other message." So it IS a message: a row in the store, the
         `[sb: from <name>]` tag, and `_ring` putting it in the pane. Printing the text
         instead would have been the easy version and a different thing — command output is
@@ -3519,7 +3529,7 @@ class Broker:
             # The parent's turn ended while this ran; the poke is what restarts it, so a
             # lazy parent never has to poll (C4, C10).
             #
-            # WHEN IDLE, explicitly and not by default — DESIGN-TRUTH.md:220-224 names the
+            # WHEN IDLE, explicitly and not by default — DESIGN-TRUTH.md:293-297 names the
             # mode for `done` by name. A parent that is mid-turn is already working; a
             # child finishing is not news worth reaching it before its own next boundary,
             # and a fan-out of five would otherwise poke it five times in one turn.
@@ -3943,7 +3953,7 @@ class Broker:
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with
         # its full context" must not quietly mean.
-        spec = roles_mod.get(self.roles, a["role"]).spec()
+        spec = roles_mod.get(self.roles, a["role"], self.repo).spec()
         try:
             agent = self.h.start_agent(name, pane, resume=a["session_id"],
                                        model_args=spec.cli_args())
@@ -4311,7 +4321,7 @@ class Broker:
         - *when-idle* holds the ring — `ring_deferred` — and `flush_pending` rings it once
           the turn has ended. The default, because most callers here are not a `tell` at
           all: `done`'s poke to a parent, and `flush_pending`'s own re-ring, are both
-          when-idle by their nature (DESIGN-TRUTH.md:220-224 for `done`).
+          when-idle by their nature (DESIGN-TRUTH.md:293-297 for `done`).
         - *next-turn* rings anyway. `agent prompt` queues rather than interleaves — three
           90-second single tool calls, none cut short, text delivered at the boundary
           after each — so this is not a stealth interrupt: the in-flight tool call
@@ -4526,7 +4536,7 @@ class Broker:
         nothing. The board has shown that for as long as there has been a board; nothing
         has ever told the agent.
 
-        **The ping goes to the agent, never to its parent** (`DESIGN-TRUTH.md:129-133`):
+        **The ping goes to the agent, never to its parent** (`DESIGN-TRUTH.md:152-156`):
         the agent is the only party that knows whether it is finished, stuck, or simply
         wrong about having finished, and a parent told "your child went quiet" can only
         ask it the same question this asks directly.

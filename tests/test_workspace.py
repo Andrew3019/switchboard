@@ -238,12 +238,12 @@ class Fixture:
         of its own, STAMPED. What `sb start` produces — and, since `sb workspace new` was
         deleted, the only caller whose spawn mints a workspace."""
         if store.get_agent(self.db, name) is None:
-            store.create_agent(self.db, name=name, role="orchestrator",
+            store.create_agent(self.db, name=name, role="lead",
                                workspace="scratch", cwd=str(cwd or self.repo),
                                pane_id="w1:p1", is_top=True)
         return name
 
-    def _open(self, name: str = "api", *, b=None, me=None, role: str = "orchestrator",
+    def _open(self, name: str = "api", *, b=None, me=None, role: str = "lead",
               task: str = "t", **kw) -> dict:
         """Open the workspace `name` the one way left: a top delegates, and the child's
         NAME is the workspace, the branch and the checkout. Returns the facts the deleted
@@ -596,7 +596,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         """
         import os
         from unittest import mock
-        store.create_agent(self.db, name="lead", role="orchestrator", workspace="api",
+        store.create_agent(self.db, name="lead", role="lead", workspace="api",
                            branch="api", cwd=str(self.repo))      # no workspace_id
         with mock.patch.dict(os.environ, {"HERDR_WORKSPACE_ID": "w1"}, clear=False):
             kid = self.b.delegate("t", role="worker", me="lead")
@@ -852,7 +852,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
     def test_a_bare_space_is_not_mistaken_for_a_named_checkout(self):
         """The recorded cwd of a bare space is the main checkout — real, and not this
         workspace's. Reading it as one is what made a label look like a worktree."""
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch",
+        store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo))
         self.assertIsNone(self.b._recorded_path("scratch"))
 
@@ -862,7 +862,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
         """`_workspace_id` fell through to `_attach_workspace`, whose create step runs
         `worktree create --branch <name>`. Merely resolving an id therefore forked a git
         branch and a checkout for a space that never had one."""
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch",
+        store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo))
         self.assertEqual(self.b._workspace_id("scratch"), "")
         self.assertEqual(self.h.calls, [])                   # herdr was not even asked
@@ -873,7 +873,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
         placement for a child whose parent's workspace id we never recorded."""
         import os
         from unittest import mock
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch",
+        store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
         with mock.patch.dict(os.environ, {}, clear=True):
             kid = self.b.delegate("t", role="worker", me="root")
@@ -893,7 +893,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
         """Two spaces may share a name — that is what the split is for. A branch belongs
         to the workspace it was recorded in, and is not inherited by name."""
         self._open("api", me=self._root("other-top"))        # worktree space 'api'
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="api",
+        store.create_agent(self.db, name="root", role="lead", workspace="api",
                            cwd=str(self.repo), is_top=True)  # a bare row, same name
         self.assertIsNone(store.get_agent(self.db, "root")["branch"])
         kid = self.b.delegate("t", role="worker", me="root")
@@ -924,7 +924,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
     def _bare_root(self, name: str = "root") -> str:
         """A top orchestrator's space: a herdr workspace over the main checkout, no branch
         of its own, STAMPED. What `sb start` produces."""
-        store.create_agent(self.db, name=name, role="orchestrator", workspace="scratch",
+        store.create_agent(self.db, name=name, role="lead", workspace="scratch",
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
         return name
 
@@ -938,7 +938,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         self.assertTrue(self.b.has_worktree(kid))
 
     def test_a_grandchild_inherits_its_parents_worktree_rather_than_forking(self):
-        kid = self.b.delegate("t", role="orchestrator", me=self._bare_root())
+        kid = self.b.delegate("t", role="lead", me=self._bare_root())
         grandkid = self.b.delegate("t", role="worker", me=kid)
         rows = [store.get_agent(self.db, n) for n in (kid, grandkid)]
         self.assertEqual(rows[1]["branch"], rows[0]["branch"])
@@ -954,7 +954,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         """A top's bare space whose label happens to name a real branch must still fork.
         The name cannot answer this — only the stamp can."""
         r = self._open("api", me=self._root("other-top"))    # a real worktree named 'api'
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="api",
+        store.create_agent(self.db, name="root", role="lead", workspace="api",
                            cwd=str(self.repo), pane_id="w1:p1",   # a BARE space, same name
                            is_top=True)
         kid = self.b.delegate("t", role="worker", me="root")
@@ -987,7 +987,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         main = self._git_repo()
         subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
         b = Broker(self.db, self.h, repo=main)
-        store.create_agent(self.db, name="root", role="orchestrator", cwd=str(main),
+        store.create_agent(self.db, name="root", role="lead", cwd=str(main),
                            is_top=True)
         with self.assertRaises(ValueError) as cm:
             b.delegate("t", role="worker", name="spike", me="root")
@@ -999,7 +999,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         main = self._git_repo()
         subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
         b = Broker(self.db, self.h, repo=main)
-        store.create_agent(self.db, name="root", role="orchestrator", cwd=str(main),
+        store.create_agent(self.db, name="root", role="lead", cwd=str(main),
                            is_top=True)
         with self.assertRaises(ValueError) as cm:
             b.delegate("t", role="worker", name="spike", me="root")
@@ -1013,7 +1013,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         main = self._git_repo()
         subprocess.run(["git", "branch", "spike"], cwd=main, capture_output=True)
         b = Broker(self.db, self.h, repo=main)
-        store.create_agent(self.db, name="root", role="orchestrator", cwd=str(main),
+        store.create_agent(self.db, name="root", role="lead", cwd=str(main),
                            is_top=True)
         with self.assertRaises(ValueError):
             b.delegate("t", role="worker", name="spike", me="root")
@@ -1027,7 +1027,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         main = self._git_repo()
         subprocess.run(["git", "branch", "somebody-else"], cwd=main, capture_output=True)
         b = Broker(self.db, self.h, repo=main)
-        store.create_agent(self.db, name="root", role="orchestrator", cwd=str(main),
+        store.create_agent(self.db, name="root", role="lead", cwd=str(main),
                            is_top=True)
         kid = b.delegate("t", role="worker", name="spike", me="root")
         self.assertEqual(store.get_agent(self.db, kid)["branch"], "spike")
@@ -1116,7 +1116,7 @@ class ForkBaseTest(Fixture, unittest.TestCase):
         main = self._repo_with_origin()
         self._git(main, "update-ref", "-d", "refs/remotes/origin/main")
         b = Broker(self.db, self.h, repo=main)
-        store.create_agent(self.db, name="root", role="orchestrator", cwd=str(main),
+        store.create_agent(self.db, name="root", role="lead", cwd=str(main),
                            pane_id="w1:p1", is_top=True)
         b.delegate("t", role="worker", me="root")
         self.assertEqual(self.bases, ["origin/main"])
@@ -1146,7 +1146,7 @@ class JoinWorkspaceTest(Fixture, unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch",
+        store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
 
     def test_a_child_joins_the_named_workspace_instead_of_its_parents(self):
@@ -1311,10 +1311,10 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
 
     def test_every_spawn_path_resolves_the_same_bindings(self):
         """The property the fix is really about: one resolution point, not three."""
-        kid = self.b.delegate("t", role="orchestrator", me=HUMAN)
-        store.create_agent(self.db, name="root", role="orchestrator", workspace="scratch",
+        kid = self.b.delegate("t", role="lead", me=HUMAN)
+        store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
-        lead = self.b.delegate("t", role="orchestrator", name="api", me="root")
+        lead = self.b.delegate("t", role="lead", name="api", me="root")
         top = self.b.start()
         plugins = [[p for p in self._prompts_for(n) if "keep it short" in p]
                    for n in (kid, lead, top)]

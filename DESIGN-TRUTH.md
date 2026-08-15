@@ -33,51 +33,72 @@ Entry format: one short claim, plus the date it was confirmed.
 
 **Starting work.** On some terminal in a repo, I call `sb start`. It makes a new bare
 space on main — bare meaning no worktree of its own; forking from `origin/main` is what
-a workspace does. This is a top orchestrator. — confirmed 2026-08-09
+a workspace does. This is a dispatcher, and its home is the repo's main checkout: `sb
+start` lays the space over the directory it was run in, and it is refused anywhere but the
+main checkout, so in practice those are the same place. (The refusal is skipped, never
+guessed, when the main checkout cannot be established at all.) — confirmed 2026-08-09,
+the dispatcher's home confirmed 2026-08-14, corrected against the code 2026-08-14
 
-**Anything that might need code changes.** It gets a workspace/worktree. Unless it is
-small and clear enough for one agent end to end, it gets an orchestrator with it, and
-that agent can be called `<name>-lead`. — confirmed 2026-08-09
+**Anything that might need code changes.** It gets a workspace/worktree, and a lead with
+it — which is also what such an agent was already being called, `<name>-lead`. Whether a
+part of the work underneath is small and clear enough for one agent end to end is then
+that lead's judgement to make. — confirmed 2026-08-09, the role named `lead` and the
+routing judgement moved to it 2026-08-14
 
-**Only `sb start` ever creates a top orchestrator — that is the only path.** Being a top
-is stamped at that moment, and `sb delegate` branches on the stamp: a top's spawn gets a
-new space and worktree, anyone else's gets a tab in the caller's space. A bare agent's
-delegate is refused outright. That stamp, not the prompt, is what makes top and workspace
-orchestrators different; a top-only prompt fragment explains behaviour the code already
-guarantees. — confirmed 2026-08-09
+**Only `sb start` ever creates a TOP — that is the only path.** Being a top is stamped at
+that moment, and `sb delegate` branches on the stamp: a top's spawn gets a new space and
+worktree, anyone else's gets a tab in the caller's space. A bare agent's delegate is
+refused outright. That stamp, not the prompt, is what decides where an agent's children
+land. What an agent may do *itself* is a different question, and the answer to it is the
+role it was spawned as: dispatcher and lead are two roles with two prompts, not one role
+told its scope. — confirmed 2026-08-09, the second half confirmed 2026-08-14
 
-**Only a human may create a top orchestrator; `sb start` is refused for agents.** —
-confirmed 2026-08-11
+**The dispatcher ROLE is not gated, and saying "only `sb start` makes a dispatcher" would
+be false.** `dispatcher` is a name `--role` takes like any other, the roles fragment every
+agent gets advertises it, and a lead that types it spawns a child holding the dispatcher
+prompt with no stamp and a parent above it — verified by running it. What stops that is
+the lead prompt saying it is not one of its options, which is the same answer given
+everywhere else here: enforcement of what a dispatcher is and does was rejected, so the
+prompt is the mechanism. The two halves are separate and both true — top-ness is stamped
+and ungettable any other way, and the role that goes with it is only asked for. —
+confirmed 2026-08-14
+
+**Only a human may create a top; `sb start` is refused for agents.** The refusal is on
+that one command, so what an agent cannot do is create a top — asking for the dispatcher
+role at `sb delegate` is a different act and is not refused, per the entry above. —
+confirmed 2026-08-11, narrowed to what the refusal actually covers 2026-08-14
 
 **A fork that fails refuses the spawn and tells the parent.** It never falls back to
 Andrew's own checkout. `sb start` run inside a worktree is refused too, naming the main
 checkout to run it from. — confirmed 2026-08-09
 
-**Where each spawn lands.** `sb start` = new bare space + orchestrator. Top spawns a
-bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
-Top spawns an orchestrator = same thing. An orchestrator spawning anything = new tab in
-the same exact space. So only the top ever creates a space: a sub-orchestrator a lead
-spawns is a tab in the lead's space, and its whole subtree stays in that one space. —
-confirmed 2026-08-09
+**Where each spawn lands.** `sb start` = new bare space + dispatcher. A dispatcher spawns
+a bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
+A dispatcher spawns a lead = same thing. A lead spawning anything = new tab in the same
+exact space. So only the dispatcher ever creates a space: a sub-lead a lead spawns is a
+tab in the lead's space, and its whole subtree stays in that one space. — confirmed
+2026-08-09
 
 **A worktree belongs to a space, not to an agent.** Everything in a lead's space shares
 that lead's worktree, since a lead's spawns are tabs in it. A bare agent gets its own
 worktree because it gets its own space. — confirmed 2026-08-09, read-only exception
 dropped 2026-08-12
 
-**While the work runs.** The top orchestrator is just idle. It should not be monitoring.
-It persists until Andrew closes it. — confirmed 2026-08-09
+**While the work runs.** The dispatcher is just idle. It should not be monitoring. It
+persists until Andrew closes it. — confirmed 2026-08-09
 
 **When work finishes.** It depends who is done and who is reporting it. A worker that is
-done reports done, and its parent orchestrator sees it. Once all of its children are
-done, that orchestrator either reports done or blocks, depending on whether the task is
-fully complete: fully complete, report done; Andrew's input needed to finish it, block.
-Once that is done it reports done, and the top orchestrator blocks. A lead cleans up its
-children, pushes the PR if relevant, and summarizes — it does not close itself, since
-cleaning an orchestrator takes its children and it still has to report. A bare agent
-under the top pushes and opens its own PR if the top said so; the top blocks for it. Once a block is
-resolved the agent finishes and reports done, and the parent cleans up. — confirmed
-2026-08-09
+done reports done, and its parent lead sees it. Once all of its children are done, that
+lead either reports done or blocks, depending on whether the task is fully complete:
+fully complete, report done; Andrew's input needed to finish it, block. Once that is done
+it reports done, and the dispatcher blocks. A lead cleans up its children, pushes the PR
+if relevant, and summarizes — it does not close itself, since cleaning a lead takes its
+children and it still has to report. A dispatcher hands work to a lead rather than to a
+bare agent, but where one is directly under it, that agent pushes and opens its own PR if
+it was told to; the dispatcher blocks for it either way, since being told his work has
+landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
+and reports done, and the parent cleans up. — confirmed 2026-08-09, the dispatcher's
+report restated 2026-08-14
 
 ---
 
@@ -147,50 +168,94 @@ explicitly told to block; an ambiguous instruction; going back and forth with th
 itself; or finished work that needs Andrew's input or approval to complete. — confirmed
 2026-08-09, ambiguous instruction confirmed 2026-08-12
 
-### Orchestrators
+### Dispatchers and leads
 
-**The top orchestrator is everything: its scope is the whole of its own tree, and its
-job is to orchestrate the creation of worktrees and new orchestrators and workspaces.**
-It is above that layer. — confirmed 2026-08-09
+**The hierarchy, and what a dispatcher sits above.** A dispatcher is above spaces and
+worktrees and repos — its scope is the whole of its own tree — though in practice it is
+usually specific to one repo. Below it is a lead in a worktree of its own,
+then another lead or worker below that, to no fixed depth: unlimited levels are allowed,
+but stupid levels of it are not wanted and have not been observed. — confirmed
+2026-08-09, hierarchy restated 2026-08-14, everything a dispatcher spawns being a lead
+2026-08-14
 
-**A small task that a single agent can do end to end without interruption goes to a bare
-agent; otherwise, an orchestrator.** The top spawning a well-directed bare agent
-directly is how a clear, unambiguous task — e.g. a small change — skips extra layers
-that are not needed. — confirmed 2026-08-09
+**One space per repo, and one space per dispatcher.** That is what the herdr UI should
+show: a single space for each repo, a single space for each dispatcher, and everything
+else nested under a repo. — confirmed 2026-08-14
 
-**Like any orchestrator, it can spawn discovery or scout or research agents or
-whatever, to improve its decisions and actions.** — confirmed 2026-08-09
+**Where that model can bend, and it is deliberately left bending.** herdr picks one pane
+already sitting in a repo's folder to serve as that repo's group parent. A dispatcher's
+home is in that folder, so a dispatcher is a candidate like any other pane. In practice
+Andrew's own manually opened pane on the repo has always been picked first, so dispatchers
+have stayed separate — the other outcome has been seen once, in a throwaway clone, and
+never in the live fleet. If a dispatcher were picked, that repo's space would *be* the
+dispatcher, and every worktree agent for the repo, including other dispatchers' children,
+would nest inside it. Nothing breaks functionally; the view is muddled. The only real fix
+is a small flag in herdr, which Andrew has chosen not to take; the alternative of moving
+dispatchers outside the repo would mean separating a dispatcher's home from the repo it
+dispatches into, which `sb start` does not support today. So this is a known limitation,
+not pending work. — confirmed 2026-08-14
+
+**A dispatcher relays; it does not interpret.** Its job is basically to relay Andrew's
+words to new leads, and to orchestrate the creation of the worktrees, workspaces and leads
+that takes — without assuming too much, and without adding instructions of its own about
+how the work should be approached. Whether a piece of work is to be carried end to end, or
+investigated with the questions brought back first, is his to say and not the dispatcher's
+to guess. If that is unclear, it does not start: it asks him to clarify intent before
+dispatching. — confirmed 2026-08-14, superseding the 2026-08-09 rules that the top routes
+a small, clear task straight to a bare agent itself and that it spawns scout or research
+agents to improve its own decisions; both of those are a lead's judgement now
+
+**Work that belongs in another repo is a question, not a spawn.** A dispatcher that
+notices it asks Andrew and starts nothing — it never puts an agent in that repo, because
+nothing can (see Open: real cross-repo dispatch does not exist). The handover, when there
+is one, runs through him and not through a spawn: he sets that repo up and starts its own
+dispatcher there, and that tree is not below this one. This is a separate thing from the
+grouping limitation above, and the two should not be run together: here the work was in a
+repo switchboard had never been set up in, and an agent with no way to root a child there
+forked a worktree of *this* repo instead and appeared in this repo's space. Nothing was
+adopted by anything; an agent was simply in the wrong repo. — confirmed 2026-08-14, the
+handover reworded 2026-08-14 so it cannot be read as a spawn the dispatcher performs
 
 **A lead's children share its worktree, so the lead assigns disjoint files and
 serialises anything that overlaps.** — confirmed 2026-08-09
 
-**A workspace orchestrator's job is to orchestrate other agents and stuff.** Review is
-coordinated by it. There is no prompt for that yet, so nothing about how it runs is
-anchored here — Andrew will have prompts for it. — confirmed 2026-08-09
+**A lead's job is to orchestrate other agents and stuff.** Review is coordinated by it.
+— confirmed 2026-08-09
 
-**The orchestrator prompt is mostly good already.** — confirmed 2026-08-09
+**A lead can spawn discovery or scout or research agents or whatever, to improve its
+decisions and actions.** — confirmed 2026-08-09
 
-**Top and workspace orchestrators must be clearly differentiated, and some mechanism
-other than the prompt must make that true as well.** — confirmed 2026-08-09
+**The lead prompt is mostly good already.** It is the old orchestrator prompt, carried
+through the split. — confirmed 2026-08-09
+
+**Dispatcher and lead must be clearly differentiated, and some mechanism other than the
+prompt must make that true as well.** The mechanism is the `is_top` stamp, which decides
+where each one's children land. Past that, the prompt is the mechanism and is judged
+enough — see Explicitly rejected. — confirmed 2026-08-09, prompt-is-enough confirmed
+2026-08-14
+
+**`orchestrator` is retired as a role name.** It survives only as a config alias for
+`lead`, resolving all the way through — so a stale `--role orchestrator` gets a lead
+rather than falling through to a role that cannot delegate at all. — confirmed 2026-08-14
 
 ### Scope
 
-**Siblings are not invisible to each other; any other top orchestrator's entire tree is
+**Siblings are not invisible to each other; any other dispatcher's entire tree is
 invisible.** Across that boundary agents cannot `sb tell` or anything else. Separating
-two subtrees inside one top orchestrator's tree is not something we have to do. —
+two subtrees inside one dispatcher's tree is not something we have to do. —
 confirmed 2026-08-09
 
 **Only agents have the scope constraints.** The board is shared, and from it Andrew
 crosses freely into any tree. — confirmed 2026-08-09
 
-**Agents the top orchestrator spawns directly are owned by it — no other agent owns
+**Agents the dispatcher spawns directly are owned by it — no other agent owns
 them — and they answer to it.** They can talk to each other, but they should not: keeping
 it simple is the point. — confirmed 2026-08-09
 
 ### Interface
 
-**Every single view I see that is made by sb — `sb start`, orchestrators, agents, etc.
-— needs to be a split pane with `sb board`.** — confirmed 2026-08-09
+**Every single view I see that is made by sb — `sb start`, dispatchers, leads, agents,
+etc. — needs to be a split pane with `sb board`.** — confirmed 2026-08-09
 
 **`sb board` stays as it is right now.** It shows the full tree with its nest structure;
 an archived agent shows collapsed, which it already does. Clicking an agent's name in
@@ -213,17 +278,22 @@ later.) — confirmed 2026-08-09
 ### Commands
 
 **`sb delegate` figures out where a spawn lands rather than the caller passing flags for
-it.** The top can spawn a space with either an orchestrator or a single worker. —
-confirmed 2026-08-09
+it.** A dispatcher's spawn gets a space and a worktree of its own whatever role it is
+given — the code branches on the `is_top` stamp, not on the role. What a dispatcher
+actually hands out is a lead, every time: choosing a single worker instead would mean
+judging the work small enough for one agent, and that judgement moved to the lead when the
+dispatcher stopped interpreting. So the mechanism takes either and the rule is one of
+them. — confirmed 2026-08-09, lead-every-time 2026-08-14
 
-**The orchestrator handles cleanup itself, and it should do this aggressively** —
-probably literally every agent that is done. Cleaning up an orchestrator always cleans
-its children. — confirmed 2026-08-09
+**The lead handles cleanup itself, and it should do this aggressively** — probably
+literally every agent that is done. Cleaning up a lead always cleans its children. What
+stays open below a dispatcher is not the dispatcher's call: it is decided from the board
+by the person watching it. — confirmed 2026-08-09, the dispatcher half 2026-08-14
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
-orchestrator, which then decides whether to close it. It always uses the **when idle**
-delivery mode — which is also how an idle top learns a child finished: the held doorbell
-fires the moment the top is idle, so it is woken rather than monitoring. — confirmed
+parent, which then decides whether to close it. It always uses the **when idle**
+delivery mode — which is also how an idle dispatcher learns a child finished: the held
+doorbell fires the moment it is idle, so it is woken rather than monitoring. — confirmed
 2026-08-09
 
 **Cleanup closes the agents, closes the tab, and closes the entire space and deletes the
@@ -284,8 +354,8 @@ be brought up again.** — confirmed 2026-08-09
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
 **Pushing and merging are decided by the parent, which may or may not be a human.** An
-agent can push if its parent says so; a lead can push if the top orchestrator says so;
-any agent can merge if Andrew tells some top orchestrator and it passes that instruction
+agent can push if its parent says so; a lead can push if the dispatcher says so;
+any agent can merge if Andrew tells some dispatcher and it passes that instruction
 down. So it is never merge without asking your parent. The default shape of shipping work
 is branch named for the workspace, push, open the PR, and put its URL in the summary. —
 confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
@@ -325,8 +395,13 @@ decisions; this is the list of what no longer exists.*
 **`sb interrupt` as a verb.** Interrupting is a delivery mode of `tell`. — confirmed
 2026-08-09
 
-**`--keep`, `--ephemeral`, `--include-kept`, `--leave-children`.** Cleanup is the
-orchestrator's, and it always takes the children. — confirmed 2026-08-09
+**`--keep`, `--ephemeral`, `--include-kept`, `--leave-children`.** Cleanup is the lead's,
+and it always takes the children. — confirmed 2026-08-09
+
+**Hard tool-layer enforcement of what a dispatcher may do.** No gate, no blocked verbs: a
+dispatcher legitimately writes a handoff file and legitimately reads one, and a rule that
+cannot tell those from doing the work would either block the job or wave the work through.
+A well-written prompt is judged sufficient. — confirmed 2026-08-14
 
 **`--no-board`.** Every sb-made view is split with the board. — confirmed 2026-08-09
 
@@ -337,9 +412,24 @@ confirmed 2026-08-09
 
 ## Open / undecided
 
-*Questions Andrew has named as open — listed here so they are visibly undecided rather
-than quietly assumed.*
+*Questions that are open — listed here so they are visibly undecided rather than quietly
+assumed.*
 
-*Nothing open. The one item here — the mechanism distinguishing top from workspace
-orchestrators — was answered on 2026-08-09 and moved to Product decisions: `sb start` is
-the only path that creates a top, and `sb delegate` branches on that stamp.*
+*The item that used to sit here — the mechanism distinguishing the top agent from a
+nested one — was answered on 2026-08-09 by the `is_top` stamp and moved to Product
+decisions. That answer covered where an agent's children go; it never covered what an
+agent may do itself, which is now answered too, by the split into two roles with two
+prompts. Both are in Product decisions and neither is open. What follows is.*
+
+**Real cross-repo dispatch does not exist and is not close.** The store is per repo, so a
+child in another repo would have no parentage, no messaging, no status, no board row and
+no cleanup reaching it — that is a multi-store fleet, not a flag. What ships instead is a
+stopping rule: the dispatcher notices, asks, and starts nothing. Whether the missing thing
+is ever built is undecided. — open 2026-08-14
+
+**Whether every level really gets a worktree of its own.** Andrew described the hierarchy
+that way, and the code does not do it: only a dispatcher's children fork a worktree, and a
+lead's children are tabs sharing the lead's. This document was written to match the code —
+which is why the entries above say a lead's children share its worktree and assign disjoint
+files — so if the description is what he meant, several of those entries change and so does
+the code. His call, and with him now. — open 2026-08-14

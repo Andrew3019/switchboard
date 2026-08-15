@@ -87,11 +87,29 @@ linked_config = ["CLAUDE.md", ".switchboard"]
 human  = "human"
 parent = "parent"
 
-# The role `sb start` spawns. There is exactly ONE orchestrator role: the top-level agent,
-# a workspace lead, and a sub-orchestrator spawned by another orchestrator are all the same
-# thing at different scopes, and scope is told to them at spawn. Two roles meant two prompts
-# to keep in sync, and they drifted.
-main_role = "orchestrator"
+# The role `sb start` spawns — the top, and the only agent that is one. It holds no task
+# and no context: its job is to hand what it is given to a lead, so that every follow-up
+# continues with the agent that has the context. Everything nested is a `lead` instead,
+# at any depth, and that role holds everything about its task. The two used to be one
+# role at every scope; the split exists because "hold everything" and "hold nothing" do
+# not fit in one prompt without a conditional, and a conditional gets read selectively.
+main_role = "dispatcher"
+
+# Old role names that still work. A name here resolves to the role it points at — fields,
+# prompt and display name — instead of falling through to `fallback_role` below, which is
+# the difference between a stale `--role orchestrator` behaving as a lead and it silently
+# spawning an agent that cannot delegate at all. `orchestrator` maps to `lead` rather than
+# to `dispatcher` because that is what anyone typing it at `sb delegate` meant: an agent
+# that owns this piece of work and splits it. Empty it once nothing types the old name.
+#
+# What the rename does NOT reach, which matters on the day it lands. A running agent keeps
+# the prompt it was spawned with, so no top already up becomes a dispatcher — it goes on
+# being an orchestrator, holding context and doing its own planning, until it is restarted,
+# and every row already in the store goes on saying `orchestrator` forever. Both are
+# harmless because nothing decides anything from that string: `roles.get` resolves it here,
+# and everything structural reads the `is_top` stamp instead (`store.live_tops`, which
+# filtered on the role name until this rename made the running tops invisible).
+role_aliases = { orchestrator = "lead" }
 
 # The default NAME of the agent `sb start` spawns — separate from its role, so that
 # `sb start` with no arguments lands you somewhere obvious.

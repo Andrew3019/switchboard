@@ -50,7 +50,7 @@ class Fixture:
 
     def _top(self, name: str = "top") -> str:
         """What `sb start` produces: a bare space over the main checkout, stamped."""
-        store.create_agent(self.db, name=name, role="orchestrator", workspace=name,
+        store.create_agent(self.db, name=name, role="lead", workspace=name,
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
         return name
 
@@ -85,7 +85,7 @@ class TopStampTest(Fixture, unittest.TestCase):
     def test_the_stamp_is_independent_of_parent_and_branch(self):
         """The whole point: a row can be parentless and bare without being a top, and the
         two questions must give different answers."""
-        store.create_agent(self.db, name="loner", role="orchestrator")
+        store.create_agent(self.db, name="loner", role="lead")
         self.assertIsNone(store.get_agent(self.db, "loner")["parent"])
         self.assertIsNone(store.get_agent(self.db, "loner")["branch"])
         self.assertFalse(self.b.is_top("loner"))
@@ -170,9 +170,9 @@ class TopStampMigrationTest(unittest.TestCase):
     def test_pre_existing_tops_are_stamped_and_nobody_else_is(self):
         d = self._old_store()
         d.execute("INSERT INTO agents (name, role, state, workspace, created_at) "
-                  "VALUES ('main', 'orchestrator', 'working', 'main', 1)")
+                  "VALUES ('main', 'dispatcher', 'working', 'main', 1)")
         d.execute("INSERT INTO agents (name, parent, role, state, workspace, branch, "
-                  "created_at) VALUES ('lead', 'main', 'orchestrator', 'working', 'api', "
+                  "created_at) VALUES ('lead', 'main', 'lead', 'working', 'api', "
                   "'api', 1)")
         # Deliberately bare and NOT a top: the read-only agent whose shape used to be
         # indistinguishable from a top's, which is the bug this whole phase is about.
@@ -191,7 +191,7 @@ class TopStampMigrationTest(unittest.TestCase):
         """The behaviour the migration exists to preserve, not just the column value."""
         d = self._old_store()
         d.execute("INSERT INTO agents (name, role, state, workspace, cwd, pane_id, "
-                  "created_at) VALUES ('main', 'orchestrator', 'working', 'main', ?, "
+                  "created_at) VALUES ('main', 'dispatcher', 'working', 'main', ?, "
                   "'w1:p1', 1)", (str(self.path.parent),))
         d.commit()
         d.close()
@@ -221,10 +221,10 @@ class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
     def _bare_non_top(self) -> str:
         """A read-only agent under a lead: no worktree of its own, and no stamp."""
         self._top()
-        store.create_agent(self.db, name="lead", role="orchestrator", parent="top",
+        store.create_agent(self.db, name="lead", role="lead", parent="top",
                            workspace="api", branch="api", cwd=str(self.repo),
                            pane_id="w1:p2")
-        store.create_agent(self.db, name="scout", role="orchestrator", parent="lead",
+        store.create_agent(self.db, name="scout", role="lead", parent="lead",
                            workspace="api", pane_id="w1:p3")
         return "scout"
 
@@ -244,8 +244,8 @@ class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
     def test_a_sub_orchestrators_whole_subtree_stays_in_one_space(self):
         """Three deep. DESIGN-TRUTH: "a sub-orchestrator a lead spawns is a tab in the
         lead's space, and its whole subtree stays in that one space"."""
-        lead = self.b.delegate("t", role="orchestrator", me=self._top())
-        sub = self.b.delegate("t", role="orchestrator", me=lead)
+        lead = self.b.delegate("t", role="lead", me=self._top())
+        sub = self.b.delegate("t", role="lead", me=lead)
         kid = self.b.delegate("t", role="worker", me=sub)
         spaces = [store.get_agent(self.db, n)["workspace"] for n in (lead, sub, kid)]
         self.assertEqual(spaces, [lead, lead, lead])
@@ -276,7 +276,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             self.b.delegate("t", role="worker", me="w")
         self.assertIn("does not spawn", str(cm.exception))
-        self.assertIn("orchestrator", str(cm.exception))   # and what CAN, by name
+        self.assertIn("lead", str(cm.exception))          # and what CAN, by name
 
     def test_the_refusal_costs_no_row_and_no_pane(self):
         store.create_agent(self.db, name="w", role="worker", parent=self._top())
@@ -285,7 +285,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         self.assertIsNone(store.get_agent(self.db, "kid"))
         self.assertEqual(self.h.started, [])
 
-    def test_an_orchestrator_is_not_refused(self):
+    def test_a_lead_is_not_refused(self):
         self.assertTrue(self.b.delegate("t", role="worker", me=self._top()))
 
     def test_bareness_is_a_field_on_the_role_not_the_role_s_name(self):
@@ -312,6 +312,24 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             self.b.delegate("t", role="worker", me="x")
 
+    def test_a_row_that_still_says_orchestrator_may_still_delegate(self):
+        """The rename reaches the role table, never the rows already written. Every agent
+        alive on the day this lands has `orchestrator` on its row, and the check above
+        reads that string off the store — so without the alias resolving on a STORED role,
+        and not only on a typed `--role`, the previous test is the one that would fire and
+        the whole running fleet would lose the right to spawn."""
+        store.create_agent(self.db, name="old", role="orchestrator",
+                           parent=self._top(), workspace="api", branch="api",
+                           cwd=str(self.repo))
+        self.assertTrue(self.b.delegate("t", role="worker", me="old"))
+
+    def test_delegating_with_the_retired_name_files_the_child_as_a_lead(self):
+        """The alias resolves all the way, so the row says what the agent actually is: it
+        is holding the lead prompt, and a row saying `orchestrator` would be a third answer
+        to a question that already has two."""
+        kid = self.b.delegate("t", role="orchestrator", me=self._top())
+        self.assertEqual(store.get_agent(self.db, kid)["role"], "lead")
+
 
 # ---------------------------------------------------------------------------
 # 5.4 — the tree boundary
@@ -319,7 +337,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
 
 
 class TreeBoundaryTest(Fixture, unittest.TestCase):
-    """DESIGN-TRUTH:175-181. "Siblings are not invisible to each other; any other top
+    """DESIGN-TRUTH:243-249. "Siblings are not invisible to each other; any other top
     orchestrator's entire tree is invisible." And: "Only agents have the scope
     constraints" — the human crosses freely.
 
@@ -333,7 +351,7 @@ class TreeBoundaryTest(Fixture, unittest.TestCase):
         # Two trees, each two deep, so "sibling" and "cousin in another tree" are both
         # real positions rather than assertions about a pair of rows.
         for top in ("top-a", "top-b"):
-            store.create_agent(self.db, name=top, role="orchestrator", workspace=top,
+            store.create_agent(self.db, name=top, role="lead", workspace=top,
                                cwd=str(self.repo), pane_id=f"w:{top}", is_top=True)
             for kid in ("1", "2"):
                 store.create_agent(self.db, name=f"{top}-{kid}", role="worker",
@@ -352,7 +370,7 @@ class TreeBoundaryTest(Fixture, unittest.TestCase):
             self.b.tell(["top-b-1"], "hi", me="top-a-1")
         # Named as a boundary, not as a missing name: a workflow that quietly stops
         # crossing trees must not look like one that mistyped an agent.
-        self.assertIn("another top orchestrator's tree", str(cm.exception))
+        self.assertIn("another dispatcher's tree", str(cm.exception))
 
     def test_a_refused_tell_writes_no_message(self):
         with self.assertRaises(ValueError):
@@ -374,7 +392,7 @@ class TreeBoundaryTest(Fixture, unittest.TestCase):
         """Parentless and UNSTAMPED is not a tree of one.
 
         `sb delegate` typed by a person makes a root that is not a top, and two of them are
-        siblings in every sense that matters. The rule makes "another top orchestrator's
+        siblings in every sense that matters. The rule makes "another dispatcher's
         tree" invisible, and that is not what they are in. Treating each as its own tree
         cut a sibling off from a sibling — caught by the acceptance run's check 3, not by
         this file, which is why it is here now.
@@ -414,7 +432,7 @@ class TreeBoundaryCliTest(Fixture, unittest.TestCase):
         from switchboard import cli
         self.cli = cli
         for top in ("top-a", "top-b"):
-            store.create_agent(self.db, name=top, role="orchestrator", workspace=top,
+            store.create_agent(self.db, name=top, role="lead", workspace=top,
                                cwd=str(self.repo), pane_id=f"w:{top}", is_top=True)
             store.create_agent(self.db, name=f"{top}-1", role="worker", parent=top,
                                workspace=top, branch=top, pane_id=f"w:{top}-1")

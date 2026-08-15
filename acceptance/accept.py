@@ -463,11 +463,11 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
         f"LATER, only if you are told that you have mail, run: sb inbox — and then finish "
         f"by running: sb done \"WOKEN <paste here the exact text of what you read>\"")
 
-    # `--role orchestrator` because the parent's whole job here is to delegate, and since
+    # `--role lead` because the parent's whole job here is to delegate, and since
     # phase 5 a role without delegate rights is refused outright. Left at the default
     # (`worker`) this check failed with the parent's own `sb delegate` refused, which reads
     # as "the child never reported" and is not what it is measuring.
-    spawn = clone.sb("delegate", parent_task, "--name", parent, "--role", "orchestrator",
+    spawn = clone.sb("delegate", parent_task, "--name", parent, "--role", "lead",
                      "--json", timeout=SPAWN_S)
     if spawn.rc != 0:
         c.ok, c.seconds = False, now() - t0

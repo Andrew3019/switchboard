@@ -82,7 +82,7 @@ class RolesTest(unittest.TestCase):
     # prompt and silently dropped from the one that ships.
 
     def test_the_protocol_names_every_sanctioned_reason_to_block(self):
-        """DESIGN-TRUTH.md:142-145's five, three of which reached no prompt at all. Each is
+        """DESIGN-TRUTH.md:165-169's five, three of which reached no prompt at all. Each is
         checked by a phrase only that reason would produce, so a rewrite that drops one
         fails here rather than passing on the word "block"."""
         p = config.protocol(self.repo)
@@ -97,7 +97,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(phrase, p)
 
     def test_the_protocol_states_the_default_shape_of_shipping_work(self):
-        """DESIGN-TRUTH.md:281-284, and it goes to every role rather than to orchestrators
+        """DESIGN-TRUTH.md:356-362, and it goes to every role rather than to orchestrators
         alone — so it is asserted on the protocol, which is the only text all five share."""
         p = config.protocol(self.repo)
         for part in ("branch named for your workspace", "push", "pull request",
@@ -116,7 +116,7 @@ class RolesTest(unittest.TestCase):
         self.assertIn("Pushing and merging are your parent's call", every)
 
     def test_the_protocol_asks_for_skimmable_human_facing_output(self):
-        """DESIGN-TRUTH.md:135-140. The numbered-questions half was already taught; the
+        """DESIGN-TRUTH.md:158-163. The numbered-questions half was already taught; the
         formatting half was in no shipped prompt anywhere."""
         p = config.protocol(self.repo)
         for part in ("concise and skimmable", "bullets", "sections",
@@ -125,19 +125,127 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(part, p)
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
-        """"This must be known to all sessions" (DESIGN-TRUTH.md:292-295) — it used to be
+        """"This must be known to all sessions" (DESIGN-TRUTH.md:370-373) — it used to be
         known to orchestrators only, so the protocol is where it has to be."""
         p = config.protocol(self.repo)
         self.assertIn("sb presets", p)
         self.assertIn("--apply", p)
 
+    def test_a_dispatcher_asks_before_handing_work_into_another_repo(self):
+        """Andrew, on the recruiting incident: a dispatcher may hand work into a different
+        repo, but it asks first and it blocks without starting the task. Containment only —
+        it proves the rule is in the text every dispatcher is sent, not that one obeys it.
+        The failure it guards is the observed one: no flag exists for a cross-repo spawn,
+        so a dispatcher that does not stop dispatches a child that forks THIS repo and
+        edits the other project through a path."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("repo other than the one you were started in", prompt)
+        self.assertIn("Do not dispatch it and do not guess", prompt)
+        self.assertIn("sb block", prompt)
+        self.assertIn("start nothing until you have an answer", prompt)
+
+    def test_a_dispatcher_is_told_setting_up_another_repo_is_not_its_own_job(self):
+        """The other half of the same rule, and the half a dispatcher would otherwise get
+        wrong by being helpful. Note what is NOT behind it: `sb start` is refused to agents
+        (`cli._dispatch`), `sb init` is not — it runs before the caller is even resolved.
+        So this sentence is the only thing standing between a helpful dispatcher and a
+        pinned repo nobody asked for, which is why it is pinned here."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("sb init", prompt)
+        self.assertIn("Andrew's to run, not yours", prompt)
+        self.assertIn("that tree is not below", prompt)
+
+    def test_a_dispatcher_is_told_flatly_that_it_does_none_of_the_work(self):
+        """The prompt is the only mechanism here, and it does not arrive alone: the
+        protocol comes first ("do the task you were given"), this repo's house-rules
+        preset comes last ("run the suite", "commit on your own branch"), and both are
+        written for an agent that works. A trailing "past that you are doing the work" was
+        the whole of the counterweight and it loses on position. So the flat statement and
+        the tie-break both have to be in the text."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("You do none of the work, and that is unconditional", prompt)
+        self.assertIn("this file wins", prompt)
+        # And the licence that used to undercut it is gone, not merely outweighed.
+        self.assertNotIn("a glance at one file", prompt)
+
+    def test_a_dispatcher_is_given_a_verb_for_a_finished_child_and_none_for_cleanup(self):
+        """Two gaps that were both filled by silence. DESIGN-TRUTH says the dispatcher
+        blocks when work is done, but the prompt only said what NOT to do with a child's
+        report — and a report the dispatcher merely notes to itself reaches nobody, since
+        Andrew sees an agent only when it blocks. Cleanup is the mirror image: the protocol
+        hands every agent `sb cleanup` and calls it cheap, so leaving the reason for the
+        dispatcher's abstinence in a stripped comment left it with the verb and no rule."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("When a child reports done", prompt)
+        self.assertIn("You do not close agents", prompt)
+
+    def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
+        """The roles fragment every agent gets is generated from the role table, so it
+        advertises `dispatcher` as a name `--role` takes — and it is one: nothing refuses
+        it, by the same decision that refuses no other dispatcher behaviour. A nested agent
+        given the top's prompt would be told to hold nothing while its children landed as
+        tabs, so the role that does the spawning is told not to."""
+        prompt = roles.load(self.repo)["lead"].prompt
+        self.assertIn("`dispatcher`", prompt)
+        self.assertIn("only a human starting one creates it", prompt)
+
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH.md:161-162. Serialising overlap was already taught; assigning
+        """DESIGN-TRUTH.md:219-220. Serialising overlap was already taught; assigning
         ownership up front — the half that prevents the overlap — was not."""
-        prompt = roles.load(self.repo)["orchestrator"].prompt
+        prompt = roles.load(self.repo)["lead"].prompt
         self.assertIn("disjoint", prompt)
         self.assertIn("share your worktree", prompt)
         self.assertIn("Serialise", prompt)      # and the half that was already right
+
+    # -- the dispatcher / lead split --------------------------------------
+
+    def test_both_halves_of_the_split_ship_and_may_delegate(self):
+        """One role became two: `dispatcher` at the top, `lead` everywhere nested. Both
+        spawn agents, which is the field that matters — a half of the split that cannot
+        delegate is a half that cannot do its job."""
+        r = roles.load(self.repo)
+        for name in ("dispatcher", "lead"):
+            with self.subTest(role=name):
+                self.assertIn(name, r)
+                self.assertTrue(r[name].delegate)
+                self.assertTrue(r[name].prompt)
+
+    def test_the_retired_name_resolves_to_the_lead_and_not_to_the_fallback(self):
+        """`--role orchestrator` gets typed out of muscle memory long after the rename.
+        Unaliased it would inherit `fallback_role` (`worker`), whose `delegate` is False —
+        so the one name that used to mean "an agent that splits work" would silently spawn
+        an agent that cannot spawn anything. The alias resolves it all the way: the Role
+        that comes back IS the lead, name included, so the board, the prompt and the
+        stored row agree."""
+        r = roles.load(self.repo)
+        got = roles.get(r, "orchestrator")
+        self.assertEqual(got.name, "lead")
+        self.assertTrue(got.delegate)
+        self.assertEqual(got.prompt, r["lead"].prompt)
+
+    def test_a_repo_can_write_an_alias_of_its_own(self):
+        """The layering that `[vocabulary]` claims and that `roles.get` was not honouring:
+        both settings it reads are shipped-then-repo, and it was resolving them with no
+        repo at all, so a repo that retired a role of its own and wrote the alias for it got
+        silence — the name fell through to the fallback exactly as if nothing was written.
+        The shipped alias must survive the repo's, since appending is what every other layer
+        in this system does."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "settings.toml").write_text(
+            "[vocabulary]\nrole_aliases = { foreman = \"lead\" }\n")
+        r = roles.load(self.repo)
+        self.assertEqual(roles.get(r, "foreman", self.repo).name, "lead")
+        self.assertEqual(roles.get(r, "orchestrator", self.repo).name, "lead")
+
+    def test_a_dispatcher_and_a_lead_are_given_different_jobs(self):
+        """The one thing that justifies two prompts rather than one with a branch in it: a
+        dispatcher is built to hold nothing and a lead to hold everything about its task.
+        Asserted on the sentence each one opens with, so a merge that quietly re-unified
+        the two texts fails here."""
+        r = roles.load(self.repo)
+        self.assertIn("hold no task", r["dispatcher"].prompt)
+        self.assertNotIn("hold no task", r["lead"].prompt)
+        self.assertIn("own one task from end to end", r["lead"].prompt)
 
     # -- model tiers -----------------------------------------------------
 

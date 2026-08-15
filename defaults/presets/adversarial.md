@@ -7,10 +7,14 @@ review adversarial and made "run an adversarial review of this design" impossibl
 because there was no procedure anywhere, only a mood. One reviewer, one pass, one verdict,
 and nothing that converged on anything.
 
-It is now a PROCEDURE FOR AN ORCHESTRATOR. The human says "run an adversarial review of
-X"; the orchestrator reads this and runs the loop. Nothing here is addressed to a reviewer
-— the reviewer gets its lens in the task string the orchestrator writes, which is why the
-lens can be chosen for the artifact instead of being fixed in a file.
+It is now a PROCEDURE FOR THE AGENT RUNNING THE REVIEW — a `lead`, since the split (it was
+"an orchestrator" when this was written, and that role is now two). Whoever asked says "run
+an adversarial review of X"; the lead reads this and runs the loop. Nothing here is
+addressed to a reviewer — the reviewer gets its lens in the task string the lead writes,
+which is why the lens can be chosen for the artifact instead of being fixed in a file.
+Nothing in the body below names a role at all, which is why the rename did not reach it:
+it says "a procedure you run", and the only agent that reads it is the one told to run
+one.
 
 Three things are deliberate:
 
@@ -29,16 +33,17 @@ Three things are deliberate:
 
 The convergence rule is stated as a stop condition rather than a round count because the
 failure it guards against is a loop that keeps going while the reviewer invents smaller
-objections. The hard cap exists because "converged" is a judgement the orchestrator makes
+objections. The hard cap exists because "converged" is a judgement the lead makes
 about its own work, and a judgement with no ceiling is how three rounds becomes nine.
 
 BINDING: none, deliberately. This is not a disposition and must not go back onto the
 reviewer role — that would tax every reviewer spawn with a procedure meant for its parent,
-which is what it used to do. It is not bound to the orchestrator either, because a
-procedure used occasionally should not be paid for on every spawn that might one day use
-it. It is READ ON DEMAND: `sb presets adversarial` prints this file, and the orchestrator
-role points at it by name. That command exists because of this file — presets could only
-be listed, not read, so a procedure had to be stapled to a spawn to reach anyone.
+which is what it used to do. It is not bound to the lead either, because a procedure used
+occasionally should not be paid for on every spawn that might one day use it. It is READ
+ON DEMAND: `sb presets adversarial` prints this file (comments stripped, so this note is
+not part of what an agent reads), and the lead role points at it by name. That command
+exists because of this file — presets could only be listed, not read, so a procedure had
+to be stapled to a spawn to reach anyone.
 
 Which means the first rule of editing this file: it is read as prose, not flattened, so
 its layout is load-bearing in a way no bound preset's is.
