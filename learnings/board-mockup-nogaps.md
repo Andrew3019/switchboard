@@ -22,6 +22,13 @@ grouping variants, default `bracket`) and `--gutter-colour single|rotate` (defau
 > round 6 marks one-row workspaces and moves `done` off yellow; round 7 takes tops out
 > of the gutter and settles `done` on a muted blue; round 8 makes the panel fill the
 > pane. **Only the round 8 frames show what the board currently looks like.**
+>
+> **The footer `x  clear N gone` offer, visible in every frame from round 4 on, no
+> longer exists.** Andrew decided not to build it: nothing ever read the `x` key and
+> nothing ever swept a gone agent. It was removed from the real renderer
+> (`switchboard/richboard.py`, commit `3178f47`) and then from `scripts/board_mockup.py`.
+> The frames below are left as the record of what each round actually rendered at the
+> time — read them knowing the footer now carries the dim provenance note alone.
 
 ## Round 1 — no blank lines
 
@@ -419,6 +426,11 @@ bracketed.
 
 ### Gone agents: visible, and an offer in the footer
 
+> **The offer was never built and has since been removed.** The red `x  clear N gone`
+> block described here went from the real renderer in commit `3178f47` and from the
+> mockup script afterwards; the gone-row treatment (red row, struck-through name, `GONE`
+> tail) stayed. What follows is the round 4 record, not the current board.
+
 **Only the visual half.** No input handling, no sweep — the mockup reads no keys and
 clears nothing. What is here is how it would read.
 
@@ -715,7 +727,7 @@ style strings, so it is what the terminal is actually told.
 | NEEDS YOU name | `bold` | `1` | bold default |
 | NEEDS YOU reason | `dim` | `2` | dim default |
 | NEEDS YOU `+ N more` | `dim` | `2` | dim default |
-| Footer `x  clear N gone` | `bold white on red` | `1;37;41` | white on red |
+| Footer `x  clear N gone` (since removed) | `bold white on red` | `1;37;41` | white on red |
 | Footer provenance note | `dim` | `2` | dim default |
 
 Two things that fall out of the list, reported and not changed:

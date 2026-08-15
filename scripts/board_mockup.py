@@ -821,21 +821,13 @@ def render(agents: list[dict], width: int, source_note: str,
             needs.append(Text(clip(f"  + {len(wanted) - 6} more", inner), style=DIM,
                               no_wrap=True, overflow="crop"))
 
-    # The footer, with the gone-sweep affordance FIRST so a narrow pane clips the
-    # provenance note instead of the one actionable thing on the line. It is a sketch of
-    # a key, not a key: this mockup reads no input at all and clears nothing. What it
-    # shows is how the offer would read, and how many rows it would take.
-    doomed_n = sum(1 for a in agents if g(a, "gone"))
+    # The footer: the provenance note and nothing else, dim, like the real board's own
+    # footer. It used to carry a `x  clear N gone` offer on a red block; that was a
+    # sketch of a key and not a key — nothing read `x` and nothing swept anything — and
+    # the real renderer dropped it, so the mockup does not show an affordance the board
+    # does not have.
     foot = Text(no_wrap=True, overflow="crop")
-    used = 0
-    if doomed_n:
-        offer = f" x  clear {doomed_n} gone "
-        foot.append(clip(offer, inner), style="bold white on red")
-        used = vlen(clip(offer, inner))
-        if inner - used > 3:
-            foot.append("  ")
-            used += 2
-    foot.append(clip(f"{source_note} · mockup, not the board", inner - used), style=DIM)
+    foot.append(clip(f"{source_note} · mockup, not the board", inner), style=DIM)
 
     # FILL THE PANE. The panel is exactly `height` lines: two of border and `capacity`
     # of body. The agent rows sit at the top, NEEDS YOU and the footer are pinned to the
