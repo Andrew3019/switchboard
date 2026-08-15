@@ -231,6 +231,74 @@ def needs_kind(a) -> str:
     return ""
 
 
+def still_going(a) -> bool:
+    """Whether this agent is work in flight — the thing an ancestor is waiting ON.
+
+    Working, blocked, or sitting at a prompt: all three are a live subtree with something
+    still to come out of it. A finished agent is not, and neither is a GONE one — its pane
+    is not there, nothing is coming, and letting it stand in for live work is what would
+    keep a whole branch's idle ancestors out of the summons list forever.
+
+    Deliberately NOT the store's raw `state`, which says `working` about every open row
+    including the idle ones. `display_state` is the reconciled word — the same one drawn
+    on the agent's own row — so a subtree that has quietly gone idle stops holding its
+    ancestors back, and the board cannot say `idle` on a row and treat it as working here.
+    """
+    if a.finished or a.gone:
+        return False
+    return bool(a.blocked or a.at_prompt or a.display_state in status_mod.RUNNING)
+
+
+def busy_below(agents: list[Any]) -> set[str]:
+    """Every agent with at least one `still_going` agent somewhere BENEATH it.
+
+    Walks up from each live agent rather than down from each candidate: one pass over the
+    fleet, and no recursion to blow up on a deep tree.
+
+    Two shapes of broken data have to be survivable, because this runs on a snapshot the
+    board took of a live store and not on a tree anyone validated. A parent naming an agent
+    that is not in the snapshot (archived, swept, never collected) simply ends the walk —
+    `by_name.get` returns None. A cycle, including a row that is its own parent, is stopped
+    by `seen`, which starts holding the agent itself: nothing is ever its own descendant.
+    """
+    by_name = {a.name: a for a in agents}
+    out: set[str] = set()
+    for a in agents:
+        if not still_going(a):
+            continue
+        seen = {a.name}
+        up = by_name.get(a.parent) if a.parent else None
+        while up is not None and up.name not in seen:
+            seen.add(up.name)
+            out.add(up.name)
+            up = by_name.get(up.parent) if up.parent else None
+    return out
+
+
+def needs_list(agents: list[Any]) -> list[Any]:
+    """The NEEDS YOU section's membership, in the order it is drawn: blocked, then idle.
+
+    Blocked first because a blocked agent asked a question and is holding until a person
+    answers it, and it is listed whatever is happening under it — its own children cannot
+    unblock it.
+
+    AN IDLE AGENT WITH LIVE WORK BENEATH IT IS NOT THE HUMAN'S PROBLEM. `stalled` already
+    excuses a parent whose own direct children are open, but "open" is the store's word and
+    the excuse stops at one generation: a lead whose child is itself idle-with-a-working-
+    grandchild came back into the list, and every one of those rows summoned Andrew to an
+    agent he could only wait for. The rule is now the whole subtree and the reconciled
+    state: listed only when NOTHING under it is still going, recursively. Children that
+    finished or whose panes are gone hold nobody back.
+
+    Rows only, so the section is not the place this is decided twice — `_needs_block` draws
+    whatever this returns.
+    """
+    busy = busy_below(agents)
+    out = [a for a in agents if needs_kind(a) == "blocked"]
+    out += [a for a in agents if needs_kind(a) == "idle" and a.name not in busy]
+    return out
+
+
 def needs_reason(a) -> str:
     """Why this agent is in the list — the half after the kind word."""
     if a.at_prompt:
@@ -359,7 +427,7 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
                 continue                         # a top alone in its own workspace
             off = -1                             # the space before the glyph
         else:
-            off = 2 * (depth - 1)
+            off = len(board.INDENT) * (depth - 1)
         if first == last:                        # a workspace of one: a mark, not a bracket
             out[first] = (LONE_MARK, off)
             continue
@@ -422,8 +490,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # --- NEEDS YOU and the footer, sized before the body gets what is left ---
     # Read from `snap.agents` and not from `rows`: a blocked agent inside a collapsed
     # archive is still a person's problem, and the collapse must not be able to bury it.
-    wanted = [a for a in snap.agents if needs_kind(a) == "blocked"]
-    wanted += [a for a in snap.agents if needs_kind(a) == "idle"]
+    wanted = needs_list(snap.agents)
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
 
@@ -524,7 +591,7 @@ def _row_budget(window: list[Any], inner: int) -> tuple[int, int, bool, int]:
     reserve = max([0] + [_vlen(f[-1]) for f in (tail_forms(a) for a in live) if f])
     reserve += 2 if reserve else 0               # the two spaces before it
     w_state = max([0] + [_vlen(a.display_state) for a in live])
-    w_name_full = max([0] + [_vlen(("  " * a.depth) + a.name) for a in live])
+    w_name_full = max([0] + [_vlen((board.INDENT * a.depth) + a.name) for a in live])
 
     fixed = 3 + 2                                # " ● " and the gap before the state
     show_age = True
@@ -558,7 +625,7 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
     # nothing that carries meaning.
     doomed = bool(row.gone)
     g = board.glyph(row)
-    indent = "  " * row.depth
+    indent = board.INDENT * row.depth
     label = _pad(indent + clip_name(row.name, max(1, w_name - _vlen(indent))), w_name)
     name_style = "bold red strike" if doomed else "bold" if board.wants_you(row) else ""
 

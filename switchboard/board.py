@@ -374,6 +374,13 @@ def _starts_group(rows, i: int) -> bool:
 # a click on it does nothing (see `layout`).
 _BREAK = ""
 
+# One rung of the tree, in columns. FOUR, not two: at two the ladder was there but did not
+# read as one at a glance, which is the whole job of drawing depth at all. Named once and
+# shared with `richboard` (rows, name-column widths and the workspace gutter's offset all
+# have to agree, or the gutter lands outside the indentation it is drawn into) so the two
+# renderers cannot come to indent by different amounts.
+INDENT = "    "
+
 
 def _is_group(row) -> bool:
     """Is this display row a collapsed group rather than an agent?
@@ -493,7 +500,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # the end of every session is worse than one with a narrow column.
         # Columns, not characters, in both column widths and in every pad and clip
         # below — see `_visible_len`.
-        w_name = max([0] + [_visible_len(("  " * a.depth) + a.name)
+        w_name = max([0] + [_visible_len((INDENT * a.depth) + a.name)
                             for a, _ in window if not _is_group(a)])
         # `display_state`, not the store's raw word: `working` drawn next to this row's
         # own `STALLED — idle …` note is the row contradicting itself, and the one thing
@@ -510,7 +517,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 emit(_c("   " + status_mod.collapsed_label(a), DIM), a)
                 continue
             g = glyph(a)
-            label = ("  " * a.depth) + a.name
+            label = (INDENT * a.depth) + a.name
             # ONE LINE, and everything on it. Identity, state and age take fixed columns;
             # whatever is left goes to `detail_bits`, in priority order, and at sixty
             # columns that is usually room for one piece — which is the whole difference
