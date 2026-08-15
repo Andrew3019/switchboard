@@ -248,10 +248,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="with --reset-store: do it even though agents are running")
 
     c = cmd(
-        "cleanup", help="close finished agents",
+        "cleanup", help="close finished agents, and ones switchboard gave up on",
         description="With no name, closes every finished agent in your subtree (for a "
-                    "human: all of them). Naming agents closes those instead, and a name "
-                    "also means you want it closed whatever state it is in.")
+                    "human: all of them), plus any whose turn switchboard itself gave up "
+                    "on — a crashed session nobody reported an end for. Naming agents "
+                    "closes those instead, at the same bar; --force is what closes one "
+                    "whatever state it is in.")
     c.add_argument("name", nargs="*", help="specific agents to close")
     c.add_argument("--force", action="store_true",
                    help="close a NAMED agent whatever state it is in, unread mail and all "

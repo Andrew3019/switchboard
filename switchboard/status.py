@@ -592,8 +592,9 @@ class AgentStatus:
         `stalled` belongs here for the same reason the other three do, even though the
         agent is not asking: its turn ended without `sb done` or `sb block`, so the store
         will say `working` about it forever, no doorbell will ever ring it again, and
-        `sb cleanup` will not touch a row that is not finished. Nothing in the fleet moves
-        it. Left out of this predicate it appeared only in the DRIFT block at the bottom
+        `sb cleanup` will not touch it — its turn edge ended cleanly, so it is not a row
+        switchboard ever gave up on, which is the only unfinished row a sweep takes.
+        Nothing in the fleet moves it. Left out of this predicate it appeared only in the DRIFT block at the bottom
         of a full readout and in `--json`, so `sb status --needs-me` — the filter for
         "what wants me" — was the one view that dropped it.
 
@@ -1071,8 +1072,10 @@ def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
     The one write on the read path, and it is here because this is the only place that
     ever learns it. Nothing else closes a row that died abnormally — a crash, a pane
     closed from the outside, a herdr restart, a reboot — because the only writers of an
-    end are the agent's own `sb done` and a `sb cleanup` that already gates on the row
-    being finished. So the row claims `working` forever, `sb cleanup` cannot reach it,
+    end are the agent's own `sb done` and a `sb cleanup` that gates on the row being
+    finished, or on a turn edge switchboard gave up on — which a row whose turn ended
+    cleanly does not have. So the row claims `working` forever, `sb cleanup` cannot
+    reach it,
     and `sb start` counts it as an orchestrator that is still up. Recording it here is
     what unsticks all three.
 
