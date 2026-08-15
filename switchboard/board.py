@@ -543,11 +543,14 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # somewhere, because this screen is the only place the fact is relevant — and clipped
     # first, because it is the least useful thing on the line to somebody who already
     # knows. See `_frame`.
-    hints = "click a row to focus it · scroll to pan · a archived · q quits"
     from . import richboard
+    line = (_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
+            + ("   " + msg if msg else ""))
     if not richboard.available():
-        hints += " · plain: pip install rich"
-    emit(_c(hints, DIM) + ("   " + msg if msg else ""))
+        # AFTER the message, so it is this note that a narrow pane clips and never the
+        # answer to the click the human just made.
+        line += _c("  ·  pip install rich", DIM)
+    emit(line)
 
     # The one invariant this view rests on: no line may ever wrap. A wrapped line
     # pushes every row below it down by one, and the next click focuses the wrong
