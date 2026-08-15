@@ -3824,6 +3824,15 @@ class Broker:
           on. Mail for an agent that has finished AND lost its name binding is the one
           exception, because it is not mail anybody is going to read either way — see the
           gate itself.
+
+          "Finished" means the agent said so, OR switchboard has already decided it
+          stopped: a row `status` calls `stalled` is one whose turn ended with nothing
+          reported, and refusing to sweep it forever is how a crashed session came to sit
+          at `working` for six and a half hours. A sweep takes only `stalled` — the
+          debounced verdict the reconciler already trusts — and an agent named outright
+          also gets `turn_doubted`, which fires sooner. See `given_up_on`. The mail gate
+          is NOT lifted with it: mail is cleared by the close and by nothing else, so a
+          stalled row holding mail is still refused, and still needs `--force`.
         - **an end nobody reported is re-checked against herdr.** `done` is the agent's
           own word; `failed` is `status._record_gone`'s inference from one `agent list`,
           and that call can be taken mid-spawn or against a herdr that hiccupped. So for
@@ -3910,6 +3919,52 @@ class Broker:
                 store.log_event(self.db, kind="cleanup_refused", agent=a["name"],
                                 reason=reason[:EVENT_CLIP])
 
+        snap: list = []                        # one element once collected; [] until then
+
+        def given_up_on(name: str) -> bool:
+            """Has switchboard itself already decided this unfinished row has stopped?
+
+            The exemption gate 4a is built on, and it asks `status.py` rather than
+            answering for itself: `stalled` and `turn_doubted` are a join of our own turn
+            edge, herdr's live read and the idle clock, and none of those three is on the
+            `agents` row this loop works from. A second notion of "stalled" in here would
+            be a second thing to keep in agreement with the board and the reconciler.
+
+            Two bars, and the difference is who is asking:
+
+            - a SWEEP gets `stalled` alone — the debounced one, true only after
+              `_forget_turn` has cleared the stuck edge, i.e. after the full
+              `turn_stale_grace + turn_doubt_grace` window. It is the same predicate
+              `reconcile` already trusts to decide these rows are worth pinging, and
+              keeping "safe to sweep" and "safe to ping" in agreement is the point.
+            - a NAMED agent also gets `turn_doubted`, the undebounced single reading
+              that fires earlier — the doubt, before `_sustained` has confirmed it. Naming an agent is a parent or a person who has already
+              looked at the board, so the bar is lower than for an unattended sweep.
+
+            `--force` remains the escape for everything below even that. And this lifts
+            gate 4a only: live descendants, an unconfirmed end and unread mail all still
+            apply on top.
+
+            One `collect` per `cleanup`, taken lazily: a sweep whose candidates are all
+            finished never asks herdr at all, and a sweep over a hundred of them asks
+            exactly once — `collect` is one `agent list` plus one pass over the store,
+            priced by the size of the fleet and not by the number of candidates.
+
+            `reap=False` for the reason `reconcile` passes it: this reading is taken to
+            decide one command's behaviour, and letting it also write `failed` rows and
+            clear turn edges halfway through would have the gate deciding against a store
+            the gate itself had just moved.
+            """
+            from . import status as status_mod
+
+            if not snap:
+                snap.append({s.name: s for s in
+                             status_mod.collect(self.db, self.h, reap=False).agents})
+            s = snap[0].get(name)
+            if s is None:
+                return False
+            return s.stalled or (bool(names) and s.turn_doubted)
+
         for a in candidates:
             if a["name"] == me:
                 # Named, this is somebody asking to close the pane they are typing in.
@@ -3926,16 +3981,30 @@ class Broker:
                 refuse(a, "still working underneath: " + ", ".join(held[a["name"]]),
                        log=False)
                 continue                      # the invariant; see the docstring
+            stalled = False        # per candidate; only ever asked of an unfinished row
             if not force:
-                if a["state"] not in FINISHED:
-                    # only finished agents, and no flag lifts this
+                stalled = a["state"] not in FINISHED and given_up_on(a["name"])
+                if a["state"] not in FINISHED and not stalled:
+                    # only finished agents, or ones switchboard has given up on
+                    #
+                    # A row nothing has reported the end of used to sit here forever: the
+                    # 45-minute repair clears the stuck turn edge but never touches
+                    # `state`, so a crashed session read `working` to this gate for the
+                    # rest of the day and `--force` — which this refusal did not mention —
+                    # was the only way out. `given_up_on` is the exemption; the wording is
+                    # the rest of it.
                     #
                     # Blocked is the one state in here a sweep must still say out loud.
                     # An agent that is working will finish on its own and the next sweep
                     # takes it; an agent that is BLOCKED is stopped, waiting on a person,
                     # and the person most likely to see that line is the one who just ran
                     # `sb cleanup` and is about to walk away believing the fleet is idle.
-                    refuse(a, f"{a['state']}, not finished — it has not reported an end",
+                    #
+                    # `--force` is named only where it would be taken: it is illegal on a
+                    # sweep (see above), so promising it to a sweep would be pointing at a
+                    # command that answers with a refusal of its own.
+                    refuse(a, f"{a['state']}, not finished — it has not reported an end"
+                              + (". --force closes it anyway" if names else ""),
                            expected=a["state"] != "blocked")
                     continue
                 if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
@@ -3951,7 +4020,20 @@ class Broker:
                     # jams that row forever, closable by neither a sweep nor `--force`
                     # having been meant. Closing loses nothing; the message survives, and
                     # `sb restore` brings back an inbox that still holds it.
-                    refuse(a, "unread mail it could still read")
+                    #
+                    # A stalled row reaches this gate now that the one above lets it
+                    # through, and it is the gate that holds it: mail is cleared by the
+                    # close (`_clear_unreadable_mail`, below) and by nothing else, so
+                    # there is no path where the mail goes and the row stays. Saying only
+                    # "unread mail" to somebody looking at a row the board calls STALLED
+                    # reads as the stall not having been noticed at all, so say which gate
+                    # this is — and what it costs to lift, since nothing is lost: the
+                    # message survives in the inbox and `sb restore` brings it back.
+                    refuse(a, "unread mail it could still read" if not stalled else
+                              "stalled, but holding unread mail — that gate stands on its "
+                              "own, and only closing the row clears the mail"
+                              + (". --force closes it: the message survives in its inbox"
+                                 if names else ""))
                     continue
                 # A row written before `--keep` was removed. Nothing writes this any
                 # more, so this only ever fires for an agent that predates the removal —
@@ -3971,6 +4053,14 @@ class Broker:
                 # the escape hatch, and naming the agent is the confirmation.
                 store.log_event(self.db, kind="cleanup_forced_live", agent=a["name"],
                                 state=a["state"])
+            if stalled:
+                # The other way a row that never reported an end gets closed, and the one
+                # nobody typed `--force` for. `cleanup_forced_live` says a person overrode
+                # the gate; this says the gate opened by itself, and which reading opened
+                # it — otherwise the only trace of a sweep taking a `working` row is a
+                # `cleanup` event that looks exactly like closing a finished one.
+                store.log_event(self.db, kind="cleanup_stalled", agent=a["name"],
+                                state=a["state"], named=bool(names))
             try:
                 if a["pane_id"]:
                     self.h.release_agent(a["pane_id"], a["name"], store.next_seq(self.db, a["name"]))

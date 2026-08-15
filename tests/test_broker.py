@@ -2024,6 +2024,78 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(r, [])
         self.assertIn("unread mail", r.refused[0][1])
 
+    # -- cleanup reaches a stall ------------------------------------------
+
+    def _stalled_kid(self, *, turn: Optional[str] = None, idle_for: int = 0) -> None:
+        """A `working` row whose turn ended with nothing reported. The whole shape.
+
+        `session_id` puts it past the spawn grace, herdr answering `idle` is the pane
+        signal, and `created_at` is the idle clock — nothing has ever logged an event for
+        this row, so `status._last_activity` has nothing and `idle` is its age.
+        """
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="s-kid")
+        if turn is not None:
+            store.set_turn(self.db, "kid", turn)
+        if idle_for:
+            self.db.execute("UPDATE agents SET created_at=? WHERE name=?",
+                            (store.now() - idle_for, "kid"))
+            self.db.commit()
+        self.h.states_by_name = {"kid": "idle"}
+
+    def test_a_sweep_closes_a_row_whose_turn_ended_without_a_report(self):
+        """The six-and-a-half-hour row. Its session died mid-turn, so nothing ever wrote
+        `done` and nothing ever will — and the sweep used to refuse it forever on the
+        strength of a `state` column that only the agent itself could advance. `stalled`
+        is switchboard's own verdict that this one stopped, and the sweep takes it."""
+        self._stalled_kid()
+        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+        self.assertIn("w1:p1", self.h.closed)
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
+
+    def test_a_sweep_still_refuses_a_working_agent_and_names_the_way_through(self):
+        """The other half, and the one that must not regress: an agent herdr says is
+        mid-turn is not a stall, whatever its silence looks like. Naming it gets told
+        about `--force`; a sweep is not, because `--force` is illegal on a sweep."""
+        self._stalled_kid()
+        self.h.states_by_name = {"kid": "working"}
+        r = self.b.cleanup(["kid"], me="orch")
+        self.assertEqual(r, [])
+        self.assertIn("--force", r.refused[0][1])
+        self.assertEqual(self.h.closed, [])
+        self.assertNotIn("--force", self.restart_sb().cleanup(me="orch").refused[0][1])
+
+    def test_a_named_cleanup_takes_a_doubted_turn_that_a_sweep_will_not(self):
+        """The lower bar for a deliberate act. A stuck `working` edge means `stalled`
+        reads False until the 45-minute repair clears it; `turn_doubted` is the earlier,
+        undebounced doubt, and a parent naming the agent has already looked at the
+        board.
+
+        The sweep half is a dry run on purpose: a live refusal logs `cleanup_refused`
+        against the agent, which `status._last_activity` counts as the agent having done
+        something and which therefore resets the very idle clock `turn_doubted` is built
+        on. That is this file's subject nowhere — see the report — but a live sweep here
+        would be measuring it instead of the gate.
+        """
+        self._stalled_kid(turn=store.TURN_WORKING,
+                          idle_for=int(status.TURN_STALE_GRACE) + 60)
+        self.assertEqual(self.b.cleanup(me="orch", dry_run=True), [])   # a sweep waits
+        self.assertEqual(self.restart_sb().cleanup(["kid"], me="orch"), ["kid"])
+
+    def test_a_stalled_row_holding_mail_is_still_refused_and_says_so(self):
+        """The mail gate stands on its own. Mail is cleared by the close and by nothing
+        else, so letting the stall through the finished gate must not read as the stall
+        having been missed — the refusal names the gate that actually holds it."""
+        self._stalled_kid()
+        store.put_message(self.db, from_agent="orch", to_agent="kid",
+                          kind="tell", body="one more thing")
+        r = self.b.cleanup(["kid"], me="orch")
+        self.assertEqual(r, [])
+        self.assertIn("stalled", r.refused[0][1])
+        self.assertIn("unread mail", r.refused[0][1])
+        self.assertEqual(self.h.closed, [])
+
     def _legacy_keep(self, name: str) -> None:
         """A row as it was written before `--keep` was removed. Nothing writes this any
         more (see `store._INSERT_AGENT`), so a test that wants one writes the column."""
