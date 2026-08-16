@@ -1,0 +1,7 @@
+## NEGATIVE CONTROL: plain idle shell pane (no agent at all), pane w1HK:p6
+### herdr pane read --lines 20
+(base) andrew@Andrews-MacBook-Pr
+o-683 scratchpad %
+
+### herdr pane get w1HK:p6
+{"id":"cli:pane:get","result":{"pane":{"agent_status":"unknown","cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad","focused":false,"foreground_cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad","pane_id":"w1HK:p6","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":3},"tab_id":"w1HK:t1","terminal_id":"term_65927eea9937159","workspace_id":"w1HK"},"type":"pane_info"}}

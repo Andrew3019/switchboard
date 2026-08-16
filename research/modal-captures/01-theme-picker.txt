@@ -1,0 +1,28 @@
+## capture: first-run theme picker (modal), pane w1HK:p3
+### herdr pane read --lines 60
+(base) andrew@Andrews-MacBook-Pro-683 fresh-config % claude
+Welcome to Claude Code v2.1.233
+
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+   1. Auto (match terminal)
+ ❯ 2. Dark mode ✔
+   3. Light mode
+   4. Dark mode (colorblind-friendly)
+   5. Light mode (colorblind-friendly)
+   6. Dark mode (ANSI colors only)
+   7. Light mode (ANSI colors only)
+
+ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1  function greet() {
+  2 -  console.log("Hello, World!");
+  2 +  console.log("Hello, Claude!");
+  3  }
+ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  Syntax theme: Monokai Extended (ctrl+t to disable)
+
+### herdr agent get w1HK:p3
+{"id":"cli:agent:get","result":{"agent":{"agent":"claude","agent_status":"idle","cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad/fresh-config","focused":false,"foreground_cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad/fresh-config","pane_id":"w1HK:p3","revision":0,"state_change_seq":147,"tab_id":"w1HK:t1","terminal_id":"term_65927e45ee43953","workspace_id":"w1HK"},"type":"agent_info"}}
