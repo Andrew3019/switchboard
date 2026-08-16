@@ -493,8 +493,8 @@ class HeadlineTest(unittest.TestCase):
 class StatsSectionTest(unittest.TestCase):
     """The top section, and the ONE WAY IT CAN LIE.
 
-    `stats.Stats` is thirteen fields that are `None` until their group has been sampled —
-    on a board's first tick, all thirteen — and a `None` drawn as `0` turns "we could not
+    `stats.Stats` is fourteen fields that are `None` until their group has been sampled —
+    on a board's first tick, all fourteen — and a `None` drawn as `0` turns "we could not
     measure this" into a confident measurement, on a screen where nothing would look
     wrong. Both halves are pinned here: the unknown is not a zero, and the zero is not an
     unknown.
@@ -505,10 +505,10 @@ class StatsSectionTest(unittest.TestCase):
     """
 
     FULL = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
-            "store_age": 2.0, "lines_changed": 4412, "lines_changed_nondocs": 2516,
+            "store_age": 2.0, "code_added": 1740, "code_deleted": 776,
             "commits_last_hour": 25, "git_age": 30.0, "cpu_percent": 384.0,
-            "memory_bytes": 1288490188, "processes": 9, "cpu_cores": 10,
-            "proc_age": 1.0}
+            "memory_bytes": 1288490188, "memory_available_bytes": 6227702579,
+            "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
 
     def pieces(self, stats):
         return {label: bits for label, bits in board.stats_rows(stats)}
@@ -528,24 +528,65 @@ class StatsSectionTest(unittest.TestCase):
         hour in which nobody spawned anything is a fact, and the board reports it."""
         got = self.pieces({**self.FULL, "spawns_last_hour": 0, "messages_last_hour": 0})
         self.assertIn("0 spawns", got[board.STATS_HOUR])
-        self.assertIn("0 messages", got[board.STATS_HOUR])
+        # `mail` is uncountable, so it does not pluralise at any count.
+        self.assertIn("0 mail", got[board.STATS_HOUR])
+        self.assertNotIn("mails", " ".join(got[board.STATS_HOUR]))
         # Never "calls": nothing logs an sb invocation, so that number does not exist.
         self.assertNotIn("calls", " ".join(got[board.STATS_HOUR]))
 
     def test_the_numbers_read_the_way_a_person_would_size_them(self):
         got = self.pieces(self.FULL)
         self.assertEqual(got[board.STATS_HOUR],
-                         ["47 turns", "4.4k lines", "2.5k code", "25 commits", "6 spawns",
-                          "3 messages"])
-        # CPU against its denominator, because `ps` sums over the tree and 384% alone
-        # reads as a broken gauge; memory named `rss`, because summed RSS is an upper
-        # bound and not the fleet's footprint.
-        self.assertEqual(got[board.STATS_NOW], ["3.8 of 10 cores", "1.2G rss", "9 procs"])
+                         ["47 turns", "+1.7k/-776", "25 commits", "6 spawns", "3 mail"])
+        # CPU as a share of the WHOLE MACHINE, because `ps` sums over the tree and 384%
+        # alone reads as a broken gauge; memory named `rss`, because summed RSS is an
+        # upper bound and not the fleet's footprint.
+        self.assertEqual(got[board.STATS_NOW],
+                         ["38% cpu", "1.2G rss", "5.8G free", "17% mem", "9 procs"])
         # And a narrow pane keeps whole pieces from the important end — a half-written
-        # `4.4k li` says nothing and a dangling `·` says less.
-        room = board._visible_len("47 turns · 4.4k lines")
+        # `+1.7k/-7` says nothing and a dangling `·` says less.
+        room = board._visible_len("47 turns · +1.7k/-776")
         self.assertEqual(board.stats_fit(got[board.STATS_HOUR], room),
-                         ["47 turns", "4.4k lines"])
+                         ["47 turns", "+1.7k/-776"])
+
+    def test_the_code_piece_needs_both_halves_and_the_cpu_share_needs_its_cores(self):
+        """Half a `+/-` is a half measurement wearing whole punctuation, and a share of
+        the machine has no meaning without the machine's core count."""
+        for missing in ("code_added", "code_deleted"):
+            got = self.pieces({**self.FULL, missing: None})
+            self.assertFalse([p for p in got[board.STATS_HOUR] if p.startswith("+")],
+                             missing)
+        no_cores = self.pieces({**self.FULL, "cpu_cores": None})
+        self.assertNotIn("cpu", " ".join(no_cores[board.STATS_NOW]))
+        self.assertEqual(no_cores[board.STATS_NOW][0], "1.2G rss")   # the rest survives
+
+    def test_the_cpu_share_is_clamped_to_a_percentage_of_the_machine(self):
+        """Summed `ps` %CPU is a decaying average and can momentarily overshoot the box.
+        `104% cpu` reads as a broken gauge; 100 is the honest ceiling."""
+        hot = self.pieces({**self.FULL, "cpu_percent": 1040.0, "cpu_cores": 10})
+        self.assertEqual(hot[board.STATS_NOW][0], "100% cpu")
+        idle = self.pieces({**self.FULL, "cpu_percent": 0.0, "cpu_cores": 10})
+        self.assertEqual(idle[board.STATS_NOW][0], "0% cpu")
+
+    def test_the_memory_share_is_of_what_the_fleet_could_use_not_of_the_whole_box(self):
+        """`rss / (rss + free)`, deliberately: memory another program is holding is not
+        memory this fleet could have, and counting it would report a machine that is nearly
+        full as a quiet one. Half the usable memory is 50% however big the box is."""
+        got = self.pieces({**self.FULL, "memory_bytes": 4 * 1024 ** 3,
+                           "memory_available_bytes": 4 * 1024 ** 3})
+        self.assertIn("50% mem", got[board.STATS_NOW])
+        # And with nothing left, the fleet's share of what it could use is all of it.
+        full = self.pieces({**self.FULL, "memory_available_bytes": 0})
+        self.assertIn("100% mem", full[board.STATS_NOW])
+
+    def test_an_unreadable_free_figure_costs_the_share_and_not_the_rss(self):
+        """A machine whose free memory could not be read still reports what the fleet
+        holds — the two are separate measurements and one is not evidence about the
+        other."""
+        got = self.pieces({**self.FULL, "memory_available_bytes": None})
+        self.assertIn("1.2G rss", got[board.STATS_NOW])
+        self.assertNotIn("mem", " ".join(got[board.STATS_NOW]))
+        self.assertNotIn("free", " ".join(got[board.STATS_NOW]))
 
     def test_the_section_has_a_header_of_its_own_and_a_blank_line_under_it(self):
         """Andrew, reading the real board: the numbers want a `STATS` header like
