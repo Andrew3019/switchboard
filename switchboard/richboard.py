@@ -112,6 +112,22 @@ BORDER_STYLE = "blue"
 GUTTER_STYLE = "bold cyan"
 DIM = "dim"
 
+# The wash on the row a human just clicked — see `_wash` and `board.lit_row`.
+#
+# NEUTRAL, because every colour on this board already means something: green is working,
+# red is trouble, yellow is a summons, cyan is a workspace. A highlight that borrowed any
+# of them would say the agent had changed, when the only thing that changed is which row
+# the human last touched.
+#
+# DARK, because the row underneath has to stay readable and everything it is drawn in was
+# picked against a black pane. Lighter greys were tried on paper and lose the muted words
+# first — `done`'s steel blue, then the age — which is the wrong half to lose.
+#
+# `not dim` is the other half of readable. Dim grey on a grey wash is the one combination
+# that disappears, and it is the state word of every idle row plus the age of every row on
+# the board. Lifting it for the ten seconds the row is lit changes nothing the row SAYS.
+HIGHLIGHT_STYLE = "not dim on grey30"
+
 # A workspace holding one visible agent. A middle dot, not a bullet: `●` is already the
 # healthy-agent glyph and `•` beside it would read as a second status glyph.
 LONE_MARK = "·"
@@ -490,7 +506,8 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
-           note_text: str = "", show_archived: Optional[bool] = None
+           note_text: str = "", show_archived: Optional[bool] = None,
+           lit: Optional[str] = None
            ) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
@@ -504,6 +521,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     then adds one border line above and one below, and if the arithmetic ever stops being
     that — a wrapped row, a rich version that pads differently — the mismatch is caught
     here rather than showing up as a click that focuses the wrong agent.
+
+    `lit` is the name of the agent whose row was clicked recently enough to still be
+    marked, or None. A NAME and not a click time: WHEN is `board.lit_row`'s question and it
+    is asked once per frame, before this is called, so nothing in this renderer has to know
+    what time it is. The row it names is drawn washed (`_wash`); every other row, and a
+    name matching nothing on screen, draws exactly as it did before.
     """
     if not available() or width < MIN_WIDTH or height < MIN_HEIGHT:
         return None
@@ -591,7 +614,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             drawn += 1
         w_name, w_state, show_age, left = _row_budget(rows[first:last], inner)
         for i in range(first, last):
-            emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left),
+            # A collapsed row is never lit: it is not an agent, `lit` is a name, and a
+            # click on one focuses nobody — `board.main` says so rather than lighting it.
+            on = (lit is not None and not board._is_group(rows[i])
+                  and rows[i].name == lit)
+            emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on),
                  rows[i])
             drawn += 1
         if last < len(rows):
@@ -696,8 +723,30 @@ def _gutter(line, label: str, mark: Optional[tuple[str, int]], indent_cols: int,
         line.append(label, style=style)
 
 
+def _wash(line, inner: int) -> None:
+    """Mark this line as the one just clicked: a background across the WHOLE row.
+
+    PADDED FIRST, and that is the whole of why this is not one call. A row is drawn to
+    whatever it has to say and then stops — nothing pads it, because until now nothing
+    needed the columns after the last word. A background applied to the printed characters
+    alone ends wherever that row's tail happened to end, so a fleet of rows lights up with
+    a ragged right edge, which reads as a rendering fault and not as a mark. `_bar` fills a
+    line to `inner` for the same reason; this is that idiom applied to a line that already
+    has content.
+
+    Measured by `board._visible_len`, like every other width in this file, so the wash ends
+    in the same column the bars do — see `_lines` on why the two measurements must agree.
+
+    Applied LAST, over the finished row, so it can be one span rather than a rule every
+    `append` above has to remember. `rich` combines a later span over the earlier ones, so
+    the foregrounds carry meaning as before and only the background and the dimming change.
+    """
+    line.pad_right(max(0, inner - _vlen(line.plain)))
+    line.stylize(HIGHLIGHT_STYLE)
+
+
 def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state: int,
-         show_age: bool, left_used: int):
+         show_age: bool, left_used: int, lit: bool = False):
     """One agent's line — the whole of it, because an agent is one line."""
     from rich.text import Text
 
@@ -762,6 +811,8 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         line.append("  " + _clip(text, room), style="bold red" if doomed else "yellow")
     elif _excuse(row):
         line.append("  " + _clip(_excuse(row), room), style=DIM)
+    if lit:
+        _wash(line, inner)
     return line
 
 

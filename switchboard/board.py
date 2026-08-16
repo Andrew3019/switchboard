@@ -89,6 +89,16 @@ _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # how the same view came out two sizes.
 BOARD_SHARE = 0.45
 
+# How long the row a human clicked stays marked — see `lit_row`. Ten seconds is long
+# enough to look from the board to the pane that just took focus and back and still find
+# your place, and short enough that the mark is never answering an older question than the
+# one you are asking.
+#
+# NOTHING CLEARS IT AND NOTHING HAS TO. The board redraws every `REFRESH` (half a second),
+# so the mark expires on an ordinary refresh: no timer, no thread, and no clean-up path to
+# get wrong on the way out.
+HIGHLIGHT = 10.0
+
 # Colour is a nicety, never load-bearing: every distinction below is also carried
 # by a glyph or a word, so NO_COLOR loses nothing but polish.
 _COLOR = os.environ.get("NO_COLOR") is None
@@ -422,7 +432,8 @@ def _is_group(row) -> bool:
 
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
-           note_text: str = "", show_archived: Optional[bool] = None
+           note_text: str = "", show_archived: Optional[bool] = None,
+           lit: Optional[str] = None
            ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
@@ -441,6 +452,16 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     Every line is drawn by `emit`, which takes the owner alongside the text. A
     collapsed group carries itself; a group break carries `None`, which is what
     makes clicking it do nothing rather than focusing whatever is nearby.
+
+    `lit` — the row a click has just marked — is ACCEPTED AND NOT DRAWN here, and
+    the signature says so rather than the caller having to remember it: `_frame`
+    calls this and `richboard.layout` with the same keywords, and one renderer
+    quietly taking a keyword the other does not is how that seam rots. The mark is
+    a background across a whole line (`richboard.HIGHLIGHT_STYLE`) and this
+    renderer has no vocabulary for one — every colour it draws is a `_c` piece
+    that ends in a reset, so a background would have to be re-opened after each of
+    them and survive `_fit`, on the path that exists precisely so a machine without
+    `rich` still has a working board. Polish is what this renderer does without.
 
     `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
     being the same thing when collapse landed: `display_rows` replaces whole
@@ -640,6 +661,30 @@ def agent_at(rows, row: int):
     if i < 0 or i >= len(rows):
         return None
     return rows[i][1]
+
+
+def lit_row(click: Optional[tuple[str, float]], now: float) -> Optional[str]:
+    """Which agent's row is still marked from a click, or None. THE WHOLE RULE, and pure.
+
+    `click` is the last click that landed on an agent — `(name, time.monotonic())` — and
+    it is ONE SLOT, not a list. A second click MOVES the mark rather than adding one: two
+    lit rows would say two agents were just clicked, and the mark's only job is to answer
+    "which row did I just touch", which has exactly one answer. The first row goes dark the
+    instant the second lights, which is also what a human watching their own click expects.
+
+    MONOTONIC, not wall-clock. The board can outlive a clock correction, an NTP step or a
+    laptop suspend, and every one of those makes a wall-clock difference lie — a row lit
+    forever, or a row that never lights at all. Monotonic time has no opinion about what
+    time it is, which is the only property this needs.
+
+    An agent named here that is not on the screen — archived, collapsed, scrolled past, or
+    gone since the click — costs nothing: the renderer matches by name and finds nothing to
+    mark. See `richboard.layout`.
+    """
+    if click is None:
+        return None
+    name, when = click
+    return name if now - when < HIGHLIGHT else None
 
 
 def _visible_len(s: str) -> int:
@@ -854,7 +899,8 @@ def _size() -> tuple[int, int]:
 
 
 def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
-           show_archived: bool) -> list[tuple[str, Optional[object]]]:
+           show_archived: bool, lit: Optional[str] = None
+           ) -> list[tuple[str, Optional[object]]]:
     """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
 
     `richboard` is the look Andrew approved and it needs `rich`, which is
@@ -879,17 +925,18 @@ def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
     from . import richboard
 
     rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=show_archived)
+                            note_text=note_text, show_archived=show_archived, lit=lit)
     if rows is not None:
         return rows
     return layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived)
+                  note_text=note_text, show_archived=show_archived, lit=lit)
 
 
-def draw(snap, top: int, msg: str, note_text: str, show_archived: bool) -> list:
+def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
+         lit: Optional[str] = None) -> list:
     height, width = _size()
     rows = _frame(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived)
+                  note_text=note_text, show_archived=show_archived, lit=lit)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -948,13 +995,19 @@ def main() -> int:
     # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
     show_archived = status_mod.SHOW_ARCHIVED
+    # The last click that landed on an agent, and when — `lit_row` turns the pair into the
+    # row to mark, per frame. Kept here beside `top` and `msg` because it is the same kind
+    # of thing they are: what this human has done to this pane, held nowhere else and
+    # deliberately not persisted.
+    click: Optional[tuple[str, float]] = None
     try:
         tty.setraw(fd)
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)
         sys.stdout.flush()
 
         snap, note_text = refresh(sup)
-        rows = draw(snap, top, msg, note_text, show_archived)
+        rows = draw(snap, top, msg, note_text, show_archived,
+                    lit_row(click, time.monotonic()))
         last = time.time()
 
         while True:
@@ -989,6 +1042,12 @@ def main() -> int:
                             msg = "press a to show archived"
                         else:
                             msg = focus(a.name) if a else ""
+                            if a:
+                                # Marked because it was CLICKED, not because the focus
+                                # worked: the row answers "this is the one you just
+                                # touched", and a herdr that refused says so on the
+                                # status line, where an answer belongs.
+                                click = (a.name, time.monotonic())
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
@@ -996,7 +1055,13 @@ def main() -> int:
                 dirty[0] = True
                 last = time.time()
             if dirty[0]:
-                rows = draw(snap, top, msg, note_text, show_archived)
+                # `lit_row` is asked HERE, on the frame being drawn, rather than when the
+                # click came in — which is what makes the mark expire without anything
+                # having to expire it. The refresh above marks the board dirty twice a
+                # second whatever the human does, so the frame that stops lighting the row
+                # comes along on its own, within half a second of the ten seconds being up.
+                rows = draw(snap, top, msg, note_text, show_archived,
+                            lit_row(click, time.monotonic()))
                 dirty[0] = False
     except KeyboardInterrupt:
         pass

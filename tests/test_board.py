@@ -690,5 +690,33 @@ class CollapseLayoutTest(unittest.TestCase):
         self.assertIn(status.summary_line(s), board._ANSI.sub('', rows[0][0]))
 
 
+class HighlightTest(unittest.TestCase):
+    """Which row a click leaves marked, and for how long — `board.lit_row`, the pure half.
+
+    The mark itself is a background the renderer paints (`richboard._wash`); what is worth
+    pinning is the rule under it, because the rule is the part with no timer. Nothing
+    clears the mark: the board asks this question again on every frame it draws, so an
+    answer that stopped changing with `now` would leave a row lit for the rest of the
+    session and look exactly like a highlight that had simply been drawn.
+    """
+
+    def test_the_mark_lasts_and_then_stops_lasting(self):
+        click = ("worker-3", 100.0)
+        self.assertEqual(board.lit_row(click, 100.0), "worker-3")
+        self.assertEqual(board.lit_row(click, 100.0 + board.HIGHLIGHT - 0.1), "worker-3")
+        self.assertIsNone(board.lit_row(click, 100.0 + board.HIGHLIGHT))
+        self.assertIsNone(board.lit_row(click, 100.0 + board.HIGHLIGHT + 60))
+
+    def test_a_second_click_moves_the_mark_rather_than_adding_one(self):
+        """One slot, so this is arithmetic rather than a rule — which is the point. Two
+        rows lit at once would say two agents had just been clicked, and one of them
+        would be a row the human touched ten seconds ago and has already looked away
+        from. A click with nothing before it marks nothing at all."""
+        self.assertIsNone(board.lit_row(None, 500.0))
+        first = board.lit_row(("worker-3", 100.0), 101.0)
+        second = board.lit_row(("worker-9", 101.0), 101.0)
+        self.assertEqual((first, second), ("worker-3", "worker-9"))
+
+
 if __name__ == "__main__":
     unittest.main()
