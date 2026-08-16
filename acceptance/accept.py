@@ -33,7 +33,10 @@ otherwise-isolated stores, so every name here carries a random run id (`sba1b2c3
 WHAT IT LEAVES BEHIND: nothing. Agents, herdr workspaces, worktrees and the clones are
 all torn down on success, on failure, and on Ctrl-C. Never an unscoped `pkill`: agents are
 closed through `sb cleanup`, workspaces through `herdr workspace close <id>` selected by
-their checkout path, and the one process closed by pid is each clone's own collector,
+their checkout path AND refused unless every path herdr reports for them is inside this
+run's own directories (`workspace_is_ours` — herdr closes a whole worktree family when
+asked to close a repo's primary checkout), and the one process closed by pid is each
+clone's own collector,
 whose pid this script read out of that clone's own snapshot and verified before signalling.
 
 Logs and the raw evidence for every check are written to a run directory that SURVIVES the
@@ -147,6 +150,33 @@ def herdr_call(*args: str) -> Optional[dict]:
         return json.loads(r.out).get("result")
     except Exception:
         return None
+
+
+def workspace_is_ours(wt: dict, roots: list[Path]) -> bool:
+    """Is this herdr workspace provably one of ours — every path it names inside `roots`?
+
+    `herdr workspace close <id>` is not the single-workspace operation its name promises.
+    herdr groups a repo's primary checkout with every `git worktree` of it under one key
+    (the shared `.git`), and closing the primary closes the WHOLE group in one call — which
+    is how one hand-typed close took the live fleet down on 2026-08-16 (see
+    `notes/herdr-close-mechanism.md`). A clone is its own repository, so its key cannot
+    collide with the live fleet's; this function is what makes that an enforced fact rather
+    than an assumption. It answers False unless every path herdr reports for the workspace
+    is at or under a directory this run created — no path at all, one path outside, or an
+    unresolvable path all refuse.
+    """
+    real_roots = [Path(os.path.realpath(r)) for r in roots]
+    paths = [p for p in (wt.get("repo_root"), wt.get("checkout_path")) if p]
+    if not paths:
+        return False
+    for p in paths:
+        try:
+            here = Path(os.path.realpath(str(p)))
+        except OSError:
+            return False
+        if not any(here == root or root in here.parents for root in real_roots):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -288,10 +318,19 @@ class Clone:
         res = herdr_call("workspace", "list") or {}
         mine = str(self.path)
         home = str(Path.home() / ".herdr" / "worktrees" / self.name)
+        roots = [self.path, Path(home)]
         for w in res.get("workspaces", []):
             wt = w.get("worktree") or {}
             paths = f"{wt.get('repo_root', '')}|{wt.get('checkout_path', '')}"
             if mine in paths or home in paths:
+                # The substring match above SELECTS; this check AUTHORISES, and nothing is
+                # closed without it. A herdr close can take every workspace sharing the
+                # repo's `.git` with it, so "looks like ours" is not good enough to spend.
+                if not workspace_is_ours(wt, roots):
+                    self.log.write(self.name, f"teardown: REFUSING to close "
+                                              f"{w['workspace_id']} ({w.get('label')}): "
+                                              f"{paths} is not under {roots} — left open")
+                    continue
                 self.log.write(self.name, f"teardown: herdr workspace close "
                                           f"{w['workspace_id']} ({w.get('label')})")
                 herdr_call("workspace", "close", w["workspace_id"])

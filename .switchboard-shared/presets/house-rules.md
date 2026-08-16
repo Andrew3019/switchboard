@@ -36,6 +36,13 @@ rather than stating it flatly. Anything else machine-specific added here needs t
 treatment, or it belongs in `.switchboard/presets/` instead — a `<name>.md` there replaces
 the one here wholesale.
 
+THE `herdr workspace close` CLAUSE is paid on every spawn on purpose, next to the `pkill`
+one it rhymes with. Both are rules written by an outage: an agent whose own task told it to
+tear down with raw `herdr workspace close` ran it on a scratch workspace on 2026-08-16 and
+closed the whole fleet, because herdr groups a repo's primary checkout with every worktree
+of it under one key and closes the group. Task text saying it is exactly what failed, so the
+rule has to live somewhere no brief can omit. Mechanism: `notes/herdr-close-mechanism.md`.
+
 KEEP IT UNDER A MINUTE TO READ. It is paid on every single spawn by every agent. A fifth
 section is a real cost and should have to argue for itself.
 -->
@@ -53,8 +60,11 @@ work is judged on. Prove a fix in the smallest run that can tell fixed from brok
 - Never run a clone's `sb` from outside the clone; that silently touches the live store.
 - No endurance testing unless the bug itself is endurance. Rare and slow-burn faults are
   accepted; they will surface in real use.
-- Tear down everything you created. Never an unscoped `pkill` — one of those killed the
-  live fleet's collector.
+- Tear down everything you created, with `sb` — `sb cleanup`, `sb workspace close`. Never
+  raw `herdr workspace close`: on a repo's primary checkout it closes every other herdr
+  workspace sharing that repo's `.git`, which took the whole live fleet down on
+  2026-08-16. Never an unscoped `pkill` either — one of those killed the live fleet's
+  collector.
 
 **Tests.** Automated tests are for pinning a decision, not for confidence. Two or three per
 fix.

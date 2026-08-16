@@ -153,12 +153,54 @@ def task_arrived(cwd: Optional[str], text: str, *, since: float) -> bool:
     that happened to carry the same words; files untouched since then are skipped
     unread, which is what keeps this cheap enough to poll.
     """
+    # `any` short-circuits on the first match, so this still stops reading at the first
+    # file that answers the question — the cost that makes it pollable.
+    return any(_transcripts_with(cwd, text, since=since))
+
+
+def matched_transcript(cwd: Optional[str], text: str, *, since: float) -> Optional[str]:
+    """WHICH transcript `text` landed in — the session id of the agent that took it.
+
+    The same scan `task_arrived` makes, keeping the answer instead of throwing it away.
+    A freshly spawned agent's `session_id` is otherwise written by nothing until the
+    agent itself runs an `sb` command (`Broker._claim_session`), and an agent that is
+    killed, interrupted or superseded before it ever does is unrecoverable for its whole
+    life — `sb restore` has no session to restore. Two agents were permanently lost that
+    way on 2026-08-16. Reading it here, from the delivery proof, closes the window
+    before the agent has run anything.
+
+    Content, not time, is what makes this sound: `delegate` shares one cwd between a
+    parent and all its children, so the same transcript directory holds several live
+    sessions at once and "the file that changed most recently" is a guess. The task text
+    is the agent's own, and only its transcript carries it.
+
+    None on ambiguity as well as on no match: if two files in the window both carry the
+    text (two spawns seconds apart with textually identical first tasks — the empty
+    `spawn.start_task` placeholder makes that reachable), there is no way to tell which
+    is ours, and a wrong session id on the row is worse than none. An empty column is a
+    known gap; a wrong one sends `sb restore` into a stranger's session.
+    """
+    seen: list[str] = []
+    for sid in _transcripts_with(cwd, text, since=since):
+        seen.append(sid)
+        if len(seen) > 1:
+            return None
+    return seen[0] if seen else None
+
+
+def _transcripts_with(cwd: Optional[str], text: str, *, since: float):
+    """Session ids of the transcripts in `cwd` that carry `text`, written since `since`.
+
+    A generator, so a caller that only needs to know THAT one exists stops at the first
+    and a caller that needs to know it is the ONLY one keeps going. The scan itself is
+    the one `task_arrived` has always made.
+    """
     d = store.transcript_dir(cwd)
     if d is None or not d.is_dir():
-        return False
+        return
     needle = text.strip()
     if not needle:
-        return False
+        return
     floor = since - _CLOCK_SLOP
     for f in sorted(d.glob("*.jsonl")):
         try:
@@ -178,8 +220,11 @@ def task_arrived(cwd: Optional[str], text: str, *, since: float) -> bool:
             if not isinstance(content, str):
                 content = json.dumps(content)
             if needle in content:
-                return True
-    return False
+                # The file's stem IS the session id: Claude Code names each transcript
+                # for the session that wrote it, which is the same identifier
+                # `store.transcript_path` turns back into a path.
+                yield f.stem
+                break
 
 
 def _record_time(rec: dict) -> Optional[float]:

@@ -38,7 +38,9 @@ is what stops an isolated run from colliding with a live agent.
 ## What it leaves behind
 
 Nothing: agents (`sb cleanup --force`, by name), herdr workspaces (`herdr workspace close
-<id>`, selected by checkout path), the worktrees under `~/.herdr/worktrees/<run>/`, and the
+<id>`, selected by checkout path and refused unless every path herdr reports for the
+workspace is inside this run's own directories — herdr closes a repo's whole worktree family
+when asked to close its primary checkout, see `notes/herdr-close-mechanism.md`), the worktrees under `~/.herdr/worktrees/<run>/`, and the
 clones. On success, on failure, and on Ctrl-C. There is no `pkill` of any kind; the one
 process signalled by pid is each clone's own collector, whose pid the script reads from
 that clone's own snapshot and checks with `ps` before sending SIGTERM.

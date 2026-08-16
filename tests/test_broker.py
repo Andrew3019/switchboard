@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -165,6 +166,19 @@ class EvictingHerdr(FakeHerdrAPI):
     def report_state(self, pane, name, state, seq, **kw):
         super().report_state(pane, name, state, seq, **kw)
         self.unreachable.add(name)
+
+
+class SilentSessionHerdr(FakeHerdrAPI):
+    """The herdr that is actually installed: `agent start` names no session.
+
+    The plain fake hands one back, which is convenient everywhere else and is not what
+    0.8.x does — checked against every stored reply in the live store's event log. Only
+    the tests about where a session id comes from when herdr supplies none use this.
+    """
+
+    def start_agent(self, name, pane, **kw):
+        a = super().start_agent(name, pane, **kw)
+        return replace(a, session_id="")
 
 
 def reap_gone(db, h):
@@ -436,6 +450,65 @@ class BrokerTest(unittest.TestCase):
                 "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             }) + "\n")
             self.assertTrue(proof(now - 1))
+
+    def _transcript(self, home: Path, cwd: str, session_id: str, text: str) -> Path:
+        """A Claude Code transcript for `session_id`, holding `text` as a submitted turn."""
+        d = home / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{session_id}.jsonl"
+        p.write_text(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }) + "\n")
+        return p
+
+    def test_a_spawn_records_the_session_before_the_agent_runs_anything(self):
+        """The gap two agents were permanently lost through on 2026-08-16.
+
+        `session_id` is otherwise written only by `_claim_session`, off the agent's own
+        first `sb` command — so an agent killed, interrupted or superseded before it ran
+        one had no session on its row and `sb restore` had nothing to restore. The
+        delivery proof has already found the right transcript by content; this keeps it.
+        """
+        self.b = Broker(self.db, SilentSessionHerdr(), repo=self.repo)
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        home = Path(self.tmp.name) / "home-capture"
+        self._transcript(home, str(self.repo), "sess-from-transcript", "do the thing")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            name = self.b.delegate("do the thing", role="worker", me="orch")
+        # Nothing here ran `sb` as the child: the id came from its transcript.
+        self.assertEqual(store.get_agent(self.db, name)["session_id"],
+                         "sess-from-transcript")
+
+    def test_two_children_in_one_cwd_each_get_their_own_session(self):
+        """`delegate` shares one cwd between a parent and all its children, so the
+        transcript bucket holds several live sessions at once. Matching on the task text
+        is what keeps a child from claiming its sibling's session — the shape that made
+        after-the-fact recovery by cwd plus timing unsound."""
+        self.b = Broker(self.db, SilentSessionHerdr(), repo=self.repo)
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        home = Path(self.tmp.name) / "home-siblings"
+        self._transcript(home, str(self.repo), "sess-first", "review the design")
+        self._transcript(home, str(self.repo), "sess-second", "rewrite the parser")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            one = self.b.delegate("review the design", role="worker", me="orch")
+            two = self.b.delegate("rewrite the parser", role="worker", me="orch")
+        self.assertEqual(store.get_agent(self.db, one)["session_id"], "sess-first")
+        self.assertEqual(store.get_agent(self.db, two)["session_id"], "sess-second")
+
+    def test_a_session_herdr_reported_itself_is_not_overwritten(self):
+        """If herdr ever starts answering with a real session id, its answer wins: this
+        is a fallback for the hole, not a second opinion about a filled column."""
+        home = Path(self.tmp.name) / "home-noclobber"
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        self._transcript(home, str(self.repo), "sess-from-transcript", "do the thing")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            name = self.b.delegate("do the thing", role="worker", me="orch")
+        self.assertEqual(store.get_agent(self.db, name)["session_id"], f"sess-{name}")
 
     def test_as_prompt_overrides_the_role_prompt(self):
         self.b.delegate("t", role="worker", as_prompt="You are a haiku critic.", me="orch")
@@ -3391,9 +3464,44 @@ class WorkspacePlacementTest(unittest.TestCase):
 
     def test_restore_survives_a_vanished_workspace_too(self):
         """The path `sb start` actually took: restore a top-level orchestrator whose
-        recorded workspace died with the previous herdr."""
+        recorded workspace died with the previous herdr.
+
+        It still costs the placement rather than the restore — and the placement is no
+        longer simply lost: see the test below, which is why the tab here is the
+        name-resolved one and not None.
+        """
         self._parent(workspace_id="wA", session_id="sess-parent")
         self._workspace_gone()
+        self.b.restore("parent")
+        self.assertEqual(store.get_agent(self.db, "parent")["state"], "working")
+
+    def test_restore_after_a_dead_workspace_id_lands_back_in_the_named_space(self):
+        """The gap this closes. herdr hands ids out per RUN, so after a restart every
+        recorded `workspace_id` 404s — and restore used to fall all the way through to a
+        bare tab wherever herdr had focus, even though the space's NAME was on the row the
+        whole time. "Restored into the space it came from" was not true of any agent
+        restored after a restart.
+        """
+        self._parent(workspace_id="wA", session_id="sess-parent")
+        self._workspace_gone()                 # wA is dead; the name still resolves
+        self.b.restore("parent")
+        self.assertEqual(self.h.tabs[-1], "w-derived")
+        self.assertEqual(self.derived, ["main"])   # resolved by NAME, once
+
+    def test_a_restore_that_re_resolves_leaves_no_empty_pane_behind(self):
+        """The first attempt opens a bare tab before herdr disowns the id. It is ours, so
+        it is closed rather than left as one empty shell per dead workspace."""
+        self._parent(workspace_id="wA", session_id="sess-parent")
+        self._workspace_gone()
+        self.b.restore("parent")
+        self.assertEqual(len(self.h.closed), 1)
+
+    def test_a_space_that_is_genuinely_gone_still_degrades_to_a_bare_tab(self):
+        """Re-resolving is a second guess, not a new condition of the restore: a name that
+        resolves to nothing keeps today's behaviour rather than refusing."""
+        self._parent(workspace_id="wA", session_id="sess-parent")
+        self._workspace_gone()
+        self.b._workspace_id = lambda name: ""
         self.b.restore("parent")
         self.assertIsNone(self.h.tabs[-1])
         self.assertEqual(store.get_agent(self.db, "parent")["state"], "working")
@@ -3726,3 +3834,138 @@ class PinningHerdr(FakeHerdrAPI):
     def start_agent(self, *a, **kw):
         self.order.append("start")
         return super().start_agent(*a, **kw)
+
+
+class RestoreSweepTest(unittest.TestCase):
+    """`sb restore --sweep` — one command for the minutes after a herdr restart.
+
+    A restart takes out whatever panes existed at that moment, across every tree the human
+    had running, and leaves the rows behind. What the sweep has to get right is the scope
+    (whose agents it may touch), the selection (which rows count as "just went down"), the
+    order (parents first), and the report (nothing dropped in silence).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = FakeHerdrAPI()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _agent(self, name, *, parent=None, is_top=False, session=True, branch="main"):
+        store.create_agent(self.db, name=name, role="lead" if is_top else "worker",
+                           parent=parent, workspace="main", cwd=str(self.repo),
+                           branch=branch, pane_id=f"p-{name}", is_top=is_top,
+                           session_id=f"sess-{name}" if session else None)
+
+    def _crashed(self, *names):
+        """What `status._record_gone` leaves behind once the absence is confirmed."""
+        for n in names:
+            store.set_state(self.db, n, status.GONE_STATE)
+
+    def _fresh_broker(self) -> Broker:
+        """A second `sb` invocation. Each one is its own short-lived process, and the
+        herdr probe is cached per process on purpose — so a second sweep is a second
+        Broker, not a second call on this one."""
+        return Broker(self.db, self.h, repo=self.repo)
+
+    def test_restore_sweep_run_by_the_human_crosses_every_tree(self):
+        """The incident's own shape: a crash cohort spans whatever trees existed, because
+        a herdr restart does not respect tree boundaries. Parents come back before their
+        children, so a restored child's mail has a live pane to land in — and the row
+        nothing can restore is NAMED rather than left out of the list."""
+        self._agent("alpha", is_top=True)
+        self._agent("alpha-kid", parent="alpha")
+        self._agent("bravo", is_top=True)
+        self._agent("no-session", parent="bravo", session=False, branch="feature-x")
+        self._crashed("alpha", "alpha-kid", "bravo", "no-session")
+
+        r = self.b.restore_sweep(me=HUMAN)
+
+        self.assertEqual(sorted(r), ["alpha", "alpha-kid", "bravo"])
+        order = [s["name"] for s in self.h.started]
+        self.assertLess(order.index("alpha"), order.index("alpha-kid"))
+        self.assertEqual([n for n, _ in r.unrestorable], ["no-session"])
+        self.assertIn("feature-x", r.unrestorable[0][1])
+
+    def test_restore_sweep_run_by_an_agent_only_reaches_its_own_tree(self):
+        """Deliberately under-scoped, and neither of the two ways it could regress: not a
+        silent skip of the other tree, and not a `require_same_tree` exception that kills
+        the whole sweep on the first foreign row."""
+        self._agent("alpha", is_top=True)
+        self._agent("alpha-kid", parent="alpha")
+        self._agent("bravo", is_top=True)
+        self._crashed("alpha-kid", "bravo")
+
+        r = self.b.restore_sweep(me="alpha")
+
+        self.assertEqual(list(r), ["alpha-kid"])
+        self.assertEqual(r.failed, [])
+        self.assertEqual(store.get_agent(self.db, "bravo")["state"], status.GONE_STATE)
+        self.assertNotIn("bravo", [s["name"] for s in self.h.started])
+
+    def test_restore_sweep_is_a_noop_on_a_second_run(self):
+        """Twice is once, and it is once at the SELECTION, not only at the spawn: a
+        restored row is `working` with no `ended_at` and no `absent_since`, so the second
+        pass does not find it at all. Nothing is spawned a second time."""
+        self._agent("alpha", is_top=True)
+        self._agent("alpha-kid", parent="alpha")
+        self._crashed("alpha", "alpha-kid")
+        first = self.b.restore_sweep(me=HUMAN)
+        self.assertEqual(sorted(first), ["alpha", "alpha-kid"])
+        # herdr lists what it has started.
+        self.h.states_by_name = {"alpha": "idle", "alpha-kid": "idle"}
+
+        again = self._fresh_broker().restore_sweep(me=HUMAN)
+
+        self.assertEqual(list(again), [])
+        self.assertEqual(again.considered, 0)
+        self.assertEqual(len(self.h.started), 2)          # nothing spawned twice
+
+    def test_a_row_herdr_still_has_a_pane_for_is_skipped_not_spawned_twice(self):
+        """The other half of idempotency, and the one that survives a rewritten row: a
+        `failed` state is `status._record_gone`'s INFERENCE from one `agent list`, and
+        that call can be taken against a herdr that hiccupped. If the pane is really still
+        there, the sweep says so and leaves it alone — resuming a live agent's session in
+        a second pane is the one outcome here that no command undoes."""
+        self._agent("alpha", is_top=True)
+        self._crashed("alpha")
+        self.h.states_by_name = {"alpha": "idle"}         # herdr disagrees with the row
+
+        r = self.b.restore_sweep(me=HUMAN)
+
+        self.assertEqual(list(r), [])
+        self.assertEqual(r.skipped, [("alpha", "already running")])
+        self.assertEqual(self.h.started, [])
+
+    def test_a_herdr_that_cannot_be_asked_refuses_the_whole_sweep(self):
+        """"We cannot tell" is never reported as "nothing to restore" — that reads as
+        reassurance in the one moment it is false."""
+        self._agent("alpha", is_top=True)
+        self._crashed("alpha")
+        self.h.list_error = HerdrError("connection_refused", "no herdr")
+
+        with self.assertRaises(ValueError) as e:
+            self.b.restore_sweep(me=HUMAN)
+        self.assertIn("herdr cannot be reached", str(e.exception))
+        self.assertEqual(self.h.started, [])
+
+    def test_the_cohort_is_what_went_down_recently_not_everything_that_ever_failed(self):
+        """`sb restore <name>` is how an older crash comes back, one at a time, with a
+        person deciding. A row still inside its absence debounce counts too — which half
+        of the union a row is in depends only on when the collector last ticked."""
+        self._agent("old", is_top=True)
+        self._agent("mid-debounce", is_top=True)
+        self._crashed("old")
+        self.db.execute("UPDATE agents SET ended_at=? WHERE name=?",
+                        (store.now() - broker_mod.SWEEP_RECENT - 60, "old"))
+        self.db.execute("UPDATE agents SET absent_since=? WHERE name=?",
+                        (store.now(), "mid-debounce"))
+        self.db.commit()
+
+        r = self.b.restore_sweep(me=HUMAN, dry_run=True)
+
+        self.assertEqual(list(r), ["mid-debounce"])
