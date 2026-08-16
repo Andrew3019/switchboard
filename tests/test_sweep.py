@@ -12,10 +12,12 @@ fake.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import unittest
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -23,6 +25,24 @@ from switchboard import store, sweep  # noqa: E402
 from test_workspace_list import Harness  # noqa: E402
 
 DAY = 86400
+
+
+def no_identity_to_guess() -> dict:
+    """The environment of a machine git can auto-detect no committer on.
+
+    The Linux CI runner is one: no global or system config, and a hostname with no
+    domain in it, which git calls bogus and refuses to build an address from. macOS has
+    a `.local` hostname to work from, guesses happily, and that is why the macOS leg of
+    the matrix stayed green. `user.useConfigOnly` asks for that state on any machine:
+    it is the switch that turns off the guessing, and it leaves the repository's own
+    config as the only place an identity can come from, which is exactly the question.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("GIT_") and k != "EMAIL"}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+               GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="user.useConfigOnly",
+               GIT_CONFIG_VALUE_0="true")
+    return env
 
 
 class SweepHarness(Harness):
@@ -61,6 +81,23 @@ class SweepHarness(Harness):
         self.commit(path, cwd=checkout, message=message, age=age)
         return checkout
 
+    def merge(self, branch: str, *, env: Optional[dict] = None) -> None:
+        """Merge `branch` into the base, and refuse to carry on if git did not.
+
+        `Harness.git` returns the failure rather than raising it, so a merge that never
+        happened looks from here exactly like a landing check that cannot see one — and
+        that is how it read for a day, as a platform-fragile check rather than a fixture
+        that quietly did nothing (`test_a_merge_lands_where_git_can_guess_no_identity`).
+        A fixture that skips a step in silence is worse than one that breaks: it moves
+        the blame onto the code under test.
+        """
+        out = self.git("merge", "-q", "--no-ff", "-m", f"merge {branch}", branch,
+                       env=env)
+        if out.returncode != 0:
+            said = (out.stderr or out.stdout).strip().splitlines()
+            raise AssertionError(f"the fixture could not merge {branch!r}: "
+                                 f"{said[-1] if said else 'git said nothing'}")
+
     def stranded(self, branch: str) -> list[str]:
         base = sweep.base_ref(self.reader)
         return sweep.stranded(self.reader, sweep.tip_of(self.reader, branch), base)
@@ -86,7 +123,20 @@ class LandingTest(SweepHarness, unittest.TestCase):
 
     def test_a_branch_merged_into_main_is_landed(self):
         self.branched("merged", "switchboard/thing.py", "a feature that got merged")
-        self.git("merge", "-q", "--no-ff", "-m", "merge it", "merged")
+        self.merge("merged")
+        self.assertEqual(self.stranded("merged"), [])
+
+    def test_a_merge_lands_where_git_can_guess_no_identity(self):
+        """The Linux CI failure of 2026-08-16, pinned where it happened — in the fixture.
+
+        The check was never the fragile part and never ran on a merged branch at all:
+        the runner could auto-detect no committer, so the fixture's own `git merge`
+        refused to write a commit, and a branch that was never merged read as stranded.
+        The repo the harness builds carries an identity of its own now, so a merge here
+        is a merge on any machine. Same test as the one above, with the guessing off.
+        """
+        self.branched("merged", "switchboard/thing.py", "a feature that got merged")
+        self.merge("merged", env=no_identity_to_guess())
         self.assertEqual(self.stranded("merged"), [])
 
     def test_a_squashed_branch_is_landed_though_its_commits_are_ancestors_of_nothing(self):
@@ -214,7 +264,7 @@ class SweptSetTest(SweepHarness, unittest.TestCase):
             age = 0 if name == "young" else 3 * DAY
             checkout = self.branched(name, path, message, age=age)
             if name in ("landed", "young", "busy", "dirty"):
-                self.git("merge", "-q", "--no-ff", "-m", f"merge {name}", name)
+                self.merge(name)
             self.space(name, checkout, state="working" if name == "busy" else "done",
                        age=0 if name == "young" else 3 * DAY)
         Path(self.root / "wt" / "dirty" / "left-behind.md").write_text("unsaved\n")
@@ -231,7 +281,7 @@ class SweptSetTest(SweepHarness, unittest.TestCase):
     def test_nothing_is_swept_on_an_unknown_answer(self):
         """Unknown is not empty, and a sweep is the one loop that acts unattended."""
         checkout = self.branched("opaque", "switchboard/a.py", "a feature that merged")
-        self.git("merge", "-q", "--no-ff", "-m", "merge opaque", "opaque")
+        self.merge("opaque")
         self.space("opaque", checkout)
         import switchboard.live as live_mod
         live_mod.scan = lambda *a, **kw: None     # the machine would not answer

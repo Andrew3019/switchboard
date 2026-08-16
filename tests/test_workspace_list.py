@@ -42,6 +42,16 @@ class Harness:
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.git("init", "-q", "-b", "main")
+        # The repo carries an identity of its own, rather than every commit bringing one
+        # on its command line. A `git merge` needs a committer too, and it is not a
+        # command anybody thinks to decorate: on a machine with no global config and a
+        # hostname with no domain — the Linux CI runner — git can auto-detect no identity
+        # at all, refuses to write the merge commit, and `self.git` swallows the error,
+        # so the branch that was never merged reads as unmerged. macOS has a `.local`
+        # hostname to guess from, which is the whole of why that failed on one platform
+        # only. See `tests/test_sweep.py::LandingTest`.
+        self.git("config", "user.email", "t@t")
+        self.git("config", "user.name", "t")
         self.git("-c", "user.email=t@t", "-c", "user.name=t",
                  "commit", "-q", "--allow-empty", "-m", "x")
         self.db = store.connect(path=self.root / "state.db")
@@ -55,9 +65,11 @@ class Harness:
         self.db.close()
         self.tmp.cleanup()
 
-    def git(self, *args, cwd=None):
+    def git(self, *args, cwd=None, env=None):
+        """`env` is the child's whole environment, as `subprocess.run` takes it — it is
+        here so a test can ask what git does on a machine unlike this one."""
         return subprocess.run(["git", *args], cwd=str(cwd or self.repo),
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=env)
 
     def open_workspace(self, name: str = "api") -> dict:
         """Open the workspace `name` the one way left: a top delegates, and the child's
