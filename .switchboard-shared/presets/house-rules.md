@@ -20,7 +20,11 @@ from the landing-work rules is only the half nothing else says: commit on your o
 and this repo's default that the lead integrates. That half was a flat prohibition
 until 2026-08-12, when DESIGN-TRUTH made push and merge the parent's call; it is now a
 default the parent can override, because agents given a brief that said push and a preset
-that said never were guessing which one won.
+that said never were guessing which one won. On 2026-08-16 the prohibition was cut
+entirely and replaced by a pointer at the plans plugin's merge gate, matching the same cut
+in `defaults/protocol.md` — the gate tells an agent to merge, and it may not ship while
+anything here still says never. With the plugin off there is no gate and this is the
+default minus the prohibition, which is weaker and honest.
 
 The one clause that looks like a repeat and is not: "unproven and stated is fine, silent is
 not". The protocol says what a summary is FOR; it does not say that an unfinished proof
@@ -84,9 +88,9 @@ code.
 - `sb inspect`'s pane view is not a reliable liveness signal — it has repeatedly shown an
   empty pane or a shell error for an agent that was working fine. Use the agent tree.
 
-**Landing work.** Commit on your own branch. By default the lead integrates: do not
-push, open a pull request, merge or touch `main` unless your parent told you to. If it did,
-that instruction is your authority — follow it.
+**Landing work.** Commit on your own branch. Where a plan is running, its merge gate is
+the authority on pushing, opening a PR and merging; where none is, this repo's default is
+that the lead integrates and your parent's instruction overrides it.
 
 - Anything you left unproven belongs in your summary. Unproven and stated is fine; unproven
   and silent is not.
