@@ -284,6 +284,12 @@ TASK_CLIP = config.setting("limits.task_clip")
 # because a quoted "false" is a true string and would silently invert it.
 SHOW_ARCHIVED = config.flag("display.show_archived")
 
+# How long an INFERRED summons must hold before a board draws it — the NEEDS YOU debounce.
+# Read here, beside the model it qualifies, so the two renderers cannot come to debounce by
+# different amounts. See `AgentStatus.settled` for what it gates and
+# `display.needs_settle` in defaults/settings.toml for the measurements behind the number.
+NEEDS_SETTLE = config.setting("display.needs_settle")
+
 # Event kinds that NAME an agent without being that agent acting — see `_last_activity`,
 # which is the only thing that reads this and the only place the distinction costs anything.
 #
@@ -378,6 +384,13 @@ class AgentStatus:
     # an agent that quietly died, and telling those two apart at a glance is the whole
     # point of showing `idle` at all.
     idle_excuse: Optional[str] = None
+    # How long this row's INFERRED summons has held, in seconds, or None if nobody was
+    # watching continuously enough to say. See `settled`, which is the only reader, and
+    # `stamp_needs_for`, which is the only writer.
+    #
+    # Defaulted and last for the reason `turn` is: a hand-built row in a test, and a
+    # snapshot published by a collector running older code, both have to construct.
+    needs_for: Optional[int] = None
 
     @property
     def blocked(self) -> bool:
@@ -607,6 +620,43 @@ class AgentStatus:
                 or self.waiting_to_be_rung or self.stalled or self.signal_drift)
 
     @property
+    def inferred_summons(self) -> bool:
+        """Whether the reason to summon a human here is INFERRED rather than declared.
+
+        The two halves of NEEDS YOU are not the same kind of fact. `blocked` is a word the
+        agent wrote into the store when it stopped to ask, and `gone` is an absence herdr
+        confirmed and held for GONE_CONFIRM_GRACE; neither can be true for one tick and
+        false the next. These three are read fresh every tick off signals that do go the
+        other way a second later — a turn edge, a herdr screen-scrape — and they are
+        exactly the rows that flashed into NEEDS YOU for a frame and back out.
+
+        `signal_drift` is here for completeness rather than because it flickers: it already
+        requires STALL_GRACE of quiet, so the debounce below can never be what decides it.
+        """
+        return bool(self.stalled or self.at_prompt or self.signal_drift)
+
+    @property
+    def settled(self) -> bool:
+        """Has this row's summons held long enough that a board should draw it?
+
+        A debounce and NOT a new predicate: `stalled`, `at_prompt` and `needs_human` are
+        untouched, and so is everything that acts on them — the reconciler still pings, the
+        stop gate still gates, `--needs-me` still lists. What this gates is one thing, the
+        SUMMONS: whether a human is called over to a row whose trouble may not outlive the
+        frame it is drawn in.
+
+        True for anything that is not an inferred summons at all, so a blocked agent and a
+        gone one are drawn the instant they are seen — and true when `needs_for` is None,
+        which is what a reader gets when nobody watched continuously enough to time the
+        condition (`sb status`, any snapshot from a collector predating this). Unknown
+        means SHOW: a debounce that hides a row because it has no history is a debounce
+        that hides rows forever on the readouts that never had one.
+        """
+        if not self.inferred_summons or NEEDS_SETTLE <= 0:
+            return True
+        return self.needs_for is None or self.needs_for >= NEEDS_SETTLE
+
+    @property
     def archived(self) -> bool:
         """Its pane is not on herdr, and it is old enough for that to mean something.
 
@@ -643,6 +693,7 @@ class AgentStatus:
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
+            "needs_for",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -652,6 +703,7 @@ class AgentStatus:
                  waiting_to_be_rung=self.waiting_to_be_rung,
                  ringable=self.ringable,
                  signal_drift=self.signal_drift,
+                 settled=self.settled,
                  turn_doubted=self.turn_doubted,
                  archived=self.archived)
         return d
@@ -984,6 +1036,36 @@ def collect(
     hidden = len(agents) - len(kept)
 
     return Snapshot(now=now, agents=kept, herdr_error=herdr_error, hidden=hidden)
+
+
+def stamp_needs_for(snap: Snapshot, since: dict[str, int]) -> dict[str, int]:
+    """Time each row's inferred summons, in place. -> the memory for the next call.
+
+    `_sustained`'s question — has this reading held CONTINUOUSLY? — asked by the one process
+    that can ask it without a column. `absent_since` and `turn_doubt_since` are columns
+    because the readers that need them live for one `sb` command and share nothing else; the
+    collector is the opposite case, a single process ticking against the same fleet for
+    hours, and it is a READ-ONLY one. Writing a `needs_since` column would give the one
+    process the split exists to keep out of the store a reason to be in it, for a fact whose
+    whole lifetime is a few frames of a screen.
+
+    So the memory is a dict the caller keeps and hands back, and the cost of losing it is
+    stated rather than hidden: a collector that is replaced re-times every summons from
+    zero, and a row that was already stuck stays out of NEEDS YOU for one settle window
+    after the takeover. One window, once, on a restart that is itself seconds long.
+
+    A name that stops summoning is DROPPED, not zeroed — continuously is the word that
+    matters here as much as it does in `_sustained`, and a row that goes quiet, works for a
+    minute and goes quiet again is at the start of a new summons, not thirty seconds into
+    the old one.
+    """
+    out = {}
+    for a in snap.agents:
+        if not a.inferred_summons:
+            continue
+        out[a.name] = since.get(a.name, snap.now)
+        a.needs_for = max(0, snap.now - out[a.name])
+    return out
 
 
 def _confirmed_gone(db: sqlite3.Connection, absent: list[str],

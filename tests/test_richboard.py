@@ -35,8 +35,9 @@ HAVE_RICH = richboard.available()
 
 def agent(name, *, depth=0, parent=None, state="working", herdr_state="working",
           alive=True, stalled=False, gone=False, unread=0, task=None, blocked_why=None,
-          workspace="api", idle=5, undelivered=0, turn="working"):
+          workspace="api", idle=5, undelivered=0, turn="working", needs_for=None):
     return status.AgentStatus(
+        needs_for=needs_for,
         name=name, role="worker", parent=parent, depth=depth, state=state,
         herdr_state=herdr_state, alive=alive, stalled=stalled, gone=gone, unread=unread,
         age=100, idle=idle, last_activity=0, workspace=workspace, task=task,
@@ -332,6 +333,38 @@ class NeedsYouTest(unittest.TestCase):
                   blocked_why="which branch?"),
         )
         self.assertEqual(names, ["kid"])
+
+    def test_an_idleness_that_has_not_held_is_not_summoned_yet(self):
+        """The flicker itself: a row between two turns, and the same row a window later.
+
+        `needs_for` is the collector's timing of it, so this is the whole of what a
+        renderer sees — measured live at 2.7 s and 8.4 s on two real agents that then went
+        back to work.
+        """
+        fresh = agent("w1", stalled=True, turn="idle", idle=900, needs_for=3)
+        self.assertEqual(self._names(fresh), [])
+        held = agent("w1", stalled=True, turn="idle", idle=900,
+                     needs_for=int(status.NEEDS_SETTLE))
+        self.assertEqual(self._names(held), ["w1"])
+
+    def test_a_descendants_turn_gap_does_not_summon_its_ancestors(self):
+        """THE CASCADE, which the per-row debounce alone does not fix.
+
+        `lead` and `mid` have been idle for fifteen minutes and are settled, so nothing
+        about their own rows is in doubt. The only thing that changed is that `kid` fell
+        out of RUNNING for a couple of seconds between two turns — and without
+        `still_going` reading that as work in flight, that one gap summons Andrew to two
+        rows he can do nothing about, and then withdraws them.
+        """
+        settled = int(status.NEEDS_SETTLE)
+        names = self._names(
+            agent("lead", stalled=True, turn="idle", idle=900, needs_for=settled),
+            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900,
+                  needs_for=settled),
+            agent("kid", depth=2, parent="mid", stalled=True, turn="idle", idle=2,
+                  herdr_state="idle", needs_for=2),
+        )
+        self.assertEqual(names, [])
 
     def test_a_cycle_or_a_missing_parent_does_not_hang_the_board(self):
         # Snapshot data, not a validated tree: a parent may be archived out of the fleet,

@@ -185,16 +185,17 @@ def publish(paths: Paths, payload: dict) -> None:
     """Replace the snapshot atomically. A reader mid-write gets the PREVIOUS good one.
 
     `os.replace` on the same filesystem is a rename, which is atomic: a reader either
-    opens the old inode or the new one, never a file being filled in. Forty readers at
-    2 Hz against a writer at 0.5 Hz makes a torn read a certainty rather than a risk if
-    this is written in place, and a torn read of JSON is a traceback in a raw terminal.
+    opens the old inode or the new one, never a file being filled in. Forty readers and a
+    writer, all at `display.board_refresh` — 2 Hz since it went to half a second — makes a
+    torn read a certainty rather than a risk if this is written in place, and a torn read
+    of JSON is a traceback in a raw terminal.
 
     The temporary carries the writer's pid so two collectors that overlap for the instant
     it takes the loser to notice the lock cannot scribble on each other's tmp file.
 
     fsync before the rename: without it a crash can leave the new name pointing at a file
-    whose contents have not landed, which is a torn read with extra steps. One fsync every
-    two seconds, fleet-wide.
+    whose contents have not landed, which is a torn read with extra steps. One fsync per
+    tick, fleet-wide — the collector is the only writer however many panes are open.
     """
     paths.dir.mkdir(parents=True, exist_ok=True)
     tmp = paths.dir / f"snapshot.json.{os.getpid()}.tmp"

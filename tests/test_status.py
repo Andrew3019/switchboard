@@ -1816,5 +1816,62 @@ class CollapseTest(unittest.TestCase):
         self.assertEqual(len(status.display_rows(agents)), 11)
 
 
+class NeedsSettleTest(unittest.TestCase):
+    """The NEEDS YOU debounce: `stamp_needs_for` times a summons, `settled` gates it.
+
+    Two decisions are pinned here and nothing else. WHICH summonses are debounced — the
+    inferred ones only, so a block a human is waiting on is never held back — and that the
+    timing is CONTINUOUS, so a row that goes quiet, works, and goes quiet again starts its
+    window again rather than inheriting the old one. Both are the difference between a
+    debounce and a delay.
+    """
+
+    def row(self, name="w1", **kw):
+        kw.setdefault("state", "working")
+        return status.AgentStatus(
+            name=name, role="worker", parent=None, depth=0,
+            herdr_state=kw.pop("herdr_state", "idle"), alive=True,
+            stalled=kw.pop("stalled", False), gone=False, unread=0, age=100,
+            idle=kw.pop("idle", 60), last_activity=0, workspace=None, task=None,
+            blocked_why=kw.pop("blocked_why", None), **kw)
+
+    def snap(self, *rows, now):
+        return status.Snapshot(now=now, agents=list(rows))
+
+    def test_a_summons_is_unsettled_until_it_has_held_for_the_window(self):
+        a = self.row(stalled=True)
+        snap = self.snap(a, now=1000)
+        since = status.stamp_needs_for(snap, {})
+        self.assertEqual(a.needs_for, 0)
+        self.assertFalse(a.settled)
+
+        later = self.row(stalled=True)
+        status.stamp_needs_for(self.snap(later, now=1000 + int(status.NEEDS_SETTLE)), since)
+        self.assertEqual(later.needs_for, int(status.NEEDS_SETTLE))
+        self.assertTrue(later.settled)
+
+    def test_a_summons_that_lapses_starts_its_window_again(self):
+        """The turn gap this whole thing exists for, twice: idle, working, idle again is
+        two short summonses and not one long one."""
+        first = self.row(stalled=True)
+        since = status.stamp_needs_for(self.snap(first, now=1000), {})
+        working = self.row(stalled=False)
+        since = status.stamp_needs_for(self.snap(working, now=1010), since)
+        self.assertEqual(since, {})                       # dropped, not zeroed
+        again = self.row(stalled=True)
+        status.stamp_needs_for(self.snap(again, now=1020), since)
+        self.assertEqual(again.needs_for, 0)
+        self.assertFalse(again.settled)
+
+    def test_a_block_and_an_unwatched_row_are_never_held_back(self):
+        """`blocked` is a word the agent wrote, so it is drawn the instant it is seen —
+        and a row nobody timed (`sb status`, an older collector) is shown, never hidden."""
+        blocked = self.row(state="blocked", blocked_why="which pane?")
+        status.stamp_needs_for(self.snap(blocked, now=1000), {})
+        self.assertIsNone(blocked.needs_for)              # not an inferred summons at all
+        self.assertTrue(blocked.settled)
+        self.assertTrue(self.row(stalled=True).settled)   # never stamped -> unknown -> show
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -90,6 +90,10 @@ from . import panel
 from . import status as status_mod
 
 INTERVAL = config.setting("display.board_refresh")
+# The most of one core this loop may spend collecting, as a fraction. Not a tunable: it is
+# the one number that decides what a faster board can cost when a tick is slow, and the
+# arithmetic behind it is in `_gap`, which is the only reader.
+MAX_DUTY = 0.25
 # The floor between two doorbell runs, in seconds. Not a tunable: it is the one number
 # that decides how much a stuck target costs. Mail held back for an agent that stays busy
 # stays pending tick after tick, so without a floor this would spawn a process every
@@ -459,12 +463,17 @@ def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
 
 
 def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
-         last_good: Optional[dict]) -> Optional[dict]:
+         last_good: Optional[dict], needs: Optional[dict] = None) -> Optional[dict]:
     """One collect-and-publish. -> the snapshot dict now published.
 
     Publishing happens on the failure path too, and that is deliberate: a panel that can
     see the counters can say WHY it is stale, and a panel that can see nothing can only
     say that it sees nothing.
+
+    `needs` is the debounce's memory, carried across ticks by the caller and updated in
+    place — see `status.stamp_needs_for` for why this process is the one that holds it and
+    why it is a dict rather than a column. Omitted, nothing is timed and every renderer
+    falls back to drawing a summons the moment it appears, which is what they did before.
     """
     t0 = time.perf_counter()
     state.polls += 1
@@ -476,6 +485,12 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         state.errors += 1
         state.last_error, state.last_error_at = err, at
     else:
+        if needs is not None:
+            # Before `as_dict`, because the timing is a field of the rows being published
+            # and not something a renderer could work out for itself.
+            fresh = status_mod.stamp_needs_for(snap, needs)
+            needs.clear()
+            needs.update(fresh)
         last_good = snap.as_dict()
         state.collected_at = at
         # Not cleared on success: `sb doctor` wants the most recent error even on a
@@ -530,8 +545,11 @@ def run(*, cwd: Optional[Path] = None, interval: float = INTERVAL,
             return 1
 
         ticks = 0
+        needs: dict = {}
         while not stop.is_set():
-            last_good = tick(paths, state, db_path, last_good)
+            t0 = time.perf_counter()
+            last_good = tick(paths, state, db_path, last_good, needs)
+            elapsed = time.perf_counter() - t0
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:
                 break
@@ -544,10 +562,35 @@ def run(*, cwd: Optional[Path] = None, interval: float = INTERVAL,
             # panel can read a half-written envelope out of it.
             if _source_changed(state):
                 break
-            stop.wait(interval)
+            stop.wait(_gap(interval, elapsed))
         return 0
     finally:
         panel.release(fd)
+
+
+def _gap(interval: float, elapsed: float) -> float:
+    """How long to sleep after a tick that took `elapsed`. -> seconds, never below zero.
+
+    `interval`, unless honouring it would spend more of this process's life collecting than
+    `MAX_DUTY` allows. THE COST GUARD ON A FASTER BOARD, and it is here rather than in the
+    interval because the thing that varies is not the number a person set — it is what one
+    tick costs on the machine and the store it is actually running against.
+
+    Measured, on the largest store in this fleet (507 agents, 30 602 events): a collect is
+    57 ms median uncontended, of which `herdr agent list` is 11 ms and the rest is four
+    queries over the events table. At `board_refresh = 0.5` that is 11% of one core and
+    this returns the interval untouched — the guard never fires on a healthy machine. The
+    same collector on the same store under a working fleet measured 146 ms median and, at
+    the ninetieth percentile, near a second: at that price a fixed half-second gap is 2/3 of
+    a core, forever, for a readout nobody is looking at that hard. So the loop gives back
+    three seconds of quiet for every second it spends, and the board goes slower exactly
+    when the machine is busy — which is the direction a person would choose.
+
+    `stale_after` is above the worst of this on purpose (see defaults/settings.toml), so
+    backing off shows up as a board that updates a little less often, never as forty panes
+    announcing that the snapshot is stale.
+    """
+    return max(0.0, max(interval, elapsed * (1 - MAX_DUTY) / MAX_DUTY))
 
 
 def _nobody_is_looking(paths: panel.Paths, state: State, idle_exit: float) -> bool:

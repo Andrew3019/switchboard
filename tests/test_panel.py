@@ -45,12 +45,13 @@ RENDERER_MODULES = ("switchboard/panel.py", "switchboard/board.py",
                     "switchboard/richboard.py")
 
 
-def a_snapshot(*names, herdr_error=None, hidden=0, now=1000):
+def a_snapshot(*names, herdr_error=None, hidden=0, now=1000, stalled=False):
     return status.Snapshot(
         now=now, herdr_error=herdr_error, hidden=hidden,
         agents=[status.AgentStatus(
             name=n, role="worker", parent=None, depth=0, state="working",
-            herdr_state="working", alive=True, stalled=False, gone=False, unread=0,
+            herdr_state="idle" if stalled else "working", alive=True, stalled=stalled,
+            gone=False, unread=0,
             age=10, idle=5, last_activity=now - 5, workspace="api", task="do it",
             blocked_why=None, summary=None) for n in names])
 
@@ -494,6 +495,17 @@ class CollectorLoop(PanelTest):
         self.assertIsNotNone(r.collector["tick_ms"])
         self.assertFalse(r.stale)
 
+    def test_it_times_each_summons_across_ticks_and_publishes_the_age(self):
+        """The debounce's memory is this loop's, and the published `needs_for` is the only
+        way a renderer can know a summons is a second old rather than an hour.
+
+        Two ticks ten seconds apart on the same stalled agent: the second says ten.
+        """
+        self._run([(a_snapshot("w1", stalled=True, now=1000), None),
+                   (a_snapshot("w1", stalled=True, now=1010), None)])
+        a = panel.read(self.paths).snap.agents[0]
+        self.assertEqual(a.needs_for, 10)
+
     def test_a_failing_tick_keeps_the_last_good_tree_and_lets_it_age(self):
         """Blanking the panel on one bad tick would be worse than showing the last good
         one — but showing it as current would be worse than either, so `collected_at`
@@ -549,6 +561,34 @@ class CollectorLoop(PanelTest):
         self.assertFalse(self.paths.demand.exists())
         self._run([(a_snapshot("w1"), None)] * 3, idle_exit=60.0, max_ticks=3)
         self.assertEqual(panel.read(self.paths).collector["polls"], 3)
+
+
+class WhatAFasterBoardMayCost(PanelTest):
+    """The guard on the interval: a cheap tick honours it, an expensive one backs off.
+
+    `display.board_refresh` went from two seconds to half a second, and the renderers' side
+    of that is free — a read of one small file. The collector's is not: measured at 57 ms
+    per tick uncontended on the largest store in this fleet, and 146 ms with occasional
+    ticks near a second on a machine under load. A fixed half-second gap at that price is
+    two thirds of a core, forever, for a readout nobody is looking at that hard.
+    """
+
+    def test_a_cheap_tick_sleeps_the_whole_interval(self):
+        self.assertEqual(collector._gap(0.5, 0.057), 0.5)
+
+    def test_an_expensive_tick_gives_back_more_than_it_took(self):
+        """The interval stops being a floor on the cost the moment honouring it would
+        spend more than `MAX_DUTY` of this process's life collecting."""
+        gap = collector._gap(0.5, 1.0)
+        self.assertAlmostEqual(gap, 3.0)                                  # MAX_DUTY = 0.25
+        self.assertLessEqual(1.0 / (1.0 + gap), collector.MAX_DUTY + 1e-9)
+
+    def test_the_backoff_stays_inside_the_staleness_threshold(self):
+        """A board that slows down must not become forty panes announcing a stale
+        snapshot: the worst tick measured, backed off, is still younger than
+        `panel.stale_after`."""
+        worst = 1.11                                     # the slowest live tick sampled
+        self.assertLess(worst + collector._gap(0.5, worst), panel.STALE_AFTER)
 
 
 class TheCollectorNoticingItsOwnCodeChanged(PanelTest):
