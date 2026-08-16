@@ -182,6 +182,53 @@ turn_working = "working"
 turn_idle    = "idle"
 
 
+[sweep]
+# The automatic worktree sweep — `switchboard/sweep.py` for the rules, `Broker.sweep` for
+# what acts on them. Read that module before changing a number here: every one of these is
+# a policy Andrew settled on 2026-08-16, not a tuning knob somebody guessed at.
+
+# Whether a board sweeps at all. False leaves `sb sweep` working when typed by hand, and
+# is how a machine opts out of the automatic half without editing code.
+enabled = true
+
+# Seconds between ticks. 1800 puts them on :00 and :30 of the system clock — the slot is
+# `epoch // period`, so any period that divides an hour lands on the clock rather than on
+# whenever the board happened to start. A sweep runs from a BOARD, so no board running
+# means no sweep at all; that is the accepted cost of not having a daemon.
+period = 1800.0
+
+# How old a worktree must be on BOTH clocks — last agent activity in the workspace, and
+# last commit date — before it may be deleted. Either one being more recent than this
+# holds it open. 24h.
+min_age = 86400.0
+
+# A stranded commit is docs-only if every file it touches is a `.md` or lives under one of
+# these. Path-based, deliberately: see `sweep.docs_only`.
+docs_dirs = ["notes", "design", "learnings", "research"]
+
+# ...except these, which are never docs however they are spelled. DESIGN-TRUTH.md is the
+# only trusted document in the repo and only Andrew edits it, so an unpushed change to it
+# is not a note somebody can regenerate.
+docs_never = ["DESIGN-TRUTH.md"]
+
+# Shortest commit subject the squash-merge check will match on (`sweep.stranded`, rule 3).
+# A subject shorter than this — "wip", "fix" — would match half a history.
+min_subject = 12
+
+# Whether ignored content in a checkout holds it back from an automatic sweep the way it
+# holds back `sb workspace close` without `--yes`.
+#
+# FALSE, and this is the one rule here that is not straight from Andrew's list. Every
+# worktree in this repo carries ignored files — `__pycache__/`, `.pytest_cache/`, and the
+# `.switchboard` symlink switchboard itself planted — so with this true the sweep refuses
+# all 147 of them and deletes nothing, which is not a conservative sweep, it is no sweep.
+# What still holds a checkout open is work git can SEE: anything modified or untracked is
+# an unconditional refusal (`_inventory_gate`), and that is where uncommitted work lives.
+# The exposure this accepts is an ignored file somebody meant to keep — a real `.env` in
+# an agent's worktree — going with the checkout. Set it true to get the refusal back.
+ignored_content_holds = false
+
+
 [limits]
 # Caps, in characters. None of these is a buffer limit; they are smell detectors.
 #
