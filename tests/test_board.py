@@ -26,7 +26,7 @@ from switchboard import board, panel, richboard, status  # noqa: E402
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
           summary=None, parent=None, archived=False, undelivered=0, undelivered_age=0,
-          idle_excuse=None):
+          idle_excuse=None, pane_id=None):
     """One agent. `archived=True` sets what being absent from herdr past the spawn
     grace actually looks like, so the real `AgentStatus.archived` decides — nothing
     here mocks the predicate."""
@@ -39,7 +39,7 @@ def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
         idle=5, last_activity=0, workspace="api", task=task,
         blocked_why=blocked_why, summary=summary,
         undelivered=undelivered, undelivered_age=undelivered_age,
-        idle_excuse=idle_excuse,
+        idle_excuse=idle_excuse, pane_id=pane_id,
     )
 
 
@@ -782,32 +782,67 @@ class CollapseLayoutTest(unittest.TestCase):
         self.assertIn(status.summary_line(s), board._ANSI.sub('', rows[0][0]))
 
 
-class HighlightTest(unittest.TestCase):
-    """Which row a click leaves marked, and for how long — `board.lit_row`, the pure half.
+class YouAreHereTest(unittest.TestCase):
+    """Which row a board highlights: the agent sharing its own tmux tab.
 
-    The mark itself is a background the renderer paints (`richboard._wash`); what is worth
-    pinning is the rule under it, because the rule is the part with no timer. Nothing
-    clears the mark: the board asks this question again on every frame it draws, so an
-    answer that stopped changing with `now` would leave a row lit for the rest of the
-    session and look exactly like a highlight that had simply been drawn.
+    The mark itself is a background the renderer paints (`richboard._wash`) and the live
+    proof is two boards on two tabs lighting two different rows — neither is testable here.
+    What is pinned is the join, which is the part with no terminal in it: a `herdr pane
+    list` payload and a tab id in, a set of sibling pane ids out (`tab_siblings`), and
+    those against published rows to a name (`here_agent`).
     """
 
-    def test_the_mark_lasts_and_then_stops_lasting(self):
-        click = ("worker-3", 100.0)
-        self.assertEqual(board.lit_row(click, 100.0), "worker-3")
-        self.assertEqual(board.lit_row(click, 100.0 + board.HIGHLIGHT - 0.1), "worker-3")
-        self.assertIsNone(board.lit_row(click, 100.0 + board.HIGHLIGHT))
-        self.assertIsNone(board.lit_row(click, 100.0 + board.HIGHLIGHT + 60))
+    # `herdr pane list`'s own shape, trimmed to the keys this reads — one tab holding an
+    # agent pane and the board beside it, and a second tab of the same shape.
+    PANES = [
+        {"pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "claude"},
+        {"pane_id": "w1:p2", "tab_id": "w1:t1"},
+        {"pane_id": "w1:p3", "tab_id": "w1:t2", "agent": "claude"},
+        {"pane_id": "w1:p4", "tab_id": "w1:t2"},
+    ]
+    ROWS = [agent("alpha", pane_id="w1:p1"), agent("beta", pane_id="w1:p3")]
 
-    def test_a_second_click_moves_the_mark_rather_than_adding_one(self):
-        """One slot, so this is arithmetic rather than a rule — which is the point. Two
-        rows lit at once would say two agents had just been clicked, and one of them
-        would be a row the human touched ten seconds ago and has already looked away
-        from. A click with nothing before it marks nothing at all."""
-        self.assertIsNone(board.lit_row(None, 500.0))
-        first = board.lit_row(("worker-3", 100.0), 101.0)
-        second = board.lit_row(("worker-9", 101.0), 101.0)
-        self.assertEqual((first, second), ("worker-3", "worker-9"))
+    def test_each_board_finds_the_agent_on_its_own_tab_and_not_the_other_one(self):
+        """The whole feature in one assertion. Two boards, two tabs, two answers — if
+        this ever returned the same name for both, every board in the fleet would be
+        highlighting one agent and saying "you are here" to forty people at once."""
+        first = board.tab_siblings(self.PANES, "w1:t1", "w1:p2")
+        second = board.tab_siblings(self.PANES, "w1:t2", "w1:p4")
+        self.assertEqual((first, second), (["w1:p1"], ["w1:p3"]))
+        self.assertEqual(board.here_agent(self.ROWS, first), "alpha")
+        self.assertEqual(board.here_agent(self.ROWS, second), "beta")
+
+    def test_nothing_to_highlight_is_ordinary_and_never_an_error(self):
+        """Four ways to have no answer, and all four are normal: a board outside herdr
+        with no tab id at all, a single-pane tab, a tab whose only sibling belongs to no
+        agent row (another checkout's fleet, or a hand-opened shell), and rows carrying no
+        pane id because an older collector published them."""
+        self.assertEqual(board.tab_siblings(self.PANES, None, "w1:p2"), [])
+        self.assertEqual(board.tab_siblings(self.PANES, "w1:t9", None), [])
+        self.assertIsNone(board.here_agent(self.ROWS, []))
+        self.assertIsNone(board.here_agent(self.ROWS, ["w1:p99"]))
+        self.assertIsNone(board.here_agent([agent("alpha")], ["w1:p1"]))
+
+    def test_the_lookup_is_throttled_and_off_without_a_tab(self):
+        """`herdr pane list` is a subprocess and the board redraws twice a second, so
+        what is pinned is that ticking does not mean asking. `_resolve` is not run here —
+        `tick` only ever starts the thread — so nothing shells out either way."""
+        loc = board.Locator(refresh=10.0, env={"HERDR_TAB_ID": "w1:t1",
+                                               "HERDR_PANE_ID": "w1:p2"})
+        loc._busy = True                     # stand in for the worker, so none is started
+        self.assertTrue(loc.enabled)
+        self.assertFalse(loc.tick(at=1000.0))
+        loc._busy = False
+        self.assertTrue(loc.tick(at=1000.0))
+        loc._busy = False
+        self.assertFalse(loc.tick(at=1009.9))
+        loc._busy = False
+        self.assertTrue(loc.tick(at=1010.0))
+
+        outside = board.Locator(env={})      # a bare `python -m switchboard.board`
+        self.assertFalse(outside.enabled)
+        self.assertFalse(outside.tick(at=1000.0))
+        self.assertIsNone(outside.name(self.ROWS))
 
 
 if __name__ == "__main__":

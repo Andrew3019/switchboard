@@ -112,12 +112,13 @@ BORDER_STYLE = "blue"
 GUTTER_STYLE = "bold cyan"
 DIM = "dim"
 
-# The wash on the row a human just clicked — see `_wash` and `board.lit_row`.
+# The wash on the row of the agent this board is sitting beside — see `_wash` and
+# `board.Locator`.
 #
 # NEUTRAL, because every colour on this board already means something: green is working,
 # red is trouble, yellow is a summons, cyan is a workspace. A highlight that borrowed any
-# of them would say the agent had changed, when the only thing that changed is which row
-# the human last touched.
+# of them would say something had happened to the agent, when all it says is where the
+# human's own pane is.
 #
 # DARK, because the row underneath has to stay readable and everything it is drawn in was
 # picked against a black pane. Lighter greys were tried on paper and lose the muted words
@@ -125,7 +126,7 @@ DIM = "dim"
 #
 # `not dim` is the other half of readable. Dim grey on a grey wash is the one combination
 # that disappears, and it is the state word of every idle row plus the age of every row on
-# the board. Lifting it for the ten seconds the row is lit changes nothing the row SAYS.
+# the board. Lifting it on the one lit row changes nothing that row SAYS.
 HIGHLIGHT_STYLE = "not dim on grey30"
 
 # A workspace holding one visible agent. A middle dot, not a bullet: `●` is already the
@@ -507,7 +508,7 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           lit: Optional[str] = None, stats: Optional[dict] = None
+           here: Optional[str] = None, stats: Optional[dict] = None
            ) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
@@ -522,11 +523,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     that — a wrapped row, a rich version that pads differently — the mismatch is caught
     here rather than showing up as a click that focuses the wrong agent.
 
-    `lit` is the name of the agent whose row was clicked recently enough to still be
-    marked, or None. A NAME and not a click time: WHEN is `board.lit_row`'s question and it
-    is asked once per frame, before this is called, so nothing in this renderer has to know
-    what time it is. The row it names is drawn washed (`_wash`); every other row, and a
-    name matching nothing on screen, draws exactly as it did before.
+    `here` is the name of the agent sharing this board's own tmux tab — the row that says
+    "you are here" — or None. A NAME and nothing else: WHERE is `board.Locator`'s question,
+    answered against pane ids off the drawing thread and resolved to a name once per frame
+    before this is called, so nothing in this renderer has to know what a pane is. The row
+    it names is drawn washed (`_wash`); every other row, and a name matching nothing on
+    screen, draws exactly as it did before.
 
     `stats` is the fleet's numbers as the collector computed them — `panel.Reading.stats`,
     a plain dict, `{}` or None when there are none yet. Drawn as the head's middle section
@@ -647,10 +649,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             drawn += 1
         w_name, w_state, show_age, left = _row_budget(rows[first:last], inner)
         for i in range(first, last):
-            # A collapsed row is never lit: it is not an agent, `lit` is a name, and a
-            # click on one focuses nobody — `board.main` says so rather than lighting it.
-            on = (lit is not None and not board._is_group(rows[i])
-                  and rows[i].name == lit)
+            # A collapsed row is never lit: it is not an agent, `here` is a name, and a
+            # workspace's archived tail is not a pane anybody is sitting in.
+            on = (here is not None and not board._is_group(rows[i])
+                  and rows[i].name == here)
             emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on),
                  rows[i])
             drawn += 1
@@ -757,7 +759,7 @@ def _gutter(line, label: str, mark: Optional[tuple[str, int]], indent_cols: int,
 
 
 def _wash(line, inner: int) -> None:
-    """Mark this line as the one just clicked: a background across the WHOLE row.
+    """Mark this line as the agent beside this board: a background across the WHOLE row.
 
     PADDED FIRST, and that is the whole of why this is not one call. A row is drawn to
     whatever it has to say and then stops — nothing pads it, because until now nothing

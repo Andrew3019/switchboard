@@ -236,6 +236,10 @@ class TheFormatIsStatusJson(PanelTest):
         a = a_snapshot("w1").agents[0]
         a.summary, a.undelivered, a.undelivered_age = "shipped it", 3, 90
         a.blocked_why, a.gone, a.stalled = "needs a key", True, True
+        # Set to something, not left at its default: this field is the join key a board
+        # highlights its own tab's agent by (`board.Locator`), and a None that survives as
+        # None would pass this test while every board silently highlighted nothing.
+        a.pane_id = "w1:p3"
         back = panel.agent_from_dict(json.loads(json.dumps(a.as_dict())))
         for f in dataclasses.fields(status.AgentStatus):
             self.assertEqual(getattr(back, f.name), getattr(a, f.name), f.name)

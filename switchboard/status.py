@@ -469,6 +469,23 @@ class AgentStatus:
     # failed, the row was past `KEYPRESS_PROBE_MAX` — and every reader must treat it that
     # way: the row falls back to reading exactly as it does today.
     awaiting_keypress: bool = False
+    # WHERE THIS AGENT IS, as herdr names panes — `agents.pane_id`, straight from the row.
+    # It is here for one reader: a board pane resolving which agent shares its own tmux
+    # tab (`board.Locator`). herdr's `pane list` gives the board its tab's other pane ids
+    # and nothing else — the switchboard-level NAME lives only in the store, which a
+    # renderer must never open, so the join key has to arrive on the published row or the
+    # board cannot make the join at all.
+    #
+    # NOT AN IDENTITY, and nothing may start treating it as one. herdr renumbers a pane on
+    # a move, so a row can disagree with the live agent it describes — which is exactly why
+    # `collect` compares `terminal_id` and not this when deciding whether a listed agent is
+    # ours (see the note there). The only failure a stale value can cause here is a
+    # highlight that lands on nobody, and no highlight is this feature's normal resting
+    # state anyway.
+    #
+    # Defaulted and last, for `turn`'s reason: hand-built rows in tests and snapshots from
+    # an older collector both have to construct.
+    pane_id: Optional[str] = None
 
     @property
     def blocked(self) -> bool:
@@ -778,7 +795,7 @@ class AgentStatus:
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
-            "needs_for", "awaiting_keypress",
+            "needs_for", "awaiting_keypress", "pane_id",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -1258,6 +1275,11 @@ def collect(
             # sitting, and a fresh message arriving behind a stuck one must not reset it.
             undelivered_age=(max(0, now - pending[name][1]) if name in pending else 0),
             undelivered_answer=pending.get(name, (0, 0, False))[2],
+            # The store's value verbatim, never herdr's: `agent list` is machine-global and
+            # matching by name is what the identity note above refuses to do. A row whose
+            # pane has moved carries a stale id and matches nothing, which is the harmless
+            # end of this field's only use — see the field's own note.
+            pane_id=row["pane_id"] or None,
         ))
 
     # Every row is built before this and none is changed by it except in the one field it
