@@ -266,7 +266,9 @@ topic is, and what stage it has reached — investigating, designing, waiting on
 decision, implementing, verifying. It goes last, immediately before you block, and it
 is not the restatement that opens the message: that one says what you were asked,
 this one says where the work has got to. Blocking ends your turn; you are poked the
-moment they answer.
+moment they answer. Only one agent ever waits on a person for one question: if you
+have told a child to `sb block`, that row is the child's and not yours, so `sb done`
+instead and say in that message who is waiting and what for.
 You may report a child's work once; you may not become the channel for the
 conversation about it. So a parent may point a human at a child instead of speaking
 for it — a handoff, not another relay. Restore the child if it is closed, `sb tell` it
