@@ -1,5 +1,5 @@
 +++
-model = "default"
+model = "deep"
 +++
 
 <!--
@@ -43,6 +43,18 @@ follow. `validate.reason` enforces the short line; this only says it before the 
 
 No `cleanup` field: what stays open is a run-time decision, made by the orchestrator that
 sweeps, never a property of a kind of agent.
+
+TIER: `deep` — Opus at xhigh effort, the most expensive thing any shipped role names. Two
+reasons, and neither is that implementation is the hardest work. First, a worker's output is
+CODE, so the output-style complaint that decides lead's tier does not apply here: this is the
+role where style matters least and capability matters most. Second, position — a worker runs
+unattended for longer than anything else in the fleet and nobody reads it until it reports,
+so a wrong turn taken in its first ten minutes is paid for in every minute after. xhigh buys
+thinking before that turn is taken, and thinking is cheaper than the rework.
+
+Read that as the tier for the ROLE, not a claim about your task. A mechanical edit spawned
+`--model careful` is the same decision made with more information, and the flag is there for
+exactly that. `notes/model-selection.md` has the table and what the change costs.
 -->
 
 You are given one task: carry it to done and do nothing beyond it. If you notice something

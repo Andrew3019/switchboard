@@ -22,12 +22,15 @@ provider = "claude"
 # -- the shipped tiers ---------------------------------------------------------
 #
 # Small on purpose: this only has to be good enough that switchboard works with no config
-# file at all.
+# file at all. Every shipped role names one of these, so the table below IS what a fresh
+# checkout's fleet runs on — see `notes/model-selection.md` for the role-by-role reasoning
+# and what it costs.
 #
 # ALIASES, never pinned ids. `claude --help` documents --model as taking "an alias for the
 # latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
 # follows the current model of its class and keeps working as models churn; a pinned id
-# fails outright the day it is retired or your plan loses access to it.
+# fails outright the day it is retired or your plan loses access to it. `prose` is the one
+# exception and says at its own definition why it earns it.
 
 # No tier uses haiku. `--permission-mode auto` is MODEL-DEPENDENT: it runs a classifier
 # that decides what still needs approval, and haiku's is far more conservative. Verified
@@ -61,9 +64,43 @@ provider = "claude"
 # The older name for `default`. Still honoured so config written against it keeps working.
 provider = "claude"
 
+[tiers.careful]
+# Sonnet with the effort dial up one more notch than `cheap`. For work that is judgement
+# rather than reading, but tool-driven rather than deep reasoning — `qa` is the shipped
+# consumer: running the checks and telling a real defect from your own bad invocation.
+# Same price per token as `cheap`; the difference is how long it thinks.
+provider = "claude"
+model    = "sonnet"
+effort   = "high"
+
 [tiers.strong]
 provider = "claude"
 model    = "opus"
+effort   = "high"
+
+[tiers.deep]
+# `strong` with the effort dial at xhigh. For implementation: a worker's output is code, it
+# runs unattended for longer than anything else, and a wrong turn taken early is the most
+# expensive thing in the fleet. Nothing here costs more per token than `strong` — it just
+# spends more of them.
+provider = "claude"
+model    = "opus"
+effort   = "xhigh"
+
+[tiers.prose]
+# THE ONE TIER THAT PINS AN ID, against the rule three paragraphs up. It exists because the
+# choice it encodes is not "the current Opus" — it is *that* Opus, and an alias cannot say
+# so. Leads write the prose Andrew reads, and the output style of the model the `opus` alias
+# currently points at is the thing being avoided (`notes/model-selection.md`: the verbosity,
+# hedging and apology loops the community named within a week of launch). Same price as
+# `strong`, so this is a behaviour choice and never a cost one.
+#
+# Accepting the cost of a pinned id knowingly: the day this id is retired, spawns on this
+# tier fail outright. That is the correct failure — it asks the question again rather than
+# silently sliding onto the model this tier was invented to avoid. When it happens, re-read
+# the table in `notes/model-selection.md` and pick again.
+provider = "claude"
+model    = "claude-opus-4-8"
 effort   = "high"
 
 

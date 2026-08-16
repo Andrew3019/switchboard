@@ -360,6 +360,26 @@ class RolesTest(unittest.TestCase):
 
     # -- model tiers -----------------------------------------------------
 
+    def test_every_shipped_role_pins_the_tier_the_table_chose(self):
+        """The table in `notes/model-selection.md`, in the form the spawn layer sees it.
+
+        Pinned as a DECISION, not as behaviour: the point of the 2026-08-16 pass is that no
+        shipped role rides `default` any more, since `default` is whatever the provider CLI
+        picks that week. If a role here resolves to no flags at all, that pass has been
+        undone — which is allowed, but should be a choice someone made and edited this with.
+        """
+        r = roles.load(self.repo)
+        want = {
+            "dispatcher": ["--model", "sonnet", "--effort", "medium"],
+            "researcher": ["--model", "sonnet", "--effort", "medium"],
+            "qa":         ["--model", "sonnet", "--effort", "high"],
+            "reviewer":   ["--model", "opus", "--effort", "high"],
+            "worker":     ["--model", "opus", "--effort", "xhigh"],
+            "lead":       ["--model", "claude-opus-4-8", "--effort", "high"],
+        }
+        got = {name: roles.get(r, name).spec().cli_args() for name in want}
+        self.assertEqual(got, want)
+
     def test_an_override_replaces_the_roles_tier(self):
         """`sb delegate --model <tier>` picks another tier, not another mechanism."""
         r = roles.load(self.repo)

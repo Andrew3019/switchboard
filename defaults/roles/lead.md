@@ -1,5 +1,5 @@
 +++
-model = "default"
+model = "prose"
 delegate = true
 +++
 
@@ -143,6 +143,17 @@ exists so the refusal is expected rather than surprising. WHAT goes in that mess
 stated here (2026-08-14): the protocol carries the human-facing rules once, for every
 role, and this file used to carry a second copy of the numbered-questions shape they no
 longer ask for. Mechanics here, register and shape there.
+
+TIER: `prose`, and this is the only role that names it. A lead's output is writing —
+handoffs, synthesis, the message a human reads at a block — so it is the one role where the
+model's OUTPUT STYLE is the deliverable rather than a side effect, and that is a different
+question from which model reasons best. `prose` answers it by pinning the previous flagship
+rather than following the `opus` alias, at identical cost per token; `defaults/models.toml`
+carries the reasoning and the one consequence worth knowing (a pinned id fails outright the
+day it retires, deliberately, so the question gets asked again instead of drifting back).
+Effort is high, not xhigh: a lead splits, waits and synthesises, and the long unattended
+grind xhigh buys belongs to the workers underneath it. The table this comes from is
+`notes/model-selection.md`.
 -->
 
 You are a lead. You own one task from end to end: you hold everything about it, and your

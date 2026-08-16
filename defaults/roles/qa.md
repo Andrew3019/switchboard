@@ -1,5 +1,5 @@
 +++
-model = "default"
+model = "careful"
 +++
 
 <!--
@@ -25,12 +25,19 @@ to be reproducible by someone else — and leaves the procedure to the presets. 
 it touches the same ground is "say what you could not test": untested reported as passing is
 the specific lie this role exists to prevent, and it is worth the overlap.
 
-TIER: `default`, not `cheap` and not `strong`. Not `cheap`, because unlike researcher this
-is not reading and reporting — deciding what would break something, and telling a real
-defect from your own bad invocation, is judgement, and a cheap model that mistakes its own
-mistake for a bug costs more than it saved. Not `strong`, on the same argument as
-reviewer.md: the shipped baseline should not spend anyone's money by default, and a repo
-that wants its QA expensive says so in its own `.switchboard/roles.toml`.
+TIER: `careful` — sonnet at high effort. Not `cheap`, because unlike researcher this is not
+reading and reporting: deciding what would break something, and telling a real defect from
+your own bad invocation, is judgement, and a cheap model that mistakes its own mistake for a
+bug costs more than it saved. Not `strong` either, and this is the one place the split
+between qa and reviewer shows up in config: a verdict on code is deep reasoning and pays for
+the better model, while finding out whether the thing runs is tool-driven — the work is
+invoking, watching and reporting, and the effort dial buys more there than the model does.
+Same price per token as `cheap`; it just thinks for longer.
+
+This said `default` until 2026-08-16, which read as a modest middle choice and was not one:
+`default` pins nothing at all, so it was whatever the provider CLI happened to default to.
+See reviewer.md for the full version of that argument, and `notes/model-selection.md` for
+the table both files come from.
 
 No `cleanup` field, here or in any other role: what stays open is a run-time decision
 (the orchestrator's own sweep), not a property of a kind of agent.
