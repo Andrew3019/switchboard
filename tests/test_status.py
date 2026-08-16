@@ -1983,6 +1983,42 @@ class AwaitingKeypressTest(unittest.TestCase):
             Spy(), [self.row("stuck", stalled=True)], 1000 + int(status.KEYPRESS_PROBE_GAP))
         self.assertEqual(asked, ["stuck", "stuck"])
 
+    def test_a_booting_agent_is_not_asked_about_however_its_row_got_there(self):
+        """qa-10 caught a real one: `sb restore` keeps the session id and clears the turn,
+        so the startup grace does not cover it, and a resumed Claude still drawing its
+        splash screen read AWAITING KEYPRESS for ~1.25 s. The settle gate closes it from
+        the other end — restore logs an event, so the row's idle clock is at zero and
+        stays under the window for the whole boot, whatever its session id says."""
+        asked = []
+
+        class Spy:
+            def explain_agent(_, name):
+                asked.append(name)
+                return AwaitingKeypressTest.MODAL
+
+        restored = self.row("restored", stalled=True, idle=1)   # `restore` just fired
+        status._mark_awaiting_keypress(Spy(), [restored], 1000)
+        self.assertEqual(asked, [])
+        self.assertFalse(restored.awaiting_keypress)
+
+    def test_no_row_s_label_depends_on_who_else_is_stalled(self):
+        """The other one qa-10 caught: with a small cap over `agents` order, an unrelated
+        agent stalling flipped a parked modal between AWAITING KEYPRESS and STALLED frame
+        after frame. A row's answer must be a fact about its own pane."""
+        seen = []
+
+        class Spy:
+            def explain_agent(_, name):
+                return (AwaitingKeypressTest.MODAL if name == "modal"
+                        else AwaitingKeypressTest.AT_PROMPT)
+
+        for tick, others in enumerate([1, 9, 2, 9, 30, 0]):
+            rows = [self.row(f"other-{i}", stalled=True) for i in range(others)]
+            rows.append(self.row("modal", stalled=True))
+            status._mark_awaiting_keypress(Spy(), rows, 1000 + tick)
+            seen.append({a.name: a.awaiting_keypress for a in rows}["modal"])
+        self.assertEqual(seen, [True] * 6)
+
 
 if __name__ == "__main__":
     unittest.main()

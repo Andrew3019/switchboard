@@ -166,19 +166,31 @@ NO_RULE_FALLBACK = "default_known_agent_idle_fallback"
 # How many already-stalled rows one `collect` will spend a subprocess on, and how long
 # before it will ask about the same row again.
 #
-# TWO NUMBERS BECAUSE THE BOARD NOW REFRESHES AT 0.5 s. `agent explain` measured ~120 ms
-# per call on this machine, which was five times the 23.4 ms tick collector.py's docstring
-# measures and is now a QUARTER OF THE WHOLE INTERVAL. A cap alone was enough at 2 s and is
-# not enough here: a stall lasts hours, so a per-tick probe of two stalled rows would spend
-# 240 ms of every 500 ms for as long as the stall lasts, and `collector._gap`'s duty cap
-# would answer that by slowing the board down — the opposite of what PR #66 was for.
+# MEASURED, AND THE FIRST MEASUREMENT WAS WRONG. This was ~120 ms a call here, and that
+# number was taken by differencing two one-shot `collect`s, so most of what it timed was
+# the first call's warm-up. Timed directly, nine calls in a row: 8 ms median, the same as
+# `agent list` (7.5 ms; qa-10 measured the same thing independently at 7.5 ms). What it
+# really costs a tick, on a small store: 11 ms with nothing stalled, 31 ms with two rows
+# probed every tick, 14 ms with two rows stalled inside the gap.
 #
-# So the cap bounds ONE tick and the gap bounds the RATE. Two rows re-asked every 30 s is
-# 240 ms per sixty ticks, about 4 ms a tick amortised, and no single tick over the cap.
-# Nothing is lost by asking less often: the answer is a property of a pane that has been
-# sitting still long enough to be summoned about, and a dialog dismissed is a dialog whose
-# row stops being stalled within the same window anyway.
-KEYPRESS_PROBE_MAX = 2
+# THE FIRST CAP WAS 2 AND THAT WAS A BUG, not a conservative choice. At 8 ms a call there
+# was nothing to protect, and a small cap over `agents` order meant WHICH rows got an
+# opinion depended on who else in the fleet happened to be stalled — qa-10 flipped a parked
+# modal between AWAITING KEYPRESS and STALLED frame after frame by toggling an unrelated
+# agent, and with four stalled rows both modals silently read STALLED. A cap is only safe
+# if it cannot decide a row's label, so:
+#
+# - the GAP bounds the rate, and is what keeps the steady-state cost at about nothing: a
+#   stall lasts hours, and re-asking about the same still pane sixty times a minute buys
+#   nothing. It also makes the cap self-scheduling — a row asked about this tick is out of
+#   the running next tick, so the budget rotates through every candidate.
+# - the CAP is a backstop against a fleet that has gone quiet all at once, sized so it
+#   cannot bite a real fleet: eight rows is ~64 ms, and reaching it needs nine agents
+#   stalled and past the settle window at the same moment.
+# - and a row over budget KEEPS ITS LAST ANSWER (`_KEYPRESS_SEEN`) rather than reverting,
+#   which is what makes the cap unable to flip a label at all. It can only delay a first
+#   opinion, by a tick or two.
+KEYPRESS_PROBE_MAX = 8
 KEYPRESS_PROBE_GAP = 30
 
 # The answers, and when they were asked for — the memory that makes the gap above mean
@@ -920,19 +932,32 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus],
     for name in set(_KEYPRESS_SEEN) - {x.name for x in candidates}:
         del _KEYPRESS_SEEN[name]
 
+    # Least recently asked about first, and never `agents` order — an order that depends on
+    # the rest of the fleet is an order that can decide one row's label from another row's
+    # state, which is exactly the flicker qa-10 caught. Name breaks the tie so two rows
+    # asked about in the same second still have a fixed order.
     spent = 0
-    for a in candidates:
+    for a in sorted(candidates, key=lambda x: (_KEYPRESS_SEEN.get(x.name, (0, False))[0],
+                                               x.name)):
         asked_at, answer = _KEYPRESS_SEEN.get(a.name, (0, False))
-        if now - asked_at < KEYPRESS_PROBE_GAP:
-            a.awaiting_keypress = answer          # inside the gap: last answer, no cost
+        # Inside the gap, and over budget outside it, both answer from what was last seen.
+        # Over budget is the load-bearing one: a row that HAS an answer keeps it rather
+        # than reverting to "no opinion", so a busy tick can delay a first reading but can
+        # never take a label off a row that already earned one.
+        if now - asked_at < KEYPRESS_PROBE_GAP or spent >= KEYPRESS_PROBE_MAX:
+            a.awaiting_keypress = answer
             continue
-        if spent >= KEYPRESS_PROBE_MAX:
-            continue                              # no opinion, so the row reads STALLED
         spent += 1
         try:
             a.awaiting_keypress = awaiting_keypress_screen(ask(a.name))
         except (HerdrError, OSError):
-            continue                              # no answer is not an answer: nothing kept
+            # No answer is not an answer, and it is not the OLD answer either: a herdr that
+            # has stopped answering must not leave a row telling a human to go and press a
+            # key on the strength of a reading nothing can confirm any more. Forgotten, so
+            # the row degrades to plain STALLED for as long as the outage lasts.
+            _KEYPRESS_SEEN.pop(a.name, None)
+            a.awaiting_keypress = False
+            continue
         _KEYPRESS_SEEN[a.name] = (now, a.awaiting_keypress)
 
 
@@ -2100,6 +2125,15 @@ def _attention(snap: Snapshot) -> list[str]:
                 out.append(f"  {a.name:<{w}}  {a.undelivered} never announced to it, "
                            f"oldest {fmt_age(a.undelivered_age)}{extra}"
                            f"  →  sb inspect {a.name}")
+            elif a.awaiting_keypress:
+                # ABOVE the stalled branch and worded away from it, because the advice is
+                # the opposite: `sb tell` writes text into a pane, and this is the one row
+                # where the pane cannot read text — herdr's classifier recognises nothing
+                # on that screen, and anything sent goes into whatever is drawn over it.
+                # Only a person at the keyboard clears this one.
+                out.append(f"  {a.name:<{w}}  idle {fmt_age(a.idle)} on a screen herdr "
+                           f"cannot read  →  press a key in its pane: "
+                           f"sb inspect {a.name}")
             elif a.stalled:
                 # After the mail branches, which are the more actionable read of the same
                 # agent: mail nobody announced is fixed by ringing it, and this is not.
@@ -2167,12 +2201,21 @@ def _attention(snap: Snapshot) -> list[str]:
                 # running, and herdr's independent look at the pane is what contradicts it.
                 what = ("NO SESSION  our signal still says working, but herdr sees no "
                         "agent in that pane — the session died mid-turn")
+            elif a.awaiting_keypress:
+                # The one row in this block that a `tell` cannot reach — see the NEEDS YOU
+                # branch above, and `awaiting_keypress_screen` for what was actually
+                # observed (herdr matched no rule; not "there is a dialog").
+                what = ("AWAITING KEYPRESS  herdr's classifier recognises nothing on "
+                        "that screen — text sent to it goes into whatever is drawn over it")
             else:
                 what = (f"STALLED  {a.stall_source} — turn ended, "
                         f"`sb done` never called")
             out.append(f"  {a.name:<{w}}  {what}, quiet {fmt_age(a.idle)}")
         out.append(f"  {'':<{w}}  →  sb inspect <name>, then: "
                    f"sb tell <name> \"wrap up and run sb done\"")
+        if any(a.awaiting_keypress for a in drift):
+            out.append(f"  {'':<{w}}  →  except an AWAITING KEYPRESS one: go to its pane "
+                       f"and press a key, a tell cannot reach it")
     return out
 
 
