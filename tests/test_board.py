@@ -200,6 +200,16 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
         self.assertIn("press a key in its pane", richboard.needs_reason(a))
         self.assertIn(a, richboard.needs_list([a]))
 
+        # AND IT WAITS ITS TURN LIKE THE STALL UNDER IT. The reading is one frame of
+        # herdr's screen classifier, so it goes through the NEEDS YOU debounce rather than
+        # around it: until the summons has settled the row says nothing at all and nobody
+        # is called over. `needs_for=None` above is an unwatched row, which is shown.
+        a.needs_for = 0
+        self.assertFalse(a.settled)
+        self.assertEqual(board.marker(a), "")
+        self.assertFalse(board.wants_you(a))
+        self.assertEqual(richboard.needs_kind(a), "")
+
     def test_mail_alone_no_longer_marks_the_agent_row(self):
         """It used to: unread mail took over the note and the `←`, so an agent with mail
         looked like an agent in trouble. Mail names itself where it is drawn, and the

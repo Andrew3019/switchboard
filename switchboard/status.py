@@ -163,15 +163,35 @@ GONE_STATE = "failed"
 # `awaiting_keypress_screen`, the only thing that reads it.
 NO_RULE_FALLBACK = "default_known_agent_idle_fallback"
 
-# How many already-stalled rows one `collect` will spend a subprocess on. Not a tuning
-# knob and not a sample: stalled is normally zero rows (measured live, a fleet with none
-# stalled costs exactly zero of these calls), and this bounds what a fleet that has gone
-# quiet all at once can do to the board's tick. Measured on this machine at ~120 ms per
-# call — five times the 23.4 ms tick collector.py's docstring measures — so the cap is
-# small deliberately: two of them is a quarter of a second added to a refresh, and more
-# than that would make the board slowest exactly when a person is trying to read it. Rows
-# past the cap, in tree order, are left with no opinion and read as today's plain STALLED.
+# How many already-stalled rows one `collect` will spend a subprocess on, and how long
+# before it will ask about the same row again.
+#
+# TWO NUMBERS BECAUSE THE BOARD NOW REFRESHES AT 0.5 s. `agent explain` measured ~120 ms
+# per call on this machine, which was five times the 23.4 ms tick collector.py's docstring
+# measures and is now a QUARTER OF THE WHOLE INTERVAL. A cap alone was enough at 2 s and is
+# not enough here: a stall lasts hours, so a per-tick probe of two stalled rows would spend
+# 240 ms of every 500 ms for as long as the stall lasts, and `collector._gap`'s duty cap
+# would answer that by slowing the board down — the opposite of what PR #66 was for.
+#
+# So the cap bounds ONE tick and the gap bounds the RATE. Two rows re-asked every 30 s is
+# 240 ms per sixty ticks, about 4 ms a tick amortised, and no single tick over the cap.
+# Nothing is lost by asking less often: the answer is a property of a pane that has been
+# sitting still long enough to be summoned about, and a dialog dismissed is a dialog whose
+# row stops being stalled within the same window anyway.
 KEYPRESS_PROBE_MAX = 2
+KEYPRESS_PROBE_GAP = 30
+
+# The answers, and when they were asked for — the memory that makes the gap above mean
+# anything. Process-local and deliberately not a column: the collector is one process
+# watching the same fleet for hours (this is `stamp_needs_for`'s argument for its own
+# dict), and it is a READ-ONLY one, so a fact whose whole lifetime is a few frames of a
+# screen must not be given a reason to write. A short-lived `sb status` starts with this
+# empty, asks once, and throws it away with the process, which is exactly right for it.
+#
+# Never a source of truth: `_mark_awaiting_keypress` prunes it to the rows that are still
+# candidates on every call, so a row that stops being stalled forgets its answer rather
+# than carrying a stale one into its next stall.
+_KEYPRESS_SEEN: dict[str, tuple[int, bool]] = {}
 
 # How long a row with no session id is read as a *claim* rather than as a live agent.
 #
@@ -828,16 +848,33 @@ def awaiting_keypress_screen(explain: object) -> bool:
     return explain.get("state") in IDLE_LIKE
 
 
-def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus]) -> None:
+def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus],
+                            now: int) -> None:
     """Stamp the narrower label on the rows that already earned the broader one.
 
     IDLE MUST STAY FREE. `collect` costs one herdr subprocess for the whole fleet, and the
-    collector re-runs it every `display.board_refresh` seconds; `agent explain` is one
-    subprocess PER AGENT and reads the pane to answer, so asking it about every row every
-    tick would multiply the most expensive part of the tick by the size of the fleet
-    (collector.py's docstring measures where a tick's time actually goes). So the question
-    is only ever asked about rows `collect` has ALREADY decided are stalled — normally
-    none, occasionally one — and a healthy fleet pays nothing at all for this.
+    collector re-runs it every `display.board_refresh` seconds — now 0.5 s, not 2 s;
+    `agent explain` is one subprocess PER AGENT and reads the pane to answer, so asking it
+    about every row every tick would multiply the most expensive part of the tick by the
+    size of the fleet (collector.py's docstring measures where a tick's time actually
+    goes). So the question is only ever asked about rows `collect` has ALREADY decided are
+    stalled — normally none, occasionally one — and a healthy fleet pays nothing at all
+    for this.
+
+    THREE GATES, and at 0.5 s all three earn their place:
+
+    - `stalled and alive is True`, below, which is what makes the normal cost zero.
+    - the stall must have HELD for `NEEDS_SETTLE`, the same window the NEEDS YOU debounce
+      uses. A turn gap is 2 s and the tail of a spawn is 30 s, and neither will be drawn
+      as a summons before it settles, so asking herdr about one buys a reading nothing
+      would draw — while costing a fifth of a frame at the exact moment a person is
+      watching the board move. `a.idle` is the cheap form of that question: it is on the
+      row already, it needs no memory, and for a row this function can see at all it is
+      counting the same silence `settled` counts.
+    - `KEYPRESS_PROBE_GAP` since this row was last asked about. The two above bound a
+      transient; a real stall lasts hours, and without this it would spend 120 ms of every
+      500 ms tick for the whole of it — which `collector._gap` would answer by slowing the
+      board down, undoing the interval PR #66 shortened.
 
     That gate is also what keeps the label honest about the case it would most easily get
     wrong. A freshly spawned agent that has been sent a message and is not yet detected as
@@ -851,9 +888,11 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus]) -> No
     `agent start`, while its splash screen was still drawing and its prompt box did not
     exist yet to be matched, and read as `live_prompt_box` on every reading after — which
     is a STARTING agent producing this signal, and is precisely the row the stall gate
-    keeps away from here. It is also why nothing repeats a probe or remembers one: the
-    reading is per-frame, and the only rows it is ever taken on are rows that have been
-    sitting still for a long time.
+    keeps away from here.
+
+    What the row does with the answer is the debounce's business and not this function's:
+    `awaiting_keypress` is in `inferred_summons`, so a board draws it only once the row's
+    summons has `settled`, exactly as it draws the STALLED underneath it.
 
     `alive is True` and not merely truthy, for the reason `turn_doubted` gives: there is no
     pane to explain if herdr answered and did not list the agent, and nothing was observed
@@ -872,11 +911,29 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus]) -> No
     ask = getattr(h, "explain_agent", None)
     if ask is None:
         return
-    for a in [x for x in agents if x.stalled and x.alive is True][:KEYPRESS_PROBE_MAX]:
+
+    candidates = [x for x in agents
+                  if x.stalled and x.alive is True and x.idle >= NEEDS_SETTLE]
+    # Forget every row that is not a candidate now, BEFORE anything is read back: a row
+    # that worked again and stalled again is a new stall, and must not inherit the answer
+    # given about the pane it had last time.
+    for name in set(_KEYPRESS_SEEN) - {x.name for x in candidates}:
+        del _KEYPRESS_SEEN[name]
+
+    spent = 0
+    for a in candidates:
+        asked_at, answer = _KEYPRESS_SEEN.get(a.name, (0, False))
+        if now - asked_at < KEYPRESS_PROBE_GAP:
+            a.awaiting_keypress = answer          # inside the gap: last answer, no cost
+            continue
+        if spent >= KEYPRESS_PROBE_MAX:
+            continue                              # no opinion, so the row reads STALLED
+        spent += 1
         try:
             a.awaiting_keypress = awaiting_keypress_screen(ask(a.name))
         except (HerdrError, OSError):
-            pass
+            continue                              # no answer is not an answer: nothing kept
+        _KEYPRESS_SEEN[a.name] = (now, a.awaiting_keypress)
 
 
 def collect(
@@ -1143,7 +1200,7 @@ def collect(
     # stamps. It goes here, after the loop, because it needs the finished `stalled` verdict
     # to know who to ask about — and it asks about nobody on a fleet where nothing is
     # stalled, which is the normal case and the reason this is affordable at all.
-    _mark_awaiting_keypress(h if consulted else None, agents)
+    _mark_awaiting_keypress(h if consulted else None, agents, now)
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.

@@ -1890,12 +1890,17 @@ class AwaitingKeypressTest(unittest.TestCase):
     which only a live run can show.
     """
 
+    def setUp(self):
+        status._KEYPRESS_SEEN.clear()
+
+    tearDown = setUp
+
     @staticmethod
-    def row(name, *, stalled=False, idle_excuse=None):
+    def row(name, *, stalled=False, idle_excuse=None, idle=600):
         return status.AgentStatus(
             name=name, role="worker", parent=None, depth=0, state="working",
             herdr_state="idle", alive=True, stalled=stalled, gone=False, unread=0,
-            age=600, idle=600, last_activity=0, workspace=None, task=None,
+            age=600, idle=idle, last_activity=0, workspace=None, task=None,
             blocked_why=None, idle_excuse=idle_excuse)
 
     MODAL = {"state": "idle", "matched_rule": None,
@@ -1931,7 +1936,7 @@ class AwaitingKeypressTest(unittest.TestCase):
             self.row("starting", idle_excuse="starting up"),         # excused, not stalled
             self.row("waiting", idle_excuse="waiting on children"),  # ditto
         ]
-        status._mark_awaiting_keypress(Spy(), rows)
+        status._mark_awaiting_keypress(Spy(), rows, 1000)
         self.assertEqual(asked, ["stuck"])
         self.assertEqual([a.name for a in rows if a.awaiting_keypress], ["stuck"])
 
@@ -1942,11 +1947,41 @@ class AwaitingKeypressTest(unittest.TestCase):
             def explain_agent(_, name):
                 raise HerdrError("timeout", "herdr did not return")
 
+        status._KEYPRESS_SEEN.clear()
         rows[0].awaiting_keypress = False
-        status._mark_awaiting_keypress(Broken(), rows)
-        status._mark_awaiting_keypress(FakeHerdr(), rows)
+        status._mark_awaiting_keypress(Broken(), rows, 2000)
+        status._mark_awaiting_keypress(FakeHerdr(), rows, 3000)
         self.assertFalse(any(a.awaiting_keypress for a in rows))
         self.assertTrue(rows[0].stalled)
+
+    def test_the_board_at_half_a_second_does_not_pay_for_the_same_stall_every_tick(self):
+        """The two gates the 0.5 s refresh added. A stall that has not held for the
+        settle window is not asked about at all — it is not going to be drawn as a
+        summons either — and a stall that HAS held is asked about once per
+        `KEYPRESS_PROBE_GAP`, not once per frame, which is the difference between 4 ms
+        and 240 ms on a tick that is only 500 ms long."""
+        asked = []
+
+        class Spy:
+            def explain_agent(_, name):
+                asked.append(name)
+                return AwaitingKeypressTest.MODAL
+
+        fresh = [self.row("gap", stalled=True, idle=int(status.NEEDS_SETTLE) - 1)]
+        status._mark_awaiting_keypress(Spy(), fresh, 1000)
+        self.assertEqual(asked, [])                     # a turn gap costs nothing
+        self.assertFalse(fresh[0].awaiting_keypress)
+
+        # Held. Asked once, then answered from the last reading for the whole gap, and
+        # asked again on the far side of it.
+        for t in range(1000, 1000 + int(status.KEYPRESS_PROBE_GAP), 5):
+            row = self.row("stuck", stalled=True)
+            status._mark_awaiting_keypress(Spy(), [row], t)
+            self.assertTrue(row.awaiting_keypress)      # the label holds between probes
+        self.assertEqual(asked, ["stuck"])
+        status._mark_awaiting_keypress(
+            Spy(), [self.row("stuck", stalled=True)], 1000 + int(status.KEYPRESS_PROBE_GAP))
+        self.assertEqual(asked, ["stuck", "stuck"])
 
 
 if __name__ == "__main__":
