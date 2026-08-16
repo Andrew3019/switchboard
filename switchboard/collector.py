@@ -29,6 +29,13 @@ startup and the path handed to `connect(path=...)` from then on, so a tick spawn
 subprocess (herdr) instead of two. Renderers pay it zero times: `panel.git_common_dir`
 answers the same question in Python.
 
+**The board's top-line numbers are collected here for the same reason the tree is.**
+`stats.collect()` reads the store and shells out to `git`, `lsof` and `ps`, so a renderer
+calling it would break the property above twice over. It rides in the snapshot beside the
+tree as a plain dict (`FleetStats`, `panel.envelope`), and the one call that is expensive
+— a ~370 ms table scan, once per process — is primed on a thread so it lands beside the
+first tick rather than in front of it.
+
 **Errors are published, not fatal, and never overwrite good data with nothing.** A tick
 that fails keeps the last good snapshot, bumps `errors`, records `last_error` — and
 leaves `collected_at` where it was, so the age every panel prints keeps growing. A
@@ -87,6 +94,7 @@ from typing import Optional
 
 from . import config
 from . import panel
+from . import stats as stats_mod
 from . import status as status_mod
 
 INTERVAL = config.setting("display.board_refresh")
@@ -125,6 +133,13 @@ SOURCE_CHECK_GAP = 45.0
 # spawned to ask it.
 RECONCILE_GAP = 10.0
 RECONCILE_SWEEP = 600.0
+# The floor between two attempts at the fleet-stats cold call, in seconds. Not a tunable,
+# for `DOORBELL_GAP`'s reason: it decides what a store that cannot be opened costs. The
+# cold call is primed once at startup (`FleetStats`), and if the store was not there yet —
+# a collector a renderer started in a repo where no `sb` has run — the retry is what stops
+# the numbers being unknown for the rest of this process's life. A thread every tick to
+# fail the same `connect` twice a second is not worth a number that is a minute late.
+STATS_RETRY_GAP = 30.0
 
 
 @dataclass
@@ -203,6 +218,119 @@ def snapshot(db_path: Optional[Path] = None):
         return None, f"could not read the tree: {e}"
     finally:
         db.close()
+
+
+def unknown_stats() -> dict:
+    """The fleet numbers with nothing known yet — every field `None`, never a zero.
+
+    Published on every tick that has no reading, so the shape a renderer sees never
+    changes: the `stats` key is always there and always has the same field names, and the
+    only thing that varies is whether a value is `None`. A renderer therefore has one case
+    to handle ("unknown"), not two ("absent" and "unknown"), and `stats.py`'s rule that
+    `None` is never zero survives the trip to the file.
+    """
+    return stats_mod.Stats().as_dict()
+
+
+class FleetStats:
+    """The board's top-line numbers, fetched HERE so that no renderer has to.
+
+    `stats.collect()` reads the store and shells out to `git`, `lsof` and `ps` —
+    both halves of what `panel.py` says a renderer must never do, and
+    `tests/test_panel.py::RendererImports` pins it. So these numbers travel the way every
+    other number in this system travels: computed once in this process, published in the
+    snapshot as a plain dict, read by forty panes with `.get()`.
+
+    **THE FIRST CALL IS THE ONLY EXPENSIVE ONE, and that is why this is a class rather
+    than a line in `tick`.** The three store counts are table scans of an un-indexed
+    `created_at`: measured at ~370 ms on the first call in a process against a 17 MB store,
+    and ~5-20 ms on each `stats.STORE_TTL` expiry after it, against ~0.07 ms warm. 370 ms
+    on tick one is 370 ms in which no pane can draw anything at all, spent on three numbers
+    at the top of the screen — so `prime()` pays it on a daemon thread nobody waits on, and
+    `read()` answers "unknown" until that lands. The board appears at its usual speed and
+    the numbers arrive a third of a second behind it.
+
+    Nothing else here waits either: `stats.collect` returns the last sample for the git
+    walk and the `ps` scan and refreshes them on its own threads, so a warm `read()` is one
+    `connect`, three counting queries every ten seconds, and arithmetic.
+
+    **Its own connection, opened and closed on the thread that uses it.** A sqlite handle
+    belongs to the thread that opened it, and the priming thread and the tick are two
+    threads — so sharing the one `snapshot()` opens is not available, and holding one open
+    across the collector's life would be a departure from the connect-read-close discipline
+    the rest of this process keeps. A `readonly=True` connect on a known path is a `stat`
+    and a `sqlite3.connect` — no migration, no `git rev-parse` — so a tick that opens this
+    one as well as `snapshot()`'s pays tens of microseconds for the separation.
+    """
+
+    def __init__(self, db_path: Optional[Path], repo: Optional[str] = None, *,
+                 retry_gap: float = STATS_RETRY_GAP):
+        self.db_path = db_path
+        self.repo = Path(repo) if repo else None
+        self.retry_gap = retry_gap
+        self._lock = threading.Lock()
+        self._ready = False
+        self._priming = False
+        self._last_attempt: Optional[float] = None
+
+    def read(self) -> dict:
+        """The numbers as a plain dict. **Never blocks and never raises.**
+
+        Unknown until the cold call has landed, and it starts one if none has — so a
+        collector whose store appeared after it did (a renderer starting a board in a repo
+        where no `sb` has run yet) picks the numbers up within `retry_gap` rather than
+        going without them until it is replaced.
+        """
+        if not self._ready:
+            self.prime()
+            return unknown_stats()
+        return self._sample() or unknown_stats()
+
+    def prime(self) -> bool:
+        """Pay the cold call on a thread nobody waits on. -> whether one was started.
+
+        One at a time and no more than one per `retry_gap`, for `Sampler._running`'s
+        reason: the thing being guarded is slow, and starting it again on every one of the
+        many ticks it takes to finish would be the cost this exists to remove.
+        """
+        now = panel.now()
+        with self._lock:
+            if self._ready or self._priming:
+                return False
+            if self._last_attempt is not None and now - self._last_attempt < self.retry_gap:
+                return False
+            self._priming, self._last_attempt = True, now
+        threading.Thread(target=self._prime, daemon=True).start()
+        return True
+
+    def _prime(self) -> None:
+        """The threaded half. Ready means the expensive call has actually been PAID —
+        a `connect` that failed has warmed nothing, so the next `read()` must try again
+        rather than hand the tick a scan this was supposed to keep off it."""
+        got = self._sample()
+        with self._lock:
+            self._ready, self._priming = got is not None, False
+
+    def _sample(self) -> Optional[dict]:
+        """One reading. -> the dict, or **None** if the store could not be opened at all.
+
+        `None` and not an empty dict: the caller has to tell "asked, and the answer is
+        unknown" from "never got as far as asking", because only the second is worth
+        retrying.
+        """
+        if self.db_path is None:
+            return None
+        from . import store                  # the one module the renderers may not have
+        try:
+            db = store.connect(path=self.db_path, readonly=True)
+        except Exception:                    # noqa: BLE001 — no store yet, unreadable, ...
+            return None
+        try:
+            return stats_mod.collect(db, repo=self.repo).as_dict()
+        except Exception:                    # noqa: BLE001 — never fatal to a tick
+            return None
+        finally:
+            db.close()
 
 
 def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
@@ -463,7 +591,8 @@ def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
 
 
 def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
-         last_good: Optional[dict], needs: Optional[dict] = None) -> Optional[dict]:
+         last_good: Optional[dict], needs: Optional[dict] = None,
+         fleet: Optional[FleetStats] = None) -> Optional[dict]:
     """One collect-and-publish. -> the snapshot dict now published.
 
     Publishing happens on the failure path too, and that is deliberate: a panel that can
@@ -474,6 +603,13 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
     place — see `status.stamp_needs_for` for why this process is the one that holds it and
     why it is a dict rather than a column. Omitted, nothing is timed and every renderer
     falls back to drawing a summons the moment it appears, which is what they did before.
+
+    `fleet` is the top section's numbers, read at the end and published beside the tree
+    (`FleetStats`, `panel.envelope`). It is read on the FAILURE path too and on purpose:
+    the two are independent — how many turns the fleet took in the last hour is still true
+    when this tick could not read the tree — and blanking one because the other broke
+    would be inventing a dependency the data does not have. Omitted, every field goes out
+    unknown, which is what a caller with no store to point at should publish.
     """
     t0 = time.perf_counter()
     state.polls += 1
@@ -503,7 +639,8 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         run_reconciler(snap, state, db_path)
 
     state.wrote_at = at
-    panel.publish(paths, panel.envelope(last_good or {}, state.as_dict()))
+    panel.publish(paths, panel.envelope(last_good or {}, state.as_dict(),
+                                        unknown_stats() if fleet is None else fleet.read()))
     return last_good
 
 
@@ -541,14 +678,23 @@ def run(*, cwd: Optional[Path] = None, interval: float = INTERVAL,
             state.errors += 1
             state.last_error, state.last_error_at = f"store unavailable: {e}", panel.now()
             state.wrote_at = panel.now()
-            panel.publish(paths, panel.envelope({}, state.as_dict()))
+            panel.publish(paths, panel.envelope({}, state.as_dict(), unknown_stats()))
             return 1
+
+        # The top section's numbers, primed HERE rather than on the first tick. The cold
+        # store scan is ~370 ms (`FleetStats`) and the first tick is the one every pane is
+        # waiting on to draw anything at all, so it runs beside that tick instead of
+        # inside it: the board appears when it always did and the numbers join it a moment
+        # later. `_doorbell_cwd` for the git walk's directory — the same main checkout the
+        # doorbell runs `sb` in, which is a work tree and not the `.git` the store is under.
+        fleet = FleetStats(db_path, _doorbell_cwd(db_path))
+        fleet.prime()
 
         ticks = 0
         needs: dict = {}
         while not stop.is_set():
             t0 = time.perf_counter()
-            last_good = tick(paths, state, db_path, last_good, needs)
+            last_good = tick(paths, state, db_path, last_good, needs, fleet)
             elapsed = time.perf_counter() - t0
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:

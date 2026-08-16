@@ -35,7 +35,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import collector, panel, status, store  # noqa: E402
+from switchboard import collector, panel, stats, status, store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -134,6 +134,33 @@ class RendererImports(unittest.TestCase):
                         "store", names,
                         f"{rel}:{node.lineno} imports `store`. A renderer must not be able "
                         f"to reach a write — see switchboard/panel.py.")
+
+    def test_no_renderer_module_reaches_the_stats_collector(self):
+        """The same rule, for the other module that would break it.
+
+        `stats.collect()` reads the store — through a handle its caller opens, so it would
+        need the import banned above — and shells out to `git`, `lsof` and `ps`. A renderer
+        that imported it would break the second half of the property (a renderer spawns no
+        subprocess at all) even without a connection to hand it. The numbers reach forty
+        panes as an already-computed dict in the snapshot instead: `collector.FleetStats`
+        makes the call, `panel.envelope` carries it, `Reading.stats` is what a renderer
+        reads.
+        """
+        for rel in RENDERER_MODULES:
+            with self.subTest(module=rel):
+                tree = ast.parse((ROOT / rel).read_text())
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        names = [a.name.split(".")[-1] for a in node.names]
+                    elif isinstance(node, ast.ImportFrom):
+                        names = [a.name for a in node.names] + [(node.module or "")]
+                    else:
+                        continue
+                    self.assertNotIn(
+                        "stats", names,
+                        f"{rel}:{node.lineno} imports `stats`. A renderer draws the fleet "
+                        f"numbers out of `panel.Reading.stats`; collecting them is the "
+                        f"collector's — see switchboard/stats.py.")
 
     def test_the_collector_is_the_one_process_that_may(self):
         """The counterpart, so the rule above reads as a split and not as a blanket ban:
@@ -561,6 +588,94 @@ class CollectorLoop(PanelTest):
         self.assertFalse(self.paths.demand.exists())
         self._run([(a_snapshot("w1"), None)] * 3, idle_exit=60.0, max_ticks=3)
         self.assertEqual(panel.read(self.paths).collector["polls"], 3)
+
+
+class TheFleetNumbersRideAlong(PanelTest):
+    """The board's top section: collected here, drawn there, and a plain dict in between.
+
+    `stats.collect()` reads the store and shells out to `git`, `lsof` and `ps` — both
+    halves of what `RendererImports` above says a renderer must not do — so the numbers
+    take the same route the tree does: one process computes them, forty read a file. What
+    is worth pinning about the middle of that pipe is exactly two things, and they are the
+    two below: that `None` still means "unknown" at the far end, and that the one expensive
+    call never lands on the tick every pane is waiting for.
+    """
+
+    def _stats(self, **kw) -> dict:
+        """A reading with real field names, taken off the dataclass rather than typed out,
+        so a renamed field fails here instead of quietly becoming a key nobody reads."""
+        return stats.Stats(**kw).as_dict()
+
+    def test_a_collector_that_publishes_none_is_read_as_unknown_and_not_as_broken(self):
+        """Why `panel.FORMAT` is not bumped for this key: during a rollout some panes read
+        a file an older collector wrote. A missing key must be "we do not know yet", not
+        forty screens refusing to draw."""
+        panel.publish(self.paths, {"format": panel.FORMAT, "snapshot": {},
+                                   "collector": {"pid": 1, "collected_at": panel.now()}})
+        r = panel.read(self.paths)
+        self.assertEqual(r.stats, {})
+        self.assertIsNone(r.error)
+
+    def test_the_first_tick_does_not_wait_for_the_cold_scan(self):
+        """The reason the call is primed on a thread instead of made in `tick`.
+
+        The three store counts are table scans of an un-indexed `created_at` — ~370 ms on
+        the first call in a process, against ~0.07 ms warm. Paid on the tick that publishes
+        the first snapshot, that is a third of a second in which no pane can draw anything
+        at all, for three numbers at the top of the screen. So a read before the scan lands
+        answers "unknown" at once, and picks the numbers up once it has.
+        """
+        gate = threading.Event()
+        landed = self._stats(turns_last_hour=41)
+
+        class Slow(collector.FleetStats):
+            samples = 0
+
+            def _sample(self):
+                Slow.samples += 1
+                gate.wait(10)
+                return dict(landed)
+
+        fleet = Slow(Path("/x/state.db"))
+        t0 = time.perf_counter()
+        first = fleet.read()
+        self.assertLess(time.perf_counter() - t0, 0.5)      # did not wait for the scan
+        self.assertIsNone(first["turns_last_hour"])         # and said so rather than 0
+        self.assertEqual(Slow.samples, 1)                   # one primer, on its own thread
+
+        gate.set()
+        for _ in range(200):
+            if fleet.read()["turns_last_hour"] == 41:
+                break
+            time.sleep(0.01)
+        self.assertEqual(fleet.read()["turns_last_hour"], 41)
+
+    def test_a_tick_publishes_them_beside_the_tree_with_unknown_still_unknown(self):
+        """End to end through the loop, and the one thing a zero would silently ruin.
+
+        `stats.py` is careful that `None` is never a zero — "no lines changed in the last
+        hour" and "git would not answer" are different sentences, and only one of them is a
+        measurement. Nothing on screen would look wrong if that distinction were flattened
+        in transit, which is exactly why it is pinned rather than trusted.
+        """
+        landed = self._stats(turns_last_hour=41, spawns_last_hour=0, cpu_percent=317.5)
+
+        class Stub:
+            def prime(self):
+                return False
+
+            def read(self):
+                return dict(landed)
+
+        with mock.patch.object(collector, "FleetStats", lambda *a, **k: Stub()):
+            CollectorLoop._run(self, [(a_snapshot("w1", "w2"), None)])
+        r = panel.read(self.paths)
+        self.assertEqual([a.name for a in r.snap.agents], ["w1", "w2"])   # tree undisturbed
+        self.assertEqual(r.stats["turns_last_hour"], 41)
+        self.assertEqual(r.stats["spawns_last_hour"], 0)          # a real, measured zero
+        self.assertEqual(r.stats["cpu_percent"], 317.5)
+        self.assertIn("lines_changed", r.stats)                   # present, and unknown —
+        self.assertIsNone(r.stats["lines_changed"])               # never dropped, never 0
 
 
 class WhatAFasterBoardMayCost(PanelTest):

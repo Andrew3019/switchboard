@@ -1910,10 +1910,20 @@ class Collapsed:
     depth: int
     count: int                      # every agent hidden here, the whole subtree
     needs_human: int = 0            # how many of them were still asking for a person
+    # The workspace every agent this row stands for was in, or None if they were in
+    # more than one (or in none). NOT decoration: the board's workspace gutter brackets
+    # runs of consecutive rows sharing a workspace, and without this the row that ends a
+    # workspace's block was read as belonging to no workspace and so ended the bracket
+    # one row early — a group whose last member was archived lost its own closing corner.
+    # None is the honest answer for a mixed group and keeps the old behaviour for it.
+    #
+    # Defaulted and last, because a caller that builds one of these by hand (a test, a
+    # renderer's fixture) must not be the thing this breaks.
+    workspace: Optional[str] = None
 
 
-def collapsed_label(c: Collapsed) -> str:
-    """The text of a collapsed row, indented to the level it stands in for.
+def collapsed_text(c: Collapsed) -> str:
+    """The WORDS of a collapsed row, with no indentation of its own.
 
     `· N need you` is what stops the collapse from being able to bury anything. Archived
     is archived and a blocked agent whose pane died still collapses — but a blocked agent
@@ -1921,11 +1931,26 @@ def collapsed_label(c: Collapsed) -> str:
     is carrying. No per-row logic and nothing extra hidden: it labels a row that is
     already there. (Every one of them is still listed by name in NEEDS YOU below, which
     reads `snap.agents` and never sees this.)
+
+    Separate from the indent because the two renderers indent by different units and one
+    of them cannot be handed the spaces at all: `board._clip` flattens runs of whitespace,
+    so a pre-indented string arrives at the panel with its indentation gone.
     """
-    out = ("  " * c.depth) + f"+ {c.count} archived"
+    out = f"+ {c.count} archived"
     if c.needs_human:
         out += f" · {c.needs_human} need you"
     return out
+
+
+def collapsed_label(c: Collapsed, indent: str = "  ") -> str:
+    """`collapsed_text`, indented to the level it stands in for.
+
+    `indent` is ONE RUNG, and the caller's to choose because a rung is: `sb status` draws
+    the tree two spaces at a time and the boards draw it `board.INDENT` at a time, and a
+    collapsed row that indents by the other one does not line up with the siblings it
+    stands among.
+    """
+    return (indent * c.depth) + collapsed_text(c)
 
 
 def display_rows(agents: list[AgentStatus], *, show_archived: bool = False
@@ -2011,12 +2036,20 @@ def display_rows(agents: list[AgentStatus], *, show_archived: bool = False
 
     def collapsed(group: list[AgentStatus]) -> Collapsed:
         hidden = [a for g in group for a in subtree(g)]
+        # The workspace of the rows this one replaced, when they agree — the whole
+        # subtree's and not just the roots', because the row stands for all of them. They
+        # usually do agree: a sealed subtree is a finished delegation and a delegation is
+        # what opens a workspace. When they do not, None, and the board's gutter then
+        # treats this row as belonging to no workspace exactly as it did before the field
+        # existed.
+        spaces = {a.workspace for a in hidden}
         # The depth the hidden rows would have been drawn at — they are siblings, so they
         # share one. Taken from the rows themselves rather than from this walk, so the row
         # lands at the nest level of what it replaced even for a tree `_tree` had to
         # straighten out.
         return Collapsed(depth=min(g.depth for g in group), count=len(hidden),
-                         needs_human=sum(1 for a in hidden if a.needs_human))
+                         needs_human=sum(1 for a in hidden if a.needs_human),
+                         workspace=next(iter(spaces)) if len(spaces) == 1 else None)
 
     out: list[Any] = []
     drawn: set[str] = set()

@@ -102,10 +102,31 @@ GLYPH_STYLE = {"✗": "bold red", "◐": "bold yellow", "◌": "bold yellow",
                "○": "dim", "?": "dim", "●": "bold green"}
 
 HEADER_STYLE = "bold white on blue"
+# A section divider inside the head, quieter than either of the two bars above: the blue
+# one is the board's own title and the yellow one is an alarm, and a divider that shouts
+# as loudly as an alarm teaches the eye to ignore the alarm. Same `_bar` shape, so it
+# reads as one of the family rather than as a new kind of line.
+SECTION_STYLE = "bold white on grey23"
 NEEDS_STYLE = "bold black on yellow"
 BORDER_STYLE = "blue"
 GUTTER_STYLE = "bold cyan"
 DIM = "dim"
+
+# The wash on the row a human just clicked — see `_wash` and `board.lit_row`.
+#
+# NEUTRAL, because every colour on this board already means something: green is working,
+# red is trouble, yellow is a summons, cyan is a workspace. A highlight that borrowed any
+# of them would say the agent had changed, when the only thing that changed is which row
+# the human last touched.
+#
+# DARK, because the row underneath has to stay readable and everything it is drawn in was
+# picked against a black pane. Lighter greys were tried on paper and lose the muted words
+# first — `done`'s steel blue, then the age — which is the wrong half to lose.
+#
+# `not dim` is the other half of readable. Dim grey on a grey wash is the one combination
+# that disappears, and it is the state word of every idle row plus the age of every row on
+# the board. Lifting it for the ten seconds the row is lit changes nothing the row SAYS.
+HIGHLIGHT_STYLE = "not dim on grey30"
 
 # A workspace holding one visible agent. A middle dot, not a bullet: `●` is already the
 # healthy-agent glyph and `•` beside it would read as a second status glyph.
@@ -412,13 +433,16 @@ def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
     child whose `workspace` is its parent's, unlike every one of its siblings. Depth
     cannot tell that row from the ones around it; the workspace value can.
 
-    Collapsed-archive markers carry no workspace of their own — the agents they stand for
-    may be several — so they belong to no run and end whichever run they follow.
+    A collapsed-archive marker is read the same way, off the same field. It carries the
+    workspace of the agents it stands for when they shared one (`status.Collapsed`), and
+    None when they did not — so a group whose last member has been archived keeps its
+    closing corner, and a marker standing for several workspaces still belongs to none of
+    them and ends the run it follows, which is what it did before it had the field.
     """
     runs: list[list[int]] = []
     current: Optional[str] = None
     for i, row in enumerate(rows):
-        ws = None if board._is_group(row) else row.workspace
+        ws = row.workspace
         if ws is not None and ws == current:
             runs[-1][1] = i
         elif ws is not None:
@@ -430,11 +454,18 @@ def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
 def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
     """Per row: `(char, offset)`, or `None` for a row with no mark.
 
-    The mark lives INSIDE the indentation the row already has, at the column the run's
-    shallowest row indents to. Every row in a run is at least that deep, so the mark
-    always lands on a space and the name column never moves: the gutter costs zero
-    columns. `offset` indexes the row's rendered label, with `-1` meaning the space in
-    front of the glyph — see below.
+    The mark lives INSIDE the indentation the row already has, at the LAST column the
+    run's shallowest row indents to — the space directly in front of that row's name.
+    Every row in a run is at least that deep, so the mark always lands on a space and the
+    name column never moves: the gutter costs zero columns. `offset` indexes the row's
+    rendered label, with `-1` meaning the space in front of the glyph — see below.
+
+    AS FAR RIGHT AS THE RUN ALLOWS, which is Andrew's call and not an arbitrary one: the
+    whole block from column 0 to `INDENT_width * depth - 1` is free for every row in the
+    run, and drawing at the left end of it left the bracket floating in open space with
+    the names it groups four columns away. Against the name it reads as a brace around
+    them. The shallowest row still decides the column, so the bracket never lands on a
+    glyph or a letter of a deeper row.
 
     `╭ │ ╰` around a run of two or more. A run of one gets a standalone `·`, because a
     bracket needs two rows to read as one.
@@ -460,7 +491,7 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
                 continue                         # a top alone in its own workspace
             off = -1                             # the space before the glyph
         else:
-            off = len(board.INDENT) * (depth - 1)
+            off = len(board.INDENT) * depth - 1  # the space before the name
         if first == last:                        # a workspace of one: a mark, not a bracket
             out[first] = (LONE_MARK, off)
             continue
@@ -475,7 +506,8 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
-           note_text: str = "", show_archived: Optional[bool] = None
+           note_text: str = "", show_archived: Optional[bool] = None,
+           lit: Optional[str] = None, stats: Optional[dict] = None
            ) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
@@ -489,6 +521,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     then adds one border line above and one below, and if the arithmetic ever stops being
     that — a wrapped row, a rich version that pads differently — the mismatch is caught
     here rather than showing up as a click that focuses the wrong agent.
+
+    `lit` is the name of the agent whose row was clicked recently enough to still be
+    marked, or None. A NAME and not a click time: WHEN is `board.lit_row`'s question and it
+    is asked once per frame, before this is called, so nothing in this renderer has to know
+    what time it is. The row it names is drawn washed (`_wash`); every other row, and a
+    name matching nothing on screen, draws exactly as it did before.
+
+    `stats` is the fleet's numbers as the collector computed them — `panel.Reading.stats`,
+    a plain dict, `{}` or None when there are none yet. Drawn as the head's middle section
+    (`_stats_block`); what it SAYS is `board.stats_rows`, shared with the plain renderer so
+    the two boards cannot come to report different numbers.
     """
     if not available() or width < MIN_WIDTH or height < MIN_HEIGHT:
         return None
@@ -514,12 +557,6 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         """
         content.append((line, owner))
 
-    # --- the head -----------------------------------------------------------
-    # Counts from `status.summary_bits`, the same list `sb status` joins, so the two
-    # readouts of one snapshot cannot come to show different numbers.
-    emit(_bar(" " + " · ".join(["switchboard"] + status_mod.summary_bits(snap)),
-              inner, HEADER_STYLE))
-
     # --- NEEDS YOU and the footer, sized before the body gets what is left ---
     # Read from `snap.agents` and not from `rows`: a blocked agent inside a collapsed
     # archive is still a person's problem, and the collapse must not be able to bury it.
@@ -527,17 +564,73 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
 
+    # The head is FOUR lines: the board's own bar, the two lines of fleet numbers, and the
+    # section bar that says the tree below it is the tree. Counted as ONE number because
+    # everything downstream — the body's room, the fill, and the frame's own height check
+    # — is counted off it; which pieces that number is made of is only decided where the
+    # head is drawn, and only ever by the two give-backs below.
+    stats_block = _stats_block(stats, inner)
+    bar = True                                   # is the AGENTS section header drawn?
+    head_lines = 2 + len(stats_block)
     gap_min = 1 if needs else 0
-    room = capacity - 1 - 1 - len(needs) - gap_min          # head, footer
+    room = capacity - head_lines - 1 - len(needs) - gap_min          # head, footer
+    if room < 1 and stats_block:
+        # THE NUMBERS GO BEFORE THE SUMMONS DOES. A pane this short has room for the
+        # board's real work and nothing else, and NEEDS YOU is the section a human is
+        # looking for — so the stats block gives its lines back here, above the line that
+        # would otherwise start shortening that list.
+        head_lines -= len(stats_block)
+        room += len(stats_block)
+        stats_block = []
     if room < 1 and needs:
         # Too short even for one agent row: give the NEEDS YOU list back a line at a time,
         # its bar last — a count with no names still says somebody is waiting.
         keep = max(1, len(needs) + room - 1)
         needs = needs[:keep]
-        room = capacity - 2 - len(needs) - gap_min
+        room = capacity - head_lines - 1 - len(needs) - gap_min
         if room < 1:                                        # still none: the section goes
             needs, gap_min = [], 0
-            room = capacity - 2
+            room = capacity - head_lines - 1
+
+    # WHICH ROWS ARE ON SCREEN, decided before the head is drawn because on the shortest
+    # pane the head is what decides it. A section header over no agents at all is the one
+    # thing this board must not spend its last line on, and a fleet's statistics over no
+    # fleet is the same trade one line earlier — so when that is what it comes to, the head
+    # gives its lines back and the tree keeps them. Pure, so asking twice is free.
+    #
+    # IN ORDER: the numbers first, the tree's own header last, the board's title never. And
+    # only if a row actually comes of it — `_window` charges for its own `↑ N above` and
+    # `+ N more below` lines, so a line given back does not always buy one.
+    first, last = _window(len(rows), max(0, top), max(0, room))
+    if rows and first == last:
+        n = len(stats_block)
+        for give_stats, give_bar in (((n, 0), (n, 1)) if n else ((0, 1),)):
+            give = give_stats + give_bar
+            grown = _window(len(rows), max(0, top), max(0, room + give))
+            if grown[0] == grown[1]:
+                continue
+            head_lines, room = head_lines - give, room + give
+            if give_stats:
+                stats_block = []
+            if give_bar:
+                bar = False
+            first, last = grown
+            break
+
+    # --- the head -----------------------------------------------------------
+    # Counts from `status.summary_bits`, the same list `sb status` joins, so the two
+    # readouts of one snapshot cannot come to show different numbers.
+    emit(_bar(" " + " · ".join(["switchboard"] + status_mod.summary_bits(snap)),
+              inner, HEADER_STYLE))
+    for line in stats_block:
+        # Owned by nobody, like the bars around it: a click on a number focuses no agent.
+        emit(line)
+    if bar:
+        # The tree is a SECTION rather than the whole body, because it is no longer the
+        # whole body: without a header of its own it would run straight on from the last
+        # line of numbers above. One line and no blank around it — this is a pane, and a
+        # row of agents is worth more than air.
+        emit(_bar(" AGENTS", inner, SECTION_STYLE))
 
     # --- the body -----------------------------------------------------------
     if not rows:
@@ -546,7 +639,6 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                   overflow="crop"))
         drawn = 1
     else:
-        first, last = _window(len(rows), max(0, top), max(0, room))
         drawn = 0
         if first > 0:
             emit(Text(_clip(f"  ↑ {first} above", inner), style=DIM, no_wrap=True,
@@ -554,7 +646,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             drawn += 1
         w_name, w_state, show_age, left = _row_budget(rows[first:last], inner)
         for i in range(first, last):
-            emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left),
+            # A collapsed row is never lit: it is not an agent, `lit` is a name, and a
+            # click on one focuses nobody — `board.main` says so rather than lighting it.
+            on = (lit is not None and not board._is_group(rows[i])
+                  and rows[i].name == lit)
+            emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on),
                  rows[i])
             drawn += 1
         if last < len(rows):
@@ -567,7 +663,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # and all the slack goes in ONE run between them. The blank line above NEEDS YOU is
     # that run's last line rather than a line added on top of it, so it is exactly one
     # when the board is full and the slack when it is not, and never multiplies.
-    gap = max(gap_min, capacity - 1 - drawn - len(needs) - 1)
+    gap = max(gap_min, capacity - head_lines - drawn - len(needs) - 1)
     for _ in range(gap):
         emit(Text(""))
     for line, owner in needs:
@@ -637,8 +733,52 @@ def _row_budget(window: list[Any], inner: int) -> tuple[int, int, bool, int]:
     return w_name, w_state, show_age, fixed + w_name + w_state + (7 if show_age else 0)
 
 
+def _gutter(line, label: str, mark: Optional[tuple[str, int]], indent_cols: int,
+            style: str) -> None:
+    """Append `label`, with the run's mark drawn INTO the indentation it already has.
+
+    `off` is always inside this row's indentation, so the character it replaces is a space
+    and the name column stays exactly where it was.
+
+    ONE FUNCTION FOR BOTH KINDS OF ROW, and that is the point rather than tidiness: an
+    agent row and the collapsed row that closes its workspace have to put the mark in the
+    same screen column, or the bracket closes on nothing. Bounded by the INDENT and not by
+    the label, so a mark that somehow came out too far right is dropped rather than drawn
+    over a letter of the name.
+    """
+    if mark is not None and 0 <= mark[1] < indent_cols:
+        ch, off = mark
+        line.append(label[:off], style=style)
+        line.append(ch, style=GUTTER_STYLE)
+        line.append(label[off + 1:], style=style)
+    else:
+        line.append(label, style=style)
+
+
+def _wash(line, inner: int) -> None:
+    """Mark this line as the one just clicked: a background across the WHOLE row.
+
+    PADDED FIRST, and that is the whole of why this is not one call. A row is drawn to
+    whatever it has to say and then stops — nothing pads it, because until now nothing
+    needed the columns after the last word. A background applied to the printed characters
+    alone ends wherever that row's tail happened to end, so a fleet of rows lights up with
+    a ragged right edge, which reads as a rendering fault and not as a mark. `_bar` fills a
+    line to `inner` for the same reason; this is that idiom applied to a line that already
+    has content.
+
+    Measured by `board._visible_len`, like every other width in this file, so the wash ends
+    in the same column the bars do — see `_lines` on why the two measurements must agree.
+
+    Applied LAST, over the finished row, so it can be one span rather than a rule every
+    `append` above has to remember. `rich` combines a later span over the earlier ones, so
+    the foregrounds carry meaning as before and only the background and the dimming change.
+    """
+    line.pad_right(max(0, inner - _vlen(line.plain)))
+    line.stylize(HIGHLIGHT_STYLE)
+
+
 def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state: int,
-         show_age: bool, left_used: int):
+         show_age: bool, left_used: int, lit: bool = False):
     """One agent's line — the whole of it, because an agent is one line."""
     from rich.text import Text
 
@@ -648,7 +788,19 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         # No glyph, no state, no tail. It is not an agent and must not read as one:
         # `board.agent_at` hands this very object to the click handler, which has to be
         # able to tell the two apart.
-        line.append(_clip("   " + status_mod.collapsed_label(row), inner), style=DIM)
+        #
+        # Two things it DOES share with an agent row, because it stands among agent rows:
+        # it indents by `board.INDENT` to the depth of the rows it replaced, so it lines
+        # up with the siblings it is the footer of; and it carries the workspace mark,
+        # because it is the last row of that workspace's run and the bracket has to close
+        # on something. `_clip` is given the WORDS only — it flattens runs of whitespace,
+        # and an indent handed to it arrives with the indent gone.
+        indent = board.INDENT * row.depth
+        head = " " if mark is None or mark[1] >= 0 else mark[0]
+        line.append(head, style="" if head == " " else GUTTER_STYLE)
+        line.append("  ")                        # where an agent row draws its glyph
+        text = _clip(status_mod.collapsed_text(row), max(1, inner - 3 - _vlen(indent)))
+        _gutter(line, indent + text, mark, _vlen(indent), DIM)
         return line
 
     # A gone agent is one whose pane herdr no longer has. It is the row a future "clear
@@ -668,16 +820,9 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         line.append(" ")
     line.append(g, style=GLYPH_STYLE.get(g, ""))
     line.append(" ")
-    # The workspace mark, drawn INTO the indent rather than in front of it: `off` is always
-    # inside this row's indentation, so the character it replaces is a space and the name
-    # column stays exactly where it was.
-    if mark is not None and 0 <= mark[1] < _vlen(indent):
-        ch, off = mark
-        line.append(label[:off], style=name_style)
-        line.append(ch, style=GUTTER_STYLE)
-        line.append(label[off + 1:], style=name_style)
-    else:
-        line.append(label, style=name_style)
+    # The workspace mark, drawn INTO the indent rather than in front of it — see `_gutter`,
+    # which the collapsed row above goes through as well.
+    _gutter(line, label, mark, _vlen(indent), name_style)
     line.append("  ")
     if doomed:
         line.append(_pad(_clip(row.display_state, w_state), w_state), style="red")
@@ -698,7 +843,46 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         line.append("  " + _clip(text, room), style="bold red" if doomed else "yellow")
     elif _excuse(row):
         line.append("  " + _clip(_excuse(row), room), style=DIM)
+    if lit:
+        _wash(line, inner)
     return line
+
+
+def _stats_block(stats: Optional[dict], inner: int):
+    """The head's middle section: the fleet's numbers, two lines, above the tree.
+
+    NO BAR OF ITS OWN, which is the one visual call in here and the only place this
+    section departs from `AGENTS` and `NEEDS YOU`. It does not need one: it is already
+    delimited, by a filled bar directly above it and a filled bar directly below, and a
+    third bar between two bars would spend a third of a small section on the word STATS.
+    What a bar would have said, the two labels say better — they name the TIME FRAME each
+    line is counted over, which is the half a reader cannot infer from the numbers, where
+    a heading would only repeat what a line of counts already looks like.
+
+    ALWAYS TWO LINES, whatever is known. A section that grew a line as the first sample
+    landed would push the whole tree down half a second into every board's life, and the
+    rows a human is reading would move under the cursor. `board.stats_rows` says what goes
+    on them; the width ladder is the header's — whole pieces, dropped from the right.
+    """
+    from rich.text import Text
+
+    out = []
+    room = max(0, inner - 2 - board.STATS_LABEL_W - 2)
+    for label, pieces in board.stats_rows(stats):
+        line = Text(no_wrap=True, overflow="crop")
+        line.append("  " + _pad(label, board.STATS_LABEL_W) + "  ", style=DIM)
+        kept = board.stats_fit(pieces, room)
+        for i, piece in enumerate(kept):
+            if i:
+                line.append(board.STATS_SEP, style=DIM)
+            # The numbers themselves undimmed, and everything around them dim: the labels
+            # and separators are scaffolding, and the figures are the only thing on these
+            # two lines anybody came to read.
+            line.append(piece)
+        if not kept:
+            line.append(_clip(board.STATS_NONE, room), style=DIM)
+        out.append(line)
+    return out
 
 
 def _needs_block(wanted: list[Any], inner: int) -> list[tuple[Any, Optional[object]]]:

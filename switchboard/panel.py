@@ -217,6 +217,14 @@ class Reading:
     collector: dict                       # the counters — see collector.State
     age: Optional[float] = None           # since the last SUCCESSFUL collect; None = never
     error: Optional[str] = None           # why there is nothing to draw
+    # The fleet numbers for the board's top section — `stats.Stats.as_dict()`, already
+    # computed, arriving as a plain dict. A renderer READS this and never calls
+    # `stats.collect()`: that function reads the store and shells out to `git`, `lsof` and
+    # `ps`, which is both halves of what the module note above says a renderer must not do.
+    # `{}` when the collector published none, and every value is `None` when unknown — so
+    # `.get(k)` is `None` for "we do not know" either way, and never a zero that would read
+    # on screen as a measurement. See `envelope`.
+    stats: dict = dataclasses.field(default_factory=dict)
 
     @property
     def stale(self) -> bool:
@@ -281,7 +289,7 @@ def read(paths: Paths, *, at: Optional[float] = None) -> Reading:
 
     collected = meta.get("collected_at")
     age = None if collected is None else max(0.0, at - collected)
-    return Reading(snap, meta, age)
+    return Reading(snap, meta, age, None, payload.get("stats") or {})
 
 
 def _empty() -> status_mod.Snapshot:
@@ -292,8 +300,9 @@ def _empty() -> status_mod.Snapshot:
 # The format: `Snapshot.as_dict()`, and its inverse
 # ---------------------------------------------------------------------------
 #
-# The wire format is `sb status --json` verbatim, nested under one key so the collector's
-# counters sit BESIDE it rather than inside it. That is worth more than the convenience:
+# The wire format is `sb status --json` verbatim, nested under one key so everything else
+# the collector publishes — its counters, the fleet numbers — sits BESIDE it rather than
+# inside it (see `envelope`). That is worth more than the convenience:
 # the panel and `--json` become one contract with one set of tests, and `sb status --json`
 # gains a documented meaning as "the thing every panel is drawing".
 #
@@ -336,8 +345,24 @@ def snapshot_from_dict(d: dict) -> status_mod.Snapshot:
                                **kw)
 
 
-def envelope(snapshot: dict, collector: dict) -> dict:
-    return {"format": FORMAT, "snapshot": snapshot, "collector": collector}
+def envelope(snapshot: dict, collector: dict, stats: Optional[dict] = None) -> dict:
+    """The published file: the tree, the collector's counters, and the fleet numbers.
+
+    Three keys and not two, and `stats` is deliberately NEITHER of the others. It is not
+    part of `snapshot` because that half is `sb status --json` verbatim and stays one
+    contract with one set of tests; it is not part of `collector` because those counters
+    describe this process — polls, errors, how old the reading is — and these describe the
+    fleet the process is watching. A renderer wanting one has no use for the other.
+
+    `FORMAT` is not bumped for it. The version exists for a shape an older renderer would
+    MISREAD, and a key it never looks at is not that: an old pane ignores this, a new one
+    finds `{}` in an old collector's file and draws nothing, and both are correct while a
+    fleet is halfway through picking up a new build. Bumping would instead blank forty
+    panes for the length of that rollout ("the collector is running different code"), which
+    is a real cost paid for no real ambiguity.
+    """
+    return {"format": FORMAT, "snapshot": snapshot, "collector": collector,
+            "stats": stats or {}}
 
 
 # ---------------------------------------------------------------------------

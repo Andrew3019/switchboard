@@ -6,7 +6,7 @@ three decisions the wiring had to make, and nothing about appearance. A misdrawn
 still looks like a panel; a panel one line taller than it measured focuses the wrong agent
 on the next click, and looks exactly like a correct one.
 
-Four, not more, and each is a decision rather than a reassurance:
+Five, not more, and each is a decision rather than a reassurance:
 
 1. no line wraps, measured by `board`'s own column arithmetic, on the characters that
    break it — CJK, ZWJ emoji, variation selectors, flag pairs;
@@ -14,13 +14,17 @@ Four, not more, and each is a decision rather than a reassurance:
    NEEDS YOU block and across a scroll;
 3. a missing `rich` falls back rather than crashing;
 4. the two gutter cases the mockup could not decide — a group cut by the scroll, and a
-   workspace shared at depth 0.
+   workspace shared at depth 0;
+5. the clicked row's highlight reaches the end of the row. A width, not a look: which
+   colour it is drawn in is nobody's invariant, and a wash that stops where the row's
+   words stop leaves a ragged edge down the pane that reads as a broken panel.
 
 Skipped whole when `rich` is absent, except (3), which is the test for exactly that.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -49,9 +53,18 @@ def snap(*agents):
     return status.Snapshot(now=0, agents=list(agents))
 
 
-def frame(s, *, top=0, height=20, width=80, msg="", note_text=""):
+# A full sample, so the head is drawn at its widest wherever a width is under test. The
+# top section is two lines of text like any other, and a line one column wider than it
+# measured is the wrap every test in here exists to catch.
+STATS = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
+         "store_age": 2.0, "lines_changed": 4412, "lines_changed_nondocs": 2516,
+         "commits_last_hour": 25, "git_age": 30.0, "cpu_percent": 384.0,
+         "memory_bytes": 1288490188, "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
+
+
+def frame(s, *, top=0, height=20, width=80, msg="", note_text="", lit=None, stats=None):
     rows = richboard.layout(s, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=False)
+                            note_text=note_text, show_archived=False, lit=lit, stats=stats)
     assert rows is not None, "the rich renderer declined this frame"
     return rows
 
@@ -83,7 +96,8 @@ class NoLineWrapsTest(unittest.TestCase):
         for width in (24, 40, 56, 80, 120):
             for height in (6, 12, 24):
                 with self.subTest(width=width, height=height):
-                    for text, _ in frame(self.WIDE, width=width, height=height):
+                    for text, _ in frame(self.WIDE, width=width, height=height,
+                                         stats=STATS):
                         self.assertLessEqual(board._visible_len(text), width, repr(text))
 
     def test_every_line_fills_the_pane_exactly_so_the_panel_cannot_be_ragged(self):
@@ -94,7 +108,7 @@ class NoLineWrapsTest(unittest.TestCase):
         column narrower than `board` did would still pass the test above and would show
         up here.
         """
-        for text, _ in frame(self.WIDE, width=72, height=20):
+        for text, _ in frame(self.WIDE, width=72, height=20, stats=STATS):
             self.assertEqual(board._visible_len(text), 72, repr(text))
 
     def test_rich_and_board_agree_so_the_last_resort_clip_never_fires(self):
@@ -241,6 +255,48 @@ class FallbackTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_RICH, "rich is not installed here")
+class SectionHeadTest(unittest.TestCase):
+    """The tree is a SECTION of the head, and the head is where a stats block goes next.
+
+    Pinned because the head's line count is not cosmetic: every row below it is placed off
+    that number, and a head one line taller than it measured focuses the wrong agent on
+    the next click. `layout` refuses a frame whose height it cannot account for, so `None`
+    here would be that bug caught — and a frame of the wrong length is it uncaught.
+    """
+
+    FLEET = snap(agent("top", workspace="top"),
+                 agent("kid", depth=1, parent="top", workspace="ws"),
+                 agent("kid2", depth=1, parent="top", workspace="ws"))
+
+    def _plain(self, rows):
+        return [board._ANSI.sub("", t).strip("│ ").rstrip() for t, _ in rows]
+
+    def test_the_tree_sits_under_its_own_header_and_the_frame_still_measures(self):
+        for height in range(richboard.MIN_HEIGHT, 24):
+            rows = frame(self.FLEET, width=70, height=height)
+            self.assertEqual(len(rows), height, height)
+        lines = self._plain(frame(self.FLEET, width=70, height=20,
+                                  stats={"turns_last_hour": 47, "processes": 9}))
+        # The head, in order: the board's bar, the two lines of fleet numbers, the tree's
+        # own bar. Four lines, and every row below is placed off that count.
+        self.assertTrue(lines[1].startswith("switchboard"), lines[1])
+        self.assertEqual(lines[2], "LAST HOUR  47 turns")
+        self.assertEqual(lines[3], "RIGHT NOW  9 procs")
+        self.assertEqual(lines[4], "AGENTS")
+        self.assertIn("top", lines[5])
+
+    def test_the_shortest_pane_keeps_the_agent_row_and_drops_the_header(self):
+        """A section header over no agents at all is the one thing the last line must not
+        go on — the board is the tree. Below the height that fits both, the head gives its
+        lines back: the numbers first, the tree's own header last."""
+        lines = self._plain(frame(self.FLEET, width=70, height=richboard.MIN_HEIGHT,
+                                  stats={"turns_last_hour": 47}))
+        self.assertNotIn("AGENTS", lines)
+        self.assertFalse([ln for ln in lines if ln.startswith("LAST HOUR")], lines)
+        self.assertTrue(any("top" in ln for ln in lines), lines)
+
+
+@unittest.skipUnless(HAVE_RICH, "rich is not installed here")
 class GutterTest(unittest.TestCase):
     """The two cases the mockup never had to answer, pinned as answers.
 
@@ -274,6 +330,40 @@ class GutterTest(unittest.TestCase):
         cut = self._marks(frame(fleet, width=80, height=8, top=2))
         self.assertTrue(cut and cut[0] == "│", cut)
         self.assertNotIn("╭", cut)
+
+    def test_the_bracket_sits_at_the_right_hand_end_of_the_run_s_indent(self):
+        """AS FAR RIGHT AS THE RUN ALLOWS — Andrew's call, and the one thing about the
+        gutter that is a column number rather than a character. The whole indent block is
+        free, so the choice is the left end or the right, and the right is the column
+        directly before the shallowest row's name. Pinned on `gutter_column`, which is
+        pure, rather than on a drawn frame: the number is the decision."""
+        rows = [agent("top", workspace="top"),
+                agent("lead", depth=1, parent="top", workspace="w"),
+                agent("kid", depth=2, parent="lead", workspace="w")]
+        unit = len(board.INDENT)
+        self.assertEqual(richboard.gutter_column(rows),
+                         [None, ("╭", unit - 1), ("╰", unit - 1)])
+        # A run whose shallowest row is deeper moves right with it, and never past the
+        # end of that row's own indentation.
+        deeper = [agent("top", workspace="top"),
+                  agent("lead", depth=1, parent="top", workspace="top"),
+                  agent("a", depth=2, parent="lead", workspace="w"),
+                  agent("b", depth=3, parent="a", workspace="w")]
+        self.assertEqual(richboard.gutter_column(deeper)[2:],
+                         [("╭", 2 * unit - 1), ("╰", 2 * unit - 1)])
+
+    def test_a_collapsed_archive_row_closes_the_workspace_it_belonged_to(self):
+        """A group whose last member has been archived still has a last member — the row
+        standing in for it. It carries the workspace it stands for, so it joins that run
+        and the bracket closes on it; a marker standing for SEVERAL workspaces belongs to
+        none of them and ends the run, exactly as every marker did before the field."""
+        rows = [agent("top", workspace="top"),
+                agent("lead", depth=1, parent="top", workspace="w"),
+                agent("kid", depth=2, parent="lead", workspace="w"),
+                status.Collapsed(depth=2, count=2, workspace="w")]
+        self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 3)])
+        rows[-1] = status.Collapsed(depth=2, count=2, workspace=None)
+        self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 2)])
 
     def test_a_workspace_shared_at_depth_zero_is_marked_and_a_top_alone_is_not(self):
         """qa-2 found this on Andrew's own board: the mockup skipped every run whose
@@ -380,3 +470,48 @@ class NeedsYouTest(unittest.TestCase):
             agent("loop", parent="loop", stalled=True, turn="idle"),
         )
         self.assertEqual(names, ["orphan", "loop"])
+
+
+@unittest.skipUnless(HAVE_RICH, "rich is not installed here")
+class HighlightTest(unittest.TestCase):
+    """The clicked row's mark REACHES THE END OF THE ROW.
+
+    The one way this fails and still looks deliberate. Rows are drawn to whatever they
+    have to say and stop there, so a background applied to the printed characters alone
+    ends in a different column on every row — a highlight with a ragged right edge, which
+    reads as a broken panel rather than as a mark. `_wash` pads first; this counts the
+    columns that came back lit and insists they are the pane's whole inner width.
+
+    Counted in COLUMNS carrying the background, not in escape codes: `rich` is free to
+    split a line into as many spans as it likes, and the question is what a human sees.
+    """
+
+    FLEET = snap(
+        agent("top", workspace="top"),
+        agent("alpha", depth=1, parent="top", workspace="ws-a"),
+        agent("gamma", depth=1, parent="top", workspace="ws-b", stalled=True,
+              turn="idle", idle=800),
+    )
+
+    def _washed(self, text: str) -> int:
+        """How many of this line's columns are drawn on a background colour."""
+        cols, on = 0, False
+        for piece in re.split(r"(\033\[[0-9;]*m)", text):
+            if piece.startswith("\033["):
+                on = "48;5;" in piece or "48;2;" in piece    # 256-colour, or truecolour
+            elif on:
+                cols += board._visible_len(piece)
+        return cols
+
+    def test_the_mark_spans_the_whole_row_and_only_the_row_that_was_clicked(self):
+        """The bars have backgrounds of their own and are owned by nobody, so the rows
+        that belong to an agent are the ones asked. `gamma` is drawn TWICE — its own row
+        and the NEEDS YOU line naming it — and one click marks one row: the row in the
+        tree, which is the thing that was clicked and the place a human is looking."""
+        width = 72
+        rows = frame(self.FLEET, width=width, height=16, lit="gamma")
+        owned = [(o.name, self._washed(text)) for text, o in rows if o is not None]
+        self.assertEqual([p for p in owned if p[1]], [("gamma", width - 4)])
+        # 2 columns of border and 2 of padding — the width `_bar` fills, so the mark ends
+        # where the header and NEEDS YOU bars end and the panel stays rectangular.
+        self.assertEqual(sorted(n for n, _ in owned), ["alpha", "gamma", "gamma", "top"])
