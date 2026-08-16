@@ -277,13 +277,16 @@ class SectionHeadTest(unittest.TestCase):
             self.assertEqual(len(rows), height, height)
         lines = self._plain(frame(self.FLEET, width=70, height=20,
                                   stats={"turns_last_hour": 47, "processes": 9}))
-        # The head, in order: the board's bar, the two lines of fleet numbers, the tree's
-        # own bar. Four lines, and every row below is placed off that count.
+        # The head, in order: the board's bar, the STATS bar, the two lines of fleet
+        # numbers, the blank that holds them off the tree, the tree's own bar. Six lines,
+        # and every row below is placed off that count.
         self.assertTrue(lines[1].startswith("switchboard"), lines[1])
-        self.assertEqual(lines[2], "LAST HOUR  47 turns")
-        self.assertEqual(lines[3], "RIGHT NOW  9 procs")
-        self.assertEqual(lines[4], "AGENTS")
-        self.assertIn("top", lines[5])
+        self.assertEqual(lines[2], "STATS")
+        self.assertEqual(lines[3], "LAST HOUR  47 turns")
+        self.assertEqual(lines[4], "RIGHT NOW  9 procs")
+        self.assertEqual(lines[5], "")
+        self.assertEqual(lines[6], "AGENTS")
+        self.assertIn("top", lines[7])
 
     def test_the_shortest_pane_keeps_the_agent_row_and_drops_the_header(self):
         """A section header over no agents at all is the one thing the last line must not

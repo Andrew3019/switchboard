@@ -73,9 +73,10 @@ SGR = re.compile(r"\033\[<(\d+);(\d+);(\d+)([Mm])")
 REFRESH = config.setting("display.board_refresh")   # how often the collector re-collects,
                                                     # and so how often re-reading it can
                                                     # tell us anything new
-CHROME = config.setting("display.board_chrome")       # header, two stats lines, AGENTS,
-                                                     # tail, hints — the lines of this
-                                                     # renderer that are not agent rows
+CHROME = config.setting("display.board_chrome")      # header, STATS, two stats lines, a
+                                                     # blank, AGENTS, tail, hints — the
+                                                     # lines of this renderer that are
+                                                     # not agent rows
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 
 # How much of the width the board takes when it opens beside an agent — THE ONLY
@@ -676,12 +677,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     if show_archived is None:                       # `display.show_archived`, via status,
         show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
     agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
-    # The top section is two lines and `display.board_chrome` counts them, so nothing
+    # The top section is FOUR lines — its own label, two lines of numbers, and the blank
+    # that holds it off `AGENTS` — and `display.board_chrome` counts them, so nothing
     # below has to learn about it. The one exception is a pane too short to hold the
-    # numbers AND a single agent row, where the numbers give their lines back: the board
-    # is the tree, and a fleet's statistics over no fleet is what the last line must not
-    # be spent on. `richboard.layout` makes the same trade one section later, on `AGENTS`.
-    top_lines = [_stats_line(label, pieces, width) for label, pieces in stats_rows(stats)]
+    # numbers AND a single agent row, where the whole block gives its lines back: the
+    # board is the tree, and a fleet's statistics over no fleet is what the last line must
+    # not be spent on. `richboard.layout` makes the same trade one section later, on
+    # `AGENTS`. Header and blank go back WITH the numbers — a label over nothing and a gap
+    # holding nothing apart are the two things a pane this short has least use for.
+    top_lines = ([_c(" STATS", DIM)]
+                 + [_stats_line(label, pieces, width) for label, pieces in stats_rows(stats)]
+                 + [""])
     capacity = height - CHROME
     if capacity < 1:
         capacity += len(top_lines)
@@ -731,9 +737,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         head += _c(" · " + b, DIM)
         cols += 3 + _visible_len(b)
     emit(head)
-    # The stats block, between the two labels rather than under a third one — see
-    # `richboard._stats_block`, which makes that call for both renderers. Owned by
-    # nobody: a click on a number focuses no agent.
+    # The stats block — its own label, its numbers, and the blank line under them. See
+    # `richboard._stats_block`, which makes the call about the header for both renderers;
+    # here the label is dim text rather than a filled bar, exactly as `AGENTS` below is,
+    # because filled bars are what this renderer does without. Owned by nobody: a click on
+    # a number, on the label or on the blank focuses no agent.
     for line in top_lines:
         emit(line)
     # The tree is a SECTION here too, and for the panel's reason (`richboard.layout`): the
@@ -744,8 +752,9 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # It REPLACED the blank line that separated the header from the tree rather than
     # being added above it — a label separates as well as a blank does, and the pane is
     # worth more than the air. The stats block above it is the one that did add lines, and
-    # `display.board_chrome` went from 4 to 6 for them: the number is what "rows that are
-    # not agents" means here, and it is the one place that has to know.
+    # `display.board_chrome` went 4 → 6 → 8 for them: two for the numbers, then one each
+    # for their own `STATS` label and the blank line under it. The number is what "rows
+    # that are not agents" means here, and it is the one place that has to know.
     emit(_c(" AGENTS", DIM))
 
     if not agents:
