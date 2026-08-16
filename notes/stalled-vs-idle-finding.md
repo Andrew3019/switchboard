@@ -53,6 +53,10 @@ designated first responder to idle-with-no-excuse is the reconciler. The board s
 Andrew simultaneously is not something DESIGN-TRUTH asks for; "STALLED means a human should
 look" comes only from module docstrings, which are untrusted.
 
+**Since resolved.** Andrew chose (2) and (3) below, and explicitly not (1); both shipped
+together, with the reconciler untouched. See `notes/stalled-floor-and-reply.md` for what
+landed, the end-to-end latency it leaves, and the live proof.
+
 ## Why this was not shipped
 
 The fix is a design choice with at least three defensible answers, and picking one is
