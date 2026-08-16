@@ -352,3 +352,58 @@ Rendered through `panel.read` on the clone's own published envelope with the sta
 rather than in a tmux pane: a pane whose collector is stopped elects a new one within two
 seconds and fills the line back in, so the blank state cannot be held on screen long enough
 to capture. The renderer and the file are real; the pty is not.
+## "You are here": each board highlights the agent sharing its own tab
+
+Captured from two REAL boards, not a pty and not a fixture: a `git clone` of this repo in
+a scratch directory, `you-are-here` checked out, and two agents delegated through that
+clone's own `bin/sb` — so each is a real herdr tab holding an agent pane and the board
+pane `open_beside` split for it. Read back with `herdr pane read <pane> --format ansi`.
+The clone, its two agents and its workspaces were torn down; nothing here touched the live
+store.
+
+The two boards are drawing the same fleet at the same moment and are NOT the same picture:
+
+```
+    the board in fixture-a's tab (w1J0:p2)           the board in fixture-b's tab (w1K1:p2)
+╭─ switchboard ──────────────────────────╮      ╭─ switchboard ──────────────────────────╮
+│  switchboard · 2 alive · 2 blocked     │      │  switchboard · 2 alive · 2 blocked     │
+│  AGENTS                                │      │  AGENTS                                │
+│ ▓◐ fixture-a  blocked   2m  BLOCKED …▓ │      │  ◐ fixture-a  blocked   2m  BLOCKED …  │
+│  ◐ fixture-b  blocked   2m  BLOCKED …  │      │ ▓◐ fixture-b  blocked   2m  BLOCKED …▓ │
+╰────────────────────────────────────────╯      ╰────────────────────────────────────────╯
+```
+
+`▓` stands for the wash, which is the row background this repo already had — the ANSI
+confirms it is the whole row and only that row:
+
+```
+│ ESC[48;5;239m ESC[1;33;48;5;239m◐ … ESC[1;48;5;239mfixture-a … BLOCKED — fixture pane, nothing to doESC[0m │
+│ ESC[1;33m◐ ESC[1mfixture-b  ESC[1;31mblocked …                                              │
+```
+
+`48;5;239` is `grey30`, opened at the first column of the row and still open at its last —
+the same `_wash` the click highlight used, now triggered by adjacency instead of by a
+click. Every board that is not in fixture-a's tab draws that row plain.
+
+The honest edge cases, each driven with the board run under a chosen `HERDR_TAB_ID`
+against the same clone (no highlight in any of them, and no crash in any of them):
+
+- **no herdr at all** (bare `python -m switchboard.board`): no `48;5;239` in the frame;
+- **a single-pane tab** (`wZ:t2`, a real one from `herdr pane list`): no sibling to find;
+- **a tab whose panes belong to another checkout's fleet** (`w1JY:t5`): siblings found,
+  no row in this store carries either pane id, so nothing lights — this is also what a
+  stale `pane_id` after a pane move looks like, and what an agent that has dropped out of
+  the snapshot looks like.
+
+Cadence, measured rather than asserted: a `herdr` shim on `PATH` logging every invocation,
+across 22 seconds of a live board (~44 redraws at `display.board_refresh`):
+
+```
+64990 1786911771 pane list
+65131 1786911781 pane list
+65191 1786911791 pane list
+```
+
+Three calls, ten seconds apart — `HERE_REFRESH`, on a worker thread — and no other herdr
+call from the renderer at all. A frame with `Locator.tick()` and `Locator.name()` on it
+measures 3.1 ms, which is the same board it always was: the subprocess is never on it.
