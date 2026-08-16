@@ -494,6 +494,18 @@ is made by the agent a plan would constrain. Making a declared no-plan a recorde
 close it; whether that ceremony is worth paying on every investigation and question is
 Andrew's call and is not yet made.
 
+**Step sets from different leads are not really comparable.** Granularity is a judgement,
+so two leads splitting the same job into three coarse steps and twelve fine ones produce
+records that count differently — while the analysis pass exists to count what recurs. Library
+steps are the part that does compare, since a name means the same thing wherever it appears,
+and that is an argument for the catalogue growing rather than a reason to fix granularity by
+rule.
+
+**The granularity criteria are for splitting, and do not invalidate a plan later.** If the
+lead ends up handing three consecutive steps to one agent, the split was finer than it needed
+to be and that is all. It may merge them, keeping the highest try count and both sets of
+notes, or leave them; the plan is not wrong mid-run for having been split optimistically.
+
 **The record is biased toward jobs that went well.** Ticking and note-writing are voluntary
 acts by an agent that is still on top of its job. A run that derails stops being written
 down, so the analysis pass reads a sample thinnest in exactly the runs it exists to find.
