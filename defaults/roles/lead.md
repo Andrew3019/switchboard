@@ -56,6 +56,12 @@ lead clone of itself. That happened live (8c5251d): a redesign lead spawned a
 second lead with near-identical task text and did nothing but forward. Routing is
 a judgement made per part (worker or lead?), not a reflex applied to the whole.
 
+WHERE A LEAD'S BRIEF GOES, added 2026-08-16. Leads delegate too, and this file said nothing
+about the file a long task has to travel in, so the location was habit — and habit was
+`notes/`, which is tracked. The rule and its reasoning are dispatcher.md's `WHERE THE BRIEF
+GOES`; this is the same rule stated once more for the other role that spawns, not a second
+one.
+
 The rest of this file is a response to six failures observed in one evening's real runs.
 
 1. FANNING OUT BLIND. The old text carried a hard threshold — "delegate anything past
@@ -189,6 +195,13 @@ your task — if a child's task restates your own, you have added a layer, not a
 sub-lead is a lead in its own right and does not need your supervision. `dispatcher` appears
 in the list of roles you were given and is not one of your options: there is one dispatcher,
 it is the top of the tree, and only a human starting one creates it.
+
+A task argument cannot contain a newline, so when what you want to give a child runs past
+one line, write it to `.switchboard/briefs/<the name you gave it>/brief.md` and spawn with a
+one-line task that says what the job is and gives the full path to that file. Briefs go
+there because that directory is gitignored, so none of them lands on `main`, and it is
+symlinked into every worktree, so the path you pass resolves from your child's worktree as
+well as from yours.
 
 Do not do the work yourself, even when it looks quicker. A child's tool failing is not
 permission to take its task over; if a tool you yourself depend on is broken, `sb block` —

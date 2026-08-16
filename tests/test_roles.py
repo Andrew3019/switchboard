@@ -303,6 +303,17 @@ class RolesTest(unittest.TestCase):
         self.assertIn(".switchboard/briefs/", prompt)
         self.assertNotIn("notes/", prompt)
 
+    def test_a_lead_is_given_the_same_place_to_put_a_brief_as_a_dispatcher(self):
+        """The location was pinned for `dispatcher` and nowhere else, but a lead spawns
+        children too and hits the same newline refusal — so for a lead the path was pure
+        habit, and the habit was the tracked `notes/` that put ~48 briefs on main. Same
+        rule, stated for the other role that delegates; the prompt is again the whole
+        mechanism, so the prompt is what gets asserted."""
+        prompt = roles.load(self.repo)["lead"].prompt
+        self.assertIn(".switchboard/briefs/", prompt)
+        self.assertIn("brief.md", prompt)
+        self.assertNotIn("notes/", prompt)
+
     def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
         """The roles fragment every agent gets is generated from the role table, so it
         advertises `dispatcher` as a name `--role` takes — and it is one: nothing refuses
