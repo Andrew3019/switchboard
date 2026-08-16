@@ -26,6 +26,11 @@ time, and removing them is a large part of the point. — confirmed 2026-08-16
 scattered prose about approval, pushing and merging conflicts with a step, the step is the
 authority and the prose gets cut back to a pointer. — confirmed 2026-08-16
 
+**The lead role survives with cuts rather than being rewritten.** Its planning is right up
+to the point of implementation and needs trimming, not replacing: once the basic steps
+exist, a lead can and should plan around them, and the two should not conflict. — confirmed
+2026-08-16
+
 **A human-facing output shape may be a template.** `DESIGN-TRUTH.md`'s rule that almost
 none of the human-facing guidance may become something to copy was an exaggeration, and it
 is set aside here. A step may specify an output format exactly. — confirmed 2026-08-16
@@ -53,10 +58,14 @@ is twelve words at most.** — confirmed 2026-08-16
 
 **Implementation begins only after he confirms.** — confirmed 2026-08-16
 
+**Two blocks for a whole job, and no more: this one and the merge gate.** Everything else
+resolves without him. — confirmed 2026-08-16
+
 ### Pre-merge gate
 
 **The gate creates the PR and writes the description to his liking.** He is not asked
-whether to create it. — confirmed 2026-08-16
+whether to create it. What "to his liking" means in content is deferred and does not block
+building the rest. — confirmed 2026-08-16
 
 **Testing steps are given only when actually needed.** Anything the agent has already
 tested does not need him — asking is a waste of his time, his effort and his reading. —
@@ -90,12 +99,12 @@ change and a large one. — confirmed 2026-08-16
 internal fragments composed into others. A step may be nothing more than an output format —
 the `-` / `---` / `-----` bullet contract is itself a step. — confirmed 2026-08-16
 
-**Steps are named from a shared catalogue, and a step may be nothing but a name.** The
-value is the name, not the text: a rule such as "merging obliges a merge review" can only
-be written if the step it names is called the same thing in every tree. A "merge PR" step
-carrying no logic is legitimate and worth having. One-off nodes may still be freeform;
-anything that recurs, or that a rule refers to, earns a catalogue name. — decided
-2026-08-16
+**There is no fixed catalogue of steps yet, and one is not to be invented.** Trees are
+saved and carry enough notes to be analysed, so what belongs in a catalogue — and what a
+default template should contain — is read off real runs after a while rather than decided
+up front. The system must work without one. This supersedes the earlier reading that steps
+are named from a shared catalogue from the start; the two gates below are the exception,
+being confirmed by name already. — confirmed 2026-08-16
 
 **A step names presets always, and a role only when it spawns a new agent.** A role is what
 an agent is, fixed when it is spawned; a preset is behaviour injected into one, and can be
@@ -148,10 +157,17 @@ agent-driven is what makes the ceiling unnecessary. — confirmed 2026-08-16
 **Losing a tree is cheap.** A tree is files or rows, and nothing about it compares to
 losing a worktree or an agent, so its lifetime rules can stay loose. — confirmed 2026-08-16
 
-**A tree dies with its worktree, not with its agents.** Tasks are short-lived and agents
-outlive them. When every agent on a worktree is closed the tree goes dormant with them and
-is restored when they are; when the worktree goes, the tree goes with it and does not come
-back. — confirmed 2026-08-16
+**A tree stops being live with its worktree; the record of it is kept.** Trees are plain
+text and nothing about losing one is expensive, so they are not deleted — cleanup means
+dropping out of the UI and stopping being counted as active, never erasing. When every
+agent on a worktree is closed the tree goes dormant and is restored when they are; when the
+worktree goes, the tree stops being live but the record survives, because those records are
+what the catalogue is later derived from. This supersedes the earlier "the tree goes with
+it and does not come back". — confirmed 2026-08-16
+
+**A tree carries enough notes to be worth analysing later.** Its value after the job is
+evidence about how work actually ran, so it is written to be read cold. — confirmed
+2026-08-16
 
 **Nodes carry references to briefs and artifacts as checkpoints — references, never
 content.** Whether that supersedes the brief mechanism outright on restore is to be
