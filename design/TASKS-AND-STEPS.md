@@ -132,9 +132,26 @@ agent rather than in a new one. — confirmed 2026-08-16
 the static library; the task tree is the per-job, mutable thing. A node can name a step,
 which is what stops a step being forgotten. — confirmed 2026-08-16
 
-**Semi-structured, and more structured than a todo list without being a rigid DAG.** Not
-Claude's internal todos, not a flat list; something like a DAG but dynamic and changeable
-at any time. This was in the earliest braindump. — confirmed 2026-08-16
+**It is a DAG, not a tree.** One node may fan out to several and those may join back into
+one, and a join waits for every branch feeding it. This supersedes the earlier reading of it
+as a tree. — confirmed 2026-08-16
+
+**Redoing work is not modelled as an edge.** Where part of the job must be redone, the lead
+or sole worker simply goes back to it; the graph stays acyclic and the flexibility comes
+from it being agent-driven. — confirmed 2026-08-16
+
+**Semi-structured and changeable at any time — more structured than a todo list, less rigid
+than a fixed workflow.** Not Claude's internal todos and not a flat list. This was in the
+earliest braindump. — confirmed 2026-08-16
+
+**This is an integral part of the system, though not load-bearing.** It is how the work
+process itself can be looked back on and improved. — confirmed 2026-08-16
+
+**A recurring analysis pass reads the saved records and proposes what to add.** Something
+like a skill run every so often — analyse switchboard usage — that looks over past jobs and
+says what should become a new step, template, preset, role, optimisation or piece of
+tooling. This is the payoff that saving the records buys, and the reason they must be worth
+reading cold. — confirmed 2026-08-16
 
 **One task tree per job, with agents attached to its nodes.** A lead may define one task or
 several, or collapse everything into a single task — both must work gracefully, because the
