@@ -4841,6 +4841,17 @@ class Broker:
                 out.skipped.append((name, "already running"))
                 continue
             if dry_run:
+                # The one refusal a preview can see for itself, and the one it most has
+                # to: a crash cohort is exactly where checkouts have been removed, and a
+                # dry run that lists a row as "would restore" when nothing can restore it
+                # is a preview of the wrong command. `restore` still owns the
+                # authoritative refusal and its wording — this only declines to promise.
+                where = a["cwd"] or str(self.repo)
+                if not Path(where).is_dir():
+                    branch = store.agent_branch(self.db, name)
+                    out.failed.append((name, f"its checkout is gone ({where})" + (
+                        f"; its work is on branch {branch}" if branch else "")))
+                    continue
                 out.append(name)
                 continue
             try:

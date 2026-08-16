@@ -1244,7 +1244,10 @@ def _sweep_restored(r, *, dry_run: bool) -> str:
     """
     lines = [f"would restore {n}" if dry_run else f"restored {n}" for n in r]
     lines += [f"already running, skipped {n}" for n, _ in r.skipped]
-    lines += [f"restore failed: {n}: {why}" for n, why in r.failed]
+    # "failed" is what it is called once something was attempted. In a preview nothing
+    # was, so the same row says what it would run into rather than claiming an error.
+    lines += [(f"would not restore {n}: {why}" if dry_run else f"restore failed: {n}: {why}")
+              for n, why in r.failed]
     lines += [f"cannot restore {n}: {why}" for n, why in r.unrestorable]
     if not lines:
         return ("nothing has gone down recently in your scope — nothing to restore. "
