@@ -284,10 +284,35 @@ class RolesTest(unittest.TestCase):
     def test_a_dispatcher_puts_a_multi_line_ask_in_a_file_rather_than_flattening_it(self):
         """herdr refuses a multi-line agent argument, so "relay it verbatim" and "pass it
         in the task" cannot both hold for anything with structure in it. The reachable move
-        was to flatten, which is the lossy rewrite relaying exists to prevent."""
+        was to flatten, which is the lossy rewrite relaying exists to prevent.
+
+        This pins the file/flatten decision only. WHERE the file goes changed on
+        2026-08-16 and is pinned separately below, because this assertion was loose
+        enough that the old `notes/` location could have drifted back unnoticed."""
         prompt = roles.load(self.repo)["dispatcher"].prompt
-        self.assertIn("-brief.md", prompt)
+        self.assertIn("brief.md", prompt)
         self.assertIn("write their words, unaltered", prompt)
+
+    def test_a_brief_goes_under_gitignored_switchboard_and_never_under_notes(self):
+        """Andrew, 2026-08-16. `notes/` is tracked, so ~48 briefs in two weeks were
+        committed to main as a side effect of relaying. `.switchboard/` is gitignored and
+        `link_config` symlinks it into every worktree, so one absolute path both stays off
+        main and reads the same from the child's tree. Nothing at the tool layer enforces
+        this — the prompt is the whole mechanism, so the prompt is what gets asserted."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn(".switchboard/briefs/", prompt)
+        self.assertNotIn("notes/", prompt)
+
+    def test_a_lead_is_given_the_same_place_to_put_a_brief_as_a_dispatcher(self):
+        """The location was pinned for `dispatcher` and nowhere else, but a lead spawns
+        children too and hits the same newline refusal — so for a lead the path was pure
+        habit, and the habit was the tracked `notes/` that put ~48 briefs on main. Same
+        rule, stated for the other role that delegates; the prompt is again the whole
+        mechanism, so the prompt is what gets asserted."""
+        prompt = roles.load(self.repo)["lead"].prompt
+        self.assertIn(".switchboard/briefs/", prompt)
+        self.assertIn("brief.md", prompt)
+        self.assertNotIn("notes/", prompt)
 
     def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
         """The roles fragment every agent gets is generated from the role table, so it
