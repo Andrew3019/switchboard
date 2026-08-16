@@ -44,7 +44,9 @@ to say plainly that the plan is now a thing it writes.
 **Step** — the unit. What an agent owns, what gets ticked, what carries a try count and
 notes.
 
-**Plan** — a group of steps. Nothing more than that.
+**Plan** — a group of steps, with an identity, a worktree, a changelog and a kept record.
+The steps are the substance; the rest is what makes it a thing that can be found, shown and
+read back.
 
 **Template** — a preconfigured plan, in the ordinary sense of the word. A starting point
 you can do as you like with: a plan may be a template plus whatever else the job needs, and
@@ -57,8 +59,12 @@ edited afterwards if it needs it, and nothing links it back to what it came from
 
 A plan is the live state of one job: what is being done, by whom, and what is left.
 
-**A plan is a DAG.** One step may fan out to several, and those may join back into one; a
-join waits for every branch feeding it.
+**A plan is a DAG.** One step may fan out to several, and those may join back into one.
+
+**A join waits because the lead does not start it.** Nothing enforces the wait — the lead
+holding the plan is what reads the shape and acts on it, which is what being interpreted
+rather than executed means. Fan-out and join are how the lead is told what may run at once
+and what must not; they are not control flow something else runs.
 
 **Redoing work is not an edge.** Where part of a job must be redone, the lead or sole
 worker goes back to it. The graph stays acyclic, and the flexibility comes from it being
@@ -93,7 +99,8 @@ prompt carries alongside the step it hands a worker.
 renders plans inside the worktree grouping it already has, rather than in a section of
 their own. From inside a plan the others are invisible and irrelevant: nothing in a plan
 refers to another, and anything a step needs from the world outside is an input it takes.
-The merge gate takes a PR, so several plans mean several PRs and no plan has to know that.
+A plan has at most one merge step and so at most one PR, which is what makes several plans
+mean several PRs without any of them knowing about the others.
 A plan never spans two worktrees: everything below a lead shares that lead's worktree, so
 work spanning two of them is two plans, and one plan across both would be a different
 feature.
@@ -141,22 +148,33 @@ shaped, and takes one if it fits.
 of agents and worktrees; it does not plan, own, tick or read one.
 
 **A plan may be created with some of its steps already done.** Nothing requires one to
-start empty — but a gate step may not be one of them. A gate exists to be reached before the
-work it guards, so a plan authored after the fact does not get to mark it already passed. If
-the work is already past that point, the gate is skipped with a reason, which is visible,
-rather than born complete, which is not.
+start empty — but not a step whose exit condition is a gate. A gate exists to be reached
+before the work it guards, so a plan authored after the fact does not get to mark it already
+passed. If the work is already past that point, that step is skipped with a reason, which is
+visible, rather than born complete, which is not.
 
 ---
 
 ## Steps
 
-**Steps compose.** A step may itself be a combination of steps, so long as nothing is
-circular.
+**Steps compose in the library, not in a plan.** A library step may be defined as several
+steps, so long as nothing is circular, and naming it puts those steps in the plan. What a
+plan holds is always flat: no step contains another, because a step that did would be a plan
+by another name, and its parts would fail the granularity test below by sharing one owner and
+one context.
 
 **Steps come from a library or are made on the fly.** Both are first class: a plan may name
-a step that already exists and invent the rest as it goes. A named step is a link to the
-library rather than a copy of it — steps are units, and there is little about one to change
-once it exists. Templates work the other way, being copied and then edited freely.
+a step that already exists and invent the rest as it goes.
+
+**A named step is a link to its definition and its own object besides.** The plan holds the
+name and everything belonging to this run — progress, owner, try count, notes, checkpoints —
+while the library holds only the definition. Editing a library step therefore reaches every
+plan naming it, including live ones, which is the point: there is little about a definition
+to change once it exists, and steps are units.
+
+**A lead that wants a variant writes an on-the-fly step, never an edited link.** There is no
+forking a library step for one job. This is also what a template copy carries: copying a
+template copies the plan, and a named step inside it stays a name.
 
 **A step may be word-only.** Nothing has to be defined behind it; the name alone is worth
 having.
@@ -173,16 +191,22 @@ field saying `vibe = bad` if that is what conveys it. None of that needs specify
 advance, and specifying it is how this turns into a workflow engine.
 
 **A step may carry a command**, which may live in a script shipped alongside it. How it gets
-called is settled when it comes up. A step is ticked before its command runs, never after:
-the agent that tears down its own workspace is gone the instant it succeeds, so a teardown
-step ticked afterwards is never ticked at all, and a finished job would end up looking
-exactly like an abandoned one. What this buys is that "merge, clean up, delete the
+called is settled when it comes up. The agent owning the step is what
+runs it — nothing watches a plan and fires commands, because that would be the evaluator this
+design does not have. What the step buys is that the closing act is written down instead of
+remembered, which is why the last agent standing gets closed at all.
+
+**A step is ticked before its command runs, never after.** The agent that tears down its own
+workspace is gone the instant it succeeds, so a teardown step ticked afterwards is never
+ticked. Nothing enforces the order; it is an instruction, and the reason for it is that the
+tick has to outlive the agent. What this buys is that "merge, clean up, delete the
 worktree, close the agents" stops being five things an agent has to remember — and it is the
 only way the last agent standing gets closed at all.
 
 **No conditionals, and no control flow.** Whatever branching a job needs, the agent does.
 
-**A step names presets always, and a role only when it spawns a new agent.** A role is what
+**Presets are the field that always applies; a role only matters when a step spawns a new
+agent.** A word-only step has neither, and that is fine. A role is what
 an agent is, fixed when it is spawned. A preset is behaviour injected into one, and can be
 applied to an agent already running. A step has to work both ways — spawned into a new
 agent, or applied inside the agent already there — so the preset is the part that always
@@ -257,12 +281,21 @@ verb, which is deferred, so until then it is told at spawn.
 re-entering progress after being done — a failed review sends its step back — so repetition
 is a number on the step rather than an edge in the graph.
 
+**Ticks downstream of a re-entered step are stale, and the lead decides which to reopen.**
+Nothing un-ticks them by itself. A review that passed against code since rewritten is the
+case that matters: leaving it ticked merges work nothing reviewed, and reopening everything
+reachable throws away a day of good review. Which is why it is a judgement rather than a
+rule, and why the lead has to be told it is one.
+
 **No visit ceiling on rework.** A loop that will not converge ends the way everything else
 does: the lead eventually blocks. Being agent-driven is what makes a ceiling unnecessary.
 
 **Rework after a gate is rejected is handled however the lead likes.** It may edit the plan
-to add a fix step between two reviews, or simply run the review a second time. Which one is
-chosen does not matter; what matters is that neither breaks anything.
+to add a fix step between two reviews, or simply run the review a second time. Neither breaks
+anything, which is what matters for the running job. It does matter to the record, since one
+leaves a try count and the other leaves a step that looks like a recurring pattern — so a
+lead adding a step for rework says so in the changelog, and the analysis pass can tell the
+two apart.
 
 ---
 
@@ -272,6 +305,11 @@ chosen does not matter; what matters is that neither breaks anything.
 saying when it is complete; a gate is one that requires a human. So a design step ending in
 "no implementation until he confirms" needs no second step for the confirmation, and
 collapsing a step into the agent before it never loses the gate.
+
+**The step is the thing with a name, and everything is said about the step.** A gate is not
+addressable and never appears on its own: what shows on the board, what carries a skip and
+its reason, and what an obligation attaches to is always the step whose exit condition the
+gate is. A step is either complete or skipped, never both.
 
 **A plan is never a control surface.** Andrew talks only to agents and never edits a plan.
 Where a gate needs him the owning agent blocks, the step shows its owner blocked, and
@@ -314,8 +352,8 @@ close agents. No further questions.
 
 ### Both gates
 
-Neither is end to end, so both are steps rather than templates, and each may turn out to be
-one step or several. Both are general enough for any and all PRs. Every agent runs them for
+Neither is end to end, so both are step-sized rather than template-sized, and each may turn
+out to be one step or several — each being a step whose exit condition is a gate. Both are general enough for any and all PRs. Every agent runs them for
 any PR-creating task, and agents and leads should recognise them and adopt them when the
 work calls for it.
 
