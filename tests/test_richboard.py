@@ -62,9 +62,9 @@ STATS = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
          "memory_bytes": 1288490188, "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
 
 
-def frame(s, *, top=0, height=20, width=80, msg="", note_text="", lit=None, stats=None):
+def frame(s, *, top=0, height=20, width=80, msg="", note_text="", here=None, stats=None):
     rows = richboard.layout(s, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=False, lit=lit, stats=stats)
+                            note_text=note_text, show_archived=False, here=here, stats=stats)
     assert rows is not None, "the rich renderer declined this frame"
     return rows
 
@@ -506,13 +506,13 @@ class HighlightTest(unittest.TestCase):
                 cols += board._visible_len(piece)
         return cols
 
-    def test_the_mark_spans_the_whole_row_and_only_the_row_that_was_clicked(self):
+    def test_the_mark_spans_the_whole_row_and_only_the_agent_beside_this_board(self):
         """The bars have backgrounds of their own and are owned by nobody, so the rows
         that belong to an agent are the ones asked. `gamma` is drawn TWICE — its own row
-        and the NEEDS YOU line naming it — and one click marks one row: the row in the
-        tree, which is the thing that was clicked and the place a human is looking."""
+        and the NEEDS YOU line naming it — and "you are here" marks one row: the row in
+        the tree, which is where a human reads an agent's state."""
         width = 72
-        rows = frame(self.FLEET, width=width, height=16, lit="gamma")
+        rows = frame(self.FLEET, width=width, height=16, here="gamma")
         owned = [(o.name, self._washed(text)) for text, o in rows if o is not None]
         self.assertEqual([p for p in owned if p[1]], [("gamma", width - 4)])
         # 2 columns of border and 2 of padding — the width `_bar` fills, so the mark ends

@@ -42,6 +42,7 @@ every sb-made view is split with the board (DESIGN-TRUTH.md's "`--no-board`.").
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
@@ -93,15 +94,20 @@ _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # how the same view came out two sizes.
 BOARD_SHARE = 0.45
 
-# How long the row a human clicked stays marked — see `lit_row`. Ten seconds is long
-# enough to look from the board to the pane that just took focus and back and still find
-# your place, and short enough that the mark is never answering an older question than the
-# one you are asking.
-#
-# NOTHING CLEARS IT AND NOTHING HAS TO. The board redraws every `REFRESH` (half a second),
-# so the mark expires on an ordinary refresh: no timer, no thread, and no clean-up path to
-# get wrong on the way out.
-HIGHLIGHT = 10.0
+# YOU ARE HERE — see `Locator`. How often a board re-asks herdr which panes share its own
+# tab. The answer is a fact about a tmux tab that switchboard itself built and then leaves
+# alone: `open_beside` splits an agent's pane once and neither half moves afterwards, so
+# this changes at most when a human closes or opens a pane by hand. Ten seconds is a
+# compromise entirely in one direction — the board redraws twice a second, and asking on
+# every frame would put a subprocess on the hot path this file exists to keep clear.
+HERE_REFRESH = 10.0
+
+# The environment herdr puts in every pane it opens, read by `Locator` to answer "where am
+# I". Already load-bearing elsewhere in switchboard — `broker.whoami()` reads the pane id
+# to decide who is calling — so this is the same door, not a new one. Absent means the
+# board is not running under herdr (a bare `python -m switchboard.board`), and the feature
+# is then simply off.
+TAB_ENV, PANE_ENV = "HERDR_TAB_ID", "HERDR_PANE_ID"
 
 # Colour is a nicety, never load-bearing: every distinction below is also carried
 # by a glyph or a word, so NO_COLOR loses nothing but polish.
@@ -613,7 +619,7 @@ def _stats_line(label: str, pieces: list[str], width: int) -> str:
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           lit: Optional[str] = None, stats: Optional[dict] = None
+           here: Optional[str] = None, stats: Optional[dict] = None
            ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
@@ -633,10 +639,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     collapsed group carries itself; a group break carries `None`, which is what
     makes clicking it do nothing rather than focusing whatever is nearby.
 
-    `lit` — the row a click has just marked — is ACCEPTED AND NOT DRAWN here, and
-    the signature says so rather than the caller having to remember it: `_frame`
-    calls this and `richboard.layout` with the same keywords, and one renderer
-    quietly taking a keyword the other does not is how that seam rots. The mark is
+    `here` — the agent sharing this board's own tab, from `Locator` — is ACCEPTED
+    AND NOT DRAWN here, and the signature says so rather than the caller having to
+    remember it: `_frame` calls this and `richboard.layout` with the same keywords,
+    and one renderer quietly taking a keyword the other does not is how that seam
+    rots. What is lost on this path is that a human on a machine without `rich`
+    cannot see which agent is beside them; what would be lost by faking it is a
+    working board, which is the whole reason this renderer exists. The mark is
     a background across a whole line (`richboard.HIGHLIGHT_STYLE`) and this
     renderer has no vocabulary for one — every colour it draws is a `_c` piece
     that ends in a reset, so a background would have to be re-opened after each of
@@ -873,28 +882,147 @@ def agent_at(rows, row: int):
     return rows[i][1]
 
 
-def lit_row(click: Optional[tuple[str, float]], now: float) -> Optional[str]:
-    """Which agent's row is still marked from a click, or None. THE WHOLE RULE, and pure.
+def tab_siblings(panes: list[dict], tab: Optional[str],
+                 me: Optional[str]) -> list[str]:
+    """Every pane id sharing `tab` that is not `me`. Pure, and the first half of the join.
 
-    `click` is the last click that landed on an agent — `(name, time.monotonic())` — and
-    it is ONE SLOT, not a list. A second click MOVES the mark rather than adding one: two
-    lit rows would say two agents were just clicked, and the mark's only job is to answer
-    "which row did I just touch", which has exactly one answer. The first row goes dark the
-    instant the second lights, which is also what a human watching their own click expects.
+    `panes` is `herdr pane list`'s `panes` array verbatim. A pane carries a `tab_id` and a
+    `pane_id` and, if herdr has an agent bound to it, a generic `agent` kind — "claude",
+    never the switchboard NAME, which is why this returns ids for `here_agent` to look up
+    rather than a name of its own.
 
-    MONOTONIC, not wall-clock. The board can outlive a clock correction, an NTP step or a
-    laptop suspend, and every one of those makes a wall-clock difference lie — a row lit
-    forever, or a row that never lights at all. Monotonic time has no opinion about what
-    time it is, which is the only property this needs.
+    NOT FILTERED TO PANES HERDR CALLS AGENTS. The board's sibling is an agent pane and
+    herdr does bind those, but the filter would buy nothing — an id that belongs to no
+    agent row matches no agent in `here_agent` and drops out there — and it would cost the
+    one case this most has to survive: a pane herdr has momentarily lost track of is still
+    the pane the human is sitting beside.
 
-    An agent named here that is not on the screen — archived, collapsed, scrolled past, or
-    gone since the click — costs nothing: the renderer matches by name and finds nothing to
-    mark. See `richboard.layout`.
+    A tab with no sibling at all is ordinary rather than exceptional: single-pane tabs
+    exist, and a human may close the agent half of a pair and leave the board.
     """
-    if click is None:
+    if not tab:
+        return []
+    return [p["pane_id"] for p in panes
+            if isinstance(p, dict) and p.get("tab_id") == tab
+            and p.get("pane_id") and p.get("pane_id") != me]
+
+
+def here_agent(agents, pane_ids: list[str]) -> Optional[str]:
+    """Which agent is sitting in one of `pane_ids`, by name. Pure, and the second half.
+
+    TREE ORDER DECIDES A TIE, because something has to and nothing better is available: a
+    tab with two agent panes in it is not a shape switchboard makes (`open_beside` splits
+    once), so this is a human's hand-built tab and the first row is as good an answer as
+    any. What must not happen is two rows lit — "you are here" has one answer.
+
+    A stale `pane_id` on a row, or a sibling belonging to a fleet in another checkout,
+    matches nothing and the board draws no highlight. That is the resting state of this
+    feature and never an error.
+    """
+    if not pane_ids:
         return None
-    name, when = click
-    return name if now - when < HIGHLIGHT else None
+    want = set(pane_ids)
+    for a in agents:
+        if getattr(a, "pane_id", None) in want:
+            return a.name
+    return None
+
+
+def pane_list() -> Optional[list[dict]]:
+    """`herdr pane list` -> its `panes` array, or None if it could not be had.
+
+    None and not `[]`, so a caller can tell "herdr said there are no panes" — which would
+    mean the board's own pane does not exist — from "herdr did not answer", which is a
+    hiccup to ride out on the last good answer. See `Locator._resolve`.
+
+    Never raises: this runs on a worker thread whose exception would be lost anyway, and
+    every failure it can have (herdr missing, slow, angry, or answering something that is
+    not JSON) has the same meaning here — no new answer this time.
+    """
+    try:
+        p = subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True,
+                           timeout=_SUBPROCESS_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        payload = json.loads(p.stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    panes = (payload.get("result", payload) or {}).get("panes")
+    return panes if isinstance(panes, list) else None
+
+
+class Locator:
+    """YOU ARE HERE: which agent shares this board's own tmux tab.
+
+    Every sb-made view is one tab holding an agent pane and the board pane beside it
+    (`open_beside`), so each board has exactly one agent it is sitting next to — and until
+    now no board knew which. Whatever tab a human lands on, the highlighted row names the
+    agent in front of them. That is the whole feature, and it REPLACED a highlight that
+    marked whichever row you last clicked: one board, one meaning for a lit row.
+
+    Three steps, and each is somewhere it can be tested: `HERDR_TAB_ID` from the
+    environment (here), the tab's other pane ids from `herdr pane list` (`tab_siblings`),
+    and those ids against the published rows (`here_agent`). The last hop is why
+    `status.AgentStatus` carries `pane_id` at all — herdr knows panes and the store knows
+    names, and a renderer may not open the store.
+
+    OFF THE DRAWING THREAD, and that is the one thing about this class that is not
+    obvious. `herdr pane list` is a subprocess costing tens of milliseconds and the board
+    redraws twice a second; both blocking on it every tick and blocking on it every tenth
+    tick are the same mistake, differently priced. So `tick` starts a daemon thread at most
+    every `HERE_REFRESH` seconds and returns immediately, and `name` answers from the last
+    result — which is a set of pane ids, joined against whatever rows the current frame has,
+    so the highlight follows an agent that is renamed away or restored without waiting for
+    the next subprocess.
+
+    Every failure degrades to no highlight and none of them says anything on screen: this
+    is polish, and a board that drew an error where a row's background should be would be
+    reporting a fault a human can do nothing about.
+    """
+
+    def __init__(self, *, refresh: float = HERE_REFRESH,
+                 env: Optional[dict] = None):
+        env = os.environ if env is None else env
+        self.tab = env.get(TAB_ENV) or None
+        self.me = env.get(PANE_ENV) or None
+        self.refresh = refresh
+        self.panes: list[str] = []          # sibling pane ids, last successful answer
+        self._last = 0.0
+        self._busy = False
+
+    @property
+    def enabled(self) -> bool:
+        """False outside herdr — a bare `python -m switchboard.board`. Not an error."""
+        return self.tab is not None
+
+    def tick(self, *, at: Optional[float] = None) -> bool:
+        """Ask again if it is time to. -> whether a lookup was started. Never blocks."""
+        if not self.enabled or self._busy:
+            return False
+        at = time.monotonic() if at is None else at
+        if self._last and at - self._last < self.refresh:
+            return False
+        self._last = at
+        self._busy = True
+        threading.Thread(target=self._resolve, daemon=True).start()
+        return True
+
+    def _resolve(self) -> None:
+        try:
+            panes = pane_list()
+            if panes is not None:
+                self.panes = tab_siblings(panes, self.tab, self.me)
+        finally:
+            self._busy = False
+
+    def name(self, agents) -> Optional[str]:
+        """The agent to highlight on this frame, or None. Cheap: a set lookup per row."""
+        return here_agent(agents, self.panes)
 
 
 def _visible_len(s: str) -> int:
@@ -1115,7 +1243,7 @@ def _size() -> tuple[int, int]:
 
 
 def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
-           show_archived: bool, lit: Optional[str] = None,
+           show_archived: bool, here: Optional[str] = None,
            stats: Optional[dict] = None
            ) -> list[tuple[str, Optional[object]]]:
     """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
@@ -1142,19 +1270,19 @@ def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
     from . import richboard
 
     rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=show_archived, lit=lit,
+                            note_text=note_text, show_archived=show_archived, here=here,
                             stats=stats)
     if rows is not None:
         return rows
     return layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, lit=lit, stats=stats)
+                  note_text=note_text, show_archived=show_archived, here=here, stats=stats)
 
 
 def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
-         lit: Optional[str] = None, stats: Optional[dict] = None) -> list:
+         here: Optional[str] = None, stats: Optional[dict] = None) -> list:
     height, width = _size()
     rows = _frame(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, lit=lit, stats=stats)
+                  note_text=note_text, show_archived=show_archived, here=here, stats=stats)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -1255,11 +1383,10 @@ def main() -> int:
     # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
     show_archived = status_mod.SHOW_ARCHIVED
-    # The last click that landed on an agent, and when — `lit_row` turns the pair into the
-    # row to mark, per frame. Kept here beside `top` and `msg` because it is the same kind
-    # of thing they are: what this human has done to this pane, held nowhere else and
-    # deliberately not persisted.
-    click: Optional[tuple[str, float]] = None
+    # Which agent shares this pane's tab — the row this board highlights. Built here and
+    # not at import, so the environment it reads is this process's own, and asked again per
+    # frame because the answer is a NAME resolved against the rows being drawn.
+    where = Locator()
     # The slot this board started in, so the first sweep is at the next boundary and never
     # at startup — see `sweep_tick`. `sweep_note` is the worker thread's one-slot mailbox.
     armed, sweep_note = sweep_mod.slot_of(time.time()), []
@@ -1269,8 +1396,9 @@ def main() -> int:
         sys.stdout.flush()
 
         snap, note_text, stats = refresh(sup)
+        where.tick()
         rows = draw(snap, top, msg, note_text, show_archived,
-                    lit_row(click, time.monotonic()), stats)
+                    where.name(snap.agents), stats)
         last = time.time()
 
         while True:
@@ -1304,13 +1432,13 @@ def main() -> int:
                             # branch exists to prevent. Say what would work.
                             msg = "press a to show archived"
                         else:
+                            # A click still focuses, and now that is ALL it does: the row
+                            # background stopped meaning "the one you just touched" and
+                            # started meaning "the one beside you", and one board cannot
+                            # have two meanings for one mark. What a click did that was
+                            # worth keeping — jumping to the pane — is here, and what it
+                            # said on screen is said by the status line.
                             msg = focus(a.name) if a else ""
-                            if a:
-                                # Marked because it was CLICKED, not because the focus
-                                # worked: the row answers "this is the one you just
-                                # touched", and a herdr that refused says so on the
-                                # status line, where an answer belongs.
-                                click = (a.name, time.monotonic())
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
@@ -1321,17 +1449,22 @@ def main() -> int:
                 # granularity is plenty for a boundary that comes twice an hour, and this
                 # is the one place in the loop that already costs something.
                 armed = sweep_tick(armed, sweep_note)
+                # On the refresh tick, for `sweep_tick`'s reason and one of its own: this
+                # only ever STARTS a lookup, and starting one twice a second to have it
+                # declined by the throttle is work for nothing. `Locator` holds the real
+                # cadence; this just gives it chances to fire.
+                where.tick()
             if sweep_note:
                 msg = sweep_note.pop()
                 dirty[0] = True
             if dirty[0]:
-                # `lit_row` is asked HERE, on the frame being drawn, rather than when the
-                # click came in — which is what makes the mark expire without anything
-                # having to expire it. The refresh above marks the board dirty twice a
-                # second whatever the human does, so the frame that stops lighting the row
-                # comes along on its own, within half a second of the ten seconds being up.
+                # Asked HERE, on the frame being drawn, rather than when the pane list came
+                # back: the cached answer is a set of pane IDS, and turning those into the
+                # name of a row is done against the rows this frame actually has. So an
+                # agent that is restored, renamed away, or dropped from the snapshot stops
+                # or starts being highlighted on the next frame, with no subprocess in it.
                 rows = draw(snap, top, msg, note_text, show_archived,
-                            lit_row(click, time.monotonic()), stats)
+                            where.name(snap.agents), stats)
                 dirty[0] = False
     except KeyboardInterrupt:
         pass
