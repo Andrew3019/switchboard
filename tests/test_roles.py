@@ -107,15 +107,17 @@ class RolesTest(unittest.TestCase):
             with self.subTest(part=part):
                 self.assertIn(part, p)
 
-    def test_no_shipped_prompt_lets_an_agent_merge_unasked(self):
-        """DESIGN-TRUTH.md, 2026-08-12: the parent decides, and the parent may be an
-        agent. So the prompt must name the parent as the source of the permission, not
-        Andrew alone — a brief saying "push" and a prompt saying "never" is the exact
-        contradiction four agents each resolved differently."""
+    def test_no_shipped_prompt_forbids_merging(self):
+        """PLANS-AND-STEPS, 2026-08-16: the plans plugin's merge gate tells an agent to
+        merge, so the prohibition is cut back to a pointer at it — a gate saying merge and
+        a prompt saying never is the same contradiction four agents each resolved
+        differently, and the cut has to land before the gate ships. What replaces it names
+        who decides in both cases: the gate under a plan, the parent without one."""
         every = " ".join([config.protocol(self.repo)]
                          + [r.prompt for r in roles.load(self.repo).values()])
-        self.assertIn("Never merge without that say-so", every)
-        self.assertIn("Pushing and merging are your parent's call", every)
+        self.assertNotIn("ever merge without", every)        # "Never"/"never merge without"
+        self.assertIn("its merge gate is the authority on pushing and merging", every)
+        self.assertIn("where none is, your parent's instruction is", every)
 
     def test_the_protocol_asks_for_skimmable_human_facing_output(self):
         """DESIGN-TRUTH.md's "Skimming it is the test." rules, 2026-08-14. Skimming is what

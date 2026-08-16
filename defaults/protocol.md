@@ -94,10 +94,12 @@ sentence. "A tool fails twice" survives as the concrete form of being blocked on
 something: it is the threshold that stops an agent retrying a broken tool forever, and
 deleting it in favour of the general phrasing would lose the number. The last reason and
 the shipping rule above are deliberately joined — a pull request waiting on a merge is the
-canonical case of finished work needing approval, and an agent that has just been told it
-may not merge on its own needs to be told in the same breath what it does instead. The
-clause now says "only he can authorise", because since 2026-08-12 a merge may also be
-authorised down the tree and that case is a `tell`, not a `block`.
+canonical case of finished work needing approval, and an agent that has just been told what
+shipping looks like needs to be told in the same breath where the decision to land it comes
+from. The clause says "only he can authorise", because since 2026-08-12 a merge may also be
+authorised down the tree and that case is a `tell`, not a `block`. Where a plan is running
+its merge gate is that block, so the escalation reason still holds; where none is, the
+sentence is the only thing left pointing an agent at its parent.
 
 Shipping (branch, push, PR, URL in the summary) sits with the `sb done` contract rather
 than in a role file, because Andrew's ruling was that it goes to every role: five copies of
@@ -118,6 +120,15 @@ and some handing the work back. The instruction from the parent is now plainly t
 that decides it, and the inbox is named alongside the task because that is where a
 later-granted permission arrives. `house-rules` was loosened the same way; it still says
 this repo's default is that the orchestrator integrates.
+
+CUT BACK TO A POINTER (2026-08-16, PLANS-AND-STEPS). The prohibition itself — never merge
+without that say-so, ask the parent, stop and ask if that parent is the human — is gone,
+replaced by one clause naming who decides: the merge gate where a plan is running, the
+parent's instruction where none is. The plans plugin's merge gate tells an agent to merge,
+and three texts telling it never to is the same contradiction as above, one release later,
+so the cut lands BEFORE the gate ships. With the plugin off there is no gate and this file
+is today's text minus that prose — a weaker promise than the old one, and the honest one.
+`house-rules` and `DESIGN-TRUTH.md` carry the same pointer.
 
 HUMAN-FACING OUTPUT is one paragraph, stated once, at `block`, and it names its own scope
 in both directions (2026-08-14, DESIGN-TRUTH). The scope turns on WHO READS IT, not on the
@@ -234,11 +245,9 @@ it never reads your transcript. Keep it to a line or two of plain, simple langua
 what you found or did, and what it means. Give file paths for the detail rather than
 pasting it.
 Work that ships has a default shape: a branch named for your workspace, push it,
-open the pull request, and put its URL in your summary. Pushing and merging are your
-parent's call, not yours — an explicit instruction from your parent, in your task or
-your inbox, is what authorises either, and your parent may be an agent or the human.
-Never merge without that say-so; there is no merge verb. If you have not been told,
-ask the parent that would have to decide it, and if that is the human, stop and ask.
+open the pull request, and put its URL in your summary. Where a plan is running,
+its merge gate is the authority on pushing and merging; where none is, your
+parent's instruction is.
 To delegate: `sb delegate "<task>" --role <role>` spawns a child that runs
 independently; do NOT wait for it, end your turn and you will be poked when it
 reports. `sb status` lists your children, and `sb cleanup [names]` closes finished

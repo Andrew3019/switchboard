@@ -1,0 +1,99 @@
+PR6 — DESIGN-TRUTH.md cut, for Andrew to apply. No agent applies this file.
+
+Three passages are trimmed so none of them still forbids merging, ahead of the plans
+plugin's merge gate (PR7), which tells an agent to merge:
+
+  1. "When work finishes" (~line 92)  — the push / open-own-PR clauses drop out; who lands
+     the work becomes a pointer at the merge gate.
+  2. "The lead handles cleanup itself" (~line 416) — the separate "ask him to approve
+     closing it" drops out; under a plan the gate is the one approval.
+  3. "Pushing and merging are decided by the parent" (~line 532) — "never merge without
+     asking your parent" is superseded by the gate; the no-plan case is kept as-is.
+
+Whole-file pass done: nothing else in the file asserts the never-merge rule. The block
+reasons entry (~line 172) still lists "finished work that needs Andrew's input or approval"
+— left alone, since a merge gate IS such a block. "Pushing first is a convention and not a
+gate here" (~line 434) is about the cleanup commands, not about merge authority — also left.
+
+Two things to decide before applying:
+
+  - The wording of the gate sentences is a proposal; the entries below are yours to say.
+  - The file has no entry defining a plan or a merge gate, so these three now point at a
+    term the file never introduces. By its own rules that term is undecided, not free —
+    it may want an entry of its own, from you, when the gate is confirmed.
+
+Apply with:  git apply notes/pr6-design-truth.diff
+
+diff --git a/DESIGN-TRUTH.md b/DESIGN-TRUTH.md
+index f0f1e16..ed6c3b8 100644
+--- a/DESIGN-TRUTH.md
++++ b/DESIGN-TRUTH.md
+@@ -93,15 +93,16 @@ persists until Andrew closes it. — confirmed 2026-08-09
+ done reports done, and its parent lead sees it. Once all of its children are done, that
+ lead either reports done or blocks, depending on whether the task is fully complete:
+ fully complete, report done; Andrew's input needed to finish it, block. Once that is done
+-it reports done, and the dispatcher blocks. A lead cleans up its children, pushes the PR
+-if relevant, and summarizes — it does not close itself, since cleaning a lead takes its
+-children and it still has to report. A dispatcher hands work to a lead or to a single
+-worker, and where a worker is directly under it, that agent pushes and opens its own PR if
+-it was told to; the dispatcher blocks for it either way, since being told his work has
+-landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
+-and reports done, and the parent cleans up — a lead on its own judgement, a dispatcher on
+-Andrew's. — confirmed 2026-08-09, the dispatcher's report restated 2026-08-14, the
+-lead-or-worker spawn and the dispatcher's cleanup 2026-08-15
++it reports done, and the dispatcher blocks. A lead cleans up its children and summarizes —
++it does not close itself, since cleaning a lead takes its children and it still has to
++report. A dispatcher hands work to a lead or to a single worker; either way it blocks for
++that agent, since being told his work has landed is the one report a dispatcher makes.
++Who lands the work — pushes, opens the PR, merges — is the merge gate's where a plan is
++running, and the parent's where none is; see the entry on pushing and merging below. Once
++a block is resolved the agent finishes and reports done, and the parent cleans up — a lead
++on its own judgement, a dispatcher on Andrew's. — confirmed 2026-08-09, the dispatcher's
++report restated 2026-08-14, the lead-or-worker spawn and the dispatcher's cleanup
++2026-08-15, the landing clauses cut back to the merge gate 2026-08-16
+ 
+ **A follow-up on a child's report is a handoff, not another relay.** A parent may report a
+ child's work once; it may not become the channel for the conversation about it. "When work
+@@ -417,13 +418,15 @@ hands out a lead every time
+ literally every agent that is done. Cleaning up a lead always cleans its children. What
+ stays open below a dispatcher is still decided by the person watching the board, and never
+ by the dispatcher sweeping on its own judgement — what changes is that the dispatcher
+-carries that decision out. It closes children when Andrew tells it to, and when a child
+-reports its task fully done it may ask him to approve closing it. The automatic worktree
+-sweep is not an exception to that and not a judgement anybody is making: it closes whole
++carries that decision out. It closes children when Andrew tells it to. Where a plan is
++running, closing a finished child is not a separate ask: its merge gate is the one
++approval, and cleanup follows it. The automatic worktree sweep is not an exception to
++that and not a judgement anybody is making: it closes whole
+ workspaces rather than agents, it only reaches one where every agent has already finished,
+ and an agent still working or blocked holds its worktree open. — confirmed 2026-08-09,
+ the dispatcher half 2026-08-15, superseding the 2026-08-14 wording that left closing
+-below a dispatcher entirely off it; the sweep's place in it 2026-08-16
++below a dispatcher entirely off it; the sweep's place in it 2026-08-16; the separate
++approval to close a finished child cut back to the merge gate 2026-08-16
+ 
+ **`sb done` keeps the agent open.** It is just a status update and a message for the
+ parent, which then decides whether to close it. It always uses the **when idle**
+@@ -529,13 +532,15 @@ be brought up again.** — confirmed 2026-08-09
+ 
+ **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
+ 
+-**Pushing and merging are decided by the parent, which may or may not be a human.** An
+-agent can push if its parent says so; a lead can push if the dispatcher says so;
+-any agent can merge if Andrew tells some dispatcher and it passes that instruction
+-down. So it is never merge without asking your parent. The default shape of shipping work
+-is branch named for the workspace, push, open the PR, and put its URL in the summary. —
+-confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
+-explicit approval and that no agent merges without asking first
++**Where a plan is running its merge gate decides pushing and merging; where none is, the
++parent does, and it may or may not be a human.** At the gate the agent asks once and, once
++approved, merges and cleans up without asking again. Without a plan: an agent can push if
++its parent says so; a lead can push if the dispatcher says so; any agent can merge if
++Andrew tells some dispatcher and it passes that instruction down. The default shape of
++shipping work is branch named for the workspace, push, open the PR, and put its URL in the
++summary. — confirmed 2026-08-12, the merge gate 2026-08-16, superseding both the
++2026-08-09 rule that merging needed Andrew's own explicit approval and the 2026-08-12
++"never merge without asking your parent", which the gate would contradict
+ 
+ **`sb workspace new` is deleted, provided the other commands cover it fully and it is
+ clear how to use them.** — confirmed 2026-08-09
