@@ -410,9 +410,12 @@ literally every agent that is done. Cleaning up a lead always cleans its childre
 stays open below a dispatcher is still decided by the person watching the board, and never
 by the dispatcher sweeping on its own judgement — what changes is that the dispatcher
 carries that decision out. It closes children when Andrew tells it to, and when a child
-reports its task fully done it may ask him to approve closing it. — confirmed 2026-08-09,
+reports its task fully done it may ask him to approve closing it. The automatic worktree
+sweep is not an exception to that and not a judgement anybody is making: it closes whole
+workspaces rather than agents, it only reaches one where every agent has already finished,
+and an agent still working or blocked holds its worktree open. — confirmed 2026-08-09,
 the dispatcher half 2026-08-15, superseding the 2026-08-14 wording that left closing
-below a dispatcher entirely off it
+below a dispatcher entirely off it; the sweep's place in it 2026-08-16
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 parent, which then decides whether to close it. It always uses the **when idle**
@@ -421,8 +424,33 @@ doorbell fires the moment it is idle, so it is woken rather than monitoring. —
 2026-08-09
 
 **Cleanup closes the agents, closes the tab, and closes the entire space and deletes the
-worktree if everything else is closed too.** Work is usually pushed before its worktree
-is deleted. — confirmed 2026-08-09
+worktree if everything else is closed too.** Pushing first is a convention and not a gate
+here: `sb cleanup` and `sb workspace close`, both typed by hand, still delete a worktree
+holding unpushed commits. The automatic sweep below is the one path where landing is a
+rule rather than a habit. — confirmed 2026-08-09, the convention separated from the
+sweep's rule 2026-08-16
+
+**A board sweeps the fleet's worktrees twice an hour, at :00 and :30 on the system
+clock.** A worktree goes only when nothing is left to lose: no live agent, nothing git can
+see uncommitted, its commits merged or pushed — or the only unpushed ones docs-only, which
+`DESIGN-TRUTH.md` is never part of — and quiet for over a day on both clocks, last agent
+activity and last commit. Landed means merged **or** pushed, because origin is the bar,
+and it is read off this machine's repository with nothing asked over the network, so a
+branch pushed and never fetched back still counts. Docs-only is decided by path — a `.md`
+anywhere, or anything under `notes/`, `design/`, `learnings/`, `research/` — never by
+reading what a change really is. Every unknown holds: a git that will not answer is not
+evidence that there is nothing to lose. Exactly one board sweeps per tick, and no board
+running means no sweep, which is the accepted cost of having no daemon. Every deletion is
+`sb workspace close`'s, gates and all; the repository's own checkout and the space the
+sweep is standing in are never candidates; and the gate answering "is anything live in
+there" counts any process of Andrew's own sitting in the directory, agent or not, which is
+deliberately left as it is. Ignored content does not hold a worktree back from a sweep the
+way it holds back a close typed by hand — every worktree here carries `__pycache__` and
+the like, so refusing on those would not be a conservative sweep but no sweep at all —
+while work git can see holds one open unconditionally. Everything held back is named with
+the reason, every half hour, and that list is the half of this a person reads. `sb sweep`
+is the same run typed by hand, and it is the human's: an agent asking for it is refused. —
+confirmed 2026-08-16
 
 **`sb status` is for agents; `sb board` is Andrew's view of the tree.** A soft
 convention about what each is for, not an enforced gate. — confirmed 2026-08-09, soft
@@ -471,8 +499,12 @@ confirmed 2026-08-09
 more tail — like 100 lines.** — confirmed 2026-08-09
 
 **`sb restore` is gone if the worktree is gone.** Aggressive cleanup therefore destroys
-it, and that is accepted: the push is the recovery path for the work, not restore. —
-confirmed 2026-08-09
+it, and so now does the sweep, with nobody typing anything — both accepted: the push is
+the recovery path for the work, not restore. What the sweep costs is bounded by the rules
+it deletes under, since it only ever reaches a worktree whose commits are on origin or are
+docs-only, and a swept branch's ref is deleted with `git branch -d`, which refuses an
+unmerged one. So a sweep costs a checkout and its restore, never a commit. — confirmed
+2026-08-09, the sweep 2026-08-16
 
 **`sb inbox --peek` stays, and it must be clear that once a message is read it will not
 be brought up again.** — confirmed 2026-08-09
@@ -502,7 +534,9 @@ same path as any other message. This must be known to all sessions. — confirme
 
 **Andrew will never call the spawn and lifecycle commands himself, other than
 `sb start`.** The surfaces that are his are the board, the session he types into, and
-`sb inspect` for reading a blocked agent. — confirmed 2026-08-09
+`sb inspect` for reading a blocked agent. `sb sweep` is his rather than an agent's and does
+not change that: it is the board's own housekeeping run by hand, and the board runs it
+without anybody typing it. — confirmed 2026-08-09, `sb sweep` placed against it 2026-08-16
 
 ---
 
