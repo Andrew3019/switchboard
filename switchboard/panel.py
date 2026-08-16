@@ -148,6 +148,56 @@ def git_common_dir(cwd: Optional[Path] = None) -> Path:
     raise RuntimeError(f"not inside a git repo: {start}")
 
 
+def primary_worktree(checkout: Optional[Path] = None) -> Optional[Path]:
+    """The repo's MAIN working tree — the one a human merges into. None if unsure.
+
+    THE PROBLEM this exists for, measured on 2026-08-16. There is one collector per repo
+    and it is elected by whichever renderer pane grabs the flock first. That pane can be
+    standing in any of forty linked worktrees, most of them on old feature branches, and
+    the collector used to be launched with the ELECTING pane's checkout as its cwd and on
+    its `PYTHONPATH`. So the code the whole fleet's boards are drawn from was decided by a
+    race. A worktree predating `switchboard/stats.py` won it, and every board fleet-wide
+    said `not measured` for a feature that had been merged to `main` for hours.
+
+    `collector.source_signature` does not and should not cover this: by design it treats a
+    different worktree as different code rather than stale code (read its docstring). The
+    answer is to stop letting the election choose the code at all — one repo, one canonical
+    checkout, whoever elects.
+
+    CANONICAL = THE PRIMARY WORKTREE, full stop. Not "the newest of the forty", which is a
+    heuristic that would put a stranger's half-finished branch in front of forty panes and
+    surprise everyone about which. The primary checkout may be behind `origin/main`; that
+    is accepted, because "the code the human maintains by hand" is one predictable place
+    and a random branch is not.
+
+    WITHOUT SPAWNING GIT. `git worktree list --porcelain` lists the main working tree first
+    and would answer this, but a renderer paying `git rev-parse` was 12.3 ms of a 23.4 ms
+    tick and this module exists partly to have deleted it (see the module note, and the
+    test that pins a renderer spawns no subprocess). `git_common_dir` already resolves the
+    shared `.git` in Python from any worktree, and the primary working tree is its parent —
+    that is what makes a linked worktree's `commondir` point where it does.
+
+    VALIDATED, because the parent of a common dir is not a working tree in every layout —
+    a bare repo has no working tree at all, and a `.git` moved out of its checkout would
+    name a directory belonging to nobody. So the candidate has to look like a switchboard
+    checkout AND agree with us about which repo it is in; anything else returns None and
+    the caller keeps today's behaviour, which is a wrong-code collector rather than none.
+    """
+    try:
+        common = git_common_dir(checkout)
+    except (RuntimeError, OSError):
+        return None
+    root = common.parent
+    try:
+        if not (root / "switchboard" / "collector.py").is_file():
+            return None
+        if git_common_dir(root) != common:        # not this repo's own working tree
+            return None
+    except (RuntimeError, OSError):
+        return None
+    return root
+
+
 @dataclass(frozen=True)
 class Paths:
     """The three files the mechanism is made of."""
@@ -455,6 +505,36 @@ def demand_age(paths: Paths, *, at: Optional[float] = None) -> Optional[float]:
         return None
 
 
+def canonical_checkout(paths: Paths) -> Optional[Path]:
+    """The checkout a collector for `paths` should run: the primary worktree of THIS repo.
+
+    Two questions the launch used to answer with one directory, and they come apart the
+    moment the code and the repo are not the same repo:
+
+      - WHICH CODE the collector runs — `primary_worktree`, so an old worktree winning the
+        election cannot decide what forty boards are drawn by.
+      - WHICH REPO it collects — the one the electing renderer is serving. The collector
+        finds its store from its own cwd (`store.db_path`), so moving cwd to a checkout of
+        a DIFFERENT repo would silently point it at that repo's store, and the boards would
+        show a fleet nobody asked about. `paths.dir` is `<shared .git>/<store>/panel`, so
+        the repo being served is two levels up, and this refuses to move the collector
+        anywhere that is not the same shared `.git`.
+
+    So: redirect only within one repo, which is the whole case the bug is about (forty
+    worktrees, one `.git`). Anything else — a switchboard checkout driving another repo, an
+    unrecognisable panel directory — returns None and the launch stays where it always was.
+    """
+    root = primary_worktree(Path(__file__).resolve().parent.parent)
+    if root is None:
+        return None
+    try:
+        if git_common_dir(root) != paths.dir.parent.parent.resolve():
+            return None
+    except (RuntimeError, OSError):
+        return None
+    return root
+
+
 def ensure_collector(paths: Paths, *, cwd: Optional[Path] = None) -> bool:
     """Start a collector if there is none. -> whether one was launched.
 
@@ -473,18 +553,31 @@ def ensure_collector(paths: Paths, *, cwd: Optional[Path] = None) -> bool:
     installed — `bin/sb` puts the checkout on `sys.path` itself — so `-m` in a child with a
     different cwd cannot import it, and the collector dies before it can publish the error
     saying why. Every panel then shows "no collector has published one" forever with
-    nothing to point at. The child must run the same code as the renderer that started it
-    in any case, so naming the parent's package directory is the correct thing to pass and
-    not merely a workaround.
+    nothing to point at.
+
+    WHICH checkout is `canonical_checkout`'s answer and NOT this renderer's, which is the
+    whole point of it — one repo, one collector, one canonical copy of the code, whoever
+    won the race to start it. cwd and `PYTHONPATH` are set to it TOGETHER and can
+    no longer disagree: `-m` puts cwd at the front of the child's `sys.path`, so a child
+    with the primary on `PYTHONPATH` but standing in the electing worktree would still
+    import the electing worktree's `switchboard`, and the fix would do nothing.
+
+    The lookup happens here — once, when a collector is actually being launched — and never
+    on a tick that finds one already running, so it is off the renderer's hot path.
+
+    If the primary cannot be determined we launch exactly as before, from this renderer's
+    own checkout: a fleet with a wrong-code collector still beats a fleet with none.
     """
     if collector_running(paths):
         return False
-    checkout = str(Path(__file__).resolve().parent.parent)
+    own = Path(__file__).resolve().parent.parent
+    root = canonical_checkout(paths)
+    checkout = str(root or own)
     existing = os.environ.get("PYTHONPATH")
     try:
         subprocess.Popen(
             [sys.executable, "-m", "switchboard.collector"],
-            cwd=str(cwd) if cwd else None,
+            cwd=str(root) if root else (str(cwd) if cwd else None),
             env={**os.environ, DIR_ENV: str(paths.dir),
                  "PYTHONPATH": f"{checkout}{os.pathsep}{existing}" if existing else checkout},
             stdin=subprocess.DEVNULL,
