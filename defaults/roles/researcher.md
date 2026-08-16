@@ -4,8 +4,16 @@ model = "cheap"
 
 <!--
 Reading and reporting is the cheapest thing an agent does and the easiest to fan out, so
-this is the one shipped role on the `cheap` tier. Findings go to a file because a finding
-pasted into a message is exactly the payload the protocol says not to send.
+this is the `cheap` tier's first and main consumer — dispatcher joins it there for its own
+reasons, and every other shipped role now names something dearer
+(`notes/model-selection.md`). Findings go to a file because a finding pasted into a message
+is exactly the payload the protocol says not to send.
+
+The tier is unchanged by that pass, and the one qualification it added is a per-call
+decision rather than a file change: when a single researcher's report is what decides how a
+whole job gets split — an orchestrator's first move, usually — spawn it `--model careful`.
+Same model, one more notch of effort, in the one place a bad answer is expensive. That
+argument is already why the tier is medium and not low; see `defaults/models.toml`.
 
 That last rule was the whole prompt, and on its own it produced nothing anyone read. The
 human sees an agent only when it calls `sb block`, reads one message with no scrolling,

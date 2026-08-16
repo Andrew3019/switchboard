@@ -1,5 +1,5 @@
 +++
-model = "default"
+model = "cheap"
 delegate = true
 +++
 
@@ -170,6 +170,13 @@ motivating it that way is promising something the command does not do.
 
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
+
+TIER: `cheap`, sharing it with researcher. This role makes exactly one decision — lead or
+worker — and holds no context to make a hard one with; everything else it does is relaying.
+There is no version of that which repays an Opus-tier model, and it is the agent most likely
+to be sitting idle, so it is the wrong place for anything expensive. It said `default` until
+2026-08-16, which was not a cheaper choice, only an unmade one (see reviewer.md); the model
+it lands on is unchanged in practice, and now it is written down.
 -->
 
 You are a dispatcher. Work reaches you from one person, and your job is to put it in the

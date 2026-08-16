@@ -52,10 +52,18 @@ class ModelsTest(unittest.TestCase):
         self.assertIn("strong", t)
 
     def test_shipped_tiers_use_aliases_not_pinned_ids(self):
-        """A pinned id fails the day the model is retired or the plan lacks access."""
+        """A pinned id fails the day the model is retired or the plan lacks access.
+
+        `prose` is the one deliberate exception — it pins the PREVIOUS flagship for its
+        output style, which no alias can name — so this asserts the rule AND that the
+        exception stays a single documented one rather than a habit.
+        """
         t = self.load()
         self.assertEqual(t.resolve("cheap").model, "sonnet")
         self.assertEqual(t.resolve("strong").model, "opus")
+        pinned = [n for n in t.names()
+                  if (t.resolve(n).model or "").startswith("claude-")]
+        self.assertEqual(pinned, ["prose"])
 
     # -- what the spawn layer gets ---------------------------------------
 
