@@ -674,8 +674,8 @@ class TheFleetNumbersRideAlong(PanelTest):
         self.assertEqual(r.stats["turns_last_hour"], 41)
         self.assertEqual(r.stats["spawns_last_hour"], 0)          # a real, measured zero
         self.assertEqual(r.stats["cpu_percent"], 317.5)
-        self.assertIn("lines_changed", r.stats)                   # present, and unknown —
-        self.assertIsNone(r.stats["lines_changed"])               # never dropped, never 0
+        self.assertIn("code_added", r.stats)                      # present, and unknown —
+        self.assertIsNone(r.stats["code_added"])                  # never dropped, never 0
 
 
 class WhatAFasterBoardMayCost(PanelTest):

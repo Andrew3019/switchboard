@@ -57,9 +57,10 @@ def snap(*agents):
 # top section is two lines of text like any other, and a line one column wider than it
 # measured is the wrap every test in here exists to catch.
 STATS = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
-         "store_age": 2.0, "lines_changed": 4412, "lines_changed_nondocs": 2516,
+         "store_age": 2.0, "code_added": 1740, "code_deleted": 776,
          "commits_last_hour": 25, "git_age": 30.0, "cpu_percent": 384.0,
-         "memory_bytes": 1288490188, "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
+         "memory_bytes": 1288490188, "memory_available_bytes": 6227702579,
+         "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
 
 
 def frame(s, *, top=0, height=20, width=80, msg="", note_text="", lit=None, stats=None):

@@ -464,7 +464,7 @@ def stats_rows(stats: Optional[dict]) -> list[tuple[str, list[str]]]:
     varies is how much of each line a pane has room for — whole pieces, dropped from the
     right, the same way the header above drops its counts.
 
-    AN UNKNOWN IS NOT DRAWN AT ALL. On the first tick every one of the thirteen fields is
+    AN UNKNOWN IS NOT DRAWN AT ALL. On the first tick every one of the fourteen fields is
     None by design (the numbers join a tick later), and a `0 turns` there would be a
     measurement this board never made. A line left with nothing to say draws `STATS_NONE`,
     which is that fact in the one place a reader would otherwise see a gap.
@@ -473,56 +473,75 @@ def stats_rows(stats: Optional[dict]) -> list[tuple[str, list[str]]]:
     back None from `stats.collect` already, so an age here could only decorate a number
     that is already known to be current enough to show.
 
-    Five of the thirteen are left out on purpose — the three ages, and nothing else. What
-    is in is what a person glancing at a fleet acts on: whether it is moving, what came of
+    The three ages are the only fields with no piece of their own; `cpu_cores` has none
+    either, but it is read — as the denominator that turns summed CPU into a share. What is
+    drawn is what a person glancing at a fleet acts on: whether it is moving, what came of
     it, and what it is costing the machine.
     """
     hour: list[str] = []
     turns = _num(stats, "turns_last_hour")
-    lines = _num(stats, "lines_changed")
-    nondocs = _num(stats, "lines_changed_nondocs")
+    added = _num(stats, "code_added")
+    deleted = _num(stats, "code_deleted")
     commits = _num(stats, "commits_last_hour")
     spawns = _num(stats, "spawns_last_hour")
     messages = _num(stats, "messages_last_hour")
     if turns is not None:
         # FIRST, because it is the closest thing the store has to "is the fleet moving".
         hour.append(_plural(turns, "turn"))
-    if lines is not None:
-        hour.append(_plural(lines, "line"))
-        if nondocs is not None:
-            # The half that is not prose. Its own piece and immediately after the total,
-            # so a narrow pane drops the split before the number it splits.
-            hour.append(f"{fmt_count(nondocs)} code")
+    if added is not None and deleted is not None:
+        # CODE ONLY, and COMMITTED only. Prose is filtered out upstream (`stats.is_docs`),
+        # so a documentation hour does not read as a thousand lines of work; and this walks
+        # commits, so uncommitted edits in a worktree are not in it. The `+/-` shape is
+        # about which direction the code moved, not about a live working-tree diff.
+        # Both halves or neither — a `+312` beside an unknown deletion count is a half
+        # measurement wearing the punctuation of a whole one.
+        hour.append(f"+{fmt_count(added)}/-{fmt_count(deleted)}")
     if commits is not None:
         hour.append(_plural(commits, "commit"))
     if spawns is not None:
         hour.append(_plural(spawns, "spawn"))
     if messages is not None:
-        # MESSAGES, and never "calls". Andrew asked for sb calls; nothing logs one —
+        # MAIL, and never "calls". Andrew asked for sb calls; nothing logs one —
         # `store.log_event` is called from particular sites, so that number does not exist
         # to be reported. This is inter-agent mail, which is the honest near thing, and
         # labelling it as the thing he asked for would have the board claim a measurement
-        # nobody takes.
-        hour.append(_plural(messages, "message"))
+        # nobody takes. Not through `_plural`: mail is uncountable, so `3 mail` and never
+        # `3 mails`.
+        hour.append(f"{fmt_count(messages)} mail")
 
     now: list[str] = []
     cpu = _num(stats, "cpu_percent")
     cores = _num(stats, "cpu_cores")
     rss = _num(stats, "memory_bytes")
+    avail = _num(stats, "memory_available_bytes")
     procs = _num(stats, "processes")
-    if cpu is not None:
-        # CORES BUSY, not a bare percentage. `ps` sums %CPU across the fleet's whole
-        # process tree, so on any multi-core machine the figure goes over 100 and reads as
-        # a broken gauge. `cpu_cores` rides in the dict for exactly this: `3.8 of 10
-        # cores` is the same measurement with the denominator a person needs to size it.
-        busy = cpu / 100.0
-        share = f"{busy:.1f}" if busy < 10 else f"{busy:.0f}"
-        now.append(f"{share} of {fmt_count(cores)} cores" if cores else f"{share} cores")
+    if cpu is not None and cores:
+        # A SHARE OF THE WHOLE MACHINE. `ps` sums %CPU across the fleet's process tree, so
+        # on any multi-core machine the raw figure goes over 100 and reads as a broken
+        # gauge; divided by the core count it is the one percentage a person can size at a
+        # glance — half the machine is half the machine whatever the box has in it.
+        # Unknown cores means no piece at all: a share has no meaning without its
+        # denominator, and guessing one would be inventing the measurement.
+        # Clamped, because a summed decaying average can momentarily overshoot the machine
+        # and a `104% cpu` would read as a bug rather than as a busy fleet.
+        share = min(100, max(0, round(cpu / cores)))
+        now.append(f"{share}% cpu")
     if rss is not None:
         # `rss` and not "memory". This is summed resident set, so a page shared by ten
         # processes is counted ten times — an upper bound, ~6% high where it was measured.
         # The word names which number it is rather than dressing it up as the footprint.
         now.append(f"{fmt_bytes(rss)} rss")
+    if avail is not None:
+        # What is LEFT, straight from the OS — the fleet's number above says nothing about
+        # whether the machine is near its limit, which is the thing a person watching forty
+        # panes actually wants to know.
+        now.append(f"{fmt_bytes(avail)} free")
+    if rss is not None and avail is not None and (rss + avail) > 0:
+        # The fleet's share of the memory it COULD use: its own plus what is free. Not a
+        # share of physical RAM — that denominator includes everything other programs are
+        # holding, which the fleet cannot have, and would report a busy machine as a light
+        # one. Both halves come from the same proc sample, so this is one moment's ratio.
+        now.append(f"{min(100, max(0, round(100 * rss / (rss + avail))))}% mem")
     if procs is not None:
         now.append(_plural(procs, "proc"))
 

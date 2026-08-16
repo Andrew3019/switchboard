@@ -9,12 +9,12 @@ keeping the expensive ones off the caller's clock:
   process (a 17 MB store, 32k events, nothing of it in this process's page cache) and
   ~5-20 ms on every later expiry. That first call is why this belongs in the collector,
   where a slow tick is invisible, and not in something drawing a frame.
-- **From git** — lines changed in the last hour. ONE `git log --all` walk of the shared
-  repository, not one `git diff` per checkout: this store holds 275 workspace rows, 153 of
-  whose checkouts still exist on disk, and a subprocess each would be ~45 s of work for a
-  number that changes when somebody commits. Every worktree shares one `.git`, so one walk
-  over all refs already covers all of them — ~0.3 s of CPU, 1.5-5 s of wall time while
-  fifteen agents are running their own git in the same repository.
+- **From git** — code lines added and deleted in the last hour. ONE `git log --all` walk of
+  the shared repository, not one `git diff` per checkout: this store holds 275 workspace
+  rows, 153 of whose checkouts still exist on disk, and a subprocess each would be ~45 s of
+  work for a number that changes when somebody commits. Every worktree shares one `.git`,
+  so one walk over all refs already covers all of them — ~0.3 s of CPU, 1.5-5 s of wall
+  time while fifteen agents are running their own git in the same repository.
 - **From the machine** — CPU and resident memory across the fleet's process tree. `lsof`
   plus `ps`, ~0.4 s, and the reason the caching in here exists at all.
 
@@ -44,6 +44,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -107,14 +108,20 @@ class Stats:
     store_age: Optional[float] = None
 
     # From git — commits made in the last hour on ANY ref of the shared repository.
-    lines_changed: Optional[int] = None
-    lines_changed_nondocs: Optional[int] = None
+    # Added and deleted separately, and non-docs only: the prose trees move by hundreds of
+    # lines in a writing hour and would drown the code figure they sit beside.
+    code_added: Optional[int] = None
+    code_deleted: Optional[int] = None
     commits_last_hour: Optional[int] = None
     git_age: Optional[float] = None
 
     # From the machine.
     cpu_percent: Optional[float] = None       # summed across the tree; >100 on many cores
     memory_bytes: Optional[int] = None        # summed RSS; shared pages counted per process
+    # What the machine would hand out right now, asked of the OS and not of the fleet. Its
+    # own field because it is a different measurement from the one above — that one is what
+    # the fleet holds, this is what is left — and either can be unknown without the other.
+    memory_available_bytes: Optional[int] = None
     processes: Optional[int] = None
     cpu_cores: Optional[int] = None           # so a caller can turn cpu_percent into a share
     proc_age: Optional[float] = None
@@ -166,12 +173,13 @@ def collect(db: Optional[sqlite3.Connection] = None, *,
         spawns_last_hour=counts.get("spawns"),
         messages_last_hour=counts.get("messages"),
         store_age=store_age,
-        lines_changed=lines.get("total"),
-        lines_changed_nondocs=lines.get("nondocs"),
+        code_added=lines.get("added"),
+        code_deleted=lines.get("deleted"),
         commits_last_hour=lines.get("commits"),
         git_age=git_age,
         cpu_percent=procs.get("cpu"),
         memory_bytes=procs.get("rss"),
+        memory_available_bytes=procs.get("available"),
         processes=procs.get("count"),
         cpu_cores=os.cpu_count(),
         proc_age=proc_age,
@@ -344,7 +352,7 @@ _RENAME_BRACED = re.compile(r"\{[^{}]*? => ([^{}]*?)\}")
 
 
 def _git_lines(repo: Optional[Path]) -> Optional[dict]:
-    """Lines added+deleted in the last hour, total and excluding docs. **None** if git won't say.
+    """Non-docs lines added and deleted in the last hour. **None** if git won't say.
 
     None rather than zero on every failure — not a repo, no git, a walk that timed out. An
     hour in which nobody committed and an hour nobody could ask about look identical as a
@@ -374,14 +382,17 @@ def _git_lines(repo: Optional[Path]) -> Optional[dict]:
 
 
 def _parse_numstat(text: str) -> dict:
-    """Sum a `--numstat` walk. Binary files ("-\t-") count as a file, not as lines.
+    """Sum a `--numstat` walk into added and deleted, NON-DOCS ONLY, plus a commit count.
+
+    Binary files ("-\t-") count as a file, not as lines. Docs are dropped from both sums
+    rather than tracked alongside them: `is_docs` is the filter, unchanged.
 
     Lenient where `live._parse` is strict, and for the opposite reason: nothing destructive
     is decided here, the shapes are open-ended (a 40-char sha line, a blank line, a numstat
     row, a path with a rename arrow in it), and a line this does not recognise costs one
     file's lines rather than the honesty of a gate.
     """
-    total = nondocs = commits = 0
+    added_sum = deleted_sum = commits = 0
     for line in text.splitlines():
         if not line:
             continue
@@ -391,13 +402,14 @@ def _parse_numstat(text: str) -> dict:
             continue
         added, deleted, path = parts
         try:
-            n = int(added) + int(deleted)
+            a, d = int(added), int(deleted)
         except ValueError:
             continue                            # "-\t-": a binary file has no line count
-        total += n
-        if not is_docs(path):
-            nondocs += n
-    return {"total": total, "nondocs": nondocs, "commits": commits}
+        if is_docs(path):
+            continue                            # prose is not what this figure is about
+        added_sum += a
+        deleted_sum += d
+    return {"added": added_sum, "deleted": deleted_sum, "commits": commits}
 
 
 def is_docs(path: str) -> bool:
@@ -445,6 +457,9 @@ def _proc_sample(roots: list[str]) -> Optional[dict]:
       published beside it.
     - Summed RSS counts a shared page once per process sharing it, so this is an upper
       bound on real memory rather than a measurement of it.
+    - `available` is the machine's, not the fleet's: what the OS says it could hand out
+      right now. It is sampled here so it shares the fleet's RSS reading's instant — a
+      share computed from two figures taken seconds apart is a ratio of two moments.
 
     Unprivileged `lsof` sees only the caller's own processes (see `live`'s module note),
     which is the right scope here — agents run as the caller — and is still narrower than
@@ -464,7 +479,78 @@ def _proc_sample(roots: list[str]) -> Optional[dict]:
     tree = _descendants(seeds, table)
     cpu = sum(table[pid][2] for pid in tree if pid in table)
     rss = sum(table[pid][1] for pid in tree if pid in table)
-    return {"cpu": round(cpu, 1), "rss": rss * 1024, "count": len(tree)}
+    return {"cpu": round(cpu, 1), "rss": rss * 1024, "count": len(tree),
+            "available": _available_memory()}
+
+
+def _available_memory() -> Optional[int]:
+    """Bytes the machine would hand out right now, or **None** if it will not say.
+
+    Asked of the OS, once per proc sample, because it is a machine query and belongs on the
+    same slow cadence as `ps` rather than on a redraw. `None` on anything unexpected — an
+    unknown platform, a `vm_stat` that would not run, a `/proc` that is not there — for the
+    module's usual reason: a zero here would say the machine is full.
+
+    AVAILABLE, not free. On Linux that is `MemAvailable`, which is the kernel's own estimate
+    of what a new allocation could get, reclaimable cache included. macOS publishes no such
+    single figure, so it is assembled from the page classes that a new allocation can take:
+    free, speculative, and inactive. Not `psutil`, which would be a dependency the
+    collector's interpreter is not promised — the same reason everything else in here is a
+    subprocess.
+    """
+    if sys.platform == "darwin":
+        return _available_darwin()
+    return _available_linux()
+
+
+# Page classes an allocation can have. `inactive` is included because macOS's inactive list
+# is pages that have not been touched lately and are taken back under pressure, not pages in
+# use; leaving it out would report a machine with 20 GB spare as nearly full.
+_VM_STAT_FREE = ("Pages free", "Pages inactive", "Pages speculative")
+_VM_PAGE_SIZE = re.compile(r"page size of (\d+) bytes")
+
+
+def _available_darwin() -> Optional[int]:
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True,
+                             timeout=SUBPROCESS_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    m = _VM_PAGE_SIZE.search(out.stdout)
+    if not m:
+        return None                             # no page size, no bytes: a count of pages
+    page = int(m.group(1))                      # is not an amount of memory
+    pages = 0
+    found = 0
+    for line in out.stdout.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() in _VM_STAT_FREE:
+            try:
+                pages += int(value.strip().rstrip("."))
+            except ValueError:
+                return None
+            found += 1
+    if found != len(_VM_STAT_FREE):
+        return None                             # a class missing is a `vm_stat` we do not
+    return pages * page                         # recognise, not a machine without free pages
+
+
+def _available_linux() -> Optional[int]:
+    """`MemAvailable` from `/proc/meminfo`, in bytes. Read, not shelled out — it is a file."""
+    try:
+        text = Path("/proc/meminfo").read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "MemAvailable":
+            try:
+                return int(value.split()[0]) * 1024
+            except (ValueError, IndexError):
+                return None
+    return None
 
 
 def _ps_table() -> Optional[dict]:

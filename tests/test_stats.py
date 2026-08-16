@@ -1,9 +1,10 @@
-"""The two decisions in `stats` that are policy rather than plumbing.
+"""The decisions in `stats` that are policy rather than plumbing.
 
 Everything else in that module is a subprocess and a sum, and a test of those would be a
-test of `git log` and `ps`. These two are not: what counts as docs decides a number on
-screen, and the cache's two boundaries decide whether that number is a reading or a
-memory. Both are pure, so both can be pinned without teaching a fake anything.
+test of `git log` and `ps`. These are not: what counts as docs and which memory pages
+count as available each decide a number on screen, and the cache's two boundaries decide
+whether that number is a reading or a memory. All of them can be pinned on canned text and
+a fake clock, without teaching a fake anything.
 
 Deliberately NOT tested here, and named so the gap is visible rather than assumed: the
 `lsof`/`ps` scan and the git walk. Proving those needs real processes in a real repository
@@ -13,9 +14,11 @@ be pinning the fake.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -23,7 +26,7 @@ from switchboard import stats  # noqa: E402
 
 
 class DocsFilter(unittest.TestCase):
-    """`lines_changed_nondocs` is the number Andrew asked to see beside the total."""
+    """Whether a path is prose decides whether its lines reach the `+/-` on screen."""
 
     def test_prose_by_suffix_and_by_tree(self):
         for path in ("README.md", "notes/board-layout-scout.md", "notes/x/y.txt",
@@ -60,15 +63,57 @@ class NumstatSum(unittest.TestCase):
         "1\t1\tREADME.md\n"
     )
 
-    def test_totals_split_docs_from_the_rest(self):
+    def test_added_and_deleted_are_summed_separately_and_docs_are_dropped(self):
+        """The docs rows (`notes/scout.md`, `README.md`) contribute to neither sum, and the
+        binary row contributes to neither either — only `stats.py`'s 10 and 5 survive."""
         got = stats._parse_numstat(self.OUTPUT)
-        self.assertEqual(got["total"], 20)          # 15 + 3 + 2, binary contributes none
-        self.assertEqual(got["nondocs"], 15)
+        self.assertEqual(got["added"], 10)
+        self.assertEqual(got["deleted"], 5)
         self.assertEqual(got["commits"], 2)
 
     def test_an_hour_with_no_commits_is_zero_and_not_unknown(self):
         """The one place a zero is honest: git answered, and the answer was nothing."""
-        self.assertEqual(stats._parse_numstat("")["total"], 0)
+        self.assertEqual(stats._parse_numstat("")["added"], 0)
+        self.assertEqual(stats._parse_numstat("")["deleted"], 0)
+
+
+class AvailableMemory(unittest.TestCase):
+    """The macOS half, on the one thing about `vm_stat` that is a decision.
+
+    Its output is pages, in classes, and which classes count as available is the whole
+    question — inactive pages are reclaimed under pressure and leaving them out reports a
+    machine with room as a full one. Pinned on canned output rather than the live command:
+    what is being checked is the arithmetic and the class list, not that macOS has `vm_stat`.
+
+    The Linux half is a `/proc/meminfo` read of a number the kernel computes, with nothing
+    to decide, and is left to the live check.
+    """
+
+    VM_STAT = (
+        "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        "Pages free:                                2.\n"
+        "Pages active:                          99999.\n"
+        "Pages inactive:                            3.\n"
+        "Pages speculative:                         5.\n"
+        "Pages wired down:                      88888.\n"
+    )
+
+    def run_with(self, stdout, returncode=0):
+        done = subprocess.CompletedProcess([], returncode, stdout, "")
+        with mock.patch.object(stats.subprocess, "run", return_value=done):
+            return stats._available_darwin()
+
+    def test_free_inactive_and_speculative_pages_are_what_a_new_allocation_can_have(self):
+        self.assertEqual(self.run_with(self.VM_STAT), (2 + 3 + 5) * 4096)
+
+    def test_output_this_does_not_recognise_is_unknown_and_never_a_full_machine(self):
+        """A zero here would say the machine has nothing left — a conclusion nobody
+        reached. Both failures: no page size, and a page class missing."""
+        self.assertIsNone(self.run_with("Pages free: 2.\n"))          # no page size
+        self.assertIsNone(self.run_with(
+            "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+            "Pages free:                                2.\n"))       # classes missing
+        self.assertIsNone(self.run_with(self.VM_STAT, returncode=1))
 
 
 class CacheBoundaries(unittest.TestCase):
