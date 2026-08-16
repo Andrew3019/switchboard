@@ -14,8 +14,10 @@ not a decision: what is missing is undecided rather than free. Held to the same 
 ## Why this exists
 
 What agents do, how they do it, and how deep verification goes each time is disorganised.
-The recurring moments of a job — design, design review, implementation review, merge
-review — get reinvented on every task. Structuring them is the fix.
+The recurring moments of a job — design, design review, implementation review, merge review
+and the like — get reinvented on every task. Structuring them is the fix. Those four are
+examples rather than a required set: this can ship with no gates at all and still be worth
+having.
 
 Today everything asks Andrew, three times over: whether to create the PR, whether to merge,
 whether to clean up. Each is a decision he is made to take one at a time. Removing them is a
