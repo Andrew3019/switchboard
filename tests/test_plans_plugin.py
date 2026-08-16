@@ -149,15 +149,42 @@ class PlansTest(PlansSandbox):
 
     def test_an_unreadable_file_is_refused_rather_than_replaced(self):
         """Starting over on a corrupt file would silently replace every plan in the repo on
-        the next `create`, and the records are the whole reason for keeping them."""
+        the next `create`, and the records are the whole reason for keeping them.
+
+        Every verb, and the message names the path and says the file is safe: a refusal
+        that only says no sends a human looking for a bug in sb instead of at the file."""
         self.ok("plugin", "plans", "create", "a job")
         self._file().write_text("{ this is not json")
-        for argv in (("create", "another"), ("list",), ("show", "p-1")):
+        for argv in (("create", "another"), ("list",), ("show", "p-1"), ("changelog", "p-1")):
             with self.subTest(verb=argv[0]):
                 code, _, err = self.sb("plugin", "plans", *argv)
                 self.assertEqual(code, 1)
                 self.assertIn("not readable JSON", err)
+                self.assertIn("plans.json", err)
+                self.assertIn("will overwrite", err)
         self.assertEqual(self._file().read_text(), "{ this is not json")
+
+    def test_a_file_malformed_inside_the_plans_list_is_refused_by_name(self):
+        """Checked all the way down, not just at the top level — and the seal is why, not
+        tidiness. It is keyed on the plan id, so two plans sharing one (or one with none)
+        collapse to a single entry and `_write`'s drop check passes over the plan whose
+        changelog is no longer in it. Refusing here is refusing before anything is written.
+        """
+        wrecks = {"holds a str where a plan should be": {"plans": ["hello"]},
+                  "holds a NoneType where a plan should be": {"plans": [None]},
+                  "holds a plan with no usable id": {"plans": [{"title": "nameless"}]},
+                  "holds two plans called p-1": {"plans": [{"id": "p-1"}, {"id": "1"}]},
+                  "whose steps are not a list": {"plans": [{"id": "p-1", "steps": "nope"}]},
+                  "whose changelog is not a list": {"plans": [{"id": "p-1",
+                                                               "changelog": {}}]}}
+        for expected, doc in wrecks.items():
+            with self.subTest(expected=expected):
+                self._dir().mkdir(parents=True, exist_ok=True)
+                self._file().write_text(json.dumps(doc))
+                code, _, err = self.sb("plugin", "plans", "create", "should not land")
+                self.assertEqual(code, 1)
+                self.assertIn(expected, err)
+                self.assertEqual(json.loads(self._file().read_text()), doc)
 
     def test_the_state_lock_is_held_while_a_command_writes(self):
         """Two commands touching different steps are safe because each reads, changes and

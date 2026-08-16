@@ -226,6 +226,13 @@ def _read(d: Path) -> tuple[dict, dict]:
     empty document: starting over would silently replace every plan in the repo on the next
     `create`, and the records are the whole point of keeping them. The failing verb stops,
     nothing is written, and a human fixes or moves the file.
+
+    Unreadable is checked all the way down, not just at the top level, and the reason is
+    the seal rather than tidiness: it is keyed on the plan id, so two plans sharing an id —
+    or two with no id at all — collapse into one entry and `_write`'s drop check passes
+    over the plan whose changelog is no longer in it. Every shape that would break that
+    assumption is refused here, where nothing has been written yet, which is cheaper than
+    a `_write` that has to be right about a file it was already lied to about.
     """
     f = d / FILE
     if f.exists():
@@ -235,8 +242,8 @@ def _read(d: Path) -> tuple[dict, dict]:
             raise ValueError(f"{f} is not readable JSON ({e}); nothing here will overwrite "
                              f"it. Fix it or move it aside.") from e
         if not isinstance(doc, dict) or not isinstance(doc.get("plans", []), list):
-            raise ValueError(f"{f} is not a plans file — a JSON object with a 'plans' "
-                             f"list. Nothing here will overwrite it.")
+            raise _refuse(f, "is not a plans file — a JSON object with a 'plans' list")
+        _check(f, doc.get("plans") or [])
     else:
         doc = {"format": FORMAT, "next_plan": 1, "next_step": 1, "plans": []}
     doc.setdefault("format", FORMAT)
@@ -250,6 +257,42 @@ def _read(d: Path) -> tuple[dict, dict]:
     return doc, _seal(doc)
 
 
+def _refuse(f: Path, what: str) -> ValueError:
+    """The one refusal, so every malformed file says the same two things.
+
+    Returned rather than raised, so the caller reads as `raise _refuse(...)` and nothing
+    can call this and carry on. What it says is the path and that the file is safe: a
+    message that only says "no" sends a human looking for a bug in sb.
+    """
+    return ValueError(f"{f} {what}. Nothing here will overwrite it — fix it or move it "
+                      f"aside.")
+
+
+def _check(f: Path, plans: list) -> None:
+    """Every shape inside `plans` that the rest of this module assumes, checked once.
+
+    Plan ids are checked for BEING there and for being distinct, because both are load
+    bearing: the seal is keyed on the id, and `_write` decides a plan was dropped by
+    looking its id up. Compared as numbers, so `p-1` and a bare `1` are the one plan they
+    name rather than two rows that pass a string comparison.
+    """
+    seen: set[int] = set()
+    for plan in plans:
+        if not isinstance(plan, dict):
+            raise _refuse(f, f"holds a {type(plan).__name__} where a plan should be")
+        n = _num(_PLAN_ID, plan.get("id"))
+        if n is None:
+            raise _refuse(f, f"holds a plan with no usable id ({plan.get('id')!r})")
+        if n in seen:
+            raise _refuse(f, f"holds two plans called p-{n}, and ids are never reused")
+        seen.add(n)
+        steps = plan.get("steps", [])
+        if not isinstance(steps, list) or any(not isinstance(s, dict) for s in steps):
+            raise _refuse(f, f"has a p-{n} whose steps are not a list of steps")
+        if not isinstance(plan.get("changelog", []), list):
+            raise _refuse(f, f"has a p-{n} whose changelog is not a list")
+
+
 def _counter(given: Any) -> int:
     """A stored counter, or 1 if a hand-edit left something that is not a number there.
 
@@ -259,13 +302,18 @@ def _counter(given: Any) -> int:
     """
     try:
         return max(1, int(given))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 1
 
 
 def _seal(doc: dict) -> dict:
-    """Every plan's changelog as it stands, keyed by plan id. Compared on the way out."""
-    return {p.get("id"): json.dumps(p.get("changelog") or [], sort_keys=True)
+    """Every plan's changelog as it stands, keyed by plan NUMBER. Compared on the way out.
+
+    The number rather than the string, so that `p-1` and a bare `1` cannot seal one plan
+    and be looked up as another. `_read` has already refused a file where two plans share
+    one, which is what makes a dict safe to key on it at all.
+    """
+    return {_num(_PLAN_ID, p.get("id")): json.dumps(p.get("changelog") or [], sort_keys=True)
             for p in doc["plans"]}
 
 
@@ -284,21 +332,28 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
     to lose a changelog than editing one: a plan that was read and is not being written
     back has lost every entry it had, and the design says records are kept and never
     erased — cleanup means dropping out of the UI.
+
+    What `os.replace` buys is readers, not crashes: a power loss between the rename and
+    the blocks reaching disk can still cost the last write, and there is no `fsync` here.
+    That is `todo`'s trade taken deliberately, and the cost is one command's worth of
+    changelog, not the file.
     """
-    here = {plan.get("id") for plan in doc["plans"]}
-    gone = [pid for pid in seal if pid not in here]
+    here = {_num(_PLAN_ID, plan.get("id")) for plan in doc["plans"]}
+    gone = [n for n in seal if n not in here]
     if gone:
-        raise ValueError(f"this write would have dropped {', '.join(sorted(gone))} and "
-                         f"its changelog; plans are kept, never erased")
+        raise ValueError(f"this write would have dropped "
+                         f"{', '.join(f'p-{n}' for n in sorted(gone))} and its changelog; "
+                         f"plans are kept, never erased")
     for plan in doc["plans"]:
-        was = seal.get(plan.get("id"))
+        n = _num(_PLAN_ID, plan.get("id"))
+        was = seal.get(n)
         if was is None:
             continue                    # a plan created by this command; nothing to keep
         old = json.loads(was)
         now = plan.get("changelog") or []
-        if now[:len(old)] != old:
-            raise ValueError(f"{plan.get('id')}'s changelog is append-only, and this write "
-                             f"would have dropped or rewritten {len(old)} entries")
+        if not isinstance(now, list) or now[:len(old)] != old:
+            raise ValueError(f"p-{n}'s changelog is append-only, and this write would have "
+                             f"dropped or rewritten {len(old)} entries")
     tmp = d / f".{FILE}.tmp"
     tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, d / FILE)
