@@ -1,6 +1,6 @@
 """The `plans` plugin — the state model, before any step can move.
 
-Ten tests, pinning decisions rather than buying confidence. Everything sb owns — the
+Eleven tests, pinning decisions rather than buying confidence. Everything sb owns — the
 parser built from the declaration, the state directory, the `--json` envelope — is tested
 in `test_plugins.py`, so these run through `cli.main` for the same reason the other
 shipped-plugin tests do and then assert only what this plugin decided:
@@ -12,7 +12,9 @@ shipped-plugin tests do and then assert only what this plugin decided:
 3. `list` is scoped to this worktree, matched on the checkout path.
 4. The workspace is resolved once, at `create`, and a branch change in the same checkout
    does not move it — the key is the workspace, and the branch is not the workspace.
-5. A checkout that is no workspace says so rather than being filed under a guess.
+5. A checkout that is no workspace says so rather than being filed under a guess, and an
+   sb that cannot be reached is a different answer again — `workspace_from` carries which,
+   and resolution is bounded so a wedged sb cannot hold the plans lock for a minute.
 6. The changelog accumulates and carries the reason the agent supplied, and a write that
    would drop an entry — or the plan holding it — is refused. That record is what the
    analysis pass reads.
@@ -36,8 +38,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -143,6 +147,7 @@ class PlansTest(PlansSandbox):
         self.as_agent("lead-1")         # the normal path: a lead makes the plan
         made = self.data("plugin", "plans", "create", "a job", "--step", "write it")
         self.assertEqual(made["workspace"], "ws-1")
+        self.assertEqual(made["workspace_from"], "agent")
         self.assertEqual(Path(made["checkout"]).resolve(), self.repo.resolve())
 
         self.ok("plugin", "plans", "create", "a second job")
@@ -160,8 +165,33 @@ class PlansTest(PlansSandbox):
         directory — would read to PR4 as a worktree that has gone."""
         made = self.data("plugin", "plans", "create", "in a plain clone")
         self.assertIsNone(made["workspace"])
+        self.assertEqual(made["workspace_from"], "none")
         self.assertIn("(no workspace)", self.ok("plugin", "plans", "show", "p-1"))
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
+
+    def test_an_unanswerable_sb_is_not_the_same_fact_as_no_workspace(self):
+        """Both store a null workspace, and PR4 reads that field to decide a plan is
+        abandoned. `none` is sb saying this checkout belongs to nowhere; `unavailable` is
+        sb not saying anything, at one instant, about a job that may be perfectly healthy —
+        and nothing recomputes the field afterwards, so the distinction has to be written
+        down when the plan is made or it is never recoverable.
+
+        The whole resolution is bounded, too: it happens with the plans lock held, so an
+        sb that has wedged must cost seconds rather than wedge every other plans command in
+        the repo behind it.
+        """
+        (Path(self.tmp.name) / "bin").unlink()          # no build beside the plugin
+        real = shutil.which
+        with mock.patch("shutil.which",                 # and none on PATH either
+                        lambda name, *a, **k: None if name == "sb" else real(name, *a, **k)):
+            started = time.monotonic()
+            made = self.data("plugin", "plans", "create", "during an outage")
+        self.assertLess(time.monotonic() - started, 10)
+
+        self.assertIsNone(made["workspace"])
+        self.assertEqual(made["workspace_from"], "unavailable")
+        self.assertIn("workspace unresolved", made["changelog"][0]["detail"])
+        self.assertIn("(unresolved)", self.ok("plugin", "plans", "show", "p-1"))
 
     def test_ids_are_monotonic_and_never_reused(self):
         """One step counter for the whole file, not one per plan: two plans on a worktree

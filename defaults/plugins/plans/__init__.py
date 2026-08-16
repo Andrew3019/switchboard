@@ -9,7 +9,7 @@ has to get right is the shape everything after it writes into.
 The records
 -----------
 
-    plan  {"id": "p-1", "workspace": "task-guardrails-build",
+    plan  {"id": "p-1", "workspace": "task-guardrails-build", "workspace_from": "agent",
            "checkout": "/…/worktrees/switchboard/task-guardrails-build", "title": "…",
            "steps": [...], "changelog": [...], "notes": [...],
            "created_by": "lead", "created_at": 1754570000}
@@ -50,6 +50,13 @@ A checkout that is no workspace sb knows has no name to store, and that is writt
 `null` and rendered as itself rather than filed under a plausible-looking wrong key. A plan
 under a key no workspace has would read, to the PR that derives records, as a worktree that
 is gone — abandoned rather than live.
+
+`workspace_from` says HOW that was decided — `agent`, `workspace-list`, `none`,
+`unavailable` — because a null on its own is two different facts wearing one face. `none`
+is sb answering that this checkout belongs to no workspace; `unavailable` is sb not
+answering at all, which is a hiccup at one instant and not a statement about the job.
+Nothing recomputes the field, so a plan made during a hiccup would otherwise carry a
+worktree-is-gone verdict for the rest of its life.
 
 Nothing about liveness is stored: whether the workspace still exists, whether anybody is
 working in it, and whether a step's owner is alive are all read at display time, by a later
@@ -96,6 +103,12 @@ FORMAT = 1
 
 # What `create` writes into a step it makes. Not an enum — see the module docstring.
 OPEN = "open"
+
+# How a plan's workspace was decided, stored as `workspace_from`. Four values and no more,
+# because this one IS a closed vocabulary: it describes what this code did, not what a job
+# is like, and the PR that derives records has to be able to switch on it. The two that
+# matter are the two that both leave `workspace` null — see `_workspace`.
+BY_AGENT, BY_LIST, NONE, UNAVAILABLE = "agent", "workspace-list", "none", "unavailable"
 
 # `p-1`, `P-1` and a bare `1` all name the same plan; likewise `s-1` for a step. An id is
 # read out of a board or a spawn prompt and retyped, and being strict buys nothing.
@@ -147,7 +160,8 @@ def create(ctx, args) -> Result:
 
     doc, seal = _read(ctx.state_dir)
     who = ctx.agent or "human"
-    plan = {"id": f"p-{doc['next_plan']}", "workspace": _workspace(ctx),
+    where, how = _workspace(ctx)
+    plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
             "checkout": str(_here(ctx)), "title": title,
             "steps": [], "changelog": [], "notes": [_note(n, who) for n in notes],
             "created_by": who, "created_at": int(time.time())}
@@ -157,8 +171,13 @@ def create(ctx, args) -> Result:
         doc["next_step"] += 1
 
     made = ", ".join(s["id"] for s in plan["steps"])
-    _log(plan, who, "create", args.reason,
-         f"{_count(plan['steps'])} ({made})" if made else "empty")
+    detail = f"{_count(plan['steps'])} ({made})" if made else "empty"
+    if how == UNAVAILABLE:
+        # In the append-only record as well as in the field, because this is the one thing
+        # about a plan that was never true of the job and cannot be re-derived later: sb
+        # was not reachable at the moment this plan was made.
+        detail += "; workspace unresolved — sb did not answer"
+    _log(plan, who, "create", args.reason, detail)
     doc["plans"].append(plan)
     _write(ctx.state_dir, doc, seal)
     return Result(human=_full(plan), data=plan)
@@ -447,8 +466,8 @@ def _same(stored: Any, here: Path) -> bool:
         return str(stored) == str(here)
 
 
-def _workspace(ctx) -> Optional[str]:
-    """The name of the workspace this checkout belongs to, asked of sb, or None.
+def _workspace(ctx) -> tuple[Optional[str], str]:
+    """Which workspace this checkout belongs to, and HOW that was decided. Asked of sb.
 
     The name has to be the string the store holds — it is what the board groups by and what
     a later PR uses to decide a plan's worktree is gone — and a plugin `Context` carries no
@@ -461,21 +480,38 @@ def _workspace(ctx) -> Optional[str]:
        on the path. This is the human-at-a-terminal path, and it is second because it is an
        order of magnitude slower to answer.
 
-    None when neither answers — a plain clone, a bare workspace, an sb that cannot be
-    found. That is stored as `null` and rendered as itself. The alternative, inventing a
-    name from the branch or the directory, is what this file did before and it was wrong:
-    branches move under a checkout that has not, and a plan filed under a name no workspace
-    has reads to PR4 as a worktree that is gone.
+    A name from anywhere else is not an option. Inventing one from the branch or the
+    directory is what this file did before and it was wrong: branches move under a checkout
+    that has not, and a plan filed under a name no workspace has reads as a worktree gone.
+
+    So there are two ways to have no name, and they are NOT the same fact:
+
+        none          sb answered, and this checkout is no workspace it knows — a plain
+                      clone, or the primary checkout, whose workspaces are bare and share
+                      one directory so there is no single right answer to pick.
+        unavailable   sb could not be asked or did not answer — not found, non-zero,
+                      unparseable, or slower than the budget below.
+
+    Both store `workspace: null`, which is why the second half of this return value exists.
+    A record that cannot tell them apart hands PR4 a transient hiccup dressed as a plan
+    whose worktree is gone — permanently, since nothing recomputes this. `create` writes
+    the answer to `workspace_from`, and the four values are the whole vocabulary:
+    `agent`, `workspace-list`, `none`, `unavailable`.
 
     Called once, by `create`. Nothing else recomputes it, and no verb re-attaches a plan.
     """
+    clock = _Budget()
+    reached = True
     if ctx.agent:
-        row = _ask(ctx, "inspect", ctx.agent)
+        row = _ask(ctx, "inspect", ctx.agent, clock=clock)
+        reached = row is not None
         name = (row or {}).get("workspace")
         if name:
-            return str(name)
+            return str(name), BY_AGENT
+    listed = _ask(ctx, "workspace", "list", clock=clock)
+    reached = reached and listed is not None
     here = _here(ctx)
-    for w in ((_ask(ctx, "workspace", "list") or {}).get("workspaces") or ()):
+    for w in ((listed or {}).get("workspaces") or ()):
         if not isinstance(w, dict) or not w.get("name"):
             continue
         if not _same(w.get("checkout"), here):
@@ -485,23 +521,44 @@ def _workspace(ctx) -> Optional[str]:
         # the right shape, and taking it would put the drift this resolver exists to fix
         # straight back. Only a workspace the store knows has a name to file a plan under.
         if set(w.get("sources") or ()) - {"git"}:
-            return str(w["name"])
-    return None
+            return str(w["name"]), BY_LIST
+    return None, (NONE if reached else UNAVAILABLE)
 
 
-def _ask(ctx, *argv: str) -> Any:
+# How long resolving a workspace may cost, in total and for any one question. Measured, not
+# guessed: `sb inspect` answers in ~0.4s and `sb workspace list` in ~1.5-2.6s against a
+# 260-row store. The budget is shared across both questions rather than per-call, because
+# the thing being bounded is `create` — which holds the plugin lock while it waits, so every
+# other plans command in the repo waits behind it. An sb that has wedged costs seconds and
+# an `unavailable` marker, never a minute of a locked state directory.
+BUDGET, PER_ASK = 8.0, 5.0
+
+
+class _Budget:
+    """The wall clock for one resolution, spent across however many questions it asks."""
+
+    def __init__(self) -> None:
+        self.until = time.monotonic() + BUDGET
+
+    def left(self) -> float:
+        return min(PER_ASK, self.until - time.monotonic())
+
+
+def _ask(ctx, *argv: str, clock: _Budget) -> Any:
     """One `sb <argv> --json`, parsed, or None if it fails in any way at all.
 
     Every failure is None rather than an exception: this is a name to label a plan with,
     and a plan that cannot be made because `sb inspect` timed out would be a plugin that
-    breaks when the thing it is describing is busy.
+    breaks when the thing it is describing is busy. The caller records that it happened.
     """
     sb = _sb()
-    if not sb:
+    seconds = clock.left()
+    if not sb or seconds <= 0:
         return None
     try:
         out = subprocess.run([sb, *argv, "--json"], cwd=str(ctx.worktree),
-                             capture_output=True, text=True, timeout=30)
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                             timeout=seconds)
         return json.loads(out.stdout) if out.returncode == 0 and out.stdout else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -551,13 +608,17 @@ def _count(steps: list) -> str:
 
 
 def _where(p: dict) -> str:
-    """A plan's workspace, or the fact that it has none, said rather than left blank.
+    """A plan's workspace, or which kind of no-workspace it is, said rather than blank.
 
-    An em dash here would read as "not filled in yet". This is a plan on a checkout that is
-    no workspace sb knows — a plain clone, somebody's own worktree — which is a real answer
-    and the one a later PR must not mistake for a worktree that has gone.
+    An em dash here would read as "not filled in yet". A plan may be on a checkout that is
+    no workspace sb knows — a plain clone, the primary checkout whose workspaces are bare
+    and share one directory — and that is a real answer, not a gap. The other null is sb
+    having been unreachable when the plan was made, and it renders differently because
+    nothing about the job is being described: the record simply does not know.
     """
-    return str(p.get("workspace") or "(no workspace)")
+    if p.get("workspace"):
+        return str(p["workspace"])
+    return "(unresolved)" if p.get("workspace_from") == UNAVAILABLE else "(no workspace)"
 
 
 def _line(p: dict, *, workspace: bool) -> str:
