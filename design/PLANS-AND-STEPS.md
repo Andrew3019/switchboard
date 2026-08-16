@@ -72,9 +72,10 @@ same either way — a design that does not handle both is wrong.
 renders plans inside the worktree grouping it already has, rather than in a section of
 their own. From inside a plan the others are invisible and irrelevant: nothing in a plan
 refers to another, and anything a step needs from the world outside is an input it takes.
-The merge gate takes a PR, so several plans mean several PRs and no plan has to know that. A job is owned by a lead, and everything below a lead shares that lead's
-worktree, so a job and a worktree are the same span. Work spanning two worktrees is two
-plans; one plan spanning both would be a different feature.
+The merge gate takes a PR, so several plans mean several PRs and no plan has to know that.
+A plan never spans two worktrees: everything below a lead shares that lead's worktree, so
+work spanning two of them is two plans, and one plan across both would be a different
+feature.
 
 **Defining a plan upfront is the point, not overhead.** More effort can be spent getting it
 right when it is defined early, and the payoff is that an agent reaching a step already
