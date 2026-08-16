@@ -140,8 +140,10 @@ def collect(db: Optional[sqlite3.Connection] = None, *,
 
     The store counts are computed inline on expiry rather than in a thread, because a
     sqlite connection belongs to the thread that opened it and handing this one to a
-    sampler would be a `ProgrammingError` waiting for the first cache miss. They are cheap
-    enough that this is not a compromise: ~5-20 ms, once every `STORE_TTL`.
+    sampler would be a `ProgrammingError` waiting for the first cache miss. That is the one
+    real cost left on a caller's clock — ~370 ms on the first call in a process against the
+    17 MB store measured, ~5-20 ms on each `STORE_TTL` expiry after it. Measured warm, with
+    every sample in hand, a call is ~0.07 ms.
     """
     counts, store_age = ((None, None) if db is None
                          else _STORE.get(lambda: _store_counts(db), wait=True))
@@ -149,7 +151,10 @@ def collect(db: Optional[sqlite3.Connection] = None, *,
     # The checkouts are read HERE, on the caller's thread, and handed to the sampler as
     # plain paths — same connection-affinity rule as above, and the reason this is not
     # simply `lambda: _proc_sample(_checkouts(db))`. Behind `due()` so a warm call does no
-    # SQL at all: this one runs at the caller's rate, not the sampler's.
+    # SQL at all: this one runs at the caller's rate, not the sampler's. If the ttl expires
+    # in the microseconds between `due()` and `get()`, the sampler gets no roots, declines
+    # to answer and leaves the previous value standing — one skipped sample, and the next
+    # call finds `due()` true and takes it.
     roots = _checkouts(db) if (wait or _PROC.due()) else []
     procs, proc_age = _PROC.get(lambda: _proc_sample(roots), wait=wait)
 

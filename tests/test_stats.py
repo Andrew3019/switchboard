@@ -82,6 +82,9 @@ class CacheBoundaries(unittest.TestCase):
         self.t = 1000.0
         self.calls = 0
         self.s = stats.Sampler(ttl=10.0, max_age=30.0, clock=lambda: self.t)
+        # The module's own samplers are process-wide singletons. Nothing here touches them,
+        # but a test file that leaves them holding a sample would hand the next one a cache.
+        self.addCleanup(stats.reset)
 
     def sample(self):
         self.calls += 1
