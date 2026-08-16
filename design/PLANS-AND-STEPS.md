@@ -283,8 +283,8 @@ creating the step, which is enforcement in appearance only.
 **Agents learn their step through output they already read**, never through a command they
 have to remember. What they are told is asymmetric: a lead needs the plan, a worker needs
 only its own step, so sending the whole plan to a worker is context spent for nothing. The
-carriers are the places they already look — the spawn prompt, `sb inbox`, the response to
-`sb done`, and the lead's own `sb status`. Nothing polls and nothing new has to be run.
+spawn prompt is the carrier for now; decorating the core verbs — a step line on `sb inbox`,
+a prompt on `sb done`, a column on `sb status` — is deferred rather than dropped.
 
 ---
 
@@ -324,6 +324,21 @@ review is one — and everything else is created by the lead at plan time. What 
 promoted into the fixed part, and what a default template should contain, is read off real
 runs after a while rather than decided up front. The system must work with the catalogue
 almost empty.
+
+---
+
+## Shipping it
+
+**It ships as a plugin, and switching it off restores today's behaviour exactly.** Disabled
+means no agent is ever told plans exist, so none are made. Deleting the folder behaves like
+off, and putting it back behaves like on.
+
+**The board needs a hook for it.** Rendering plans under their worktree is the one thing the
+plugin cannot do from outside, so the board grows an extension point rather than knowledge
+of plans.
+
+**Everything else lives in the plugin** — its commands, its state, and the prompt text that
+tells agents plans exist.
 
 ---
 
