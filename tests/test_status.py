@@ -58,6 +58,16 @@ class StatusTest(unittest.TestCase):
     def by_name(self, snap):
         return {a.name: a for a in snap.agents}
 
+    def past_the_floor(self, seconds=1):
+        """`now`, far enough on that an idle row's idleness MEANS something. -> epoch.
+
+        `status.STALLED_FLOOR` is the floor under every stall, so a row built in this
+        second is a row that has this instant ended a turn: excused, not stalled. Every
+        test below about a REAL stall says so with this, and the clock moves rather than
+        the store so nothing else on the row reads differently than it otherwise would.
+        """
+        return store.now() + int(status.STALLED_FLOOR) + seconds
+
     def confirm_gone(self, h=None, *, at=None):
         """Collect twice, a confirmation window apart — what it now takes to record a death.
 
@@ -76,7 +86,8 @@ class StatusTest(unittest.TestCase):
         # `session_id` is what says this one has taken a turn at all: a session-less row
         # this young has not started yet, and is held off (see the stall-grace tests).
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]))
+        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                              now=self.past_the_floor())
         a = self.by_name(snap)["w1"]
         self.assertTrue(a.stalled)
         self.assertEqual(a.state, "working")      # the store is reported, not rewritten
@@ -91,20 +102,22 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="w1", role="worker", parent="lead",
                            session_id="s2")
         h = FakeHerdr([alive("lead", "idle"), alive("w1", "working")])
-        lead = self.by_name(status.collect(self.db, h))["lead"]
+        at = self.past_the_floor()
+        lead = self.by_name(status.collect(self.db, h, now=at))["lead"]
         self.assertFalse(lead.stalled)
         self.assertFalse(lead.needs_human)
         self.assertEqual(lead.display_state, "idle")
 
         store.set_state(self.db, "w1", "done")
-        lead = self.by_name(status.collect(self.db, h))["lead"]
+        lead = self.by_name(status.collect(self.db, h, now=at))["lead"]
         self.assertTrue(lead.stalled)
         self.assertEqual(lead.display_state, "idle")   # never `working` beside a stall
 
     def test_herdrs_derived_done_counts_as_idle(self):
         """herdr shows `done` for idle-and-unviewed; missing that hides real drift."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        snap = status.collect(self.db, FakeHerdr([alive("w1", "done")]))
+        snap = status.collect(self.db, FakeHerdr([alive("w1", "done")]),
+                              now=self.past_the_floor())
         self.assertTrue(self.by_name(snap)["w1"].stalled)
 
     def test_drift_is_not_repaired(self):
@@ -181,7 +194,8 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.display_state, "working")
 
         store.set_turn(self.db, "w1", store.TURN_IDLE)
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")])))["w1"]
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")]),
+                                        now=self.past_the_floor()))["w1"]
         self.assertTrue(a.stalled)
         self.assertEqual(a.display_state, "idle")
 
@@ -205,9 +219,12 @@ class StatusTest(unittest.TestCase):
         behaves exactly as it did before any of this existed."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         self.assertIsNone(store.get_agent(self.db, "w1")["turn"])
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        at = self.past_the_floor()
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=at))["w1"]
         self.assertTrue(a.stalled)
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")])))["w1"]
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")]),
+                                        now=at))["w1"]
         self.assertFalse(a.stalled)
 
     def test_a_session_that_died_mid_turn_is_surfaced_not_left_working(self):
@@ -281,7 +298,8 @@ class StatusTest(unittest.TestCase):
 
         # The next reading is the repaired one — the write lands after the snapshot it was
         # computed from, exactly as `_record_gone`'s does.
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor()))["w1"]
         self.assertTrue(a.stalled)
         self.assertEqual(a.display_state, "idle")
 
@@ -361,7 +379,8 @@ class StatusTest(unittest.TestCase):
                            awaiting_task=True)
         store.put_message(self.db, from_agent="human", to_agent="lead",
                           kind="tell", body="do the thing")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")])))["lead"]
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("lead", "idle")]),
+                                        now=self.past_the_floor()))["lead"]
         self.assertTrue(a.stalled)
 
     def test_an_ordinary_agent_is_stalled_from_the_start(self):
@@ -370,8 +389,75 @@ class StatusTest(unittest.TestCase):
         that costs something is a stuck agent nobody is warned about."""
         store.create_agent(self.db, name="w1", role="worker", task="fix the parser",
                            session_id="s1")
-        self.assertTrue(self.by_name(
-            status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"].stalled)
+        self.assertTrue(self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", "idle")]),
+            now=self.past_the_floor()))["w1"].stalled)
+
+    # -- the floor under a stall, and the question that excuses one ---------
+    #
+    # `stalled` had no duration term in it at all: the `Stop` hook writes `turn='idle'` at
+    # the end of every turn, so an ordinary worker was stalled at ZERO seconds — pinged and
+    # put in front of a person in the instant it finished speaking. Two answers, and these
+    # pin both. Neither touches the reconciler, which still pings exactly the stalled set.
+
+    def test_a_turn_that_just_ended_is_not_a_stall_yet(self):
+        """The zero-second stall, and what ends it. Both halves in one, because the floor
+        is only worth anything if the stall still ARRIVES: three seconds later this same
+        row is stalled, with nothing else about it changed."""
+        store.create_agent(self.db, name="w1", role="worker", task="fix the parser",
+                           session_id="s1")
+        store.set_turn(self.db, "w1", store.TURN_IDLE)
+        h = FakeHerdr([alive("w1", "idle")])
+
+        fresh = self.by_name(status.collect(self.db, h, now=store.now()))["w1"]
+        self.assertFalse(fresh.stalled)
+        self.assertFalse(fresh.needs_human)
+        self.assertEqual(fresh.idle_excuse, "just finished a turn")
+
+        held = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))["w1"]
+        self.assertTrue(held.stalled)
+        self.assertTrue(held.needs_human)
+        self.assertIsNone(held.idle_excuse)
+
+    def test_an_agent_waiting_on_a_reply_it_asked_for_is_not_stalled(self):
+        """The sharpest case the eager stall got wrong: `sb tell --needs-reply` and end the
+        turn is exactly what the protocol says to do, and it summoned a person for it."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.create_agent(self.db, name="w2", role="worker", session_id="s2")
+        store.put_message(self.db, from_agent="w1", to_agent="w2", kind="tell",
+                          body="which branch?", needs_reply=True)
+        h = FakeHerdr([alive("w1", "idle"), alive("w2", "working")])
+        a = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))["w1"]
+        self.assertFalse(a.stalled)
+        self.assertFalse(a.needs_human)
+        self.assertEqual(a.idle_excuse, "waiting on a reply")
+
+    def test_the_answer_ends_the_excuse(self):
+        """It excuses a WAIT and not a name: anything back from the agent it asked spends
+        the question, and the row is a stall again like any other."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.create_agent(self.db, name="w2", role="worker", session_id="s2")
+        store.put_message(self.db, from_agent="w1", to_agent="w2", kind="tell",
+                          body="which branch?", needs_reply=True)
+        store.put_message(self.db, from_agent="w2", to_agent="w1", kind="tell",
+                          body="main")
+        h = FakeHerdr([alive("w1", "idle"), alive("w2", "working")])
+        a = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))["w1"]
+        self.assertTrue(a.stalled)
+        self.assertIsNone(a.idle_excuse)
+
+    def test_a_question_nobody_is_left_to_answer_is_not_an_excuse(self):
+        """The bound on a wait with no clock on it. The recipient reported and its row is
+        closed, so no answer is ever coming — and an agent waiting for one is stuck, which
+        is the thing STALLED exists to say."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.create_agent(self.db, name="w2", role="worker", session_id="s2")
+        store.put_message(self.db, from_agent="w1", to_agent="w2", kind="tell",
+                          body="which branch?", needs_reply=True)
+        store.set_state(self.db, "w2", "done")
+        h = FakeHerdr([alive("w1", "idle")])
+        a = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))["w1"]
+        self.assertTrue(a.stalled)
 
     # -- the other half of the same test: WHY an idle agent is idle ------
 
@@ -392,7 +478,8 @@ class StatusTest(unittest.TestCase):
         """The pair the whole distinction rests on: `stalled` is idle and this is None."""
         store.create_agent(self.db, name="w1", role="worker", task="fix the parser",
                            session_id="s1")
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor()))["w1"]
         self.assertTrue(a.stalled)
         self.assertIsNone(a.idle_excuse)
 
@@ -413,7 +500,8 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
         self.db.execute("ALTER TABLE agents DROP COLUMN awaiting_task")
         self.db.commit()
-        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor()))["w1"]
         self.assertTrue(a.stalled)
 
     def test_an_agent_that_has_never_run_sb_is_not_stalled_yet(self):
@@ -1142,13 +1230,15 @@ class StatusTest(unittest.TestCase):
         without `sb done`, so the store says `working` forever, no doorbell rings it again
         and no sweep closes it. Only a person moves it, so it is owed an action."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), needs_me=True)
+        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]), needs_me=True,
+                              now=self.past_the_floor())
         self.assertEqual([a.name for a in snap.agents], ["w1"])
         self.assertTrue(self.by_name(snap)["w1"].needs_human)
 
     def test_a_stalled_agent_is_named_in_the_inbox_with_the_way_out(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                           now=self.past_the_floor()))
         self.assertIn("NEEDS YOU", out)
         self.assertIn("stalled", out)
         self.assertIn('sb tell w1 "wrap up and run sb done"', out)
@@ -1242,7 +1332,8 @@ class StatusTest(unittest.TestCase):
 
     def test_render_names_drift_loudly(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
+        out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                           now=self.past_the_floor()))
         self.assertIn("STALLED", out)
         self.assertIn("sb done", out)             # says what was actually skipped
 
@@ -1280,7 +1371,8 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="kid", role="worker", parent="root",
                            session_id="s1")
         store.put_message(self.db, from_agent="x", to_agent="kid", kind="tell", body="a")
-        snap = status.collect(self.db, FakeHerdr([alive("root"), alive("kid", "idle")]))
+        snap = status.collect(self.db, FakeHerdr([alive("root"), alive("kid", "idle")]),
+                              now=self.past_the_floor())
         d = json.loads(json.dumps(snap.as_dict()))          # must be plain JSON types
 
         self.assertEqual(d["herdr"], "ok")

@@ -76,6 +76,10 @@ class InspectTest(Base):
         return store.create_agent(self.db, name=name, **fields)
 
     def inspect(self, name="w1", h=None, **kw):
+        # A moment on, past `status.STALLED_FLOOR`: a row read in the second it was
+        # written has just ended a turn and is excused rather than stalled, and every
+        # test here about a stall would agree for that reason instead of its own.
+        kw.setdefault("now", store.now() + int(status.STALLED_FLOOR) + 1)
         return status.inspect(self.db, h or FakeHerdr([alive(name)]), name, **kw)
 
     # -- the facts --------------------------------------------------------
@@ -302,7 +306,9 @@ class InspectTest(Base):
         store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="q?")
         store.log_event(self.db, kind="delegate", agent="w1")
         h = FakeHerdr([alive("w1", "idle")], pane_text="on screen\n")
-        d = json.loads(json.dumps(status.inspect(self.db, h, "w1").as_dict()))
+        d = json.loads(json.dumps(status.inspect(
+            self.db, h, "w1",
+            now=store.now() + int(status.STALLED_FLOOR) + 1).as_dict()))
 
         self.assertEqual(d["name"], "w1")
         self.assertEqual(d["task"], "rewrite the parser")

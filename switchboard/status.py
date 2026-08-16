@@ -317,6 +317,20 @@ GONE_CONFIRM_GRACE = config.setting("timeouts.gone_confirm_grace")
 TURN_STALE_GRACE = config.setting("timeouts.turn_stale_grace")
 TURN_DOUBT_GRACE = config.setting("timeouts.turn_doubt_grace")
 
+# The floor under `stalled` — how long the idleness has to have LASTED. Until this existed
+# there was no duration term in `stalled` anywhere: it was the idle flag minus three
+# excuses, computed on the same tick, so the `Stop` hook writing `turn='idle'` made an
+# ordinary worker stalled at zero seconds.
+#
+# NOT a second debounce, and the distinction is the whole reason it is three seconds and not
+# thirty. `NEEDS_SETTLE` gates one thing — when a BOARD draws a summons — and everything
+# that ACTS on a stall is deliberately outside it (`display.needs_settle` says so in as many
+# words): the reconciler's ping, `--needs-me`, `--json`, DRIFT. Those paths had nothing at
+# all under them, and this is what they now have. On the board the two are consecutive
+# rather than alternative, which costs a real stall three seconds on top of thirty; see
+# `collect` for why that is the honest arrangement and not a stack of two debounces.
+STALLED_FLOOR = config.setting("timeouts.stalled_floor")
+
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
 # mailbox rather than something every reader has to know about.
@@ -421,11 +435,12 @@ class AgentStatus:
     # Whether any of that mail came from the human — the one thing that lifts a block.
     undelivered_answer: bool = False
     # WHY this agent is idle, when something excuses it — the other half of `stalled`,
-    # carried rather than left behind in `collect`. Three phrases, one of the exemptions
-    # `stalled` is already computed from (`awaiting_task`, a live child, a startup grace),
-    # and None when either the agent is not idle at all or nothing excuses it. No new
-    # predicate: `stalled` is exactly "idle and this is None", and the two are set from one
-    # expression in `collect` so they cannot drift apart.
+    # carried rather than left behind in `collect`. Five phrases, one of the exemptions
+    # `stalled` is already computed from (`awaiting_task`, a live child, an unanswered
+    # question of its own, a startup grace, the idle floor), and None when either the agent
+    # is not idle at all or nothing excuses it. No new predicate: `stalled` is exactly
+    # "idle and this is None", and the two are set from one expression in `collect` so they
+    # cannot drift apart.
     #
     # It exists because `idle` alone reads the same on a lead waiting on its children as on
     # an agent that quietly died, and telling those two apart at a glance is the whole
@@ -1023,6 +1038,7 @@ def collect(
     unread = _unread_counts(db)
     pending = _undelivered_counts(db)
     activity = _last_activity(db)
+    awaiting_reply = _awaiting_reply(db)
     why = _block_reasons(db)
     summaries = _last_summaries(db)
 
@@ -1168,9 +1184,15 @@ def collect(
         # stalled"): never given anything, still has work out, has not started yet.
         # Phrases, not tokens, because two readouts want the same words and a second
         # vocabulary is how they come to disagree.
+        idle_for = max(0, now - last)
         excuse = ("awaiting first task" if awaiting
                   else "waiting on children" if name in live_parent
+                  else "waiting on a reply" if name in awaiting_reply
                   else "starting up" if starting
+                  # LAST, so a row that has a reason of its own says that reason instead:
+                  # every excuse above is a fact about the agent, and this one is only
+                  # "not long enough to mean anything yet". See STALLED_FLOOR.
+                  else "just finished a turn" if idle_for < STALLED_FLOOR
                   else None)
         idle = bool(running and turn_over and alive is not False)
         agents.append(AgentStatus(
@@ -1184,8 +1206,22 @@ def collect(
             turn=turn,
             # The join this file exists for, now with a signal of our own on one side of
             # it. Idle with no excuse left: its turn is over (`turn_over` above), it is
-            # not awaiting a first task, not still starting, and has nothing of its own
-            # still running. See `live_parent`.
+            # not awaiting a first task, not still starting, has nothing of its own still
+            # running, is not waiting on a reply it asked for, and has been idle for
+            # longer than STALLED_FLOOR. See `live_parent` and `_awaiting_reply`.
+            #
+            # THE FLOOR IS AN EXCUSE AND NOT A SEPARATE TERM, which is what keeps
+            # `idle_excuse`'s invariant true — `stalled` is exactly "idle and no excuse",
+            # both set from the one expression above, so no reader can find a row that is
+            # stalled and also says why it is idle.
+            #
+            # It is three seconds and NEEDS_SETTLE is thirty, and on a board they are
+            # consecutive: the row is not stalled until 3 s, and the debounce then times
+            # the summons from there, so a real stall reaches a person at ~33 s instead of
+            # ~30 s. Seeding the debounce from when the silence began instead would make
+            # the two overlap, and was not done — `stamp_needs_for` times what the
+            # collector CONTINUOUSLY OBSERVED, and paying three seconds is cheaper than
+            # giving that clock a second, inferred way to start.
             #
             # `alive is not False` rather than `alive`, and the change is deliberate. It
             # used to require herdr to be reachable AND to be listing the agent, because
@@ -1208,7 +1244,7 @@ def collect(
             gone=bool(unended and alive is False and not spawning),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),
-            idle=max(0, now - last),
+            idle=idle_for,
             last_activity=last,
             workspace=row["workspace"],
             task=row["task"],
@@ -1628,6 +1664,65 @@ def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
             if r["t"] and r["t"] > seen.get(r["a"], 0):
                 seen[r["a"]] = r["t"]
     return seen
+
+
+def _awaiting_reply(db: sqlite3.Connection) -> set[str]:
+    """Agents that asked a question and have not been answered. -> their names.
+
+    The sharpest case the eager stall got wrong. `sb tell <who> "..." --needs-reply` is how
+    the protocol says to ask another agent something, and it says in the same breath that
+    nothing waits: you send, you end your turn, you are poked when the answer comes. An
+    agent doing exactly that was STALLED the instant its `Stop` hook fired — summoned a
+    person to a row whose only fault was following the instructions.
+
+    A message rather than a column, because the message IS the fact: `needs_reply` is
+    already stored (`store.put_message`) precisely so that "whoever later looks for one
+    still unanswered" can. Nothing writes `reply_to` any more — it went with `sb ask` —
+    so the answer is correlated the only way left, and the only way that matches what an
+    agent actually does: ANY message back from the agent it asked, sent since the question.
+
+    Three conditions, and the last two are what stop this excusing a row forever:
+
+    - a `needs_reply` message from this agent, with nothing from its recipient since. A
+      later question supersedes an answered earlier one, so a row is excused by its most
+      recent unanswered question and by nothing else.
+    - the recipient is still open. An agent whose `sb done` has landed will never answer,
+      and waiting on it is a stall like any other — the row goes back to STALLED and the
+      reconciler pings it.
+    - the question is still deliverable. `undeliverable_at` is set when the recipient's
+      turn ended with no pane left to open (`store`), which is the same sentence one step
+      earlier: nothing is coming.
+
+    What is deliberately NOT bounded is time. A question sent to a live agent that has not
+    answered it yet leaves this row excused for as long as that lasts, and that is right
+    because the open item belongs to the OTHER row: unanswered mail sits unread on the
+    recipient, and unread mail is its own NEEDS YOU condition. The fleet still surfaces the
+    situation, at the agent that can actually do something about it.
+
+    `>=` on the timestamps, not `>`: they are whole seconds, so a reply written in the same
+    second as the question would otherwise never count. The cost is that an unrelated
+    message from the recipient in that one second ends the excuse early, which errs toward
+    STALLED — the direction that summons rather than the direction that hides.
+
+    Both columns read defensively, for the reason `_unread_counts` reads its one that way:
+    the board and the collector arrive here on a READ-ONLY connection and cannot migrate a
+    store older than either column. A store without `needs_reply` has no questions to find
+    and excuses nobody — which is the behaviour it has always had.
+    """
+    if not _has_column(db, "messages", "needs_reply"):
+        return set()
+    deliverable = ("AND q.undeliverable_at IS NULL "
+                   if _has_column(db, "messages", "undeliverable_at") else "")
+    return {r["from_agent"] for r in db.execute(
+        "SELECT DISTINCT q.from_agent FROM messages q "
+        "  JOIN agents a ON a.name = q.to_agent "
+        f" WHERE q.needs_reply = 1 {deliverable}"
+        "   AND a.ended_at IS NULL "
+        "   AND NOT EXISTS (SELECT 1 FROM messages r "
+        "                    WHERE r.from_agent = q.to_agent "
+        "                      AND r.to_agent = q.from_agent "
+        "                      AND r.id <> q.id AND r.created_at >= q.created_at)"
+    )}
 
 
 def _block_reasons(db: sqlite3.Connection) -> dict[str, str]:

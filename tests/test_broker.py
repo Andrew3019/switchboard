@@ -2917,7 +2917,11 @@ class BrokerTest(unittest.TestCase):
         name = self.b.start()
         idle = FakeHerdrAPI()
         idle.states_by_name = {name: "idle"}
-        by_name = lambda: {a.name: a for a in status.collect(self.db, idle).agents}
+        # Read a moment on, past `status.STALLED_FLOOR`: the flag being tested here is the
+        # placeholder task, and a row read in the second it was written is excused by the
+        # floor whatever the placeholder says.
+        by_name = lambda: {a.name: a for a in status.collect(
+            self.db, idle, now=store.now() + int(status.STALLED_FLOOR) + 1).agents}
         self.assertFalse(by_name()[name].stalled)
         self.b.tell([name], "merge PR 41", me=HUMAN)
         self.assertTrue(by_name()[name].stalled)
@@ -3244,6 +3248,13 @@ class BrokerTest(unittest.TestCase):
             self.h.states_by_name[name] = "idle"
         store.set_state(self.db, "stuck", "blocked")
         store.set_state(self.db, "finished", "done")
+        # And old enough for the idleness to MEAN something. `status.STALLED_FLOOR` is the
+        # floor under every stall, so a fleet built in this second is a fleet of agents
+        # that have just this moment ended a turn — excused, unpingable, and agreeing with
+        # every assertion below for a reason that has nothing to do with the reconciler.
+        self.db.execute("UPDATE agents SET created_at = created_at - ?",
+                        (int(status.STALLED_FLOOR) + 1,))
+        self.db.commit()
 
     def test_only_an_agent_that_went_quiet_is_pinged(self):
         """T1. The turn ended without `sb done` or `sb block` — the one case DESIGN-TRUTH
@@ -3304,8 +3315,14 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.restart_sb().reconcile(), [])        # same stall, again
         self.assertEqual(len(self.h.prompts), 1)
 
-        # It woke and did something — but inside the gap, so still not a second ping.
+        # It woke and did something — but inside the gap, so still not a second ping. Aged
+        # past `status.STALLED_FLOOR` so the refusal is the gap's and not the floor's: an
+        # agent that acted a moment ago is excused anyway, and would agree here for a
+        # reason this test is not about.
         store.log_event(self.db, kind="inbox", agent="quiet")
+        self.db.execute("UPDATE events SET created_at=created_at-? WHERE kind='inbox'",
+                        (int(status.STALLED_FLOOR) + 1,))
+        self.db.commit()
         self.assertEqual(self.restart_sb().reconcile(), [])
 
         # ...and once the gap has lapsed, with that activity behind it, it is pinged again.

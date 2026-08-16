@@ -318,6 +318,27 @@ herdr_log_clip = 500
 # can be confirmed dead during its own spawn.
 gone_confirm_grace = 60.0
 
+# How long an unexcused idle agent must STAY idle before that idleness is read as a stall
+# (`status.STALLED_FLOOR`). The floor under `stalled`, which until now had no duration term
+# in it at all: the `Stop` hook writes `turn='idle'` at the end of every turn, so an
+# ordinary worker that ends a turn was stalled at ZERO seconds — pinged by the reconciler
+# and put in front of a person in the same instant, including the agent that ran
+# `sb tell --needs-reply` and ended its turn to wait exactly as the protocol tells it to.
+#
+# Three seconds, and small on purpose. This is not the debounce and must not grow into one:
+# `display.needs_settle` is the 30 s window that decides when a BOARD summons a human, and
+# it is sized against the long tail of turn gaps and spawns. This is the floor under
+# everything that acts on a stall WITHOUT that debounce — the reconciler's ping,
+# `sb status --needs-me`, `--json`, DRIFT — and its whole job is to stop zero. Measured
+# against the same store the debounce was sized from: `turn_end` to the next `turn_start`
+# was under 3 s for 2.1% of 523 resumed turns, so this alone clears the sharpest edge of
+# the flicker, and the 30 s window covers the rest of it on the one readout that has a
+# collector behind it to time it.
+#
+# Erring long here would delay a real stall on the paths that have no other guard, so it is
+# deliberately the smallest number that is not zero and still means something.
+stalled_floor = 3.0
+
 # How long a `working` turn edge must have NOTHING behind it before that edge is doubted at
 # all (`status.TURN_STALE_GRACE`). Measured, not guessed: across 406 real agent sessions in
 # this repo, the longest a live agent goes inside one turn without running an `sb` command
