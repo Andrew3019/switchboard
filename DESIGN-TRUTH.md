@@ -103,6 +103,17 @@ and reports done, and the parent cleans up — a lead on its own judgement, a di
 Andrew's. — confirmed 2026-08-09, the dispatcher's report restated 2026-08-14, the
 lead-or-worker spawn and the dispatcher's cleanup 2026-08-15
 
+**A follow-up on a child's report is a handoff, not another relay.** A parent may report a
+child's work once; it may not become the channel for the conversation about it. "When work
+finishes" above still governs the first time a child's completion reaches me — the
+dispatcher or lead writes a short line in the child's own words and blocks, or folds it
+into a synthesis. What changes is anything after that: if I come back wanting more on a
+piece of work already reported — explain it further, defend it, walk me through the
+reasoning — that belongs to the child, not to whoever first told me about it. The parent
+restores the child if needed, tells it what to explain and to `sb block` once it has, then
+reports itself done and steps aside. I talk to the child directly from there; when I am
+done with it, it reports done to its own parent as usual. — confirmed 2026-08-16
+
 ---
 
 ## Product decisions
@@ -180,8 +191,12 @@ each claim is correct; he is trying to get the idea. So a message passes if skim
 conveys the right idea, and fails if he has to reread it word by word to get there —
 however accurate it is. This is the primary rule and the rest serve it. Prefer bullets,
 lists, nested lists and diagrams — things that can be visually skimmed — and break into
-sections where it helps. — confirmed 2026-08-14, superseding the 2026-08-09 rule that
-listed what a message must say
+sections where it helps. One idea per bullet: a second independent point is a second
+bullet, not the same one stretched with a dash or a semicolon. And several short items that
+belong side by side — PRs, files, names — get a line each, or a table where they share the
+same fields, never one crowded line. — confirmed 2026-08-14, superseding the 2026-08-09
+rule that listed what a message must say; one idea per bullet and no crowded lines
+confirmed 2026-08-16
 
 **Skimming happens down the message, not along the line, so the message needs places for
 the eye to stop.** The complaint was two halves — "too much line wrapping, not enough
@@ -200,6 +215,13 @@ optimised for completion instead of for the reader. — confirmed 2026-08-14
 unconditional — not "if the context is unclear" — and it is stated once. Instructing it
 in seven separate places across the protocol and role files is what turned one sentence
 into a ritual paragraph. — confirmed 2026-08-14
+
+**A message that ends in a block closes with "Where we are now".** Its own header, one line
+under it, twenty words at most and the header not counted: what the overall task or topic
+is, and what stage that topic is at — investigating, designing, waiting on a decision,
+implementing, verifying. It is a different job from the restatement above, which says what
+was asked and not where the work stands, and it sits at the end because that is the last
+thing read before the turn ends. — confirmed 2026-08-16
 
 **Compression is checked for meaning, not only for size.** A real failure: "a child forks
 from the branch its parent is on" was shortened to "only when the parent has its own
@@ -222,10 +244,21 @@ any word doing disambiguating work — `a`/`the` where it distinguishes, `will`/
 readings. Shape is a bigger lever than register — which is worth saying, because it stops
 agents reaching for register first. — confirmed 2026-08-14
 
-**None of this may be turned into something to copy.** No template, no worked example, no
-word or line limit, no fixed section list, no "here is what a good one looks like".
-Anything an agent can pattern-match and reproduce collapses every message into one shape
-and gets gamed on length instead of judgement. — confirmed 2026-08-14
+**Past the length aim below and the one section named above, none of this may be turned
+into something to copy.** No
+template, no worked example, no fixed section list beyond "Where we are now", no "here is
+what a good one looks like". Anything an agent can pattern-match and reproduce collapses
+every message into one shape and gets gamed on length instead of judgement. — confirmed
+2026-08-14, narrowed for the length aim and the "Where we are now" line 2026-08-16
+
+**A rough length aim, not a limit to hit.** Bullets run short — a plain fact in around ten
+words, something genuinely more tangled up to about twenty — judged by feel, not counted or
+labelled. This trades away the airtight version of the entry above, because the stated cost
+of no aim at all (bullets Andrew cannot skim) is worse than the cost of a loose aim
+occasionally drifting long. What it does not trade away: nothing here is a template, a
+worked example, or a category to sort a bullet into before writing it. It is the same
+instruction Andrew gives by hand — "depends how complex, sometimes ten words, sometimes
+twenty" — asked of the agent instead of decided for it. — confirmed 2026-08-16
 
 ### Dispatchers and leads
 
@@ -263,7 +296,10 @@ how the work should be approached. Whether a piece of work is to be carried end 
 investigated with the questions brought back first, is his to say and not the dispatcher's
 to guess. If that is unclear, it does not start: it asks him to clarify intent before
 dispatching. Choosing a lead or a worker is a judgement about the shape of the tree and is
-no licence to interpret: it picks who runs the work, never what the work is. — confirmed
+no licence to interpret: it picks who runs the work, never what the work is. (This is
+relaying the *task* downward, untouched — a different thing from relaying a child's
+*answer* back upward, which "A follow-up on a child's report is a handoff" above now
+covers, and which is not always the right move.) — confirmed
 2026-08-14, widened from leads to whichever agent it hands the work to 2026-08-15; it still
 supersedes the 2026-08-09 rule that the top spawns scout or research agents to improve its
 own decisions, which is a lead's judgement now, while the other rule it superseded —

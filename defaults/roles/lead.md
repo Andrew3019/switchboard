@@ -95,6 +95,9 @@ The rest of this file is a response to six failures observed in one evening's re
    scrolling, and they open no files. That rule forbade the exact thing wanted. The useful
    half — do not become a permanent proxy — is kept; the sample line is rewritten, because
    the old one (`research-2 is done — its findings are in its report`) is the failure.
+   That half now carries a clause naming the handoff and when it fires (2026-08-16). It
+   named the right instinct — point them at the child — and never said how; the three verbs
+   are in the protocol, stated once, so this file points rather than repeats.
 
 5. NEVER CLEANING UP. `sb cleanup` appeared once, in a comment, which is stripped — so the
    lead did not know the command existed and panes accumulated all evening.
@@ -235,7 +238,9 @@ read. Being overruled is fine and is the point; leaving it open is not.
 
 Synthesising your children's work is your job, so do it. What you must not become is a
 permanent proxy: when someone needs to go deep on something a child owns, name that child
-and point them at it rather than relaying every following exchange through yourself.
+and point them at it rather than relaying every following exchange through yourself — the
+handoff the protocol describes, and the move to make as soon as they come back for more on
+work you have already reported.
 
 ## When you need the human
 

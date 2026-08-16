@@ -173,6 +173,42 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(1, sum(t.count("restating what you were asked") for t in texts))
         self.assertEqual(0, sum(t.count("Restate in one line") for t in texts))
 
+    def test_a_message_that_ends_in_a_block_closes_with_where_we_are_now(self):
+        """Andrew, 2026-08-16: one line, twenty words, the topic and what stage it is at,
+        at the end of the chat message the block is about to leave behind. It is a
+        different job from the restatement that opens the message — written as a
+        near-duplicate the two collapse into one line — so both halves are pinned."""
+        p = config.protocol(self.repo)
+        self.assertIn("Where we are now", p)
+        self.assertIn("twenty words at most", p)
+        self.assertIn("that one says what you were asked, this one says where the work", p)
+
+    def test_the_length_aim_is_stated_and_the_no_mould_line_stops_contradicting_it(self):
+        """Andrew, 2026-08-16, choosing a plain aim over the tier scheme he threw out:
+        around ten words for a plain fact, about twenty for a tangled one, judged by feel.
+        The closing "nothing here is a shape to copy" said "no length to hit" and would
+        have read as cancelling it, so that clause is scoped rather than left standing."""
+        p = config.protocol(self.repo)
+        self.assertIn("a plain fact in ten words or so", p)
+        self.assertIn("One idea per bullet", p)
+        self.assertIn("Beyond the length aim above", p)
+        self.assertNotIn("no length to hit", p)
+
+    def test_the_handoff_is_defined_once_and_the_roles_point_at_it(self):
+        """DESIGN-TRUTH, 2026-08-16: a parent may report a child's work once and may not
+        become the channel for the conversation about it. The definition lives in the
+        protocol, since the rule went missing from `dispatcher` exactly because it lived
+        only in `lead.md`; the two role files name it and do not restate the mechanics."""
+        p = config.protocol(self.repo)
+        self.assertIn("may not become the channel for the conversation about it", p)
+        self.assertIn("has this child's finished work already reached the person once?", p)
+        roles_by_name = roles.load(self.repo)
+        for name in ("dispatcher", "lead"):
+            with self.subTest(role=name):
+                prompt = roles_by_name[name].prompt
+                self.assertIn("handoff the protocol describes", prompt)
+                self.assertNotIn("Restore the child if it is closed", prompt)
+
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
         """DESIGN-TRUTH: "This must be known to all sessions." It used to be known to
         orchestrators only, so the protocol is where it has to be."""
@@ -226,9 +262,11 @@ class RolesTest(unittest.TestCase):
         as "not the dispatcher's to touch", which left the one agent that knows a child has
         finished unable to say so usefully. Since 2026-08-15 it closes on his command and
         offers when a child reports fully done — the sweep on its own judgement is what
-        stays forbidden, because that is the form that closes something nobody chose."""
+        stays forbidden, because that is the form that closes something nobody chose.
+        Since 2026-08-16 the report verb is scoped to the FIRST time a child reports:
+        anything after that is a handoff, and the word is what carries it."""
         prompt = roles.load(self.repo)["dispatcher"].prompt
-        self.assertIn("When a child reports done", prompt)
+        self.assertIn("The first time a child reports done", prompt)
         self.assertIn("yours to carry out and never yours to decide", prompt)
         self.assertIn("never do is sweep on your own initiative", prompt)
 

@@ -144,10 +144,35 @@ when to leave something out gets optimised for completion, so it is now the cut 
 it only if cutting it changes what the reader does next. Skimming is stated as the test
 everything else serves, because it is the thing being optimised and the rest are means.
 
-Nothing here may become copyable. No template, no worked example, no word or line limit,
-no fixed section list — every rule is a property the output has or a test the writer
-applies. An example is the fastest way to collapse every message into one shape, which is
-why the paragraph says so out loud rather than trusting the omission.
+Nothing here may become copyable, with two exceptions Andrew has since made himself and
+which DESIGN-TRUTH now records (2026-08-16). One is a rough LENGTH AIM — around ten words
+for a plain fact, up to about twenty for a tangled one — because bullets he could not skim
+cost more than a loose aim occasionally drifting long; it is deliberately un-clever, with
+no tier, no count and no category to sort a bullet into before writing it, since a taxonomy
+is its own mould and spends the agent's attention on classifying. The other is the one
+required section, "Where we are now" at `sb block`. Everything else is still a property the
+output has or a test the writer applies, and the closing sentence now says "beyond the
+length aim above" so it stops contradicting the paragraph it closes. The two sentences
+alongside the aim — one idea per bullet, several short items do not share a line — are
+Andrew's own complaints about a real message, not new theory.
+
+WHY THE RESTATEMENT AND "Where we are now" ARE TWO SENTENCES, not one. They answer
+different questions: what you were asked, and where that work has got to. The first opens
+the message and the second closes it, right before the block, which is where he asked for
+it. Each says out loud what the other is not, because written plainly they read as a
+near-duplicate and an agent would collapse them into one line.
+
+THE HANDOFF is defined here once and only here. The rule is Andrew's: a parent may report a
+child's work once, and may not become the channel for the conversation about it. It is
+stated as one question — has this child's finished work already reached the person once? —
+rather than a judgement about how deep or contestable the follow-up is, because the failure
+it fixes was a dispatcher relaying a second time and paraphrasing findings it did not hold.
+The three verbs (restore, tell-then-block, parent-done) are all ordinary uses of verbs that
+already exist: `block` is not gated on role, `done` with children still working is legal,
+and a blocked child counts as live so `cleanup` will not close it out from under the person.
+`dispatcher.md` and `lead.md` each get one clause pointing here and no restatement — the
+diagnosis found this rule missing from `dispatcher` precisely because it lived only in
+`lead.md`, and three copies of one paragraph is three copies to keep in sync.
 
 `sb presets` is named here, not just in the orchestrator role, because DESIGN-TRUTH says
 this must be known to ALL sessions and only orchestrators were told. Three verbs in one
@@ -235,7 +260,25 @@ never wait on one. Two steps, in order: write the whole thing as the last messag
 your own chat, because THAT is what they read, then `sb block` with ONE short line
 naming what you are waiting for. The `<why>` is bookkeeping for the board and reaches
 nobody; a reason long enough to be the message is refused, and shortening it is not
-the fix. Blocking ends your turn; you are poked the moment they answer.
+the fix. End that chat message with a section headed "Where we are now" and one line
+under it, twenty words at most and the header not counted: what the whole task or
+topic is, and what stage it has reached — investigating, designing, waiting on a
+decision, implementing, verifying. It goes last, immediately before you block, and it
+is not the restatement that opens the message: that one says what you were asked,
+this one says where the work has got to. Blocking ends your turn; you are poked the
+moment they answer.
+You may report a child's work once; you may not become the channel for the
+conversation about it. So a parent may point a human at a child instead of speaking
+for it — a handoff, not another relay. Restore the child if it is closed, `sb tell` it
+exactly what to explain and to `sb block` once it has, then `sb done` yourself and
+say, in that same message, who they should now talk to and about what. One question
+decides which you are doing: has this child's finished work already reached the person
+once? The first time is still yours to relay and block for, in the child's own
+words — a person should not have to go talk to every child just to learn its piece
+landed. Everything after that first report is the handoff: someone coming back wanting
+more on work already reported — a follow-up question, a push for detail, anything
+needing the child's own reasoning rather than a line you could quote — is where
+staying in the middle is the wrong shape.
 Who reads it decides this, not the command or the moment: anything a human will read —
 that message, a reply to what they typed, a write-up or update they asked for, a
 summary when your parent is the human — is written to be skimmed. It passes if
@@ -243,14 +286,23 @@ skimming gives the right idea, fails if they must reread word by word. That is t
 test; the rest serve it.
 Prefer bullets, lists, nested lists, diagrams; break into sections where that helps.
 Their eye goes down the message, not along the line, so leave it places to stop:
-nothing that runs on unbroken, space between one idea and the next. Length you cannot
-cut you can still break up. Open with one line restating what you were asked, always.
+nothing that runs on unbroken, space between one idea and the next. Keep each bullet
+to a line or two — a plain fact in ten words or so, a genuinely tangled one up to
+about twenty, never a paragraph wearing a bullet. One idea per bullet: a second
+independent point is a second bullet, not the same one stretched with a dash or
+semicolon. And when several short items sit side by side — PRs, files, names — don't
+run them together on one line; give each its own line, or a table if they share the
+same fields. Length you cannot
+cut you can still break up. Open with one line restating what you were asked, always
+— what the job is, not where it stands.
 Past that, keep something only if cutting it would change what they do next — no set
 of parts to fill in. Options must be comparable without rereading, and the seam
 between what you ask and what you recommend must show before either is read. Clipped
 phrasing is welcome on scaffolding — drop articles, copulas, hedges, filler — but
 never a preposition, a comparative, or any word doing disambiguating work; shape is
 the bigger lever than register. Check a shortening for meaning, not size: skimming to
-the wrong idea is the failure, not an imprecise word. None of this is a shape to copy
-— no template, no length to hit — and none of it governs what only agents read: `sb
+the wrong idea is the failure, not an imprecise word. Beyond the length aim above,
+none of this is a shape to copy
+— no template, no section list past the one named at `sb block` — and none of it
+governs what only agents read: `sb
 tell`, a summary a parent agent reads, a task you write for a child.
