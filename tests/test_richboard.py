@@ -241,6 +241,40 @@ class FallbackTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_RICH, "rich is not installed here")
+class SectionHeadTest(unittest.TestCase):
+    """The tree is a SECTION of the head, and the head is where a stats block goes next.
+
+    Pinned because the head's line count is not cosmetic: every row below it is placed off
+    that number, and a head one line taller than it measured focuses the wrong agent on
+    the next click. `layout` refuses a frame whose height it cannot account for, so `None`
+    here would be that bug caught — and a frame of the wrong length is it uncaught.
+    """
+
+    FLEET = snap(agent("top", workspace="top"),
+                 agent("kid", depth=1, parent="top", workspace="ws"),
+                 agent("kid2", depth=1, parent="top", workspace="ws"))
+
+    def _plain(self, rows):
+        return [board._ANSI.sub("", t).strip("│ ").rstrip() for t, _ in rows]
+
+    def test_the_tree_sits_under_its_own_header_and_the_frame_still_measures(self):
+        for height in range(richboard.MIN_HEIGHT, 24):
+            rows = frame(self.FLEET, width=70, height=height)
+            self.assertEqual(len(rows), height, height)
+        lines = self._plain(frame(self.FLEET, width=70, height=20))
+        self.assertEqual(lines[2], "AGENTS")
+        self.assertIn("top", lines[3])
+
+    def test_the_shortest_pane_keeps_the_agent_row_and_drops_the_header(self):
+        """A section header over no agents at all is the one thing the last line must not
+        go on — the board is the tree. Below the height that fits both, the header is what
+        gives way."""
+        lines = self._plain(frame(self.FLEET, width=70, height=richboard.MIN_HEIGHT))
+        self.assertNotIn("AGENTS", lines)
+        self.assertTrue(any("top" in ln for ln in lines), lines)
+
+
+@unittest.skipUnless(HAVE_RICH, "rich is not installed here")
 class GutterTest(unittest.TestCase):
     """The two cases the mockup never had to answer, pinned as answers.
 

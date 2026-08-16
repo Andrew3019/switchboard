@@ -515,7 +515,16 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         head += _c(" · " + b, DIM)
         cols += 3 + _visible_len(b)
     emit(head)
-    emit("")
+    # The tree is a SECTION here too, and for the panel's reason (`richboard.layout`): a
+    # stats block goes above it next and the tree must not run straight on from it. This
+    # renderer has no filled bars, so the section reads as a dim label rather than a
+    # coloured band — the same meaning in this renderer's own vocabulary.
+    #
+    # It REPLACES the blank line that separated the header from the tree rather than
+    # being added above it. A label separates as well as a blank does, the pane is worth
+    # more than the air, and the line count is what `display.board_chrome` is: unchanged,
+    # so nothing that windows or counts below has to learn about this.
+    emit(_c(" AGENTS", DIM))
 
     if not agents:
         why = note_text or "nothing running — sb start"

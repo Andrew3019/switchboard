@@ -102,6 +102,11 @@ GLYPH_STYLE = {"✗": "bold red", "◐": "bold yellow", "◌": "bold yellow",
                "○": "dim", "?": "dim", "●": "bold green"}
 
 HEADER_STYLE = "bold white on blue"
+# A section divider inside the head, quieter than either of the two bars above: the blue
+# one is the board's own title and the yellow one is an alarm, and a divider that shouts
+# as loudly as an alarm teaches the eye to ignore the alarm. Same `_bar` shape, so it
+# reads as one of the family rather than as a new kind of line.
+SECTION_STYLE = "bold white on grey23"
 NEEDS_STYLE = "bold black on yellow"
 BORDER_STYLE = "blue"
 GUTTER_STYLE = "bold cyan"
@@ -524,12 +529,6 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         """
         content.append((line, owner))
 
-    # --- the head -----------------------------------------------------------
-    # Counts from `status.summary_bits`, the same list `sb status` joins, so the two
-    # readouts of one snapshot cannot come to show different numbers.
-    emit(_bar(" " + " · ".join(["switchboard"] + status_mod.summary_bits(snap)),
-              inner, HEADER_STYLE))
-
     # --- NEEDS YOU and the footer, sized before the body gets what is left ---
     # Read from `snap.agents` and not from `rows`: a blocked agent inside a collapsed
     # archive is still a person's problem, and the collapse must not be able to bury it.
@@ -537,17 +536,46 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
 
+    # The head is TWO lines: the board's own bar, and the section bar that says the tree
+    # below it is the tree. Counted as one number because everything downstream — the
+    # body's room, the fill, and the frame's own height check — is counted off it, and a
+    # stats block is going in between the two next.
+    head_lines = 2
     gap_min = 1 if needs else 0
-    room = capacity - 1 - 1 - len(needs) - gap_min          # head, footer
+    room = capacity - head_lines - 1 - len(needs) - gap_min          # head, footer
     if room < 1 and needs:
         # Too short even for one agent row: give the NEEDS YOU list back a line at a time,
         # its bar last — a count with no names still says somebody is waiting.
         keep = max(1, len(needs) + room - 1)
         needs = needs[:keep]
-        room = capacity - 2 - len(needs) - gap_min
+        room = capacity - head_lines - 1 - len(needs) - gap_min
         if room < 1:                                        # still none: the section goes
             needs, gap_min = [], 0
-            room = capacity - 2
+            room = capacity - head_lines - 1
+
+    # WHICH ROWS ARE ON SCREEN, decided before the head is drawn because on the shortest
+    # pane the head is what decides it. A section header over no agents at all is the one
+    # thing this board must not spend its last line on, so when that is what it comes to,
+    # the header gives the line back and the tree keeps it. Pure, so asking twice is free.
+    first, last = _window(len(rows), max(0, top), max(0, room))
+    if rows and first == last:
+        grown = _window(len(rows), max(0, top), max(0, room + 1))
+        if grown[0] != grown[1]:                 # and only if a row comes of it
+            head_lines, room = head_lines - 1, room + 1
+            first, last = grown
+
+    # --- the head -----------------------------------------------------------
+    # Counts from `status.summary_bits`, the same list `sb status` joins, so the two
+    # readouts of one snapshot cannot come to show different numbers.
+    emit(_bar(" " + " · ".join(["switchboard"] + status_mod.summary_bits(snap)),
+              inner, HEADER_STYLE))
+    if head_lines > 1:
+        # The tree is a SECTION now rather than the whole body, because it is about to
+        # stop being the whole body: a stats block goes above it next, and without a
+        # header of its own the tree would run straight on from whatever ends that block.
+        # One line and no blank around it — this is a pane, and a row of agents is worth
+        # more than air.
+        emit(_bar(" AGENTS", inner, SECTION_STYLE))
 
     # --- the body -----------------------------------------------------------
     if not rows:
@@ -556,7 +584,6 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                   overflow="crop"))
         drawn = 1
     else:
-        first, last = _window(len(rows), max(0, top), max(0, room))
         drawn = 0
         if first > 0:
             emit(Text(_clip(f"  ↑ {first} above", inner), style=DIM, no_wrap=True,
@@ -577,7 +604,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # and all the slack goes in ONE run between them. The blank line above NEEDS YOU is
     # that run's last line rather than a line added on top of it, so it is exactly one
     # when the board is full and the slack when it is not, and never multiplies.
-    gap = max(gap_min, capacity - 1 - drawn - len(needs) - 1)
+    gap = max(gap_min, capacity - head_lines - drawn - len(needs) - 1)
     for _ in range(gap):
         emit(Text(""))
     for line, owner in needs:
