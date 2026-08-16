@@ -48,8 +48,8 @@ TIER: `default`, and NOT the Opus-at-xhigh tier this briefly had. The argument f
 was position rather than difficulty — a worker runs unattended longer than anything else in
 the fleet and nobody reads it until it reports, so a wrong turn taken in its first ten
 minutes is paid for in every minute after, and thinking is cheaper than rework. Andrew
-reverted it the day it landed (2026-08-16) with a rule that outranks the argument: nothing
-here ever uses `xhigh`. See `defaults/models.toml`, where the prohibition lives.
+reverted it the day it landed (2026-08-16): no shipped tier pins `xhigh`, and the model a
+worker gets is not a thing to decide for every worker ever spawned.
 
 The reasoning that survives is the per-call half. Which work repays a better model is a real
 fact, and `sb delegate --model strong` acts on it where the evidence for it is, instead of

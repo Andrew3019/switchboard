@@ -375,7 +375,7 @@ class RolesTest(unittest.TestCase):
             "dispatcher": ["--model", "sonnet", "--effort", "medium"],
             "researcher": ["--model", "sonnet", "--effort", "medium"],
             "qa":         ["--model", "sonnet", "--effort", "high"],
-            "lead":       ["--model", "claude-opus-4-8", "--effort", "high"],
+            "lead":       ["--model", "claude-opus-4-8", "--effort", "medium"],
         }
         got = {name: roles.get(r, name).spec().cli_args() for name in want}
         self.assertEqual(got, want)

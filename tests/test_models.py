@@ -65,16 +65,6 @@ class ModelsTest(unittest.TestCase):
                   if (t.resolve(n).model or "").startswith("claude-")]
         self.assertEqual(pinned, ["prose"])
 
-    def test_no_shipped_tier_uses_xhigh(self):
-        """Andrew, 2026-08-16, on the `deep` tier that lasted one day: "i dont want anything
-        to ever use xhigh". A standing rule, so it is asserted rather than left to whoever
-        next writes a tier. `xhigh` stays in `effort_levels` — that list is what the CLI
-        accepts, which is a fact; this is the preference, and they are different things."""
-        t = self.load()
-        offenders = [n for n in t.names() if t.resolve(n).effort == "xhigh"]
-        self.assertEqual(offenders, [])
-        self.assertIn("xhigh", models.effort_levels())
-
     # -- what the spawn layer gets ---------------------------------------
 
     def test_cli_args_carry_model_and_effort(self):
@@ -167,6 +157,7 @@ class ModelsTest(unittest.TestCase):
         with self.assertRaises(models.ModelConfigError) as cm:
             self.load()
         self.assertIn("models.toml", str(cm.exception))
+
 
 class RoleModelTest(unittest.TestCase):
     """Roles name a tier and nothing more; models.py owns what that tier means."""

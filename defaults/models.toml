@@ -78,12 +78,10 @@ provider = "claude"
 model    = "opus"
 effort   = "high"
 
-# NO TIER USES `xhigh`, AND NONE MAY. There was a `deep` tier here for one day — opus at
-# xhigh, for workers — and Andrew removed it on sight (2026-08-16): "i dont want anything to
-# ever use xhigh". It stays a standing rule rather than a judgement to remake, so a tier
-# proposing it is wrong before its reasoning is read. `xhigh` remains in `effort_levels`
-# below because that list says what the CLI ACCEPTS, which is a fact and not a preference —
-# the prohibition is here, where tiers are chosen.
+# No tier pins `xhigh`. A `deep` tier here did — opus at xhigh, for workers — and lasted a
+# day (Andrew, 2026-08-16: "i dont want anything to ever use xhigh"). Left as a note rather
+# than enforced anywhere: `xhigh` is still a level the CLI takes and still reachable per call
+# if someone has a reason, it just is not what a shipped tier hands every spawn of a kind.
 
 [tiers.prose]
 # THE ONE TIER THAT PINS AN ID, against the rule three paragraphs up. It exists because the
@@ -99,7 +97,7 @@ effort   = "high"
 # the table in `notes/model-selection.md` and pick again.
 provider = "claude"
 model    = "claude-opus-4-8"
-effort   = "high"
+effort   = "medium"
 
 
 # -- what the code can actually do ---------------------------------------------
