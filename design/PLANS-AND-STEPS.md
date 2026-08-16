@@ -42,7 +42,8 @@ notes.
 
 **Template** — a preconfigured plan, in the ordinary sense of the word. A starting point
 you can do as you like with: a plan may be a template plus whatever else the job needs, and
-nothing holds a plan to the shape it started from.
+nothing holds a plan to the shape it started from. Using one is copy and paste — the copy is
+edited afterwards if it needs it, and nothing links it back to what it came from.
 
 ---
 
@@ -110,11 +111,17 @@ start empty.
 **Steps compose.** A step may itself be a combination of steps, so long as nothing is
 circular.
 
+**Steps come from a library or are made on the fly.** Both are first class: a plan may name
+a step that already exists and invent the rest as it goes.
+
 **A step may be word-only.** Nothing has to be defined behind it; the name alone is worth
 having.
 
 **Effort and scale flex inside a step; the shape does not.** The same step covers a trivial
 change and a large one.
+
+**A preset may exist only for steps to name**, rather than being offered to spawns at
+all — the design gate's bullet format is one.
 
 **A step names presets always, and a role only when it spawns a new agent.** A role is what
 an agent is, fixed when it is spawned. A preset is behaviour injected into one, and can be
@@ -176,6 +183,10 @@ is a number on the step rather than an edge in the graph.
 **No visit ceiling on rework.** A loop that will not converge ends the way everything else
 does: the lead eventually blocks. Being agent-driven is what makes a ceiling unnecessary.
 
+**Rework after a gate is rejected is handled however the lead likes.** It may edit the plan
+to add a fix step between two reviews, or simply run the review a second time. Which one is
+chosen does not matter; what matters is that neither breaks anything.
+
 ---
 
 ## Gates
@@ -189,8 +200,11 @@ collapsing a step into the agent before it never loses the gate.
 Where a gate needs him the owning agent blocks, the step shows its owner blocked, and
 answering the agent clears both. There is no unblocking a gate through the plan.
 
-**Two blocks for a whole job and no more** — the design gate and the merge gate. Everything
-else resolves without him.
+**A gate's message may show the plan** where showing it helps.
+
+**Two blocks is the shape of a job, not a ceiling.** A plan that lands a change has a
+design gate and a merge gate, and everything else resolves without him. Nothing enforces a
+count — several plans on one worktree means several of each, and that is fine.
 
 ### The design gate
 
@@ -276,6 +290,9 @@ survives.
 **A plan carries enough notes to be worth analysing later.** Its value after the job is as
 evidence of how the work actually ran, so it is written to be read cold.
 
+**Anyone may write notes, and two moments are expected:** the lead as it creates the plan,
+and whoever finishes a step as it is ticked.
+
 **Steps carry references to briefs and artifacts as checkpoints** — references, never
 content.
 
@@ -284,10 +301,11 @@ skill run every so often — analyse switchboard usage — that looks over past 
 what should become a new step, template, preset, role, optimisation or piece of tooling.
 This is what saving the records buys, and why they must be worth reading cold.
 
-**There is no fixed catalogue of steps, and one is not to be invented.** What belongs in a
-catalogue, and what a default template should contain, is read off real runs after a while
-rather than decided up front. The system must work without one. The two gates are the
-exception: they are named already.
+**The catalogue is a mix, and grows from use.** A few steps are fixed and named — merge
+review is one — and everything else is created by the lead at plan time. What should be
+promoted into the fixed part, and what a default template should contain, is read off real
+runs after a while rather than decided up front. The system must work with the catalogue
+almost empty.
 
 ---
 
