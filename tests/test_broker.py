@@ -1348,6 +1348,67 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(m["read_at"])
         self.assertIn("stop and do this instead", m["body"])
 
+    # -- the doorbell whose Enter was dropped (7.x) ------------------------
+
+    def _target(self) -> None:
+        """An ordinary live agent with a transcript on disk, under a fake HOME."""
+        self.home = Path(self.tmp.name) / "home"
+        self.cwd = str(self.repo / "ws")
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1",
+                           cwd=self.cwd, session_id="sess-w")
+        self.bucket = (self.home / ".claude" / "projects"
+                       / re.sub(r"[^a-zA-Z0-9]", "-", self.cwd))
+        self.bucket.mkdir(parents=True)
+        (self.bucket / "sess-w.jsonl").write_text("")
+
+    def _ring_and_age(self, seconds: int = 60) -> str:
+        """Ring w's doorbell and backdate the ring, returning the text that went out.
+
+        Backdated rather than slept through: nothing is judged inside `RING_SETTLE`, which
+        is what stops the confirmer chasing a send made a moment ago.
+        """
+        self.b.tell(["w"], "have a look at this", me=HUMAN)
+        self.db.execute("UPDATE events SET created_at=created_at-? WHERE kind='ring_sent'",
+                        (seconds,))
+        self.db.commit()
+        return self.h.prompts[-1][1]
+
+    def _confirm(self) -> list[str]:
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.b.flush_pending()
+        return [r["kind"] for r in store.recent_events(self.db, agent="w")]
+
+    def test_a_doorbell_the_busy_target_queued_is_confirmed_not_sent_again(self):
+        """The false positive matters as much as the true one. A busy Claude Code records
+        a prompt it takes as a `queue-operation`/`enqueue` and writes nothing user-side
+        until the turn ends — 3 min 09 s later, measured — so a confirmer that cannot read
+        that record re-sends every correct delivery to every working agent in the fleet."""
+        self._target()
+        text = self._ring_and_age()
+        (self.bucket / "sess-w.jsonl").write_text(json.dumps({
+            "type": "queue-operation", "operation": "enqueue", "content": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }) + "\n")
+        self.assertIn("ring_confirmed", self._confirm())
+        self.assertEqual(len(self.h.prompts), 1)          # rung once, and left alone
+
+    def test_a_doorbell_nothing_recorded_is_re_sent_and_then_given_up_on(self):
+        """The bug: `agent prompt` pasted the text and the Enter was dropped, so `sb tell`
+        reported success over a message that will never be seen. The agent's own transcript
+        says nothing, so the doorbell is SENT AGAIN — never Enter pressed on a box nobody
+        has read, which could submit a human's half-typed line or answer a modal — and the
+        repairs are capped, so an agent that cannot be reached at all is logged rather than
+        rung for ever."""
+        self._target()
+        text = self._ring_and_age()
+        for _ in range(4):
+            kinds = self._confirm()
+        self.assertEqual([t for _, t in self.h.prompts], [text, text, text])
+        self.assertEqual(kinds.count("ring_repaired"), 2)
+        self.assertIn("ring_unconfirmed", kinds)
+        [m] = store.unread_for(self.db, "w", mark=False)   # still there to be read
+        self.assertIn("have a look at this", m["body"])
+
     # -- applying a preset to your own session (6.4) -----------------------
 
     def _preset(self, name: str, text: str) -> None:

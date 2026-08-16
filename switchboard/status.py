@@ -345,7 +345,8 @@ NEEDS_SETTLE = config.setting("display.needs_settle")
 # `sb` calls, its `done`, its `blocked`, its turn edges. These are the exceptions, and all of
 # them are one process acting ON an agent from outside it:
 #
-#     ring_*        the doorbell we tried to ring at it (`Broker._ring`)
+#     ring_*        the doorbell we tried to ring at it (`Broker._ring`), and whether the
+#                   ring was ever confirmed or had to be sent again (`_confirm_rings`)
 #     mail_*        mail of its own we gave up on delivering (`_clear_unreadable_mail`)
 #     notify_failed a desktop notification we failed to raise about it (`Broker._surface`)
 #     read_output   somebody ran `sb inspect` and read its terminal (`output.py`)
@@ -374,6 +375,8 @@ NEEDS_SETTLE = config.setting("display.needs_settle")
 # agent in `agent=`, because `sb log <name>` is where somebody asks why a row was left.
 DONE_TO_THE_AGENT = (
     "ring_deferred", "ring_held", "ring_failed", "ring_skipped",
+    "ring_sent", "ring_confirmed", "ring_repaired", "ring_repair_failed",
+    "ring_unconfirmed",
     "mail_unannounced", "mail_cleared", "notify_failed", "read_output",
     "cleanup_refused", "cleanup_held",
 )

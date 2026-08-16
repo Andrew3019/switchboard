@@ -294,6 +294,25 @@ turn_doubt_grace = 900.0
 # meant to stop.
 interrupt_settle = 0.5
 
+# How long a doorbell is given to reach the target's own transcript before
+# `Broker._confirm_rings` treats it as never submitted and sends it again. NOBODY WAITS
+# THIS OUT: the sender returns the moment the ring is on the wire, and this only says how
+# OLD a ring has to be before the next `sb` command anyone runs is allowed to judge it.
+#
+# Set by the slower of the two ways the evidence can appear, because the whole cost lives on
+# that side. A BUSY target's queue record was readable 2.29 s after the send. An IDLE target
+# writes no queue record at all, and its `user` record took 14.59 s — Claude Code flushes
+# that file when it gets round to it, and `deliver_working_ms` records 35 s for the same lag
+# under a six-way fan-out. Thirty seconds clears the ordinary case of both.
+#
+# Five seconds — the number the design note first proposed — would have re-sent on most
+# correct deliveries to an idle agent, and that duplicate is not free: the first doorbell
+# already started its turn, so the second arrives mid-turn and buys the agent a whole extra
+# turn to find an empty inbox. Erring the other way costs only how long a genuinely dropped
+# Enter sits before it is repaired, and against today's behaviour — stranded for ever, with
+# nobody aware — thirty seconds is not a cost.
+ring_settle = 30.0
+
 # How long `sb workspace close` lets the panes it just closed leave the process table
 # before the re-confirmation is allowed to refuse on them. `pane close` returning is not
 # the shell having exited: measured on this machine, an idle shell and a shell with an
@@ -381,6 +400,19 @@ spawn_backoff = 2
 # retry — this is the other half of the same flakiness, and a second knob for it would only
 # be a second thing to keep in step.
 deliver_attempts = 3
+
+# How many times a doorbell the target's own transcript never recorded is SENT AGAIN
+# (`Broker._confirm_rings`) before we stop and log `ring_unconfirmed`. Not a delivery
+# retry like `deliver_attempts`: nothing waits on these, they are made by whichever `sb`
+# command happens to run next, and each one is a plain `agent prompt` — never an Enter
+# pressed on a box nobody has read (see `_confirm_rings`).
+#
+# Two, because the repair is for a keystroke the terminal dropped and a third send is no
+# likelier to land than the second: what two buys is the difference between "the Enter was
+# dropped" (repaired) and "this agent cannot be reached at all" (logged, and left, which is
+# exactly what happened before this existed). Giving up is a LOG line and not a failure —
+# the message is still in the store, still unread, and still in that agent's `sb inbox`.
+ring_repairs = 2
 
 # How many times the `sb` pin is typed into a spawning pane before the spawn is refused.
 # Two, not three: the only failure it recovers from is a shell that had not quite reached
