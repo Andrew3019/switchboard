@@ -5366,7 +5366,13 @@ class Broker:
             if who == HUMAN or who in skip:
                 continue
             ring = self._last_ring(who)
-            if ring is None or now - ring["at"] < RING_SETTLE:
+            # Aged from the LAST thing we did about this ring, not from the first. Every
+            # `sb` command any agent runs comes through here, and in a live fleet that is
+            # constantly: gating on the original send meant the moment a ring went unproved,
+            # the next two commands repaired it back to back — measured live, both repairs
+            # inside the same second, the second one sent before the first could possibly
+            # have been taken. Each attempt gets its own window to show up in.
+            if ring is None or now - ring["last"] < RING_SETTLE:
                 continue
             a = store.get_agent(self.db, who)
             path = store.transcript_path(a) if a is not None else None
@@ -5421,6 +5427,11 @@ class Broker:
         messages arriving inside one settle window — leave the older one open for ever, and
         that is right: both doorbells announce the same mailbox, so the newer one supersedes
         it entirely.
+
+        `at` is when the doorbell first went out, and is what the proof is dated from: a
+        record written any time since then answers for it. `last` is when we last did
+        anything about it, send or repair, and is what the settle window is measured
+        against — see `_confirm_rings`.
         """
         rows = self.db.execute(
             "SELECT kind, payload, created_at FROM events "
@@ -5429,15 +5440,19 @@ class Broker:
             (who, RING_OPEN, *RING_CLOSED, *RING_TRIED, RING_SCAN),
         ).fetchall()
         tries = 0
+        last = None
         for r in rows:
             if r["kind"] in RING_CLOSED:
                 return None
+            if last is None:
+                last = r["created_at"]
             if r["kind"] != RING_OPEN:
                 tries += 1
                 continue
             payload = json.loads(r["payload"]) if r["payload"] else {}
-            return {"at": r["created_at"], "text": payload.get("text") or "",
-                    "repair": bool(payload.get("repair")), "tries": tries}
+            return {"at": r["created_at"], "last": last, "tries": tries,
+                    "text": payload.get("text") or "",
+                    "repair": bool(payload.get("repair"))}
         return None
 
     def _pane_still_listed(self, who: str) -> bool:

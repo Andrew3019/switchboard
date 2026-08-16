@@ -295,9 +295,10 @@ turn_doubt_grace = 900.0
 interrupt_settle = 0.5
 
 # How long a doorbell is given to reach the target's own transcript before
-# `Broker._confirm_rings` treats it as never submitted and sends it again. NOBODY WAITS
-# THIS OUT: the sender returns the moment the ring is on the wire, and this only says how
-# OLD a ring has to be before the next `sb` command anyone runs is allowed to judge it.
+# `Broker._confirm_rings` treats it as never submitted and sends it again — and how long
+# each repair is then given in its turn. NOBODY WAITS THIS OUT: the sender returns the
+# moment the ring is on the wire, and this only says how OLD the last thing we did about a
+# ring has to be before the next `sb` command anyone runs is allowed to judge it.
 #
 # Set by the slower of the two ways the evidence can appear, because the whole cost lives on
 # that side. A BUSY target's queue record was readable 2.29 s after the send. An IDLE target

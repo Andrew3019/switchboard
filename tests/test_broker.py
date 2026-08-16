@@ -1361,16 +1361,21 @@ class BrokerTest(unittest.TestCase):
         self.bucket.mkdir(parents=True)
         (self.bucket / "sess-w.jsonl").write_text("")
 
-    def _ring_and_age(self, seconds: int = 60) -> str:
-        """Ring w's doorbell and backdate the ring, returning the text that went out.
+    def _age_rings(self, seconds: int = 60) -> None:
+        """Put the ring bookkeeping into the past.
 
-        Backdated rather than slept through: nothing is judged inside `RING_SETTLE`, which
-        is what stops the confirmer chasing a send made a moment ago.
+        Backdated rather than slept through. Nothing is judged inside `RING_SETTLE` — not
+        the send, and not a repair either — so a test that did not age these would only
+        ever see the confirmer decline to look.
         """
-        self.b.tell(["w"], "have a look at this", me=HUMAN)
-        self.db.execute("UPDATE events SET created_at=created_at-? WHERE kind='ring_sent'",
+        self.db.execute("UPDATE events SET created_at=created_at-? WHERE kind LIKE 'ring%'",
                         (seconds,))
         self.db.commit()
+
+    def _ring_and_age(self) -> str:
+        """Ring w's doorbell, age it, and return the text that went out."""
+        self.b.tell(["w"], "have a look at this", me=HUMAN)
+        self._age_rings()
         return self.h.prompts[-1][1]
 
     def _confirm(self) -> list[str]:
@@ -1401,7 +1406,16 @@ class BrokerTest(unittest.TestCase):
         rung for ever."""
         self._target()
         text = self._ring_and_age()
-        for _ in range(4):
+        self._confirm()
+        self.assertEqual(len(self.h.prompts), 2)      # nothing recorded it: sent again
+        self._confirm()
+        self.assertEqual(len(self.h.prompts), 2)      # and the repair gets its own window
+
+        # Measured live before that window existed: every `sb` command any agent runs comes
+        # through `flush_pending`, so the second repair went out inside the same second as
+        # the first, before the first could possibly have been taken.
+        for _ in range(3):
+            self._age_rings()
             kinds = self._confirm()
         self.assertEqual([t for _, t in self.h.prompts], [text, text, text])
         self.assertEqual(kinds.count("ring_repaired"), 2)
