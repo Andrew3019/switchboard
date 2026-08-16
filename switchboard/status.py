@@ -164,12 +164,14 @@ GONE_STATE = "failed"
 NO_RULE_FALLBACK = "default_known_agent_idle_fallback"
 
 # How many already-stalled rows one `collect` will spend a subprocess on. Not a tuning
-# knob and not a sample: stalled is normally zero rows and rarely more than two (that is
-# what makes this affordable at all — see `_mark_awaiting_keypress`), so this only bounds
-# the pathological case, a fleet that has gone quiet all at once, where paying N
-# subprocesses per tick would be the worst possible moment to slow the board down. Rows
-# past it are left with no opinion, which reads as today's plain STALLED.
-KEYPRESS_PROBE_MAX = 4
+# knob and not a sample: stalled is normally zero rows (measured live, a fleet with none
+# stalled costs exactly zero of these calls), and this bounds what a fleet that has gone
+# quiet all at once can do to the board's tick. Measured on this machine at ~120 ms per
+# call — five times the 23.4 ms tick collector.py's docstring measures — so the cap is
+# small deliberately: two of them is a quarter of a second added to a refresh, and more
+# than that would make the board slowest exactly when a person is trying to read it. Rows
+# past the cap, in tree order, are left with no opinion and read as today's plain STALLED.
+KEYPRESS_PROBE_MAX = 2
 
 # How long a row with no session id is read as a *claim* rather than as a live agent.
 #
@@ -843,6 +845,15 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus]) -> No
     excused out of `stalled` by `idle_excuse` (`starting up`, the session-id grace) before
     this function ever sees the row, and this adds no path back in — it only ever narrows
     an existing stall, never creates one.
+
+    That gate is doing real work there, not being careful about nothing. A healthy,
+    authenticated Claude read as an unmatched screen for the first few seconds after
+    `agent start`, while its splash screen was still drawing and its prompt box did not
+    exist yet to be matched, and read as `live_prompt_box` on every reading after — which
+    is a STARTING agent producing this signal, and is precisely the row the stall gate
+    keeps away from here. It is also why nothing repeats a probe or remembers one: the
+    reading is per-frame, and the only rows it is ever taken on are rows that have been
+    sitting still for a long time.
 
     `alive is True` and not merely truthy, for the reason `turn_doubted` gives: there is no
     pane to explain if herdr answered and did not list the agent, and nothing was observed
