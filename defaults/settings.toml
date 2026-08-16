@@ -364,6 +364,40 @@ turn_doubt_grace = 900.0
 # meant to stop.
 interrupt_settle = 0.5
 
+# How long a doorbell is given to reach the target's own transcript before
+# `Broker._confirm_rings` treats it as never submitted and sends it again — and how long
+# each repair is then given in its turn. NOBODY WAITS THIS OUT: the sender returns the
+# moment the ring is on the wire, and this only says how OLD the last thing we did about a
+# ring has to be before the next `sb` command anyone runs is allowed to judge it.
+#
+# Set by the slower of the two ways the evidence can appear, because the whole cost lives on
+# that side. A BUSY target's queue record was readable 2.29 s after the send. An IDLE target
+# writes no queue record at all, and its `user` record took 14.59 s — Claude Code flushes
+# that file when it gets round to it, and `deliver_working_ms` and `Herdr._took_prompt` both
+# record **35 s** for that same flush under a six-way fan-out. FORTY-FIVE is that worst case
+# plus a margin of roughly one collector tick, so the first judgement lands past it rather
+# than on top of it.
+#
+# It was 30 s, which is below the 35 s figure its own comment cited — the fan-out case is
+# precisely `delegate`'s shape, so the agents most likely to be judged unconfirmed while
+# perfectly fine were the busiest ones in the fleet.
+#
+# A FLAT number, not the conditional stretch `_took_prompt` uses for the identical lag, and
+# the difference between the two is who is waiting. `deliver`'s window is a sender blocked
+# on it, so it must be short by default and lengthen only when it must. Nobody waits on this
+# one at all — it is staleness, not delay — so buying certainty with a longer flat window
+# costs nothing, while the stretch would need `_busy`, whose own docstring records herdr's
+# busy detector going dark for every Claude pane on the machine. Wrong there means "not
+# busy", means the short window, means exactly the spurious repair the stretch was for.
+#
+# Five seconds — the number the design note first proposed — would have re-sent on most
+# correct deliveries to an idle agent, and that duplicate is not free: the first doorbell
+# already started its turn, so the second arrives mid-turn and buys the agent a whole extra
+# turn to find an empty inbox. Erring the other way costs only how long a genuinely dropped
+# Enter sits before it is repaired, and against today's behaviour — stranded for ever, with
+# nobody aware — forty-five seconds is not a cost.
+ring_settle = 45.0
+
 # How long `sb workspace close` lets the panes it just closed leave the process table
 # before the re-confirmation is allowed to refuse on them. `pane close` returning is not
 # the shell having exited: measured on this machine, an idle shell and a shell with an
@@ -451,6 +485,24 @@ spawn_backoff = 2
 # retry — this is the other half of the same flakiness, and a second knob for it would only
 # be a second thing to keep in step.
 deliver_attempts = 3
+
+# How many times a doorbell the target's own transcript never recorded is SENT AGAIN
+# (`Broker._confirm_rings`) before we stop and log `ring_unconfirmed`. Not a delivery
+# retry like `deliver_attempts`: nothing waits on these, they are made by whichever `sb`
+# command happens to run next, and each one is a plain `agent prompt` — never an Enter
+# pressed on a box nobody has read (see `_confirm_rings`).
+#
+# A HARD cap across processes, not just within one. Every attempt is claimed with a row
+# written inside the store's write lock before the send (`_claim_repair`), because
+# `flush_pending` runs at the head of every `sb` command and counting-then-sending let four
+# concurrent commands each send "repair number one".
+#
+# Two, because the repair is for a keystroke the terminal dropped and a third send is no
+# likelier to land than the second: what two buys is the difference between "the Enter was
+# dropped" (repaired) and "this agent cannot be reached at all" (logged, and left, which is
+# exactly what happened before this existed). Giving up is a LOG line and not a failure —
+# the message is still in the store, still unread, and still in that agent's `sb inbox`.
+ring_repairs = 2
 
 # How many times the `sb` pin is typed into a spawning pane before the spawn is refused.
 # Two, not three: the only failure it recovers from is a shell that had not quite reached

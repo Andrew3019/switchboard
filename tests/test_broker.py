@@ -1348,6 +1348,97 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(m["read_at"])
         self.assertIn("stop and do this instead", m["body"])
 
+    # -- the doorbell whose Enter was dropped (7.x) ------------------------
+
+    def _target(self) -> None:
+        """An ordinary live agent with a transcript on disk, under a fake HOME."""
+        self.home = Path(self.tmp.name) / "home"
+        self.cwd = str(self.repo / "ws")
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1",
+                           cwd=self.cwd, session_id="sess-w")
+        self.bucket = (self.home / ".claude" / "projects"
+                       / re.sub(r"[^a-zA-Z0-9]", "-", self.cwd))
+        self.bucket.mkdir(parents=True)
+        (self.bucket / "sess-w.jsonl").write_text("")
+
+    def _age_rings(self, seconds: int = 60) -> None:
+        """Put the ring bookkeeping into the past.
+
+        Backdated rather than slept through. Nothing is judged inside `RING_SETTLE` — not
+        the send, and not a repair either — so a test that did not age these would only
+        ever see the confirmer decline to look.
+        """
+        self.db.execute("UPDATE events SET created_at=created_at-? WHERE kind LIKE 'ring%'",
+                        (seconds,))
+        self.db.commit()
+
+    def _ring_and_age(self) -> str:
+        """Ring w's doorbell, age it, and return the text that went out."""
+        self.b.tell(["w"], "have a look at this", me=HUMAN)
+        self._age_rings()
+        return self.h.prompts[-1][1]
+
+    def _confirm(self) -> list[str]:
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.b.flush_pending()
+        return [r["kind"] for r in store.recent_events(self.db, agent="w")]
+
+    def test_a_doorbell_the_busy_target_queued_is_confirmed_not_sent_again(self):
+        """The false positive matters as much as the true one. A busy Claude Code records
+        a prompt it takes as a `queue-operation`/`enqueue` and writes nothing user-side
+        until the turn ends — 3 min 09 s later, measured — so a confirmer that cannot read
+        that record re-sends every correct delivery to every working agent in the fleet."""
+        self._target()
+        text = self._ring_and_age()
+        (self.bucket / "sess-w.jsonl").write_text(json.dumps({
+            "type": "queue-operation", "operation": "enqueue", "content": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }) + "\n")
+        self.assertIn("ring_confirmed", self._confirm())
+        self.assertEqual(len(self.h.prompts), 1)          # rung once, and left alone
+
+    def test_a_doorbell_nothing_recorded_is_re_sent_and_then_given_up_on(self):
+        """The bug: `agent prompt` pasted the text and the Enter was dropped, so `sb tell`
+        reported success over a message that will never be seen. The agent's own transcript
+        says nothing, so the doorbell is SENT AGAIN — never Enter pressed on a box nobody
+        has read, which could submit a human's half-typed line or answer a modal — and the
+        repairs are capped, so an agent that cannot be reached at all is logged rather than
+        rung for ever."""
+        self._target()
+        text = self._ring_and_age()
+        self._confirm()
+        self.assertEqual(len(self.h.prompts), 2)      # nothing recorded it: sent again
+        self._confirm()
+        self.assertEqual(len(self.h.prompts), 2)      # and the repair gets its own window
+
+        # Measured live before that window existed: every `sb` command any agent runs comes
+        # through `flush_pending`, so the second repair went out inside the same second as
+        # the first, before the first could possibly have been taken.
+        for _ in range(3):
+            self._age_rings()
+            kinds = self._confirm()
+        self.assertEqual([t for _, t in self.h.prompts], [text, text, text])
+        self.assertEqual(kinds.count("ring_repaired"), 2)
+        self.assertIn("ring_unconfirmed", kinds)
+        [m] = store.unread_for(self.db, "w", mark=False)   # still there to be read
+        self.assertIn("have a look at this", m["body"])
+
+    def test_the_repair_cap_holds_against_a_stale_read(self):
+        """What `RING_REPAIRS` counts is the claim, not the count that decided to try.
+
+        `flush_pending` runs at the head of every `sb` command, so several processes reach
+        `_confirm_rings` for the same stalled ring inside one race window — reproduced with
+        four, all reading `tries=0`, all believing they were repair number one, all sending.
+        Handing `_claim_repair` that same stale ring over and over is that race made
+        deterministic: the third call must find no slot left, whatever the read said.
+        """
+        self._target()
+        self._ring_and_age()
+        ring = self.b._last_ring("w")
+        self.assertEqual(ring["tries"], 0)
+        seen = [self.b._claim_repair("w", ring, store.now()) for _ in range(3)]
+        self.assertEqual(seen, [1, 2, None])
+
     # -- applying a preset to your own session (6.4) -----------------------
 
     def _preset(self, name: str, text: str) -> None:
