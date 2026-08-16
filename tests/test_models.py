@@ -158,6 +158,7 @@ class ModelsTest(unittest.TestCase):
             self.load()
         self.assertIn("models.toml", str(cm.exception))
 
+
 class RoleModelTest(unittest.TestCase):
     """Roles name a tier and nothing more; models.py owns what that tier means."""
 

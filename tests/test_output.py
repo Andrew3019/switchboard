@@ -321,6 +321,42 @@ class TaskArrivedTest(OutputTestBase):
             "type": "user", "message": {"role": "user", "content": "do the thing"}}))
         self.assertTrue(self.arrived("do the thing", since=time.time() - 1))
 
+    def queue_line(self, text: str, *, at: float, operation: str = "enqueue") -> str:
+        """What Claude Code writes when the target is MID-TURN, captured live from a real
+        transcript: a `queue-operation` record at submit time, carrying the text as a plain
+        top-level `content` rather than a message."""
+        return json.dumps({
+            "type": "queue-operation",
+            "operation": operation,
+            "content": text,
+            "timestamp": datetime.fromtimestamp(at, tz=timezone.utc).isoformat(),
+        })
+
+    def test_a_prompt_queued_behind_a_running_turn_has_arrived(self):
+        """The record a busy agent leaves, and for minutes it is the ONLY one: measured on
+        a single send, the queue record was readable at 2.29 s and the `user` record for the
+        same text at 3 min 09 s, when the turn ended and the queue drained. A `user`-only
+        predicate therefore answers "no" about a delivery that landed in seconds — which is
+        how `sb tell --interrupt` came to raise `Undeliverable` for an interrupt the agent
+        had already queued, and what would make `Broker._confirm_rings` re-send every
+        correct doorbell.
+
+        The `since` floor still applies to it, and `remove` — the same text on its way back
+        OUT of the queue — is not an arrival.
+        """
+        now = time.time()
+        self.write_transcript("s1", self.queue_line("do the thing", at=now))
+        self.assertTrue(self.arrived("do the thing", since=now - 1))
+
+        # Three different needles, so each answer comes from its own record and not from a
+        # neighbour's: every file here shares one cwd bucket, which is the scan's whole
+        # search space.
+        self.write_transcript("s2", self.queue_line("an older thing", at=now - 600))
+        self.assertFalse(self.arrived("an older thing", since=now))
+
+        self.write_transcript("s3", self.queue_line("cancel me", at=now, operation="remove"))
+        self.assertFalse(self.arrived("cancel me", since=now - 1))
+
     def test_an_empty_task_proves_nothing(self):
         now = time.time()
         self.write_transcript("s1", self.user_line("do the thing", at=now))

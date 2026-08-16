@@ -22,9 +22,9 @@ provider = "claude"
 # -- the shipped tiers ---------------------------------------------------------
 #
 # Small on purpose: this only has to be good enough that switchboard works with no config
-# file at all. Every shipped role names one of these, so the table below IS what a fresh
-# checkout's fleet runs on — see `notes/model-selection.md` for the role-by-role reasoning
-# and what it costs.
+# file at all. Four of the six shipped roles name a tier here; `reviewer` and `worker` are
+# deliberately on `default` and the note in each says why. See `notes/model-selection.md`
+# for the role-by-role reasoning and what it costs.
 #
 # ALIASES, never pinned ids. `claude --help` documents --model as taking "an alias for the
 # latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
@@ -78,14 +78,10 @@ provider = "claude"
 model    = "opus"
 effort   = "high"
 
-[tiers.deep]
-# `strong` with the effort dial at xhigh. For implementation: a worker's output is code, it
-# runs unattended for longer than anything else, and a wrong turn taken early is the most
-# expensive thing in the fleet. Nothing here costs more per token than `strong` — it just
-# spends more of them.
-provider = "claude"
-model    = "opus"
-effort   = "xhigh"
+# No tier pins `xhigh`. A `deep` tier here did — opus at xhigh, for workers — and lasted a
+# day (Andrew, 2026-08-16: "i dont want anything to ever use xhigh"). Left as a note rather
+# than enforced anywhere: `xhigh` is still a level the CLI takes and still reachable per call
+# if someone has a reason, it just is not what a shipped tier hands every spawn of a kind.
 
 [tiers.prose]
 # THE ONE TIER THAT PINS AN ID, against the rule three paragraphs up. It exists because the
@@ -101,7 +97,7 @@ effort   = "xhigh"
 # the table in `notes/model-selection.md` and pick again.
 provider = "claude"
 model    = "claude-opus-4-8"
-effort   = "high"
+effort   = "medium"
 
 
 # -- what the code can actually do ---------------------------------------------

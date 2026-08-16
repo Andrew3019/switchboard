@@ -152,10 +152,33 @@ def task_arrived(cwd: Optional[str], text: str, *, since: float) -> bool:
     directory is empty. `since` keeps a re-send from being confirmed by some older turn
     that happened to carry the same words; files untouched since then are skipped
     unread, which is what keeps this cheap enough to poll.
+
+    WHICH records count is `_submitted_text`, and it is not only the `user` one: a busy
+    agent's queue record is written minutes before the turn boundary that produces a `user`
+    record, and waiting for the latter is the difference between "not yet" and "no".
     """
     # `any` short-circuits on the first match, so this still stops reading at the first
     # file that answers the question — the cost that makes it pollable.
     return any(_transcripts_with(cwd, text, since=since))
+
+
+def submitted_since(path: Optional[Path], text: str, *, since: float) -> bool:
+    """`task_arrived`'s question, narrowed to ONE session file.
+
+    The proof `Broker._confirm_rings` uses on a doorbell it already rang. By then the
+    target has a session id, so the whole directory is the wrong place to look: `delegate`
+    puts a parent and all its children in one cwd, so several live transcripts sit in that
+    bucket and a sibling's turn would confirm our doorbell. `task_arrived` scans the
+    directory because at SPAWN time there is no session id to narrow it with — a spawn that
+    never took its prompt never started one — and that is the only reason it does.
+
+    `None` is not a proof of anything: an agent with no session id yet, or whose transcript
+    file is not on disk, is one we cannot see, and the caller must not read that as "it
+    never arrived" (see `_confirm_rings`).
+    """
+    if path is None:
+        return False
+    return _carries(path, text.strip(), since - _CLOCK_SLOP)
 
 
 def matched_transcript(cwd: Optional[str], text: str, *, since: float) -> Optional[str]:
@@ -203,28 +226,70 @@ def _transcripts_with(cwd: Optional[str], text: str, *, since: float):
         return
     floor = since - _CLOCK_SLOP
     for f in sorted(d.glob("*.jsonl")):
-        try:
-            if f.stat().st_mtime < floor:
-                continue
-        except OSError:
+        if _carries(f, needle, floor):
+            # The file's stem IS the session id: Claude Code names each transcript for the
+            # session that wrote it, which is the same identifier `store.transcript_path`
+            # turns back into a path.
+            yield f.stem
+
+
+def _carries(path: Path, needle: str, floor: float) -> bool:
+    """Does this one transcript record `needle` being submitted, at or after `floor`?
+
+    The whole of the proof, in one file. Both callers are polling — `Herdr.deliver` twice a
+    second against a session that may be hours long — so a file untouched since the send is
+    skipped unread, and only the tail of the rest is parsed: text submitted seconds ago is
+    at the END.
+    """
+    if not needle:
+        return False
+    try:
+        if path.stat().st_mtime < floor:
+            return False
+    except OSError:
+        return False
+    for rec in _tail_records(path, _ARRIVAL_RECORDS):
+        content = _submitted_text(rec)
+        if content is None:
             continue
-        # The tail only: text submitted seconds ago is at the END of the file, and this
-        # is polled twice a second against a session that may be hours long.
-        for rec in _tail_records(f, _ARRIVAL_RECORDS):
-            if rec.get("type") != "user":
-                continue
-            when = _record_time(rec)
-            if when is not None and when < floor:
-                continue
-            content = (rec.get("message") or {}).get("content")
-            if not isinstance(content, str):
-                content = json.dumps(content)
-            if needle in content:
-                # The file's stem IS the session id: Claude Code names each transcript
-                # for the session that wrote it, which is the same identifier
-                # `store.transcript_path` turns back into a path.
-                yield f.stem
-                break
+        when = _record_time(rec)
+        if when is not None and when < floor:
+            continue
+        if needle in content:
+            return True
+    return False
+
+
+def _submitted_text(rec: dict) -> Optional[str]:
+    """What this record says was PUT TO the agent, or None if it says nothing.
+
+    Two record shapes, because Claude Code writes a different one depending on what the
+    agent was doing when the text was submitted, and reading only the first is what made a
+    correct delivery to a busy agent unprovable:
+
+      - **idle** — a `user` record, written when the turn starts. The only evidence there
+        is; no queue record is written at all.
+      - **busy** — a `queue-operation`/`enqueue` record, written at SUBMIT time, carrying
+        the text as a plain top-level `content`. The `user`-side record for it does not
+        appear until the turn ends and the queue drains: measured at 2.29 s for the enqueue
+        record against **3 min 09 s** for the `user` one, on the same send.
+
+    So a `user`-only predicate answers "no" for three minutes about a doorbell that landed
+    in three seconds — which is why `sb tell --interrupt` could raise `Undeliverable` for an
+    interrupt the agent had already queued, and why a confirmation pass built on it would
+    re-send every correct delivery.
+
+    Only `enqueue`. The sibling `queue-operation`/`remove` record carries the same text on
+    its way OUT of the queue, and a cancelled prompt is not an arrived one.
+    """
+    kind = rec.get("type")
+    if kind == "user":
+        content = (rec.get("message") or {}).get("content")
+    elif kind == "queue-operation" and rec.get("operation") == "enqueue":
+        content = rec.get("content")
+    else:
+        return None
+    return content if isinstance(content, str) else json.dumps(content)
 
 
 def _record_time(rec: dict) -> Optional[float]:

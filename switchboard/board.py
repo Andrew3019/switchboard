@@ -49,6 +49,7 @@ import signal
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 import unicodedata
@@ -57,6 +58,7 @@ from typing import Iterator, Optional
 from . import config
 from . import panel
 from . import status as status_mod
+from . import sweep as sweep_mod
 
 # 1000h = press/release reporting. 1006h = SGR encoding, which is the only one
 # that survives past column 223 and the only one 05-mouse saw herdr emit.
@@ -1151,6 +1153,48 @@ def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
     return rows
 
 
+def sweep_tick(armed: int, note: list) -> int:
+    """Run the half-hourly worktree sweep if this board is the one that gets to. Returns
+    the slot now armed, whether or not anything ran.
+
+    The board is the trigger because there is nothing else: switchboard has no daemon, and
+    the collector is elected per repo by an flock in a process that must never touch the
+    store. So the sweep rides the one long-lived human-facing loop there is — and that
+    means **no board running is no sweep**, which is accepted.
+
+    `armed` is the slot this board has already seen, initialised at startup to the slot it
+    started IN. A board opened at :17 therefore sweeps at :30 and not at :17: the trigger
+    is a boundary being crossed while the board watches, never "it has been a while".
+
+    Every agent's pane opens with a board beside it, so a fleet of twenty crosses :30
+    twenty times at once. `sweep.claim` is what makes exactly one of them run — an flock
+    around a marker file in the repo's shared `.git`, which is the only thing boards in
+    different worktrees have in common.
+
+    In a subprocess, and its output goes to a note rather than to the terminal: this pane
+    is in raw mode with mouse reporting on, and anything written to it that the frame
+    loop did not draw corrupts the screen.
+    """
+    slot = sweep_mod.slot_of(time.time())
+    if slot == armed:
+        return armed
+    if not sweep_mod.ENABLED or not sweep_mod.claim(slot):
+        return slot
+    threading.Thread(target=_sweep, args=(note,), daemon=True).start()
+    return slot
+
+
+def _sweep(note: list) -> None:
+    """The sweep itself, off the drawing thread. Never raises into it."""
+    try:
+        out = subprocess.run(sweep_mod.command(), capture_output=True, text=True,
+                             env=sweep_mod.environ())
+        line = (out.stdout or out.stderr or "").strip().splitlines()
+        note.append(f"sweep: {line[0] if line else 'nothing to do'}")
+    except (OSError, subprocess.SubprocessError) as e:
+        note.append(f"sweep did not run: {e}")
+
+
 def main() -> int:
     if not sys.stdin.isatty():
         print("board: stdin is not a tty — run this in a pane.", file=sys.stderr)
@@ -1207,6 +1251,9 @@ def main() -> int:
     # of thing they are: what this human has done to this pane, held nowhere else and
     # deliberately not persisted.
     click: Optional[tuple[str, float]] = None
+    # The slot this board started in, so the first sweep is at the next boundary and never
+    # at startup — see `sweep_tick`. `sweep_note` is the worker thread's one-slot mailbox.
+    armed, sweep_note = sweep_mod.slot_of(time.time()), []
     try:
         tty.setraw(fd)
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)
@@ -1261,6 +1308,13 @@ def main() -> int:
                 snap, note_text, stats = refresh(sup)
                 dirty[0] = True
                 last = time.time()
+                # On the refresh tick rather than every select timeout: a two-second
+                # granularity is plenty for a boundary that comes twice an hour, and this
+                # is the one place in the loop that already costs something.
+                armed = sweep_tick(armed, sweep_note)
+            if sweep_note:
+                msg = sweep_note.pop()
+                dirty[0] = True
             if dirty[0]:
                 # `lit_row` is asked HERE, on the frame being drawn, rather than when the
                 # click came in — which is what makes the mark expire without anything

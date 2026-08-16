@@ -395,11 +395,17 @@ class NeedsYouTest(unittest.TestCase):
         return [a.name for a in richboard.needs_list(list(agents))]
 
     def test_idle_with_a_working_descendant_is_not_summoned(self):
-        # `lead` is idle, its child is idle, and the GRANDCHILD is working. The one-
-        # generation excuse `stalled` carries never reached `lead`.
+        # `lead` is idle and the GRANDCHILD is working. The one-generation excuse
+        # `stalled` carries never reached `lead`.
+        #
+        # `mid` is FINISHED, and it has to be: `collect` excuses any parent whose direct
+        # child is still open (`live_parent`), so a `lead` above a running `mid` is not
+        # stalled and this row could never exist. An intermediate agent that reported
+        # while a grandchild of its own was still going is legal and is the shape that
+        # actually produces this — `sb done` closes `mid`, and `kid` runs on.
         names = self._names(
             agent("lead", stalled=True, turn="idle", idle=900),
-            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900),
+            agent("mid", depth=1, parent="lead", state="done", turn="idle"),
             agent("kid", depth=2, parent="mid"),
         )
         self.assertEqual(names, [])

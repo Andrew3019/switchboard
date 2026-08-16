@@ -48,6 +48,7 @@ from . import output
 from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
+from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
@@ -184,6 +185,25 @@ NOTIFY_CLIP = config.setting("limits.notify_clip")
 # How far back `unreachable` reads an agent's events to find the last doorbell. Only the
 # newest ring matters, and rings are rare next to the herdr call logged on every command.
 EVENT_SCAN = 200
+# How old a doorbell must be before `_confirm_rings` is allowed to judge it, and how many
+# times a doorbell nobody could confirm is sent again. Both are `defaults/settings.toml`,
+# where the measurements behind the numbers sit next to them.
+RING_SETTLE = config.setting("timeouts.ring_settle")
+RING_REPAIRS = config.setting("retries.ring_repairs")
+# How far back `_last_ring` reads the ring bookkeeping for one agent. A cycle is at most a
+# send plus `RING_REPAIRS` repairs plus the line that closes it, and the newest `ring_sent`
+# ends the scan, so this is only ever a handful of rows.
+RING_SCAN = 8
+# The event kinds `_last_ring` reconstructs a ring's state from. `ring_sent` opens a cycle;
+# `ring_confirmed`/`ring_unconfirmed` close it; `ring_repaired` is one attempt, and is
+# COUNTED — it is written by `_claim_repair` before the send rather than after it, so the
+# row is the claim on the slot and not a report of having used one.
+#
+# `ring_repair_failed` is deliberately absent. It annotates a `ring_repaired` whose send
+# then raised; counting it too would spend two of `RING_REPAIRS` on one attempt.
+RING_OPEN = "ring_sent"
+RING_TRY = "ring_repaired"
+RING_CLOSED = ("ring_confirmed", "ring_unconfirmed")
 
 class AgentNameTaken(ValueError):
     """Somebody else holds this agent name.
@@ -3783,7 +3803,13 @@ class Broker:
                              max_len=validate.MAX_PROMPT)
         body = f"{tag(me)} {self._say('notify.preset', name=name, text=line)}"
         mid = store.put_message(self.db, from_agent=me, to_agent=me, kind="tell", body=body)
-        if self._ring(me, body, mode=NEXT_TURN):
+        # `repair=False`: this is the one ring whose TEXT is the payload, so the repair
+        # `_confirm_rings` makes for every other doorbell — send it again — would paste the
+        # whole preset into the pane a second time. A doorbell can be repeated because it
+        # says nothing; a procedure cannot. So a preset whose Enter was dropped stays
+        # unrepaired, exactly as it is today, and the ring is recorded only so the log says
+        # what happened.
+        if self._ring(me, body, mode=NEXT_TURN, repair=False):
             store.mark_collected(self.db, mid)
         # A ring that did not land leaves the row undelivered and unread on purpose: it is
         # then an ordinary queued message, re-rung by `flush_pending`, and the caller reads
@@ -4585,6 +4611,165 @@ class Broker:
             return str(e)
         return None
 
+    # -- the automatic sweep -------------------------------------------------------------
+
+    def sweep(self, *, dry_run: bool = False, now: Optional[float] = None) -> dict:
+        """Delete every worktree that has nothing left to lose. Runs unattended.
+
+        The trigger is `sb board`, twice an hour on the system clock — see
+        `switchboard/sweep.py`, which holds the schedule, the lock that keeps twenty
+        boards to one sweep, and every rule below that is not a gate. **No board running
+        means no sweep**, which is the accepted cost of not having a daemon.
+
+        This is the acting half, and it acts through exactly one command: every deletion
+        below is `workspace_close`'s, with its gates, its inventory, its process scan and
+        its ordering unchanged. Nothing here deletes anything itself, for the reason
+        `_close_empty_spaces` gives — a second implementation of "is it safe to delete
+        this directory" is the one thing this must not add. What this adds is the
+        POLICY that decides which safe deletions are also WANTED ones:
+
+          live agent > dirty tree > unpushed code > too young > delete
+
+        read cheapest-first and stopping at the first thing that holds. The first two are
+        the gate's own answers, taken from the listing rather than re-asked, so the whole
+        machine is scanned once for a sweep rather than once per space.
+
+        A refusal is never raised. A sweep looks at the whole fleet, most of it is held
+        back by something ordinary, and one space that will not close is not a reason to
+        abandon the ones that will. Everything held is returned with the reason it was
+        held, which is the half of this a person actually reads: the three worktrees in
+        the census holding unpushed code are meant to show up here every half hour until
+        somebody deals with them.
+        """
+        now = time.time() if now is None else now
+        me = self.whoami()
+        out: dict = {"swept": [], "held": [], "dry_run": dry_run, "at": int(now),
+                     "looked": 0}
+        gap = store.workspace_fill_gap(self.db)
+        if gap:
+            # The same refusal `workspace_close` opens with, made once instead of per
+            # space: with the store mid-rebuild nothing here can be trusted to name what
+            # it is about to delete.
+            out["stopped"] = gap
+            return out
+        git = sweep_mod.reader(self.repo)
+        try:
+            base = sweep_mod.base_ref(git)
+        except sweep_mod.Unknown as e:
+            out["stopped"] = str(e)
+            return out
+        # The one directory this must never be aimed at, established once and before
+        # anything is looked at rather than per space: not knowing where it is disqualifies
+        # the whole sweep, exactly as it refuses a single `workspace_close`.
+        primary = self._primary_checkout()
+        if primary is None:
+            out["stopped"] = ("git would not say where this repository's own checkout is")
+            return out
+        my_names, my_dirs = self._my_spaces(me)
+        for w in self.workspace_list()["workspaces"]:
+            name, checkout = w["name"], w["checkout"]
+            if w["verdict"] != store.CHECKOUT_OK:
+                continue                       # bare, retired, already gone, unreadable
+            if _same_dir(checkout, primary):
+                continue                       # the repository's own working tree
+            if name in my_names or any(live.is_under(d, checkout) for d in my_dirs):
+                continue                       # never the space the sweep is standing in
+            out["looked"] += 1
+            why, facts = self._sweepable(w, git=git, base=base, me=me, now=now)
+            if why is None and not dry_run:
+                try:
+                    self.workspace_close(name, me=me,
+                                         confirm=not sweep_mod.IGNORED_HOLDS)
+                except ValueError as e:        # whatever arrived while we were looking
+                    why = str(e)
+            if why is None:
+                out["swept"].append(name)
+            else:
+                out["held"].append({"name": name, "reason": why, **facts})
+        if not dry_run:
+            store.log_event(self.db, kind="sweep", swept=",".join(out["swept"]) or None,
+                            looked=out["looked"], held=len(out["held"]))
+        return out
+
+    def _sweepable(self, w: dict, *, git, base: str, me: str,
+                   now: float) -> tuple[Optional[str], dict]:
+        """None if this worktree may go, else the first thing that holds it — and why.
+
+        Order is cheapest-first and, where it is not, safest-first. The two facts that
+        come out of the listing (what is live in the directory, what git can see in it)
+        are free by the time this runs, so they are asked before any per-space git call.
+
+        Every unknown holds. A scan that could not be made, a git that would not answer, a
+        checkout whose branch nothing can name: none of those is evidence that there is
+        nothing to lose, and this is the one loop in switchboard that acts on its own
+        conclusions with nobody watching.
+        """
+        name, checkout = w["name"], w["checkout"]
+        facts: dict = {"checkout": checkout, "branch": w["branch"]}
+        if w["live_verdict"] == "unknown":
+            return ("this machine could not be asked what is running in it, and unknown "
+                    "is not empty"), facts
+        if w["live_verdict"] == "live":
+            who = ", ".join(sorted({p["command"] for p in w["live"]})[:3])
+            return f"{who} still running in it", facts
+        try:
+            self._records_gate(name, checkout, me=me)
+            self._filed_gate(name, me=me)
+        except ValueError as e:
+            return str(e), facts
+        weight = w["ignored"] or {}
+        if weight.get("dirty") is None:
+            return "git would not say what is in it", facts
+        if weight["dirty"]:
+            # Named rather than counted with the ignored files, because this is the one
+            # thing in a worktree that exists nowhere else, and a sweep's report is where
+            # it has to be visible: `sb workspace list` shows only an ignored count, and
+            # six dirty trees sat behind it unnoticed in the 2026-08-16 census.
+            facts["dirty"] = weight["dirty"]
+            return (f"{weight['dirty']} file(s) in it are modified or untracked — work "
+                    f"git can see, and the one thing with no copy anywhere"), facts
+        if sweep_mod.IGNORED_HOLDS and weight.get("unknown"):
+            return (f"{weight['unknown']} ignored file(s) nobody has looked at "
+                    f"(`sb workspace close {name} --yes`)"), facts
+        branch = self._branch_for(name, checkout) or w["branch"]
+        if not branch:
+            return "nothing names the branch it is on", facts
+        facts["branch"] = branch
+        try:
+            tip = sweep_mod.tip_of(git, branch)
+            left = sweep_mod.stranded(git, tip, base)
+            facts["stranded"] = len(left)
+            if left:
+                paths = sorted(sweep_mod.paths_of(git, left))
+                facts["docs_only"] = sweep_mod.docs_only(paths)
+                if not facts["docs_only"]:
+                    shown = ", ".join(paths[:3]) + ("..." if len(paths) > 3 else "")
+                    return (f"{len(left)} commit(s) on {branch} are on no remote and in "
+                            f"no history but this one, and they are not docs: {shown}"), facts
+            last_commit = sweep_mod.last_commit_at(git, tip)
+        except sweep_mod.Unknown as e:
+            return str(e), facts
+        facts["landed"] = not facts.get("stranded")
+        recent = sweep_mod.too_recent(last_commit, self._last_activity(name), now)
+        return (recent, facts) if recent else (None, facts)
+
+    def _last_activity(self, workspace: str) -> int:
+        """When anything last happened in this workspace, epoch seconds. 0 if nothing did.
+
+        Its agents' own rows and their events, which is every trace an agent leaves in the
+        store: spawned, ended, and every `sb` command in between. 0 is a checkout the
+        store has no rows for at all — git knows it and nothing else ever did — and it
+        reads as ancient, which leaves the commit clock deciding on its own.
+        """
+        r = self.db.execute(
+            "SELECT MAX(t) AS last FROM ("
+            "  SELECT MAX(created_at) AS t FROM agents WHERE workspace=?"
+            "  UNION ALL SELECT MAX(ended_at) FROM agents WHERE workspace=?"
+            "  UNION ALL SELECT MAX(created_at) FROM events WHERE agent IN ("
+            "    SELECT name FROM agents WHERE workspace=?))",
+            (workspace, workspace, workspace)).fetchone()
+        return int(r["last"] or 0)
+
     def live_descendants(self, name: str) -> list[str]:
         """Descendants of `name` whose work is still going. The invariant's one predicate.
 
@@ -5243,18 +5428,23 @@ class Broker:
         sweep is this loop rather than a migration: it costs nothing when there is none,
         and it happens once per message rather than on every command like the ring it
         replaces.
+
+        And it is where doorbells ALREADY RUNG get checked — `_confirm_rings`, a second
+        pass that runs whether or not anything was pending for the first. That is the whole
+        reason the confirmation lives here rather than in `tell`: a ring whose Enter the
+        terminal dropped needs somebody to notice, most rings are not a `tell` at all, and
+        the only thing that already looks at every mailbox without being on anybody's
+        critical path is this method.
         """
-        # The human is excluded because they are not an agent and have no doorbell. Nothing
-        # is addressed to them any more, but a store written before the human mailbox was
-        # removed still holds rows that would otherwise be retried on every command.
-        pending = store.unseen(self.db, exclude=(HUMAN,))
-        if not pending:
-            return []
         if refresh:
             self._alive_cache = None
             self._bound_cache = set()
             self._pane_cache = {}
             self._alive_unknown = False
+        # The human is excluded because they are not an agent and have no doorbell. Nothing
+        # is addressed to them any more, but a store written before the human mailbox was
+        # removed still holds rows that would otherwise be retried on every command.
+        pending = store.unseen(self.db, exclude=(HUMAN,))
         rung = []
         for who in dict.fromkeys(m["to_agent"] for m in pending):
             mine = [m for m in pending if m["to_agent"] == who]
@@ -5275,7 +5465,221 @@ class Broker:
             senders = ", ".join(dict.fromkeys(m["from_agent"] for m in mine))
             if self._ring(who, f"{tag(senders)} {self._say('notify.mail')}", answer=answer):
                 rung.append(who)
+        self._confirm_rings(skip=rung)
         return rung
+
+    def _confirm_rings(self, *, skip: Sequence[str] = ()) -> None:
+        """Did the doorbells we rang actually get SUBMITTED — and send again the ones that
+        did not.
+
+        The repair for the failure `sb tell` could not see. `agent prompt` types the text
+        into the pane and presses Enter inside herdr, out of this repo's reach; when the
+        machine is loaded the paste can land and the Enter be dropped, and every layer above
+        reports success — `Herdr.prompt` returns clean, `_ring` marks the message delivered,
+        `sb tell` tells the sender it arrived. The text then sits unsubmitted in the
+        recipient's box for ever, and the message is stranded with nobody aware. Andrew hit
+        exactly this: "when my computer was lagging, it inserted prompts via tell but the
+        enter didn't go through."
+
+        OFF EVERYBODY'S TURN, which is the whole shape of it. Next-turn delivery waits for
+        nothing and cancels nothing (DESIGN-TRUTH: "`sb tell` has three delivery modes."),
+        and it still does not: routing the doorbell through `Herdr.deliver` instead was
+        measured at three to six minutes per `tell`, ending in a false failure, because that
+        proof cannot see a submission to a busy agent at all until its turn ends. And the
+        confirmation has to cover EVERY doorbell, not just `tell`'s:
+        most rings come from `flush_pending` itself and from `done`'s poke to a parent, and
+        `flush_pending` is on the critical path of every `sb` command any agent runs. So the
+        confirmer is the one thing already looking that nobody is waiting on.
+
+        **The proof is the target's own transcript** (`output.submitted_since`), read from
+        its own session file rather than its cwd — several agents share one cwd under
+        `delegate`, and a sibling's turn must not confirm our doorbell. Not the prompt box:
+        Claude Code renders the previous input as a ghost suggestion in an EMPTY box, so a
+        capture cannot tell a stuck paste from a clean send, and the doorbell's own text is
+        what the ghost says right after a successful one.
+
+        **The repair is a RE-SEND, never an Enter.** `Herdr._rescue` presses Enter on
+        whatever is in the box without looking, which is the right trade for an interrupt —
+        its text is the message, so a second `prompt` would duplicate it — and the wrong one
+        here. A doorbell carries no payload, so sending it again costs the recipient one
+        wasted `sb inbox`; a blind Enter can submit a human's half-typed text or answer a
+        modal dialog (`herdr.py:648-655` records a live `agent start` returning
+        `interactive_ready` over a workspace-trust prompt).
+
+        It stays free when nothing is outstanding, which is the property `flush_pending` is
+        allowed on every command for: one store query, then a transcript tail per agent with
+        a ring in flight, and **herdr is asked nothing at all** unless there is a repair to
+        make. A repair additionally takes the store's write lock for two statements
+        (`_claim_repair`) — only ever on the path that was about to shell out to herdr
+        anyway, never on the common one.
+
+        **The cap is enforced by the claim, not by the read.** Everything this loop decides
+        before `_claim_repair` is read without holding anything, so under concurrency it is
+        already stale — see there for the four-way race it cost.
+
+        `skip` is the names this pass has just rung. `RING_SETTLE` already excludes them —
+        a ring made a moment ago is far too young to judge — but the re-entrancy is worth
+        refusing outright rather than by arithmetic: `flush_pending` is itself a `_ring`
+        caller, and confirming and re-ringing the same agent in one pass is a loop.
+        """
+        # "We rang, and they still have not read it" — the exact set worth asking about.
+        # Mail already read needs no confirmation whatever happened to the keystroke, and
+        # mail never rung has no ring to confirm.
+        outstanding = self.db.execute(
+            "SELECT DISTINCT to_agent FROM messages "
+            "WHERE read_at IS NULL AND delivered_at IS NOT NULL"
+        ).fetchall()
+        now = store.now()
+        for row in outstanding:
+            who = row["to_agent"]
+            if who == HUMAN or who in skip:
+                continue
+            ring = self._last_ring(who)
+            # Aged from the LAST thing we did about this ring, not from the first. Every
+            # `sb` command any agent runs comes through here, and in a live fleet that is
+            # constantly: gating on the original send meant the moment a ring went unproved,
+            # the next two commands repaired it back to back — measured live, both repairs
+            # inside the same second, the second one sent before the first could possibly
+            # have been taken. Each attempt gets its own window to show up in.
+            if ring is None or now - ring["last"] < RING_SETTLE:
+                continue
+            a = store.get_agent(self.db, who)
+            path = store.transcript_path(a) if a is not None else None
+            if path is None:
+                # No session file to read, so there is no evidence either way — and "we
+                # cannot see" is not "it did not arrive". Re-sending on blindness would be a
+                # standing tax on every message to such an agent rather than a repair, so
+                # this closes the ring unproved and leaves it exactly as it was before any
+                # of this existed.
+                store.log_event(self.db, kind="ring_unconfirmed", agent=who,
+                                reason="no_transcript", repairs=ring["tries"])
+                continue
+            if output.submitted_since(path, ring["text"], since=ring["at"]):
+                store.log_event(self.db, kind="ring_confirmed", agent=who,
+                                after=now - ring["at"], repairs=ring["tries"])
+                continue
+            if not ring["repair"]:
+                # `apply_preset` — the ring whose text IS the payload. See its call site.
+                store.log_event(self.db, kind="ring_unconfirmed", agent=who,
+                                reason="payload", repairs=ring["tries"])
+                continue
+            if ring["tries"] >= RING_REPAIRS:
+                # Today's behaviour, reached deliberately instead of by default: the message
+                # keeps its place in the store and in that agent's `sb inbox`, and this is
+                # the line that says nobody could prove it was ever announced.
+                store.log_event(self.db, kind="ring_unconfirmed", agent=who,
+                                reason="exhausted", repairs=ring["tries"])
+                continue
+            # Everything above this line was read without holding anything, so all of it is
+            # advisory by the time we act on it. The slot is taken here or not at all.
+            attempt = self._claim_repair(who, ring, now)
+            if attempt is None:
+                continue
+            try:
+                self.h.prompt(who, ring["text"])
+            except HerdrError as e:
+                store.log_event(self.db, kind="ring_repair_failed", agent=who,
+                                attempt=attempt, error=str(e))
+
+    def _claim_repair(self, who: str, ring: dict, now: int) -> Optional[int]:
+        """Take the next repair slot for this ring, or None if there is not one to take.
+
+        The claim is written BEFORE the send, inside one write transaction, and it is what
+        `RING_REPAIRS` actually counts. Reading a count and then sending does not cap
+        anything across processes, and this is not theoretical — qa-12 reproduced it: four
+        concurrent `_confirm_rings`, each on its own connection to one store, all read
+        `tries=0`, all believed they were repair number one, and all four sent. The cap held
+        only for a single serialized stream of `sb` commands, and `flush_pending` runs at
+        the head of every `sb` command every agent in the fleet runs. It is a resonance, not
+        a corner: the load that makes an Enter drop is the load that puts many commands
+        inside one race window.
+
+        `BEGIN IMMEDIATE` rather than an `fcntl` lock file (`_fork_lock`'s answer to the
+        same shape of problem) because the contended thing here IS the store, and SQLite
+        already serializes writers to it. Taking the write lock up front is what makes the
+        count and the insert one indivisible step — a plain `SELECT` would run outside the
+        transaction pysqlite starts for the `INSERT`, which is exactly the gap being closed.
+        Nothing slow happens inside: no herdr call, no file read, two statements.
+
+        Re-checked inside the lock, not trusted from `_last_ring`: the count of attempts,
+        and that nothing has closed the ring since. `ring["tries"]` is the stale read that
+        got us here and is used for nothing but deciding whether to try.
+        """
+        claimed: Optional[int] = None
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            holes = ",".join("?" * len(RING_CLOSED))
+            settled = self.db.execute(
+                f"SELECT 1 FROM events WHERE agent=? AND id>? AND kind IN ({holes}) LIMIT 1",
+                (who, ring["id"], *RING_CLOSED),
+            ).fetchone()
+            n = self.db.execute(
+                "SELECT COUNT(*) n FROM events WHERE agent=? AND id>? AND kind=?",
+                (who, ring["id"], RING_TRY),
+            ).fetchone()["n"]
+            if settled is None and n < RING_REPAIRS:
+                claimed = n + 1
+                self.db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (who, RING_TRY,
+                     json.dumps({"attempt": claimed, "after": now - ring["at"]}), now),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return claimed
+
+    def _last_ring(self, who: str) -> Optional[dict]:
+        """The newest doorbell for this agent that is still waiting for a verdict.
+
+        None for both ways there is nothing to do — no ring on record, and a ring already
+        confirmed or given up on — because the caller does the same thing with either.
+
+        Read back out of the event log rather than off a column, for the reason
+        `unreachable` reads `ring_failed` there: it is an observation about one send, not a
+        state of the agent, and `delivered_at` already means "we rang" to fifteen tests,
+        `sb tell`'s own report, `status._undelivered_counts` and the collector. A second
+        meaning on that column would break all four; a row in a log that already exists
+        breaks nothing and needs no schema change.
+
+        A `ring_sent` with no verdict after it is an open ring; the repair rows between
+        them are the attempts already made. Two sends with no verdict between them — two
+        messages arriving inside one settle window — leave the older one open for ever, and
+        that is right: both doorbells announce the same mailbox, so the newer one supersedes
+        it entirely.
+
+        `at` is when the doorbell first went out, and is what the proof is dated from: a
+        record written any time since then answers for it. `last` is when we last did
+        anything about it, send or repair, and is what the settle window is measured
+        against — see `_confirm_rings`.
+
+        Everything here is a READ, held under nothing, so `tries` is advisory: by the time
+        the caller acts on it another `sb` process may have claimed the slot it describes.
+        `id` is what makes the real decision possible — it anchors `_claim_repair`'s count
+        to this cycle, inside the write transaction where the answer cannot go stale.
+        """
+        holes = ",".join("?" * (2 + len(RING_CLOSED)))
+        rows = self.db.execute(
+            f"SELECT id, kind, payload, created_at FROM events "
+            f"WHERE agent=? AND kind IN ({holes}) ORDER BY id DESC LIMIT ?",
+            (who, RING_OPEN, RING_TRY, *RING_CLOSED, RING_SCAN),
+        ).fetchall()
+        tries = 0
+        last = None
+        for r in rows:
+            if r["kind"] in RING_CLOSED:
+                return None
+            if last is None:
+                last = r["created_at"]
+            if r["kind"] != RING_OPEN:
+                tries += 1
+                continue
+            payload = json.loads(r["payload"]) if r["payload"] else {}
+            return {"id": r["id"], "at": r["created_at"], "last": last, "tries": tries,
+                    "text": payload.get("text") or "",
+                    "repair": bool(payload.get("repair"))}
+        return None
 
     def _pane_still_listed(self, who: str) -> bool:
         """Does herdr still have a pane for this agent — under any name, bound or not?
@@ -5368,7 +5772,7 @@ class Broker:
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
     def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
-              answer: bool = False) -> bool:
+              answer: bool = False, repair: bool = True) -> bool:
         """The doorbell. Carries no payload — the message is in the store.
 
         `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`), and the
@@ -5415,6 +5819,21 @@ class Broker:
         no such retry worth waiting for, because "later" is precisely what it was refusing,
         so that one raises instead of quietly returning False. A failed *next-turn* ring is
         an ordinary failed doorbell: the row stays undelivered and is retried.
+
+        A ring that SUCCEEDS is now recorded too — `ring_sent`, carrying the text and the
+        moment. Nothing about the send waits on it: it is a note for `_confirm_rings`, which
+        runs off everybody's turn and asks, later, whether the text the terminal accepted
+        was ever actually submitted. `agent prompt` cannot answer that (`Herdr.prompt`'s own
+        docstring: its return "reflects state BEFORE the prompt lands"), and the failure it
+        hides — pasted into the box, Enter dropped, `sb tell` reporting success — stranded
+        the message for ever with nobody aware. `delivered_at` is deliberately NOT reused
+        for this: it means "we rang", fifteen tests and three readouts say so, and
+        confirmation is a different fact.
+
+        `repair=False` says: record this ring, but never send it again. For every caller
+        but one the doorbell is a doorbell — no payload, so a duplicate costs the recipient
+        a wasted `sb inbox` and nothing else. `apply_preset` is the exception, because there
+        the ring's TEXT is the payload; see its call site.
         """
         force = mode == INTERRUPT
         if who == HUMAN:
@@ -5464,6 +5883,17 @@ class Broker:
             if force:
                 raise Undeliverable(who, e) from e
             return False
+        if mode != INTERRUPT:
+            # Not the interrupt: that one was already proved on the send (`Herdr.deliver`,
+            # via `_deliver_interrupt`), so a second pass has nothing to add and re-sending
+            # it would duplicate a payload rather than repeat a doorbell.
+            #
+            # The text goes in verbatim, not clipped: it is both the needle
+            # `_confirm_rings` looks for in the target's transcript and the string it would
+            # send again, and a prefix is no good as the second of those. Doorbells are one
+            # short line; the only long one is a preset, which is recorded for the first
+            # reason and re-sent for neither.
+            store.log_event(self.db, kind="ring_sent", agent=who, text=text, repair=repair)
         store.mark_delivered(self.db, who)
         return True
 
@@ -5548,10 +5978,11 @@ class Broker:
 
         Read from the event log rather than a column on the row, because it is an
         observation and not a state — and disproved by a later DELIVERY rather than by an
-        event of its own. A successful ring deliberately writes nothing to the log: those
-        rows are `status._last_activity`'s idea of an agent having done something, and a
-        doorbell is somebody else acting, so logging one would reset the idle clock on
-        exactly the silent agent a person is trying to spot.
+        event of its own. Every ring writes a row now, the successful ones included
+        (`ring_sent`, which `_confirm_rings` reads back), and all of them are in
+        `status.DONE_TO_THE_AGENT` — a doorbell is somebody else acting, and counting one as
+        activity would reset the idle clock on exactly the silent agent a person is trying
+        to spot.
 
         `sb tell` uses it to stop promising delivery it cannot make.
 

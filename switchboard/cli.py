@@ -267,6 +267,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "one that is genuinely stuck)")
     c.add_argument("--dry-run", action="store_true")
 
+    # Hidden for `board`'s reason: it is a human's housekeeping, not an agent's
+    # vocabulary, and it is refused for an agent caller in `_dispatch` rather than merely
+    # hidden. A board runs it twice an hour on its own (`switchboard/sweep.py`); this is
+    # the same run, typed, and it is how a person sees what the automatic one would do.
+    sw = cmd("sweep", hidden=True,
+             description="Delete every worktree with nothing left to lose: no live agent, "
+                         "nothing git can see uncommitted, its commits merged or pushed "
+                         "(or docs-only), and quiet for over a day on both clocks. Every "
+                         "deletion is `sb workspace close`'s, gates and all.")
+    sw.add_argument("--dry-run", action="store_true",
+                    help="say what would go and what holds each of the rest, delete nothing")
+
     # No `new` here. A space is minted by ONE path — a top's `sb delegate` — and this verb
     # is what is left of workspaces once that is true: the two read/teardown halves, which
     # are the human's, not an agent's. See DESIGN-TRUTH.md's "`sb workspace new` is
@@ -1144,6 +1156,31 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                "spaces": list(names.spaces),
                "spaces_refused": [{"name": n, "reason": why}
                                   for n, why in names.spaces_refused]})
+        return 0
+
+    if cmd == "sweep":
+        # Human-only, and gated the same way `board` is rather than merely hidden: this
+        # deletes checkouts across the whole fleet, which is nobody's subtree. The board
+        # that runs it on a schedule is a human's pane and resolves to the human here.
+        if me != broker_mod.HUMAN:
+            print(f"sb: sweep is the human's housekeeping; you are '{me}'.\n"
+                  f"    `sb cleanup` is yours, and it is scoped to your own subtree.",
+                  file=sys.stderr)
+            return 1
+        d = b.sweep(dry_run=args.dry_run)
+        verb = "would delete" if args.dry_run else "deleted"
+        text = f"{verb}: {', '.join(d['swept']) or '(nothing)'}"
+        if d.get("stopped"):
+            text = f"nothing swept: {d['stopped']}"
+        # Every held space gets a line, unlike `cleanup`'s sweep, which stays quiet about
+        # the ordinary ones. This is the readout that has to name the three worktrees
+        # holding unpushed code every half hour until somebody deals with them, and a
+        # sweep that printed only what it deleted would be the silence this whole change
+        # is about. It is a hidden verb a person types, not something an agent reads.
+        for h in d["held"]:
+            text += f"\n  kept {h['name']}: {h['reason']}"
+        text += f"\n({d['looked']} worktree(s) looked at)"
+        _emit(args, text, d)
         return 0
 
     if cmd == "workspace" and args.wcmd == "list":
