@@ -183,8 +183,8 @@ from the child's report. It does not spawn another agent to verify progress unle
 genuinely needed.
 
 **A child may tick its own step when confident, and hand the decision up when not.** The
-moment to say so is when it calls `sb done`: that output prompts it to mark the step done
-if confident, and to return it to the parent if not.
+moment to say so is when it calls `sb done`. Prompting it there means decorating a core
+verb, which is deferred, so until then it is told at spawn.
 
 **A step carries a try count, and a count above one is rendered.** Rework is a step
 re-entering progress after being done — a failed review sends its step back — so repetition
