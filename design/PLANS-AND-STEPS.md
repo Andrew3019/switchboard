@@ -32,10 +32,14 @@ on it.
 
 ## Vocabulary
 
-Three words, chosen to collide with nothing else in the system. `task` is not available for
-any of them: it is already the agent's own task — its store column, its `sb delegate`
-argument, and the protocol's "the task you were given". Neither is `preset`, which is
-already prompt text injected at spawn.
+Three words. `task` was not available for any of them: it is already the agent's own task —
+its store column, its `sb delegate` argument, and the protocol's "the task you were given".
+Neither was `preset`, which is already prompt text injected at spawn.
+
+`plan` is not perfectly clear either. The lead role already says "Plan, then re-plan", of a
+plan a lead holds in its head and never writes down. That is the same activity, which is why
+the word was taken — but a lead can read the two as already satisfied, so the lead role has
+to say plainly that the plan is now a thing it writes.
 
 **Step** — the unit. What an agent owns, what gets ticked, what carries a try count and
 notes.
@@ -62,6 +66,10 @@ agent-driven rather than modelled.
 
 **Semi-structured and changeable at any time.** More structured than a todo list, less
 rigid than a fixed workflow. Not Claude's internal todos, not a flat list.
+
+**Changed through the plugin's commands, not by editing the file.** Being interpreted rather
+than executed is about what a plan *means*; it is still written through one door. Obliged
+steps are added on that path, and a plan hand-edited around it gets none of them.
 
 **Interpreted, never executed.** A plan is read and acted on by an agent, not run by a
 machine. Nothing evaluates it, and there is no workflow engine around it.
@@ -101,11 +109,18 @@ the outcome is known and there is a clear path from what was found through to a 
 Investigation still appears as a step when it is one piece of an already-shaped job.
 
 **There is a plan-making instruction for the lead**, explaining clearly how all of this is
-done. It is read when the job comes up rather than carried on every spawn, the way the
-adversarial procedure already works.
+done. It is read when the job comes up rather than carried on every spawn.
+
+**The trigger travels at spawn, even though the instruction does not.** Every agent is told
+the one line that makes the lookup happen — if your work is heading for a change that will
+land, go and read the plan-making instruction. Knowing plans exist is not the same as knowing
+when to make one, and an agent that has to infer the second will not. This is the difference
+from the adversarial procedure, where a human says the words that start it.
 
 **The worktree's owner creates the plan and chooses the template** — the lead of that
-worktree, or the sole worker where there is no lead.
+worktree, or the sole worker where there is no lead. A sole worker counts as a lead here, and
+its role has to say so: the worker role otherwise tells it to carry one task and do nothing
+beyond it, which reads as a reason not to.
 
 **Templates are browsable, and one is found rather than named up front.** Nobody has to
 know at the start of a job that a template exists for it: the lead looks once the work is
@@ -115,7 +130,10 @@ shaped, and takes one if it fits.
 of agents and worktrees; it does not plan, own, tick or read one.
 
 **A plan may be created with some of its steps already done.** Nothing requires one to
-start empty.
+start empty — but a gate step may not be one of them. A gate exists to be reached before the
+work it guards, so a plan authored after the fact does not get to mark it already passed. If
+the work is already past that point, the gate is skipped with a reason, which is visible,
+rather than born complete, which is not.
 
 ---
 
@@ -230,6 +248,12 @@ collapsing a step into the agent before it never loses the gate.
 Where a gate needs him the owning agent blocks, the step shows its owner blocked, and
 answering the agent clears both. There is no unblocking a gate through the plan.
 
+**A child at a gate does not finish the lead.** The protocol has a parent report done and
+step aside when a child blocks, so that only one agent waits on a person. That is right for a
+child's own question and wrong here: a gate is the plan's, and the lead is what assigns the
+next step once it clears. So the lead stays until its plan is complete, and says who is
+waiting without standing down.
+
 **A gate's message may show the plan** where showing it helps.
 
 **Two blocks is the shape of a job, not a ceiling.** A plan that lands a change has a
@@ -306,6 +330,10 @@ only its own step, so sending the whole plan to a worker is context spent for no
 spawn prompt is the carrier for now; decorating the core verbs — a step line on `sb inbox`,
 a prompt on `sb done`, a column on `sb status` — is deferred rather than dropped.
 
+**So a step applied to an agent already running is deferred with them.** Until a core verb
+carries it, a step reaches its owner at spawn and nowhere else, which means the in-place path
+— confirmation inside the designer agent rather than in a new one — waits for the same work.
+
 ---
 
 ## Records, and what they are for
@@ -349,9 +377,19 @@ almost empty.
 
 ## Shipping it
 
-**It ships as a plugin, and switching it off restores today's behaviour exactly.** Disabled
-means no agent is ever told plans exist, so none are made. Deleting the folder behaves like
-off, and putting it back behaves like on.
+**It ships as a plugin. Switching it off stops plans being made, and does not restore the
+old prose.** Disabled means no agent is ever told plans exist, so none are made; deleting the
+folder behaves like off and putting it back behaves like on. What does not come back is the
+approval, push and merge guidance the gates replaced — that text is in the protocol and the
+role files, not in the plugin, so once it is cut back to a pointer it stays cut. Off is
+therefore today's behaviour minus that prose, which is a weaker promise than off being
+identical, and is the honest one.
+
+**The merge gate cannot ship before those cuts land.** Until they do, an agent running it
+reads the gate telling it to merge and three separate texts telling it never to merge without
+its parent — the protocol, the house rules and `DESIGN-TRUTH.md`. The last time an injected
+instruction contradicted the protocol about pushing, four agents in one session resolved it
+differently, some pushing and some handing the work back. Same change, or not yet.
 
 **The board needs a hook for it.** Rendering plans under their worktree is the one thing the
 plugin cannot do from outside, so the board grows an extension point rather than knowledge
@@ -359,6 +397,26 @@ of plans.
 
 **Everything else lives in the plugin** — its commands, its state, and the prompt text that
 tells agents plans exist.
+
+---
+
+## Known limitations
+
+Named because they are real and accepted for now, not because they are solved.
+
+**A plan that was never made is invisible.** The design is careful that a skipped step is a
+state with a reason on the board rather than an absence — but the same argument applies one
+level up and nothing carries it there. A worktree whose owner decided no plan was needed
+looks exactly like one whose owner never considered it, and the judgement that starts a plan
+is made by the agent a plan would constrain. Making a declared no-plan a recorded state would
+close it; whether that ceremony is worth paying on every investigation and question is
+Andrew's call and is not yet made.
+
+**The record is biased toward jobs that went well.** Ticking and note-writing are voluntary
+acts by an agent that is still on top of its job. A run that derails stops being written
+down, so the analysis pass reads a sample thinnest in exactly the runs it exists to find.
+Accepted because nothing else is load-bearing on the records: the cost is a weaker analysis
+pass, not a broken job.
 
 ---
 
