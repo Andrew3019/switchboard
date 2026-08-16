@@ -21,12 +21,28 @@ having.
 
 Today everything asks Andrew, three times over: whether to create the PR, whether to merge,
 whether to clean up. Each is a decision he is made to take one at a time. Removing them is a
-large part of the point.
+large part of the point. Two of those are the system's; the first is this repo's own house
+rule, and could be loosened today by editing one line — worth knowing before building
+anything.
 
-It is also how the work process becomes legible. A finished plan is evidence of how a job
-actually ran, and that evidence is what shows where the system should be faster, more
-abstracted, or better tooled. Integral to the system, though nothing else is load-bearing
-on it.
+**The two gates are a ceiling, not a floor.** Today's three approvals are guaranteed. A gate
+is a step's exit condition and a step may be skipped with a reason, so under this design he
+is asked at most twice and possibly not at all. The exchange is that a skip is recorded and
+visible where a missing approval never was — which is a duty to look rather than a promise to
+be asked, and he accepts it deliberately.
+
+**Cost per decision goes up as the count goes down, and that is the trade.** Today's three
+sit at the end of a job, are close to yes or no, and never need him to understand the fix.
+The design gate lands mid-job, asks him to judge a behavioural contract before any code
+exists, and holds the lead and everything under it while he thinks. Catching a wrong design
+before it is built is worth that; it is a trade rather than a removal.
+
+It is also how the work process becomes legible, though that half is a bet rather than a
+delivery. What lands immediately is that a running job can be looked at — its shape, and who
+is on what. Everything beyond that is addressed to a later reader: a finished plan as evidence
+of how a job actually ran, and an analysis pass that reads many of them. The known limitations
+below concede three defects that all land on that same future reader, so it is worth building
+and is not yet worth leaning on.
 
 ---
 
@@ -267,7 +283,10 @@ Two agents in one worktree on one step is the collision nothing prevents.
 
 **If the lead itself dies, the plan dies with it.** Nobody else can carry it: the agent above
 is a dispatcher, and dispatchers are never involved in plans. This is accepted rather than
-solved.
+solved — but what Andrew does about it is written down rather than left to the moment. He
+starts a new lead, which makes a new plan, and the gates he has already cleared are skipped
+with the reason naming the plan that cleared them. He never edits a plan to recover one, since
+that would be the second write path this design exists without.
 
 **On a child's report the lead verifies progress and decides whether to tick.** Quickly,
 from the child's report. It does not spawn another agent to verify progress unless that is
@@ -321,7 +340,10 @@ child's own question and wrong here: a gate is the plan's, and the lead is what 
 next step once it clears. So the lead stays until its plan is complete, and says who is
 waiting without standing down.
 
-**A gate's message may show the plan** where showing it helps.
+**A gate's message may show the plan** where showing it helps, **and may name the other plan
+this job is part of.** Plans stay isolated as state; that isolation must not reach the message,
+or a change spanning two worktrees asks him to approve half a contract twice with the sentence
+that would explain it ruled out.
 
 **Two blocks is the shape of a job, not a ceiling.** A plan that lands a change has a
 design gate and a merge gate, and everything else resolves without him. Nothing enforces a
@@ -334,8 +356,20 @@ behavioural contract of the fix. Two sections, ordered step by step: what is cau
 problem, and what the fix will be — not necessarily a step-by-step capture of the fix
 itself, but an ordered account for his understanding.
 
-The format is fixed: bullets indented with `-`, then `---`, then `-----`, each bullet
-twelve words at most. Implementation begins only after he confirms.
+The format is fixed: bullets indented with `-`, then `---`, then `-----`, each bullet twelve
+words at most. Note this is tighter than the standing human-facing rule, which allows about
+twenty for a genuinely tangled point — and a behavioural contract is where the conditions and
+fallbacks live. Twelve is Andrew's number and stands; what it costs is that one proposition
+with three conditions becomes several bullets whose logical structure has to survive the
+split.
+
+**A gate message may point at a fuller artifact.** Anything that does not fit the format is
+referenced rather than crammed into it, so the short version is never the only version
+available to him.
+
+**A trivially small change may skip this step, with the reason recorded.** The relief is the
+ordinary one every step has, and it is named here so nobody has to assemble it from three
+sections: a behavioural contract for a typo is a block nobody wants.
 
 ### The merge gate
 
@@ -348,7 +382,10 @@ The review-and-review-again behavioural gate has been run by this point. The mes
 the design gate: concise, simply explained.
 
 Once he approves, everything else happens automatically — merge, cleanup, delete worktrees,
-close agents. No further questions.
+close agents. No further questions **means no routine ones**: if any part of that chain fails
+— the merge conflicts, checks are red, a teardown does not complete — the agent blocks. The
+approval covers the routine path, and it is given before the merge is attempted, so the
+failure case is the one thing it cannot have covered.
 
 ### Both gates
 
