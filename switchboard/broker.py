@@ -48,6 +48,7 @@ from . import output
 from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
+from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
@@ -4584,6 +4585,165 @@ class Broker:
         except ValueError as e:
             return str(e)
         return None
+
+    # -- the automatic sweep -------------------------------------------------------------
+
+    def sweep(self, *, dry_run: bool = False, now: Optional[float] = None) -> dict:
+        """Delete every worktree that has nothing left to lose. Runs unattended.
+
+        The trigger is `sb board`, twice an hour on the system clock — see
+        `switchboard/sweep.py`, which holds the schedule, the lock that keeps twenty
+        boards to one sweep, and every rule below that is not a gate. **No board running
+        means no sweep**, which is the accepted cost of not having a daemon.
+
+        This is the acting half, and it acts through exactly one command: every deletion
+        below is `workspace_close`'s, with its gates, its inventory, its process scan and
+        its ordering unchanged. Nothing here deletes anything itself, for the reason
+        `_close_empty_spaces` gives — a second implementation of "is it safe to delete
+        this directory" is the one thing this must not add. What this adds is the
+        POLICY that decides which safe deletions are also WANTED ones:
+
+          live agent > dirty tree > unpushed code > too young > delete
+
+        read cheapest-first and stopping at the first thing that holds. The first two are
+        the gate's own answers, taken from the listing rather than re-asked, so the whole
+        machine is scanned once for a sweep rather than once per space.
+
+        A refusal is never raised. A sweep looks at the whole fleet, most of it is held
+        back by something ordinary, and one space that will not close is not a reason to
+        abandon the ones that will. Everything held is returned with the reason it was
+        held, which is the half of this a person actually reads: the three worktrees in
+        the census holding unpushed code are meant to show up here every half hour until
+        somebody deals with them.
+        """
+        now = time.time() if now is None else now
+        me = self.whoami()
+        out: dict = {"swept": [], "held": [], "dry_run": dry_run, "at": int(now),
+                     "looked": 0}
+        gap = store.workspace_fill_gap(self.db)
+        if gap:
+            # The same refusal `workspace_close` opens with, made once instead of per
+            # space: with the store mid-rebuild nothing here can be trusted to name what
+            # it is about to delete.
+            out["stopped"] = gap
+            return out
+        git = sweep_mod.reader(self.repo)
+        try:
+            base = sweep_mod.base_ref(git)
+        except sweep_mod.Unknown as e:
+            out["stopped"] = str(e)
+            return out
+        # The one directory this must never be aimed at, established once and before
+        # anything is looked at rather than per space: not knowing where it is disqualifies
+        # the whole sweep, exactly as it refuses a single `workspace_close`.
+        primary = self._primary_checkout()
+        if primary is None:
+            out["stopped"] = ("git would not say where this repository's own checkout is")
+            return out
+        my_names, my_dirs = self._my_spaces(me)
+        for w in self.workspace_list()["workspaces"]:
+            name, checkout = w["name"], w["checkout"]
+            if w["verdict"] != store.CHECKOUT_OK:
+                continue                       # bare, retired, already gone, unreadable
+            if _same_dir(checkout, primary):
+                continue                       # the repository's own working tree
+            if name in my_names or any(live.is_under(d, checkout) for d in my_dirs):
+                continue                       # never the space the sweep is standing in
+            out["looked"] += 1
+            why, facts = self._sweepable(w, git=git, base=base, me=me, now=now)
+            if why is None and not dry_run:
+                try:
+                    self.workspace_close(name, me=me,
+                                         confirm=not sweep_mod.IGNORED_HOLDS)
+                except ValueError as e:        # whatever arrived while we were looking
+                    why = str(e)
+            if why is None:
+                out["swept"].append(name)
+            else:
+                out["held"].append({"name": name, "reason": why, **facts})
+        if not dry_run:
+            store.log_event(self.db, kind="sweep", swept=",".join(out["swept"]) or None,
+                            looked=out["looked"], held=len(out["held"]))
+        return out
+
+    def _sweepable(self, w: dict, *, git, base: str, me: str,
+                   now: float) -> tuple[Optional[str], dict]:
+        """None if this worktree may go, else the first thing that holds it — and why.
+
+        Order is cheapest-first and, where it is not, safest-first. The two facts that
+        come out of the listing (what is live in the directory, what git can see in it)
+        are free by the time this runs, so they are asked before any per-space git call.
+
+        Every unknown holds. A scan that could not be made, a git that would not answer, a
+        checkout whose branch nothing can name: none of those is evidence that there is
+        nothing to lose, and this is the one loop in switchboard that acts on its own
+        conclusions with nobody watching.
+        """
+        name, checkout = w["name"], w["checkout"]
+        facts: dict = {"checkout": checkout, "branch": w["branch"]}
+        if w["live_verdict"] == "unknown":
+            return ("this machine could not be asked what is running in it, and unknown "
+                    "is not empty"), facts
+        if w["live_verdict"] == "live":
+            who = ", ".join(sorted({p["command"] for p in w["live"]})[:3])
+            return f"{who} still running in it", facts
+        try:
+            self._records_gate(name, checkout, me=me)
+            self._filed_gate(name, me=me)
+        except ValueError as e:
+            return str(e), facts
+        weight = w["ignored"] or {}
+        if weight.get("dirty") is None:
+            return "git would not say what is in it", facts
+        if weight["dirty"]:
+            # Named rather than counted with the ignored files, because this is the one
+            # thing in a worktree that exists nowhere else, and a sweep's report is where
+            # it has to be visible: `sb workspace list` shows only an ignored count, and
+            # six dirty trees sat behind it unnoticed in the 2026-08-16 census.
+            facts["dirty"] = weight["dirty"]
+            return (f"{weight['dirty']} file(s) in it are modified or untracked — work "
+                    f"git can see, and the one thing with no copy anywhere"), facts
+        if sweep_mod.IGNORED_HOLDS and weight.get("unknown"):
+            return (f"{weight['unknown']} ignored file(s) nobody has looked at "
+                    f"(`sb workspace close {name} --yes`)"), facts
+        branch = self._branch_for(name, checkout) or w["branch"]
+        if not branch:
+            return "nothing names the branch it is on", facts
+        facts["branch"] = branch
+        try:
+            tip = sweep_mod.tip_of(git, branch)
+            left = sweep_mod.stranded(git, tip, base)
+            facts["stranded"] = len(left)
+            if left:
+                paths = sorted(sweep_mod.paths_of(git, left))
+                facts["docs_only"] = sweep_mod.docs_only(paths)
+                if not facts["docs_only"]:
+                    shown = ", ".join(paths[:3]) + ("..." if len(paths) > 3 else "")
+                    return (f"{len(left)} commit(s) on {branch} are on no remote and in "
+                            f"no history but this one, and they are not docs: {shown}"), facts
+            last_commit = sweep_mod.last_commit_at(git, tip)
+        except sweep_mod.Unknown as e:
+            return str(e), facts
+        facts["landed"] = not facts.get("stranded")
+        recent = sweep_mod.too_recent(last_commit, self._last_activity(name), now)
+        return (recent, facts) if recent else (None, facts)
+
+    def _last_activity(self, workspace: str) -> int:
+        """When anything last happened in this workspace, epoch seconds. 0 if nothing did.
+
+        Its agents' own rows and their events, which is every trace an agent leaves in the
+        store: spawned, ended, and every `sb` command in between. 0 is a checkout the
+        store has no rows for at all — git knows it and nothing else ever did — and it
+        reads as ancient, which leaves the commit clock deciding on its own.
+        """
+        r = self.db.execute(
+            "SELECT MAX(t) AS last FROM ("
+            "  SELECT MAX(created_at) AS t FROM agents WHERE workspace=?"
+            "  UNION ALL SELECT MAX(ended_at) FROM agents WHERE workspace=?"
+            "  UNION ALL SELECT MAX(created_at) FROM events WHERE agent IN ("
+            "    SELECT name FROM agents WHERE workspace=?))",
+            (workspace, workspace, workspace)).fetchone()
+        return int(r["last"] or 0)
 
     def live_descendants(self, name: str) -> list[str]:
         """Descendants of `name` whose work is still going. The invariant's one predicate.

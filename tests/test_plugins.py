@@ -1025,6 +1025,10 @@ class IsolationTest(Sandbox):
         # Its reconciler trigger, and level 0 for the same reason: it runs unattended on a
         # timer, so it must not be able to reach plugin code.
         "reconcile": [],
+        # The board's half-hourly worktree sweep, and level 0 for that same reason — it is
+        # the one verb that DELETES unattended, so the set of code it can reach while
+        # doing it is worth pinning here.
+        "sweep": [],
     }
 
     def test_1_every_level_0_verb_runs_to_completion(self):
