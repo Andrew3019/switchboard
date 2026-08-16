@@ -42,10 +42,11 @@ herdr held for `GONE_CONFIRM_GRACE`. Everything that flashes is inferred fresh e
   reported separately, an agent sitting in NEEDS YOU for several frames while its pane
   comes up.
 
-Caught live while watching the fleet read-only for 15 minutes: `agent-handoff-wording`
-entered NEEDS YOU for **2.7 s** and `codex-support` for **8.4 s**, both then working
-again. The two blocked agents in the same window held for 139 s and 247 s — a real block,
-which is why blocks are exempt from the debounce.
+Caught live while watching the fleet read-only for 15 minutes — three false summonses and
+no true ones: `agent-handoff-wording` entered NEEDS YOU for **2.7 s**, `codex-support` for
+**8.4 s** and `codex` for **13.5 s**, each then working again. The blocked agents in the
+same window held for 139 s, 241 s and 247 s — real blocks, which is why blocks are exempt
+from the debounce and why nothing about them changes.
 
 30 s is sized off the spawn tail, the only one of the three worth sizing against.
 
@@ -77,3 +78,7 @@ tests after it.
   flicker was caught in the 15-minute window, so its inclusion rests on it being the same
   shape of reading as the rest, not on a measurement.
 - Nothing was run against the live fleet's own board; the installed build was left alone.
+- The board HEADER is not debounced. `summary_bits` is the line `sb status` prints too, so
+  its `N stalled` still counts the row the summons is holding back — the count is honest
+  and this only decides when a human is called over. It means the header can say
+  `1 stalled` with NEEDS YOU empty for up to a settle window.
