@@ -564,8 +564,9 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
 
-    # The head is FOUR lines: the board's own bar, the two lines of fleet numbers, and the
-    # section bar that says the tree below it is the tree. Counted as ONE number because
+    # The head is SIX lines: the board's own bar, the `STATS` bar, the two lines of fleet
+    # numbers, the blank that separates them from what follows, and the section bar that
+    # says the tree below it is the tree. Counted as ONE number because
     # everything downstream — the body's room, the fill, and the frame's own height check
     # — is counted off it; which pieces that number is made of is only decided where the
     # head is drawn, and only ever by the two give-backs below.
@@ -849,24 +850,26 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
 
 
 def _stats_block(stats: Optional[dict], inner: int):
-    """The head's middle section: the fleet's numbers, two lines, above the tree.
+    """The head's middle section: `STATS`, the fleet's numbers, and a blank line.
 
-    NO BAR OF ITS OWN, which is the one visual call in here and the only place this
-    section departs from `AGENTS` and `NEEDS YOU`. It does not need one: it is already
-    delimited, by a filled bar directly above it and a filled bar directly below, and a
-    third bar between two bars would spend a third of a small section on the word STATS.
-    What a bar would have said, the two labels say better — they name the TIME FRAME each
-    line is counted over, which is the half a reader cannot infer from the numbers, where
-    a heading would only repeat what a line of counts already looks like.
+    A BAR OF ITS OWN, like `AGENTS` and `NEEDS YOU`. It was left out when this section
+    landed — two labels naming the time frames looked like heading enough, and the line
+    was worth more as a row of tree — and Andrew, reading the real board, asked for the
+    header anyway: a section on this screen is a filled bar with a word in it, and one
+    section drawn a different way reads as a section that is missing something. So it is
+    the same `_bar` in the same `SECTION_STYLE`, and the block below it ends in a blank
+    line so the numbers and the tree do not run into one another.
 
-    ALWAYS TWO LINES, whatever is known. A section that grew a line as the first sample
+    FOUR LINES, ALWAYS, whatever is known. A section that grew a line as the first sample
     landed would push the whole tree down half a second into every board's life, and the
     rows a human is reading would move under the cursor. `board.stats_rows` says what goes
-    on them; the width ladder is the header's — whole pieces, dropped from the right.
+    on the two middle ones; the width ladder is the header's — whole pieces, dropped from
+    the right. The whole block is given back together on a pane too short for it
+    (`layout`), header and blank included: half a section is not a smaller section.
     """
     from rich.text import Text
 
-    out = []
+    out = [_bar(" STATS", inner, SECTION_STYLE)]
     room = max(0, inner - 2 - board.STATS_LABEL_W - 2)
     for label, pieces in board.stats_rows(stats):
         line = Text(no_wrap=True, overflow="crop")
@@ -882,6 +885,7 @@ def _stats_block(stats: Optional[dict], inner: int):
         if not kept:
             line.append(_clip(board.STATS_NONE, room), style=DIM)
         out.append(line)
+    out.append(Text(""))                         # the space between STATS and AGENTS
     return out
 
 

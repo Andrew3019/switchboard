@@ -339,19 +339,19 @@ class GroupBreakTest(unittest.TestCase):
         return out
 
     def test_the_break_falls_between_groups_and_never_inside_one(self):
-        rows = board.layout(self.tree(), top=0, height=14, width=60, msg="")
+        rows = board.layout(self.tree(), top=0, height=board.CHROME + 8, width=60, msg="")
         self.assertEqual(self.shape(rows),
                          ["main", "", "lead", "w1", "w2", "", "solo"])
 
     def test_a_break_is_owned_by_nobody_so_clicking_it_does_nothing(self):
-        rows = board.layout(self.tree(), top=0, height=14, width=60, msg="")
+        rows = board.layout(self.tree(), top=0, height=board.CHROME + 8, width=60, msg="")
         blank = next(i for i, (t, _) in enumerate(rows)
                      if board._ANSI.sub("", t).strip() == ""
                      and any(a is not None for _, a in rows[:i]))
         self.assertIsNone(board.agent_at(rows, blank + 1))
 
     def test_every_other_row_still_resolves_to_the_agent_drawn_on_it(self):
-        rows = board.layout(self.tree(), top=0, height=14, width=60, msg="")
+        rows = board.layout(self.tree(), top=0, height=board.CHROME + 8, width=60, msg="")
         drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
         self.assertEqual([n for _, n in drawn],
                          ["main", "lead", "w1", "w2", "solo"])
@@ -378,7 +378,7 @@ class GroupBreakTest(unittest.TestCase):
 class LayoutTest(unittest.TestCase):
     def test_a_click_resolves_to_the_agent_drawn_on_that_row(self):
         rows = board.layout(snap(agent("one"), agent("two", depth=1), agent("three")),
-                            top=0, height=12, width=100, msg="")
+                            top=0, height=board.CHROME + 6, width=100, msg="")
         drawn = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
         self.assertEqual([a.name for a in blocks(rows)], ["one", "two", "three"])
         for row, name in drawn:
@@ -419,7 +419,7 @@ class LayoutTest(unittest.TestCase):
         characters and 60 columns — inside an ASCII budget of 40, twice over it in a
         terminal — and the row after it is the one whose click has to survive."""
         rows = board.layout(snap(agent("cjk", task="日本語の説明" * 5), agent("below")),
-                            top=0, height=10, width=40, msg="")
+                            top=0, height=board.CHROME + 4, width=40, msg="")
         for text, _ in rows:
             self.assertLessEqual(board._visible_len(text), 40)
         row = next(i + 1 for i, (_, a) in enumerate(rows) if a is not None
@@ -442,7 +442,7 @@ class LayoutTest(unittest.TestCase):
         mismeasurement seen before it becomes a wrap."""
         rows = board.layout(snap(agent("日本語", state="working"),
                                  agent("ascii", state="working")),
-                            top=0, height=10, width=200, msg="")
+                            top=0, height=board.CHROME + 4, width=200, msg="")
         drawn = [t for t, a in rows if a is not None and "working" in t]
         self.assertEqual(*[board._visible_len(t[:t.index("working")]) for t in drawn])
 
@@ -546,6 +546,31 @@ class StatsSectionTest(unittest.TestCase):
         room = board._visible_len("47 turns · 4.4k lines")
         self.assertEqual(board.stats_fit(got[board.STATS_HOUR], room),
                          ["47 turns", "4.4k lines"])
+
+    def test_the_section_has_a_header_of_its_own_and_a_blank_line_under_it(self):
+        """Andrew, reading the real board: the numbers want a `STATS` header like
+        `AGENTS`, and a line of air between the two sections. Pinned as the ORDER of the
+        head, because every row below it is placed off that count — `display.board_chrome`
+        counts these four lines and a fifth one appearing here would push the tree off the
+        bottom of the pane while the footer still claimed it was on screen."""
+        rows = board.layout(snap(agent("top")), top=0, height=board.CHROME + 4,
+                            width=80, msg="", stats=self.FULL)
+        head = [board._ANSI.sub("", t).rstrip() for t, _ in rows[:6]]
+        self.assertTrue(head[0].startswith("switchboard"), head[0])
+        self.assertEqual(head[1], " STATS")
+        self.assertTrue(head[2].startswith(" LAST HOUR"), head[2])
+        self.assertTrue(head[3].startswith(" RIGHT NOW"), head[3])
+        self.assertEqual(head[4], "")
+        self.assertEqual(head[5], " AGENTS")
+        # And the whole block goes back together on a pane too short for it: a label over
+        # nothing and a gap holding nothing apart are what the last line must not be spent
+        # on. The tree is what a board is.
+        short = [board._ANSI.sub("", t).rstrip()
+                 for t, _ in board.layout(snap(agent("top")), top=0, height=board.CHROME,
+                                          width=80, msg="", stats=self.FULL)]
+        self.assertNotIn(" STATS", short)
+        self.assertFalse([ln for ln in short if ln.startswith(" LAST HOUR")], short)
+        self.assertTrue(any("top" in ln for ln in short), short)
 
 
 class RefreshTest(unittest.TestCase):
