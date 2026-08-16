@@ -77,11 +77,22 @@ multi-line agent argument (`Herdr.start_agent`), so "pass it verbatim" was impos
 anything with structure in it and the only reachable move was to flatten it — the lossy
 rewrite the relay rule exists to prevent. Hence the brief file, which is not a licence to
 write anything of the dispatcher's own: the file holds his words untouched and the one-line
-task says what the job is and where the file is, nothing more. `notes/` rather than a new
-convention — researcher.md is where that location is explained and this defers to it — and
-DESIGN-TRUTH already has a dispatcher legitimately writing and reading a handoff file (its
-entry on why there is no tool-layer enforcement). The path passed has to resolve from the
-child's own worktree, which is not the one the file was written in.
+task says what the job is and where the file is, nothing more. DESIGN-TRUTH already has a
+dispatcher legitimately writing and reading a handoff file (its entry on why there is no
+tool-layer enforcement). The path passed has to resolve from the child's own worktree, which
+is not the one the file was written in.
+
+WHERE THE BRIEF GOES is `.switchboard/briefs/<name>/brief.md` as of 2026-08-16, and was
+`notes/` before that. `notes/` was only ever borrowed from researcher.md, which is about
+findings reports and not about briefs, and it is TRACKED — so every brief written there got
+committed to main, about 48 of them in two weeks. `.switchboard/` is gitignored
+(`.gitignore:13`) so nothing lands on main, and `link_config` (`broker.py:1035`, called on
+every spawn at `broker.py:3406`) symlinks it into each worktree from the main checkout, so
+one absolute path reads the same from every tree. Checked live on 2026-08-16 rather than
+inferred: all 46 forked worktrees on this machine carry the symlink, a file written through
+one was read through two others and through the main checkout, and a fresh `git worktree` in
+a scratch clone got the symlink from that same `link_config` call. No `sb delegate` flag was
+added — this is a convention, and the only thing that enforces it is this paragraph.
 
 The rule used to read "if what you were handed does not say, and it matters, ask" — and "and
 it matters" was a materiality judgement, which is the exact interpretive act this role exists
@@ -234,11 +245,13 @@ Anything longer than one line does not fit in the spawn at all, because a task a
 cannot contain a newline — and rewriting, trimming, summarising or re-ordering their words
 to make it fit is exactly the loss relaying exists to prevent. So when what you were given
 runs past a line, or has structure worth keeping in it — lists, numbered questions, quoted
-errors, code — write their words, unaltered, into `notes/<the name you gave it>-brief.md`
-under the checkout you were started in, creating `notes/` if it is not there. Then spawn
-with a one-line task that says what the job is and gives the full path to that file, so the
-one line carries the job and the file carries their words untouched. Pass a path that
-resolves from anywhere, since your child works in a worktree of its own and not in yours.
+errors, code — write their words, unaltered, into
+`.switchboard/briefs/<the name you gave it>/brief.md` under the checkout you were started
+in, creating those directories if they are not there. Then spawn with a one-line task that
+says what the job is and gives the full path to that file, so the one line carries the job
+and the file carries their words untouched. Briefs go there because that directory is
+gitignored, so none of them lands on `main`, and it is symlinked into every worktree, so the
+path you pass resolves from your child's worktree as well as from yours.
 
 When something arrives about work you have already dispatched, it belongs to the child that
 owns it: pass it on with `sb tell <name> "..."` rather than answering it yourself, and let
