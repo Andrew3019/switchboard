@@ -296,6 +296,19 @@ class GutterTest(unittest.TestCase):
         self.assertEqual(richboard.gutter_column(deeper)[2:],
                          [("╭", 2 * unit - 1), ("╰", 2 * unit - 1)])
 
+    def test_a_collapsed_archive_row_closes_the_workspace_it_belonged_to(self):
+        """A group whose last member has been archived still has a last member — the row
+        standing in for it. It carries the workspace it stands for, so it joins that run
+        and the bracket closes on it; a marker standing for SEVERAL workspaces belongs to
+        none of them and ends the run, exactly as every marker did before the field."""
+        rows = [agent("top", workspace="top"),
+                agent("lead", depth=1, parent="top", workspace="w"),
+                agent("kid", depth=2, parent="lead", workspace="w"),
+                status.Collapsed(depth=2, count=2, workspace="w")]
+        self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 3)])
+        rows[-1] = status.Collapsed(depth=2, count=2, workspace=None)
+        self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 2)])
+
     def test_a_workspace_shared_at_depth_zero_is_marked_and_a_top_alone_is_not(self):
         """qa-2 found this on Andrew's own board: the mockup skipped every run whose
         shallowest row is depth 0, so two agents sharing one checkout under the human got

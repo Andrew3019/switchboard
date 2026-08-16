@@ -412,13 +412,16 @@ def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
     child whose `workspace` is its parent's, unlike every one of its siblings. Depth
     cannot tell that row from the ones around it; the workspace value can.
 
-    Collapsed-archive markers carry no workspace of their own — the agents they stand for
-    may be several — so they belong to no run and end whichever run they follow.
+    A collapsed-archive marker is read the same way, off the same field. It carries the
+    workspace of the agents it stands for when they shared one (`status.Collapsed`), and
+    None when they did not — so a group whose last member has been archived keeps its
+    closing corner, and a marker standing for several workspaces still belongs to none of
+    them and ends the run it follows, which is what it did before it had the field.
     """
     runs: list[list[int]] = []
     current: Optional[str] = None
     for i, row in enumerate(rows):
-        ws = None if board._is_group(row) else row.workspace
+        ws = row.workspace
         if ws is not None and ws == current:
             runs[-1][1] = i
         elif ws is not None:
@@ -644,6 +647,28 @@ def _row_budget(window: list[Any], inner: int) -> tuple[int, int, bool, int]:
     return w_name, w_state, show_age, fixed + w_name + w_state + (7 if show_age else 0)
 
 
+def _gutter(line, label: str, mark: Optional[tuple[str, int]], indent_cols: int,
+            style: str) -> None:
+    """Append `label`, with the run's mark drawn INTO the indentation it already has.
+
+    `off` is always inside this row's indentation, so the character it replaces is a space
+    and the name column stays exactly where it was.
+
+    ONE FUNCTION FOR BOTH KINDS OF ROW, and that is the point rather than tidiness: an
+    agent row and the collapsed row that closes its workspace have to put the mark in the
+    same screen column, or the bracket closes on nothing. Bounded by the INDENT and not by
+    the label, so a mark that somehow came out too far right is dropped rather than drawn
+    over a letter of the name.
+    """
+    if mark is not None and 0 <= mark[1] < indent_cols:
+        ch, off = mark
+        line.append(label[:off], style=style)
+        line.append(ch, style=GUTTER_STYLE)
+        line.append(label[off + 1:], style=style)
+    else:
+        line.append(label, style=style)
+
+
 def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state: int,
          show_age: bool, left_used: int):
     """One agent's line — the whole of it, because an agent is one line."""
@@ -655,7 +680,19 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         # No glyph, no state, no tail. It is not an agent and must not read as one:
         # `board.agent_at` hands this very object to the click handler, which has to be
         # able to tell the two apart.
-        line.append(_clip("   " + status_mod.collapsed_label(row), inner), style=DIM)
+        #
+        # Two things it DOES share with an agent row, because it stands among agent rows:
+        # it indents by `board.INDENT` to the depth of the rows it replaced, so it lines
+        # up with the siblings it is the footer of; and it carries the workspace mark,
+        # because it is the last row of that workspace's run and the bracket has to close
+        # on something. `_clip` is given the WORDS only — it flattens runs of whitespace,
+        # and an indent handed to it arrives with the indent gone.
+        indent = board.INDENT * row.depth
+        head = " " if mark is None or mark[1] >= 0 else mark[0]
+        line.append(head, style="" if head == " " else GUTTER_STYLE)
+        line.append("  ")                        # where an agent row draws its glyph
+        text = _clip(status_mod.collapsed_text(row), max(1, inner - 3 - _vlen(indent)))
+        _gutter(line, indent + text, mark, _vlen(indent), DIM)
         return line
 
     # A gone agent is one whose pane herdr no longer has. It is the row a future "clear
@@ -675,16 +712,9 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         line.append(" ")
     line.append(g, style=GLYPH_STYLE.get(g, ""))
     line.append(" ")
-    # The workspace mark, drawn INTO the indent rather than in front of it: `off` is always
-    # inside this row's indentation, so the character it replaces is a space and the name
-    # column stays exactly where it was.
-    if mark is not None and 0 <= mark[1] < _vlen(indent):
-        ch, off = mark
-        line.append(label[:off], style=name_style)
-        line.append(ch, style=GUTTER_STYLE)
-        line.append(label[off + 1:], style=name_style)
-    else:
-        line.append(label, style=name_style)
+    # The workspace mark, drawn INTO the indent rather than in front of it — see `_gutter`,
+    # which the collapsed row above goes through as well.
+    _gutter(line, label, mark, _vlen(indent), name_style)
     line.append("  ")
     if doomed:
         line.append(_pad(_clip(row.display_state, w_state), w_state), style="red")

@@ -542,7 +542,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 # No glyph, no state, no note. It is not an agent and must not
                 # read as one — `agent_at` hands this very object to the click
                 # handler, which has to be able to tell them apart.
-                emit(_c("   " + status_mod.collapsed_label(a), DIM), a)
+                #
+                # `INDENT`, the same rung every row above it uses: this row is the
+                # footer of a block of siblings and has to start where their names
+                # do. `sb status` draws the same tree two spaces at a time and
+                # passes its own rung, which is why the unit is an argument.
+                emit(_c("   " + status_mod.collapsed_label(a, INDENT), DIM), a)
                 continue
             g = glyph(a)
             label = (INDENT * a.depth) + a.name
