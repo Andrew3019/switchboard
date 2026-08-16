@@ -1,6 +1,6 @@
 """The `plans` plugin — the state model, before any step can move.
 
-Four tests, pinning decisions rather than buying confidence. Everything sb owns — the
+Six tests, pinning decisions rather than buying confidence. Everything sb owns — the
 parser built from the declaration, the state directory, the `--json` envelope — is tested
 in `test_plugins.py`, so these run through `cli.main` for the same reason the other
 shipped-plugin tests do and then assert only what this plugin decided:
@@ -9,9 +9,12 @@ shipped-plugin tests do and then assert only what this plugin decided:
    and with its steps already in it. Both halves of `create` are first class.
 2. Ids are monotonic and never reused, across plans and across steps — a spawn prompt
    citing `s-2` has to stay true even after somebody hand-deletes a row.
-3. The changelog accumulates and carries the reason the agent supplied, and a write that
-   would drop an entry is refused. That record is what the analysis pass reads.
-4. The state lock is held while a command writes, which is what makes two commands
+3. `list` is scoped to this worktree, because from inside a plan the others are invisible.
+4. The changelog accumulates and carries the reason the agent supplied, and a write that
+   would drop an entry — or the plan holding it — is refused. That record is what the
+   analysis pass reads.
+5. An unreadable file is refused rather than replaced, by every verb.
+6. The state lock is held while a command writes, which is what makes two commands
    touching different steps safe.
 
 Unproven, and not provable here: the real two-process race (test 4 asserts the lock is
@@ -131,13 +134,30 @@ class PlansTest(PlansSandbox):
         self.assertIn("s-1", entry["detail"])
 
         # The single write is where append-only is enforced, so that a future verb that
-        # rewrites a plan wholesale fails loudly instead of quietly losing the story.
-        doc, seal = _plans()._read(self._dir())
-        doc["plans"][0]["changelog"] = []
-        with self.assertRaises(ValueError) as caught:
-            _plans()._write(self._dir(), doc, seal)
-        self.assertIn("append-only", str(caught.exception))
+        # rewrites a plan wholesale fails loudly instead of quietly losing the story. Both
+        # halves: an edited changelog, and the easier loss — the whole plan not written back.
+        mod = _plans()
+        for wreck, expected in ((lambda d: d["plans"][0].update(changelog=[]), "append-only"),
+                                (lambda d: d.update(plans=[]), "never erased")):
+            with self.subTest(expected=expected):
+                doc, seal = mod._read(self._dir())
+                wreck(doc)
+                with self.assertRaises(ValueError) as caught:
+                    mod._write(self._dir(), doc, seal)
+                self.assertIn(expected, str(caught.exception))
         self.assertEqual(len(self._doc()["plans"][0]["changelog"]), 1)
+
+    def test_an_unreadable_file_is_refused_rather_than_replaced(self):
+        """Starting over on a corrupt file would silently replace every plan in the repo on
+        the next `create`, and the records are the whole reason for keeping them."""
+        self.ok("plugin", "plans", "create", "a job")
+        self._file().write_text("{ this is not json")
+        for argv in (("create", "another"), ("list",), ("show", "p-1")):
+            with self.subTest(verb=argv[0]):
+                code, _, err = self.sb("plugin", "plans", *argv)
+                self.assertEqual(code, 1)
+                self.assertIn("not readable JSON", err)
+        self.assertEqual(self._file().read_text(), "{ this is not json")
 
     def test_the_state_lock_is_held_while_a_command_writes(self):
         """Two commands touching different steps are safe because each reads, changes and

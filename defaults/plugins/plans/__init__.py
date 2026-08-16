@@ -138,7 +138,7 @@ def create(ctx, args) -> Result:
 
     made = ", ".join(s["id"] for s in plan["steps"])
     _log(plan, who, "create", args.reason,
-         f"{len(plan['steps'])} steps ({made})" if made else "empty")
+         f"{_count(plan['steps'])} ({made})" if made else "empty")
     doc["plans"].append(plan)
     _write(ctx.state_dir, doc, seal)
     return Result(human=_full(plan), data=plan)
@@ -221,19 +221,46 @@ def _read(d: Path) -> tuple[dict, dict]:
     Never raises for a file that is not there yet. The two counters are recomputed as
     floors over every id present, so a hand-edited file that lost one still cannot mint an
     id that has already been written down somewhere else.
+
+    A file that is there and unreadable is a REFUSAL, naming the path, rather than a fresh
+    empty document: starting over would silently replace every plan in the repo on the next
+    `create`, and the records are the whole point of keeping them. The failing verb stops,
+    nothing is written, and a human fixes or moves the file.
     """
     f = d / FILE
-    doc = json.loads(f.read_text(encoding="utf-8")) if f.exists() \
-        else {"format": FORMAT, "next_plan": 1, "next_step": 1, "plans": []}
+    if f.exists():
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise ValueError(f"{f} is not readable JSON ({e}); nothing here will overwrite "
+                             f"it. Fix it or move it aside.") from e
+        if not isinstance(doc, dict) or not isinstance(doc.get("plans", []), list):
+            raise ValueError(f"{f} is not a plans file — a JSON object with a 'plans' "
+                             f"list. Nothing here will overwrite it.")
+    else:
+        doc = {"format": FORMAT, "next_plan": 1, "next_step": 1, "plans": []}
     doc.setdefault("format", FORMAT)
     doc.setdefault("plans", [])
     plans = doc["plans"]
-    doc["next_plan"] = max(int(doc.get("next_plan") or 1),
+    doc["next_plan"] = max(_counter(doc.get("next_plan")),
                            _high(_PLAN_ID, (p.get("id") for p in plans)) + 1)
-    doc["next_step"] = max(int(doc.get("next_step") or 1),
+    doc["next_step"] = max(_counter(doc.get("next_step")),
                            _high(_STEP_ID, (s.get("id") for p in plans
                                             for s in (p.get("steps") or ()))) + 1)
     return doc, _seal(doc)
+
+
+def _counter(given: Any) -> int:
+    """A stored counter, or 1 if a hand-edit left something that is not a number there.
+
+    1 is safe because it is a floor and not the answer: `_read` takes the higher of it and
+    one past the highest id actually present, so a mangled counter costs nothing and a
+    mangled counter that also refused to run would cost the plan.
+    """
+    try:
+        return max(1, int(given))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _seal(doc: dict) -> dict:
@@ -252,7 +279,17 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
     The append-only check is here, at the single write, rather than trusted to each verb.
     A command changes the steps it names; if one ever rewrites a plan wholesale it will
     take the changelog with it, and that failure is silent everywhere except here.
+
+    Both halves of "append-only" are checked, because dropping the plan is the easier way
+    to lose a changelog than editing one: a plan that was read and is not being written
+    back has lost every entry it had, and the design says records are kept and never
+    erased — cleanup means dropping out of the UI.
     """
+    here = {plan.get("id") for plan in doc["plans"]}
+    gone = [pid for pid in seal if pid not in here]
+    if gone:
+        raise ValueError(f"this write would have dropped {', '.join(sorted(gone))} and "
+                         f"its changelog; plans are kept, never erased")
     for plan in doc["plans"]:
         was = seal.get(plan.get("id"))
         if was is None:
@@ -280,8 +317,11 @@ def _workspace(ctx) -> str:
     one: the plan is still the record of the job, and nothing here depends on the name
     resolving to a live workspace.
     """
-    out = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                         cwd=str(ctx.worktree), capture_output=True, text=True)
+    try:
+        out = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                             cwd=str(ctx.worktree), capture_output=True, text=True)
+    except OSError:
+        return ctx.worktree.name        # no git on the path; still not a reason to refuse
     branch = (out.stdout or "").strip()
     return branch if out.returncode == 0 and branch and branch != "HEAD" \
         else ctx.worktree.name
@@ -305,11 +345,14 @@ def _high(pattern: re.Pattern, ids) -> int:
     return max((n for n in (_num(pattern, i) for i in ids) if n), default=0)
 
 
+def _count(steps: list) -> str:
+    return "empty" if not steps else f"{len(steps)} step{'s' if len(steps) > 1 else ''}"
+
+
 def _line(p: dict, *, workspace: bool) -> str:
-    steps = p.get("steps") or []
-    count = "empty" if not steps else (f"{len(steps)} steps" if len(steps) > 1 else "1 step")
     where = f"{p.get('workspace', '—'):<24}" if workspace else ""
-    return f"{p['id']:<6}{count:<10}{where}{p.get('title') or '(untitled)'}"
+    return (f"{p['id']:<6}{_count(p.get('steps') or []):<10}{where}"
+            f"{p.get('title') or '(untitled)'}")
 
 
 def _full(p: dict) -> str:
