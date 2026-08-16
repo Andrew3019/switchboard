@@ -330,5 +330,55 @@ class TaskArrivedTest(OutputTestBase):
         self.assertFalse(self.arrived("do the thing", since=time.time(), cwd=""))
 
 
+class MatchedTranscriptTest(TaskArrivedTest):
+    """`matched_transcript` — the same scan, keeping the answer instead of dropping it.
+
+    Inherits `TaskArrivedTest` so every case above runs against this one too: the
+    two are one scan, and a `matched_transcript` that disagreed with `task_arrived`
+    about whether the text is there would be a second definition of "arrived".
+    """
+
+    def arrived(self, text, *, since, cwd=None):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            return output.matched_transcript(
+                str(cwd if cwd is not None else self.cwd), text, since=since) is not None
+
+    def matched(self, text, *, since, cwd=None):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            return output.matched_transcript(
+                str(cwd if cwd is not None else self.cwd), text, since=since)
+
+    def test_the_match_names_the_session_that_took_the_task(self):
+        """The whole point: an id, before the agent has run a single `sb` command."""
+        now = time.time()
+        self.write_transcript("s-mine", self.user_line("do the thing", at=now))
+        self.assertEqual(self.matched("do the thing", since=now - 1), "s-mine")
+
+    def test_a_siblings_transcript_in_the_same_cwd_is_not_ours(self):
+        """`delegate` shares one cwd between a parent and every child it spawns.
+
+        The shape that made cwd-plus-timing unusable for recovery after the fact: two
+        live sessions writing to the same bucket at the same moment. Content is what
+        tells them apart, and each id must come back attached to its own words.
+        """
+        now = time.time()
+        self.write_transcript("s-parent", self.user_line("review the design", at=now))
+        self.write_transcript("s-child", self.user_line("do the thing", at=now))
+        self.assertEqual(self.matched("do the thing", since=now - 1), "s-child")
+        self.assertEqual(self.matched("review the design", since=now - 1), "s-parent")
+
+    def test_two_transcripts_with_the_same_task_name_neither(self):
+        """No id beats the wrong id: an empty column is a known gap, a wrong one sends
+        `sb restore` into a stranger's session."""
+        now = time.time()
+        self.write_transcript("s1", self.user_line("do the thing", at=now))
+        self.write_transcript("s2", self.user_line("do the thing", at=now))
+        self.assertIsNone(self.matched("do the thing", since=now - 1))
+        # …and `task_arrived`'s own answer is unchanged: the task did arrive.
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.assertTrue(output.task_arrived(str(self.cwd), "do the thing",
+                                                since=now - 1))
+
+
 if __name__ == "__main__":
     unittest.main()

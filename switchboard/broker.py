@@ -3531,6 +3531,7 @@ class Broker:
             # that no SEND could be confirmed in time, which is still true.
             alive = self._took_a_turn(name, task=task, cwd=str(where), since=sent)
             if alive:
+                self._capture_session_id(name, cwd=str(where), task=task, since=sent)
                 store.log_event(self.db, kind="task_unconfirmed", agent=name, parent=me,
                                 role=role, pane_id=agent.pane_id or pane, alive=alive,
                                 error=str(e))
@@ -3552,7 +3553,45 @@ class Broker:
             store.log_event(self.db, kind="task_undelivered", agent=name, parent=me,
                             role=role, pane_id=agent.pane_id or pane, error=str(e))
             raise TaskUndelivered(name, e) from None
+        self._capture_session_id(name, cwd=str(where), task=task, since=sent)
         return name
+
+    def _capture_session_id(self, name: str, *, cwd: str, task: Optional[str],
+                            since: float) -> None:
+        """Record the session the delivery proof just found, before the agent runs `sb`.
+
+        `session_id` has exactly one writer that fires in practice — `_claim_session`,
+        off the agent's OWN first `sb` command. herdr's `agent start` reply carries none
+        on the installed version, so between spawn and that first command the row has no
+        session at all, and an agent that never runs one (killed, interrupted, or simply
+        never needing to report) has none for its whole life. `sb restore` cannot bring
+        back an agent it cannot name a session for: two were permanently lost that way in
+        the 2026-08-16 outage, one of them a root dispatcher.
+
+        The window closes here because `deliver` has just proved the task landed by
+        finding it in the child's transcript — the id is already in hand, and until now
+        it was thrown away. Not a new guess: content-matching is the only signal that
+        tells siblings apart, since `delegate` shares one cwd between a parent and all
+        its children.
+
+        Best effort, and deliberately so. This runs after the spawn has already
+        succeeded; a scan that comes back empty or a store that refuses the write leaves
+        the row exactly as it was before — no worse than every spawn before this — and
+        must not turn a live agent into a raised exception on its caller.
+        """
+        if not task:
+            return
+        try:
+            a = store.get_agent(self.db, name)
+            if a is None or a["session_id"]:
+                return           # herdr answered after all, or the agent beat us to it
+            sid = output.matched_transcript(cwd, task, since=since)
+            if not sid:
+                return
+            store.update_agent(self.db, name, session_id=sid)
+            store.log_event(self.db, kind="session_captured", agent=name, session_id=sid)
+        except Exception:
+            return
 
     def _took_a_turn(self, name: str, *, task: Optional[str] = None,
                      cwd: Optional[str] = None,

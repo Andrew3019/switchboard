@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -165,6 +166,19 @@ class EvictingHerdr(FakeHerdrAPI):
     def report_state(self, pane, name, state, seq, **kw):
         super().report_state(pane, name, state, seq, **kw)
         self.unreachable.add(name)
+
+
+class SilentSessionHerdr(FakeHerdrAPI):
+    """The herdr that is actually installed: `agent start` names no session.
+
+    The plain fake hands one back, which is convenient everywhere else and is not what
+    0.8.x does — checked against every stored reply in the live store's event log. Only
+    the tests about where a session id comes from when herdr supplies none use this.
+    """
+
+    def start_agent(self, name, pane, **kw):
+        a = super().start_agent(name, pane, **kw)
+        return replace(a, session_id="")
 
 
 def reap_gone(db, h):
@@ -436,6 +450,65 @@ class BrokerTest(unittest.TestCase):
                 "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             }) + "\n")
             self.assertTrue(proof(now - 1))
+
+    def _transcript(self, home: Path, cwd: str, session_id: str, text: str) -> Path:
+        """A Claude Code transcript for `session_id`, holding `text` as a submitted turn."""
+        d = home / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{session_id}.jsonl"
+        p.write_text(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }) + "\n")
+        return p
+
+    def test_a_spawn_records_the_session_before_the_agent_runs_anything(self):
+        """The gap two agents were permanently lost through on 2026-08-16.
+
+        `session_id` is otherwise written only by `_claim_session`, off the agent's own
+        first `sb` command — so an agent killed, interrupted or superseded before it ran
+        one had no session on its row and `sb restore` had nothing to restore. The
+        delivery proof has already found the right transcript by content; this keeps it.
+        """
+        self.b = Broker(self.db, SilentSessionHerdr(), repo=self.repo)
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        home = Path(self.tmp.name) / "home-capture"
+        self._transcript(home, str(self.repo), "sess-from-transcript", "do the thing")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            name = self.b.delegate("do the thing", role="worker", me="orch")
+        # Nothing here ran `sb` as the child: the id came from its transcript.
+        self.assertEqual(store.get_agent(self.db, name)["session_id"],
+                         "sess-from-transcript")
+
+    def test_two_children_in_one_cwd_each_get_their_own_session(self):
+        """`delegate` shares one cwd between a parent and all its children, so the
+        transcript bucket holds several live sessions at once. Matching on the task text
+        is what keeps a child from claiming its sibling's session — the shape that made
+        after-the-fact recovery by cwd plus timing unsound."""
+        self.b = Broker(self.db, SilentSessionHerdr(), repo=self.repo)
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        home = Path(self.tmp.name) / "home-siblings"
+        self._transcript(home, str(self.repo), "sess-first", "review the design")
+        self._transcript(home, str(self.repo), "sess-second", "rewrite the parser")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            one = self.b.delegate("review the design", role="worker", me="orch")
+            two = self.b.delegate("rewrite the parser", role="worker", me="orch")
+        self.assertEqual(store.get_agent(self.db, one)["session_id"], "sess-first")
+        self.assertEqual(store.get_agent(self.db, two)["session_id"], "sess-second")
+
+    def test_a_session_herdr_reported_itself_is_not_overwritten(self):
+        """If herdr ever starts answering with a real session id, its answer wins: this
+        is a fallback for the hole, not a second opinion about a filled column."""
+        home = Path(self.tmp.name) / "home-noclobber"
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        self._transcript(home, str(self.repo), "sess-from-transcript", "do the thing")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            name = self.b.delegate("do the thing", role="worker", me="orch")
+        self.assertEqual(store.get_agent(self.db, name)["session_id"], f"sess-{name}")
 
     def test_as_prompt_overrides_the_role_prompt(self):
         self.b.delegate("t", role="worker", as_prompt="You are a haiku critic.", me="orch")
