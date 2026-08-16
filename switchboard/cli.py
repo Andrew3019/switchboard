@@ -300,8 +300,25 @@ def build_parser() -> argparse.ArgumentParser:
                          "and run the whole command again — never for an owner confirmed "
                          "still going")
 
-    r = cmd("restore", help="bring a closed agent back with its context")
-    r.add_argument("name")
+    r = cmd(
+        "restore", help="bring a closed agent back with its context",
+        description="Names one agent and brings it back in a fresh pane, resumed, in the "
+                    "workspace it came from. --sweep instead brings back everything that "
+                    "went down in the last few minutes and has not been dealt with — the "
+                    "one command for after a herdr restart. What --sweep can reach is "
+                    "your own scope, and that is the whole point to know about it: run by "
+                    "a HUMAN it covers every tree in the store, which is the only way it "
+                    "means 'everything'; run by an agent it covers that agent's own "
+                    "subtree and nothing else, so a crash spread across several trees "
+                    "needs the human to type it. Agents with no recorded session id "
+                    "cannot be restored at all; they are named in the report rather than "
+                    "left out of it.")
+    r.add_argument("name", nargs="?", help="the agent to bring back")
+    r.add_argument("--sweep", action="store_true",
+                   help="bring back everything in your scope that recently went down, "
+                        "parents before children (a second run is a no-op)")
+    r.add_argument("--dry-run", action="store_true",
+                   help="with --sweep: classify the cohort and print it, restore nothing")
 
     ins = cmd(
         "inspect", help="everything about ONE agent, including its recent terminal output",
@@ -397,7 +414,22 @@ def _validate(args) -> None:
             args.name = validate.ref_name(args.name)
 
     elif cmd == "restore":
-        args.name = validate.agent_name(args.name)
+        # One shape or the other, never both and never neither. A bare `sb restore` used
+        # to be an argparse usage error and still has to say something, and `sb restore
+        # <name> --sweep` is two different commands typed at once — guessing which one was
+        # meant would spawn panes nobody asked for.
+        if args.sweep and args.name is not None:
+            raise validate.Invalid(
+                "`sb restore --sweep` takes no name: it is the whole recent cohort. "
+                f"For one agent: `sb restore {args.name}`")
+        if not args.sweep:
+            if args.name is None:
+                raise validate.Invalid(
+                    "`sb restore` needs the name of the agent to bring back — or "
+                    "`sb restore --sweep` for everything that recently went down")
+            args.name = validate.agent_name(args.name)
+        if args.dry_run and not args.sweep:
+            raise validate.Invalid("--dry-run belongs to `sb restore --sweep`")
 
     elif cmd == "inspect":
         args.name = validate.agent_name(args.name)
@@ -1127,6 +1159,17 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         _emit(args, _workspace_closed(r), r)
         return 0
 
+    if cmd == "restore" and args.sweep:
+        r = b.restore_sweep(dry_run=args.dry_run, me=me)
+        _emit(args, _sweep_restored(r, dry_run=args.dry_run),
+              {"restored": list(r),
+               "skipped": [{"name": n, "reason": why} for n, why in r.skipped],
+               "unrestorable": [{"name": n, "reason": why}
+                                for n, why in r.unrestorable],
+               "failed": [{"name": n, "reason": why} for n, why in r.failed],
+               "dry_run": args.dry_run})
+        return 0
+
     if cmd == "restore":
         b.restore(args.name, me=me)
         _emit(args, f"restored {args.name}", {"name": args.name})
@@ -1182,6 +1225,34 @@ def _sweep_refusals(notable: list[tuple[str, str]]) -> str:
     rest = len(notable) - len(shown)
     if rest:
         lines.append(f"  … and {rest} more refused — `sb cleanup --json` lists them all")
+    return "\n".join(lines)
+
+
+def _sweep_restored(r, *, dry_run: bool) -> str:
+    """One line per row the sweep considered, then a count.
+
+    Every candidate gets a line, and nothing is truncated the way `_sweep_refusals`
+    truncates: a crash cohort is bounded by the crash, not by the fleet, and this is read
+    once right after a scary event by somebody who wants the list rather than a number.
+    The two things that must be legible without re-reading are which agents came back and
+    which ones nothing can bring back — so the unrestorable rows are last, where the eye
+    stops, rather than buried between the successes.
+
+    The summary line names the scope out loud. A sweep an agent ran saw its own subtree,
+    and a count with no scope on it reads as "the fleet is back" when it may be a third
+    of it.
+    """
+    lines = [f"would restore {n}" if dry_run else f"restored {n}" for n in r]
+    lines += [f"already running, skipped {n}" for n, _ in r.skipped]
+    lines += [f"restore failed: {n}: {why}" for n, why in r.failed]
+    lines += [f"cannot restore {n}: {why}" for n, why in r.unrestorable]
+    if not lines:
+        return ("nothing has gone down recently in your scope — nothing to restore. "
+                "(An agent that crashed longer ago is still `sb restore <name>`.)")
+    verb = "would restore" if dry_run else "restored"
+    lines.append(f"{verb} {len(r)} of {r.considered} considered"
+                 + (f"; {len(r.unrestorable)} cannot be restored at all"
+                    if r.unrestorable else ""))
     return "\n".join(lines)
 
 

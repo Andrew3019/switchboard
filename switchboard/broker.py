@@ -98,6 +98,18 @@ FINISHED = tuple(config.setting("states.finished"))
 # the collector's tick rate for as long as it kept doing it.
 REPING_GAP = 600
 
+# How far back `restore_sweep` calls a death RECENT, in seconds. This is what makes the
+# sweep need no argument: it means "whatever went down just now and has not been dealt
+# with", never "everything that has ever failed" — resurrecting a week of ordinary crashed
+# work is `sb restore <name>`'s job, one row at a time, with a person deciding each.
+#
+# Ten minutes rather than one: the window is not the crash, it is how long a human takes
+# to notice a herdr restart, find the command and type it, and a cohort that has aged out
+# by then is a cohort the command never recovers. The cost of the other end is bounded and
+# visible — an unrelated crash inside the same ten minutes is offered, named on its own
+# line, and `--dry-run` shows the whole list before anything spawns.
+SWEEP_RECENT = 600
+
 # The protocol travels as a system prompt, NOT a file.
 #   - ~/.claude/CLAUDE.md would leak into every ordinary Claude session
 #   - a repo CLAUDE.md would leak into every ordinary session in that repo, and in most
@@ -467,6 +479,43 @@ class CleanupResult(list):
     def notable(self) -> list[tuple[str, str]]:
         """The refusals a sweep must not swallow. See `expected`."""
         return [(n, why) for n, why in self.refused if n not in self.expected]
+
+
+class RestoreSweepResult(list):
+    """What `restore_sweep` brought back, and — as with `CleanupResult` — what it did not.
+
+    A `list` of the restored names, for the same reason: that is the answer, and the rest
+    is why the rest of the cohort is not in it. Three refusal lists rather than one,
+    because they are three different things to do next and a caller must not have to read
+    a sentence to tell them apart:
+
+    - `skipped` — already running. This is the sweep being idempotent, and it is the only
+      one of the three that is not news.
+    - `unrestorable` — in the crash cohort and carrying no session id, so `restore` can
+      never bring it back. Excluded from the attempt, NEVER from the report: a row that
+      quietly does not appear reads as a row that came back, and this is the one failure
+      mode that costs somebody their work without saying so.
+    - `failed` — attempted and refused or errored, one row at a time, with `restore`'s own
+      words. A checkout that has been deleted lives here, already naming its branch.
+
+    Each carries `(name, reason)`. A `--dry-run` fills exactly the same shape from exactly
+    the same classification, with `restored` holding what would have been restored.
+    """
+
+    def __init__(self, restored: Sequence[str] = (),
+                 skipped: Optional[list[tuple[str, str]]] = None,
+                 unrestorable: Optional[list[tuple[str, str]]] = None,
+                 failed: Optional[list[tuple[str, str]]] = None):
+        super().__init__(restored)
+        self.skipped: list[tuple[str, str]] = [] if skipped is None else skipped
+        self.unrestorable: list[tuple[str, str]] = (
+            [] if unrestorable is None else unrestorable)
+        self.failed: list[tuple[str, str]] = [] if failed is None else failed
+
+    @property
+    def considered(self) -> int:
+        """Every row the cohort query found, restorable or not."""
+        return len(self) + len(self.skipped) + len(self.unrestorable) + len(self.failed)
 
 
 def _resolved(path: str) -> Optional[Path]:
@@ -4563,6 +4612,50 @@ class Broker:
             frontier.extend(k["name"] for k in kids)
         return out
 
+    def _restore_tab(self, a, wsid: str, where) -> str:
+        """The pane a restore comes back into — in the space it came from, by NAME once the
+        recorded id has died with the herdr that issued it.
+
+        This is the one caller for which "the placement is a preference" was quietly
+        costing the whole point of the command. herdr ids are handed out per run
+        (`_tab_for`), so after a restart EVERY recorded `workspace_id` is dead: `_tab_for`
+        gets `workspace_not_found`, purges the id from every row holding it, and falls
+        through to a bare tab wherever herdr happens to have focus. For an ordinary spawn
+        that is the right trade. For a restore it is not — the agent is being brought back
+        *into the space it came from*, that space's NAME is on the row, and
+        `_workspace_id` is exactly the live by-name lookup that turns it into a fresh id.
+        The existing fallback on `restore`'s resolution line never reaches this: it only
+        fires when the recorded id was empty to begin with, which after a spawn it never
+        is. So this is the second step of a two-step call rather than a change to
+        `_tab_for`, which `delegate` and the workspace spawn also use.
+
+        The bare tab from the first attempt is CLOSED before the retry. It is ours, and a
+        restore that leaves one empty shell behind per dead workspace is the orphan the
+        rest of this path already goes out of its way not to create.
+
+        Degrading is still allowed at the end of it: if the name resolves to nothing (the
+        space itself is gone, not just its id), the bare tab stands, exactly as it does
+        today. And the name-resolved id is NOT recorded on the row — resolving a workspace
+        NAME is one-to-many with nothing to validate the answer (`_parent_workspace_id`
+        tier 4), good enough to aim a tab at and never good enough to write down as where
+        this agent is.
+        """
+        pane, landed = self._tab_for(wsid, where)
+        if not wsid or landed or not a["workspace"]:
+            # Nothing was recorded, or what was recorded still works: no second guess.
+            return pane
+        byname = self._workspace_id(a["workspace"])
+        if not byname or byname == wsid:
+            return pane
+        try:
+            self.h.close_pane(pane)
+        except HerdrError as e:
+            store.log_event(self.db, kind="orphan_pane", agent=a["name"], error=str(e))
+        pane, landed = self._tab_for(byname, where)
+        store.log_event(self.db, kind="restore_workspace_reresolved", agent=a["name"],
+                        workspace=a["workspace"], was=wsid, now=landed or "")
+        return pane
+
     def restore(self, name: str, *, workspace: Optional[dict] = None,
                 me: Optional[str] = None) -> str:
         """Bring a closed agent back with its full context.
@@ -4625,7 +4718,7 @@ class Broker:
             )
         # The corrected id is deliberately dropped: restore rewrites pane and state, never
         # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
-        pane, _ = self._tab_for(wsid, where)
+        pane = self._restore_tab(a, wsid, where)
         # A restored agent gets the same proof a fresh one does — its pane is just as new,
         # and it comes back into the same checkout it would otherwise come back on the
         # installed build for. The tab is ours, so a refusal closes it rather than leaving
@@ -4672,6 +4765,140 @@ class Broker:
         self.db.commit()
         store.log_event(self.db, kind="restore", agent=name)
         return name
+
+    def restore_sweep(self, *, dry_run: bool = False,
+                      me: Optional[str] = None) -> "RestoreSweepResult":
+        """Bring back everything a herdr restart just took out, in one call.
+
+        The whole command is a scope, a selection and an order; every agent it restores
+        goes through `restore` unchanged, one at a time, with `restore`'s own gates.
+
+        **Scope, and the thing to say out loud about it.** `me == HUMAN` sees the whole
+        store; an agent sees `_descendants(me)` and nothing else — the same split
+        `cleanup` already makes, and NOT a lifting of `require_same_tree`. That matters
+        more here than anywhere: a crash cohort is by construction spread across whatever
+        trees existed at that moment, because a herdr restart does not respect tree
+        boundaries. So a sweep run from inside an agent systematically under-recovers — it
+        gets its own subtree back and leaves its siblings' trees for somebody else to
+        notice. That is correct and it is deliberate ("there was a crash" is not a reason
+        to let an agent reach into a tree it was never given), and it is why the CLI's own
+        help says plainly that this only brings back *everything* when a human runs it.
+        The inner `restore` is therefore called with `me=None`: the boundary was enforced
+        once, by construction, in the query that built the scope.
+
+        **Selection, and why not `absent_since` alone.** `absent_since` is a debounce
+        value, not a record: `status._record_gone` clears it the moment the absence is
+        confirmed (`state='failed'`, `ended_at` set) and the collector's own `reconcile`
+        confirms it unattended within about a minute. By the time a person notices a
+        restart and types a command, most of the cohort has already self-confirmed and
+        `absent_since` is back to NULL — selecting on it alone finds an empty fleet and
+        reports "nothing to restore" about a board full of dead panes. So it is the union
+        of both halves: rows still mid-debounce, and rows already confirmed gone within
+        `SWEEP_RECENT`.
+
+        **Order.** Parents before children, so a restored child's mail has a live pane to
+        land in. Independent trees are independent and may fall in any order.
+
+        **Idempotency.** Second run is a no-op: every row it already brought back is now
+        running and is skipped by name. Nothing about that is new machinery — `restore`
+        refuses a live agent on its own — but the sweep classifies it up front so the
+        second run reports `already running` rather than a list of failures.
+
+        **One herdr check, at the top, and never read as an empty cohort.** A herdr that
+        cannot be asked fails identically for every candidate, so it refuses the whole
+        sweep once instead of N identical per-row errors. `_agent_states()` returning None
+        is "we cannot tell", which is the one answer this command must never round down to
+        "nothing to restore" — that reads as reassurance in exactly the moment it is
+        false. A dry run refuses on it too: its classification is a liveness question, and
+        an answer nobody could ask is not a preview of anything.
+        """
+        me = me or self.whoami()
+        live_now = self._agent_states()
+        if live_now is None:
+            raise ValueError(
+                "herdr cannot be reached, so nothing can be restored and nothing can be "
+                "checked — this is NOT 'nothing to restore'. Start herdr and run it "
+                "again; the agents are still in the store either way."
+            )
+        if me == HUMAN:
+            scope = self.db.execute("SELECT * FROM agents").fetchall()
+        else:
+            scope = self._descendants(me)
+
+        out = RestoreSweepResult()
+        for a in self._crash_cohort(scope):
+            name = a["name"]
+            if not a["session_id"]:
+                # Excluded from the attempt and never from the report. A row that silently
+                # does not appear reads exactly like a row that came back.
+                branch = store.agent_branch(self.db, name)
+                out.unrestorable.append((name, "no session id recorded — " + (
+                    f"restore cannot bring it back; its work is on branch {branch}"
+                    if branch else
+                    "restore cannot bring it back, and no branch was recorded either")))
+                continue
+            if name in live_now:
+                out.skipped.append((name, "already running"))
+                continue
+            if dry_run:
+                out.append(name)
+                continue
+            try:
+                self.restore(name, me=None)
+            except Exception as e:                # noqa: BLE001 — one row, not the batch
+                # Per row, always. A deleted checkout, a workspace mid-teardown, a
+                # transcript Claude Code cannot resume: each is one name's bad news and
+                # none of them is a reason to abandon the rest of the cohort.
+                out.failed.append((name, str(e)))
+                store.log_event(self.db, kind="restore_sweep_failed", agent=name,
+                                error=str(e))
+                continue
+            out.append(name)
+        store.log_event(self.db, kind="restore_sweep", dry_run=dry_run, by=me,
+                        restored=list(out), skipped=[n for n, _ in out.skipped],
+                        unrestorable=[n for n, _ in out.unrestorable],
+                        failed=[n for n, _ in out.failed])
+        return out
+
+    def _crash_cohort(self, scope) -> list:
+        """The rows a sweep offers to bring back, parents first. See `restore_sweep`.
+
+        Two halves, unioned, because the cohort is racing the collector: a row is either
+        still inside its absence debounce (`absent_since` set, no `ended_at` yet) or has
+        already been confirmed gone by `reconcile` (`state='failed'`, `ended_at` set).
+        Which half a given row is in depends only on how long ago the crash was and when
+        the collector last ticked — a distinction the person typing the command has no
+        way to know and no reason to care about.
+
+        Rows with no session id stay IN: they cannot be restored, and the caller has to
+        name them rather than skip them, which it can only do if they are here.
+        """
+        cutoff = store.now() - SWEEP_RECENT
+        picked = [a for a in scope
+                  if (a["ended_at"] is None and _column(a, "absent_since"))
+                  or (a["state"] == GONE_STATE and (a["ended_at"] or 0) >= cutoff)]
+        return self._parents_first(picked)
+
+    def _parents_first(self, rows) -> list:
+        """Root-first, so a restored child's mail has somewhere live to land.
+
+        Depth from the same parent pointers `_root_of` walks, and cycle-safe for the same
+        reason — the store has held a loop before. Ties break on `created_at` so the order
+        is stable and reads the way the fleet was built.
+        """
+        parentage = self._parentage()
+
+        def depth(name: str) -> int:
+            seen, cur, d = {name}, name, 0
+            while True:
+                parent = parentage.get(cur, (None, False))[0]
+                if not parent or parent in seen:
+                    return d
+                seen.add(parent)
+                cur, d = parent, d + 1
+
+        return sorted(rows, key=lambda a: (depth(a["name"]), a["created_at"] or 0,
+                                           a["name"]))
 
     def _interrupt(self, name: str, text: str, *, me: Optional[str] = None,
                    stop: bool = True, needs_reply: bool = False) -> int:
