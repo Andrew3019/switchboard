@@ -63,9 +63,8 @@ agent-driven rather than modelled.
 **Semi-structured and changeable at any time.** More structured than a todo list, less
 rigid than a fixed workflow. Not Claude's internal todos, not a flat list.
 
-**Commands run; control flow does not.** A step may carry commands and they are really
-run, but nothing evaluates conditions or branches — the composition is the point, and there
-is no workflow engine around it.
+**Interpreted, never executed.** A plan is read and acted on by an agent, not run by a
+machine. Nothing evaluates it, and there is no workflow engine around it.
 
 **One plan per job.** A lead may define one plan or several, or collapse everything into a
 single plan. Both must work gracefully, since the union of the steps involved is much the
@@ -134,18 +133,17 @@ change and a large one.
 **A preset may exist only for steps to name**, rather than being offered to spawns at
 all — the design gate's bullet format is one.
 
-**A step may carry commands.** Three things and no more: inputs, a check that says whether
-the step is complete, and commands to run — cleanup among them. This is what turns "merge,
-clean up, delete the worktree, close the agents" from five things an agent has to remember
-into something that simply happens, and it is the only way the last agent standing gets
-closed at all.
+**The agent is the interpreter.** There is no compiler and no schema to satisfy: a step
+carries whatever fields are useful and an agent reads them. Inputs if it wants inputs, a
+field saying `vibe = bad` if that is what conveys it. None of that needs specifying in
+advance, and specifying it is how this turns into a workflow engine.
 
-**Variables are a closed set that sb fills in** — the branch, the worktree, the plan, the
-step, the agent, the PR. Not user-defined and not computed.
+**A step may carry a command**, which may live in a script shipped alongside it. How it gets
+called is settled when it comes up. What this buys is that "merge, clean up, delete the
+worktree, close the agents" stops being five things an agent has to remember — and it is the
+only way the last agent standing gets closed at all.
 
-**No conditionals.** A check either passes or it does not, and that is the whole of the
-branching. Anything richer is an expression language, then a parser, then the interpreter
-that adopting a workflow engine means writing.
+**No conditionals, and no control flow.** Whatever branching a job needs, the agent does.
 
 **A step names presets always, and a role only when it spawns a new agent.** A role is what
 an agent is, fixed when it is spawned. A preset is behaviour injected into one, and can be
