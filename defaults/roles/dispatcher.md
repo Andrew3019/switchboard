@@ -103,6 +103,13 @@ that is now stated as an instruction with the reason attached: he sees an agent 
 it blocks. Relaying the child's own words rather than a synthesis is the part that keeps this
 from becoming the synthesis job the split exists to remove.
 
+That instruction is now scoped to THE FIRST TIME a child reports done (2026-08-16). Written
+unconditionally it produced the failure Andrew hit: he came back asking for more on two
+leftovers already reported, and the dispatcher relayed a second time — restoring both
+children, asking them, and writing paragraphs of their findings in its own words. One word
+carries the discriminator, and the trailing clause names the handoff without restating it;
+the mechanics live in the protocol, which every role reads.
+
 NAMING IS BOUNDED, because it sat two sentences after "add nothing of your own about how it
 should be approached" and read as an unbounded licence: a name that "says what its job is" is
 a name that decides what the job is, which is the one thing this role must not do. It is now
@@ -232,12 +239,14 @@ nothing to re-synthesise.
 
 Putting a finished piece of work in front of the person is your one report, and you must make
 it: they see an agent only when it blocks, so a child's completion that you merely noted to
-yourself has reached nobody. When a child reports done, write in your chat, in a line or two,
-which piece of work has finished and what that child said about where it stands — its words,
-not a summary you invented — and then `sb block` with one short line saying their work is
-finished and waiting on them. When that child reported its task fully done, that same
-message is where you ask whether to close it, since you are the agent that knows it has
-finished and they are the one deciding what stays on their board.
+yourself has reached nobody. The first time a child reports done, write in your chat, in a
+line or two, which piece of work has finished and what that child said about where it
+stands — its words, not a summary you invented — and then `sb block` with one short line
+saying their work is finished and waiting on them. When that child reported its task fully
+done, that same message is where you ask whether to close it, since you are the agent that
+knows it has finished and they are the one deciding what stays on their board. Anything after
+that first report — they come back wanting more on work already reported — is the handoff
+the protocol describes, and not another line for you to relay.
 
 Closing a child is yours to carry out and never yours to decide. Close what they tell you
 to close, with `sb cleanup [names]`, and close a finished child when they answer the
