@@ -1,25 +1,27 @@
 +++
-model = "strong"
+model = "default"
 +++
 
 <!--
-TIER: `strong`. This file used to say the opposite — "deliberately NOT on `strong`", on the
-argument that pinning a tier to a ROLE makes every spawn of that kind pay whether or not
-this one needed it, and that `sb delegate --model strong` buys the same thing per call. Two
-things overturned it (`notes/model-selection.md`, 2026-08-16).
+TIER: `default`. Deliberately NOT `strong`: a repo that wants its reviews expensive says so
+in its own `.switchboard/roles.toml`. The shipped baseline should not spend anyone's money
+by default.
 
-The first is that the alternative was never "cheap by default". `default` pins NOTHING: it
-is whatever the provider CLI decides its default is that week, which can change under you
-with no switchboard change at all. So the old text was not choosing a modest baseline, it
-was declining to choose — and a per-call flag is only an escape hatch if there is something
-to escape from. The second is what the evidence says reviewing actually needs: diagnosis is
-the one thing the current Opus is rated above every alternative at, and a review is exactly
-diagnosis. That is a fact about the WORK, which is what a role is for; "this particular
-review is worth more" is still a per-call decision and `--model` still buys it.
+NO SHIPPED ROLE IS ON `strong`. designer.md was, and its argument was sound as far as it
+went — design is one of the places a better model actually pays, and it was rare enough that
+the cost was bounded. What did not follow was pinning the tier to a ROLE: `sb delegate
+--model strong` buys the same thing per call, for design or review or anything else, without
+every spawn of that kind paying for it whether or not this one needed it. The fact worth
+keeping is which work repays a better model; the mechanism for acting on it is a flag, not a
+file.
 
-Cost is real and stated rather than hidden: this moves a review from roughly $0.30–0.90 to
-$0.70–2.20. The answer to an expensive review is to run a cheaper one deliberately
-(`--model careful`), not to leave every review on a model nobody chose.
+This role WAS moved to `strong` on 2026-08-16, on the argument that `default` pins nothing
+(it is whatever the provider CLI defaults to that week) and that diagnosis is what the
+current Opus is rated best at. Andrew reverted it the same day, along with worker's. Both
+halves of that are worth keeping in view: the objection to `default` is real and unanswered
+— switchboard genuinely cannot tell you what model its reviews run on — but the answer to it
+is not putting every review on the dearest model in the table. Do not re-derive the move
+without a better answer to the cost than that one had.
 
 No `cleanup` field, here or in any other role: what stays open is a run-time decision
 (the orchestrator's own sweep), not a property of a kind of agent.

@@ -151,9 +151,7 @@ question from which model reasons best. `prose` answers it by pinning the previo
 rather than following the `opus` alias, at identical cost per token; `defaults/models.toml`
 carries the reasoning and the one consequence worth knowing (a pinned id fails outright the
 day it retires, deliberately, so the question gets asked again instead of drifting back).
-Effort is high, not xhigh: a lead splits, waits and synthesises, and the long unattended
-grind xhigh buys belongs to the workers underneath it. The table this comes from is
-`notes/model-selection.md`.
+The table this comes from is `notes/model-selection.md`.
 -->
 
 You are a lead. You own one task from end to end: you hold everything about it, and your

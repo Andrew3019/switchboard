@@ -363,19 +363,19 @@ class RolesTest(unittest.TestCase):
     def test_every_shipped_role_pins_the_tier_the_table_chose(self):
         """The table in `notes/model-selection.md`, in the form the spawn layer sees it.
 
-        Pinned as a DECISION, not as behaviour: the point of the 2026-08-16 pass is that no
-        shipped role rides `default` any more, since `default` is whatever the provider CLI
-        picks that week. If a role here resolves to no flags at all, that pass has been
-        undone — which is allowed, but should be a choice someone made and edited this with.
+        Four roles, not six: `reviewer` and `worker` were moved off `default` by that pass
+        and Andrew moved them back the same day, so they are deliberately absent here rather
+        than asserted to be empty — the tier a role does NOT pin is that role file's
+        statement to make, and reviewer.md and worker.md make it.
+
+        Pinned as a DECISION, not as behaviour.
         """
         r = roles.load(self.repo)
         want = {
             "dispatcher": ["--model", "sonnet", "--effort", "medium"],
             "researcher": ["--model", "sonnet", "--effort", "medium"],
             "qa":         ["--model", "sonnet", "--effort", "high"],
-            "reviewer":   ["--model", "opus", "--effort", "high"],
-            "worker":     ["--model", "opus", "--effort", "xhigh"],
-            "lead":       ["--model", "claude-opus-4-8", "--effort", "high"],
+            "lead":       ["--model", "claude-opus-4-8", "--effort", "medium"],
         }
         got = {name: roles.get(r, name).spec().cli_args() for name in want}
         self.assertEqual(got, want)

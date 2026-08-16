@@ -28,16 +28,16 @@ the specific lie this role exists to prevent, and it is worth the overlap.
 TIER: `careful` — sonnet at high effort. Not `cheap`, because unlike researcher this is not
 reading and reporting: deciding what would break something, and telling a real defect from
 your own bad invocation, is judgement, and a cheap model that mistakes its own mistake for a
-bug costs more than it saved. Not `strong` either, and this is the one place the split
-between qa and reviewer shows up in config: a verdict on code is deep reasoning and pays for
-the better model, while finding out whether the thing runs is tool-driven — the work is
-invoking, watching and reporting, and the effort dial buys more there than the model does.
-Same price per token as `cheap`; it just thinks for longer.
+bug costs more than it saved. Not `strong` either: finding out whether the thing runs is
+tool-driven — the work is invoking, watching and reporting — and the effort dial buys more
+there than a dearer model does. Same price per token as `cheap`; it just thinks for longer.
 
-This said `default` until 2026-08-16, which read as a modest middle choice and was not one:
-`default` pins nothing at all, so it was whatever the provider CLI happened to default to.
-See reviewer.md for the full version of that argument, and `notes/model-selection.md` for
-the table both files come from.
+This said `default` until 2026-08-16. The complaint against `default` is that it pins
+nothing at all — it is whatever the provider CLI happens to default to that week — and that
+complaint is the one part of the same day's model pass that survived it: reviewer and worker
+were moved off `default` too and Andrew put both back, so read reviewer.md before proposing
+a role move onto anything dearer. Sonnet-at-high was not caught by that, because it is the
+same money as `cheap` and buys a longer look. `notes/model-selection.md` is the table.
 
 No `cleanup` field, here or in any other role: what stays open is a run-time decision
 (the orchestrator's own sweep), not a property of a kind of agent.
