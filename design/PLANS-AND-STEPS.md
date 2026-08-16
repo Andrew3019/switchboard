@@ -101,10 +101,15 @@ the outcome is known and there is a clear path from what was found through to a 
 Investigation still appears as a step when it is one piece of an already-shaped job.
 
 **There is a plan-making instruction for the lead**, explaining clearly how all of this is
-done.
+done. It is read when the job comes up rather than carried on every spawn, the way the
+adversarial procedure already works.
 
 **The worktree's owner creates the plan and chooses the template** — the lead of that
 worktree, or the sole worker where there is no lead.
+
+**Templates are browsable, and one is found rather than named up front.** Nobody has to
+know at the start of a job that a template exists for it: the lead looks once the work is
+shaped, and takes one if it fits.
 
 **A dispatcher is never involved in a plan.** It relays work and orchestrates the creation
 of agents and worktrees; it does not plan, own, tick or read one.
