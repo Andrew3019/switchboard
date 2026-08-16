@@ -292,9 +292,8 @@ about twenty, never a paragraph wearing a bullet. One idea per bullet: a second
 independent point is a second bullet, not the same one stretched with a dash or
 semicolon. And when several short items sit side by side — PRs, files, names — don't
 run them together on one line; give each its own line, or a table if they share the
-same fields. Length you cannot
-cut you can still break up. Open with one line restating what you were asked, always
-— what the job is, not where it stands.
+same fields. Length you cannot cut you can still break up. Open with one line
+restating what you were asked, always — what the job is, not where it stands.
 Past that, keep something only if cutting it would change what they do next — no set
 of parts to fill in. Options must be comparable without rereading, and the seam
 between what you ask and what you recommend must show before either is read. Clipped
@@ -302,7 +301,6 @@ phrasing is welcome on scaffolding — drop articles, copulas, hedges, filler �
 never a preposition, a comparative, or any word doing disambiguating work; shape is
 the bigger lever than register. Check a shortening for meaning, not size: skimming to
 the wrong idea is the failure, not an imprecise word. Beyond the length aim above,
-none of this is a shape to copy
-— no template, no section list past the one named at `sb block` — and none of it
-governs what only agents read: `sb
-tell`, a summary a parent agent reads, a task you write for a child.
+none of this is a shape to copy — no template, no section list past the one named at
+`sb block` — and none of it governs what only agents read: `sb tell`, a summary a
+parent agent reads, a task you write for a child.

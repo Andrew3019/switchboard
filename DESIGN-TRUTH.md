@@ -244,12 +244,12 @@ any word doing disambiguating work — `a`/`the` where it distinguishes, `will`/
 readings. Shape is a bigger lever than register — which is worth saying, because it stops
 agents reaching for register first. — confirmed 2026-08-14
 
-**Past the length aim below and the one section named above, none of this may be turned
-into something to copy.** No
-template, no worked example, no fixed section list beyond "Where we are now", no "here is
-what a good one looks like". Anything an agent can pattern-match and reproduce collapses
-every message into one shape and gets gamed on length instead of judgement. — confirmed
-2026-08-14, narrowed for the length aim and the "Where we are now" line 2026-08-16
+**Almost none of this may be turned into something to copy.** No template, no worked
+example, no "here is what a good one looks like". The two exceptions are the length aim
+below and the one section named above, "Where we are now"; there is no other fixed section
+list and nothing else to reproduce. Anything an agent can pattern-match and reproduce
+collapses every message into one shape and gets gamed on length instead of judgement. —
+confirmed 2026-08-14, the two exceptions 2026-08-16
 
 **A rough length aim, not a limit to hit.** Bullets run short — a plain fact in around ten
 words, something genuinely more tangled up to about twenty — judged by feel, not counted or
