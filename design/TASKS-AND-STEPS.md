@@ -141,6 +141,13 @@ re-entering progress after having been done — a review that fails sends its no
 repetition is a number on the node rather than an edge in a graph, and the tree stays a
 tree. — confirmed 2026-08-16
 
+**No visit ceiling on rework.** A loop that will not converge ends the way everything else
+does — the lead eventually blocks — so nodes simply repeat until the work is done. Being
+agent-driven is what makes the ceiling unnecessary. — confirmed 2026-08-16
+
+**Losing a tree is cheap.** A tree is files or rows, and nothing about it compares to
+losing a worktree or an agent, so its lifetime rules can stay loose. — confirmed 2026-08-16
+
 **A tree dies with its worktree, not with its agents.** Tasks are short-lived and agents
 outlive them. When every agent on a worktree is closed the tree goes dormant with them and
 is restored when they are; when the worktree goes, the tree goes with it and does not come
