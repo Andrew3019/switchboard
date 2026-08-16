@@ -5,7 +5,9 @@ Same bar as `DESIGN-TRUTH.md`: only what he said, high-level, no implementation 
 Nothing inferred, nothing proposed-but-unanswered. Open questions live at the bottom,
 named as open rather than quietly assumed.
 
-Entry format: one short claim, plus the date it was confirmed.
+Entry format: one short claim, plus the date it was confirmed. An entry marked **decided**
+rather than confirmed is one Andrew asked to be settled rather than left open; it follows
+from things he did confirm and is his to ratify or overturn on the final read.
 
 ---
 
@@ -88,6 +90,27 @@ change and a large one. — confirmed 2026-08-16
 internal fragments composed into others. A step may be nothing more than an output format —
 the `-` / `---` / `-----` bullet contract is itself a step. — confirmed 2026-08-16
 
+**Steps are named from a shared catalogue, and a step may be nothing but a name.** The
+value is the name, not the text: a rule such as "merging obliges a merge review" can only
+be written if the step it names is called the same thing in every tree. A "merge PR" step
+carrying no logic is legitimate and worth having. One-off nodes may still be freeform;
+anything that recurs, or that a rule refers to, earns a catalogue name. — decided
+2026-08-16
+
+**A step names presets always, and a role only when it spawns a new agent.** A role is what
+an agent is, fixed when it is spawned; a preset is behaviour injected into one, and can be
+applied to an agent already running. Since a step must work both ways — spawned into a new
+agent, or applied inside the agent already there — the preset is the part that always
+works, and the role is an optional hint used only on the spawning path. — decided
+2026-08-16
+
+**Where a role and a step overlap, the same preset named twice is applied once, and a step
+never restates what a role already says.** Overlap of wording is not something to detect and
+strip: if a step needs to repeat its role, either the step or the role is wrong. Steps
+describe the work; roles describe the agent. Where the two genuinely conflict the step wins,
+being the more specific of the two, but a conflict is a bug in the files rather than a
+mechanism to rely on. — decided 2026-08-16
+
 **Who runs a step is the lead's choice unless the step defines it.** A step is not required
 to spawn an agent: design-review confirmation, for example, may happen inside the designer
 agent rather than in a new one. — confirmed 2026-08-16
@@ -120,11 +143,43 @@ already knows which presets that step pulls in. — confirmed 2026-08-16
 **The tree is displayable: the current structure, and who is working on what.** — confirmed
 2026-08-16
 
+**A tree always belongs to one worktree, so the board renders it inside the worktree
+grouping it already has** rather than in a section of its own. A job is owned by a lead,
+and everything below a lead shares that lead's worktree, so a job and a worktree are the
+same span. A dispatcher reaches across worktrees but relays rather than plans, and owns no
+tree. Work spanning two worktrees is therefore two trees, and one tree spanning both would
+be a different feature than this. — decided 2026-08-16
+
+**Agents learn their node through output they already read, never through a command they
+have to remember.** What they are told is asymmetric: a lead needs the tree, and a worker
+needs only its own node, so sending the tree to a worker is context spent for nothing. The
+carriers are the places they already look — the spawn prompt, `sb inbox`, the response to
+`sb done`, and the lead's own `sb status`. Nothing polls, and nothing new has to be run. —
+decided 2026-08-16
+
 **Granularity is a balance, and all four costs are real.** Specific and structured against
 flexible and changeable; how it looks when displayed; how many tool calls it takes; and
 that finer nodes mean more chances to drift out of sync. — confirmed 2026-08-16
 
 ---
+
+## What makes a node
+
+**Two criteria, held in tension, and a node is what satisfies both.** They guard opposite
+extremes and neither is the answer alone. — confirmed 2026-08-16
+
+- **It can be fully owned by one accountable agent.** Owning it may mean coordinating
+  others: an adversarial review is fully owned by the review lead running its own agents
+  underneath, and that counts as one owner.
+- **Its neighbours plausibly go to different agents.** If a node and the one after it — or
+  a run of three — would sensibly be done by the same agent in the same context, the split
+  is too fine and they are one node.
+
+**A gate is a node's exit condition, not a node of its own.** Every node has a condition
+that says when it is complete, and a gate is simply one that requires a human. So the
+design step ending in "no implementation until he confirms" needs no second node for the
+confirmation, and collapsing a step into the agent that precedes it never loses the gate. —
+decided 2026-08-16
 
 ## Ticking off
 
@@ -155,6 +210,15 @@ requires one to start empty. — confirmed 2026-08-16
 Creating a PR, for example, obliges certain steps. The guidelines are part of the design
 rather than left to each agent. — confirmed 2026-08-16
 
+**An obliged step is added automatically and may be skipped, never omitted.** Adding a
+merge node brings its merge review with it. Skipping is allowed at the lead's or the
+agent's discretion, with the reason recorded, and it is expected to be rare and
+conservative — a one-line docs change should not have to be reviewed as if it were a
+migration. What this buys is that **a skip is a state rather than an absence**: an omitted
+step is invisible and a skipped one is on the board with its reason, so a bad call can be
+seen and questioned. A gate that cannot be skipped would simply be routed around by never
+creating the node, which is enforcement in appearance only. — decided 2026-08-16
+
 ---
 
 ## Not doing
@@ -167,29 +231,3 @@ design. — confirmed 2026-08-16
 to be grown into it. — confirmed 2026-08-16
 
 ---
-
-## Open / undecided
-
-*Asked and not yet answered. Listed so they are visibly open rather than assumed.*
-
-- **What makes something a node.** Two criteria proposed: that a node can be fully owned by
-  one accountable agent — where an adversarial review is fully owned by the review lead
-  coordinating its own agents — and, as an anti-granularity guard, that neighbouring nodes
-  should plausibly go to different agents, since three nodes better done by one agent in one
-  context were too finely split. — open 2026-08-16
-- **Role versus preset on a step.** Sometimes the role applies more, more often the preset
-  does, and sometimes they overlap. Whether the overlap is handled by logic, by deduplicating
-  presets a role already carries, or some other way. — open 2026-08-16
-- **A merge node without a merge-review node:** a hard logical gate, a rule in a universal
-  task-creation prompt, or a required step that a lead or agent may skip at their discretion
-  — assuming they stay conservative and skip only when genuinely warranted. Whether anything
-  is trivial enough to skip merge review is part of the same question. — open 2026-08-16
-- **Whether task trees are always per worktree.** If they are, the board can render them
-  under its existing worktree groups; if not, they need a section of their own. — open
-  2026-08-16
-- **Whether there is a catalogue of named steps**, including steps carrying no logic at all
-  — a "merge PR" step that is only a name — so that every tree naming that thing names it
-  the same way. — open 2026-08-16
-- **How agents are kept aware of their node.** The suggestion is to drop task status into
-  the output of commands they already run, such as `sb inbox`, to save tool calls. To be
-  locked down once checked. — open 2026-08-16
