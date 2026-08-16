@@ -306,6 +306,14 @@ own decisions, which is a lead's judgement now, while the other rule it supersed
 routing a small, clear task straight to a single agent — is back on the terms of the `sb
 delegate` entry
 
+**A delegation brief goes to `.switchboard/briefs/<name>/brief.md`.** A task argument
+cannot carry a newline, so a dispatcher or lead relaying an ask longer than one line writes
+it to a file and spawns with a one-line task naming the job and that path. That directory
+is gitignored and symlinked into every worktree, so the brief stays off `main` and the one
+path reads the same from the child's tree as from the writer's. It used to be `notes/`,
+which is tracked — about 48 briefs were committed to `main` in two weeks as a side effect.
+Convention in the prompts, with no `sb delegate` flag behind it. — confirmed 2026-08-16
+
 **Work that belongs in another repo is a question, not a spawn.** A dispatcher that
 notices it asks Andrew and starts nothing — it never puts an agent in that repo, because
 nothing can (see Open: real cross-repo dispatch does not exist). The handover, when there
@@ -472,6 +480,16 @@ waiting for a reply. — confirmed 2026-08-09
   reply is never buried under it.
 - **interrupt.** Injected mid-turn, cancelling what the agent was doing. Used when we
   need to change course, or the agent is doing something wrong.
+
+**A doorbell is checked afterwards, and rung again if nothing shows it landed.** herdr
+pastes the text and presses Enter, and under load the paste lands while the Enter is
+dropped — every layer above reports success and the message is stranded with nobody aware.
+So a doorbell is no longer sent once and left: about 45 seconds later, housekeeping looks
+for a submission in the recipient's own transcript, and re-sends the doorbell when it
+cannot find one — a re-send and never a blind Enter, which could submit a half-typed line
+of Andrew's or answer a modal. It runs off everybody's turn, so the sender still waits for
+nothing, and after a couple of repairs it gives up and says so. — confirmed 2026-08-16,
+superseding the 2026-08-09 reading that a doorbell was sent once and never checked
 
 **`sb tell` is for agents only, both ways round.** Andrew does not use it — he types
 directly into the session — and it cannot address a human. Anything needing a human is
