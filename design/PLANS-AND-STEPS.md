@@ -1,9 +1,9 @@
-# Tasks and steps — confirmed design
+# Plans and steps — confirmed design
 
-What Andrew has confirmed about the steps/templates layer and the task tree beneath it.
+What Andrew has confirmed about plans, steps and templates — the layer that structures how
+agents work and how that work is later analysed.
 Same bar as `DESIGN-TRUTH.md`: only what he said, high-level, no implementation detail.
-Nothing inferred, nothing proposed-but-unanswered. Open questions live at the bottom,
-named as open rather than quietly assumed.
+Nothing inferred, nothing proposed-but-unanswered.
 
 Entry format: one short claim, plus the date it was confirmed. An entry marked **decided**
 rather than confirmed is one Andrew asked to be settled rather than left open; it follows
@@ -82,12 +82,31 @@ worktrees, close agents.** No further questions. — confirmed 2026-08-16
 
 ---
 
+## The three words
+
+*Named to collide with nothing else in the system. `task` in particular is already the
+agent's own task — its store column, its `sb delegate` argument, and the protocol's "the
+task you were given" — so it is not available for any of these. — confirmed 2026-08-16*
+
+**A step is the unit.** It is what an agent owns, what gets ticked, and what carries a try
+count and notes. — confirmed 2026-08-16
+
+**A plan is a group of steps.** Nothing more than that; the DAG below is the shape a plan
+takes. — confirmed 2026-08-16
+
+**A template is a preset plan.** A plan may be a template plus whatever else that job needs,
+so a template is a starting point rather than a container the plan has to stay inside. —
+confirmed 2026-08-16
+
+**A step may be word-only, with nothing defined behind it.** Undefined steps are fine and
+expected — the name alone is worth having. — confirmed 2026-08-16
+
+---
+
 ## Steps
 
-**A step is a named unit of how work is done, and steps compose into templates.** A
-template is end to end; a step is not. A step may itself be a combination of steps, so long
-as nothing is circular. A template is therefore really just steps as well. — confirmed
-2026-08-16
+**Steps compose: a step may itself be a combination of steps**, so long as nothing is
+circular. — confirmed 2026-08-16
 
 **Loosely a chain, not a workflow engine.** The composition is the point; the machinery
 around it is not. — confirmed 2026-08-16
@@ -99,7 +118,7 @@ change and a large one. — confirmed 2026-08-16
 internal fragments composed into others. A step may be nothing more than an output format —
 the `-` / `---` / `-----` bullet contract is itself a step. — confirmed 2026-08-16
 
-**There is no fixed catalogue of steps yet, and one is not to be invented.** Trees are
+**There is no fixed catalogue of steps yet, and one is not to be invented.** Plans are
 saved and carry enough notes to be analysed, so what belongs in a catalogue — and what a
 default template should contain — is read off real runs after a while rather than decided
 up front. The system must work without one. This supersedes the earlier reading that steps
@@ -126,15 +145,15 @@ agent rather than in a new one. — confirmed 2026-08-16
 
 ---
 
-## Tasks
+## Plans
 
-**A task tree is the run state: what is being done, by whom, and what is left.** Steps are
-the static library; the task tree is the per-job, mutable thing. A node can name a step,
+**A plan is the run state: what is being done, by whom, and what is left.** Steps are
+the static library; the plan is the per-job, mutable thing. A step can name a template,
 which is what stops a step being forgotten. — confirmed 2026-08-16
 
-**It is a DAG, not a tree.** One node may fan out to several and those may join back into
-one, and a join waits for every branch feeding it. This supersedes the earlier reading of it
-as a tree. — confirmed 2026-08-16
+**A plan is a DAG, not a tree.** One step may fan out to several and those may join back
+into one, and a join waits for every branch feeding it. This supersedes the earlier reading
+of it as a tree. — confirmed 2026-08-16
 
 **Redoing work is not modelled as an edge.** Where part of the job must be redone, the lead
 or sole worker simply goes back to it; the graph stays acyclic and the flexibility comes
@@ -153,151 +172,149 @@ says what should become a new step, template, preset, role, optimisation or piec
 tooling. This is the payoff that saving the records buys, and the reason they must be worth
 reading cold. — confirmed 2026-08-16
 
-**One task tree per job, with agents attached to its nodes.** A lead may define one task or
-several, or collapse everything into a single task — both must work gracefully, because the
+**One plan per job, with agents attached to its steps.** A lead may define one plan or
+several, or collapse everything into a single plan — both must work gracefully, because the
 union of the steps involved is much the same either way. A setup that does not handle both
 is wrong by design. — confirmed 2026-08-16
 
-**Tasks never store liveness.** A node names its owning agent; whether that agent is alive
-is always read from the agent, never duplicated onto the node. Two trees that both claim to
+**Plans never store liveness.** A step names its owning agent; whether that agent is alive
+is always read from the agent, never duplicated onto the step. Two records that both claim to
 know who is working will disagree. — confirmed 2026-08-16
 
-**A node carries a try count, and a count above one is rendered.** Rework is a node
-re-entering progress after having been done — a review that fails sends its node back — so
-repetition is a number on the node rather than an edge in a graph, and the tree stays a
-tree. — confirmed 2026-08-16
+**A step carries a try count, and a count above one is rendered.** Rework is a step
+re-entering progress after having been done — a review that fails sends its step back — so
+repetition is a number on the step rather than an edge in the graph, and the plan stays
+acyclic. — confirmed 2026-08-16
 
 **No visit ceiling on rework.** A loop that will not converge ends the way everything else
-does — the lead eventually blocks — so nodes simply repeat until the work is done. Being
+does — the lead eventually blocks — so steps simply repeat until the work is done. Being
 agent-driven is what makes the ceiling unnecessary. — confirmed 2026-08-16
 
-**Losing a tree is cheap.** A tree is files or rows, and nothing about it compares to
+**Losing a plan is cheap.** A plan is files or rows, and nothing about it compares to
 losing a worktree or an agent, so its lifetime rules can stay loose. — confirmed 2026-08-16
 
-**A tree stops being live with its worktree; the record of it is kept.** Trees are plain
+**A plan stops being live with its worktree; the record of it is kept.** Plans are plain
 text and nothing about losing one is expensive, so they are not deleted — cleanup means
 dropping out of the UI and stopping being counted as active, never erasing. When every
-agent on a worktree is closed the tree goes dormant and is restored when they are; when the
-worktree goes, the tree stops being live but the record survives, because those records are
-what the catalogue is later derived from. This supersedes the earlier "the tree goes with
+agent on a worktree is closed the plan goes dormant and is restored when they are; when the
+worktree goes, the plan stops being live but the record survives, because those records are
+what the catalogue is later derived from. This supersedes the earlier "the plan goes with
 it and does not come back". — confirmed 2026-08-16
 
-**A tree carries enough notes to be worth analysing later.** Its value after the job is
+**A plan carries enough notes to be worth analysing later.** Its value after the job is
 evidence about how work actually ran, so it is written to be read cold. — confirmed
 2026-08-16
 
-**Nodes carry references to briefs and artifacts as checkpoints — references, never
+**Steps carry references to briefs and artifacts as checkpoints — references, never
 content.** Whether that supersedes the brief mechanism outright on restore is to be
 investigated rather than assumed. — confirmed 2026-08-16
 
-**The tree is never a control surface.** Andrew talks only to agents and never edits the
-tree: where a gate needs him, the owning agent blocks, the node shows its owner blocked,
-and answering the agent clears both. There is no unblocking a gate through the tree. —
+**A plan is never a control surface.** Andrew talks only to agents and never edits a plan:
+where a gate needs him, the owning agent blocks, the step shows its owner blocked,
+and answering the agent clears both. There is no unblocking a gate through the plan. —
 confirmed 2026-08-16
 
-**A node shows two different things and only one of them is ticked.** Its progress is set by
+**A step shows two different things and only one of them is ticked.** Its progress is set by
 a lead or the owning agent; its owner's status — working, blocked — is read from the agent
-and never set on the node. — decided 2026-08-16
+and never set on the step. — decided 2026-08-16
 
-**Defining the tree upfront is the point, not overhead.** More effort can be spent defining
+**Defining the plan upfront is the point, not overhead.** More effort can be spent defining
 it correctly when it is defined early, and the payoff is that on reaching a step the agent
 already knows which presets that step pulls in. — confirmed 2026-08-16
 
-**The tree is displayable: the current structure, and who is working on what.** — confirmed
+**A plan is displayable: the current structure, and who is working on what.** — confirmed
 2026-08-16
 
-**A dispatcher is never involved in a task.** It relays work and orchestrates the creation
-of agents and worktrees; it does not plan, own, tick or read a tree. — confirmed 2026-08-16
+**A dispatcher is never involved in a plan.** It relays work and orchestrates the creation
+of agents and worktrees; it does not plan, own, tick or read a plan. — confirmed 2026-08-16
 
-**A tree always belongs to one worktree, and a worktree may hold several trees.** The board
+**A plan always belongs to one worktree, and a worktree may hold several plans.** The board
 therefore renders them inside the worktree grouping it already has, rather than in a section
-of its own. A job is owned by a lead,
-and everything below a lead shares that lead's worktree, so a job and a worktree are the
-same span. A dispatcher reaches across worktrees but relays rather than plans, and owns no
-tree. Work spanning two worktrees is therefore two trees, and one tree spanning both would
-be a different feature than this. — decided 2026-08-16
+of its own. A job is owned by a lead, and everything below a lead shares that lead's
+worktree, so a job and a worktree are the same span. Work spanning two worktrees is
+therefore two plans, and one plan spanning both would be a different feature than this. — decided 2026-08-16
 
-**Agents learn their node through output they already read, never through a command they
-have to remember.** What they are told is asymmetric: a lead needs the tree, and a worker
-needs only its own node, so sending the tree to a worker is context spent for nothing. The
+**Agents learn their step through output they already read, never through a command they
+have to remember.** What they are told is asymmetric: a lead needs the plan, and a worker
+needs only its own step, so sending the plan to a worker is context spent for nothing. The
 carriers are the places they already look — the spawn prompt, `sb inbox`, the response to
 `sb done`, and the lead's own `sb status`. Nothing polls, and nothing new has to be run. —
 decided 2026-08-16
 
 **Granularity is a balance, and all four costs are real.** Specific and structured against
 flexible and changeable; how it looks when displayed; how many tool calls it takes; and
-that finer nodes mean more chances to drift out of sync. — confirmed 2026-08-16
+that finer steps mean more chances to drift out of sync. — confirmed 2026-08-16
 
 ---
 
-## What makes a node
+## What makes a step
 
-**Two criteria, held in tension, and a node is what satisfies both.** They guard opposite
+**Two criteria, held in tension, and a step is what satisfies both.** They guard opposite
 extremes and neither is the answer alone. — confirmed 2026-08-16
 
 - **It can be fully owned by one accountable agent.** Owning it may mean coordinating
   others: an adversarial review is fully owned by the review lead running its own agents
   underneath, and that counts as one owner.
-- **Its neighbours plausibly go to different agents.** If a node and the one after it — or
+- **Its neighbours plausibly go to different agents.** If a step and the one after it — or
   a run of three — would sensibly be done by the same agent in the same context, the split
-  is too fine and they are one node.
+  is too fine and they are one step.
 
-**A gate is a node's exit condition, not a node of its own.** Every node has a condition
+**A gate is a step's exit condition, not a step of its own.** Every step has a condition
 that says when it is complete, and a gate is simply one that requires a human. So the
-design step ending in "no implementation until he confirms" needs no second node for the
+design step ending in "no implementation until he confirms" needs no second step for the
 confirmation, and collapsing a step into the agent that precedes it never loses the gate. —
 decided 2026-08-16
 
 ## Ticking off
 
-**Nothing ticks automatically.** `sb done` does not mark a node complete. — confirmed
+**Nothing ticks automatically.** `sb done` does not mark a step complete. — confirmed
 2026-08-16
 
 **On a child's report the lead verifies progress and decides whether to tick.** It does
 this quickly, from the child's report, and does not spawn another agent to verify progress
 unless that is genuinely needed. — confirmed 2026-08-16
 
-**A child may tick its own node when it is confident, and hand the decision up when it is
+**A child may tick its own step when it is confident, and hand the decision up when it is
 not.** The moment to tell it so is when it calls `sb done`: that output prompts it to mark
-the node done if confident, and to return it to the parent if not. — confirmed 2026-08-16
+the step done if confident, and to return it to the parent if not. — confirmed 2026-08-16
 
 ---
 
-## When a tree is created
+## When a plan is created
 
-**Investigation produces the tree rather than living inside one.** A tree is created once
+**Investigation produces the plan rather than living inside one.** A plan is created once
 the outcome is known and there is a clear path from the investigation's results through to
-a merged PR. Investigation still appears as a node when it is one piece of an
+a merged PR. Investigation still appears as a step when it is one piece of an
 already-shaped job. — confirmed 2026-08-16
 
 **The worktree's owner chooses the template** — the lead of that worktree, or the sole
 worker where there is no lead. — confirmed 2026-08-16
 
-**A tree exists exactly when the work is heading for a change that will land.** Everything
+**A plan exists exactly when the work is heading for a change that will land.** Everything
 else runs without one: investigation, questions, scouting, review-only work, anything a
 single agent answers and reports, and everything a dispatcher does. Small does not mean
-exempt — a one-line docs change bound for a PR still gets a tree, only a short one. —
+exempt — a one-line docs change bound for a PR still gets a plan, only a short one. —
 decided 2026-08-16
 
-**Having no tree and having no node are different things.** Inside a tree, what becomes a
-node is settled by the two criteria above, so a lead's children are not automatically
-nodes and the tree is never a mirror of the agent tree. — decided 2026-08-16
+**Having no plan and having no step are different things.** Inside a plan, what becomes a
+step is settled by the two criteria above, so a lead's children are not automatically steps
+and the plan is never a mirror of the agent tree. — decided 2026-08-16
 
-**A tree may be created with some of its nodes already done.** Trees are flexible; nothing
+**A plan may be created with some of its steps already done.** Plans are flexible; nothing
 requires one to start empty. — confirmed 2026-08-16
 
-**There is logic around what a tree may contain — you cannot create just any task.**
+**There is logic around what a plan may contain — you cannot create just any task.**
 Creating a PR, for example, obliges certain steps. The guidelines are part of the design
 rather than left to each agent. — confirmed 2026-08-16
 
 **An obliged step is added automatically and may be skipped, never omitted.** Adding a
-merge node brings its merge review with it. Skipping is allowed at the lead's or the
+merge step brings its merge review with it. Skipping is allowed at the lead's or the
 agent's discretion, with the reason recorded, and it is expected to be rare and
 conservative — a one-line docs change should not have to be reviewed as if it were a
 migration. What this buys is that **a skip is a state rather than an absence**: an omitted
 step is invisible and a skipped one is on the board with its reason, so a bad call can be
 seen and questioned. A gate that cannot be skipped would simply be routed around by never
-creating the node, which is enforcement in appearance only. — decided 2026-08-16
+creating the step, which is enforcement in appearance only. — decided 2026-08-16
 
 ---
 
