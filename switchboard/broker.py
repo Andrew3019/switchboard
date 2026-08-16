@@ -3436,6 +3436,12 @@ class Broker:
             # is indistinguishable from a fact by every reader after it.
             workspace_id=(wsid if confirmed else None) or None,
             pane_id=pane, awaiting_task=awaiting_task, is_top=is_top,
+            # The TIER NAME the caller gave, recorded with the claim rather than derived
+            # again later: `restore` has only the row to work from, and re-resolving the
+            # tier from `role` alone is what silently dropped this override on the agent's
+            # second life. NULL when no `--model` was given, which is the row saying "no
+            # override" rather than saying nothing.
+            tier=model,
         )
         claimed = store.claim_agent(self.db, **claim)
         if not claimed and self._spawn_husk(name):
@@ -4774,7 +4780,13 @@ class Broker:
         # what turns that back into flags — without this a restored agent silently comes
         # back on the provider CLI's default model, which is the one thing "restored with
         # its full context" must not quietly mean.
-        spec = roles_mod.get(self.roles, a["role"], self.repo).spec()
+        #
+        # `tier` is the caller's `--model` override, if there was one, and it wins over the
+        # role's own tier for the same reason: restore brings back the SAME agent, not a
+        # fresh one of its role. Empty (no override, or a row predating the column) falls
+        # through to the role's tier, which is exactly what this line did before.
+        spec = roles_mod.get(self.roles, a["role"], self.repo).spec(
+            _column(a, "tier") or None)
         try:
             agent = self.h.start_agent(name, pane, resume=a["session_id"],
                                        model_args=spec.cli_args())

@@ -141,6 +141,21 @@ CREATE TABLE agents (
     name          TEXT PRIMARY KEY,   -- how everything addresses an agent (never an opaque id)
     parent        TEXT,               -- NULL = root. Tree, not graph (C1). No edges table.
     role          TEXT NOT NULL,
+    tier          TEXT,               -- the TIER NAME a caller pinned this agent to
+                                      -- (`sb delegate --model strong`), never a model id
+                                      -- and never the resolved flags: the tier table is
+                                      -- allowed to change under a stored row, and the tier
+                                      -- name is the thing that keeps meaning something
+                                      -- when it does. NULL means NO OVERRIDE WAS GIVEN —
+                                      -- fall through to the role's own tier, which is what
+                                      -- restore did for everyone before this column
+                                      -- existed and is therefore also the right reading
+                                      -- for rows that predate it. That is why there is no
+                                      -- backfill here: NULL is already the truth about
+                                      -- those rows, and any value invented for them would
+                                      -- be a pin nobody asked for. Read by `restore`,
+                                      -- which without it re-resolved the tier from `role`
+                                      -- alone and silently dropped the override.
     task          TEXT,
     state         TEXT NOT NULL,      -- working | blocked | done | failed
     session_id    TEXT,               -- the agent's OWN session id; how `sb` knows who is calling
@@ -975,17 +990,19 @@ def now() -> int:
 # `--include-kept`, `--leave-children`"). The column itself stays, and rows written before
 # the removal keep the value they were given.
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
-       (name, parent, role, task, state, session_id, cwd, workspace, branch,
+       (name, parent, role, tier, task, state, session_id, cwd, workspace, branch,
         workspace_id, terminal_id, pane_id, awaiting_task, is_top, created_at)
-       VALUES (?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
+       VALUES (?,?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
     name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
-    terminal_id, pane_id, awaiting_task, is_top,
+    terminal_id, pane_id, awaiting_task, is_top, tier,
 ) -> tuple:
-    return (name, parent, role, task, session_id, cwd, workspace, branch, workspace_id,
-            terminal_id, pane_id, int(awaiting_task), int(is_top), now())
+    # `tier or None` rather than `tier`: an unset `--model` arrives as "" from the CLI just
+    # as often as it arrives as None, and only NULL reads back as "no override was given".
+    return (name, parent, role, tier or None, task, session_id, cwd, workspace, branch,
+            workspace_id, terminal_id, pane_id, int(awaiting_task), int(is_top), now())
 
 
 def create_agent(
@@ -1004,6 +1021,7 @@ def create_agent(
     pane_id: Optional[str] = None,
     awaiting_task: bool = False,
     is_top: bool = False,
+    tier: Optional[str] = None,
 ) -> sqlite3.Row:
     """Insert an agent row. Raises `sqlite3.IntegrityError` if the name is taken.
 
@@ -1013,7 +1031,7 @@ def create_agent(
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, awaiting_task, is_top),
+                      workspace_id, terminal_id, pane_id, awaiting_task, is_top, tier),
     )
     db.commit()
     return get_agent(db, name)
@@ -1035,6 +1053,7 @@ def claim_agent(
     pane_id: Optional[str] = None,
     awaiting_task: bool = False,
     is_top: bool = False,
+    tier: Optional[str] = None,
 ) -> bool:
     """Take the name, or find out somebody else already has it. -> did we get it?
 
@@ -1050,7 +1069,7 @@ def claim_agent(
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, awaiting_task, is_top),
+                      workspace_id, terminal_id, pane_id, awaiting_task, is_top, tier),
     )
     db.commit()
     return cur.rowcount == 1

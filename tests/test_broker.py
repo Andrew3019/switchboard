@@ -2748,6 +2748,26 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.started[-1]["model_args"],
                          ["--model", "sonnet", "--effort", "medium"])
 
+    def test_restore_comes_back_on_the_tier_it_was_spawned_with(self):
+        """Restore brings back the SAME agent, not a fresh one of its role. `--model`
+        pinned the tier for the first life only until the row started recording it."""
+        name = self.b.delegate("t", role="researcher", model="strong", me="orch")
+        store.set_state(self.db, name, "done")
+        self.h.started.clear()
+        self.b.restore(name)
+        self.assertEqual(self.h.started[-1]["model_args"],
+                         ["--model", "opus", "--effort", "high"])   # not researcher's
+
+    def test_a_row_with_no_recorded_tier_restores_on_its_roles_tier(self):
+        """NULL means no override was given — which is what every row written before the
+        column says, so old agents come back exactly as they did."""
+        store.create_agent(self.db, name="kid", role="researcher", session_id="sess-kid",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        self.assertIsNone(store.get_agent(self.db, "kid")["tier"])
+        self.b.restore("kid")
+        self.assertEqual(self.h.started[-1]["model_args"],
+                         ["--model", "sonnet", "--effort", "medium"])
+
     def test_restore_without_a_session_is_an_error(self):
         store.create_agent(self.db, name="kid", role="worker")
         with self.assertRaises(ValueError):

@@ -56,7 +56,7 @@ would pick, weighted toward your dislike of Opus 5's style.
 | **researcher / scout** — read, map, report | Sonnet 5, medium | Sonnet 5 | no view | **keep**, bump to high effort for a first scout |
 | **reviewer** — read work, give a verdict | CLI default (Sonnet 5) | Opus 5, high | Opus 5 | **Opus 5, high** — the one thing the community rates Opus 5 above 4.8 at is diagnosing |
 | **qa** — does the thing actually work | CLI default (Sonnet 5) | Sonnet 5, high | no view | **Sonnet 5, high** — tool-driven verification, not deep reasoning |
-| **adversarial review** (a procedure a lead runs) | inherits reviewer/CLI default | Fable 5 | Fable 5 | **Opus 5 reviewers; Fable 5 only when they deadlock** — 2x price, and it runs until stopped |
+| **adversarial review** (a procedure a lead runs) | inherits reviewer/CLI default | Opus 5, high | Opus 5 | **Opus 5, high** — same as reviewer; run more of them rather than a costlier one |
 | **summarisation** (`sb done`) | whoever wrote it | n/a | n/a | not separable — it rides the agent's own model |
 
 ## What the community actually says
@@ -103,5 +103,4 @@ Reported, not fixed — neither was in scope.
 
 Moving lead, worker and reviewer off the unpinned default onto Opus-tier takes those
 agents from roughly $0.30–0.90 to $0.70–2.20 per task — call it 2.5x on the agents that
-do the heavy work, unchanged on dispatcher, researcher and qa. Fable 5 anywhere doubles
-Opus again, which is why it is a deadlock escape hatch and not a default.
+do the heavy work, unchanged on dispatcher, researcher and qa.
