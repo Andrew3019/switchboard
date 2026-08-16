@@ -69,7 +69,8 @@ hazard `herdr.py:648-655` names and the reason the repair never presses Enter.
 
 ## 3. Tests
 
-Three, per the standing rule. `python -m pytest tests`: **1336 passed**.
+Four — three for the fix, one more for the concurrency defect (§6a).
+`python -m pytest tests`: **1337 passed**.
 
 - `test_output.py::test_a_prompt_queued_behind_a_running_turn_has_arrived` — the record
   shape, on captured JSON. Fresh `enqueue` counts; one older than `since` does not; `remove`
@@ -77,6 +78,8 @@ Three, per the standing rule. `python -m pytest tests`: **1336 passed**.
 - `test_broker.py::test_a_doorbell_the_busy_target_queued_is_confirmed_not_sent_again`
 - `test_broker.py::test_a_doorbell_nothing_recorded_is_re_sent_and_then_given_up_on` — also
   pins the per-attempt window run B found.
+- `test_broker.py::test_the_repair_cap_holds_against_a_stale_read` — hands `_claim_repair`
+  the same stale ring three times; the third must find no slot, whatever the read said.
 
 `test_an_interrupt_is_delivered_confirmed_and_a_doorbell_is_not` (`:1297`) passes unchanged;
 nothing was removed from `tests/test_broker.py`.
@@ -93,8 +96,8 @@ nothing was removed from `tests/test_broker.py`.
 - **Non-Claude agent kinds.** The proof is Claude-Code-specific, exactly as `task_arrived`
   already was. A `codex` agent writes no such records, so its rings would log
   `ring_unconfirmed` or be repaired twice for nothing. Not checked.
-- **`ring_settle` against a genuinely slow flush.** 30 s clears the two measurements there
-  are; both are single readings on an idle machine.
+- **`ring_settle` against a genuinely slow flush.** 45 s clears the two measurements there
+  are; both are single readings on an idle machine, so the real worst case may be past it.
 - ~~**Concurrency.**~~ Closed in §6 — it was a real defect, not a caveat.
 
 ## 5. Teardown
