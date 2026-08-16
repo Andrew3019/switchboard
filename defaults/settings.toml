@@ -411,8 +411,49 @@ log_events = 30
 # this many times further than asked and trims afterwards.
 record_overscan = 6
 
-# `sb board`: how often the tree is re-collected, in seconds.
-board_refresh = 2.0
+# `sb board`: how often the tree is re-collected, in seconds. ONE number for two loops —
+# the collector's poll and every renderer's re-read — because a renderer re-reading faster
+# than the collector writes learns nothing, and one that reads slower is showing old data
+# for no reason.
+#
+# HALF A SECOND, and the cost was measured rather than assumed. A renderer's tick is a read
+# of one small file, so its 4x costs nothing at all; the collector's tick is `herdr agent
+# list` plus four queries, measured at 57 ms median on the largest store in this fleet
+# (507 agents, 30 602 events) with herdr 11 ms of it. That is 11% of one core at this
+# interval against 3% at two seconds, and it is a per-repo cost, not a per-pane one — the
+# whole point of the collector/renderer split. On a loaded machine the same tick was
+# measured at 146 ms median and occasionally near a second, which is where 4x would start
+# to matter, so `collector.MAX_DUTY` caps the loop's share of a core and backs the interval
+# off when a tick is slow. See that constant for the arithmetic.
+board_refresh = 0.5
+
+# How long a row's summons has to HOLD before the board shows it, in seconds — the debounce
+# on NEEDS YOU. Zero disables it.
+#
+# `blocked` and `gone` are exempt and always immediate: a block is a state an agent wrote
+# and a missing pane is an absence herdr confirmed, and neither flickers. What flickers is
+# the pair that is inferred every tick — `stalled` and `at prompt` — and both are made of
+# readings that go the other way a second later:
+#
+#   - a turn gap. `turn_end` and the next `turn_start` were within 2 s of each other for
+#     2.1% of this store's 523 resumed turns, within 15 s for 9.8%. Every one of those is a
+#     row that flashed STALLED and then went back to work.
+#   - the cascade off it. `richboard.busy_below` reads a descendant's reconciled state, so
+#     one child's two-second gap takes the excuse away from every idle ancestor at once —
+#     which is what makes this show up as a whole column blinking rather than one row.
+#   - a wake in progress. Mail delivered to an idle agent reached a `turn_start` within 2 s
+#     in 93% of 346 deliveries, and a freshly spawned agent within 5 s in 86% of 235 spawns
+#     — with a tail out to 30 s, which is the case Andrew saw sit in NEEDS YOU for several
+#     frames while the pane was still coming up.
+#
+# THIRTY SECONDS, from that last line: it is the only one of the three with a tail worth
+# sizing against, and 30 s covers 99% of it. Seconds and not frames — Andrew's "more than
+# one frame" was written when a frame was two seconds, and at 0.5 s a frame count would
+# mean a quarter of what it meant then. What it costs is that a genuinely stuck agent is
+# summoned 30 s late, which is nothing next to how long a person takes to look; the row
+# itself still says `idle` all along, and nothing that ACTS on a stall — the reconciler,
+# `--needs-me`, DRIFT — is debounced by this. It only decides when to summon a human.
+needs_settle = 30.0
 
 # Board rows that are not agents — header, blank, blank, status.
 board_chrome = 4
@@ -441,10 +482,16 @@ show_archived = false
 # When a panel starts saying its snapshot is old, in seconds.
 #
 # The design asked for "one refresh interval", and taken literally that flaps: a snapshot
-# written every 2 s is normally between 0 and 2 s old when it is read, so the threshold
-# would be crossed by ordinary phase. Two intervals plus a margin means STALE is only ever
-# shown for a tick that did not happen, which is the thing worth being loud about — a
-# warning that appears half the time is one people stop reading.
+# is normally between zero and one interval old when it is read, so the threshold would be
+# crossed by ordinary phase. Clear of that plus a margin means STALE is only ever shown for
+# a tick that did not happen, which is the thing worth being loud about — a warning that
+# appears half the time is one people stop reading.
+#
+# It stayed at five when `board_refresh` went from 2.0 to 0.5, and that is deliberate: what
+# this has to clear is no longer the interval — which is now a tenth of it — but the TICK,
+# and a collect on a loaded machine was measured near a second, with `collector.MAX_DUTY`
+# then stretching the sleep to three times that. Five seconds sits above the worst of that
+# and below anything a person would call current. Sized against the collect, not the gap.
 stale_after = 5.0
 
 # How long the collector keeps going after the last panel stops looking, in seconds. It

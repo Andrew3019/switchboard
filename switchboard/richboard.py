@@ -223,10 +223,14 @@ def needs_kind(a) -> str:
     out too — a pane herdr has no agent for is neither blocked nor idle, and its row
     already shouts GONE in red. Both stay visible ON the rows; they are only out of the
     summons list. Narrower than `board.wants_you`, deliberately.
+
+    An INFERRED summons also has to have held (`AgentStatus.settled`), which is what stops
+    a row that is between two turns being listed for the frame it takes to start the next
+    one. `blocked` is exempt and immediate — the agent wrote that word itself.
     """
-    if a.blocked or a.at_prompt:
+    if a.blocked or (a.at_prompt and a.settled):
         return "blocked"
-    if a.stalled or a.signal_drift:
+    if (a.stalled or a.signal_drift) and a.settled:
         return "idle"
     return ""
 
@@ -243,9 +247,17 @@ def still_going(a) -> bool:
     including the idle ones. `display_state` is the reconciled word — the same one drawn
     on the agent's own row — so a subtree that has quietly gone idle stops holding its
     ancestors back, and the board cannot say `idle` on a row and treat it as working here.
+
+    An agent whose idleness has NOT SETTLED counts as still going, and that is the half of
+    the debounce this section needs. A descendant's two-second turn gap takes it out of
+    RUNNING for one tick, and without this line that single gap withdraws the excuse from
+    every idle ancestor at the same instant — which is the flicker as Andrew actually sees
+    it, a column blinking rather than one row. Too soon to call it a stop is not a stop.
     """
     if a.finished or a.gone:
         return False
+    if a.inferred_summons and not a.settled:
+        return True
     return bool(a.blocked or a.at_prompt or a.display_state in status_mod.RUNNING)
 
 

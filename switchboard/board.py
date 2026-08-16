@@ -196,8 +196,12 @@ def wants_you(a) -> bool:
     another: mail does not count here. Mail names itself where it is drawn, so
     an agent with two unread messages and a task is not dressed up as an agent
     in trouble.
+
+    Narrower in one more way since the debounce: an inferred summons has to have
+    HELD (`AgentStatus.settled`). Same set of rows, a settle window later — see
+    that property, and `display.needs_settle` for what was measured.
     """
-    return bool(a.gone or a.stalled or a.signal_drift or a.blocked or a.at_prompt)
+    return bool(a.gone or a.blocked or (a.inferred_summons and a.settled))
 
 
 def marker(a) -> str:
@@ -205,13 +209,20 @@ def marker(a) -> str:
 
     Strictly ranked and only ever one: an agent that is both gone and blocked is
     gone, and the row says the thing a human would act on first.
+
+    The two declared ones — GONE, BLOCKED — are drawn the instant they are seen.
+    The inferred ones wait for `settled`, so a row that is between turns says
+    what it is FOR rather than announcing a stall that outlives no frame; the
+    state column beside it still reads `idle` the whole time.
     """
     if a.gone:
         return "GONE — herdr has no such agent"
-    if a.at_prompt:
+    if a.at_prompt and a.settled:
         return "AT PROMPT — waiting on you"
     if a.blocked:
         return f"BLOCKED — {a.blocked_why or 'no reason recorded'}"
+    if not a.settled:
+        return ""
     if a.stalled:
         return f"STALLED — idle {status_mod.fmt_age(a.idle)}"
     if a.signal_drift:
