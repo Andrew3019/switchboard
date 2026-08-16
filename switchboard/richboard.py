@@ -132,7 +132,13 @@ def marker_short(a) -> str:
     trouble a row reports.
     """
     m = board.marker(a)
-    return m.split(" — ")[0] if " — " in m else m
+    m = m.split(" — ")[0] if " — " in m else m
+    # The one word that is too long to be a last rung. `AWAITING KEYPRESS` is twice the
+    # width of anything else in this vocabulary, and this form is what a narrow pane keeps
+    # when it has given up everything else — so it gives up the half that is grammar and
+    # keeps the half that is the instruction. The ranking is still `board.marker`'s alone;
+    # only the wording is shortened here, which is what this function is for.
+    return "KEYPRESS" if m == "AWAITING KEYPRESS" else m
 
 
 def tail_forms(a) -> list[str]:
@@ -214,9 +220,17 @@ def squeeze(a, room: int) -> str:
 def needs_kind(a) -> str:
     """Which of NEEDS YOU's TWO kinds this agent is, or `""` for neither.
 
-    `blocked` — waiting on a human, whether it called `sb block` or is sitting at its
-    prompt. `idle` — nothing running: stalled, or a session that died mid-turn with the
-    pane still open.
+    `blocked` — waiting on a human, whether it called `sb block`, is sitting at its
+    prompt, or is parked on a screen herdr cannot read. `idle` — nothing running: stalled,
+    or a session that died mid-turn with the pane still open.
+
+    STILL TWO WORDS AND NOT THREE. `awaiting_keypress` is counted as `blocked` rather than
+    given a kind of its own, for two reasons that point the same way: it IS the blocked
+    shape — the agent cannot move until a person touches its pane, and no child of its own
+    can free it, which is exactly what this bucket means and exactly why `needs_list`
+    exempts the bucket from the busy-below suppression — and a third kind word would widen
+    the section's fixed kind column for every row on the board. The distinction it loses
+    here is drawn where there is room for it, in `needs_reason` and in `board.marker`.
 
     Nothing else qualifies. Mail does not: Andrew does not treat a message as something
     the board should summon him for, and the row still says `mail:` in its tail. `gone` is
@@ -226,9 +240,10 @@ def needs_kind(a) -> str:
 
     An INFERRED summons also has to have held (`AgentStatus.settled`), which is what stops
     a row that is between two turns being listed for the frame it takes to start the next
-    one. `blocked` is exempt and immediate — the agent wrote that word itself.
+    one. `blocked` is exempt and immediate — the agent wrote that word itself; the keypress
+    reading is emphatically NOT exempt, being the most inferred thing on the row.
     """
-    if a.blocked or (a.at_prompt and a.settled):
+    if a.blocked or ((a.at_prompt or a.awaiting_keypress) and a.settled):
         return "blocked"
     if (a.stalled or a.signal_drift) and a.settled:
         return "idle"
@@ -317,6 +332,12 @@ def needs_reason(a) -> str:
         return "at a prompt, waiting on you"
     if a.blocked:
         return a.blocked_why or "no reason recorded"
+    if a.awaiting_keypress:
+        # The action first, for the same reason the stalled line puts the age first: it is
+        # the half worth reading and the half a clip would eat. Says what was observed —
+        # herdr recognised nothing on the screen — and not which dialog it is, which
+        # nothing here knows. See `status.awaiting_keypress_screen`.
+        return "press a key in its pane — screen herdr cannot read"
     if a.signal_drift:
         return "died mid-turn, pane still open"
     if a.stalled:

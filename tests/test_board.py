@@ -20,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import board, panel, status  # noqa: E402
+from switchboard import board, panel, richboard, status  # noqa: E402
 
 
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
@@ -182,6 +182,23 @@ class IdleReadsAsOneThingTest(unittest.TestCase):
         self.assertIn("STALLED", line)
         self.assertTrue(board.wants_you(a))       # the ← marker, and the ◌ glyph
         self.assertEqual(board.glyph(a), "◌")
+
+    def test_a_pane_herdr_cannot_read_asks_for_a_keypress_instead_of_reporting_a_stall(self):
+        """The narrower label REPLACES the word and nothing else: same row, same section,
+        same glyph, and it says what a person has to do. The stalled row above is the
+        control — detection saying no, or never being asked, still reads STALLED."""
+        a = agent("w", state="working", herdr_state="idle", stalled=True,
+                  task="fix the parser")
+        a.awaiting_keypress = True
+        line = self.line(a)
+        self.assertIn("AWAITING KEYPRESS", line)
+        self.assertIn("press a key in its pane", line)
+        self.assertNotIn("STALLED", line)
+        self.assertTrue(board.wants_you(a))
+        self.assertEqual(richboard.marker_short(a), "KEYPRESS")
+        self.assertEqual(richboard.needs_kind(a), "blocked")
+        self.assertIn("press a key in its pane", richboard.needs_reason(a))
+        self.assertIn(a, richboard.needs_list([a]))
 
     def test_mail_alone_no_longer_marks_the_agent_row(self):
         """It used to: unread mail took over the note and the `←`, so an agent with mail
