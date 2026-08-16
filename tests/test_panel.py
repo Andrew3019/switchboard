@@ -402,11 +402,15 @@ class Election(PanelTest):
         the collector dies before it can publish the error saying why, and every panel
         shows "no collector has published one" forever with nothing to point at.
         `TwoRealProcesses` caught exactly that; this pins it without spawning anything.
+
+        WHICH checkout is `WhichCheckoutTheCollectorRuns`' subject: it is the repo's
+        primary worktree, not this one, whenever the two differ.
         """
         with mock.patch.object(panel.subprocess, "Popen") as popen:
             panel.ensure_collector(self.paths, cwd=Path("/"))
         env = popen.call_args.kwargs["env"]
-        self.assertIn(str(ROOT), env["PYTHONPATH"].split(os.pathsep))
+        self.assertIn(str(panel.canonical_checkout(self.paths) or ROOT),
+                      env["PYTHONPATH"].split(os.pathsep))
         self.assertEqual(env[panel.DIR_ENV], str(self.paths.dir))
 
     def test_an_existing_pythonpath_is_kept_rather_than_replaced(self):
@@ -414,7 +418,8 @@ class Election(PanelTest):
              mock.patch.object(panel.subprocess, "Popen") as popen:
             panel.ensure_collector(self.paths)
         parts = popen.call_args.kwargs["env"]["PYTHONPATH"].split(os.pathsep)
-        self.assertEqual(parts, [str(ROOT), "/somewhere/else"])
+        self.assertEqual(parts, [str(panel.canonical_checkout(self.paths) or ROOT),
+                                 "/somewhere/else"])
 
     def test_a_collector_that_cannot_start_is_not_respawned_every_tick(self):
         """Otherwise a broken checkout means forty panes forking twice a second forever."""
@@ -429,6 +434,102 @@ class Election(PanelTest):
 
 
 # ---------------------------------------------------------------------------
+
+
+class WhichCheckoutTheCollectorRuns(PanelTest):
+    """One repo, one collector, one canonical copy of the code — whoever elects it.
+
+    The election is a race between forty renderer panes standing in forty worktrees, most
+    of them on old branches. Launching the collector from the winner's checkout let that
+    race decide which code drew every board in the fleet: on 2026-08-16 a worktree older
+    than `switchboard/stats.py` kept winning and every board said `not measured` about a
+    feature that had been on `main` for hours. The collector must run the primary
+    worktree's code no matter who starts it.
+    """
+
+    def _checkout(self, root: Path) -> Path:
+        """A git repo that also looks like a switchboard checkout."""
+        a_git_repo(root)
+        (root / "switchboard").mkdir(exist_ok=True)
+        (root / "switchboard" / "collector.py").write_text("# primary\n")
+        return root
+
+    def _tmp(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def test_a_linked_worktree_resolves_to_the_primary_and_not_to_itself(self):
+        """The bug, in one assertion."""
+        base = self._tmp()
+        root = self._checkout(base / "repo")
+        wt = base / "wt"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "side", str(wt)],
+                       cwd=str(root), check=True, capture_output=True)
+        self.assertTrue((wt / ".git").is_file())         # genuinely a linked worktree
+        self.assertEqual(panel.primary_worktree(wt), root.resolve())
+
+    def test_a_plain_clone_is_its_own_primary(self):
+        """The single-checkout case, which must behave exactly as it always did."""
+        root = self._checkout(self._tmp() / "repo")
+        self.assertEqual(panel.primary_worktree(root), root.resolve())
+
+    def test_somewhere_that_is_not_a_switchboard_checkout_is_refused(self):
+        """A bare repo, or a `.git` living apart from its working tree, would otherwise
+        put a directory belonging to nobody on the collector's `sys.path`."""
+        root = a_git_repo(self._tmp() / "repo")          # no `switchboard/` in it
+        self.assertIsNone(panel.primary_worktree(root))
+
+    def test_outside_a_repo_it_says_it_does_not_know(self):
+        self.assertIsNone(panel.primary_worktree(self._tmp()))
+
+    def test_it_redirects_a_collector_serving_its_own_repo(self):
+        """The live case: forty worktrees, one shared `.git`, one panel directory."""
+        paths = panel.Paths.resolve(ROOT)
+        got = panel.canonical_checkout(paths)
+        self.assertEqual(got, panel.primary_worktree(ROOT))
+        self.assertIsNotNone(got)
+        self.assertTrue((got / "switchboard" / "collector.py").is_file())
+        if (ROOT / ".git").is_file():                    # these tests run in a worktree
+            self.assertNotEqual(got, ROOT)
+
+    def test_it_leaves_a_collector_for_a_different_repo_where_it_was(self):
+        """The collector reads its store from its own cwd, so moving it to a checkout of
+        another repo would quietly serve that repo's fleet to these panes. A switchboard
+        checkout driving somebody else's repo keeps today's launch."""
+        elsewhere = self._checkout(self._tmp() / "other")
+        paths = panel.Paths.resolve(elsewhere)
+        self.assertIsNone(panel.canonical_checkout(paths))
+
+    def test_the_child_both_stands_in_the_primary_and_imports_from_it(self):
+        """cwd and `PYTHONPATH` are one decision, not two. `-m` puts cwd at the FRONT of
+        the child's `sys.path`, so a collector standing in the electing worktree would
+        import that worktree's `switchboard` however good its `PYTHONPATH` was."""
+        primary = self._checkout(self._tmp() / "repo")
+        with mock.patch.object(panel, "canonical_checkout", lambda *a, **k: primary), \
+             mock.patch.object(panel.subprocess, "Popen") as popen:
+            self.assertTrue(panel.ensure_collector(self.paths, cwd=Path("/elsewhere")))
+        self.assertEqual(popen.call_args.kwargs["cwd"], str(primary))
+        self.assertEqual(popen.call_args.kwargs["env"]["PYTHONPATH"].split(os.pathsep)[0],
+                         str(primary))
+
+    def test_an_unknowable_primary_launches_from_this_checkout_rather_than_not_at_all(self):
+        """A fleet with a wrong-code collector still beats a fleet with none."""
+        with mock.patch.object(panel, "canonical_checkout", lambda *a, **k: None), \
+             mock.patch.object(panel.subprocess, "Popen") as popen:
+            self.assertTrue(panel.ensure_collector(self.paths, cwd=Path("/elsewhere")))
+        self.assertEqual(popen.call_args.kwargs["cwd"], "/elsewhere")
+        self.assertEqual(popen.call_args.kwargs["env"]["PYTHONPATH"].split(os.pathsep)[0],
+                         str(ROOT))
+
+    def test_a_tick_that_finds_a_collector_running_pays_nothing_for_this(self):
+        """The lookup belongs to the launch, which happens once per collector, and not to
+        the tick, which happens twice a second in forty panes."""
+        boom = mock.Mock(side_effect=AssertionError("resolved on the hot path"))
+        held = panel.acquire(self.paths)
+        self.addCleanup(panel.release, held)
+        with mock.patch.object(panel, "canonical_checkout", boom):
+            self.assertFalse(panel.Supervisor(self.paths).tick(at=1000.0))
 
 
 class Staleness(PanelTest):

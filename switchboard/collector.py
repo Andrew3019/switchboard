@@ -500,11 +500,14 @@ def source_signature() -> Optional[str]:
     hashing all of it costs a few milliseconds every `SOURCE_CHECK_GAP` and removes the
     maintenance hazard rather than restating it.
 
-    THIS process's own checkout (`__file__`), not a canonical one — `ensure_collector`
-    launches the collector with the spawning renderer's checkout on `PYTHONPATH`, so which
-    one that is depends on who won the election. The question being asked is "has the code
-    I loaded changed underneath me", and `__file__` is the only thing that answers it. A
-    *different* worktree of the same repo is different code, not this code gone stale.
+    THIS process's own checkout (`__file__`), and nothing else. The question being asked is
+    "has the code I loaded changed underneath me", and `__file__` is the only thing that
+    answers it. A *different* worktree of the same repo is different code, not this code
+    gone stale — which is why this was never the answer to the election picking an old
+    worktree's code; `panel.primary_worktree` is, by launching every collector from the
+    canonical checkout. Since it does, `__file__` here is now that canonical checkout in
+    the ordinary case, so a `git pull` or an edit landing there retires this process a few
+    seconds later, which is exactly the intent of both mechanisms and no coincidence.
 
     Same technique as `store._SCHEMA_HASH` — hash a source string, compare it to what was
     true earlier — pointed at `.py` files instead of the schema.
