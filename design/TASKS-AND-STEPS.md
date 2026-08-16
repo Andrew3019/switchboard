@@ -136,6 +136,29 @@ is wrong by design. — confirmed 2026-08-16
 is always read from the agent, never duplicated onto the node. Two trees that both claim to
 know who is working will disagree. — confirmed 2026-08-16
 
+**A node carries a try count, and a count above one is rendered.** Rework is a node
+re-entering progress after having been done — a review that fails sends its node back — so
+repetition is a number on the node rather than an edge in a graph, and the tree stays a
+tree. — confirmed 2026-08-16
+
+**A tree dies with its worktree, not with its agents.** Tasks are short-lived and agents
+outlive them. When every agent on a worktree is closed the tree goes dormant with them and
+is restored when they are; when the worktree goes, the tree goes with it and does not come
+back. — confirmed 2026-08-16
+
+**Nodes carry references to briefs and artifacts as checkpoints — references, never
+content.** Whether that supersedes the brief mechanism outright on restore is to be
+investigated rather than assumed. — confirmed 2026-08-16
+
+**The tree is never a control surface.** Andrew talks only to agents and never edits the
+tree: where a gate needs him, the owning agent blocks, the node shows its owner blocked,
+and answering the agent clears both. There is no unblocking a gate through the tree. —
+confirmed 2026-08-16
+
+**A node shows two different things and only one of them is ticked.** Its progress is set by
+a lead or the owning agent; its owner's status — working, blocked — is read from the agent
+and never set on the node. — decided 2026-08-16
+
 **Defining the tree upfront is the point, not overhead.** More effort can be spent defining
 it correctly when it is defined early, and the payoff is that on reaching a step the agent
 already knows which presets that step pulls in. — confirmed 2026-08-16
@@ -206,6 +229,9 @@ the node done if confident, and to return it to the parent if not. — confirmed
 the outcome is known and there is a clear path from the investigation's results through to
 a merged PR. Investigation still appears as a node when it is one piece of an
 already-shaped job. — confirmed 2026-08-16
+
+**The worktree's owner chooses the template** — the lead of that worktree, or the sole
+worker where there is no lead. — confirmed 2026-08-16
 
 **A tree exists exactly when the work is heading for a change that will land.** Everything
 else runs without one: investigation, questions, scouting, review-only work, anything a
