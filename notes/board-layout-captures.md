@@ -246,3 +246,109 @@ numbers rather than left standing over nothing.
 
 `display.board_chrome` went 6 → 8 for the plain renderer's two new lines; the panel counts
 its own head (`richboard.layout`, `head_lines = 2 + len(stats_block)`, now six lines).
+
+# The stat-line tweaks: `+added/-deleted`, `mail`, and CPU/memory as machine shares
+
+Same method again, one clone further on: a `git clone` of this repo at `statline-tweaks`
+into a scratch directory, a real `python -m switchboard.collector` holding THAT clone's
+collector lock, the clone's own `bin/sb board` in tmux panes on a socket of its own. The
+store is the clone's, seeded with three agent rows, one workspace whose checkout is the
+clone, nine `turn_end` events and five messages. Two real commits were made IN the clone —
+one adding 120 lines of code and 400 lines of prose, one trimming both — so the `+/-` has
+something of each to tell apart, and three real CPU-burning processes were started with
+their cwd inside the clone, so `cpu`, `rss` and `procs` are measurements of something.
+
+No agent was spawned: `sb start` refuses a Claude Code session (`cli._agent_caller`), which
+is the guard that stops a verification clone minting top agents. Real processes in a real
+checkout are what the machine group actually measures, and those it had.
+
+## The line, live, at 96 columns
+
+```
+╭─ switchboard ────────────────────────────────────────────────────────────────────────────────╮
+│  switchboard · 0 alive · 5 unread · 5 undelivered · 3 agents                                 │
+│  STATS                                                                                       │
+│   LAST HOUR  9 turns · +388/-109 · 11 commits · 3 spawns · 5 mail                            │
+│   RIGHT NOW  10% cpu · 53M rss · 1.4G free · 4% mem · 6 procs                                │
+│                                                                                              │
+│  AGENTS                                                                                      │
+│ ╭● verify-lead   idle     1m  mail: UNDELIVERED 5, 1m                                        │
+```
+
+## The `+388/-109` is what git says, checked two ways
+
+The board's figure was compared against the same walk done by hand, once through
+`stats.is_docs` and once through an `awk` that knows nothing about this code:
+
+```
+$ awk 'NF==3 && $3 !~ /\.md$/ && $3 !~ /^notes\// && $3 !~ /^learnings\// && $1 ~ /^[0-9]+$/ \
+       {a+=$1; d+=$2} END {print a, d}' \
+      <(git log --all --no-merges --numstat --format=%H --since=@$(( $(date +%s) - 3600 )))
+388 109
+```
+
+Both agree with the published snapshot (`code_added: 388, code_deleted: 109`) and with the
+board. The prose commits are the check that matters: 400 lines added and 399 deleted in
+`notes/verify-prose.md` appear in NEITHER half, which is the whole point of the change.
+
+## The two shares, against what the machine says
+
+`cpu_percent: 79.1` over `cpu_cores: 8` is 9.9% — drawn `10% cpu`, and it moved between 9%
+and 13% across captures as the three burners came and went. The clamp is unit-pinned rather
+than provoked live: a fleet that momentarily sums past `100 × cores` was not something worth
+manufacturing.
+
+Available memory is `vm_stat`'s free + inactive + speculative pages × page size, and it
+tracks the command it reads:
+
+```
+$ vm_stat | egrep 'page size|Pages (free|inactive|speculative)'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                     3644.
+Pages inactive:                                83424.
+Pages speculative:                               435.
+$ python -c "from switchboard import stats; print(stats._available_memory())"
+1428406272          # (3644 + 83424 + 435) × 16384 = 1433649152, sampled a moment apart
+```
+
+Worth a reader knowing: `memory_pressure` on the same machine said "System-wide memory free
+percentage: 34%" against this figure's 1.33G of 8G (17%). They are different questions —
+that one counts compressed and purgeable memory this one does not — and the conservative
+reading is the right one under a number labelled `free`.
+
+The share itself is `rss / (rss + free)`, deliberately not a share of physical RAM: memory
+another program is holding is not memory this fleet could have. 53M against 1.4G free is
+`4% mem`.
+
+## At 40 columns, and in the plain renderer
+
+```
+╭─ switchboard ────────────────────────╮   switchboard  ·  0 alive · 5 unread · …
+│  switchboard · 0 alive · 5 unread ·… │    STATS
+│  STATS                               │    LAST HOUR  9 turns · +388/-109 · 11 commits · …
+│   LAST HOUR  9 turns · +388/-109     │    RIGHT NOW  9% cpu · 64M rss · 1.3G free · 5% mem · …
+│   RIGHT NOW  9% cpu · 69M rss        │
+│                                      │    AGENTS
+│  AGENTS                              │    ● verify-lead   idle     2m  ← mail: UNDELIVERED 5
+```
+
+Nothing wraps at 40; whole pieces are dropped from the right, so the narrow pane keeps
+`+388/-109` and loses the memory pieces before the CPU one. The plain fallback (captured
+with `rich` made unimportable) draws the same pieces in its own chrome, which is what
+sharing `board.stats_rows` between the two renderers is for.
+
+## The first tick still says `not measured`
+
+With every one of the fourteen fields None — the state of every board for its first half
+second — the section says the honest thing and never `+0/-0` or `0% cpu`:
+
+```
+ STATS
+ LAST HOUR  not measured
+ RIGHT NOW  not measured
+```
+
+Rendered through `panel.read` on the clone's own published envelope with the stats blanked,
+rather than in a tmux pane: a pane whose collector is stopped elects a new one within two
+seconds and fills the line back in, so the blank state cannot be held on screen long enough
+to capture. The renderer and the file are real; the pty is not.
