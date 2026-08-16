@@ -194,12 +194,15 @@ RING_REPAIRS = config.setting("retries.ring_repairs")
 # ends the scan, so this is only ever a handful of rows.
 RING_SCAN = 8
 # The event kinds `_last_ring` reconstructs a ring's state from. `ring_sent` opens a cycle;
-# `ring_confirmed`/`ring_unconfirmed` close it; the two repair rows are what is counted
-# against `RING_REPAIRS`, the failed one included — a name that will not bind is not worth
-# chasing more times than one that will.
+# `ring_confirmed`/`ring_unconfirmed` close it; `ring_repaired` is one attempt, and is
+# COUNTED — it is written by `_claim_repair` before the send rather than after it, so the
+# row is the claim on the slot and not a report of having used one.
+#
+# `ring_repair_failed` is deliberately absent. It annotates a `ring_repaired` whose send
+# then raised; counting it too would spend two of `RING_REPAIRS` on one attempt.
 RING_OPEN = "ring_sent"
+RING_TRY = "ring_repaired"
 RING_CLOSED = ("ring_confirmed", "ring_unconfirmed")
-RING_TRIED = ("ring_repaired", "ring_repair_failed")
 
 class AgentNameTaken(ValueError):
     """Somebody else holds this agent name.
@@ -5346,7 +5349,13 @@ class Broker:
         It stays free when nothing is outstanding, which is the property `flush_pending` is
         allowed on every command for: one store query, then a transcript tail per agent with
         a ring in flight, and **herdr is asked nothing at all** unless there is a repair to
-        make.
+        make. A repair additionally takes the store's write lock for two statements
+        (`_claim_repair`) — only ever on the path that was about to shell out to herdr
+        anyway, never on the common one.
+
+        **The cap is enforced by the claim, not by the read.** Everything this loop decides
+        before `_claim_repair` is read without holding anything, so under concurrency it is
+        already stale — see there for the four-way race it cost.
 
         `skip` is the names this pass has just rung. `RING_SETTLE` already excludes them —
         a ring made a moment ago is far too young to judge — but the re-entrancy is worth
@@ -5401,13 +5410,65 @@ class Broker:
                 store.log_event(self.db, kind="ring_unconfirmed", agent=who,
                                 reason="exhausted", repairs=ring["tries"])
                 continue
+            # Everything above this line was read without holding anything, so all of it is
+            # advisory by the time we act on it. The slot is taken here or not at all.
+            attempt = self._claim_repair(who, ring, now)
+            if attempt is None:
+                continue
             try:
                 self.h.prompt(who, ring["text"])
             except HerdrError as e:
-                store.log_event(self.db, kind="ring_repair_failed", agent=who, error=str(e))
-            else:
-                store.log_event(self.db, kind="ring_repaired", agent=who,
-                                attempt=ring["tries"] + 1, after=now - ring["at"])
+                store.log_event(self.db, kind="ring_repair_failed", agent=who,
+                                attempt=attempt, error=str(e))
+
+    def _claim_repair(self, who: str, ring: dict, now: int) -> Optional[int]:
+        """Take the next repair slot for this ring, or None if there is not one to take.
+
+        The claim is written BEFORE the send, inside one write transaction, and it is what
+        `RING_REPAIRS` actually counts. Reading a count and then sending does not cap
+        anything across processes, and this is not theoretical — qa-12 reproduced it: four
+        concurrent `_confirm_rings`, each on its own connection to one store, all read
+        `tries=0`, all believed they were repair number one, and all four sent. The cap held
+        only for a single serialized stream of `sb` commands, and `flush_pending` runs at
+        the head of every `sb` command every agent in the fleet runs. It is a resonance, not
+        a corner: the load that makes an Enter drop is the load that puts many commands
+        inside one race window.
+
+        `BEGIN IMMEDIATE` rather than an `fcntl` lock file (`_fork_lock`'s answer to the
+        same shape of problem) because the contended thing here IS the store, and SQLite
+        already serializes writers to it. Taking the write lock up front is what makes the
+        count and the insert one indivisible step — a plain `SELECT` would run outside the
+        transaction pysqlite starts for the `INSERT`, which is exactly the gap being closed.
+        Nothing slow happens inside: no herdr call, no file read, two statements.
+
+        Re-checked inside the lock, not trusted from `_last_ring`: the count of attempts,
+        and that nothing has closed the ring since. `ring["tries"]` is the stale read that
+        got us here and is used for nothing but deciding whether to try.
+        """
+        claimed: Optional[int] = None
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            holes = ",".join("?" * len(RING_CLOSED))
+            settled = self.db.execute(
+                f"SELECT 1 FROM events WHERE agent=? AND id>? AND kind IN ({holes}) LIMIT 1",
+                (who, ring["id"], *RING_CLOSED),
+            ).fetchone()
+            n = self.db.execute(
+                "SELECT COUNT(*) n FROM events WHERE agent=? AND id>? AND kind=?",
+                (who, ring["id"], RING_TRY),
+            ).fetchone()["n"]
+            if settled is None and n < RING_REPAIRS:
+                claimed = n + 1
+                self.db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (who, RING_TRY,
+                     json.dumps({"attempt": claimed, "after": now - ring["at"]}), now),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return claimed
 
     def _last_ring(self, who: str) -> Optional[dict]:
         """The newest doorbell for this agent that is still waiting for a verdict.
@@ -5432,12 +5493,17 @@ class Broker:
         record written any time since then answers for it. `last` is when we last did
         anything about it, send or repair, and is what the settle window is measured
         against — see `_confirm_rings`.
+
+        Everything here is a READ, held under nothing, so `tries` is advisory: by the time
+        the caller acts on it another `sb` process may have claimed the slot it describes.
+        `id` is what makes the real decision possible — it anchors `_claim_repair`'s count
+        to this cycle, inside the write transaction where the answer cannot go stale.
         """
+        holes = ",".join("?" * (2 + len(RING_CLOSED)))
         rows = self.db.execute(
-            "SELECT kind, payload, created_at FROM events "
-            f"WHERE agent=? AND kind IN ({','.join('?' * (1 + len(RING_CLOSED) + len(RING_TRIED)))}) "
-            "ORDER BY id DESC LIMIT ?",
-            (who, RING_OPEN, *RING_CLOSED, *RING_TRIED, RING_SCAN),
+            f"SELECT id, kind, payload, created_at FROM events "
+            f"WHERE agent=? AND kind IN ({holes}) ORDER BY id DESC LIMIT ?",
+            (who, RING_OPEN, RING_TRY, *RING_CLOSED, RING_SCAN),
         ).fetchall()
         tries = 0
         last = None
@@ -5450,7 +5516,7 @@ class Broker:
                 tries += 1
                 continue
             payload = json.loads(r["payload"]) if r["payload"] else {}
-            return {"at": r["created_at"], "last": last, "tries": tries,
+            return {"id": r["id"], "at": r["created_at"], "last": last, "tries": tries,
                     "text": payload.get("text") or "",
                     "repair": bool(payload.get("repair"))}
         return None

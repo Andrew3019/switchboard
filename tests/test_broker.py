@@ -1423,6 +1423,22 @@ class BrokerTest(unittest.TestCase):
         [m] = store.unread_for(self.db, "w", mark=False)   # still there to be read
         self.assertIn("have a look at this", m["body"])
 
+    def test_the_repair_cap_holds_against_a_stale_read(self):
+        """What `RING_REPAIRS` counts is the claim, not the count that decided to try.
+
+        `flush_pending` runs at the head of every `sb` command, so several processes reach
+        `_confirm_rings` for the same stalled ring inside one race window — reproduced with
+        four, all reading `tries=0`, all believing they were repair number one, all sending.
+        Handing `_claim_repair` that same stale ring over and over is that race made
+        deterministic: the third call must find no slot left, whatever the read said.
+        """
+        self._target()
+        self._ring_and_age()
+        ring = self.b._last_ring("w")
+        self.assertEqual(ring["tries"], 0)
+        seen = [self.b._claim_repair("w", ring, store.now()) for _ in range(3)]
+        self.assertEqual(seen, [1, 2, None])
+
     # -- applying a preset to your own session (6.4) -----------------------
 
     def _preset(self, name: str, text: str) -> None:
