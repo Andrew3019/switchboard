@@ -93,12 +93,14 @@ class ShippedDefaultsTest(ShippedSandbox):
 
     def test_every_shipped_plugin_is_available_out_of_the_box(self):
         self.assertEqual(sorted(plugins.available(self.repo)),
-                         ["report-bug", "suggestions", "todo"])
+                         ["plans", "report-bug", "suggestions", "todo"])
 
-    def test_only_todo_ships_disabled(self):
-        """`todo` is available but off. The three states are the point: it stays on disk and
-        `sb plugin list` still describes it, so turning it on is one line rather than an
-        install."""
+    def test_todo_and_plans_ship_disabled(self):
+        """Both are available but off. The three states are the point: each stays on disk
+        and `sb plugin list` still describes it, so turning it on is one line rather than
+        an install. `plans` is off until the PR that binds its spawn trigger turns it on —
+        a plugin whose commands dispatch that no agent has been told about is a directory
+        under `.git` doing nothing."""
         self.assertEqual(sorted(plugins.enabled(self.repo)),
                          ["report-bug", "suggestions"])
 
