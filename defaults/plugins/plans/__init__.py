@@ -9,7 +9,8 @@ has to get right is the shape everything after it writes into.
 The records
 -----------
 
-    plan  {"id": "p-1", "workspace": "task-guardrails-build", "title": "…",
+    plan  {"id": "p-1", "workspace": "task-guardrails-build",
+           "checkout": "/…/worktrees/switchboard/task-guardrails-build", "title": "…",
            "steps": [...], "changelog": [...], "notes": [...],
            "created_by": "lead", "created_at": 1754570000}
 
@@ -30,12 +31,29 @@ otherwise both have an `s-1`, and a lead handing a worker "your step is s-1" wou
 saying nothing. `next_plan`/`next_step` are stored, and recomputed as floors on read, so a
 hand-deleted row cannot make the next create mint an id somebody already wrote down.
 
-A plan is keyed on the WORKSPACE NAME, which is the branch this checkout is on — the
-identity `agents.workspace` uses. It is recovered here with `git rev-parse` rather than read
-from the store, because a plugin `Context` deliberately carries no store handle. Nothing
-about liveness is stored: whether the workspace still exists, whether anybody is working in
-it, and whether a step's owner is alive are all read at display time, by a later PR, and
-never copied in here. Two records both claiming to know who is working will disagree.
+A plan is keyed on the WORKSPACE NAME — the string `agents.workspace` and `workspaces.name`
+hold, which is what the board groups by and what a later PR reads to decide a plan's
+worktree is gone. It is resolved ONCE, at `create`, and stored; no verb recomputes it and
+none re-attaches a plan to another key. A plugin `Context` has no store handle by design, so
+the resolution is a shell-out to sb itself (`inspect` for an agent caller, `workspace list`
+to map this checkout's path otherwise) — D2's sanctioned path, and the only one that returns
+the same string the board uses.
+
+The branch is NOT that name, which an earlier draft of this file had wrong. A branch changes
+under a checkout that stays what it was: `git checkout -b fixups` in a worktree made a plan's
+key drift away from the worktree it belongs to, and `list` went blind to it with nothing
+recording that it had. The checkout PATH is what does not move, so it is stored beside the
+name and is what "on this worktree" matches on — no subprocess on the read path, and a plan
+found from the directory it belongs to even after a rename.
+
+A checkout that is no workspace sb knows has no name to store, and that is written down as
+`null` and rendered as itself rather than filed under a plausible-looking wrong key. A plan
+under a key no workspace has would read, to the PR that derives records, as a worktree that
+is gone — abandoned rather than live.
+
+Nothing about liveness is stored: whether the workspace still exists, whether anybody is
+working in it, and whether a step's owner is alive are all read at display time, by a later
+PR, and never copied in here. Two records both claiming to know who is working will disagree.
 
 The changelog
 -------------
@@ -58,6 +76,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -120,15 +139,16 @@ def create(ctx, args) -> Result:
     title = " ".join(str(w) for w in (args.title or ())).strip()
     steps = [str(s).strip() for s in (args.step or ()) if str(s).strip()]
     notes = [str(n).strip() for n in (args.note or ()) if str(n).strip()]
-    for text in [title, *steps, *notes]:
+    # The reason is in here with the rest: it is the field every later verb carries into
+    # the changelog, and the cap is about a record staying readable when it is shown.
+    for text in [title, *steps, *notes, (args.reason or "").strip()]:
         if len(text) > MAX_TEXT:
-            return Result(ok=False, human=f"that is {len(text)} characters; a plan's text "
-                                          f"is at most {MAX_TEXT}. Write the long version "
-                                          f"somewhere a checkpoint can point at.")
+            return _too_long(len(text))
 
     doc, seal = _read(ctx.state_dir)
     who = ctx.agent or "human"
-    plan = {"id": f"p-{doc['next_plan']}", "workspace": _workspace(ctx), "title": title,
+    plan = {"id": f"p-{doc['next_plan']}", "workspace": _workspace(ctx),
+            "checkout": str(_here(ctx)), "title": title,
             "steps": [], "changelog": [], "notes": [_note(n, who) for n in notes],
             "created_by": who, "created_at": int(time.time())}
     doc["next_plan"] += 1
@@ -149,11 +169,17 @@ def ls(ctx, args) -> Result:
 
     A plan belongs to one worktree and from inside it the others are invisible; `--all` is
     for a human looking across the repo, not for a lead deciding what to do next.
+
+    Matched on the checkout PATH rather than on the workspace name, for two reasons that
+    point the same way: the path is what does not move when a branch changes or a workspace
+    is renamed, and matching on it costs no subprocess on a read that a board may run often.
+    A plan with no `checkout` — one written by hand — is only ever shown by `--all`, which
+    is the honest answer to "is this here?" when the record does not say.
     """
     plans = _read(ctx.state_dir)[0]["plans"]
-    here = _workspace(ctx)
+    here = _here(ctx)
     if not args.all:
-        plans = [p for p in plans if p.get("workspace") == here]
+        plans = [p for p in plans if _same(p.get("checkout"), here)]
     if not plans:
         return Result(human="(no plans on this worktree)" if not args.all
                             else "(no plans in this repo)", data=[])
@@ -164,7 +190,7 @@ def show(ctx, args) -> Result:
     doc, _ = _read(ctx.state_dir)
     plan = _find(doc, args.id)
     if plan is None:
-        return Result(ok=False, human=_no_such(doc, args.id))
+        return _missing(doc, args.id)
     return Result(human=_full(plan), data=plan)
 
 
@@ -173,12 +199,31 @@ def changelog(ctx, args) -> Result:
     doc, _ = _read(ctx.state_dir)
     plan = _find(doc, args.id)
     if plan is None:
-        return Result(ok=False, human=_no_such(doc, args.id))
+        return _missing(doc, args.id)
     entries = plan.get("changelog") or []
     if not entries:
         return Result(human=f"({plan['id']} has no changelog — which should be impossible)",
                       data=entries)
     return Result(human="\n".join(_entry(e) for e in entries), data=entries)
+
+
+# -- refusals ------------------------------------------------------------------
+#
+# A failed `Result` carries its reason in `data` as well as in `human`, because sb prints
+# only `data` under `--json` — so a reason that lives in `human` alone reaches a person and
+# nobody else. The consumers this matters for are the ones a later PR writes: a board that
+# shells out to render plans gets `ok:false` and, without this, nothing to render or log.
+
+
+def _missing(doc: dict, given: str) -> Result:
+    why = _no_such(doc, given)
+    return Result(ok=False, human=why, data={"error": why, "id": given})
+
+
+def _too_long(n: int) -> Result:
+    why = (f"that is {n} characters; a plan's text is at most {MAX_TEXT}. Write the long "
+           f"version somewhere a checkpoint can point at.")
+    return Result(ok=False, human=why, data={"error": why, "length": n, "max": MAX_TEXT})
 
 
 # -- the records ---------------------------------------------------------------
@@ -243,6 +288,13 @@ def _read(d: Path) -> tuple[dict, dict]:
                              f"it. Fix it or move it aside.") from e
         if not isinstance(doc, dict) or not isinstance(doc.get("plans", []), list):
             raise _refuse(f, "is not a plans file — a JSON object with a 'plans' list")
+        if _counter(doc.get("format", FORMAT)) > FORMAT:
+            # The one thing a version marker can do, and the only moment it can do it: a
+            # file from a newer plans plugin is refused rather than written back in this
+            # one's shape. Stamped and never checked, it would be a field that only ever
+            # documented the damage afterwards.
+            raise _refuse(f, f"was written by a newer plans plugin (format "
+                             f"{doc.get('format')}; this one speaks {FORMAT})")
         _check(f, doc.get("plans") or [])
     else:
         doc = {"format": FORMAT, "next_plan": 1, "next_step": 1, "plans": []}
@@ -277,6 +329,7 @@ def _check(f: Path, plans: list) -> None:
     name rather than two rows that pass a string comparison.
     """
     seen: set[int] = set()
+    steps_seen: set[int] = set()
     for plan in plans:
         if not isinstance(plan, dict):
             raise _refuse(f, f"holds a {type(plan).__name__} where a plan should be")
@@ -289,6 +342,18 @@ def _check(f: Path, plans: list) -> None:
         steps = plan.get("steps", [])
         if not isinstance(steps, list) or any(not isinstance(s, dict) for s in steps):
             raise _refuse(f, f"has a p-{n} whose steps are not a list of steps")
+        for step in steps:
+            # Checked across the whole file, not per plan, because there is one step
+            # counter for the whole file — and because everything after PR1 addresses a
+            # step by its number alone. A twin `s-1` would take a tick meant for the other
+            # one and neither would say so; a step with no id cannot be ticked at all.
+            m = _num(_STEP_ID, step.get("id"))
+            if m is None:
+                raise _refuse(f, f"has a step in p-{n} with no usable id "
+                                 f"({step.get('id')!r})")
+            if m in steps_seen:
+                raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
+            steps_seen.add(m)
         if not isinstance(plan.get("changelog", []), list):
             raise _refuse(f, f"has a p-{n} whose changelog is not a list")
 
@@ -359,27 +424,101 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
     os.replace(tmp, d / FILE)
 
 
-def _workspace(ctx) -> str:
-    """The name of the workspace this checkout is, which is the branch it is on.
+def _here(ctx) -> Path:
+    """This checkout, resolved. The stable half of a plan's address.
 
-    `broker.py` mints a workspace name and a branch name as one thing ("the workspace name
-    IS the branch name"), and `Broker._here()` recovers it exactly this way. A plugin
-    handler cannot ask the store — a `Context` carries no store handle, by design — so it
-    asks git, which is the same question one layer down.
-
-    A detached HEAD has no name to infer, and falls back to the directory. That is a plan
-    filed under something that is not a workspace, which is better than refusing to make
-    one: the plan is still the record of the job, and nothing here depends on the name
-    resolving to a live workspace.
+    Resolved because the same worktree is reached by several spellings — a symlinked
+    `/tmp`, a relative `cwd`, `/var` against `/private/var` — and a plan filed under one
+    of them must still be found from another.
     """
     try:
-        out = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                             cwd=str(ctx.worktree), capture_output=True, text=True)
+        return Path(ctx.worktree).resolve()
     except OSError:
-        return ctx.worktree.name        # no git on the path; still not a reason to refuse
-    branch = (out.stdout or "").strip()
-    return branch if out.returncode == 0 and branch and branch != "HEAD" \
-        else ctx.worktree.name
+        return Path(ctx.worktree)
+
+
+def _same(stored: Any, here: Path) -> bool:
+    """Is a stored checkout this one? False for a record that does not say."""
+    if not stored:
+        return False
+    try:
+        return Path(str(stored)).resolve() == here
+    except OSError:
+        return str(stored) == str(here)
+
+
+def _workspace(ctx) -> Optional[str]:
+    """The name of the workspace this checkout belongs to, asked of sb, or None.
+
+    The name has to be the string the store holds — it is what the board groups by and what
+    a later PR uses to decide a plan's worktree is gone — and a plugin `Context` carries no
+    store handle by design. So this asks sb itself, which D2 already settled as the way a
+    plugin reads anything the store owns. Two questions, cheapest first:
+
+    1. The caller's own agent row (`sb inspect <agent> --json`), whose `workspace` is
+       exactly the string wanted. This is the normal path: a lead creates the plan.
+    2. Otherwise the map from checkout to workspace (`sb workspace list --json`), matched
+       on the path. This is the human-at-a-terminal path, and it is second because it is an
+       order of magnitude slower to answer.
+
+    None when neither answers — a plain clone, a bare workspace, an sb that cannot be
+    found. That is stored as `null` and rendered as itself. The alternative, inventing a
+    name from the branch or the directory, is what this file did before and it was wrong:
+    branches move under a checkout that has not, and a plan filed under a name no workspace
+    has reads to PR4 as a worktree that is gone.
+
+    Called once, by `create`. Nothing else recomputes it, and no verb re-attaches a plan.
+    """
+    if ctx.agent:
+        row = _ask(ctx, "inspect", ctx.agent)
+        name = (row or {}).get("workspace")
+        if name:
+            return str(name)
+    here = _here(ctx)
+    for w in ((_ask(ctx, "workspace", "list") or {}).get("workspaces") or ()):
+        if not isinstance(w, dict) or not w.get("name"):
+            continue
+        if not _same(w.get("checkout"), here):
+            continue
+        # `sb workspace list` also synthesises a row for a checkout it finds in git and
+        # nowhere else, and names it after the BRANCH. That is the wrong answer wearing
+        # the right shape, and taking it would put the drift this resolver exists to fix
+        # straight back. Only a workspace the store knows has a name to file a plan under.
+        if set(w.get("sources") or ()) - {"git"}:
+            return str(w["name"])
+    return None
+
+
+def _ask(ctx, *argv: str) -> Any:
+    """One `sb <argv> --json`, parsed, or None if it fails in any way at all.
+
+    Every failure is None rather than an exception: this is a name to label a plan with,
+    and a plan that cannot be made because `sb inspect` timed out would be a plugin that
+    breaks when the thing it is describing is busy.
+    """
+    sb = _sb()
+    if not sb:
+        return None
+    try:
+        out = subprocess.run([sb, *argv, "--json"], cwd=str(ctx.worktree),
+                             capture_output=True, text=True, timeout=30)
+        return json.loads(out.stdout) if out.returncode == 0 and out.stdout else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _sb() -> Optional[str]:
+    """Which `sb` to ask — this build's, then whatever is installed.
+
+    `collector.doorbell_sb()`'s reasoning, one directory deeper: a plugin shipped inside a
+    checkout is three levels under it, and that checkout's `bin/sb` is the build whose
+    store the caller is standing in. Asking PATH first is how a branch's plugin ends up
+    interrogating a different build's idea of the world.
+    """
+    own = Path(__file__).resolve().parents[3] / "bin" / "sb"
+    if os.access(own, os.X_OK):
+        return str(own)
+    return shutil.which("sb")
 
 
 # -- rendering and lookup ------------------------------------------------------
@@ -392,8 +531,15 @@ def _find(doc: dict, given: str) -> Optional[dict]:
 
 
 def _num(pattern: re.Pattern, given: Any) -> Optional[int]:
+    """The number in an id, or None. Zero is not a number an id has.
+
+    Ids are minted from 1, so `p-0` only ever arrives by hand — and everything here reads
+    a number for truth (`if n`), which would quietly make a `p-0` unfindable rather than
+    refused. Saying no once, here, is what makes that impossible everywhere else.
+    """
     m = pattern.match(str(given or "").strip())
-    return int(m.group(1)) if m else None
+    n = int(m.group(1)) if m else None
+    return n if n else None
 
 
 def _high(pattern: re.Pattern, ids) -> int:
@@ -404,8 +550,18 @@ def _count(steps: list) -> str:
     return "empty" if not steps else f"{len(steps)} step{'s' if len(steps) > 1 else ''}"
 
 
+def _where(p: dict) -> str:
+    """A plan's workspace, or the fact that it has none, said rather than left blank.
+
+    An em dash here would read as "not filled in yet". This is a plan on a checkout that is
+    no workspace sb knows — a plain clone, somebody's own worktree — which is a real answer
+    and the one a later PR must not mistake for a worktree that has gone.
+    """
+    return str(p.get("workspace") or "(no workspace)")
+
+
 def _line(p: dict, *, workspace: bool) -> str:
-    where = f"{p.get('workspace', '—'):<24}" if workspace else ""
+    where = f"{_where(p):<24}" if workspace else ""
     return (f"{p['id']:<6}{_count(p.get('steps') or []):<10}{where}"
             f"{p.get('title') or '(untitled)'}")
 
@@ -413,7 +569,8 @@ def _line(p: dict, *, workspace: bool) -> str:
 def _full(p: dict) -> str:
     """A plan as a lead reads it: what it is, its steps and their edges, then the story."""
     lines = [f"{p['id']}  {p.get('title') or '(untitled)'}",
-             f"  workspace   {p.get('workspace') or '—'}",
+             f"  workspace   {_where(p)}",
+             f"  checkout    {p.get('checkout') or '—'}",
              f"  created     {_when(p.get('created_at'))} by {p.get('created_by') or '—'}"]
     steps = p.get("steps") or []
     lines.append("")

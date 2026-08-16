@@ -1,6 +1,6 @@
 """The `plans` plugin — the state model, before any step can move.
 
-Six tests, pinning decisions rather than buying confidence. Everything sb owns — the
+Ten tests, pinning decisions rather than buying confidence. Everything sb owns — the
 parser built from the declaration, the state directory, the `--json` envelope — is tested
 in `test_plugins.py`, so these run through `cli.main` for the same reason the other
 shipped-plugin tests do and then assert only what this plugin decided:
@@ -9,15 +9,21 @@ shipped-plugin tests do and then assert only what this plugin decided:
    and with its steps already in it. Both halves of `create` are first class.
 2. Ids are monotonic and never reused, across plans and across steps — a spawn prompt
    citing `s-2` has to stay true even after somebody hand-deletes a row.
-3. `list` is scoped to this worktree, because from inside a plan the others are invisible.
-4. The changelog accumulates and carries the reason the agent supplied, and a write that
+3. `list` is scoped to this worktree, matched on the checkout path.
+4. The workspace is resolved once, at `create`, and a branch change in the same checkout
+   does not move it — the key is the workspace, and the branch is not the workspace.
+5. A checkout that is no workspace says so rather than being filed under a guess.
+6. The changelog accumulates and carries the reason the agent supplied, and a write that
    would drop an entry — or the plan holding it — is refused. That record is what the
    analysis pass reads.
-5. An unreadable file is refused rather than replaced, by every verb.
-6. The state lock is held while a command writes, which is what makes two commands
+7. An unreadable file is refused rather than replaced, by every verb.
+8. So is one malformed inside its plans list — duplicate ids included, plans and steps
+   alike, and a file from a newer plugin.
+9. A refusal reaches a machine reader: the reason is in `data`, not only in `human`.
+10. The state lock is held while a command writes, which is what makes two commands
    touching different steps safe.
 
-Unproven, and not provable here: the real two-process race (test 4 asserts the lock is
+Unproven, and not provable here: the real two-process race (test 10 asserts the lock is
 held around the write, not that two `sb` processes interleave correctly — provoking that
 would be an endurance run against a real store); and that anybody keeps a plan honest once
 the job is running, which is a workflow question and not a code one.
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -39,16 +46,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from switchboard import plugins  # noqa: E402
+from switchboard import store  # noqa: E402
 
 from test_fork_lock import _held  # noqa: E402
 from test_shipped_plugins import ShippedSandbox  # noqa: E402
 
 
 class PlansSandbox(ShippedSandbox):
+    """The sandbox, plus the two things the workspace resolver needs to be real.
+
+    `bin/sb` beside the copied `defaults/` is not a fixture trick: it is the first branch of
+    `_sb()` — a plugin shipped inside a checkout asks that checkout's build — and pointing
+    it at this repo's real `bin/sb` is what makes the shell-out run the code under test
+    against the sandbox's own store rather than whatever is installed on the machine.
+    """
 
     def setUp(self) -> None:
         super().setUp()
         (self.sw / "plugins.toml").write_text('enabled = ["plans"]\n')
+        root = Path(self.tmp.name)
+        (root / "bin").symlink_to(Path(__file__).resolve().parent.parent / "bin")
+
+    def workspace(self, name: str, checkout: Path, *, agent: str = "") -> None:
+        """A workspace row, the way `sb` writes one, so the resolver has a real answer.
+
+        With `agent`, an agent row standing in it too — which is the resolver's FIRST
+        question and the normal path, since a lead is what creates a plan.
+        """
+        db = store.connect(self.repo)
+        store.record_workspace(db, name, str(checkout))
+        if agent:
+            store.create_agent(db, name=agent, role="lead", workspace=name,
+                               cwd=str(checkout))
+        db.close()
 
     def _dir(self) -> Path:
         return plugins.state_root("repo", self.repo) / "plans"
@@ -79,12 +109,11 @@ class PlansTest(PlansSandbox):
                          {"id": "s-1", "name": "write it", "progress": "open",
                           "owner": None, "tries": 1, "notes": [], "deps": [],
                           "checkpoints": []})
-        self.assertEqual(made["workspace"], "main")     # the sandbox repo's branch
         self.assertEqual(made["notes"][0]["text"], "PR1 only")
 
         shown = self.ok("plugin", "plans", "show", "p-2")
         for expected in ("p-2", "build the plugin", "s-1", "s-2", "write it", "test it",
-                         "main", "the job is shaped"):
+                         "the job is shaped"):
             self.assertIn(expected, shown)
 
         listed = self.ok("plugin", "plans", "list")
@@ -94,14 +123,45 @@ class PlansTest(PlansSandbox):
 
     def test_list_shows_the_plans_on_this_worktree(self):
         """A plan belongs to one worktree and from inside it the others are invisible. The
-        plans of another workspace are still in the file, and `--all` is how you see them."""
+        plans of another checkout are still in the file, and `--all` is how you see them."""
         self.ok("plugin", "plans", "create", "here")
         doc = self._doc()
-        doc["plans"][0]["workspace"] = "somewhere-else"
+        doc["plans"][0]["checkout"] = "/somewhere/else"
         self._file().write_text(json.dumps(doc))
         self.assertEqual(self.data("plugin", "plans", "list"), [])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
                          ["p-1"])
+
+    def test_the_workspace_is_resolved_once_and_survives_a_branch_change(self):
+        """The key is the WORKSPACE, which is what the board groups by and what a later PR
+        reads to decide a worktree is gone — not the branch, which moves under a checkout
+        that has not. Filed once at `create`, and neither recomputed nor re-attached: a
+        `git checkout -b` in the same directory used to make `list` go blind to the plan
+        that was made there, with nothing recording that it had.
+        """
+        self.workspace("ws-1", self.repo, agent="lead-1")
+        self.as_agent("lead-1")         # the normal path: a lead makes the plan
+        made = self.data("plugin", "plans", "create", "a job", "--step", "write it")
+        self.assertEqual(made["workspace"], "ws-1")
+        self.assertEqual(Path(made["checkout"]).resolve(), self.repo.resolve())
+
+        self.ok("plugin", "plans", "create", "a second job")
+        subprocess.run(["git", "checkout", "-q", "-b", "fixups"], cwd=self.repo, check=True)
+
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")],
+                         ["p-1", "p-2"])
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["workspace"], "ws-1")
+        self.assertEqual(self.data("plugin", "plans", "create", "after the branch change")
+                         ["workspace"], "ws-1")
+
+    def test_a_checkout_that_is_no_workspace_says_so(self):
+        """No workspace row for this checkout, so there is no name to store. Written down
+        as null and rendered as itself: a plausible-looking wrong key — the branch, the
+        directory — would read to PR4 as a worktree that has gone."""
+        made = self.data("plugin", "plans", "create", "in a plain clone")
+        self.assertIsNone(made["workspace"])
+        self.assertIn("(no workspace)", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
 
     def test_ids_are_monotonic_and_never_reused(self):
         """One step counter for the whole file, not one per plan: two plans on a worktree
@@ -170,13 +230,20 @@ class PlansTest(PlansSandbox):
         collapse to a single entry and `_write`'s drop check passes over the plan whose
         changelog is no longer in it. Refusing here is refusing before anything is written.
         """
+        twins = [{"id": "s-1", "name": "one"}, {"id": "s-1", "name": "a twin"}]
         wrecks = {"holds a str where a plan should be": {"plans": ["hello"]},
                   "holds a NoneType where a plan should be": {"plans": [None]},
                   "holds a plan with no usable id": {"plans": [{"title": "nameless"}]},
                   "holds two plans called p-1": {"plans": [{"id": "p-1"}, {"id": "1"}]},
                   "whose steps are not a list": {"plans": [{"id": "p-1", "steps": "nope"}]},
                   "whose changelog is not a list": {"plans": [{"id": "p-1",
-                                                               "changelog": {}}]}}
+                                                               "changelog": {}}]},
+                  # A twin step takes a tick meant for the other and neither says so; a
+                  # step with no id cannot be ticked at all. Both are PR2's bug to inherit.
+                  "holds two steps called s-1": {"plans": [{"id": "p-1", "steps": twins}]},
+                  "with no usable id": {"plans": [{"id": "p-1",
+                                                   "steps": [{"name": "nameless"}]}]},
+                  "was written by a newer plans plugin": {"format": 99, "plans": []}}
         for expected, doc in wrecks.items():
             with self.subTest(expected=expected):
                 self._dir().mkdir(parents=True, exist_ok=True)
@@ -185,6 +252,26 @@ class PlansTest(PlansSandbox):
                 self.assertEqual(code, 1)
                 self.assertIn(expected, err)
                 self.assertEqual(json.loads(self._file().read_text()), doc)
+
+    def test_a_refusal_reaches_a_machine_reader_too(self):
+        """sb prints `data` under `--json` and not `human`, so a reason that lives only in
+        `human` is a reason for a person and for nobody else. PR4 and PR8 shell out for
+        exactly these answers, and `ok:false` with a null payload gives them nothing to
+        render or log."""
+        self.ok("plugin", "plans", "create", "a job")
+        for argv, expected in ((("show", "p-9"), "the highest is p-1"),
+                               (("changelog", "banana"), "is not a plan id")):
+            with self.subTest(verb=argv[0]):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn(expected, json.loads(out)["data"]["error"])
+
+        # The cap covers `--reason` too — the one field every later verb carries into the
+        # changelog, and the one an agent is most likely to write an essay into.
+        code, out, _ = self.sb("plugin", "plans", "create", "a job",
+                               "--reason", "x" * 3000, "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["data"]["length"], 3000)
 
     def test_the_state_lock_is_held_while_a_command_writes(self):
         """Two commands touching different steps are safe because each reads, changes and
