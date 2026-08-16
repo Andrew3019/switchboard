@@ -1,0 +1,9 @@
+# herdr-outage-prevention — brief
+
+Andrew's instruction, as relayed verbatim by the `herdr-state-recovery` lead (2026-08-16):
+
+> Andrew asks you to do two things. First, close me down. Second, start an investigation into two questions: why herdr went down in the first place and how to stop it happening again, with a specific suspicion that an agent named codex was involved; and, if it cannot be prevented, how to make recovery far less painful than five commands typed by hand — he wants one command that brings back everything that was live, into the same herdr space and panes it came from. Worth telling whoever picks that up: the missing session ids are the sharper half of the second question, because an agent without one cannot be recovered at all, and that is a gap no amount of better tooling closes. Background for them, all committed on branch herdr-state-recovery and not pushed: notes/herdr-recovery-scout-live.md is what the machine looked like right after the restart, notes/herdr-recovery-scout-design.md is how state is actually stored and recovered, and notes/herdr-restore-list.md is the list of what was recoverable and why each excluded agent was excluded.
+
+Context from that lead's earlier report on what happened:
+
+> herdr's client and server restarted a few minutes ago. His workspaces came back by themselves, but the agents running inside them did not — their panes were gone. No data was lost: switchboard's own database still held every agent, and five of them could be brought back with their live conversations intact. Only Andrew could run those restores, because restore refuses to reach across into another dispatcher's tree, so I gave him the exact commands and he has run them as best he could. Two agents could not come back at all, because no session id was ever recorded for them, so there was nothing to resume.
