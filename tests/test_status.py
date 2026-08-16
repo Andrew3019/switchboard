@@ -1873,5 +1873,152 @@ class NeedsSettleTest(unittest.TestCase):
         self.assertTrue(self.row(stalled=True).settled)   # never stamped -> unknown -> show
 
 
+class AwaitingKeypressTest(unittest.TestCase):
+    """The narrower label on top of STALLED, and the two things it must not cost.
+
+    The payloads below are not hand-written: they are what `herdr agent explain --json`
+    actually answered when re-run against the pane text of `research/modal-captures/01`
+    (a first-run theme picker) and `07` (an agent that ended its turn without `sb done`
+    and is sitting at an ordinary prompt — honest STALLED, the case this must never
+    claim). Clipped to the three keys the rule reads, which is also what pins the rule to
+    reading only those.
+
+    No fake herdr models pane content and none is grown to: the decision is a plain
+    function over one parsed payload, and the wiring is exercised by calling it with a
+    stub that counts who it was asked about. What that leaves unproven is the real
+    subprocess — that `herdr agent explain <name> --json` is spelled right and parses —
+    which only a live run can show.
+    """
+
+    def setUp(self):
+        status._KEYPRESS_SEEN.clear()
+
+    tearDown = setUp
+
+    @staticmethod
+    def row(name, *, stalled=False, idle_excuse=None, idle=600):
+        return status.AgentStatus(
+            name=name, role="worker", parent=None, depth=0, state="working",
+            herdr_state="idle", alive=True, stalled=stalled, gone=False, unread=0,
+            age=600, idle=idle, last_activity=0, workspace=None, task=None,
+            blocked_why=None, idle_excuse=idle_excuse)
+
+    MODAL = {"state": "idle", "matched_rule": None,
+             "fallback_reason": "default_known_agent_idle_fallback"}
+    AT_PROMPT = {"state": "idle", "fallback_reason": None,
+                 "matched_rule": {"id": "live_prompt_box", "priority": 950,
+                                  "region": "prompt_box_body", "state": "idle"}}
+
+    def test_only_an_unmatched_screen_counts_and_anything_unreadable_is_no_opinion(self):
+        self.assertTrue(status.awaiting_keypress_screen(self.MODAL))
+        # Capture 07. A matched rule is herdr recognising the screen, whatever it matched.
+        self.assertFalse(status.awaiting_keypress_screen(self.AT_PROMPT))
+        for junk in (None, "", {}, [], {"matched_rule": None, "fallback_reason": "other"},
+                     {"matched_rule": None,
+                      "fallback_reason": "default_known_agent_idle_fallback",
+                      "state": "working"}):
+            self.assertFalse(status.awaiting_keypress_screen(junk), junk)
+
+    def test_only_already_stalled_rows_cost_a_subprocess(self):
+        """The whole cost story: idle stays free, and a row that is merely idle-looking
+        — starting up, waiting on a child, working — is never even asked about, so this
+        can never pull a STARTING agent into the state."""
+        asked = []
+
+        class Spy:
+            def explain_agent(_, name):
+                asked.append(name)
+                return AwaitingKeypressTest.MODAL
+
+        rows = [
+            self.row("stuck", stalled=True),
+            self.row("working"),                                     # not stalled
+            self.row("starting", idle_excuse="starting up"),         # excused, not stalled
+            self.row("waiting", idle_excuse="waiting on children"),  # ditto
+        ]
+        status._mark_awaiting_keypress(Spy(), rows, 1000)
+        self.assertEqual(asked, ["stuck"])
+        self.assertEqual([a.name for a in rows if a.awaiting_keypress], ["stuck"])
+
+        # Failure is no opinion, never `modal` — the required degrade. A herdr that times
+        # out, and one that has never heard of the question, both leave the row with the
+        # STALLED it already had rather than a claim nothing observed.
+        class Broken:
+            def explain_agent(_, name):
+                raise HerdrError("timeout", "herdr did not return")
+
+        status._KEYPRESS_SEEN.clear()
+        rows[0].awaiting_keypress = False
+        status._mark_awaiting_keypress(Broken(), rows, 2000)
+        status._mark_awaiting_keypress(FakeHerdr(), rows, 3000)
+        self.assertFalse(any(a.awaiting_keypress for a in rows))
+        self.assertTrue(rows[0].stalled)
+
+    def test_the_board_at_half_a_second_does_not_pay_for_the_same_stall_every_tick(self):
+        """The two gates the 0.5 s refresh added. A stall that has not held for the
+        settle window is not asked about at all — it is not going to be drawn as a
+        summons either — and a stall that HAS held is asked about once per
+        `KEYPRESS_PROBE_GAP`, not once per frame, which is the difference between 4 ms
+        and 240 ms on a tick that is only 500 ms long."""
+        asked = []
+
+        class Spy:
+            def explain_agent(_, name):
+                asked.append(name)
+                return AwaitingKeypressTest.MODAL
+
+        fresh = [self.row("gap", stalled=True, idle=int(status.NEEDS_SETTLE) - 1)]
+        status._mark_awaiting_keypress(Spy(), fresh, 1000)
+        self.assertEqual(asked, [])                     # a turn gap costs nothing
+        self.assertFalse(fresh[0].awaiting_keypress)
+
+        # Held. Asked once, then answered from the last reading for the whole gap, and
+        # asked again on the far side of it.
+        for t in range(1000, 1000 + int(status.KEYPRESS_PROBE_GAP), 5):
+            row = self.row("stuck", stalled=True)
+            status._mark_awaiting_keypress(Spy(), [row], t)
+            self.assertTrue(row.awaiting_keypress)      # the label holds between probes
+        self.assertEqual(asked, ["stuck"])
+        status._mark_awaiting_keypress(
+            Spy(), [self.row("stuck", stalled=True)], 1000 + int(status.KEYPRESS_PROBE_GAP))
+        self.assertEqual(asked, ["stuck", "stuck"])
+
+    def test_a_booting_agent_is_not_asked_about_however_its_row_got_there(self):
+        """qa-10 caught a real one: `sb restore` keeps the session id and clears the turn,
+        so the startup grace does not cover it, and a resumed Claude still drawing its
+        splash screen read AWAITING KEYPRESS for ~1.25 s. The settle gate closes it from
+        the other end — restore logs an event, so the row's idle clock is at zero and
+        stays under the window for the whole boot, whatever its session id says."""
+        asked = []
+
+        class Spy:
+            def explain_agent(_, name):
+                asked.append(name)
+                return AwaitingKeypressTest.MODAL
+
+        restored = self.row("restored", stalled=True, idle=1)   # `restore` just fired
+        status._mark_awaiting_keypress(Spy(), [restored], 1000)
+        self.assertEqual(asked, [])
+        self.assertFalse(restored.awaiting_keypress)
+
+    def test_no_row_s_label_depends_on_who_else_is_stalled(self):
+        """The other one qa-10 caught: with a small cap over `agents` order, an unrelated
+        agent stalling flipped a parked modal between AWAITING KEYPRESS and STALLED frame
+        after frame. A row's answer must be a fact about its own pane."""
+        seen = []
+
+        class Spy:
+            def explain_agent(_, name):
+                return (AwaitingKeypressTest.MODAL if name == "modal"
+                        else AwaitingKeypressTest.AT_PROMPT)
+
+        for tick, others in enumerate([1, 9, 2, 9, 30, 0]):
+            rows = [self.row(f"other-{i}", stalled=True) for i in range(others)]
+            rows.append(self.row("modal", stalled=True))
+            status._mark_awaiting_keypress(Spy(), rows, 1000 + tick)
+            seen.append({a.name: a.awaiting_keypress for a in rows}["modal"])
+        self.assertEqual(seen, [True] * 6)
+
+
 if __name__ == "__main__":
     unittest.main()

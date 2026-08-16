@@ -936,6 +936,28 @@ class Herdr:
             )
         return text
 
+    def explain_agent(self, name: str) -> dict:
+        """herdr's classifier, asked WHY it called this pane what it called it.
+
+        `agent list` gives the four-value verdict; this gives the working behind it — the
+        rule that matched, or, when nothing matched, the fallback herdr guessed from. That
+        difference is the only thing on record that separates a pane parked on a dialog
+        from an agent sitting honestly at its prompt: both report `idle` and
+        `interactive_ready`, and only one of them has a matched rule
+        (`research/modal-captures/01`-`09`). See `status.awaiting_keypress_screen`, which
+        is the rule read off this, and `status._mark_awaiting_keypress` for why this is
+        never called on a healthy row.
+
+        ONE SUBPROCESS PER AGENT, unlike `agent list`. It reads the pane under the hood, so
+        it costs what `read_pane` costs and must never be put on a per-agent-per-tick path
+        (collector.py's docstring is the measurement).
+
+        Raises like every other call here — a caller that wants "no opinion" out of a
+        failure has to say so, because silently returning an empty verdict from a timeout
+        would make "herdr is down" indistinguishable from "herdr looked and saw nothing".
+        """
+        return self._call("agent", "explain", name, "--json")
+
     # -- state authority -------------------------------------------------
 
     def report_state(

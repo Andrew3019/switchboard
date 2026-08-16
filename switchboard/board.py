@@ -200,6 +200,12 @@ def wants_you(a) -> bool:
     Narrower in one more way since the debounce: an inferred summons has to have
     HELD (`AgentStatus.settled`). Same set of rows, a settle window later — see
     that property, and `display.needs_settle` for what was measured.
+
+    AWAITING KEYPRESS is in that set and not beside it: it is a narrower reading
+    of a row that is already `stalled`, so `inferred_summons` covers it, and it
+    is debounced exactly as the stall under it is. A human is the only thing that
+    can move such an agent, which is a reason to draw the row clearly — not a
+    reason to summon anybody on one frame of a screen classifier.
     """
     return bool(a.gone or a.blocked or (a.inferred_summons and a.settled))
 
@@ -223,6 +229,17 @@ def marker(a) -> str:
         return f"BLOCKED — {a.blocked_why or 'no reason recorded'}"
     if not a.settled:
         return ""
+    if a.awaiting_keypress:
+        # Above STALLED and not beside it: this is the same stall with one more thing
+        # known about it, and the thing known is what the human has to DO. Below the two
+        # above it because those are a person being asked an actual question; neither can
+        # be true at the same time as this one anyway (both read a pane that is not idle).
+        #
+        # Deliberately does not name a dialog. What was observed is that herdr recognised
+        # nothing on the screen — the reading a first-run picker or a login screen gives —
+        # so the row says that, and says the one action that clears it whatever it turns
+        # out to be. See `status.awaiting_keypress_screen`.
+        return "AWAITING KEYPRESS — screen herdr cannot read; press a key in its pane"
     if a.stalled:
         return f"STALLED — idle {status_mod.fmt_age(a.idle)}"
     if a.signal_drift:

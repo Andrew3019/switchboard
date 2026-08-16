@@ -1,0 +1,21 @@
+## NEGATIVE CONTROL: real tool-permission prompt (herdr already calls this 'blocked'/at_prompt), named agent 'perm-prompt', pane w1HK:p5
+### herdr pane read --lines 60
+   nt-test-dir-xyz
+   Remove nonexistent test
+   directory
+
+ Do you want to proceed?
+ ❯ 1. Yes
+
+ Esc to cancel · Tab to amend ·
+ ctrl+e to explain
+
+### herdr agent get perm-prompt
+{"id":"cli:agent:get","result":{"agent":{"agent":"claude","agent_status":"blocked","cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad/modal-clone","focused":false,"foreground_cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad/modal-clone","interactive_ready":true,"name":"perm-prompt","pane_id":"w1HK:p5","revision":6,"state_change_seq":152,"tab_id":"w1HK:t1","terminal_id":"term_65927e8c283b155","terminal_title":"✳ Remove temporary test directory","terminal_title_stripped":"Remove temporary test directory","workspace_id":"w1HK"},"type":"agent_info"}}
+
+### herdr agent explain perm-prompt
+agent: claude
+state: blocked
+manifest: remote:/Users/andrew/.local/state/herdr/agent-detection/remote/claude.toml 2026.08.13.1
+rule: generic_permission_prompt (region=after_last_horizontal_rule priority=840)
+evidence: "   nt-test-dir-xyz\n   Remove nonexistent test\n   directory\n\n Do you want to proceed?\n ❯ 1. Yes\n\n Esc to cancel · Tab to amend ·\n ctrl+e to explain\n"

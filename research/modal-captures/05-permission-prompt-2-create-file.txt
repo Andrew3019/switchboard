@@ -1,0 +1,21 @@
+## NEGATIVE CONTROL: actively working, named agent 'perm-prompt' (reused pane), pane w1HK:p5
+### herdr pane read --lines 40
+  7 if __name__ == "__main__"
+    :
+  8     print(fibonacci(35))
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to create
+ scratch_fib.py?
+ ❯ 1. Yes
+
+ Esc to cancel · Tab to amend
+
+### herdr agent get perm-prompt
+{"id":"cli:agent:get","result":{"agent":{"agent":"claude","agent_status":"blocked","cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad/modal-clone","focused":false,"foreground_cwd":"/private/tmp/claude-501/-Users-andrew--herdr-worktrees-switchboard-board-awaiting-keypress/a85ac0ee-8116-4050-a4b9-dc91edbbf1d4/scratchpad/modal-clone","interactive_ready":true,"name":"perm-prompt","pane_id":"w1HK:p5","revision":11,"state_change_seq":155,"tab_id":"w1HK:t1","terminal_id":"term_65927e8c283b155","terminal_title":"✳ Remove temporary test directory","terminal_title_stripped":"Remove temporary test directory","workspace_id":"w1HK"},"type":"agent_info"}}
+
+### herdr agent explain perm-prompt
+agent: claude
+state: blocked
+manifest: remote:/Users/andrew/.local/state/herdr/agent-detection/remote/claude.toml 2026.08.13.1
+rule: legacy_no_prompt_blocker (region=whole_recent priority=300)
+evidence: "  7 if __name__ == \"__main__\"\n    :\n  8     print(fibonacci(35))\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to create\n scratch_fib.py?\n ❯ 1. Yes\n\n Esc to cancel · Tab to amend\n"

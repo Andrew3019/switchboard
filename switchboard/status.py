@@ -158,6 +158,53 @@ REAPABLE = tuple(config.setting("states.reapable"))
 # is `failed` with extra steps.
 GONE_STATE = "failed"
 
+# The `fallback_reason` herdr writes when its detection manifest matched NO rule against a
+# pane it knows is running a known agent — it gave up and guessed idle. See
+# `awaiting_keypress_screen`, the only thing that reads it.
+NO_RULE_FALLBACK = "default_known_agent_idle_fallback"
+
+# How many already-stalled rows one `collect` will spend a subprocess on, and how long
+# before it will ask about the same row again.
+#
+# MEASURED, AND THE FIRST MEASUREMENT WAS WRONG. This was ~120 ms a call here, and that
+# number was taken by differencing two one-shot `collect`s, so most of what it timed was
+# the first call's warm-up. Timed directly, nine calls in a row: 8 ms median, the same as
+# `agent list` (7.5 ms; qa-10 measured the same thing independently at 7.5 ms). What it
+# really costs a tick, on a small store: 11 ms with nothing stalled, 31 ms with two rows
+# probed every tick, 14 ms with two rows stalled inside the gap.
+#
+# THE FIRST CAP WAS 2 AND THAT WAS A BUG, not a conservative choice. At 8 ms a call there
+# was nothing to protect, and a small cap over `agents` order meant WHICH rows got an
+# opinion depended on who else in the fleet happened to be stalled — qa-10 flipped a parked
+# modal between AWAITING KEYPRESS and STALLED frame after frame by toggling an unrelated
+# agent, and with four stalled rows both modals silently read STALLED. A cap is only safe
+# if it cannot decide a row's label, so:
+#
+# - the GAP bounds the rate, and is what keeps the steady-state cost at about nothing: a
+#   stall lasts hours, and re-asking about the same still pane sixty times a minute buys
+#   nothing. It also makes the cap self-scheduling — a row asked about this tick is out of
+#   the running next tick, so the budget rotates through every candidate.
+# - the CAP is a backstop against a fleet that has gone quiet all at once, sized so it
+#   cannot bite a real fleet: eight rows is ~64 ms, and reaching it needs nine agents
+#   stalled and past the settle window at the same moment.
+# - and a row over budget KEEPS ITS LAST ANSWER (`_KEYPRESS_SEEN`) rather than reverting,
+#   which is what makes the cap unable to flip a label at all. It can only delay a first
+#   opinion, by a tick or two.
+KEYPRESS_PROBE_MAX = 8
+KEYPRESS_PROBE_GAP = 30
+
+# The answers, and when they were asked for — the memory that makes the gap above mean
+# anything. Process-local and deliberately not a column: the collector is one process
+# watching the same fleet for hours (this is `stamp_needs_for`'s argument for its own
+# dict), and it is a READ-ONLY one, so a fact whose whole lifetime is a few frames of a
+# screen must not be given a reason to write. A short-lived `sb status` starts with this
+# empty, asks once, and throws it away with the process, which is exactly right for it.
+#
+# Never a source of truth: `_mark_awaiting_keypress` prunes it to the rows that are still
+# candidates on every call, so a row that stops being stalled forgets its answer rather
+# than carrying a stale one into its next stall.
+_KEYPRESS_SEEN: dict[str, tuple[int, bool]] = {}
+
 # How long a row with no session id is read as a *claim* rather than as a live agent.
 #
 # `delegate` inserts the row before herdr is asked to start anything (the name is the lock
@@ -391,6 +438,19 @@ class AgentStatus:
     # Defaulted and last for the reason `turn` is: a hand-built row in a test, and a
     # snapshot published by a collector running older code, both have to construct.
     needs_for: Optional[int] = None
+    # A NARROWER LABEL ON TOP OF `stalled`, never instead of it. herdr's own classifier
+    # looked at this pane and matched nothing at all — the reading a first-run picker, a
+    # login screen or a trust prompt produces, where the agent looks idle, anything sent
+    # to it is swallowed by the dialog, and only a human pressing a key in that pane moves
+    # it (`research/modal-captures`).
+    #
+    # A field and not a property, because unlike every other flag on this row it cannot be
+    # derived from what `collect` already has: it costs a subprocess, so it is asked for
+    # only on rows that are ALREADY stalled and stamped here (`_mark_awaiting_keypress`).
+    # False therefore means "no opinion" as well as "no" — herdr unreachable, the probe
+    # failed, the row was past `KEYPRESS_PROBE_MAX` — and every reader must treat it that
+    # way: the row falls back to reading exactly as it does today.
+    awaiting_keypress: bool = False
 
     @property
     def blocked(self) -> bool:
@@ -632,8 +692,15 @@ class AgentStatus:
 
         `signal_drift` is here for completeness rather than because it flickers: it already
         requires STALL_GRACE of quiet, so the debounce below can never be what decides it.
+
+        `awaiting_keypress` is named for the same reason it is named in `board.wants_you`:
+        it can only be set on a row that is already `stalled`, so it adds nothing to this
+        set today, but it is the most inferred reading on the row — a single frame of
+        herdr's screen classifier — and it must never come to be the one summons that
+        reaches a human without settling first.
         """
-        return bool(self.stalled or self.at_prompt or self.signal_drift)
+        return bool(self.stalled or self.at_prompt or self.signal_drift
+                    or self.awaiting_keypress)
 
     @property
     def settled(self) -> bool:
@@ -693,7 +760,7 @@ class AgentStatus:
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
-            "needs_for",
+            "needs_for", "awaiting_keypress",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -748,6 +815,150 @@ class Snapshot:
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
+
+
+def awaiting_keypress_screen(explain: object) -> bool:
+    """Does herdr's classifier admit it does not recognise what is on this pane?
+
+    A PLAIN FUNCTION OVER ONE PARSED `herdr agent explain --json` PAYLOAD, and that is the
+    whole of the decision — the wiring around it only decides who gets asked. It is a
+    function and not a method so it can be unit-tested on the captured payloads directly,
+    with no herdr and no fake herdr in the way (the fakes model `agent list` and nothing
+    else, and are not to be grown).
+
+    The rule, checked against all nine captures in `research/modal-captures`: herdr matched
+    NO rule (`matched_rule: null`) and fell back to its known-agent-idle default. Three
+    real modals read that way; all six negative controls did not, including the one that
+    matters most — capture 07, an agent that ended its turn without `sb done` and is
+    sitting at an ordinary prompt box, which is honest STALLED and which herdr matches
+    `live_prompt_box` on. `agent_status` alone cannot tell those two apart: both say
+    `idle`, both say `interactive_ready`.
+
+    WHAT IT DOES NOT SAY. Not "a dialog is on screen" — only that herdr's manifest has no
+    rule for this screen, which is what makes a dialog it has never seen look idle. A modal
+    herdr happens to have a rule for reads as False here and stays plain STALLED, and so
+    does any unfamiliar screen this has never been tried against. That is the required
+    failure direction: false negatives degrade to today's row.
+
+    Everything unrecognisable is False, deliberately and at every step — a payload that is
+    not a dict (a timeout swallowed upstream, an empty result, a shape herdr changes under
+    us), a matched rule of any kind, a different fallback reason, a state that is not idle.
+    "No opinion" and "not a modal" are the same answer here because they lead to the same
+    row, and only ever the row that would have been drawn anyway.
+    """
+    if not isinstance(explain, dict):
+        return False
+    if explain.get("matched_rule") is not None:
+        return False
+    if explain.get("fallback_reason") != NO_RULE_FALLBACK:
+        return False
+    # herdr's own verdict for the pane, as the same payload reports it. Belt and braces
+    # over the caller's gate rather than a second opinion: `working` or `blocked` here
+    # would mean something IS happening, and neither is this state whatever the rule field
+    # says. `IDLE_LIKE` rather than `== "idle"` because `done` is herdr's fifth display
+    # state for the same reading (see the note on that constant).
+    return explain.get("state") in IDLE_LIKE
+
+
+def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus],
+                            now: int) -> None:
+    """Stamp the narrower label on the rows that already earned the broader one.
+
+    IDLE MUST STAY FREE. `collect` costs one herdr subprocess for the whole fleet, and the
+    collector re-runs it every `display.board_refresh` seconds — now 0.5 s, not 2 s;
+    `agent explain` is one subprocess PER AGENT and reads the pane to answer, so asking it
+    about every row every tick would multiply the most expensive part of the tick by the
+    size of the fleet (collector.py's docstring measures where a tick's time actually
+    goes). So the question is only ever asked about rows `collect` has ALREADY decided are
+    stalled — normally none, occasionally one — and a healthy fleet pays nothing at all
+    for this.
+
+    THREE GATES, and at 0.5 s all three earn their place:
+
+    - `stalled and alive is True`, below, which is what makes the normal cost zero.
+    - the stall must have HELD for `NEEDS_SETTLE`, the same window the NEEDS YOU debounce
+      uses. A turn gap is 2 s and the tail of a spawn is 30 s, and neither will be drawn
+      as a summons before it settles, so asking herdr about one buys a reading nothing
+      would draw — while costing a fifth of a frame at the exact moment a person is
+      watching the board move. `a.idle` is the cheap form of that question: it is on the
+      row already, it needs no memory, and for a row this function can see at all it is
+      counting the same silence `settled` counts.
+    - `KEYPRESS_PROBE_GAP` since this row was last asked about. The two above bound a
+      transient; a real stall lasts hours, and without this it would spend 120 ms of every
+      500 ms tick for the whole of it — which `collector._gap` would answer by slowing the
+      board down, undoing the interval PR #66 shortened.
+
+    That gate is also what keeps the label honest about the case it would most easily get
+    wrong. A freshly spawned agent that has been sent a message and is not yet detected as
+    working is STARTING, not stuck, and can sit in NEEDS YOU for more than a frame; it is
+    excused out of `stalled` by `idle_excuse` (`starting up`, the session-id grace) before
+    this function ever sees the row, and this adds no path back in — it only ever narrows
+    an existing stall, never creates one.
+
+    That gate is doing real work there, not being careful about nothing. A healthy,
+    authenticated Claude read as an unmatched screen for the first few seconds after
+    `agent start`, while its splash screen was still drawing and its prompt box did not
+    exist yet to be matched, and read as `live_prompt_box` on every reading after — which
+    is a STARTING agent producing this signal, and is precisely the row the stall gate
+    keeps away from here.
+
+    What the row does with the answer is the debounce's business and not this function's:
+    `awaiting_keypress` is in `inferred_summons`, so a board draws it only once the row's
+    summons has `settled`, exactly as it draws the STALLED underneath it.
+
+    `alive is True` and not merely truthy, for the reason `turn_doubted` gives: there is no
+    pane to explain if herdr answered and did not list the agent, and nothing was observed
+    at all if herdr could not be reached.
+
+    Anything that goes wrong leaves the row alone. A herdr that times out, refuses, or
+    answers in a shape we cannot read is not evidence of a dialog — it is no evidence — and
+    the row keeps the STALLED it already had.
+    """
+    if h is None:
+        return
+    # A herdr that cannot answer this question is one more way to have no opinion, and the
+    # only one worth naming: `collect` is handed test doubles and older objects that model
+    # `agent list` and nothing else, and none of them should have to learn about panes to
+    # keep working (house rules — the fakes are not to be grown).
+    ask = getattr(h, "explain_agent", None)
+    if ask is None:
+        return
+
+    candidates = [x for x in agents
+                  if x.stalled and x.alive is True and x.idle >= NEEDS_SETTLE]
+    # Forget every row that is not a candidate now, BEFORE anything is read back: a row
+    # that worked again and stalled again is a new stall, and must not inherit the answer
+    # given about the pane it had last time.
+    for name in set(_KEYPRESS_SEEN) - {x.name for x in candidates}:
+        del _KEYPRESS_SEEN[name]
+
+    # Least recently asked about first, and never `agents` order — an order that depends on
+    # the rest of the fleet is an order that can decide one row's label from another row's
+    # state, which is exactly the flicker qa-10 caught. Name breaks the tie so two rows
+    # asked about in the same second still have a fixed order.
+    spent = 0
+    for a in sorted(candidates, key=lambda x: (_KEYPRESS_SEEN.get(x.name, (0, False))[0],
+                                               x.name)):
+        asked_at, answer = _KEYPRESS_SEEN.get(a.name, (0, False))
+        # Inside the gap, and over budget outside it, both answer from what was last seen.
+        # Over budget is the load-bearing one: a row that HAS an answer keeps it rather
+        # than reverting to "no opinion", so a busy tick can delay a first reading but can
+        # never take a label off a row that already earned one.
+        if now - asked_at < KEYPRESS_PROBE_GAP or spent >= KEYPRESS_PROBE_MAX:
+            a.awaiting_keypress = answer
+            continue
+        spent += 1
+        try:
+            a.awaiting_keypress = awaiting_keypress_screen(ask(a.name))
+        except (HerdrError, OSError):
+            # No answer is not an answer, and it is not the OLD answer either: a herdr that
+            # has stopped answering must not leave a row telling a human to go and press a
+            # key on the strength of a reading nothing can confirm any more. Forgotten, so
+            # the row degrades to plain STALLED for as long as the outage lasts.
+            _KEYPRESS_SEEN.pop(a.name, None)
+            a.awaiting_keypress = False
+            continue
+        _KEYPRESS_SEEN[a.name] = (now, a.awaiting_keypress)
 
 
 def collect(
@@ -1009,6 +1220,12 @@ def collect(
             undelivered_age=(max(0, now - pending[name][1]) if name in pending else 0),
             undelivered_answer=pending.get(name, (0, 0, False))[2],
         ))
+
+    # Every row is built before this and none is changed by it except in the one field it
+    # stamps. It goes here, after the loop, because it needs the finished `stalled` verdict
+    # to know who to ask about — and it asks about nobody on a fleet where nothing is
+    # stalled, which is the normal case and the reason this is affordable at all.
+    _mark_awaiting_keypress(h if consulted else None, agents, now)
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.
@@ -1808,7 +2025,10 @@ def _herdr_cell(a: AgentStatus) -> str:
 def _flags(a: AgentStatus) -> str:
     f = []
     if a.stalled:
-        f.append("<< STALLED")
+        # One flag, not two: the keypress reading is the same stall said more precisely,
+        # and a row carrying both words would read as two problems. See `board.marker`,
+        # which ranks it the same way.
+        f.append("<< AWAITING KEYPRESS" if a.awaiting_keypress else "<< STALLED")
     if a.gone:
         f.append("<< GONE")
     if a.signal_drift:
@@ -1905,6 +2125,15 @@ def _attention(snap: Snapshot) -> list[str]:
                 out.append(f"  {a.name:<{w}}  {a.undelivered} never announced to it, "
                            f"oldest {fmt_age(a.undelivered_age)}{extra}"
                            f"  →  sb inspect {a.name}")
+            elif a.awaiting_keypress:
+                # ABOVE the stalled branch and worded away from it, because the advice is
+                # the opposite: `sb tell` writes text into a pane, and this is the one row
+                # where the pane cannot read text — herdr's classifier recognises nothing
+                # on that screen, and anything sent goes into whatever is drawn over it.
+                # Only a person at the keyboard clears this one.
+                out.append(f"  {a.name:<{w}}  idle {fmt_age(a.idle)} on a screen herdr "
+                           f"cannot read  →  press a key in its pane: "
+                           f"sb inspect {a.name}")
             elif a.stalled:
                 # After the mail branches, which are the more actionable read of the same
                 # agent: mail nobody announced is fixed by ringing it, and this is not.
@@ -1972,12 +2201,21 @@ def _attention(snap: Snapshot) -> list[str]:
                 # running, and herdr's independent look at the pane is what contradicts it.
                 what = ("NO SESSION  our signal still says working, but herdr sees no "
                         "agent in that pane — the session died mid-turn")
+            elif a.awaiting_keypress:
+                # The one row in this block that a `tell` cannot reach — see the NEEDS YOU
+                # branch above, and `awaiting_keypress_screen` for what was actually
+                # observed (herdr matched no rule; not "there is a dialog").
+                what = ("AWAITING KEYPRESS  herdr's classifier recognises nothing on "
+                        "that screen — text sent to it goes into whatever is drawn over it")
             else:
                 what = (f"STALLED  {a.stall_source} — turn ended, "
                         f"`sb done` never called")
             out.append(f"  {a.name:<{w}}  {what}, quiet {fmt_age(a.idle)}")
         out.append(f"  {'':<{w}}  →  sb inspect <name>, then: "
                    f"sb tell <name> \"wrap up and run sb done\"")
+        if any(a.awaiting_keypress for a in drift):
+            out.append(f"  {'':<{w}}  →  except an AWAITING KEYPRESS one: go to its pane "
+                       f"and press a key, a tell cannot reach it")
     return out
 
 
