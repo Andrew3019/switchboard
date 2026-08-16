@@ -356,12 +356,12 @@ behavioural contract of the fix. Two sections, ordered step by step: what is cau
 problem, and what the fix will be — not necessarily a step-by-step capture of the fix
 itself, but an ordered account for his understanding.
 
-The format is fixed: bullets indented with `-`, then `---`, then `-----`, each bullet twelve
-words at most. Note this is tighter than the standing human-facing rule, which allows about
-twenty for a genuinely tangled point — and a behavioural contract is where the conditions and
-fallbacks live. Twelve is Andrew's number and stands; what it costs is that one proposition
-with three conditions becomes several bullets whose logical structure has to survive the
-split.
+The format is fixed: bullets indented with `-`, then `---`, then `-----`. Bullets run short —
+around twelve words, and up to about twenty where the point is genuinely tangled, which
+matches the standing human-facing rule rather than tightening it. A behavioural contract is
+where the conditions and fallbacks live, so it is the case that needs the loose end of the
+range: one proposition with three conditions should not have to fragment into four bullets
+that each lose which condition governs which branch.
 
 **A gate message may point at a fuller artifact.** Anything that does not fit the format is
 referenced rather than crammed into it, so the short version is never the only version
@@ -523,13 +523,12 @@ tells agents plans exist.
 
 Named because they are real and accepted for now, not because they are solved.
 
-**A plan that was never made is invisible.** The design is careful that a skipped step is a
-state with a reason on the board rather than an absence — but the same argument applies one
-level up and nothing carries it there. A worktree whose owner decided no plan was needed
-looks exactly like one whose owner never considered it, and the judgement that starts a plan
-is made by the agent a plan would constrain. Making a declared no-plan a recorded state would
-close it; whether that ceremony is worth paying on every investigation and question is
-Andrew's call and is not yet made.
+**A plan that was never made is invisible, and stays that way.** The design is careful that a
+skipped step is a state with a reason rather than an absence, and the same argument applies one
+level up — a worktree whose owner decided no plan was needed looks exactly like one whose owner
+never considered it. Recording a declared no-plan would close it and was considered; it is not
+worth the ceremony on every investigation, question and scouting job that will never have a
+plan. No plan means nothing to show.
 
 **Step sets from different leads are not really comparable.** Granularity is a judgement,
 so two leads splitting the same job into three coarse steps and twelve fine ones produce
