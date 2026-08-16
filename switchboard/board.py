@@ -919,7 +919,8 @@ def sweep_tick(armed: int, note: list) -> int:
 def _sweep(note: list) -> None:
     """The sweep itself, off the drawing thread. Never raises into it."""
     try:
-        out = subprocess.run(sweep_mod.command(), capture_output=True, text=True)
+        out = subprocess.run(sweep_mod.command(), capture_output=True, text=True,
+                             env=sweep_mod.environ())
         line = (out.stdout or out.stderr or "").strip().splitlines()
         note.append(f"sweep: {line[0] if line else 'nothing to do'}")
     except (OSError, subprocess.SubprocessError) as e:

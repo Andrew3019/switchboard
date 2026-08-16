@@ -4633,11 +4633,20 @@ class Broker:
         except sweep_mod.Unknown as e:
             out["stopped"] = str(e)
             return out
+        # The one directory this must never be aimed at, established once and before
+        # anything is looked at rather than per space: not knowing where it is disqualifies
+        # the whole sweep, exactly as it refuses a single `workspace_close`.
+        primary = self._primary_checkout()
+        if primary is None:
+            out["stopped"] = ("git would not say where this repository's own checkout is")
+            return out
         my_names, my_dirs = self._my_spaces(me)
         for w in self.workspace_list()["workspaces"]:
             name, checkout = w["name"], w["checkout"]
             if w["verdict"] != store.CHECKOUT_OK:
                 continue                       # bare, retired, already gone, unreadable
+            if _same_dir(checkout, primary):
+                continue                       # the repository's own working tree
             if name in my_names or any(live.is_under(d, checkout) for d in my_dirs):
                 continue                       # never the space the sweep is standing in
             out["looked"] += 1

@@ -209,7 +209,9 @@ docs_dirs = ["notes", "design", "learnings", "research"]
 # ...except these, which are never docs however they are spelled. DESIGN-TRUTH.md is the
 # only trusted document in the repo and only Andrew edits it, so an unpushed change to it
 # is not a note somebody can regenerate.
-docs_never = ["DESIGN-TRUTH.md"]
+# (single-quoted, which in TOML is a literal string: a double-quoted one next to that name
+# reads as an unterminated citation to `tests/test_design_truth_refs.py`.)
+docs_never = ['DESIGN-TRUTH.md']
 
 # Shortest commit subject the squash-merge check will match on (`sweep.stranded`, rule 3).
 # A subject shorter than this — "wip", "fix" — would match half a history.

@@ -337,3 +337,18 @@ def command() -> list[str]:
     launched with, so there is no `bin/sb` path to guess at.
     """
     return [sys.executable, "-m", "switchboard.cli", "sweep"]
+
+
+def environ() -> dict:
+    """The child's environment: this package's own root on `PYTHONPATH`.
+
+    The child must keep the board's CWD, because that is what tells `sb` which repo it is
+    standing in — so `-m switchboard.cli` cannot rely on the implicit `sys.path` entry a
+    `python -m` gets, which is that same cwd. A board opened in a subdirectory of the repo
+    would otherwise spawn a sweep that cannot import switchboard at all. This is what
+    `bin/sb` does with its own `sys.path.insert`, said in the one place a subprocess can
+    hear it.
+    """
+    root = str(Path(__file__).resolve().parent.parent)
+    have = os.environ.get("PYTHONPATH")
+    return {**os.environ, "PYTHONPATH": f"{root}{os.pathsep}{have}" if have else root}
