@@ -143,8 +143,12 @@ already knows which presets that step pulls in. — confirmed 2026-08-16
 **The tree is displayable: the current structure, and who is working on what.** — confirmed
 2026-08-16
 
-**A tree always belongs to one worktree, so the board renders it inside the worktree
-grouping it already has** rather than in a section of its own. A job is owned by a lead,
+**A dispatcher is never involved in a task.** It relays work and orchestrates the creation
+of agents and worktrees; it does not plan, own, tick or read a tree. — confirmed 2026-08-16
+
+**A tree always belongs to one worktree, and a worktree may hold several trees.** The board
+therefore renders them inside the worktree grouping it already has, rather than in a section
+of its own. A job is owned by a lead,
 and everything below a lead shares that lead's worktree, so a job and a worktree are the
 same span. A dispatcher reaches across worktrees but relays rather than plans, and owns no
 tree. Work spanning two worktrees is therefore two trees, and one tree spanning both would
@@ -202,6 +206,16 @@ the node done if confident, and to return it to the parent if not. — confirmed
 the outcome is known and there is a clear path from the investigation's results through to
 a merged PR. Investigation still appears as a node when it is one piece of an
 already-shaped job. — confirmed 2026-08-16
+
+**A tree exists exactly when the work is heading for a change that will land.** Everything
+else runs without one: investigation, questions, scouting, review-only work, anything a
+single agent answers and reports, and everything a dispatcher does. Small does not mean
+exempt — a one-line docs change bound for a PR still gets a tree, only a short one. —
+decided 2026-08-16
+
+**Having no tree and having no node are different things.** Inside a tree, what becomes a
+node is settled by the two criteria above, so a lead's children are not automatically
+nodes and the tree is never a mirror of the agent tree. — decided 2026-08-16
 
 **A tree may be created with some of its nodes already done.** Trees are flexible; nothing
 requires one to start empty. — confirmed 2026-08-16
