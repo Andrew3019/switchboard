@@ -430,11 +430,18 @@ def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
 def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
     """Per row: `(char, offset)`, or `None` for a row with no mark.
 
-    The mark lives INSIDE the indentation the row already has, at the column the run's
-    shallowest row indents to. Every row in a run is at least that deep, so the mark
-    always lands on a space and the name column never moves: the gutter costs zero
-    columns. `offset` indexes the row's rendered label, with `-1` meaning the space in
-    front of the glyph — see below.
+    The mark lives INSIDE the indentation the row already has, at the LAST column the
+    run's shallowest row indents to — the space directly in front of that row's name.
+    Every row in a run is at least that deep, so the mark always lands on a space and the
+    name column never moves: the gutter costs zero columns. `offset` indexes the row's
+    rendered label, with `-1` meaning the space in front of the glyph — see below.
+
+    AS FAR RIGHT AS THE RUN ALLOWS, which is Andrew's call and not an arbitrary one: the
+    whole block from column 0 to `INDENT_width * depth - 1` is free for every row in the
+    run, and drawing at the left end of it left the bracket floating in open space with
+    the names it groups four columns away. Against the name it reads as a brace around
+    them. The shallowest row still decides the column, so the bracket never lands on a
+    glyph or a letter of a deeper row.
 
     `╭ │ ╰` around a run of two or more. A run of one gets a standalone `·`, because a
     bracket needs two rows to read as one.
@@ -460,7 +467,7 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
                 continue                         # a top alone in its own workspace
             off = -1                             # the space before the glyph
         else:
-            off = len(board.INDENT) * (depth - 1)
+            off = len(board.INDENT) * depth - 1  # the space before the name
         if first == last:                        # a workspace of one: a mark, not a bracket
             out[first] = (LONE_MARK, off)
             continue

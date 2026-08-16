@@ -275,6 +275,27 @@ class GutterTest(unittest.TestCase):
         self.assertTrue(cut and cut[0] == "│", cut)
         self.assertNotIn("╭", cut)
 
+    def test_the_bracket_sits_at_the_right_hand_end_of_the_run_s_indent(self):
+        """AS FAR RIGHT AS THE RUN ALLOWS — Andrew's call, and the one thing about the
+        gutter that is a column number rather than a character. The whole indent block is
+        free, so the choice is the left end or the right, and the right is the column
+        directly before the shallowest row's name. Pinned on `gutter_column`, which is
+        pure, rather than on a drawn frame: the number is the decision."""
+        rows = [agent("top", workspace="top"),
+                agent("lead", depth=1, parent="top", workspace="w"),
+                agent("kid", depth=2, parent="lead", workspace="w")]
+        unit = len(board.INDENT)
+        self.assertEqual(richboard.gutter_column(rows),
+                         [None, ("╭", unit - 1), ("╰", unit - 1)])
+        # A run whose shallowest row is deeper moves right with it, and never past the
+        # end of that row's own indentation.
+        deeper = [agent("top", workspace="top"),
+                  agent("lead", depth=1, parent="top", workspace="top"),
+                  agent("a", depth=2, parent="lead", workspace="w"),
+                  agent("b", depth=3, parent="a", workspace="w")]
+        self.assertEqual(richboard.gutter_column(deeper)[2:],
+                         [("╭", 2 * unit - 1), ("╰", 2 * unit - 1)])
+
     def test_a_workspace_shared_at_depth_zero_is_marked_and_a_top_alone_is_not(self):
         """qa-2 found this on Andrew's own board: the mockup skipped every run whose
         shallowest row is depth 0, so two agents sharing one checkout under the human got
