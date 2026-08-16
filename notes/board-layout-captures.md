@@ -160,3 +160,89 @@ nothing holding a row.
 - The clicked row is marked whether or not the focus lands: herdr had no such agent in this
   isolated run and said so on the footer, and the row lit anyway. The mark answers "this is
   the row you touched"; the footer answers what came of it.
+
+# The stats section: why it said "not measured" live, and the STATS header
+
+Same method again, one clone further on: a `git clone` of this repo at `stats-fix` in a
+scratch directory, a real `python -m switchboard.collector` holding THAT clone's collector
+lock, and the clone's own `bin/sb board` in tmux panes on sockets of its own. The store is
+the clone's, seeded with three agent rows, one workspace whose checkout is the clone, seven
+`turn_end` events and four messages, so every group of numbers has something real to count.
+Nothing here touched the live store, and no agent was spawned: `sb start` refuses a Claude
+Code session (`cli._agent_caller`), which is the guard that stops a verification clone
+minting top agents.
+
+## Why the live board said `not measured`, which was never a bug in this chain
+
+`stats.collect()` against the live store returns all thirteen fields populated (measured
+here: 9 turns, 41 lines, 2 commits, 3 spawns, 5 messages, 0.3 of 8 cores, 33 procs), and
+`board.stats_rows` turns them into pieces. The break was one link earlier and outside this
+code entirely: the process holding the live fleet's collector lock — pid 40401, started
+2026-08-11 01:04 with `PYTHONPATH=.../worktrees/switchboard/accept-concurrent` — predates
+`switchboard/stats.py`, so the envelope it publishes has no `stats` key at all:
+
+```
+$ python -c "import json; print(list(json.load(open('.../panel/snapshot.json')).keys()))"
+['format', 'snapshot', 'collector']
+```
+
+`panel.read` finds nothing at `stats` and hands the renderer `{}`, which is exactly what
+`STATS_NONE` is for — so every pane on the machine drew `not measured` correctly, about a
+collector that cannot measure. Two things kept it there rather than it being the momentary
+state `panel.envelope` describes ("an old pane ignores this, a new one finds `{}` in an old
+collector's file"): that collector predates `collector.source_signature` too, so it has no
+self-retirement at all, and its checkout has since been deleted, so there is nothing left
+on disk for a signature to differ from. It is retired by `kill`, and the next pane's tick
+elects a replacement from a current checkout.
+
+## The section, live, at 96 columns
+
+```
+╭─ switchboard ────────────────────────────────────────────────────────────────────────────────╮
+│  switchboard · 0 alive · 3 gone · 3 agents                                                   │
+│  STATS                                                                                       │
+│   LAST HOUR  7 turns · 888 lines · 127 code · 6 commits · 3 spawns · 4 messages              │
+│   RIGHT NOW  0.1 of 8 cores · 59M rss · 6 procs                                              │
+│                                                                                              │
+│  AGENTS                                                                                      │
+│    + 3 archived                                                                              │
+```
+
+Real numbers, published by a real collector and read off the file by a real board. `STATS`
+is the same `_bar` as `AGENTS` — `capture-pane -e` shows both opening
+`ESC[1m ESC[37m ESC[48;5;237m`, so same weight, same colour, same full-width fill — and the
+blank line between the block and `AGENTS` is line 6.
+
+## At 40 columns, and in the plain renderer
+
+```
+╭─ switchboard ────────────────────────╮        switchboard  ·  0 alive · 3 agents
+│  switchboard · 0 alive · 3 gone · 3… │         STATS
+│  STATS                               │         LAST HOUR  7 turns · 888 lines · …
+│   LAST HOUR  7 turns · 888 lines     │         RIGHT NOW  0.1 of 8 cores · 152M rss · …
+│   RIGHT NOW  0.0 of 8 cores          │
+│                                      │         AGENTS
+│  AGENTS                              │           + 3 archived
+│    + 3 archived                      │
+```
+
+Nothing wraps at 40; whole pieces are dropped from the right as before. The plain fallback
+(captured with `rich` made unimportable) says the same things in its own vocabulary — a dim
+` STATS` label where the panel fills a bar, and the same blank line under the numbers.
+
+## The short pane still gives the lines back, and in the right order
+
+At 96×8 the whole stats block — header, both lines and the blank — goes together and the
+tree keeps its rows; `AGENTS` survives one line longer, and goes at 96×7 and below. Half a
+section is not a smaller section, so the header and the blank are given back with the
+numbers rather than left standing over nothing.
+
+```
+96×8                                              96×7
+│  switchboard · 0 alive · 3 gone · 3 agents  │   │  switchboard · 0 alive · 3 gone · …  │
+│  AGENTS                                     │   │  AGENTS                              │
+│    + 3 archived                             │   │    + 3 archived                      │
+```
+
+`display.board_chrome` went 6 → 8 for the plain renderer's two new lines; the panel counts
+its own head (`richboard.layout`, `head_lines = 2 + len(stats_block)`, now six lines).
