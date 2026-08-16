@@ -395,8 +395,12 @@ class LayoutTest(unittest.TestCase):
         agents = [agent(f"a{i}") for i in range(20)]
         first = board.layout(snap(*agents), top=0, height=10, width=100, msg="")
         later = board.layout(snap(*agents), top=3, height=10, width=100, msg="")
-        self.assertEqual(board.agent_at(first, 3).name, "a0")
-        self.assertEqual(board.agent_at(later, 3).name, "a3")
+        # The first row the tree owns — which one that is moved when the stats section
+        # went in above it, and what is pinned here is that it means a different agent
+        # after a scroll, not which line of the screen it happens to be.
+        row = next(i + 1 for i, (_, a) in enumerate(first) if a is not None)
+        self.assertEqual(board.agent_at(first, row).name, "a0")
+        self.assertEqual(board.agent_at(later, row).name, "a3")
 
     def test_scrolling_past_the_end_stops_rather_than_emptying_the_view(self):
         agents = [agent(f"a{i}") for i in range(6)]
@@ -486,6 +490,64 @@ class HeadlineTest(unittest.TestCase):
         self.assertIn("alive", head)
 
 
+class StatsSectionTest(unittest.TestCase):
+    """The top section, and the ONE WAY IT CAN LIE.
+
+    `stats.Stats` is thirteen fields that are `None` until their group has been sampled —
+    on a board's first tick, all thirteen — and a `None` drawn as `0` turns "we could not
+    measure this" into a confident measurement, on a screen where nothing would look
+    wrong. Both halves are pinned here: the unknown is not a zero, and the zero is not an
+    unknown.
+
+    Pure, so this is the section's content and not its appearance: `stats_rows` is what
+    both renderers ask, which is what stops the panel and the plain board coming to report
+    different numbers about one fleet.
+    """
+
+    FULL = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
+            "store_age": 2.0, "lines_changed": 4412, "lines_changed_nondocs": 2516,
+            "commits_last_hour": 25, "git_age": 30.0, "cpu_percent": 384.0,
+            "memory_bytes": 1288490188, "processes": 9, "cpu_cores": 10,
+            "proc_age": 1.0}
+
+    def pieces(self, stats):
+        return {label: bits for label, bits in board.stats_rows(stats)}
+
+    def test_an_unknown_is_left_out_and_is_never_drawn_as_a_zero(self):
+        # The first tick of every board: a snapshot published, no sample in it yet.
+        for empty in ({}, None, {k: None for k in self.FULL}):
+            got = self.pieces(empty)
+            self.assertEqual(list(got.values()), [[], []], empty)
+            # And the line still says something deliberate rather than going blank.
+            line = board._ANSI.sub("", board._stats_line(board.STATS_HOUR, [], 96))
+            self.assertEqual(line.split(), ["LAST", "HOUR", "not", "measured"])
+            self.assertNotIn("0", line)
+
+    def test_a_real_zero_is_still_a_number_and_is_drawn(self):
+        """The other half, and the reason the first one cannot be done by falsiness: an
+        hour in which nobody spawned anything is a fact, and the board reports it."""
+        got = self.pieces({**self.FULL, "spawns_last_hour": 0, "messages_last_hour": 0})
+        self.assertIn("0 spawns", got[board.STATS_HOUR])
+        self.assertIn("0 messages", got[board.STATS_HOUR])
+        # Never "calls": nothing logs an sb invocation, so that number does not exist.
+        self.assertNotIn("calls", " ".join(got[board.STATS_HOUR]))
+
+    def test_the_numbers_read_the_way_a_person_would_size_them(self):
+        got = self.pieces(self.FULL)
+        self.assertEqual(got[board.STATS_HOUR],
+                         ["47 turns", "4.4k lines", "2.5k code", "25 commits", "6 spawns",
+                          "3 messages"])
+        # CPU against its denominator, because `ps` sums over the tree and 384% alone
+        # reads as a broken gauge; memory named `rss`, because summed RSS is an upper
+        # bound and not the fleet's footprint.
+        self.assertEqual(got[board.STATS_NOW], ["3.8 of 10 cores", "1.2G rss", "9 procs"])
+        # And a narrow pane keeps whole pieces from the important end — a half-written
+        # `4.4k li` says nothing and a dangling `·` says less.
+        room = board._visible_len("47 turns · 4.4k lines")
+        self.assertEqual(board.stats_fit(got[board.STATS_HOUR], room),
+                         ["47 turns", "4.4k lines"])
+
+
 class RefreshTest(unittest.TestCase):
     """The one impure test in this file, and it earns the exception.
 
@@ -517,18 +579,20 @@ class RefreshTest(unittest.TestCase):
     def test_a_refresh_draws_what_the_collector_published(self):
         self._publish()
         with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
-            snap, note_text = board.refresh(self.sup)
+            snap, note_text, stats = board.refresh(self.sup)
         self.assertEqual(note_text, "")
+        self.assertEqual(stats, {})                   # this collector published none
         self.assertTrue(snap.agents[0].gone)          # the screen says it, exactly as before
         rows = board.layout(snap, top=0, height=10, width=120, msg="", note_text=note_text)
-        self.assertEqual(board.agent_at(rows, 3).name, "w1")
+        row = next(i + 1 for i, (_, a) in enumerate(rows) if a is not None)
+        self.assertEqual(board.agent_at(rows, row).name, "w1")
 
     def test_an_old_snapshot_is_labelled_rather_than_drawn_as_now(self):
         """The failure a shared cache introduces, and the one thing the design asked to be
         loud: forty panes quietly agreeing on stale data."""
         self._publish(collected_at=panel.now() - 40)
         with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
-            snap, note_text = board.refresh(self.sup)
+            snap, note_text, _stats = board.refresh(self.sup)
         self.assertIn("snapshot 40s old", note_text)
         rows = board.layout(snap, top=0, height=10, width=120, msg="", note_text=note_text)
         self.assertIn("snapshot 40s old", "".join(t for t, _ in rows))
@@ -543,7 +607,7 @@ class RefreshTest(unittest.TestCase):
 
     def test_a_refresh_with_nothing_published_yet_draws_a_screen_anyway(self):
         with mock.patch.object(panel, "ensure_collector", lambda *a, **k: False):
-            snap, note_text = board.refresh(self.sup)
+            snap, note_text, _stats = board.refresh(self.sup)
         self.assertEqual(snap.agents, [])
         self.assertIn("collector", note_text)
         self.assertEqual(len(board.layout(snap, top=0, height=12, width=80, msg="",
@@ -662,7 +726,10 @@ class CollapseLayoutTest(unittest.TestCase):
         unknown = [agent(f"a{i}", alive=None, herdr_state=None) for i in range(4)]
         for a in unknown:
             a.age = int(status.SPAWN_GRACE) + 1
-        rows = board.layout(snap(*unknown), top=0, height=12, width=100, msg="")
+        # Four rows and the three group breaks between them, off the chrome: the question
+        # here is what `display_rows` keeps, so the pane is sized not to be the answer.
+        rows = board.layout(snap(*unknown), top=0, height=board.CHROME + 7, width=100,
+                            msg="")
         self.assertEqual([a.name for a in self.drawn(rows)], ["a0", "a1", "a2", "a3"])
         self.assertNotIn("archived", self.body(rows))
 

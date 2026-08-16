@@ -71,8 +71,9 @@ SGR = re.compile(r"\033\[<(\d+);(\d+);(\d+)([Mm])")
 REFRESH = config.setting("display.board_refresh")   # how often the collector re-collects,
                                                     # and so how often re-reading it can
                                                     # tell us anything new
-CHROME = config.setting("display.board_chrome")       # header, blank, blank, status —
-                                                     # lines not available to agents
+CHROME = config.setting("display.board_chrome")       # header, two stats lines, AGENTS,
+                                                     # tail, hints — the lines of this
+                                                     # renderer that are not agent rows
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 
 # How much of the width the board takes when it opens beside an agent — THE ONLY
@@ -384,6 +385,168 @@ def _compose(bits, cols: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pure: the top section — the fleet's numbers, in two lines
+# ---------------------------------------------------------------------------
+#
+# Shared by both renderers for `glyph`/`marker`/`mail_note`'s reason: what the section
+# SAYS is decided once, so the panel and the plain board cannot come to report different
+# numbers, and only the drawing of it differs. The dict comes from
+# `panel.Reading.stats` — already computed by the collector — and NOTHING in here or
+# below may import `switchboard/stats.py`, which reads the store and shells out to `git`,
+# `lsof` and `ps`. See that module's note, and `tests/test_panel.py::RendererImports`.
+
+# The label each line is read by. TIME FRAMES rather than a heading, because that is the
+# half a reader cannot get from the numbers: `47 turns` says nothing about whether it is
+# this hour or since Tuesday, and every figure in this section is one or the other. Both
+# are nine columns, so the two lines' numbers start in the same one.
+STATS_HOUR = "LAST HOUR"
+STATS_NOW = "RIGHT NOW"
+STATS_LABEL_W = 9
+STATS_SEP = " · "                   # between pieces, as in the header line and the footer
+# What a line says when it has nothing true to say — the first ~0.5 s of every board's
+# life, when the collector has published a snapshot but no sample yet. A row of zeroes
+# there would be a measurement nobody took; a blank line would read as a bug. This is the
+# third thing, and it is the honest one.
+STATS_NONE = "not measured"
+
+
+def _num(stats: Optional[dict], key: str):
+    """The number at `key`, or None for unknown. **None is never zero.**
+
+    Everything in `stats.Stats` starts as None and goes back to None when its group ages
+    out, so "we could not measure this" and "this measured zero" arrive as different
+    values and must stay different on screen. Anything that is not a number is unknown
+    too: this dict was read off a file a different process wrote.
+    """
+    v = (stats or {}).get(key)
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def fmt_count(n) -> str:
+    """A count in as few columns as it can be said in: `47`, `4.4k`, `44k`, `1.2M`.
+
+    Rounded, because this is a glance number in a pane that is spending a line on it.
+    Nobody acts on the difference between 4,412 and 4,438 lines changed in an hour, and
+    the columns the exact figure would cost are a row of the tree.
+    """
+    n = int(n)
+    if n < 1000:
+        return str(n)
+    if n < 10_000:
+        return f"{n / 1000:.1f}k"
+    if n < 1_000_000:
+        return f"{n / 1000:.0f}k"
+    return f"{n / 1_000_000:.1f}M"
+
+
+def fmt_bytes(n) -> str:
+    """Bytes as a glance figure: `640K`, `12M`, `1.2G`. Binary units, as `ps` reports."""
+    n = float(n)
+    if n < 1024 ** 2:
+        return f"{max(0, int(n // 1024))}K"
+    if n < 1024 ** 3:
+        return f"{n / 1024 ** 2:.0f}M"
+    return f"{n / 1024 ** 3:.1f}G"
+
+
+def _plural(n, word: str) -> str:
+    """`1 turn`, `2 turns`, `4.4k lines`. Plural off the raw count, not off the label."""
+    return f"{fmt_count(n)} {word}" + ("" if n == 1 else "s")
+
+
+def stats_rows(stats: Optional[dict]) -> list[tuple[str, list[str]]]:
+    """The top section: `[(label, [piece, ...]), ...]`, pieces MOST IMPORTANT FIRST.
+
+    Two lines, always both, so the tree below never moves under a number arriving. What
+    varies is how much of each line a pane has room for — whole pieces, dropped from the
+    right, the same way the header above drops its counts.
+
+    AN UNKNOWN IS NOT DRAWN AT ALL. On the first tick every one of the thirteen fields is
+    None by design (the numbers join a tick later), and a `0 turns` there would be a
+    measurement this board never made. A line left with nothing to say draws `STATS_NONE`,
+    which is that fact in the one place a reader would otherwise see a gap.
+
+    The `*_age` fields are not drawn and not read. A group older than its `max_age` comes
+    back None from `stats.collect` already, so an age here could only decorate a number
+    that is already known to be current enough to show.
+
+    Five of the thirteen are left out on purpose — the three ages, and nothing else. What
+    is in is what a person glancing at a fleet acts on: whether it is moving, what came of
+    it, and what it is costing the machine.
+    """
+    hour: list[str] = []
+    turns = _num(stats, "turns_last_hour")
+    lines = _num(stats, "lines_changed")
+    nondocs = _num(stats, "lines_changed_nondocs")
+    commits = _num(stats, "commits_last_hour")
+    spawns = _num(stats, "spawns_last_hour")
+    messages = _num(stats, "messages_last_hour")
+    if turns is not None:
+        # FIRST, because it is the closest thing the store has to "is the fleet moving".
+        hour.append(_plural(turns, "turn"))
+    if lines is not None:
+        hour.append(_plural(lines, "line"))
+        if nondocs is not None:
+            # The half that is not prose. Its own piece and immediately after the total,
+            # so a narrow pane drops the split before the number it splits.
+            hour.append(f"{fmt_count(nondocs)} code")
+    if commits is not None:
+        hour.append(_plural(commits, "commit"))
+    if spawns is not None:
+        hour.append(_plural(spawns, "spawn"))
+    if messages is not None:
+        # MESSAGES, and never "calls". Andrew asked for sb calls; nothing logs one —
+        # `store.log_event` is called from particular sites, so that number does not exist
+        # to be reported. This is inter-agent mail, which is the honest near thing, and
+        # labelling it as the thing he asked for would have the board claim a measurement
+        # nobody takes.
+        hour.append(_plural(messages, "message"))
+
+    now: list[str] = []
+    cpu = _num(stats, "cpu_percent")
+    cores = _num(stats, "cpu_cores")
+    rss = _num(stats, "memory_bytes")
+    procs = _num(stats, "processes")
+    if cpu is not None:
+        # CORES BUSY, not a bare percentage. `ps` sums %CPU across the fleet's whole
+        # process tree, so on any multi-core machine the figure goes over 100 and reads as
+        # a broken gauge. `cpu_cores` rides in the dict for exactly this: `3.8 of 10
+        # cores` is the same measurement with the denominator a person needs to size it.
+        busy = cpu / 100.0
+        share = f"{busy:.1f}" if busy < 10 else f"{busy:.0f}"
+        now.append(f"{share} of {fmt_count(cores)} cores" if cores else f"{share} cores")
+    if rss is not None:
+        # `rss` and not "memory". This is summed resident set, so a page shared by ten
+        # processes is counted ten times — an upper bound, ~6% high where it was measured.
+        # The word names which number it is rather than dressing it up as the footprint.
+        now.append(f"{fmt_bytes(rss)} rss")
+    if procs is not None:
+        now.append(_plural(procs, "proc"))
+
+    return [(STATS_HOUR, hour), (STATS_NOW, now)]
+
+
+def stats_fit(pieces: list[str], cols: int) -> list[str]:
+    """As many whole pieces as `cols` columns hold, in order. Whole ones or none.
+
+    The header line drops its counts the same way and for the same reason: half a piece
+    says nothing and a dangling separator says less. The list is ordered by how much each
+    piece matters, so what a narrow pane keeps is the top of it — and a piece too long for
+    the room left ENDS the line rather than being skipped over, because skipping would
+    quietly reorder that list.
+    """
+    out: list[str] = []
+    used = 0
+    for p in pieces:
+        gap = _visible_len(STATS_SEP) if out else 0
+        if used + gap + _visible_len(p) > cols:
+            break
+        out.append(p)
+        used += gap + _visible_len(p)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Pure: layout
 # ---------------------------------------------------------------------------
 
@@ -431,9 +594,23 @@ def _is_group(row) -> bool:
     return isinstance(row, status_mod.Collapsed)
 
 
+def _stats_line(label: str, pieces: list[str], width: int) -> str:
+    """One line of the top section, in this renderer's own vocabulary.
+
+    No filled bar and no colour: dim label, plain numbers, dim separators — the same trade
+    the `AGENTS` label makes here, and the same one the footer makes. Polish is what this
+    renderer does without; the numbers are identical to the panel's, because both ask
+    `stats_rows`.
+    """
+    kept = stats_fit(pieces, width - 1 - STATS_LABEL_W - 2)
+    body = (_c(STATS_SEP, DIM).join(kept) if kept
+            else _c(_clip(STATS_NONE, max(0, width - 1 - STATS_LABEL_W - 2)), DIM))
+    return _c(" " + _pad(label, STATS_LABEL_W) + "  ", DIM) + body
+
+
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           lit: Optional[str] = None
+           lit: Optional[str] = None, stats: Optional[dict] = None
            ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
@@ -463,6 +640,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     them and survive `_fit`, on the path that exists precisely so a machine without
     `rich` still has a working board. Polish is what this renderer does without.
 
+    `stats` — the fleet's numbers, `panel.Reading.stats` as the collector computed
+    them — IS drawn here, unlike `lit`: it is words, which this renderer has every
+    vocabulary for, and the two boards showing different numbers would be a
+    difference of fact rather than of appearance. `None` and `{}` are ordinary:
+    the section draws its labels and says the numbers are not measured.
+
     `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
     being the same thing when collapse landed: `display_rows` replaces whole
     archived subtrees with one `Collapsed`, so a window taken over `snap.agents`
@@ -491,7 +674,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     if show_archived is None:                       # `display.show_archived`, via status,
         show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
     agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
-    capacity = max(1, height - CHROME)
+    # The top section is two lines and `display.board_chrome` counts them, so nothing
+    # below has to learn about it. The one exception is a pane too short to hold the
+    # numbers AND a single agent row, where the numbers give their lines back: the board
+    # is the tree, and a fleet's statistics over no fleet is what the last line must not
+    # be spent on. `richboard.layout` makes the same trade one section later, on `AGENTS`.
+    top_lines = [_stats_line(label, pieces, width) for label, pieces in stats_rows(stats)]
+    capacity = height - CHROME
+    if capacity < 1:
+        capacity += len(top_lines)
+        top_lines = []
+    capacity = max(1, capacity)
     # How many SCREEN LINES each display row costs: its own, plus the break above it if
     # it opens a first-level group. Everything that windows or counts below reads this
     # rather than assuming one line each, the failure otherwise being a row pushed off
@@ -536,15 +729,21 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         head += _c(" · " + b, DIM)
         cols += 3 + _visible_len(b)
     emit(head)
-    # The tree is a SECTION here too, and for the panel's reason (`richboard.layout`): a
-    # stats block goes above it next and the tree must not run straight on from it. This
-    # renderer has no filled bars, so the section reads as a dim label rather than a
-    # coloured band — the same meaning in this renderer's own vocabulary.
+    # The stats block, between the two labels rather than under a third one — see
+    # `richboard._stats_block`, which makes that call for both renderers. Owned by
+    # nobody: a click on a number focuses no agent.
+    for line in top_lines:
+        emit(line)
+    # The tree is a SECTION here too, and for the panel's reason (`richboard.layout`): the
+    # stats block above it means the tree would otherwise run straight on from a line of
+    # numbers. This renderer has no filled bars, so the section reads as a dim label
+    # rather than a coloured band — the same meaning in this renderer's own vocabulary.
     #
-    # It REPLACES the blank line that separated the header from the tree rather than
-    # being added above it. A label separates as well as a blank does, the pane is worth
-    # more than the air, and the line count is what `display.board_chrome` is: unchanged,
-    # so nothing that windows or counts below has to learn about this.
+    # It REPLACED the blank line that separated the header from the tree rather than
+    # being added above it — a label separates as well as a blank does, and the pane is
+    # worth more than the air. The stats block above it is the one that did add lines, and
+    # `display.board_chrome` went from 4 to 6 for them: the number is what "rows that are
+    # not agents" means here, and it is the one place that has to know.
     emit(_c(" AGENTS", DIM))
 
     if not agents:
@@ -817,7 +1016,7 @@ def _clip_cols(plain: str, cols: int) -> str:
 
 
 def refresh(sup: panel.Supervisor):
-    """-> (snapshot, note). One tick of a renderer. Never raises.
+    """-> (snapshot, note, stats). One tick of a renderer. Never raises.
 
     Two things, and neither of them touches the store. Say a panel is still
     being looked at, starting a collector if none is up — which is how takeover
@@ -829,10 +1028,16 @@ def refresh(sup: panel.Supervisor):
     one new failure — a wedged collector leaving forty screens quietly agreeing
     on old data — so the age is printed the moment it is worth printing, and the
     board says "snapshot 40s old" instead of presenting it as now.
+
+    `stats` is the fleet's numbers for the top section, `stats.Stats.as_dict()` as
+    the collector computed them and `{}` when it published none. READ here, never
+    computed: `stats.collect()` reads the store and shells out to `git`, `lsof`
+    and `ps`, which is both halves of what a renderer must not do. It rides in the
+    same file as everything else this function reads, so it costs no second look.
     """
     sup.tick()
     r = panel.read(sup.paths)
-    return r.snap, r.note
+    return r.snap, r.note, r.stats
 
 
 def focus(name: str) -> str:
@@ -899,7 +1104,8 @@ def _size() -> tuple[int, int]:
 
 
 def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
-           show_archived: bool, lit: Optional[str] = None
+           show_archived: bool, lit: Optional[str] = None,
+           stats: Optional[dict] = None
            ) -> list[tuple[str, Optional[object]]]:
     """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
 
@@ -925,18 +1131,19 @@ def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
     from . import richboard
 
     rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=show_archived, lit=lit)
+                            note_text=note_text, show_archived=show_archived, lit=lit,
+                            stats=stats)
     if rows is not None:
         return rows
     return layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, lit=lit)
+                  note_text=note_text, show_archived=show_archived, lit=lit, stats=stats)
 
 
 def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
-         lit: Optional[str] = None) -> list:
+         lit: Optional[str] = None, stats: Optional[dict] = None) -> list:
     height, width = _size()
     rows = _frame(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, lit=lit)
+                  note_text=note_text, show_archived=show_archived, lit=lit, stats=stats)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -1005,9 +1212,9 @@ def main() -> int:
         sys.stdout.write(MOUSE_ON + HIDE_CURSOR)
         sys.stdout.flush()
 
-        snap, note_text = refresh(sup)
+        snap, note_text, stats = refresh(sup)
         rows = draw(snap, top, msg, note_text, show_archived,
-                    lit_row(click, time.monotonic()))
+                    lit_row(click, time.monotonic()), stats)
         last = time.time()
 
         while True:
@@ -1051,7 +1258,7 @@ def main() -> int:
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
-                snap, note_text = refresh(sup)
+                snap, note_text, stats = refresh(sup)
                 dirty[0] = True
                 last = time.time()
             if dirty[0]:
@@ -1061,7 +1268,7 @@ def main() -> int:
                 # second whatever the human does, so the frame that stops lighting the row
                 # comes along on its own, within half a second of the ten seconds being up.
                 rows = draw(snap, top, msg, note_text, show_archived,
-                            lit_row(click, time.monotonic()))
+                            lit_row(click, time.monotonic()), stats)
                 dirty[0] = False
     except KeyboardInterrupt:
         pass

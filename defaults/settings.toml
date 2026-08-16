@@ -455,8 +455,10 @@ board_refresh = 0.5
 # `--needs-me`, DRIFT — is debounced by this. It only decides when to summon a human.
 needs_settle = 30.0
 
-# Board rows that are not agents — header, blank, blank, status.
-board_chrome = 4
+# Board rows that are not agents, in the plain renderer — the header, the two lines of
+# fleet numbers under it, the `AGENTS` label, and the two lines at the foot. Six since the
+# top section landed; the panelled renderer counts its own head and does not read this.
+board_chrome = 6
 
 # Draw every archived agent instead of collapsing whole archived subtrees into one
 # `+ N archived` row. An agent is archived when herdr no longer has its pane and it is

@@ -53,9 +53,18 @@ def snap(*agents):
     return status.Snapshot(now=0, agents=list(agents))
 
 
-def frame(s, *, top=0, height=20, width=80, msg="", note_text="", lit=None):
+# A full sample, so the head is drawn at its widest wherever a width is under test. The
+# top section is two lines of text like any other, and a line one column wider than it
+# measured is the wrap every test in here exists to catch.
+STATS = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
+         "store_age": 2.0, "lines_changed": 4412, "lines_changed_nondocs": 2516,
+         "commits_last_hour": 25, "git_age": 30.0, "cpu_percent": 384.0,
+         "memory_bytes": 1288490188, "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
+
+
+def frame(s, *, top=0, height=20, width=80, msg="", note_text="", lit=None, stats=None):
     rows = richboard.layout(s, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=False, lit=lit)
+                            note_text=note_text, show_archived=False, lit=lit, stats=stats)
     assert rows is not None, "the rich renderer declined this frame"
     return rows
 
@@ -87,7 +96,8 @@ class NoLineWrapsTest(unittest.TestCase):
         for width in (24, 40, 56, 80, 120):
             for height in (6, 12, 24):
                 with self.subTest(width=width, height=height):
-                    for text, _ in frame(self.WIDE, width=width, height=height):
+                    for text, _ in frame(self.WIDE, width=width, height=height,
+                                         stats=STATS):
                         self.assertLessEqual(board._visible_len(text), width, repr(text))
 
     def test_every_line_fills_the_pane_exactly_so_the_panel_cannot_be_ragged(self):
@@ -98,7 +108,7 @@ class NoLineWrapsTest(unittest.TestCase):
         column narrower than `board` did would still pass the test above and would show
         up here.
         """
-        for text, _ in frame(self.WIDE, width=72, height=20):
+        for text, _ in frame(self.WIDE, width=72, height=20, stats=STATS):
             self.assertEqual(board._visible_len(text), 72, repr(text))
 
     def test_rich_and_board_agree_so_the_last_resort_clip_never_fires(self):
@@ -265,16 +275,24 @@ class SectionHeadTest(unittest.TestCase):
         for height in range(richboard.MIN_HEIGHT, 24):
             rows = frame(self.FLEET, width=70, height=height)
             self.assertEqual(len(rows), height, height)
-        lines = self._plain(frame(self.FLEET, width=70, height=20))
-        self.assertEqual(lines[2], "AGENTS")
-        self.assertIn("top", lines[3])
+        lines = self._plain(frame(self.FLEET, width=70, height=20,
+                                  stats={"turns_last_hour": 47, "processes": 9}))
+        # The head, in order: the board's bar, the two lines of fleet numbers, the tree's
+        # own bar. Four lines, and every row below is placed off that count.
+        self.assertTrue(lines[1].startswith("switchboard"), lines[1])
+        self.assertEqual(lines[2], "LAST HOUR  47 turns")
+        self.assertEqual(lines[3], "RIGHT NOW  9 procs")
+        self.assertEqual(lines[4], "AGENTS")
+        self.assertIn("top", lines[5])
 
     def test_the_shortest_pane_keeps_the_agent_row_and_drops_the_header(self):
         """A section header over no agents at all is the one thing the last line must not
-        go on — the board is the tree. Below the height that fits both, the header is what
-        gives way."""
-        lines = self._plain(frame(self.FLEET, width=70, height=richboard.MIN_HEIGHT))
+        go on — the board is the tree. Below the height that fits both, the head gives its
+        lines back: the numbers first, the tree's own header last."""
+        lines = self._plain(frame(self.FLEET, width=70, height=richboard.MIN_HEIGHT,
+                                  stats={"turns_last_hour": 47}))
         self.assertNotIn("AGENTS", lines)
+        self.assertFalse([ln for ln in lines if ln.startswith("LAST HOUR")], lines)
         self.assertTrue(any("top" in ln for ln in lines), lines)
 
 

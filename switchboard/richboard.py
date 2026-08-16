@@ -507,7 +507,7 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           lit: Optional[str] = None
+           lit: Optional[str] = None, stats: Optional[dict] = None
            ) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
@@ -527,6 +527,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     is asked once per frame, before this is called, so nothing in this renderer has to know
     what time it is. The row it names is drawn washed (`_wash`); every other row, and a
     name matching nothing on screen, draws exactly as it did before.
+
+    `stats` is the fleet's numbers as the collector computed them — `panel.Reading.stats`,
+    a plain dict, `{}` or None when there are none yet. Drawn as the head's middle section
+    (`_stats_block`); what it SAYS is `board.stats_rows`, shared with the plain renderer so
+    the two boards cannot come to report different numbers.
     """
     if not available() or width < MIN_WIDTH or height < MIN_HEIGHT:
         return None
@@ -559,13 +564,24 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
 
-    # The head is TWO lines: the board's own bar, and the section bar that says the tree
-    # below it is the tree. Counted as one number because everything downstream — the
-    # body's room, the fill, and the frame's own height check — is counted off it, and a
-    # stats block is going in between the two next.
-    head_lines = 2
+    # The head is FOUR lines: the board's own bar, the two lines of fleet numbers, and the
+    # section bar that says the tree below it is the tree. Counted as ONE number because
+    # everything downstream — the body's room, the fill, and the frame's own height check
+    # — is counted off it; which pieces that number is made of is only decided where the
+    # head is drawn, and only ever by the two give-backs below.
+    stats_block = _stats_block(stats, inner)
+    bar = True                                   # is the AGENTS section header drawn?
+    head_lines = 2 + len(stats_block)
     gap_min = 1 if needs else 0
     room = capacity - head_lines - 1 - len(needs) - gap_min          # head, footer
+    if room < 1 and stats_block:
+        # THE NUMBERS GO BEFORE THE SUMMONS DOES. A pane this short has room for the
+        # board's real work and nothing else, and NEEDS YOU is the section a human is
+        # looking for — so the stats block gives its lines back here, above the line that
+        # would otherwise start shortening that list.
+        head_lines -= len(stats_block)
+        room += len(stats_block)
+        stats_block = []
     if room < 1 and needs:
         # Too short even for one agent row: give the NEEDS YOU list back a line at a time,
         # its bar last — a count with no names still says somebody is waiting.
@@ -578,26 +594,42 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
     # WHICH ROWS ARE ON SCREEN, decided before the head is drawn because on the shortest
     # pane the head is what decides it. A section header over no agents at all is the one
-    # thing this board must not spend its last line on, so when that is what it comes to,
-    # the header gives the line back and the tree keeps it. Pure, so asking twice is free.
+    # thing this board must not spend its last line on, and a fleet's statistics over no
+    # fleet is the same trade one line earlier — so when that is what it comes to, the head
+    # gives its lines back and the tree keeps them. Pure, so asking twice is free.
+    #
+    # IN ORDER: the numbers first, the tree's own header last, the board's title never. And
+    # only if a row actually comes of it — `_window` charges for its own `↑ N above` and
+    # `+ N more below` lines, so a line given back does not always buy one.
     first, last = _window(len(rows), max(0, top), max(0, room))
     if rows and first == last:
-        grown = _window(len(rows), max(0, top), max(0, room + 1))
-        if grown[0] != grown[1]:                 # and only if a row comes of it
-            head_lines, room = head_lines - 1, room + 1
+        n = len(stats_block)
+        for give_stats, give_bar in (((n, 0), (n, 1)) if n else ((0, 1),)):
+            give = give_stats + give_bar
+            grown = _window(len(rows), max(0, top), max(0, room + give))
+            if grown[0] == grown[1]:
+                continue
+            head_lines, room = head_lines - give, room + give
+            if give_stats:
+                stats_block = []
+            if give_bar:
+                bar = False
             first, last = grown
+            break
 
     # --- the head -----------------------------------------------------------
     # Counts from `status.summary_bits`, the same list `sb status` joins, so the two
     # readouts of one snapshot cannot come to show different numbers.
     emit(_bar(" " + " · ".join(["switchboard"] + status_mod.summary_bits(snap)),
               inner, HEADER_STYLE))
-    if head_lines > 1:
-        # The tree is a SECTION now rather than the whole body, because it is about to
-        # stop being the whole body: a stats block goes above it next, and without a
-        # header of its own the tree would run straight on from whatever ends that block.
-        # One line and no blank around it — this is a pane, and a row of agents is worth
-        # more than air.
+    for line in stats_block:
+        # Owned by nobody, like the bars around it: a click on a number focuses no agent.
+        emit(line)
+    if bar:
+        # The tree is a SECTION rather than the whole body, because it is no longer the
+        # whole body: without a header of its own it would run straight on from the last
+        # line of numbers above. One line and no blank around it — this is a pane, and a
+        # row of agents is worth more than air.
         emit(_bar(" AGENTS", inner, SECTION_STYLE))
 
     # --- the body -----------------------------------------------------------
@@ -814,6 +846,43 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
     if lit:
         _wash(line, inner)
     return line
+
+
+def _stats_block(stats: Optional[dict], inner: int):
+    """The head's middle section: the fleet's numbers, two lines, above the tree.
+
+    NO BAR OF ITS OWN, which is the one visual call in here and the only place this
+    section departs from `AGENTS` and `NEEDS YOU`. It does not need one: it is already
+    delimited, by a filled bar directly above it and a filled bar directly below, and a
+    third bar between two bars would spend a third of a small section on the word STATS.
+    What a bar would have said, the two labels say better — they name the TIME FRAME each
+    line is counted over, which is the half a reader cannot infer from the numbers, where
+    a heading would only repeat what a line of counts already looks like.
+
+    ALWAYS TWO LINES, whatever is known. A section that grew a line as the first sample
+    landed would push the whole tree down half a second into every board's life, and the
+    rows a human is reading would move under the cursor. `board.stats_rows` says what goes
+    on them; the width ladder is the header's — whole pieces, dropped from the right.
+    """
+    from rich.text import Text
+
+    out = []
+    room = max(0, inner - 2 - board.STATS_LABEL_W - 2)
+    for label, pieces in board.stats_rows(stats):
+        line = Text(no_wrap=True, overflow="crop")
+        line.append("  " + _pad(label, board.STATS_LABEL_W) + "  ", style=DIM)
+        kept = board.stats_fit(pieces, room)
+        for i, piece in enumerate(kept):
+            if i:
+                line.append(board.STATS_SEP, style=DIM)
+            # The numbers themselves undimmed, and everything around them dim: the labels
+            # and separators are scaffolding, and the figures are the only thing on these
+            # two lines anybody came to read.
+            line.append(piece)
+        if not kept:
+            line.append(_clip(board.STATS_NONE, room), style=DIM)
+        out.append(line)
+    return out
 
 
 def _needs_block(wanted: list[Any], inner: int) -> list[tuple[Any, Optional[object]]]:
