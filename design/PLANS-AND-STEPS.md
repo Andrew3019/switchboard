@@ -70,7 +70,9 @@ same either way — a design that does not handle both is wrong.
 
 **A plan belongs to one worktree, and a worktree may hold several plans.** So the board
 renders plans inside the worktree grouping it already has, rather than in a section of
-their own. A job is owned by a lead, and everything below a lead shares that lead's
+their own. From inside a plan the others are invisible and irrelevant: nothing in a plan
+refers to another, and anything a step needs from the world outside is an input it takes.
+The merge gate takes a PR, so several plans mean several PRs and no plan has to know that. A job is owned by a lead, and everything below a lead shares that lead's
 worktree, so a job and a worktree are the same span. Work spanning two worktrees is two
 plans; one plan spanning both would be a different feature.
 
@@ -95,6 +97,9 @@ one-line docs change bound for a PR gets a plan, only a short one.
 the outcome is known and there is a clear path from what was found through to a merged PR.
 Investigation still appears as a step when it is one piece of an already-shaped job.
 
+**There is a plan-making instruction for the lead**, explaining clearly how all of this is
+done.
+
 **The worktree's owner creates the plan and chooses the template** — the lead of that
 worktree, or the sole worker where there is no lead.
 
@@ -112,7 +117,9 @@ start empty.
 circular.
 
 **Steps come from a library or are made on the fly.** Both are first class: a plan may name
-a step that already exists and invent the rest as it goes.
+a step that already exists and invent the rest as it goes. A named step is a link to the
+library rather than a copy of it — steps are units, and there is little about one to change
+once it exists. Templates work the other way, being copied and then edited freely.
 
 **A step may be word-only.** Nothing has to be defined behind it; the name alone is worth
 having.
@@ -167,6 +174,9 @@ steps, and a plan is never a mirror of the agent tree.
 **A step shows two things and only one of them is ticked.** Its progress is set by a lead
 or the owning agent. Its owner's status — working, blocked — is read from the agent and
 never set on the step.
+
+**The lead assigns every step its owner.** If an owner dies the lead dispatches a
+replacement and assigns the step to it, the same act as assigning it the first time.
 
 **On a child's report the lead verifies progress and decides whether to tick.** Quickly,
 from the child's report. It does not spawn another agent to verify progress unless that is
@@ -286,6 +296,14 @@ so they are not deleted. Cleanup means dropping out of the UI and no longer coun
 active, never erasing. When every agent on a worktree is closed the plan goes dormant and
 is restored when they are; when the worktree goes, the plan stops being live and its record
 survives.
+
+**A plan has a changelog, append-only, that whoever edits it adds to.** A plan is flexible
+and gets reshaped as the job runs, and without this the record keeps only the final shape —
+losing the story of what was split, renamed or dropped, which is exactly what the analysis
+pass is looking for.
+
+**The shape is loose and JSON-like** — notes, and whatever further columns turn out to be
+worth carrying.
 
 **A plan carries enough notes to be worth analysing later.** Its value after the job is as
 evidence of how the work actually ran, so it is written to be read cold.
