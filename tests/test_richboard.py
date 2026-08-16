@@ -334,7 +334,7 @@ class NeedsYouTest(unittest.TestCase):
         # answer its question — and its idle ancestors are not, because it IS live work.
         names = self._names(
             agent("lead", stalled=True, turn="idle", idle=900),
-            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900),
+            agent("mid", depth=1, parent="lead", state="done", turn="idle"),
             agent("kid", depth=2, parent="mid", state="blocked", turn="idle",
                   blocked_why="which branch?"),
         )
@@ -365,8 +365,7 @@ class NeedsYouTest(unittest.TestCase):
         settled = int(status.NEEDS_SETTLE)
         names = self._names(
             agent("lead", stalled=True, turn="idle", idle=900, needs_for=settled),
-            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900,
-                  needs_for=settled),
+            agent("mid", depth=1, parent="lead", state="done", turn="idle"),
             agent("kid", depth=2, parent="mid", stalled=True, turn="idle", idle=2,
                   herdr_state="idle", needs_for=2),
         )
