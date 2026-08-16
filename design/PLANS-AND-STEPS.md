@@ -71,12 +71,23 @@ rigid than a fixed workflow. Not Claude's internal todos, not a flat list.
 than executed is about what a plan *means*; it is still written through one door. Obliged
 steps are added on that path, and a plan hand-edited around it gets none of them.
 
+**A command changes the steps it names, never the whole plan at once.** Two agents ticking
+different steps is already safe, but a lead re-planning is a read, a think and a write, and a
+tick landing in that gap would be overwritten by a wholesale rewrite — leaving the changelog
+showing a tick the plan does not have.
+
 **Interpreted, never executed.** A plan is read and acted on by an agent, not run by a
 machine. Nothing evaluates it, and there is no workflow engine around it.
 
 **One plan per job.** A lead may define one plan or several, or collapse everything into a
 single plan. Both must work gracefully, since the union of the steps involved is much the
 same either way — a design that does not handle both is wrong.
+
+**A plan has an identity of its own, and so does every step.** A worktree's name is
+reusable and its row is revived when the name comes back, so a plan keyed on that would
+reattach to unrelated work weeks later. Plans and steps are addressed by their own ids —
+which is also what lets a command say which of several plans it means, and what a spawn
+prompt carries alongside the step it hands a worker.
 
 **A plan belongs to one worktree, and a worktree may hold several plans.** So the board
 renders plans inside the worktree grouping it already has, rather than in a section of
@@ -162,7 +173,10 @@ field saying `vibe = bad` if that is what conveys it. None of that needs specify
 advance, and specifying it is how this turns into a workflow engine.
 
 **A step may carry a command**, which may live in a script shipped alongside it. How it gets
-called is settled when it comes up. What this buys is that "merge, clean up, delete the
+called is settled when it comes up. A step is ticked before its command runs, never after:
+the agent that tears down its own workspace is gone the instant it succeeds, so a teardown
+step ticked afterwards is never ticked at all, and a finished job would end up looking
+exactly like an abandoned one. What this buys is that "merge, clean up, delete the
 worktree, close the agents" stops being five things an agent has to remember — and it is the
 only way the last agent standing gets closed at all.
 
@@ -215,6 +229,21 @@ never set on the step.
 
 **The lead assigns every step its owner.** If an owner dies the lead dispatches a
 replacement and assigns the step to it, the same act as assigning it the first time.
+
+**The lead learns of a death by reading the plan, not by being told.** A step's owner need
+not be the lead's own child — an adversarial review is owned by the review lead beneath it —
+and switchboard's own failure notice goes to the dead agent's parent in the agent tree, which
+may be neither. Since liveness is read off the agent whenever the plan is displayed, the lead
+sees a dead owner the moment it looks, and nothing has to be routed to it.
+
+**Reassigning a step means closing the agent it came from.** Until a core verb can tell a
+running agent anything, the old owner is never told it lost the step — and a stalled agent
+that recovers, or a closed one that is restored, resumes believing it still owns the work.
+Two agents in one worktree on one step is the collision nothing prevents.
+
+**If the lead itself dies, the plan dies with it.** Nobody else can carry it: the agent above
+is a dispatcher, and dispatchers are never involved in plans. This is accepted rather than
+solved.
 
 **On a child's report the lead verifies progress and decides whether to tick.** Quickly,
 from the child's report. It does not spawn another agent to verify progress unless that is
@@ -338,6 +367,18 @@ carries it, a step reaches its owner at spawn and nowhere else, which means the 
 
 ## Records, and what they are for
 
+**Live, dormant and finished are read, never written.** Nothing tells a plugin that an agent
+was closed, a worktree deleted or a session restored — there are no lifecycle hooks and the
+sweep runs with nothing of the plugin's alive. So a plan stores which worktree it belongs to
+and nothing about its own condition, exactly as it stores an owner's name and never its
+liveness. Everything else is worked out when the plan is displayed.
+
+**A plan whose worktree is gone with steps still open is abandoned, not finished.** The sweep
+deletes a worktree on its own gates, which cannot see a plan and are not going to learn to.
+So the difference has to be visible in the record afterwards, or the analysis pass reads a
+job that fell apart as a job that went well — a second, mechanical source of the bias the
+known limitations already name.
+
 **A plan stops being live with its worktree; the record of it is kept.** Plans are plain
 text and losing one is cheap — nothing about it compares to losing a worktree or an agent —
 so they are not deleted. Cleanup means dropping out of the UI and no longer counting as
@@ -345,7 +386,10 @@ active, never erasing. When every agent on a worktree is closed the plan goes do
 is restored when they are; when the worktree goes, the plan stops being live and its record
 survives.
 
-**A plan has a changelog, append-only, that whoever edits it adds to.** A plan is flexible
+**The changelog is written by the command; the agent supplies the reason.** It is
+append-only. An agent appending by hand would be editing the plan, which is the one thing the
+single write path exists to prevent, and it would also be the part of a plan most easily
+forgotten. A plan is flexible
 and gets reshaped as the job runs, and without this the record keeps only the final shape —
 losing the story of what was split, renamed or dropped, which is exactly what the analysis
 pass is looking for.
