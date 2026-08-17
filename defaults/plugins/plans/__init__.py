@@ -1,10 +1,10 @@
 """Plans and steps — the live state of one job, held where a lead can show it.
 
-The design is `design/PLANS-AND-STEPS.md`; this is the first slice of it: the state model,
-and the three things you can do with a plan before any step can move — make one, look at
-one, and read what happened to it. The verbs that change a step (`assign`, `tick`, `skip`,
-`note`, `checkpoint`, `dep`, `add-step`) are deliberately not here yet, so what this file
-has to get right is the shape everything after it writes into.
+The design is `design/PLANS-AND-STEPS.md`; this is the state model, the verbs that make a
+plan (`create`, `list`, `show`, `changelog`) and the verbs that move one along — `assign`,
+`tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep`. What is still not
+here is anything that decides for itself: library steps, obliged steps, liveness and gates
+all come later, and none of them changes the shape written below.
 
 The records
 -----------
@@ -14,7 +14,7 @@ The records
            "steps": [...], "changelog": [...], "notes": [...],
            "created_by": "lead", "created_at": 1754570000}
 
-    step  {"id": "s-1", "name": "…", "progress": "open", "owner": null,
+    step  {"id": "s-1", "name": "…", "progress": "open", "why": null, "owner": null,
            "tries": 1, "notes": [], "deps": [], "checkpoints": []}
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
@@ -23,6 +23,48 @@ and a lead that wants `progress: waiting on Andrew` gets it without a release. T
 says the agent is the interpreter and there is no schema to satisfy, so a step carrying a
 field this file has never heard of is a feature and not corruption — `_step()` fills in the
 fields the design names and leaves everything else alone.
+
+Moving a step
+-------------
+
+Progress is moved by three verbs and only three: `tick` writes `done`, `skip` writes
+`skipped`, and `rework` puts a step back to `open`. Nothing infers it, `sb done` does not
+touch it, no verb moves it as a side effect of doing something else, and nothing in this
+file ever writes `done` on a step's behalf — which is the design's first rule about progress
+and the reason `tick` exists as a verb at all. Rework belongs on that list rather than
+beside it: re-entering a step is a progress move like the other two, made by an agent that
+typed the verb, and it is `open` it writes and never a completion.
+
+Complete-or-skipped-but-never-both is structural rather than checked: `progress` is ONE
+string, so `skip` on a ticked step replaces the tick instead of joining it. A verb that
+overwrites what another verb wrote is a correction, and the changelog is what says which it
+was — every one of these entries records the progress it moved a step FROM.
+
+`why` is the reason for the step's current progress, kept on the step so that a skipped step
+renders with the reason beside it rather than twenty lines below in the changelog. The
+design's "a skip is a state rather than an absence" is only true if the reason is visible
+where the state is. It is overwritten by whatever changes progress next, so a step ticked
+after a skip does not keep the sentence explaining why it was skipped.
+
+`tries` is rework: `rework` re-enters a step, bumping the count and putting progress back to
+`open`. Repetition is a number on the step and never an edge, so nothing here creates a
+cycle to represent a second attempt. Nothing downstream is un-ticked either — the design
+makes that the lead's judgement, and a rule here would either merge unreviewed work or throw
+away a day of good review.
+
+`checkpoints` are references — a path, a URL, an id — and never content. A ref with a
+newline in it is refused, because the only way one gets there is somebody pasting the brief
+instead of pointing at it.
+
+`deps` are what a step comes after: data the lead reads, and this file's only interest in
+them is that they are storable and renderable. Nothing traverses them, waits on them,
+orders anything by them or refuses a cycle in them — a join waits because the lead does not
+start it. What IS checked is that an edge names a step that exists, in the same plan, and
+not itself, since an edge to nothing is a typo rather than a shape.
+
+Reassigning tells nobody. `assign` writes a name onto a step and stops there: the plan never
+pushes to a running agent, and the old owner learns it lost the step from its parent or not
+at all. Two agents believing they own one step is the collision the design accepts.
 
 Ids are `p-<n>` and `s-<n>`, monotonic across the whole file and never reused, so a spawn
 prompt or a changelog entry citing `s-7` stays true for the life of the repo. Step numbers
@@ -101,8 +143,11 @@ LOCK = True
 FILE = "plans.json"
 FORMAT = 1
 
-# What `create` writes into a step it makes. Not an enum — see the module docstring.
-OPEN = "open"
+# What `create`, `tick` and `skip` write into a step's `progress`. Not an enum — see the
+# module docstring. These three are what this plugin's own verbs write; a lead that types
+# `progress: waiting on Andrew` into the file by some later verb is not violating anything,
+# which is why nothing below compares against this list to decide whether a move is allowed.
+OPEN, DONE, SKIPPED = "open", "done", "skipped"
 
 # How a plan's workspace was decided, stored as `workspace_from`. Four values and no more,
 # because this one IS a closed vocabulary: it describes what this code did, not what a job
@@ -137,6 +182,50 @@ def register(reg):
     reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
         args=[reg.arg("id", help="a plan id, e.g. p-1")])
+    reg.command(
+        "assign", assign, audience="both",
+        help="give a step an owner; reassigning overwrites it and tells nobody",
+        args=[reg.arg("step", help="a step id, e.g. s-1"),
+              reg.arg("agent", help="the agent that owns it from now on"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "tick", tick, audience="both",
+        help="mark a step done — nothing infers progress and nothing else writes it",
+        args=[reg.arg("step", help="a step id, e.g. s-1"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "skip", skip, audience="both",
+        help="mark a step skipped, with the reason; a skip is a state, never an absence",
+        args=[reg.arg("step", help="a step id, e.g. s-1"),
+              reg.arg("--reason", help="why it is being skipped — required")])
+    reg.command(
+        "note", note, audience="both", help="append a note to a step, or to a plan",
+        args=[reg.arg("target", help="a step id (s-1) or a plan id (p-1)"),
+              reg.arg("--text", help="the note")])
+    reg.command(
+        "checkpoint", checkpoint, audience="both",
+        help="point a step at a brief or artifact — a path, URL or id, never its content",
+        args=[reg.arg("step", help="a step id, e.g. s-1"),
+              reg.arg("--ref", help="where the thing is: a path, a URL, an id"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "rework", rework, audience="both",
+        help="re-enter a step: its try count goes up and its progress goes back to open",
+        args=[reg.arg("step", help="a step id, e.g. s-1"),
+              reg.arg("--reason", help="why it is being redone")])
+    reg.command(
+        "add-step", add_step, audience="both",
+        help="invent a step on the fly, in a plan that is already running",
+        args=[reg.arg("plan", help="a plan id, e.g. p-1"),
+              reg.arg("name", repeat=True, help="what the step is"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "dep", dep, audience="both",
+        help="record that a step comes after others — data the lead reads, not control flow",
+        args=[reg.arg("step", help="a step id, e.g. s-2"),
+              reg.arg("--after", repeat=True,
+                      help="a step it comes after; repeat for a join"),
+              reg.arg("--reason", help="why, for the changelog")])
 
 
 # -- the handlers --------------------------------------------------------------
@@ -226,6 +315,292 @@ def changelog(ctx, args) -> Result:
     return Result(human="\n".join(_entry(e) for e in entries), data=entries)
 
 
+# -- the step lifecycle --------------------------------------------------------
+#
+# Eight verbs, and every one of them is `_on_step` (or, for the two that address a plan,
+# the same three moves written out): read, change the ONE step named, log, write. Nothing
+# here rewrites a plan wholesale — a re-plan and a tick can land in either order and the
+# loser is still in the file — and the single `_log` call per verb is why the changelog is
+# the record of how the job ran rather than of what the file ended up looking like.
+
+
+def assign(ctx, args) -> Result:
+    """Give a step an owner. Reassigning is the same act as assigning the first time.
+
+    The design says so plainly: when an owner dies the lead dispatches a replacement and
+    assigns the step to it, which is not a special case and gets no special handling. What
+    it also says is that this tells the old owner NOTHING — there is no core verb that can
+    tell a running agent anything, and inventing a notification here would be a second
+    thing that believes it knows who is working. So the old name goes into the changelog
+    and nowhere else, and closing the agent it came from is the lead's job.
+    """
+    agent = str(args.agent or "").strip()
+    if not agent:
+        return _needs("agent", "a step's owner is an agent name")
+    bad = _cap(agent, args.reason)
+    if bad:
+        return bad
+
+    def change(step: dict, who: str) -> str:
+        was = step.get("owner")
+        step["owner"] = agent
+        return f"{step['id']} → {agent}" + (f", was {was}" if was and was != agent else "")
+
+    return _on_step(ctx, args.step, "assign", args.reason, change)
+
+
+def tick(ctx, args) -> Result:
+    """Done. The only verb that writes it, and nothing in sb writes it for a step.
+
+    `sb done` does not reach this, no report ticks anything, and no verb here ticks a step
+    as a side effect of another. A lead reads a child's report and decides; a confident
+    child ticks its own. Both of those are a person or an agent typing this command, which
+    is the whole point of progress never being inferred.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+    return _on_step(ctx, args.step, "tick", args.reason,
+                    lambda step, who: _progress(step, DONE, args.reason))
+
+
+def skip(ctx, args) -> Result:
+    """Skipped, with the reason — the half of progress that is not a tick.
+
+    The reason is required, and that is the exchange the design makes: a step may be
+    skipped rather than done, so a gate can be got past without a human, and what is paid
+    for that is a state on the board with a sentence beside it. Skipping without one would
+    be an omission wearing a state's clothes, and an omitted step is invisible — which is
+    exactly what the design is buying its way out of.
+    """
+    reason = (args.reason or "").strip()
+    if not reason:
+        return _needs("--reason", "a skip is a state with a reason, never an absence — a "
+                                  "bad call has to be visible to be questioned")
+    bad = _cap(reason)
+    if bad:
+        return bad
+    return _on_step(ctx, args.step, "skip", reason,
+                    lambda step, who: _progress(step, SKIPPED, reason))
+
+
+def note(ctx, args) -> Result:
+    """A free-text note, on a step or on the plan itself. The target says which.
+
+    Both exist because the design names both moments: the lead as it creates the plan, and
+    whoever finishes a step as it is ticked. A plan-level note is the one that has nowhere
+    else to go — what the job turned out to be about, what was learned — and the analysis
+    pass reads a record cold, so notes are most of what makes one worth reading at all.
+
+    `p-1` is the plan; `s-1` and a bare `1` are the step. A bare number means a step here
+    for the same reason it does everywhere else in this file: every other verb addresses a
+    step by its number alone, and the one place that would read it as a plan is the place
+    it would be a surprise.
+    """
+    text = (args.text or "").strip()
+    if not text:
+        return _needs("--text", "a note is the text somebody reads back later")
+    bad = _cap(text)
+    if bad:
+        return bad
+    if not str(args.target or "").strip().lower().startswith("p"):
+        return _on_step(ctx, args.target, "note", None,
+                        lambda step, who: _add_note(step, text, who))
+
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, args.target)
+    if plan is None:
+        return _missing(doc, args.target)
+    who = ctx.agent or "human"
+    plan.setdefault("notes", []).append(_note(text, who))
+    _log(plan, who, "note", None, f"on {plan['id']}: {_clip(text)}")
+    _write(ctx.state_dir, doc, seal)
+    return Result(human=_full(plan), data=plan)
+
+
+def checkpoint(ctx, args) -> Result:
+    """Point a step at a brief or an artifact. A reference, and never the thing itself.
+
+    The design says references, never content, and this is where that is kept honest: a
+    ref carrying a newline is a paste and is refused. The cost of the other way is not
+    disk — it is that a plan holding a copy of a brief is a second copy that goes stale,
+    and a record read cold months later cannot tell which of the two was the real one.
+    """
+    ref = (args.ref or "").strip()
+    if not ref:
+        return _needs("--ref", "a checkpoint points at something: a path, a URL, an id")
+    if "\n" in ref or "\r" in ref:
+        why = ("a checkpoint is a reference, never content — that is more than one line. "
+               "Write it to a file and point at the file.")
+        return Result(ok=False, human=why, data={"error": why, "ref": _clip(ref)})
+    bad = _cap(ref, args.reason)
+    if bad:
+        return bad
+
+    def change(step: dict, who: str) -> str:
+        step.setdefault("checkpoints", []).append(
+            {"ref": ref, "by": who, "at": int(time.time())})
+        return f"{step['id']} → {ref}"
+
+    return _on_step(ctx, args.step, "checkpoint", args.reason, change)
+
+
+def rework(ctx, args) -> Result:
+    """Re-enter a step. Its try count goes up and its progress goes back to open.
+
+    Rework is a number on a step, not an edge in the graph: a failed review sends its step
+    back, and modelling that as a loop would make the plan cyclic to say something a
+    counter says better. There is no ceiling on it — a loop that will not converge ends
+    the way everything else does, with the lead blocking.
+
+    A step that was never done can be reworked too, and that is not policed. `progress` is
+    an open vocabulary, so this file cannot tell a step that is `done` from one a lead has
+    parked in `waiting on Andrew`, and a verb that refused what it could not identify
+    would refuse the interesting half. What it moved the step FROM is in the changelog, so
+    a rework of an already-open step reads as exactly that.
+
+    What this deliberately does NOT do is un-tick anything downstream. The design makes
+    that the lead's judgement and says why: a rule that reopened everything reachable
+    throws away good review, and one that reopened nothing merges work nothing reviewed.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+
+    def change(step: dict, who: str) -> str:
+        was = step.get("progress")
+        step["tries"] = _counter(step.get("tries")) + 1
+        step["progress"] = OPEN
+        step["why"] = (args.reason or "").strip() or None
+        return f"{step['id']} {was} → {OPEN}, try {step['tries']}"
+
+    return _on_step(ctx, args.step, "rework", args.reason, change)
+
+
+def add_step(ctx, args) -> Result:
+    """A step invented while the job runs, in a plan that already exists.
+
+    Its id comes from the same counter every other step comes from, so it is unique across
+    the file and a spawn prompt citing it stays true. The reason matters more here than
+    anywhere else: the design points out that rework leaves either a try count or a new
+    step that looks like a recurring pattern, and the analysis pass can only tell those
+    apart if the lead that added the step said which it was doing.
+    """
+    name = " ".join(str(w) for w in (args.name or ())).strip()
+    if not name:
+        return _needs("name", "a step is named so somebody can be told to do it")
+    bad = _cap(name, args.reason)
+    if bad:
+        return bad
+
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    step = _step(f"s-{doc['next_step']}", name)
+    doc["next_step"] += 1
+    plan.setdefault("steps", []).append(step)
+    who = ctx.agent or "human"
+    _log(plan, who, "add-step", args.reason, f"{step['id']} {name}")
+    _write(ctx.state_dir, doc, seal)
+    return _changed(plan, step)
+
+
+def dep(ctx, args) -> Result:
+    """Record that a step comes after others. Fan-out and join, stored as data.
+
+    Nothing here executes, evaluates, orders or waits on an edge. A join waits because the
+    lead does not start it, which is what "interpreted rather than executed" means, and
+    there is no scheduler in this file to disappoint. Cycles are not refused either: the
+    design says the graph stays acyclic, and it stays that way because rework is a counter
+    rather than a back-edge — nothing traverses these, so a cycle is a lead's mistake to
+    read, not a hang.
+
+    What is refused is an edge that names nothing: a step that does not exist, a step in
+    another plan, or the step itself. Those are typos, and an edge pointing at nothing
+    renders as a dependency the lead will wait for forever.
+    """
+    after = [str(a).strip() for a in (args.after or ()) if str(a).strip()]
+    if not after:
+        return _needs("--after", "an edge says what a step comes after")
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+
+    doc, seal = _read(ctx.state_dir)
+    plan, step = _locate(doc, args.step)
+    if step is None:
+        return _no_step(doc, args.step)
+    added = []
+    for given in after:
+        _, other = _locate(doc, given)
+        if other is None:
+            return _no_step(doc, given)
+        if other is step:
+            why = f"{step['id']} cannot come after itself"
+            return Result(ok=False, human=why, data={"error": why, "id": given})
+        if other not in (plan.get("steps") or ()):
+            why = (f"{other['id']} is not in {plan['id']} — an edge joins steps of one "
+                   f"plan, and nothing reads across plans")
+            return Result(ok=False, human=why, data={"error": why, "id": given})
+        # Compared as numbers, like every other id comparison in this file: `s-1` and a
+        # bare `1` are one edge, and no comparison here can be a substring test — `in` on a
+        # list of ids would already be right, but `in` on the string a hand-edit left there
+        # would quietly report `s-1` as present in `s-10`. `_check` refuses that file, and
+        # this is the second lock on the same door.
+        n = _num(_STEP_ID, other["id"])
+        if not any(_num(_STEP_ID, d) == n for d in step.setdefault("deps", [])):
+            step["deps"].append(other["id"])
+            added.append(other["id"])
+    who = ctx.agent or "human"
+    _log(plan, who, "dep", args.reason,
+         f"{step['id']} after {', '.join(added)}" if added
+         else f"{step['id']} already came after {', '.join(after)}")
+    _write(ctx.state_dir, doc, seal)
+    return _changed(plan, step)
+
+
+def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Result:
+    """Read, change the one step named, log, write. Every step verb is this.
+
+    `change` mutates the step and returns the changelog detail — or a `Result`, for the
+    refusal it could not make before the file was read. Having one shape for all of them is
+    what makes "every mutating verb appends a changelog entry" a property of the file
+    rather than a thing eight verbs each remember: a verb that skipped `_log` would have to
+    not be written this way at all.
+    """
+    doc, seal = _read(ctx.state_dir)
+    plan, step = _locate(doc, given)
+    if step is None:
+        return _no_step(doc, given)
+    who = ctx.agent or "human"
+    detail = change(step, who)
+    if isinstance(detail, Result):
+        return detail                   # refused, and nothing has been written
+    _log(plan, who, action, reason, detail)
+    _write(ctx.state_dir, doc, seal)
+    return _changed(plan, step)
+
+
+def _progress(step: dict, to: str, why: Optional[str]) -> str:
+    """Move a step's progress, and say what it moved from. `tick` and `skip` share this.
+
+    One field, so complete and skipped cannot both be true — the second verb replaces the
+    first rather than joining it, and the changelog is what says a correction happened.
+    `why` is overwritten too, including with nothing: a step ticked after a skip must not
+    keep the sentence explaining why it was skipped.
+    """
+    was = step.get("progress")
+    step["progress"] = to
+    step["why"] = (why or "").strip() or None
+    return f"{step['id']} {was} → {to}"
+
+
+def _add_note(step: dict, text: str, who: str) -> str:
+    step.setdefault("notes", []).append(_note(text, who))
+    return f"{step['id']}: {_clip(text)}"
+
+
 # -- refusals ------------------------------------------------------------------
 #
 # A failed `Result` carries its reason in `data` as well as in `human`, because sb prints
@@ -239,10 +614,47 @@ def _missing(doc: dict, given: str) -> Result:
     return Result(ok=False, human=why, data={"error": why, "id": given})
 
 
+def _no_step(doc: dict, given: str) -> Result:
+    """No such step. The same shape as `_missing`, one id kind along.
+
+    Steps are numbered from one counter across the whole file, so "the highest is s-7" is a
+    true and useful thing to say from anywhere — and ids are never reused, so a step that is
+    not here has never been here.
+    """
+    if _num(_STEP_ID, given) is None:
+        why = f"'{given}' is not a step id — they look like s-1"
+    else:
+        high = _high(_STEP_ID, (s.get("id") for p in doc["plans"]
+                                for s in (p.get("steps") or ())))
+        why = (f"no step {given} — none has been made yet" if not high
+               else f"no step {given} — the highest is s-{high}")
+    return Result(ok=False, human=why, data={"error": why, "id": given})
+
+
+def _needs(what: str, why: str) -> Result:
+    """A required argument that was not given, said with the reason it is required.
+
+    Argparse cannot make an option mandatory through the four keys `reg.arg` exposes, and
+    `--reason` on `skip` has to be mandatory — so the check is here. Saying WHY in the
+    refusal is the point: an agent told only "--reason is required" supplies a word, and a
+    skip reason nobody can read cold is the same as no skip reason at all.
+    """
+    why = f"{what} is required: {why}"
+    return Result(ok=False, human=why, data={"error": why, "missing": what})
+
+
 def _too_long(n: int) -> Result:
     why = (f"that is {n} characters; a plan's text is at most {MAX_TEXT}. Write the long "
            f"version somewhere a checkpoint can point at.")
     return Result(ok=False, human=why, data={"error": why, "length": n, "max": MAX_TEXT})
+
+
+def _cap(*texts: Optional[str]) -> Optional[Result]:
+    """`MAX_TEXT`, checked over everything a verb was handed, before anything is read."""
+    for text in texts:
+        if text and len(str(text)) > MAX_TEXT:
+            return _too_long(len(str(text)))
+    return None
 
 
 # -- the records ---------------------------------------------------------------
@@ -253,10 +665,13 @@ def _step(sid: str, name: str) -> dict:
 
     `tries` starts at 1 rather than 0: a step being worked is on its first try, and a count
     above one is what renders. `deps` are the ids this step comes after — fan-out and join
-    are edges the lead reads, never control flow anything executes.
+    are edges the lead reads, never control flow anything executes. `why` is the reason for
+    whatever `progress` currently says, and is here as an explicit null rather than a key
+    that appears the first time something is skipped: the shape of a step is documented, and
+    a field that exists only sometimes is a field every reader has to guess about.
     """
-    return {"id": sid, "name": name, "progress": OPEN, "owner": None, "tries": 1,
-            "notes": [], "deps": [], "checkpoints": []}
+    return {"id": sid, "name": name, "progress": OPEN, "why": None, "owner": None,
+            "tries": 1, "notes": [], "deps": [], "checkpoints": []}
 
 
 def _note(text: str, who: str) -> dict:
@@ -346,6 +761,13 @@ def _check(f: Path, plans: list) -> None:
     bearing: the seal is keyed on the id, and `_write` decides a plan was dropped by
     looking its id up. Compared as numbers, so `p-1` and a bare `1` are the one plan they
     name rather than two rows that pass a string comparison.
+
+    Every container a verb APPENDS to is checked for being a list, for the same reason the
+    ids are: not tidiness, but that the code after this point assumes it. A `notes` that is
+    null gives a raw `AttributeError` naming no file instead of the refusal this function
+    exists to give, and a `deps` that is a string is worse than a crash — `in` degrades to a
+    substring test, so `s-1` reads as already present in `"s-10"` and the edge is silently
+    dropped. Refusing here is refusing before anything is written.
     """
     seen: set[int] = set()
     steps_seen: set[int] = set()
@@ -373,8 +795,12 @@ def _check(f: Path, plans: list) -> None:
             if m in steps_seen:
                 raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
             steps_seen.add(m)
-        if not isinstance(plan.get("changelog", []), list):
-            raise _refuse(f, f"has a p-{n} whose changelog is not a list")
+            for key in ("deps", "notes", "checkpoints"):
+                if not isinstance(step.get(key, []), list):
+                    raise _refuse(f, f"has an s-{m} whose {key} are not a list")
+        for key in ("changelog", "notes"):
+            if not isinstance(plan.get(key, []), list):
+                raise _refuse(f, f"has a p-{n} whose {key} is not a list")
 
 
 def _counter(given: Any) -> int:
@@ -587,6 +1013,23 @@ def _find(doc: dict, given: str) -> Optional[dict]:
         if n else None
 
 
+def _locate(doc: dict, given: str) -> tuple[Optional[dict], Optional[dict]]:
+    """The step this id names, and the plan holding it. Searched across every plan.
+
+    A step is addressed by its number ALONE, with no plan named beside it, which is what
+    makes `sb plugin plans tick s-7` something an agent can be told at spawn and type
+    without first looking anything up. `_read` has already refused a file where two steps
+    share a number, so the first match is the only match.
+    """
+    n = _num(_STEP_ID, given)
+    if n:
+        for plan in doc["plans"]:
+            for step in plan.get("steps") or ():
+                if _num(_STEP_ID, step.get("id")) == n:
+                    return plan, step
+    return None, None
+
+
 def _num(pattern: re.Pattern, given: Any) -> Optional[int]:
     """The number in an id, or None. Zero is not a number an id has.
 
@@ -648,6 +1091,13 @@ def _full(p: dict) -> str:
 
 
 def _step_lines(steps: list) -> list[str]:
+    """One line per step, plus a line each for what hangs off it.
+
+    The reason, the refs and the notes are written out rather than counted. A step line
+    saying `[2 checkpoints]` tells a lead there is something to go and look for and not
+    where it is, and a skipped step whose reason is twenty lines down in the changelog is
+    the absence this design exists to avoid — `show` is the place a plan is read in full.
+    """
     out = []
     for s in steps:
         bits = [f"{s.get('id', '?'):<6}{s.get('progress', '?'):<10}{s.get('name', '')}"]
@@ -656,12 +1106,38 @@ def _step_lines(steps: list) -> list[str]:
         if s.get("deps"):
             # Edges the lead interprets: what this one waits for, never a wait anything runs.
             bits.append(f"after {', '.join(s['deps'])}")
-        if (s.get("tries") or 1) > 1:
+        if _counter(s.get("tries")) > 1:
             bits.append(f"try {s['tries']}")
-        if s.get("checkpoints"):
-            bits.append(f"[{len(s['checkpoints'])} checkpoints]")
         out.append("  ".join(bits))
+        if s.get("why"):
+            out.append(f"    — {s['why']}")
+        out.extend(f"    ref   {c.get('ref')}" for c in (s.get("checkpoints") or ()))
+        out.extend(f"    note  {n.get('text')}  ({n.get('by')}, {_when(n.get('at'))})"
+                   for n in (s.get("notes") or ()))
     return out
+
+
+def _changed(plan: dict, step: dict) -> Result:
+    """What a step verb hands back: the plan it was in, and the step as it now stands.
+
+    The step alone, not the whole plan — a tick that printed the entire plan back would
+    bury the one line that changed, and `show` is a command away. `data` names the plan
+    anyway, because a machine reader given only a step has lost which plan it belongs to
+    and there is no verb that maps one back to the other.
+    """
+    lines = [f"{plan['id']}  {plan.get('title') or '(untitled)'}"]
+    lines.extend(f"  {ln}" for ln in _step_lines([step]))
+    return Result(human="\n".join(lines), data={"plan": plan["id"], "step": step})
+
+
+def _clip(text: str, n: int = 60) -> str:
+    """A preview of some text for the changelog, so an entry says what it was about.
+
+    Clipped rather than whole: the text itself is on the step, and a changelog that
+    duplicated every note in full would be the notes twice with one copy going stale.
+    """
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 1] + "…"
 
 
 def _entry(e: dict) -> str:
