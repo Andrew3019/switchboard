@@ -206,8 +206,14 @@ Everything a row is drawn from is escaped on the way out (`_flat`), and every ve
 a control character in the text it is handed. A row on a board is a LINE, so a step called
 "write it\\ns-9  done  merged" would otherwise draw a step nobody added — and the same
 newline in an owner draws a status nobody read. Refusing at the door is the good error
-message; escaping at the render is what also covers a hand-edited `plans.json` and a name
-in the library, neither of which came through a verb.
+message; escaping at the render is what also covers a hand-edited `plans.json`, a name in
+the library and the refusals themselves, none of which came through a verb. An id is the
+sharpest of those: a refusal is what HAPPENS when an id fails to validate, so the message
+is built out of the one value nothing has vetted.
+
+The set is a property and not a list. What must not survive is anything `str.splitlines()`
+will break a line on — which is C0 and the C1 range, and also U+2028 and U+2029, which no
+"control character" range catches and which a test sweeps the whole codespace to pin.
 
 The changelog
 -------------
@@ -300,11 +306,20 @@ _STEP_ID = re.compile(r"^(?:s-)?(\d+)$", re.IGNORECASE)
 MAX_TEXT = 500
 
 # Everything that is not text on a line: the C0 range including newline, tab and escape,
-# DEL, and the C1 range a terminal may still act on. A row is a line and a field is part of
-# one, so any of these in a stored field is either a paste or an attempt to draw a row
-# nobody added. Refused by every verb and escaped by every renderer.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_ESCAPED = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x1b": "\\e"}
+# DEL, the C1 range a terminal may still act on, and U+2028/U+2029. A row is a line and a
+# field is part of one, so any of these in a stored field is either a paste or an attempt
+# to draw a row nobody added. Refused by every verb and escaped by every renderer.
+#
+# The two Unicode separators at the end are the ones a C0/C1 range misses, and they are the
+# reason the property this class has to hold is stated as a PROPERTY and pinned by a test
+# that sweeps `str.splitlines()` over the whole codespace rather than by a second hand-
+# written list: what matters is not that these look like control characters but that
+# nothing Python will break a line on can survive. U+2028 draws as a box or as nothing in a
+# terminal, so a human reading `show` was never the target — the target is any consumer
+# that splits the rendering into rows, which is what a board does.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_ESCAPED = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x1b": "\\e",
+            "\u2028": "\\u2028", "\u2029": "\\u2029"}
 
 
 def register(reg):
@@ -863,8 +878,11 @@ def template(ctx, args) -> Result:
         return _needs("name", "`template use` copies one template; `template list` shows "
                               "which are there")
     if wanted not in kept:
-        why = (f"no template '{wanted}'" + (f" — there is {', '.join(kept)}" if kept
-                                            else " — there are none"))
+        # Escaped for the same reason `_no_def` is: the name arrives uncapped and the
+        # keys are filenames.
+        why = (f"no template '{_flat(wanted)}'"
+               + (f" — there is {', '.join(_flat(k) for k in kept)}" if kept
+                  else " — there are none"))
         return Result(ok=False, human=why, data={"error": why, "name": wanted})
     spec = kept[wanted]
     title = (args.title or spec.get("title") or "").strip()
@@ -977,6 +995,15 @@ def _add_note(step: dict, text: str, who: str) -> str:
 
 
 def _missing(doc: dict, given: str) -> Result:
+    """No such plan. The id is escaped, and that is not decoration.
+
+    Every OTHER text in this file reaches a refusal having been through `_cap`, which
+    refuses a control character outright. An id never can: it is matched against `_PLAN_ID`
+    and the refusal IS what happens when the match fails, so this is the one message built
+    out of a value nothing has vetted. Unescaped, `sb plugin plans show $'p-2\\np-9  done'`
+    forges a row in the error output — the same hole this PR closes for the rendering, one
+    door along.
+    """
     why = _no_such(doc, given)
     return Result(ok=False, human=why, data={"error": why, "id": given})
 
@@ -988,13 +1015,14 @@ def _no_step(doc: dict, given: str) -> Result:
     true and useful thing to say from anywhere — and ids are never reused, so a step that is
     not here has never been here.
     """
+    said = _flat(given)                 # see `_missing`: an id is never vetted text
     if _num(_STEP_ID, given) is None:
-        why = f"'{given}' is not a step id — they look like s-1"
+        why = f"'{said}' is not a step id — they look like s-1"
     else:
         high = _high(_STEP_ID, (s.get("id") for p in doc["plans"]
                                 for s in (p.get("steps") or ())))
-        why = (f"no step {given} — none has been made yet" if not high
-               else f"no step {given} — the highest is s-{high}")
+        why = (f"no step {said} — none has been made yet" if not high
+               else f"no step {said} — the highest is s-{high}")
     return Result(ok=False, human=why, data={"error": why, "id": given})
 
 
@@ -1054,8 +1082,20 @@ def _flat(text: Any) -> str:
     Escaped rather than stripped, so what is there is still visible — a forged row shows up
     as the `\\n` it actually is, on the one line it was always entitled to.
     """
-    return _CONTROL.sub(lambda m: _ESCAPED.get(m.group(), f"\\x{ord(m.group()):02x}"),
-                        str(text))
+    return _CONTROL.sub(_escape, str(text))
+
+
+def _escape(m: "re.Match") -> str:
+    """One character, as the shortest spelling of it that is still text.
+
+    `\\xNN` below U+0100 and `\\uNNNN` above it, because `\\x2028` would name a character
+    that is not the one that was there — a message about a forgery that misnames the
+    forgery is barely better than not saying.
+    """
+    c = m.group()
+    if c in _ESCAPED:
+        return _ESCAPED[c]
+    return f"\\x{ord(c):02x}" if ord(c) < 0x100 else f"\\u{ord(c):04x}"
 
 
 # -- the records ---------------------------------------------------------------
@@ -1116,7 +1156,11 @@ class _BadDef(ValueError):
     """
 
     def refusal(self) -> Result:
-        return Result(ok=False, human=str(self), data={"error": str(self)})
+        # Flattened at the one place every one of these turns into a message, because each
+        # of them names a definition — and a definition is named after its FILE, which on
+        # a POSIX filesystem may legally hold a newline or a tab.
+        why = _flat(self)
+        return Result(ok=False, human=why, data={"error": why})
 
 
 def _lib(plans: Optional[list] = None) -> tuple[dict, Optional[Result]]:
@@ -1759,9 +1803,18 @@ class _Live:
         buys a second route to a false `gone` if a row is matched wrongly. The directory is
         the fact; a workspace row is a label on it.
 
-        FileNotFoundError alone means gone. Any other OSError — an unreadable parent, a
-        mount that is not answering — is `unknown`, because "I could not look" and "it is
-        not there" are the two answers this whole class exists to keep apart.
+        Any OSError that is not FileNotFoundError — an unreadable parent, a mount that is
+        not answering — is `unknown`, because "I could not look" and "it is not there" are
+        the two answers this whole class exists to keep apart.
+
+        FileNotFoundError is not quite the second of those on its own, and the DIRECTORY
+        ABOVE is what finishes the sentence. `os.stat` gives one ENOENT for a worktree that
+        was deleted and for a worktree whose parent went away under it — an unmounted
+        volume, a `worktrees/` directory that was renamed or moved. The first is a job that
+        fell apart; the second is a machine that moved, and a plan on it is not abandoned.
+        So the parent is asked too: parent there and checkout not is a deletion, and a
+        parent that is also missing is `unknown`. It costs one more stat on the one path
+        that was about to return the only verdict here that never lifts.
         """
         checkout = str(plan.get("checkout") or "").strip()
         if not checkout:
@@ -1769,10 +1822,22 @@ class _Live:
         try:
             os.stat(checkout)
         except FileNotFoundError:
-            return GONE
+            return self._deleted(checkout)
         except OSError:
             return UNSURE
         return HERE
+
+    @staticmethod
+    def _deleted(checkout: str) -> str:
+        """A checkout that is not there: was IT removed, or did the ground move under it?"""
+        parent = os.path.dirname(os.path.abspath(checkout))
+        try:
+            os.stat(parent)
+        except OSError:
+            # Missing, unreadable, or a mount that will not answer — every one of them is
+            # a reason to say nothing rather than to say abandoned.
+            return UNSURE
+        return GONE
 
     def condition(self, plan: dict) -> tuple[str, str]:
         """What a plan reads as, and where its worktree is. Derived here, written nowhere.
@@ -1816,6 +1881,15 @@ class _Live:
             # on the board, which is the direction to be wrong in.
             return LIVE, where
         mine = [a for a in rows.values() if a.get("workspace") == name]
+        if not mine:
+            # NO agent is not the same fact as every agent CLOSED, and `any()` over an
+            # empty list would quietly call it one — the same vacuous-quantifier trap the
+            # `bool(steps)` guard above closes for a plan with no steps. Nobody was ever
+            # closed here: either the plan was made by a human and no agent has been
+            # spawned into it yet, or `sb status` is scoped to the caller's own tree and
+            # the agents on this worktree belong to another. `_Live.owner` already refuses
+            # to read that scoping as a death; this must not read it as a dormancy.
+            return LIVE, where
         if any(str(a.get("state") or "") not in CLOSED for a in mine):
             return LIVE, where
         return DORMANT, where
@@ -2067,8 +2141,12 @@ def _about(spec: dict) -> list[str]:
 
 
 def _no_def(lib: dict, name: str) -> Result:
-    why = (f"no step definition '{name}' — the library holds {', '.join(lib)}" if lib
-           else f"no step definition '{name}' — the library is empty, so every step is "
+    """No such definition. Both halves escaped: `library` takes an uncapped name, and the
+    keys are FILENAMES — a POSIX filename may legally hold a tab or a newline."""
+    said = _flat(name)
+    why = (f"no step definition '{said}' — the library holds "
+           f"{', '.join(_flat(k) for k in lib)}" if lib
+           else f"no step definition '{said}' — the library is empty, so every step is "
                 f"invented on the fly")
     return Result(ok=False, human=why, data={"error": why, "name": name})
 
@@ -2098,10 +2176,11 @@ def _when(ts) -> str:
 
 
 def _no_such(doc: dict, given: str) -> str:
+    said = _flat(given)                 # see `_missing`: an id is never vetted text
     if _num(_PLAN_ID, given) is None:
-        return f"'{given}' is not a plan id — they look like p-1"
+        return f"'{said}' is not a plan id — they look like p-1"
     # Named rather than merely denied: ids are never reused, so "there is no p-9 yet" and
     # "p-9 was there and is gone" are different things, and only the first can happen.
     high = _high(_PLAN_ID, (p.get("id") for p in doc["plans"]))
-    return (f"no plan {given} — none has been made yet" if not high
-            else f"no plan {given} — the highest is p-{high}")
+    return (f"no plan {said} — none has been made yet" if not high
+            else f"no plan {said} — the highest is p-{high}")
