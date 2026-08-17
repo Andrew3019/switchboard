@@ -42,6 +42,8 @@ every sb-made view is split with the board (DESIGN-TRUTH.md's "`--no-board`.").
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import os
 import re
@@ -54,7 +56,8 @@ import threading
 import time
 import tty
 import unicodedata
-from typing import Iterator, Optional
+from pathlib import Path
+from typing import Callable, Iterator, Optional
 
 from . import config
 from . import panel
@@ -622,6 +625,239 @@ def _is_group(row) -> bool:
     return isinstance(row, status_mod.Collapsed)
 
 
+# ---------------------------------------------------------------------------
+# The plugin seam — extra lines under a worktree group
+# ---------------------------------------------------------------------------
+
+# WHAT A PLUGIN SHIPS TO DRAW HERE, and the whole of the contract:
+#
+#     <plugin>/board.py        defining
+#     board_lines(state_dir: Path, workspace: str, rows: list) -> Sequence[str]
+#
+# `rows` is the display rows of ONE worktree group, in the order they are drawn, and it is
+# how a plugin learns anything about who is alive: an `AgentStatus` already carries
+# `alive`, `state`, `gone` and `display_state`, computed once per snapshot by the
+# collector. A plugin that wants an owner's status reads it off the row it was handed. It
+# must not go and ask — the board redraws every couple of seconds, and a subprocess per
+# frame per group is the one cost this seam exists to not have.
+#
+# A SEPARATE FILE, and not a function in the plugin's `__init__.py`, for one reason worth
+# the extra convention: the question this file asks on a repo with nothing to draw is
+# `<plugin>/board.py`.is_file(), which imports NOTHING. A plugin that draws nothing costs
+# nothing at all, which is what makes "the board with no drawing plugin renders exactly as
+# it did before" a property of the code rather than a promise about it.
+BOARD_FILE = "board.py"
+_STEM = "board"                                 # `BOARD_FILE` without its extension
+BOARD_HOOK = "board_lines"
+
+# The name a plugin package is imported under — `plugins._MODULE_PREFIX`, the same string
+# deliberately, so a plugin already imported by an `sb plugin` call in this process is
+# found rather than executed a second time under a second name.
+_MODULE_PREFIX = "sb_plugin_"
+
+# The most lines one plugin may contribute to one group. Not a layout limit — the window
+# math below cuts a block to whatever the pane has left anyway — but a backstop against a
+# plugin whose state grew unbounded turning every frame into a thousand-line list to slice.
+HOOK_LINES = 40
+
+# The subdirectory a plugin's state lives in under the store — `plugins._STATE_SUBDIR`.
+# Named again here because `_state_dir` below resolves the path the renderer-safe way and
+# so cannot go through the function that owns the constant; `tests/test_board.py` pins the
+# whole path against `plugins.state_root`, which is what keeps the two from drifting.
+PLUGIN_STATE_SUBDIR = "plugins"
+
+# `{worktree: [(name, board_lines, state_dir)]}`. Discovered ONCE per process, because
+# importing is the expensive half and a board redraws every couple of seconds. The price
+# is that enabling a plugin reaches an already-open board only when it is reopened, and
+# that is the right way round: a directory that changes almost never must not be re-globbed
+# and re-imported sixty times a minute.
+_HOOKS: dict[str, list[tuple[str, Callable, Path]]] = {}
+
+
+def board_hooks(worktree: Optional[Path] = None) -> list[tuple[str, Callable, Path]]:
+    """Every enabled plugin that draws on the board, resolved and cached.
+
+    Nothing here can fail loudly. A board is what a human looks at to find out that
+    something has gone wrong, so a plugin that will not import, or a repo that is not a
+    repo, costs its own lines and nothing else — never the frame.
+    """
+    key = str(worktree) if worktree is not None else str(Path.cwd())
+    if key not in _HOOKS:
+        try:
+            _HOOKS[key] = _discover(Path(key))
+        except Exception:                       # noqa: BLE001 — see the docstring
+            _HOOKS[key] = []
+    return _HOOKS[key]
+
+
+def _discover(worktree: Path) -> list[tuple[str, Callable, Path]]:
+    """Import the `board.py` of every enabled plugin that has one.
+
+    `switchboard.plugins` IS NOT IMPORTED HERE, and that is why this globs two directories
+    itself rather than calling `plugins.available`. `report-bug` and `suggestions` ship
+    enabled, so this runs on every board in every repo, and the import graph a renderer is
+    allowed is the load-bearing property `tests/test_panel.py::RendererImports` exists to
+    keep — one this file should not be spending on a directory listing. (`plugins` is
+    reachable without a store since its `store` import moved inside `state_root`, which is
+    a change PR8 made for the plugin packages this seam imports; it is still not a module
+    a renderer should be pulling in for a glob.) The path is not borrowable either way:
+    `plugins.state_root` goes through `store.repo_root()`, which spawns `git`. See
+    `_state_dir`. `tests/test_board.py` pins both copies against the originals.
+    """
+    enabled = config.plugin_enablement(worktree)
+    if not enabled:
+        return []
+    # Shipped first, then the repo's own, which replaces a shipped one of that name
+    # wholesale. `plugins.available`'s rule, including the `__init__.py` test that tells a
+    # plugin from a pre-rename preset sitting in the same directory.
+    found: dict[str, Path] = {}
+    for root in (config.defaults_dir() / "plugins", config.path_for("plugins_dir",
+                                                                    worktree)):
+        if root is None or not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if d.is_dir() and (d / "__init__.py").is_file():
+                found[d.name] = d
+
+    out: list[tuple[str, Callable, Path]] = []
+    for name in enabled:
+        d = found.get(name)
+        # THE WHOLE COST OF A PLUGIN THAT DRAWS NOTHING: one `is_file`. Nothing is
+        # imported, so a board in a repo whose plugins all draw nothing is byte for byte
+        # the board this file drew before the seam existed.
+        if d is None or not (d / BOARD_FILE).is_file():
+            continue
+        try:
+            mod, hook = _load_drawer(name, d)
+        except KeyboardInterrupt:
+            raise
+        except BaseException:                   # noqa: BLE001 — a broken plugin costs the
+            continue                            # board nothing; `sb plugin list` reports it
+        if not callable(hook):
+            continue
+        state = _state_dir(worktree, name, str(getattr(mod, "SCOPE", "repo")))
+        if state is None:
+            continue
+        out.append((name, hook, state))
+    return out
+
+
+def _load_drawer(name: str, d: Path) -> tuple[object, object]:
+    """The plugin package, then its `board.py`, then the hook on it.
+
+    The PACKAGE first and under the same module name `plugins._import` gives it
+    (`sb_plugin_<name>`), so that `board.py`'s own `from . import …` reaches the plugin it
+    is part of and so that a plugin already imported by an `sb plugin` call in this process
+    is not imported a second time under a second name.
+    """
+    modname = _MODULE_PREFIX + name
+    mod = sys.modules.get(modname)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(
+            modname, d / "__init__.py", submodule_search_locations=[str(d)])
+        if spec is None or spec.loader is None:
+            raise ImportError(f"{d}/__init__.py is not importable")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[modname] = mod              # before exec: a package imports itself
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(modname, None)
+            raise
+    return mod, getattr(importlib.import_module(f"{modname}.{_STEM}"), BOARD_HOOK, None)
+
+
+def _state_dir(worktree: Path, name: str, scope: str) -> Optional[Path]:
+    """Where this plugin keeps its state — resolved the way a RENDERER is allowed to.
+
+    `plugins.state_root` is the same answer and is NOT used, for the reason
+    `panel.git_common_dir` exists at all: it goes through `store.repo_root()`, which spawns
+    `git rev-parse` on every call, and a renderer spawns no subprocess. `git_common_dir` is
+    the board's own resolver for exactly this and is pinned against `store.repo_root()` by
+    `tests/test_panel.py`; `tests/test_board.py` pins this against `plugins.state_root`, so
+    the two spellings of one path cannot come apart.
+
+    None when there is nothing to read: no repo, or a plugin that has never been run and so
+    has no directory. Nothing here creates one — a board draws, it does not initialise.
+    """
+    try:
+        if scope == "user":
+            root = Path(config.setting("paths.user_state", repo=worktree)).expanduser()
+        else:
+            root = panel.git_common_dir(worktree) / config.setting("paths.store_dirname")
+    except (RuntimeError, OSError, KeyError):
+        return None
+    d = root / PLUGIN_STATE_SUBDIR / name
+    return d if d.is_dir() else None
+
+
+def group_extras(rows: list) -> list[list[str]]:
+    """Per display row: the lines plugins draw under it. Aligned with `rows`, one entry each.
+
+    THE BOARD'S ONE EXTENSION POINT, and it knows nothing about what the lines say. Each
+    run of consecutive rows sharing a workspace — `richboard.group_runs`, the grouping the
+    gutter already draws — is offered to every plugin that draws, and the answer is hung on
+    the run's LAST row, which is where a block reads as belonging to the group above it.
+
+    Per ROW rather than per group so the window arithmetic has one number for each thing it
+    windows: a row costs its own line plus whatever hangs off it, and `_max_top` never has
+    to learn what a group is. A run cut in half by the window keeps its block off screen
+    with the row it hangs on, which is right — a block under a group whose tail is not
+    drawn would be a block under nothing.
+    """
+    out: list[list[str]] = [[] for _ in rows]
+    hooks = board_hooks()
+    if not hooks or not rows:
+        return out                              # today's board, and nothing imported
+    from . import richboard
+
+    for first, last in richboard.group_runs(rows):
+        ws = rows[first].workspace
+        group = rows[first:last + 1]
+        lines: list[str] = []
+        for name, hook, state in hooks:
+            lines.extend(_hook_lines(hook, state, ws, group))
+        out[last] = lines
+    return out
+
+
+def _hook_lines(hook: Callable, state: Path, workspace: str, group: list) -> list[str]:
+    """One plugin's answer for one group: text, flattened to lines, or nothing at all.
+
+    Every failure is nothing at all. A plugin that raises, returns the wrong type, or hands
+    back a newline in a string it called a line is drawing on a HUMAN'S ONLY LIVE VIEW of
+    the fleet, and the board losing a row to it — or wrapping, which moves every row below
+    and misaims the next click — is a worse outcome than a plan going unshown.
+    """
+    try:
+        given = hook(state, workspace, group)
+    except KeyboardInterrupt:
+        raise
+    except BaseException:                       # noqa: BLE001 — see the docstring
+        return []
+    if not isinstance(given, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in given[:HOOK_LINES]:
+        if not isinstance(item, str):
+            continue
+        # Split rather than refused: one line is one row here, and a plugin that put a
+        # newline in a string is describing two rows however it meant it.
+        out.extend(part for part in item.splitlines() or [""])
+    return out[:HOOK_LINES]
+
+
+def _block_line(text: str) -> str:
+    """A plugin's line, indented to where it reads as hanging under the group above it.
+
+    ONE RUNG IN, and a fixed one. A group's rows are at whatever depths they are at, so
+    indenting to the group would put two blocks on two screens at two different columns
+    for no reason a reader could name; a block one rung inside the leftmost name column is
+    in the same place every time and is plainly not a row of the tree.
+    """
+    return "   " + INDENT + text
+
+
 def _stats_line(label: str, pieces: list[str], width: int) -> str:
     """One line of the top section, in this renderer's own vocabulary.
 
@@ -726,9 +962,14 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # rather than assuming one line each, the failure otherwise being a row pushed off
     # the bottom while the footer still claims it is on screen.
     breaks = [_starts_group(agents, i) for i in range(len(agents))]
-    costs = [2 if b else 1 for b in breaks]
+    # And plus whatever a plugin draws under it: the last row of a worktree group carries
+    # its group's block, so a row is no longer one or two lines but one or two plus N. This
+    # is the ONE place that number is computed; everything that windows, clamps or counts
+    # below reads `costs`, which is why a variable-height block needed no new arithmetic.
+    extras = group_extras(agents)
+    costs = [(2 if b else 1) + len(extras[i]) for i, b in enumerate(breaks)]
     top = max(0, min(top, _max_top(costs, capacity)))
-    window: list[tuple[object, bool]] = []          # (row, draw a break above it)
+    window: list[tuple[object, bool, list[str]]] = []   # (row, break above it, its block)
     used = 0
     for i in range(top, len(agents)):
         # Never at the top of the window: a break says "a new group starts here", and
@@ -739,8 +980,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         cost = 2 if brk else 1
         if used + cost > capacity:
             break
-        window.append((agents[i], brk))
-        used += cost
+        # THE ROW OUTRANKS ITS BLOCK. A block taller than the room left is cut and the
+        # agent row is still drawn, rather than the pair of them being dropped together:
+        # the tree is what this screen is for, and a plan tall enough to fill a pane must
+        # not be able to push the agent it hangs off the bottom of it.
+        block = extras[i][:max(0, capacity - used - cost)]
+        window.append((agents[i], brk, block))
+        used += cost + len(block)
 
     bits = status_mod.summary_bits(snap)
     # The headline undimmed and the rest dim — the emphasis Andrew asked for, drawn
@@ -797,13 +1043,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # Columns, not characters, in both column widths and in every pad and clip
         # below — see `_visible_len`.
         w_name = max([0] + [_visible_len((INDENT * a.depth) + a.name)
-                            for a, _ in window if not _is_group(a)])
+                            for a, _, _ in window if not _is_group(a)])
         # `display_state`, not the store's raw word: `working` drawn next to this row's
         # own `STALLED — idle …` note is the row contradicting itself, and the one thing
         # a glanceable view must never do. See `AgentStatus.display_state`.
         w_state = max([0] + [_visible_len(a.display_state)
-                             for a, _ in window if not _is_group(a)])
-        for a, brk in window:
+                             for a, _, _ in window if not _is_group(a)])
+        for a, brk, block in window:
             if brk:
                 emit(_BREAK)                # owned by nobody: a click here is a miss
             if _is_group(a):
@@ -816,6 +1062,8 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 # do. `sb status` draws the same tree two spaces at a time and
                 # passes its own rung, which is why the unit is an argument.
                 emit(_c("   " + status_mod.collapsed_label(a, INDENT), DIM), a)
+                for extra in block:
+                    emit(_c(_block_line(extra), DIM))
                 continue
             g = glyph(a)
             label = (INDENT * a.depth) + a.name
@@ -839,6 +1087,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 if body:
                     line += _c(lead, bits[0][1]) + body
             emit(line, a)
+            # The group's block, under the last row of the group. Dim and owned by nobody
+            # — it is not an agent, and a click on it must miss rather than focus whatever
+            # agent happens to be nearest.
+            for extra in block:
+                emit(_c(_block_line(extra), DIM))
 
     while len(rows) < height - 2:
         emit("")

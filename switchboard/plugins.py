@@ -70,7 +70,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from . import config
-from . import store
 
 # The contract version: the shape of `Context`, `Result`, the registry, the `agent.md`
 # convention. A plugin declares which one it targets; sb knows the set it supports. There
@@ -594,7 +593,18 @@ def state_root(scope: str, worktree: Optional[Path] = None) -> Path:
     new mechanism and no id to generate or collide. `user` is per machine, for a plugin
     whose data is a fact about the tool rather than about whichever repo you were standing
     in when you produced it.
+
+    `store` is imported HERE and not at the top of the file, and it is the only thing in
+    this module that wants it. A renderer must never gain a path to a database handle
+    (`tests/test_panel.py::RendererImports`, and `switchboard/panel.py` for what that
+    property is worth), and since the board learned to draw a plugin's lines it imports
+    plugin packages — which import this module for `Result`. A module-level import here
+    would put `store.connect` two attribute lookups from the process that draws Andrew's
+    board. Inside the one function that needs it, it stays where it always was: on the
+    path of a plugin COMMAND, which has a store anyway.
     """
+    from . import store
+
     root = (Path(config.setting("paths.user_state", repo=worktree)).expanduser()
             if scope == "user" else store.store_dir(worktree))
     return root / _STATE_SUBDIR
