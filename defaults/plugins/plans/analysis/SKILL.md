@@ -106,3 +106,13 @@ If the analysis wants something the record does not have, say so in the output. 
 add a field: the plan schema belongs to the verbs that write it, and a pass that grew the
 record would be editing it. Known ones the report will raise on its own: plans with no notes
 at all, rework and add-step entries with no reason, and try counts with no verb behind them.
+
+Two more that the report cannot raise, because they are about the shape of the record rather
+than about one job:
+
+- **A changelog entry does not carry the step it is about as a field.** It is inside
+  `detail`, which every verb happens to open with the id. The rework split depends on
+  reading it back out of a rendered string.
+- **The record carries an owner's name and never its role.** So "leads keep doing X" and
+  "workers keep doing X" are not questions this corpus can answer, and a proposal about
+  roles rests on you knowing who those agents were.

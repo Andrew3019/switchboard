@@ -540,7 +540,16 @@ def _named(p: dict, sid: str) -> str:
 
 
 def _sid(e: dict) -> str:
-    """The step id out of a changelog entry's detail — `s-3 …` is how every verb writes it."""
+    """The step id out of a changelog entry's detail — `s-3 …` is how every verb writes it.
+
+    The one place this file parses a rendered string rather than reading a field, and it is
+    not a choice: a changelog entry carries `action`, `by`, `reason` and `detail`, and the
+    step an entry is about is only ever inside the last of those. Every verb that touches a
+    step opens its detail with the id, so this holds for anything the plugin wrote — but a
+    detail format that changes silently breaks the rework split, which is the strongest
+    argument for the entry carrying the step id as a field of its own. Not added here: the
+    schema belongs to the verbs, and this pass does not edit.
+    """
     m = re.match(r"\s*(s-\d+)", str(e.get("detail") or ""), re.IGNORECASE)
     return m.group(1).lower() if m else "?"
 
