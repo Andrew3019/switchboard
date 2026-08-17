@@ -5,9 +5,11 @@ plan (`create`, `list`, `show`, `changelog`), the verbs that move one along — 
 `tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep` — the catalogue a
 plan is built from (`library`, `name-step` and `template`), the two things that are
 READ every time a plan is displayed and written down nowhere — a step owner's status, and
-the plan's own condition — and the instruction that says when to make a plan at all
-(`guide`). What is still not here is anything that decides for itself: gates come later,
-and they do not change the shape written below.
+the plan's own condition — the instruction that says when to make a plan at all (`guide`),
+and the one mark a step carries that says a human is what finishes it (`gate`). What is
+still not here is anything that decides for itself: nothing in this file blocks, merges,
+tears down or watches for a human's answer, and the section on gates below says why that
+is the design rather than a gap.
 
 The records
 -----------
@@ -18,7 +20,7 @@ The records
            "created_by": "lead", "created_at": 1754570000}
 
     step  {"id": "s-1", "name": "…", "def": null, "obliged_by": null, "progress": "open",
-           "why": null, "owner": null, "tries": 1, "notes": [], "deps": [],
+           "why": null, "gate": null, "owner": null, "tries": 1, "notes": [], "deps": [],
            "checkpoints": []}
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
@@ -59,6 +61,46 @@ away a day of good review.
 `checkpoints` are references — a path, a URL, an id — and never content. A ref with a
 newline in it is refused, because the only way one gets there is somebody pasting the brief
 instead of pointing at it.
+
+Gates
+-----
+
+`gate` is a step's exit condition when that condition is A HUMAN: the sentence saying what
+he has to answer before this step is finished. It is a FIELD ON A STEP and never a step of
+its own, which is the design's first rule about gates and the one thing here not to get
+wrong. A design step ending in "no implementation until he confirms" needs no second step
+for the confirmation; what shows on a board, what carries a skip and its reason, and what
+an obligation attaches to is always the step whose exit condition the gate is. Open
+vocabulary like `progress`, for the same reason: the agent is the interpreter, and a job
+with a gate this file has never heard of gets it without a release.
+
+Nothing here waits, blocks, merges or tears anything down, and that boundary is the whole
+of the mechanism. The PROCEDURE at a gate is prose an agent follows — `sb presets
+design-gate` for the design gate's format, `guide` below for both — and the agent runs it
+with the tools it already has. This file's entire job is to REPRESENT the gate: to hold
+the sentence, to render it, and to make sure a gate cannot be got past without leaving a
+mark. A plugin that shelled out to `gh` or `git merge` on a plan's behalf would be the
+evaluator this design deliberately does not have, and it would be one on the only path
+where being wrong lands a merge nobody asked for.
+
+Which is why there is NO verb that clears a gate. At a gate the owning agent blocks, the
+step renders its owner as blocked — read off `sb status` at the instant of drawing, like
+every other liveness fact here, and stored nowhere — and the human answering that agent
+clears both the block and the gate. A verb to clear one through the plan would make the
+plan a control surface, and the design says plainly that Andrew talks only to agents and
+never edits a plan. `tick` is what records that the step then finished, by the agent that
+was there; `skip --reason` is the other way past, for a change too small to be worth a
+block. Both leave a mark, and there is no third way — a gate that could be dropped from a
+step would be the silent bypass the whole obligation mechanism already exists to prevent,
+so `gate` sets and corrects the sentence and cannot erase it.
+
+A gate cannot be put on a step that is already DONE. The design allows a plan to be
+created with some of its steps already complete but not a step whose exit condition is a
+gate: a gate exists to be reached before the work it guards, so a plan authored after the
+fact does not get to mark one already passed. If the work is genuinely past that point the
+step is skipped with the reason — visible — rather than born complete, which is not. A
+SKIPPED step may gain one, and that is the same rule from the other side: it is exactly
+how a lead replacing a dead one records a gate the previous plan cleared.
 
 `deps` are what a step comes after: data the lead reads, and this file's only interest in
 them is that they are storable and renderable. Nothing traverses them, waits on them,
@@ -326,7 +368,8 @@ _ESCAPED = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x1b": "\\e",
 def register(reg):
     reg.command(
         "guide", guide, audience="both",
-        help="how plan-making is done — when a plan exists, who makes it, what goes in it")
+        help="how plan-making is done — when a plan exists, who makes it, what goes in "
+             "it, and what to do at each of the two gates")
     reg.command(
         "create", create, audience="both",
         help="start a plan on this worktree, empty or with its steps already in it",
@@ -359,6 +402,13 @@ def register(reg):
         help="mark a step skipped, with the reason; a skip is a state, never an absence",
         args=[reg.arg("step", help="a step id, e.g. s-1"),
               reg.arg("--reason", help="why it is being skipped — required")])
+    reg.command(
+        "gate", gate, audience="both",
+        help="say a step's exit condition is a human — a gate is not a step of its own, "
+             "and nothing here clears one: he answers the blocked owner",
+        args=[reg.arg("step", help="a step id, e.g. s-1"),
+              reg.arg("--needs", help="what the human has to answer before this is done"),
+              reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "note", note, audience="both", help="append a note to a step, or to a plan",
         args=[reg.arg("target", help="a step id (s-1) or a plan id (p-1)"),
@@ -422,9 +472,16 @@ def register(reg):
 # to; leaving the trigger out would leave this text unreachable, because nobody looks up an
 # instruction they were never told exists.
 #
-# It states the condition, the owner and the route, and stops. What a step IS, and what
-# each verb does to one, is `sb plugin plans` and the design doc — repeating it here would
-# be a second copy going stale against the verbs in this same file.
+# It states the condition, the owner, the route — and the two gates, which are the one
+# thing here that is a PROCEDURE rather than a pointer. That is deliberate: the plugin
+# represents a gate and renders it, and everything that actually happens at one is an
+# agent following prose. The prose has to live where the verbs do, or an agent reaches a
+# gate holding a field it can see and no account of what to do about it. The design gate's
+# FORMAT is the exception and is a preset (`sb presets design-gate`), because a format is
+# long, exact, and read at one step by one agent.
+#
+# What a step IS, and what each verb does to one, is `sb plugin plans` and the design doc —
+# repeating it here would be a second copy going stale against the verbs in this same file.
 GUIDE = """\
 Plan-making — read this when a job comes up, not before.
 
@@ -469,6 +526,61 @@ HOW TO MAKE IT
   rather than executing a split you decided before you knew anything.
 
   `sb plugin plans` lists every verb; `sb plugin plans show <id>` renders one plan in full.
+
+THE TWO GATES
+
+  A gate is a step's EXIT CONDITION that requires a human — never a step of its own. Mark
+  it on the step whose end he has to answer:
+
+      sb plugin plans gate s-3 --needs "he confirms the behavioural contract"
+
+  At a gate you block. `show` then renders your step's owner as blocked, because that is
+  read off you at the moment somebody looks. Answering you clears both the block and the
+  gate: there is nothing to type against the plan, and no verb here clears one. You tick
+  the step once he has answered.
+
+  A job that lands a change has two of these and everything else resolves without him. A
+  trivially small change may skip one — `skip --reason` — and a behavioural contract for a
+  typo is exactly that case. Never route round a gate by not creating the step: a skip is
+  on the board with its reason and can be questioned, an omission is invisible.
+
+  THE DESIGN GATE, after planning and before implementing. Summarise what is causing the
+  problem and what the fix will be, in the format `sb presets design-gate` prints — read
+  it, it is exact. Point at a fuller artifact for anything that does not fit, and name the
+  other plan where the change spans two worktrees. Then block.
+
+  THE MERGE GATE, at the end. Its step is the merge step, and `merge` from the library is
+  not gated for you — mark it as you plan, the way you mark any other gate. Create the PR
+  and write the description first — he is not asked whether to create it. Say what you have
+  already tested; give him testing steps only where they are actually needed. Then block
+  for the one approval.
+
+  On his approval the rest runs without asking again — merge, cleanup, delete the worktree,
+  close the agents. That collapse is the point of the gate, so do not stop and ask at each
+  step. What "no further questions" does NOT cover is failure: a merge conflict, red
+  checks, a teardown that does not complete — any of those and you block with it. His
+  approval was given before the merge was attempted, so the failure is the one thing it
+  cannot have covered.
+
+  WHO RUNS WHICH PART OF THAT CHAIN is worth being exact about, because half of it is
+  teardown and no agent can tear itself down. The step's owner merges, ticks the step, and
+  cleans up beneath itself — `sb cleanup` reaches its own children and no further. Deleting
+  the worktree it is standing in, and closing the agents above it, are the LEAD's: the
+  owner reports that the merge is in and what is left to tear down, and the lead carries
+  those out as the last agent standing. So the owner does not stop half way and does not
+  block a second time on a routine step, and nothing is left half torn down. Where the
+  owner IS the lead — a sole worker, or a lead that took the merge step itself — it is all
+  one agent's, and the ordering below is what keeps it honest.
+
+  TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. The step that closes the last agent or
+  deletes the worktree takes with it whatever was going to tick it, so a tick that waits
+  for the command to finish is a tick that does not happen.
+
+  A CHILD AT A GATE DOES NOT FINISH THE PLAN. The protocol has a parent report and step
+  aside when a child blocks, so that only one agent waits on a person — that is right for a
+  child's own question and wrong here. A gate is the plan's, and the lead is what assigns
+  the next step once it clears. So the lead stays until its plan is complete, and says who
+  is waiting and what for without standing down.
 """
 
 
@@ -599,7 +711,7 @@ def changelog(ctx, args) -> Result:
 
 # -- the step lifecycle --------------------------------------------------------
 #
-# Eight verbs, and every one of them is `_on_step` (or, for the two that address a plan,
+# Nine verbs, and every one of them is `_on_step` (or, for the two that address a plan,
 # the same three moves written out): read, change the ONE step named, log, write. Nothing
 # here rewrites a plan wholesale — a re-plan and a tick can land in either order and the
 # loser is still in the file — and the single `_log` call per verb is why the changelog is
@@ -664,6 +776,51 @@ def skip(ctx, args) -> Result:
         return bad
     return _on_step(ctx, args.step, "skip", reason,
                     lambda step, who: _progress(step, SKIPPED, reason))
+
+
+def gate(ctx, args) -> Result:
+    """Mark a step's exit condition as one that requires a human. A field, not a step.
+
+    This is the whole of what the plugin does about a gate, and the omissions are the
+    design rather than a shortcut. It does not block, does not wait, does not ask sb
+    anything and does not run the procedure at the gate — the agent that owns the step does
+    that, following `sb presets design-gate` or the merge gate in `guide`, with the tools it
+    already has. What this buys is that the exit condition is written down on the step
+    instead of remembered, so it renders where the work is read and cannot quietly not
+    happen.
+
+    There is no argument that removes one. A gate is got past by being answered — the owner
+    blocks, the human answers the agent, the agent ticks — or by `skip --reason`, and both
+    of those leave something on the board to question. A `--needs ""` that cleared the field
+    would be the silent bypass with a verb's name on it, and it would be the only way in
+    this file to make a step's history say less than it did a moment ago.
+
+    Setting one on a step that already has one is a CORRECTION, and is allowed: what the
+    gate asks for is a sentence somebody wrote, and the changelog carries what it said
+    before. Setting one on a step that is DONE is refused — see the module docstring.
+    """
+    needs = (args.needs or "").strip()
+    if not needs:
+        return _needs("--needs", "a gate says what the human has to answer — 'he confirms "
+                                 "the contract', not merely that somebody must. There is "
+                                 "no argument that clears one: a gate is answered, or "
+                                 "skipped with a reason")
+    bad = _cap(needs, args.reason)
+    if bad:
+        return bad
+
+    def change(step: dict, who: str) -> str:
+        if str(step.get("progress") or "") == DONE:
+            why = (f"{step['id']} is already done, and a gate exists to be reached before "
+                   f"the work it guards — a plan does not get to mark one already passed. "
+                   f"Rework it if the gate is still ahead, or skip it with the reason "
+                   f"naming what cleared it.")
+            return Result(ok=False, human=why, data={"error": why, "id": step["id"]})
+        was = str(step.get("gate") or "").strip()
+        step["gate"] = needs
+        return f"{step['id']} gate: {_clip(needs)}" + (f", was {_clip(was)}" if was else "")
+
+    return _on_step(ctx, args.step, "gate", args.reason, change)
 
 
 def note(ctx, args) -> Result:
@@ -1027,7 +1184,7 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Res
     `change` mutates the step and returns the changelog detail — or a `Result`, for the
     refusal it could not make before the file was read. Having one shape for all of them is
     what makes "every mutating verb appends a changelog entry" a property of the file
-    rather than a thing eight verbs each remember: a verb that skipped `_log` would have to
+    rather than a thing nine verbs each remember: a verb that skipped `_log` would have to
     not be written this way at all.
     """
     doc, seal = _read(ctx.state_dir)
@@ -1191,6 +1348,12 @@ def _step(sid: str, name: Optional[str], *, key: Optional[str] = None,
     that appears the first time something is skipped: the shape of a step is documented, and
     a field that exists only sometimes is a field every reader has to guess about.
 
+    `gate` is the same, one field along: null on a step nobody has to be asked about, and
+    the sentence saying what he has to answer on one where a human is the exit condition.
+    Explicit here so that "this step has no gate" is a thing the record SAYS rather than a
+    key it happens not to have — a reader deciding whether a plan has a gate at all should
+    not have to tell a step made before this field existed from a step that has none.
+
     `name` and `def` are the two ways a step says what it is, and exactly one of them is
     filled. An on-the-fly step owns its words; a named one owns a LINK, and its `name` stays
     null so that there is no copy of the definition here to go stale — the text is resolved
@@ -1200,7 +1363,7 @@ def _step(sid: str, name: Optional[str], *, key: Optional[str] = None,
     `why` is.
     """
     return {"id": sid, "name": name, "def": key, "obliged_by": obliged_by,
-            "progress": OPEN, "why": None, "owner": None,
+            "progress": OPEN, "why": None, "gate": None, "owner": None,
             "tries": 1, "notes": [], "deps": [], "checkpoints": []}
 
 
@@ -2111,6 +2274,13 @@ def _step_lines(steps: list) -> list[str]:
             bits.append(f"[{_flat(_defkey(s))}]")
         if s.get("obliged_by"):
             bits.append(f"obliged by {_flat(s['obliged_by'])}")
+        if s.get("gate"):
+            # The word on the line and the sentence below it. A lead scanning a plan needs
+            # to see WHICH steps end in a human without reading every exit condition, and
+            # whoever is about to work the step needs the sentence itself — so both, rather
+            # than a marker that sends somebody looking or a sentence that hides in the run
+            # of a long line.
+            bits.append("gate")
         if s.get("owner"):
             # The two things the design says a step shows, side by side: its progress —
             # above, set by a lead or the owner — and its owner's status, read off the
@@ -2127,6 +2297,14 @@ def _step_lines(steps: list) -> list[str]:
         out.append("  ".join(bits))
         if s.get("why"):
             out.append(f"    — {_flat(s['why'])}")
+        if s.get("gate"):
+            # Said where the gate is read, and not only in the guide: the two things
+            # somebody meeting one has to know are what he is being asked and that there is
+            # nothing here to type when he answers. A step whose owner shows `blocked` on
+            # the line above is this gate being reached, which is the only signal there is.
+            out.append(f"    gate  {_flat(s['gate'])}"
+                       f" — its owner blocks; answering the owner clears it, and no verb "
+                       f"here does")
         out.extend(f"    ref   {_flat(c.get('ref'))}" for c in (s.get("checkpoints") or ()))
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
                    f"{_when(n.get('at'))})"
