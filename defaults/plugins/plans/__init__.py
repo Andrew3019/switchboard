@@ -27,9 +27,13 @@ fields the design names and leaves everything else alone.
 Moving a step
 -------------
 
-Progress is set by `tick` and `skip` and by nothing else. Nothing infers it, `sb done` does
-not touch it, and there is no path in this file that writes `done` on a step's behalf. That
-is the design's first rule about progress and the reason `tick` exists as a verb at all.
+Progress is moved by three verbs and only three: `tick` writes `done`, `skip` writes
+`skipped`, and `rework` puts a step back to `open`. Nothing infers it, `sb done` does not
+touch it, no verb moves it as a side effect of doing something else, and nothing in this
+file ever writes `done` on a step's behalf — which is the design's first rule about progress
+and the reason `tick` exists as a verb at all. Rework belongs on that list rather than
+beside it: re-entering a step is a progress move like the other two, made by an agent that
+typed the verb, and it is `open` it writes and never a completion.
 
 Complete-or-skipped-but-never-both is structural rather than checked: `progress` is ONE
 string, so `skip` on a ticked step replaces the tick instead of joining it. A verb that
@@ -186,7 +190,7 @@ def register(reg):
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "tick", tick, audience="both",
-        help="mark a step done — the only way progress is set, with skip",
+        help="mark a step done — nothing infers progress and nothing else writes it",
         args=[reg.arg("step", help="a step id, e.g. s-1"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
@@ -346,7 +350,7 @@ def assign(ctx, args) -> Result:
 
 
 def tick(ctx, args) -> Result:
-    """Done. One of the two verbs that set progress, and nothing else in sb sets it.
+    """Done. The only verb that writes it, and nothing in sb writes it for a step.
 
     `sb done` does not reach this, no report ticks anything, and no verb here ticks a step
     as a side effect of another. A lead reads a child's report and decides; a confident
@@ -539,7 +543,13 @@ def dep(ctx, args) -> Result:
             why = (f"{other['id']} is not in {plan['id']} — an edge joins steps of one "
                    f"plan, and nothing reads across plans")
             return Result(ok=False, human=why, data={"error": why, "id": given})
-        if other["id"] not in (step.setdefault("deps", [])):
+        # Compared as numbers, like every other id comparison in this file: `s-1` and a
+        # bare `1` are one edge, and no comparison here can be a substring test — `in` on a
+        # list of ids would already be right, but `in` on the string a hand-edit left there
+        # would quietly report `s-1` as present in `s-10`. `_check` refuses that file, and
+        # this is the second lock on the same door.
+        n = _num(_STEP_ID, other["id"])
+        if not any(_num(_STEP_ID, d) == n for d in step.setdefault("deps", [])):
             step["deps"].append(other["id"])
             added.append(other["id"])
     who = ctx.agent or "human"
@@ -751,6 +761,13 @@ def _check(f: Path, plans: list) -> None:
     bearing: the seal is keyed on the id, and `_write` decides a plan was dropped by
     looking its id up. Compared as numbers, so `p-1` and a bare `1` are the one plan they
     name rather than two rows that pass a string comparison.
+
+    Every container a verb APPENDS to is checked for being a list, for the same reason the
+    ids are: not tidiness, but that the code after this point assumes it. A `notes` that is
+    null gives a raw `AttributeError` naming no file instead of the refusal this function
+    exists to give, and a `deps` that is a string is worse than a crash — `in` degrades to a
+    substring test, so `s-1` reads as already present in `"s-10"` and the edge is silently
+    dropped. Refusing here is refusing before anything is written.
     """
     seen: set[int] = set()
     steps_seen: set[int] = set()
@@ -778,8 +795,12 @@ def _check(f: Path, plans: list) -> None:
             if m in steps_seen:
                 raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
             steps_seen.add(m)
-        if not isinstance(plan.get("changelog", []), list):
-            raise _refuse(f, f"has a p-{n} whose changelog is not a list")
+            for key in ("deps", "notes", "checkpoints"):
+                if not isinstance(step.get(key, []), list):
+                    raise _refuse(f, f"has an s-{m} whose {key} are not a list")
+        for key in ("changelog", "notes"):
+            if not isinstance(plan.get(key, []), list):
+                raise _refuse(f, f"has a p-{n} whose {key} is not a list")
 
 
 def _counter(given: Any) -> int:

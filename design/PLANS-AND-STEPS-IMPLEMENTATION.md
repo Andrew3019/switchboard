@@ -81,7 +81,8 @@ Verify: `sb plugin plans create`, then `show`/`list` render it; changelog append
 - Plan id `p-<n>` and step id `s-<n>` are monotonic, never reused.
 - A plan stores its owning worktree as the **workspace name**, nothing about its liveness.
 - A plan holds: id, workspace, steps, changelog, notes; JSON-like, open vocabulary.
-- A step holds: id, name, progress, owner, try-count, notes, deps, checkpoints.
+- A step holds: id, name, progress, why, owner, try-count, notes, deps, checkpoints.
+- `why` is the reason for the progress a step currently carries; PR2 fills it.
 ---
 - `create` makes an empty plan or one with steps already present.
 - `show <plan>` renders steps, deps and changelog; `list` shows plans on this worktree.
@@ -110,6 +111,8 @@ Verify: assign an owner, tick, skip with reason, add a note, bump a try count.
 ---
 - Progress is set only by `tick <step>` or `skip <step> --reason`, never by `sb done`.
 - A step is complete or skipped, never both; skip requires a reason.
+- The reason is kept on the step as `why`, so a skip renders beside its state.
+- `why` is overwritten by whatever moves progress next, including with nothing.
 ---
 - `note <step> --text` and plan-level `note` append free-text notes.
 - `checkpoint <step> --ref` records a reference to a brief or artifact, never its content.

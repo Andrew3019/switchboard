@@ -20,7 +20,9 @@ shipped-plugin tests do and then assert only what this plugin decided:
    analysis pass reads.
 7. An unreadable file is refused rather than replaced, by every verb.
 8. So is one malformed inside its plans list — duplicate ids included, plans and steps
-   alike, and a file from a newer plugin.
+   alike, a file from a newer plugin, and any container a verb appends to that is not a
+   list. The last of those is not tidiness: a `deps` holding a string makes `in` a
+   substring test, and `s-1` reads as already present in `s-10`.
 9. A refusal reaches a machine reader: the reason is in `data`, not only in `human`.
 10. The state lock is held while a command writes, which is what makes two commands
    touching different steps safe.
@@ -273,6 +275,18 @@ class PlansTest(PlansSandbox):
                   "holds two steps called s-1": {"plans": [{"id": "p-1", "steps": twins}]},
                   "with no usable id": {"plans": [{"id": "p-1",
                                                    "steps": [{"name": "nameless"}]}]},
+                  # The containers the lifecycle verbs APPEND to. A null gives a raw
+                  # AttributeError naming no file; a STRING is worse than a crash, because
+                  # `in` degrades to a substring test and `dep s-2 --after s-1` would
+                  # report the edge already present in a deps of "s-10" and drop it.
+                  "whose deps are not a list": {"plans": [{"id": "p-1", "steps": [
+                      {"id": "s-1", "deps": "s-10"}]}]},
+                  "whose notes are not a list": {"plans": [{"id": "p-1", "steps": [
+                      {"id": "s-1", "notes": None}]}]},
+                  "whose checkpoints are not a list": {"plans": [{"id": "p-1", "steps": [
+                      {"id": "s-1", "checkpoints": "notes/x.md"}]}]},
+                  "has a p-1 whose notes is not a list": {"plans": [{"id": "p-1",
+                                                                    "notes": None}]},
                   "was written by a newer plans plugin": {"format": 99, "plans": []}}
         for expected, doc in wrecks.items():
             with self.subTest(expected=expected):
@@ -329,8 +343,8 @@ class PlansTest(PlansSandbox):
 class StepsTest(PlansSandbox):
     """The verbs that move a step: assign, tick, skip, note, checkpoint, rework, add-step, dep.
 
-    Ten tests, and what each pins is a decision that could have gone the other way, not that
-    a dict got a key. The ones that matter most are the refusals: a skip without a reason and
+    Thirteen tests, and what each pins is a decision that could have gone the other way,
+    not that a dict got a key. The ones that matter most are the refusals: a skip without a reason and
     a checkpoint carrying content are both things the design forbids in prose, and prose is
     not what an agent at 3am reads.
 
@@ -546,6 +560,14 @@ class StepsTest(PlansSandbox):
         # Repeating an edge is not an error and does not double it; the plan is the same shape.
         self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
         self.assertEqual(self.step("s-2")["deps"], ["s-1"])
+
+        # And "already there" is decided on the NUMBER, like every other id comparison
+        # here, so a bare `1` written by hand is the edge it names rather than a new one.
+        doc = self._doc()
+        doc["plans"][0]["steps"][2]["deps"] = ["1"]
+        self._file().write_text(json.dumps(doc))
+        self.ok("plugin", "plans", "dep", "s-3", "--after", "s-1")
+        self.assertEqual(self.step("s-3")["deps"], ["1"])
 
     def test_an_edge_that_names_nothing_is_refused(self):
         """A cycle is not refused — nothing traverses an edge, so a cycle is a lead's
