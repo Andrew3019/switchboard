@@ -2,10 +2,11 @@
 
 The design is `design/PLANS-AND-STEPS.md`; this is the state model, the verbs that make a
 plan (`create`, `list`, `show`, `changelog`), the verbs that move one along — `assign`,
-`tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep` — and the catalogue a
-plan is built from: `library`, `name-step` and `template`. What is still not here is
-anything that decides for itself: liveness and gates come later, and neither changes the
-shape written below.
+`tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep` — the catalogue a
+plan is built from (`library`, `name-step` and `template`), and the two things that are
+READ every time a plan is displayed and written down nowhere: a step owner's status, and
+the plan's own condition. What is still not here is anything that decides for itself:
+gates come later, and they do not change the shape written below.
 
 The records
 -----------
@@ -165,8 +166,48 @@ Nothing recomputes the field, so a plan made during a hiccup would otherwise car
 worktree-is-gone verdict for the rest of its life.
 
 Nothing about liveness is stored: whether the workspace still exists, whether anybody is
-working in it, and whether a step's owner is alive are all read at display time, by a later
-PR, and never copied in here. Two records both claiming to know who is working will disagree.
+working in it, and whether a step's owner is alive are all read at display time and never
+copied in here. Two records both claiming to know who is working will disagree.
+
+What is read and never written
+------------------------------
+
+`show` and `list` render two things this file does not hold. `_Live` is where both are
+asked, once per command, sharing one `_Budget` with the resolver above.
+
+A step's OWNER STATUS — working, idle, blocked, done, dead — comes off `sb status --json`
+at the moment the step is drawn, and is put on a COPY of the step (`_viewed`), never on the
+step. That is the design's "the lead learns of a death by reading the plan, not by being
+told": switchboard's failure notice goes to the dead agent's parent, which may be neither
+the lead nor the step's owner's owner, so nothing has to be routed anywhere — the lead
+looks, and the death is on the line. `sb status` rather than `sb inspect` per owner because
+one question answers for every step of every plan being rendered, where inspect is one
+subprocess each and is refused across the tree boundary anyway.
+
+A plan's CONDITION — live, dormant, finished, abandoned — is derived the same way and for
+the same reason: there are no lifecycle hooks, nothing tells this plugin that an agent was
+closed or a worktree deleted, and the sweep that deletes one runs with nothing of the
+plugin's alive. A stored condition would be wrong from the first sweep onwards.
+
+Both are FAIL-SAFE IN ONE DIRECTION, which is most of the care in `_Live`. An sb that does
+not answer produces `unknown` — never `dead`, and never `abandoned`. The direction matters
+because these words are read cold by the analysis pass: a healthy job that read as
+abandoned for one instant leaves the same mark as one that really fell apart.
+
+"Its worktree is gone" is decided from the CHECKOUT PATH and from nothing else. It is not
+decided from `workspace: null`, which is the trap this was written to avoid: `_workspace`
+stores that null both for a checkout that is no workspace (`none`) and for an sb that could
+not be asked (`unavailable`), and reading the second as a worktree that has gone would let
+one timeout, at one instant, mark a live job abandoned for the rest of its life. A path
+that is not there is evidence needing nobody's cooperation; a path that cannot be checked
+is `unknown`, and `unknown` is never `gone`.
+
+Everything a row is drawn from is escaped on the way out (`_flat`), and every verb refuses
+a control character in the text it is handed. A row on a board is a LINE, so a step called
+"write it\\ns-9  done  merged" would otherwise draw a step nobody added — and the same
+newline in an owner draws a status nobody read. Refusing at the door is the good error
+message; escaping at the render is what also covers a hand-edited `plans.json` and a name
+in the library, neither of which came through a verb.
 
 The changelog
 -------------
@@ -220,6 +261,27 @@ OPEN, DONE, SKIPPED = "open", "done", "skipped"
 # matter are the two that both leave `workspace` null — see `_workspace`.
 BY_AGENT, BY_LIST, NONE, UNAVAILABLE = "agent", "workspace-list", "none", "unavailable"
 
+# What a plan READS as when it is displayed. Derived every time and stored never — see the
+# module docstring for why there is no other honest option. `UNSURE` is not a failure: it
+# is the answer whenever the evidence for one of the other four could not be got, and it is
+# what stands between a wedged sb and a plan that reads as abandoned.
+LIVE, DORMANT, FINISHED, ABANDONED, UNSURE = (
+    "live", "dormant", "finished", "abandoned", "unknown")
+
+# Where a plan's worktree is, as far as anything can be confirmed at this instant. Three
+# values and not two, for exactly the same reason.
+HERE, GONE = "here", "gone"
+
+# A step's owner as the agent reads right now. The rest of the vocabulary is the store's
+# own (`working`, `idle`, `blocked`, `done`), passed through rather than re-spelled here.
+# `DEAD` is something sb reported; `UNSEEN` is sb not saying, and the two must never be
+# confused — which is why an owner missing from a snapshot that DID arrive is still unseen.
+DEAD, UNSEEN = "dead", "unknown"
+
+# The states an agent row never moves out of: the store's word for a closed agent. Every
+# agent on a worktree in one of these is what "dormant" means.
+CLOSED = ("done", "failed")
+
 # The catalogue, shipped beside this file rather than kept in per-repo state: definitions
 # and templates are what the plugin KNOWS, not what a repo has done, and a repo that wants
 # its own puts a whole `plans` plugin under `.switchboard/plugins/` — which replaces this one
@@ -236,6 +298,13 @@ _STEP_ID = re.compile(r"^(?:s-)?(\d+)$", re.IGNORECASE)
 # Long enough for a real sentence, short enough that a plan stays readable when it is shown.
 # Anything longer wants a brief, and briefs are files a checkpoint can point at.
 MAX_TEXT = 500
+
+# Everything that is not text on a line: the C0 range including newline, tab and escape,
+# DEL, and the C1 range a terminal may still act on. A row is a line and a field is part of
+# one, so any of these in a stored field is either a paste or an attempt to draw a row
+# nobody added. Refused by every verb and escaped by every renderer.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_ESCAPED = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x1b": "\\e"}
 
 
 def register(reg):
@@ -334,9 +403,9 @@ def create(ctx, args) -> Result:
     notes = [str(n).strip() for n in (args.note or ()) if str(n).strip()]
     # The reason is in here with the rest: it is the field every later verb carries into
     # the changelog, and the cap is about a record staying readable when it is shown.
-    for text in [title, *steps, *notes, (args.reason or "").strip()]:
-        if len(text) > MAX_TEXT:
-            return _too_long(len(text))
+    bad = _cap(title, *steps, *notes, args.reason)
+    if bad:
+        return bad
 
     doc, seal = _read(ctx.state_dir)
     who = ctx.agent or "human"
@@ -392,11 +461,22 @@ def ls(ctx, args) -> Result:
     lib, bad = _lib(plans)
     if bad:
         return bad
-    return Result(human="\n".join(_line(p, workspace=args.all) for p in plans),
-                  data=[_shown(p, lib) for p in plans])
+    # One `_Live` for the whole listing, so twenty plans ask sb once between them and share
+    # one budget. A board that renders this often must cost one bounded question, not one
+    # per row.
+    live = _Live(ctx)
+    views = [_viewed(_shown(p, lib), live) for p in plans]
+    return Result(human="\n".join(_line(p, workspace=args.all) for p in views), data=views)
 
 
 def show(ctx, args) -> Result:
+    """One plan in full, with everything that is read rather than held read now.
+
+    Two resolutions happen here and neither is written back. A named step becomes the words
+    in the library, which is why an edit to a definition reaches a plan made last week; and
+    every owner's status and the plan's own condition are read off sb at this instant,
+    which is why a dead owner is on the line the moment a lead looks at it.
+    """
     doc, _ = _read(ctx.state_dir)
     plan = _find(doc, args.id)
     if plan is None:
@@ -406,7 +486,7 @@ def show(ctx, args) -> Result:
     lib, bad = _lib([plan])
     if bad:
         return bad
-    shown = _shown(plan, lib)
+    shown = _viewed(_shown(plan, lib), _Live(ctx))
     return Result(human=_full(shown), data=shown)
 
 
@@ -937,11 +1017,45 @@ def _too_long(n: int) -> Result:
 
 
 def _cap(*texts: Optional[str]) -> Optional[Result]:
-    """`MAX_TEXT`, checked over everything a verb was handed, before anything is read."""
+    """What every verb checks about the text it was handed, before anything is read.
+
+    Two rules, in one place because every verb wants both and a verb that remembered one
+    of them is the shape this function exists to make impossible. `MAX_TEXT` is about a
+    record staying readable when it is shown. The second is about a record being able to
+    LIE when it is shown: a plan renders as rows and a row is a line, so a step named
+    "write it\\ns-9  done  merged" draws a step nobody added, and an owner with a newline
+    in it draws a status nobody read. Refused at the door, where the message can say what
+    to do about it — and escaped again at the render, because a hand-edited file and a name
+    in the library never came through here at all.
+    """
     for text in texts:
-        if text and len(str(text)) > MAX_TEXT:
+        if not text:
+            continue
+        if len(str(text)) > MAX_TEXT:
             return _too_long(len(str(text)))
+        if _CONTROL.search(str(text)):
+            return _forged(str(text))
     return None
+
+
+def _forged(text: str) -> Result:
+    why = ("a plan's text is one line, and that has a newline or a control character in "
+           "it. A plan renders as rows, so a field carrying one can draw a step, an owner "
+           "or a status nobody wrote. Put the long version in a file and point a "
+           "checkpoint at it.")
+    return Result(ok=False, human=why, data={"error": why, "text": _clip(_flat(text))})
+
+
+def _flat(text: Any) -> str:
+    """Any stored text, as one line. The other half of `_cap`, and the load-bearing half.
+
+    Every renderer in this file goes through this, including for text `_cap` never saw: a
+    `plans.json` somebody edited by hand, and a `name` out of a definition in the library.
+    Escaped rather than stripped, so what is there is still visible — a forged row shows up
+    as the `\\n` it actually is, on the one line it was always entitled to.
+    """
+    return _CONTROL.sub(lambda m: _ESCAPED.get(m.group(), f"\\x{ord(m.group()):02x}"),
+                        str(text))
 
 
 # -- the records ---------------------------------------------------------------
@@ -1548,6 +1662,180 @@ def _sb() -> Optional[str]:
     return shutil.which("sb")
 
 
+# -- what is read, every time, and written down nowhere -------------------------
+
+
+_UNASKED = object()
+
+
+class _Live:
+    """The two things `show` and `list` read off the world instead of out of the file.
+
+    One of these per command. A `list` over twenty plans therefore asks sb ONCE between
+    them and spends one `_Budget` doing it — this runs with the plugin lock held, and a
+    board that renders plans often must cost one bounded question rather than one per row.
+
+    Every answer here is fail-safe in one direction, and that is most of what the code
+    below is for: when sb does not answer, an owner reads `unknown` and a plan reads
+    `unknown` — never `dead`, and never `abandoned`. The asymmetry is deliberate. These
+    words are read cold by the analysis pass, and a live job that read as abandoned because
+    a subprocess timed out leaves exactly the same mark as one that really fell apart.
+    """
+
+    def __init__(self, ctx) -> None:
+        self.ctx = ctx
+        self.clock = _Budget()
+        self._agents: Any = _UNASKED
+
+    def agents(self) -> Optional[dict]:
+        """Every agent sb will name, keyed by name — or None, meaning it would not say.
+
+        `sb status` and not `sb inspect` per owner: one question answers for every step of
+        every plan being rendered, where inspect is one subprocess each, is refused across
+        the tree boundary anyway, and cannot distinguish "no such agent" from "did not
+        answer" once `_ask` has turned both into None.
+
+        None is a THIRD answer and not an empty one. A snapshot that did not arrive says
+        nothing about anybody, and the callers below all branch on it before they conclude
+        anything about a death or a dormancy.
+        """
+        if self._agents is _UNASKED:
+            snap = _ask(self.ctx, "status", clock=self.clock)
+            rows = (snap or {}).get("agents")
+            self._agents = ({str(a.get("name")): a for a in rows if isinstance(a, dict)}
+                            if isinstance(rows, list) else None)
+        return self._agents
+
+    def owner(self, name: Any) -> Optional[str]:
+        """A step's owner as the agent itself reads, right now. None when there is no owner.
+
+        Read from the agent and never copied onto the step, which is the design's rule and
+        the reason this returns a word rather than writing one: two records both claiming
+        to know who is working will disagree, and the one that is wrong is always the copy.
+
+        An owner sb's snapshot does not mention is `unknown` rather than dead. A snapshot is
+        scoped to the caller's own tree, so "not in it" is as much a fact about who is
+        looking as about the owner — and a step whose owner is merely out of view must not
+        send a lead to dispatch a replacement for an agent that is working fine.
+        """
+        if not name:
+            return None
+        rows = self.agents()
+        if rows is None:
+            return UNSEEN
+        row = rows.get(str(name))
+        if row is None:
+            return UNSEEN
+        state = str(row.get("state") or "")
+        # `gone` as well as `failed`: `gone` is sb saying this agent never reported an end
+        # and its pane is not there any more, which is the death a lead needs to see now
+        # rather than after the confirmation grace writes `failed` into the row for real.
+        if state == "failed" or row.get("gone"):
+            return DEAD
+        # `display_state` is the store's own reconciliation of the state column against
+        # what the pane is doing, and it is part of `sb status`'s contract precisely so
+        # that a reader does not re-derive it. Passed through rather than re-spelled.
+        word = str(row.get("display_state") or state or "").strip()
+        return word or UNSEEN
+
+    def worktree(self, plan: dict) -> str:
+        """Is this plan's worktree still there? Decided from the checkout, and nothing else.
+
+        The checkout PATH is the stable handle — PR1 stores it so that this question has
+        something to ask about that does not move when a branch does — and a directory that
+        is not there is evidence needing nobody's cooperation to read.
+
+        `workspace: null` is NOT evidence and is never read here. PR1 writes that null both
+        for a checkout that is no workspace sb knows (`none`) and for an sb that could not
+        be asked at all (`unavailable`), and reading the second as a worktree that has gone
+        would let one timeout, at one instant, mark a healthy job abandoned for the rest of
+        its life — nothing recomputes `workspace_from`, so that verdict would never lift.
+
+        `sb workspace list` is deliberately not asked either, and it is worth saying why,
+        since it is the other handle the plan doc names. Its `verdict` for a checkout is
+        `store.checkout_verdict`, whose first act is the same existence check made here —
+        so the extra information it carries is a workspace RETIRED with its directory still
+        standing, which costs one to three seconds under the plans lock on every render and
+        buys a second route to a false `gone` if a row is matched wrongly. The directory is
+        the fact; a workspace row is a label on it.
+
+        FileNotFoundError alone means gone. Any other OSError — an unreadable parent, a
+        mount that is not answering — is `unknown`, because "I could not look" and "it is
+        not there" are the two answers this whole class exists to keep apart.
+        """
+        checkout = str(plan.get("checkout") or "").strip()
+        if not checkout:
+            return UNSURE                # a hand-written plan: nothing to go and look for
+        try:
+            os.stat(checkout)
+        except FileNotFoundError:
+            return GONE
+        except OSError:
+            return UNSURE
+        return HERE
+
+    def condition(self, plan: dict) -> tuple[str, str]:
+        """What a plan reads as, and where its worktree is. Derived here, written nowhere.
+
+        The order is the design's. A worktree that has gone decides first, and decides
+        between the two words that must not be confused: gone with steps still open is
+        ABANDONED and gone with the work done is FINISHED. The sweep deletes a worktree on
+        gates that cannot see a plan and are not going to learn to, so if the record does
+        not tell those apart afterwards the analysis pass reads every job that fell apart
+        as a job that went well — a second, mechanical source of the bias the design's
+        known limitations already name.
+
+        Then the work itself: every step ticked or skipped is finished wherever the
+        worktree is. An empty plan is NOT finished — `all()` of nothing is true, and a plan
+        created a second ago is the last thing that should read as done.
+
+        Then who is there. Every agent on the worktree closed is DORMANT, which is a state
+        a plan comes back from: restore one and the next render says live again. Nothing is
+        deleted at any point on this ladder — cleanup means dropping out of a UI, and the
+        record is plain text that is kept.
+        """
+        where = self.worktree(plan)
+        steps = plan.get("steps") or []
+        closed = bool(steps) and all(
+            str(s.get("progress") or "") in (DONE, SKIPPED) for s in steps)
+        if where == GONE:
+            return (FINISHED if closed else ABANDONED), where
+        if where == UNSURE:
+            return UNSURE, where
+        if closed:
+            return FINISHED, where
+        rows = self.agents()
+        if rows is None:
+            return UNSURE, where         # cannot tell a dormant worktree from a busy one
+        name = plan.get("workspace")
+        if not name:
+            # A plain clone, or a plan made while sb was unreachable. There is no key to
+            # count agents by — an agent row carries a workspace name and not a path — so
+            # `dormant` would be a claim about agents nothing here has looked at. The
+            # worktree is there and the steps are open: `live` is the reading that keeps it
+            # on the board, which is the direction to be wrong in.
+            return LIVE, where
+        mine = [a for a in rows.values() if a.get("workspace") == name]
+        if any(str(a.get("state") or "") not in CLOSED for a in mine):
+            return LIVE, where
+        return DORMANT, where
+
+
+def _viewed(shown: dict, live: _Live) -> dict:
+    """A resolved plan with what was read live added to the COPY, and only to the copy.
+
+    This is where "never stored" is actually kept, so it is worth being explicit about the
+    one trap in it: `_resolve` hands BACK THE STORED DICT for a step that owns its own
+    words, so annotating a step in place would write an owner's status into `plans.json` on
+    the next command that happens to write. Every step is copied again here, and there is
+    no path from anything below to `_write` at all.
+    """
+    steps = [dict(s, owner_status=live.owner(s.get("owner")))
+             for s in (shown.get("steps") or ())]
+    condition, where = live.condition(shown)
+    return dict(shown, steps=steps, condition=condition, worktree=where)
+
+
 # -- rendering and lookup ------------------------------------------------------
 
 
@@ -1604,14 +1892,17 @@ def _where(p: dict) -> str:
     nothing about the job is being described: the record simply does not know.
     """
     if p.get("workspace"):
-        return str(p["workspace"])
+        return _flat(p["workspace"])
     return "(unresolved)" if p.get("workspace_from") == UNAVAILABLE else "(no workspace)"
 
 
 def _line(p: dict, *, workspace: bool) -> str:
     where = f"{_where(p):<24}" if workspace else ""
-    return (f"{p['id']:<6}{_count(p.get('steps') or []):<10}{where}"
-            f"{p.get('title') or '(untitled)'}")
+    # The condition is a column on the listing and not a footnote: what a lead scanning
+    # `list` wants first is which of these plans anybody is still on.
+    cond = f"{str(p.get('condition') or ''):<11}" if p.get("condition") else ""
+    return (f"{p['id']:<6}{_count(p.get('steps') or []):<10}{cond}{where}"
+            f"{_flat(p.get('title') or '(untitled)')}")
 
 
 def _full(p: dict) -> str:
@@ -1620,18 +1911,27 @@ def _full(p: dict) -> str:
     Handed a RESOLVED plan — `_shown` — so that a named step renders as the words in the
     library rather than as a null. Nothing in here reaches for the catalogue itself: the
     resolution happens once, at the verb, and this stays a function of what it was given.
+
+    The same is true of the condition and the owner statuses, which is why both are drawn
+    only when they are there: `show` and `list` derive them (`_viewed`), and the verbs that
+    WRITE do not — a tick should not also pay a subprocess to say who is alive, and `show`
+    is one command away.
     """
-    lines = [f"{p['id']}  {p.get('title') or '(untitled)'}",
+    lines = [f"{p['id']}  {_flat(p.get('title') or '(untitled)')}",
              f"  workspace   {_where(p)}",
-             f"  checkout    {p.get('checkout') or '—'}",
-             f"  created     {_when(p.get('created_at'))} by {p.get('created_by') or '—'}"]
+             f"  checkout    {_flat(p.get('checkout') or '—')}"]
+    if p.get("condition"):
+        lines.append(f"  condition   {_condition(p)}")
+    lines.append(f"  created     {_when(p.get('created_at'))} "
+                 f"by {_flat(p.get('created_by') or '—')}")
     steps = p.get("steps") or []
     lines.append("")
     lines.extend([f"  {s}" for s in (_step_lines(steps) or ["(no steps yet)"])])
     if p.get("notes"):
         lines.append("")
         lines.append("  notes")
-        lines.extend(f"    {n.get('text')}  ({n.get('by')}, {_when(n.get('at'))})"
+        lines.extend(f"    {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
+                     f"{_when(n.get('at'))})"
                      for n in p["notes"])
     lines.append("")
     lines.append("  changelog")
@@ -1649,28 +1949,58 @@ def _step_lines(steps: list) -> list[str]:
     """
     out = []
     for s in steps:
-        bits = [f"{s.get('id', '?'):<6}{s.get('progress', '?'):<10}{s.get('name') or ''}"]
+        bits = [f"{_flat(s.get('id', '?')):<6}{_flat(s.get('progress', '?')):<10}"
+                f"{_flat(s.get('name') or '')}"]
         if _defkey(s):
             # The link is shown, not just what it resolves to: a lead deciding whether to
             # edit a definition or write a variant has to be able to see which steps are
             # links, and a resolved name looks exactly like a step somebody typed.
-            bits.append(f"[{_defkey(s)}]")
+            bits.append(f"[{_flat(_defkey(s))}]")
         if s.get("obliged_by"):
-            bits.append(f"obliged by {s['obliged_by']}")
+            bits.append(f"obliged by {_flat(s['obliged_by'])}")
         if s.get("owner"):
-            bits.append(f"({s['owner']})")
+            # The two things the design says a step shows, side by side: its progress —
+            # above, set by a lead or the owner — and its owner's status, read off the
+            # agent at this instant and set on nothing. A dead owner is on this line the
+            # moment somebody looks, which is how the lead learns of a death at all.
+            status = s.get("owner_status")
+            bits.append(f"({_flat(s['owner'])}"
+                        + (f" — {_flat(status)})" if status else ")"))
         if s.get("deps"):
             # Edges the lead interprets: what this one waits for, never a wait anything runs.
-            bits.append(f"after {', '.join(s['deps'])}")
+            bits.append(f"after {', '.join(_flat(d) for d in s['deps'])}")
         if _counter(s.get("tries")) > 1:
-            bits.append(f"try {s['tries']}")
+            bits.append(f"try {_flat(s['tries'])}")
         out.append("  ".join(bits))
         if s.get("why"):
-            out.append(f"    — {s['why']}")
-        out.extend(f"    ref   {c.get('ref')}" for c in (s.get("checkpoints") or ()))
-        out.extend(f"    note  {n.get('text')}  ({n.get('by')}, {_when(n.get('at'))})"
+            out.append(f"    — {_flat(s['why'])}")
+        out.extend(f"    ref   {_flat(c.get('ref'))}" for c in (s.get("checkpoints") or ()))
+        out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
+                   f"{_when(n.get('at'))})"
                    for n in (s.get("notes") or ()))
     return out
+
+
+def _condition(p: dict) -> str:
+    """A plan's condition with the sentence that says what it is claiming.
+
+    The word alone is not enough for the two that matter. `abandoned` is a verdict about a
+    job and has to say what it was read off; `unknown` has to say, plainly, that nothing is
+    being claimed at all — an agent that reads `unknown` as `dead` is exactly the mistake
+    this whole file is arranged to prevent.
+    """
+    word = str(p.get("condition") or "")
+    if word == UNSURE:
+        say = ("its worktree could not be checked, which is not the same as gone"
+               if p.get("worktree") == UNSURE
+               else "sb did not answer, which is not the same as nobody working here")
+    else:
+        say = {LIVE: "somebody is working on this worktree",
+               DORMANT: "every agent on this worktree is closed; restoring one brings "
+                        "it back",
+               FINISHED: "every step is ticked or skipped",
+               ABANDONED: "its worktree is gone with steps still open"}.get(word, "")
+    return f"{word} — {say}" if say else word
 
 
 def _changed(plan: dict, step: dict, lib: dict) -> Result:
@@ -1683,7 +2013,7 @@ def _changed(plan: dict, step: dict, lib: dict) -> Result:
     a tick on a named step should say what it ticked and not print a null.
     """
     shown = _resolve(step, lib)
-    lines = [f"{plan['id']}  {plan.get('title') or '(untitled)'}"]
+    lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines([shown]))
     return Result(human="\n".join(lines), data={"plan": plan["id"], "step": shown})
 
@@ -1697,19 +2027,20 @@ def _added(plan: dict, steps: list, lib: dict) -> Result:
     `steps` knows it is looking at everything the command did.
     """
     shown = [_resolve(s, lib) for s in steps]
-    lines = [f"{plan['id']}  {plan.get('title') or '(untitled)'}"]
+    lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines(shown))
     return Result(human="\n".join(lines), data={"plan": plan["id"], "steps": shown})
 
 
 def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     """One definition as the library renders it: its name, and what naming it does."""
-    lines = [f"{key:<16}{str(spec.get('name') or '').strip() or '(unnamed)'}"]
+    lines = [f"{_flat(key):<16}"
+             f"{_flat(str(spec.get('name') or '').strip() or '(unnamed)')}"]
     parts = _names(key, spec, "steps")
     if parts:
-        lines.append(f"    composes    {', '.join(parts)}")
+        lines.append(f"    composes    {', '.join(_flat(x) for x in parts)}")
     for ob in _obliges(lib, key):
-        lines.append(f"    obliges     {ob} — added with it, skippable with a reason, "
+        lines.append(f"    obliges     {_flat(ob)} — added with it, skippable with a reason, "
                      f"never omitted")
     if full:
         lines.extend(_about(spec))
@@ -1717,7 +2048,8 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
 
 
 def _template_lines(key: str, spec: dict) -> str:
-    lines = [f"{key:<16}{str(spec.get('title') or '').strip() or '(untitled)'}",
+    lines = [f"{_flat(key):<16}"
+             f"{_flat(str(spec.get('title') or '').strip() or '(untitled)')}",
              f"    {_count(spec.get('steps') or [])}"]
     lines.extend(_about(spec))
     return "\n".join(lines)
@@ -1730,7 +2062,7 @@ def _about(spec: dict) -> list[str]:
     thinking behind a step lives and a rendering that punished a paragraph would push that
     thinking back out into agents' heads — which is what the library exists to stop.
     """
-    text = " ".join(str(spec.get("about") or "").split())
+    text = _flat(" ".join(str(spec.get("about") or "").split()))
     return [f"    {line}" for line in textwrap.wrap(text, 84)] if text else []
 
 
@@ -1752,13 +2084,13 @@ def _clip(text: str, n: int = 60) -> str:
 
 
 def _entry(e: dict) -> str:
-    bits = [_when(e.get("at")), str(e.get("by") or "—"), str(e.get("action") or "—")]
+    bits = [_when(e.get("at")), _flat(e.get("by") or "—"), _flat(e.get("action") or "—")]
     line = "  ".join(bits)
     if e.get("detail"):
-        line += f"  {e['detail']}"
+        line += f"  {_flat(e['detail'])}"
     # The reason last and set off, because it is the part written for somebody reading the
     # job cold months later, and the only part no command could have supplied for itself.
-    return line + (f"  — {e['reason']}" if e.get("reason") else "")
+    return line + (f"  — {_flat(e['reason'])}" if e.get("reason") else "")
 
 
 def _when(ts) -> str:
