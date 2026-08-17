@@ -922,6 +922,11 @@ def a_plugin_repo(tmp: Path, *, enabled: str, plugins: dict) -> Path:
     `.git` in Python and never spawns anything — which is exactly the property the seam
     leans on. `SeamPathsTest` is where a real checkout is used, to pin this against the
     path `switchboard.plugins` would have computed.
+
+    `enabled` APPENDS to the shipped `defaults/plugins.toml`, so a test that asserts an
+    exact set of asked plugins has to start its list with `"!reset"` — otherwise whatever
+    ships enabled and ships a `board.py` (today `plans`) is legitimately asked too, and
+    the assertion is about the shipped defaults rather than about the seam.
     """
     repo = tmp / "repo"
     (repo / ".git").mkdir(parents=True)
@@ -965,7 +970,7 @@ class PluginSeamTest(unittest.TestCase):
     def test_a_plugin_that_ships_no_board_file_is_never_imported(self):
         """The whole cost of an enabled plugin that draws nothing: one `is_file`. This is
         every plugin that ships today, so it is the ordinary case and not the corner."""
-        repo = a_plugin_repo(self.tmp, enabled='["quiet"]',
+        repo = a_plugin_repo(self.tmp, enabled='["!reset", "quiet"]',
                              plugins={"quiet": {"draws": False}})
         self.assertEqual(board.board_hooks(repo), [])
         self.assertFalse(self.mark.exists())
@@ -973,7 +978,7 @@ class PluginSeamTest(unittest.TestCase):
     def test_an_enabled_plugin_that_draws_is_asked_for_each_worktree_group(self):
         """The seam itself, and nothing about plans: board.py knows only that something
         was enabled and had lines for a group."""
-        repo = a_plugin_repo(self.tmp, enabled='["drawer"]', plugins={"drawer": {}})
+        repo = a_plugin_repo(self.tmp, enabled='["!reset", "drawer"]', plugins={"drawer": {}})
         hooks = board.board_hooks(repo)
         self.assertEqual([n for n, _, _ in hooks], ["drawer"])
         self.assertTrue(self.mark.exists())
@@ -995,7 +1000,7 @@ class PluginSeamTest(unittest.TestCase):
                 board._HOOKS.clear()
                 tmp = Path(tempfile.mkdtemp())
                 self.addCleanup(shutil.rmtree, tmp, True)
-                repo = a_plugin_repo(tmp, enabled='["drawer"]',
+                repo = a_plugin_repo(tmp, enabled='["!reset", "drawer"]',
                                      plugins={"drawer": {"hook": body}})
                 hooks = board.board_hooks(repo)
                 with mock.patch.object(board, "board_hooks", return_value=hooks):
@@ -1005,7 +1010,7 @@ class PluginSeamTest(unittest.TestCase):
         """One line is one row here. A plugin that put a newline in a string is describing
         two rows however it meant it, and a string that wraps moves every row below it."""
         hook = "def board_lines(*a):\n    return ['one\\ntwo', 'three']\n"
-        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+        repo = a_plugin_repo(self.tmp, enabled='["!reset", "drawer"]',
                              plugins={"drawer": {"hook": hook}})
         with mock.patch.object(board, "board_hooks",
                                return_value=board.board_hooks(repo)):
@@ -1025,7 +1030,7 @@ class PluginSeamTest(unittest.TestCase):
         """
         hook = ("def board_lines(*a):\n"
                 "    return ['\\x1b[2J\\x1b[Hgotcha', 'a\\tb', 'bell\\x07', 'nel\\x85x']\n")
-        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+        repo = a_plugin_repo(self.tmp, enabled='["!reset", "drawer"]',
                              plugins={"drawer": {"hook": hook}})
         rows = [agent("solo")]
         with mock.patch.object(board, "board_hooks",
@@ -1047,7 +1052,7 @@ class PluginSeamTest(unittest.TestCase):
         """`group_runs` brackets CONSECUTIVE rows, and one workspace can hold two runs — a
         lead that delegated one child elsewhere and kept another at home. Asked per run,
         that workspace said the same thing twice and paid the drawer twice for it."""
-        repo = a_plugin_repo(self.tmp, enabled='["drawer"]', plugins={"drawer": {}})
+        repo = a_plugin_repo(self.tmp, enabled='["!reset", "drawer"]', plugins={"drawer": {}})
         rows = [agent("lead"), agent("away", depth=1, parent="lead", workspace="web"),
                 agent("home", depth=1, parent="lead")]
         with mock.patch.object(board, "board_hooks",
@@ -1059,7 +1064,7 @@ class PluginSeamTest(unittest.TestCase):
 
     def test_a_runaway_plugin_is_cut_off(self):
         hook = "def board_lines(*a):\n    return [str(i) for i in range(500)]\n"
-        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+        repo = a_plugin_repo(self.tmp, enabled='["!reset", "drawer"]',
                              plugins={"drawer": {"hook": hook}})
         with mock.patch.object(board, "board_hooks",
                                return_value=board.board_hooks(repo)):
@@ -1334,7 +1339,7 @@ class SeamPathsTest(unittest.TestCase):
         from switchboard import plugins
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
-        repo = a_plugin_repo(tmp, enabled='["own", "plans"]',
+        repo = a_plugin_repo(tmp, enabled='["!reset", "own", "plans"]',
                              plugins={"own": {}, "notaplugin": {}})
         (repo / ".switchboard" / "plugins" / "notaplugin" / "__init__.py").unlink()
         (repo / ".switchboard" / "plugins" / "a-preset.md").write_text("not a plugin")
