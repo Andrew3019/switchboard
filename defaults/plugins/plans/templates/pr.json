@@ -1,0 +1,13 @@
+{
+  "title": "ship a change as a pull request",
+  "about": "The shape most jobs on a worktree take: shape the work, build it, review the diff, land it. A starting point and nothing more — the copy is edited freely, and nothing holds a plan to the shape it started from.",
+  "steps": [
+    {"name": "shape the work and write the brief"},
+    {"name": "build it"},
+    {"name": "review the diff"},
+    {"def": "merge"}
+  ],
+  "notes": [
+    "Copied from the `pr` template. Add, drop and reshape steps as the job turns out — nothing links this plan back to what it came from."
+  ]
+}

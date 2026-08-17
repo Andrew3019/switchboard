@@ -1,6 +1,10 @@
-"""The `plans` plugin — the state model, before any step can move.
+"""The `plans` plugin — the state model, the verbs that move a step, and the catalogue.
 
-Eleven tests, pinning decisions rather than buying confidence. Everything sb owns — the
+Three classes, in the order the plugin was built: `PlansTest` is the state model below,
+`StepsTest` is the lifecycle verbs, and `CatalogueTest` is the library, the templates and
+the obligation — each with its own docstring saying what it is for.
+
+The state model, pinning decisions rather than buying confidence. Everything sb owns — the
 parser built from the declaration, the state directory, the `--json` envelope — is tested
 in `test_plugins.py`, so these run through `cli.main` for the same reason the other
 shipped-plugin tests do and then assert only what this plugin decided:
@@ -86,6 +90,21 @@ class PlansSandbox(ShippedSandbox):
                                cwd=str(checkout))
         db.close()
 
+    def catalogue(self, which: str) -> Path:
+        """`library/` or `templates/`, in the copy of `defaults/` this sandbox runs from.
+
+        The real shipped directories, copied by `Sandbox` along with the rest of
+        `defaults/` — so a test that writes one here is writing what the plugin under test
+        actually reads, and a test that deletes one is running the plugin with the empty
+        catalogue the design says it must survive.
+        """
+        return self.defaults / "plugins" / "plans" / which
+
+    def define(self, key: str, **spec) -> None:
+        d = self.catalogue("library")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{key}.json").write_text(json.dumps(spec))
+
     def _dir(self) -> Path:
         return plugins.state_root("repo", self.repo) / "plans"
 
@@ -111,10 +130,13 @@ class PlansTest(PlansSandbox):
                          "--note", "PR1 only", "--reason", "the job is shaped")
         self.assertEqual(made["id"], "p-2")
         self.assertEqual([s["id"] for s in made["steps"]], ["s-1", "s-2"])
+        # An on-the-fly step owns its words: `name` filled and `def` null. The other way
+        # round is a library step, and the whole schema is asserted here so that a field
+        # added by a later PR has to be added deliberately rather than noticed later.
         self.assertEqual(made["steps"][0],
-                         {"id": "s-1", "name": "write it", "progress": "open", "why": None,
-                          "owner": None, "tries": 1, "notes": [], "deps": [],
-                          "checkpoints": []})
+                         {"id": "s-1", "name": "write it", "def": None, "obliged_by": None,
+                          "progress": "open", "why": None, "owner": None, "tries": 1,
+                          "notes": [], "deps": [], "checkpoints": []})
         self.assertEqual(made["notes"][0]["text"], "PR1 only")
 
         shown = self.ok("plugin", "plans", "show", "p-2")
@@ -625,6 +647,363 @@ class StepsTest(PlansSandbox):
                 self.assertEqual(code, 1)
                 self.assertIn(expected, json.loads(out)["data"]["error"])
         self.assertEqual(self.actions(), ["create"])
+
+
+class CatalogueTest(PlansSandbox):
+    """The library, the templates and the obligation: links, copies, and what comes with what.
+
+    Nine tests, and the axis every one of them is on is LIVE LINK versus COPY. A named step
+    is a link, so editing a definition reaches a plan that is already running; a template is
+    a copy, so editing the template reaches nothing. Those point opposite ways on purpose,
+    and getting either backwards would look right in a screenshot and be wrong for the life
+    of the design — which is why the tests here assert what is in the FILE and not only what
+    `show` prints.
+
+    The shipped catalogue is deliberately almost bare — a merge, its review, one template —
+    so most of these write their own definitions into the sandbox's `defaults/`, which is
+    also the honest way to test a catalogue whose contents PR9 is supposed to grow.
+
+    Unproven here: that a lead reaches for the library at all rather than typing the step,
+    which is a workflow question; and that the shipped catalogue is the right one, which the
+    design says is read off real runs rather than decided now.
+    """
+
+    def steps(self, plan: str = "p-1") -> list[dict]:
+        """The steps as STORED, not as rendered — the difference is the whole subject."""
+        return next(p for p in self._doc()["plans"] if p["id"] == plan)["steps"]
+
+    # -- a named step is a link ------------------------------------------------
+
+    def test_a_named_step_links_to_its_definition_rather_than_copying_it(self):
+        """The plan holds `def` and leaves `name` null, and the words come out of the
+        library at render time. A copy would render identically today and stop tracking the
+        definition tomorrow, which is exactly the failure nobody would notice."""
+        self.ok("plugin", "plans", "create", "a job")
+        made = self.data("plugin", "plans", "name-step", "p-1", "merge-review",
+                         "--reason", "this one is reviewed properly")
+
+        (step,) = made["steps"]
+        self.assertEqual(step["def"], "merge-review")
+        self.assertEqual(step["id"], "s-1")
+        self.assertIsNone(self.steps()[0]["name"])      # nothing copied into the record
+        self.assertEqual(self.steps()[0]["def"], "merge-review")
+        self.assertEqual(self.steps()[0]["progress"], "open")   # its own run object
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("review the diff that is about to land", shown)
+        self.assertIn("[merge-review]", shown)          # and it says that it IS a link
+
+    def test_editing_a_definition_reaches_a_plan_already_naming_it(self):
+        """The point of the link, and the design's own words: editing a library step
+        reaches every plan naming it, live ones included. The plan here is mid-flight — its
+        step is assigned and reworked — and the new text still arrives, because there is no
+        copy in the record for the edit to have missed."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "merge")
+        self.ok("plugin", "plans", "assign", "s-1", "w1")
+        self.ok("plugin", "plans", "rework", "s-1", "--reason", "the branch moved")
+
+        self.define("merge", name="land the branch, once Andrew says so",
+                    obliges=["merge-review"])
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("land the branch, once Andrew says so", shown)
+        self.assertNotIn("merge the pull request", shown)
+        self.assertIsNone(self.steps()[0]["name"])      # still a link, not a refreshed copy
+
+        # And the run state is the plan's, untouched by the definition changing under it.
+        self.assertEqual(self.steps()[0]["owner"], "w1")
+        self.assertEqual(self.steps()[0]["tries"], 2)
+
+        # A definition that goes away says so rather than rendering a blank line.
+        (self.catalogue("library") / "merge.json").unlink()
+        self.assertIn("no such definition", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_variant_is_an_on_the_fly_step_and_not_an_edited_link(self):
+        """There is no verb that forks a definition for one job, and this is what stands in
+        for one: `add-step`. The two live side by side in one plan — one owning its words,
+        one owning a link — which is what "both are first class" means."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "merge-review")
+        self.ok("plugin", "plans", "add-step", "p-1", "review it twice, it is a migration",
+                "--reason", "a variant, not a forked link")
+
+        stored = self.steps()
+        self.assertEqual([s["def"] for s in stored], ["merge-review", None])
+        self.assertEqual(stored[1]["name"], "review it twice, it is a migration")
+        # No verb takes a definition and rewrites it for one plan; the library is files.
+        self.assertNotIn("edit", _plans_commands())
+
+    # -- composition -----------------------------------------------------------
+
+    def test_a_composite_expands_flat_with_fresh_ids(self):
+        """A plan holds no containers: naming a composite puts its PARTS in, each a step in
+        its own right with its own id, and nothing in the record says they arrived together.
+        A step that contained another would be a plan by another name."""
+        self.define("build", name="build it")
+        self.define("ship", steps=["build", "merge"])
+        self.ok("plugin", "plans", "create", "a job", "--step", "shape the work")
+        made = self.data("plugin", "plans", "name-step", "p-1", "ship")
+
+        # build, merge, and the review merge obliges — flat, in order, ids minted onwards
+        # from the on-the-fly step that was already there.
+        self.assertEqual([(s["id"], s["def"]) for s in made["steps"]],
+                         [("s-2", "build"), ("s-3", "merge"), ("s-4", "merge-review")])
+        self.assertEqual([s["def"] for s in self.steps()],
+                         [None, "build", "merge", "merge-review"])
+        self.assertTrue(all("steps" not in s for s in self.steps()))
+
+    def test_a_circular_composite_is_refused(self):
+        """Unlike a plan's `deps`, which nothing walks, composition IS traversed — so a
+        cycle here is a hang rather than a lead's mistake to read. Refused before anything
+        is written, naming the path, and the plan is untouched."""
+        self.define("a", steps=["b"])
+        self.define("b", steps=["a"])
+        self.define("loop", steps=["loop"])
+        self.ok("plugin", "plans", "create", "a job")
+        for name in ("a", "loop"):
+            with self.subTest(name=name):
+                code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", name, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn("composes into itself", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps(), [])
+        self.assertEqual([e["action"] for e in
+                          self.data("plugin", "plans", "changelog", "p-1")], ["create"])
+
+    # -- templates -------------------------------------------------------------
+
+    def test_template_list_browses_and_use_copies_with_no_back_link(self):
+        """A template is found rather than known up front, so it has to be browsable. Using
+        one is copy and paste: the copy holds no reference to what it came from, and
+        deleting the template afterwards changes nothing about the plan."""
+        listed = self.ok("plugin", "plans", "template", "list")
+        self.assertIn("pr", listed)
+        self.assertIn("ship a change as a pull request", listed)
+
+        made = self.data("plugin", "plans", "template", "use", "pr",
+                         "--title", "PR3 of the plans plugin", "--reason", "the usual shape")
+        self.assertEqual(made["title"], "PR3 of the plans plugin")
+        self.assertEqual(made["notes"][0]["text"][:7], "Copied ")
+        # Nothing anywhere in the record points back at the template it came from.
+        self.assertNotIn("template", set(made) | {k for s in made["steps"] for k in s})
+
+        shutil.rmtree(self.catalogue("templates"))
+        self.assertIn("shape the work", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertIn("(no templates", self.ok("plugin", "plans", "template", "list"))
+
+    def test_a_named_step_inside_a_template_stays_a_name(self):
+        """The two mechanisms meet here and must not collapse into one: the plan is a COPY,
+        and the merge step inside it is still a LINK. Flattening the names into copies at
+        template time would be a plan that stops tracking its definitions the moment it is
+        made, which is the same bug as snapshotting and harder to see."""
+        self.data("plugin", "plans", "template", "use", "pr")
+        stored = self.steps()
+        self.assertEqual([s["def"] for s in stored],
+                         [None, None, None, "merge", "merge-review"])
+
+        self.define("merge", name="land it, once Andrew says so", obliges=["merge-review"])
+        self.assertIn("land it, once Andrew says so", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertIsNone(self.steps()[3]["name"])
+
+        code, out, _ = self.sb("plugin", "plans", "template", "use", "nope", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("no template 'nope'", json.loads(out)["data"]["error"])
+
+    # -- the obligation --------------------------------------------------------
+
+    def test_adding_a_merge_step_brings_its_review_by_every_route(self):
+        """Obliged, not optional. Both routes that can put a library step in a plan go
+        through one expansion, so there is no argument, no template shape and no ordering
+        that lands a merge without its review — and the review says which merge it belongs
+        to, which is what PR7's gate will read."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
+                         [("merge", None), ("merge-review", "s-1")])
+
+        # A second merge is a second thing to review: the dedupe is inside one act, not
+        # across a plan, or the second merge would land with nothing reading its diff.
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
+                         [("merge", None), ("merge-review", "s-1"),
+                          ("merge", None), ("merge-review", "s-3")])
+
+        # And the other route in. `--reason` and nothing else: no flag turns this off.
+        self.data("plugin", "plans", "template", "use", "pr")
+        self.assertEqual([s["def"] for s in self.steps("p-2")][-2:], ["merge", "merge-review"])
+        self.assertEqual(sorted(_plans_args("name-step")), ["--reason", "name", "plan"])
+
+    def test_an_obliged_step_is_skipped_with_a_reason_never_omitted(self):
+        """The exchange the design makes: skipping is allowed and is expected to be rare,
+        and what is paid for it is a state on the board with a sentence beside it. An
+        omitted step is invisible; a skipped one can be seen and questioned."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        self.ok("plugin", "plans", "skip", "s-2", "--reason", "a one-line docs change")
+
+        self.assertEqual(self.steps()[1]["progress"], "skipped")
+        self.assertEqual(self.steps()[1]["why"], "a one-line docs change")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("skipped", shown)
+        self.assertIn("a one-line docs change", shown)
+        self.assertIn("obliged by s-1", shown)          # still on the board, not gone
+
+        # And it is still refused without one, on an obliged step like on any other.
+        code, out, _ = self.sb("plugin", "plans", "skip", "s-2", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("never an absence", json.loads(out)["data"]["error"])
+
+    def test_a_definition_that_both_composes_and_obliges_is_refused(self):
+        """An obligation attaches to a step, and a composite is not a step in a plan — only
+        its parts ever appear — so there is no step for `obliged_by` to name. Dropping the
+        obligation instead loses one in silence, which is the single thing this mechanism
+        exists to prevent, and it would be invisible to whoever wrote the file."""
+        self.define("signoff", name="get a signoff")
+        self.define("landing", name="land it", steps=["merge"], obliges=["signoff"])
+        self.ok("plugin", "plans", "create", "a job")
+
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "landing", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("both composes", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps(), [])
+
+        # And it is refused when it is EXPANDED, not when the catalogue is loaded, so the
+        # one bad definition takes down only what reaches it. A catalogue is edited by hand;
+        # a typo in one file must not make every other definition unusable.
+        self.ok("plugin", "plans", "name-step", "p-1", "merge")
+        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-review"])
+
+        # An obligation that reaches back into its own chain is refused for the same reason
+        # composition's cycle is: it is materialised, so it is walked.
+        self.define("landing", name="land it", obliges=["signoff"])
+        self.define("signoff", name="get a signoff", obliges=["landing"])
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "landing", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("obliges itself", json.loads(out)["data"]["error"])
+        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-review"])
+
+    def test_every_obliging_step_gets_its_own_obliged_step(self):
+        """No dedupe, anywhere: two merges are two diffs and therefore two reviews, whether
+        they arrive in one act or two. Deduping would let one step's obligation be satisfied
+        by a step it has nothing to do with — the door round the obligation in a tidier
+        coat — and a lead who thinks one review covers both skips the second with that as
+        the reason, which is visible where a dedupe would not have been."""
+        self.define("land-both", name="land two branches", steps=["merge", "merge"])
+        self.ok("plugin", "plans", "create", "a job")
+        self.data("plugin", "plans", "name-step", "p-1", "land-both")
+
+        self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
+                         [("merge", None), ("merge", None),
+                          ("merge-review", "s-1"), ("merge-review", "s-2")])
+
+    # -- a broken catalogue ----------------------------------------------------
+
+    def test_a_broken_catalogue_file_refuses_before_it_writes_anything(self):
+        """The write-then-fail bug, pinned. A verb that wrote and THEN failed to render
+        would report a failure over a mutation that had already landed, and the agent that
+        retried it would get a second plan or a second changelog entry. So the catalogue is
+        read on the way IN, and the state file is byte-identical after a refusal."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        before = self._file().read_bytes()
+        (self.catalogue("library") / "broken.json").write_text("{nope")
+
+        # p-1 names a definition, so every verb that would render it has to resolve one.
+        for argv in (("tick", "s-1"), ("skip", "s-2", "--reason", "docs only"),
+                     ("add-step", "p-1", "and one more"),
+                     ("note", "p-1", "--text", "a note"),
+                     ("name-step", "p-1", "merge"), ("template", "use", "pr"),
+                     ("show", "p-1"), ("list",), ("library",)):
+            with self.subTest(verb=argv[0]):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                # And the reason reaches a machine reader, which an escaped exception did
+                # not — PR4 and PR8 shell out with --json and would get nothing at all.
+                self.assertIn("not readable JSON", json.loads(out)["data"]["error"])
+                self.assertEqual(self._file().read_bytes(), before)
+
+        # A broken TEMPLATE file is narrower again: it reaches the two verbs that read that
+        # directory and nothing else.
+        (self.catalogue("library") / "broken.json").unlink()
+        (self.catalogue("templates") / "broken.json").write_text("[]")
+        self.ok("plugin", "plans", "show", "p-1")
+        for argv in (("template", "list"), ("template", "use", "pr")):
+            with self.subTest(verb="template " + argv[1]):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn("where a definition should be",
+                              json.loads(out)["data"]["error"])
+                self.assertEqual(self._file().read_bytes(), before)
+
+    def test_a_broken_catalogue_file_leaves_a_plan_that_named_nothing_alone(self):
+        """Refusing the verbs that resolve a definition is right; refusing `show` on a plan
+        that never named one is a typo in a shipped JSON file taking down every plan in the
+        repo. The catalogue is not opened at all when there is no link to resolve."""
+        self.ok("plugin", "plans", "create", "a job", "--step", "just words")
+        (self.catalogue("library") / "broken.json").write_text("{nope")
+
+        for argv in (("show", "p-1"), ("list",), ("changelog", "p-1"),
+                     ("tick", "s-1"), ("add-step", "p-1", "another"),
+                     ("create", "a second job"), ("template", "list")):
+            with self.subTest(verb=argv[0]):
+                self.ok("plugin", "plans", *argv)
+        self.assertEqual(self.steps()[0]["progress"], "done")
+
+    def test_a_definition_list_written_as_a_string_is_refused_by_name(self):
+        """`"obliges": "merge-review"` iterates one letter at a time. It was refused before
+        this — with `'x' obliges 'm', which is not in the step library`, which is a refusal
+        that sends whoever has to fix the file looking in the wrong place."""
+        self.define("x", name="a step", obliges="merge-review")
+        self.ok("plugin", "plans", "create", "a job")
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "x", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("read one letter at a time", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps(), [])
+
+    def test_a_definition_with_no_name_renders_as_its_own_key(self):
+        """Not as "no such definition in the library", which is a lie about a file sitting
+        right there and sends its reader looking for the wrong thing."""
+        self.define("groundwork", about="a step somebody forgot to name")
+        self.ok("plugin", "plans", "create", "a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "groundwork")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("groundwork", shown)
+        self.assertNotIn("no such definition", shown)
+
+    # -- an almost-empty catalogue ---------------------------------------------
+
+    def test_the_system_works_with_the_catalogue_empty(self):
+        """The design says so plainly, and it is a shipping constraint rather than an edge
+        case: what belongs in the catalogue is read off real runs, so it starts nearly bare
+        and everything except `name-step` has to carry on regardless."""
+        shutil.rmtree(self.catalogue("library"))
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        self.ok("plugin", "plans", "add-step", "p-1", "and review it")
+        self.ok("plugin", "plans", "tick", "s-1")
+        self.assertIn("empty", self.ok("plugin", "plans", "library"))
+        self.assertIn("write it", self.ok("plugin", "plans", "show", "p-1"))
+
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "merge", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("the library is empty", json.loads(out)["data"]["error"])
+
+        # A template naming a definition that is no longer there is refused too, rather
+        # than copied in with a link that resolves to nothing.
+        code, out, _ = self.sb("plugin", "plans", "template", "use", "pr", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("not in the step library", json.loads(out)["data"]["error"])
+
+
+def _plans_commands() -> list[str]:
+    """The verbs the plugin declares, read off the registry rather than off a docstring."""
+    reg = plugins.Registry()
+    _plans().register(reg)
+    return list(reg.commands)
+
+
+def _plans_args(command: str) -> list[str]:
+    reg = plugins.Registry()
+    _plans().register(reg)
+    return [a.name for a in reg.commands[command].args]
 
 
 def _plans():
