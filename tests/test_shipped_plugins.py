@@ -95,22 +95,25 @@ class ShippedDefaultsTest(ShippedSandbox):
         self.assertEqual(sorted(plugins.available(self.repo)),
                          ["plans", "report-bug", "suggestions", "todo"])
 
-    def test_todo_and_plans_ship_disabled(self):
-        """Both are available but off. The three states are the point: each stays on disk
-        and `sb plugin list` still describes it, so turning it on is one line rather than
-        an install. `plans` is off until the PR that binds its spawn trigger turns it on —
-        a plugin whose commands dispatch that no agent has been told about is a directory
-        under `.git` doing nothing."""
+    def test_todo_ships_disabled(self):
+        """Available but off. The three states are the point: it stays on disk and `sb
+        plugin list` still describes it, so turning it on is one line rather than an
+        install. `plans` was off beside it until the PR that binds its spawn trigger, and
+        is on here because enabling and binding it are the same decision — a plugin whose
+        commands dispatch that no agent has been told about is a directory under `.git`
+        doing nothing, and a fragment naming commands that do not dispatch is worse."""
         self.assertEqual(sorted(plugins.enabled(self.repo)),
-                         ["report-bug", "suggestions"])
+                         ["plans", "report-bug", "suggestions"])
 
-    def test_the_two_enabled_plugins_ship_bound_to_every_agent(self):
-        """Both fragments are paid on every spawn forever, which is the bar `all` sets. They
-        clear it for the same reason from two directions: an agent that works around an sb
-        bug silently, or eats the same friction silently, costs everyone after it more than
-        it cost itself, and nothing else catches either."""
+    def test_the_three_enabled_plugins_ship_bound_to_every_agent(self):
+        """Every fragment is paid on every spawn forever, which is the bar `all` sets. They
+        clear it for the same reason from three directions: an agent that works around an sb
+        bug silently, eats the same friction silently, or lands a change whose plan lived
+        only in its own head, costs everyone after it more than it cost itself, and nothing
+        else catches any of the three."""
         self.assertEqual(plugins.bound(self.repo),
-                         {"report-bug": ["every agent"], "suggestions": ["every agent"]})
+                         {"report-bug": ["every agent"], "suggestions": ["every agent"],
+                          "plans": ["every agent"]})
 
     def test_every_shipped_binding_actually_resolves(self):
         """A bound name that resolves to nothing is a fragment silently missing from every

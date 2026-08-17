@@ -27,6 +27,15 @@
 # for sb being broken and one for sb working and costing you anyway, and an agent that
 # swallows either silently makes every agent after it pay for it again.
 #
+# `plans` ships ON and bound too, on the same bar: work heading for a change that will land
+# with no plan written down is work whose shape lives in one agent's head, and that head
+# goes away. Its one-line fragment is the only thing that tells any agent plans exist, so
+# deleting `defaults/plugins/plans/` turns the design off — which is the property the
+# trigger was put in the plugin rather than in `protocol.md` to get. Enabling it here and
+# binding it in presets.toml are one decision, not two: an enabled plugin nobody has been
+# told about is a directory under `.git` doing nothing, and a bound fragment naming
+# commands that do not dispatch is worse than either.
+#
 # `todo` ships OFF — present on disk, so `sb plugin list`
 # still describes it and one line here turns it back on, but its commands do not dispatch,
 # it gets no state directory, and no spawn carries its fragment. It was on by default and
@@ -48,4 +57,4 @@
 # fragment. `enabled = ["!reset"]` here turns the commands off; `all = ["!reset"]` in a
 # repo's presets.toml keeps the commands and stops the per-spawn tax. They are different
 # levers because they are different costs.
-enabled = ["report-bug", "suggestions"]
+enabled = ["report-bug", "suggestions", "plans"]

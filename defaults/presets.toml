@@ -67,7 +67,12 @@
 # keeps `sb plugin todo` working for the human and stops it being told to every spawn —
 # which is the one thing collapsing "enabled" and "bound" into one state would have made
 # impossible to say.
-all = ["@report-bug", "@suggestions"]
+# `@plans` clears the same bar from a third direction: it is one bullet, and it is the only
+# thing that tells any agent plans exist. The instruction itself is `sb plugin plans guide`
+# and is read when a job comes up, so what is paid on every spawn forever is the trigger
+# alone. Unbinding it here is exactly "no agent is told", which is how this design is
+# turned off — and deleting the plugin folder does the same thing with a warning.
+all = ["@report-bug", "@suggestions", "@plans"]
 
 # Per-role additions, appended to `all`.
 #

@@ -3,10 +3,11 @@
 The design is `design/PLANS-AND-STEPS.md`; this is the state model, the verbs that make a
 plan (`create`, `list`, `show`, `changelog`), the verbs that move one along — `assign`,
 `tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep` — the catalogue a
-plan is built from (`library`, `name-step` and `template`), and the two things that are
-READ every time a plan is displayed and written down nowhere: a step owner's status, and
-the plan's own condition. What is still not here is anything that decides for itself:
-gates come later, and they do not change the shape written below.
+plan is built from (`library`, `name-step` and `template`), the two things that are
+READ every time a plan is displayed and written down nowhere — a step owner's status, and
+the plan's own condition — and the instruction that says when to make a plan at all
+(`guide`). What is still not here is anything that decides for itself: gates come later,
+and they do not change the shape written below.
 
 The records
 -----------
@@ -324,6 +325,9 @@ _ESCAPED = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x1b": "\\e",
 
 def register(reg):
     reg.command(
+        "guide", guide, audience="both",
+        help="how plan-making is done — when a plan exists, who makes it, what goes in it")
+    reg.command(
         "create", create, audience="both",
         help="start a plan on this worktree, empty or with its steps already in it",
         args=[reg.arg("title", repeat=True, help="what this plan is for"),
@@ -403,7 +407,82 @@ def register(reg):
               reg.arg("--reason", help="why, for the changelog")])
 
 
+# -- the plan-making instruction -----------------------------------------------
+
+
+# The whole of how a plan gets made, printed on demand and carried on no spawn.
+#
+# It lives here, in the plugin, rather than in a preset or in `protocol.md`, so that
+# disabling or deleting the plugin takes the instruction away with the commands it names.
+# An instruction that outlives the verbs it tells you to type is worse than no instruction.
+#
+# Split from the fragment on the design's own reasoning: the trigger is paid on every spawn
+# forever and the instruction is read once, when a job comes up. Merging them would put
+# this text in every system prompt in the fleet to be read by the agents it does not apply
+# to; leaving the trigger out would leave this text unreachable, because nobody looks up an
+# instruction they were never told exists.
+#
+# It states the condition, the owner and the route, and stops. What a step IS, and what
+# each verb does to one, is `sb plugin plans` and the design doc — repeating it here would
+# be a second copy going stale against the verbs in this same file.
+GUIDE = """\
+Plan-making — read this when a job comes up, not before.
+
+WHEN A PLAN EXISTS
+
+  A plan exists exactly when the work is heading for a change that will land. Small is not
+  exempt: a one-line docs change bound for a PR gets a plan, only a short one.
+
+  Everything else runs without one — investigation, questions, scouting, review-only work,
+  anything a single agent answers and reports, and everything a dispatcher does.
+
+  Investigation produces a plan rather than living inside one. Make it once the outcome is
+  known and there is a clear path from what was found through to a merged PR. Investigation
+  is a step only when it is one piece of an already-shaped job.
+
+WHO MAKES IT
+
+  The worktree's owner: the lead of that worktree, or the sole worker where there is no
+  lead. A sole worker counts as a lead for this and nothing else — making the plan for the
+  work you were given is not going beyond your task, it is how the task is carried.
+
+  A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
+  it does not plan, own, tick or read one.
+
+HOW TO MAKE IT
+
+  Look for a template first — you are not expected to know one exists:
+
+      sb plugin plans template list          browse them
+      sb plugin plans template use <name>    start a plan from one
+
+  Take a template if it fits and start from `create` if none does:
+
+      sb plugin plans create "<what this plan is for>" --step "…" --step "…"
+
+  A plan may be created with some of its steps already done — but not a step whose exit
+  condition is a gate. Skip that one with the reason, which is visible, rather than
+  starting it complete, which is not.
+
+  Then keep it honest. Nothing infers progress: `tick` when a step is done, `skip` with the
+  reason when it will not be, `rework` when it comes back, and re-plan on what you now know
+  rather than executing a split you decided before you knew anything.
+
+  `sb plugin plans` lists every verb; `sb plugin plans show <id>` renders one plan in full.
+"""
+
+
 # -- the handlers --------------------------------------------------------------
+
+
+def guide(ctx, args) -> Result:
+    """Print the plan-making instruction. Reads nothing and writes nothing.
+
+    A verb rather than a preset because a preset survives the plugin being deleted, and
+    this text is a list of commands that would then not dispatch. `data` carries the same
+    string so a machine reader gets the instruction rather than a rendering of it.
+    """
+    return Result(human=GUIDE.rstrip("\n"), data={"guide": GUIDE})
 
 
 def create(ctx, args) -> Result:
