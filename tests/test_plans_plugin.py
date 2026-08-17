@@ -852,6 +852,117 @@ class CatalogueTest(PlansSandbox):
         self.assertEqual(code, 1)
         self.assertIn("never an absence", json.loads(out)["data"]["error"])
 
+    def test_a_definition_that_both_composes_and_obliges_is_refused(self):
+        """An obligation attaches to a step, and a composite is not a step in a plan — only
+        its parts ever appear — so there is no step for `obliged_by` to name. Dropping the
+        obligation instead loses one in silence, which is the single thing this mechanism
+        exists to prevent, and it would be invisible to whoever wrote the file."""
+        self.define("signoff", name="get a signoff")
+        self.define("landing", name="land it", steps=["merge"], obliges=["signoff"])
+        self.ok("plugin", "plans", "create", "a job")
+
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "landing", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("both composes", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps(), [])
+
+        # An obligation that reaches back into its own chain is refused for the same reason
+        # composition's cycle is: it is materialised, so it is walked.
+        self.define("landing", name="land it", obliges=["signoff"])
+        self.define("signoff", name="get a signoff", obliges=["landing"])
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "landing", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("obliges itself", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps(), [])
+
+    def test_every_obliging_step_gets_its_own_obliged_step(self):
+        """No dedupe, anywhere: two merges are two diffs and therefore two reviews, whether
+        they arrive in one act or two. Deduping would let one step's obligation be satisfied
+        by a step it has nothing to do with — the door round the obligation in a tidier
+        coat — and a lead who thinks one review covers both skips the second with that as
+        the reason, which is visible where a dedupe would not have been."""
+        self.define("land-both", name="land two branches", steps=["merge", "merge"])
+        self.ok("plugin", "plans", "create", "a job")
+        self.data("plugin", "plans", "name-step", "p-1", "land-both")
+
+        self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
+                         [("merge", None), ("merge", None),
+                          ("merge-review", "s-1"), ("merge-review", "s-2")])
+
+    # -- a broken catalogue ----------------------------------------------------
+
+    def test_a_broken_catalogue_file_refuses_before_it_writes_anything(self):
+        """The write-then-fail bug, pinned. A verb that wrote and THEN failed to render
+        would report a failure over a mutation that had already landed, and the agent that
+        retried it would get a second plan or a second changelog entry. So the catalogue is
+        read on the way IN, and the state file is byte-identical after a refusal."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        before = self._file().read_bytes()
+        (self.catalogue("library") / "broken.json").write_text("{nope")
+
+        # p-1 names a definition, so every verb that would render it has to resolve one.
+        for argv in (("tick", "s-1"), ("skip", "s-2", "--reason", "docs only"),
+                     ("add-step", "p-1", "and one more"),
+                     ("note", "p-1", "--text", "a note"),
+                     ("name-step", "p-1", "merge"), ("template", "use", "pr"),
+                     ("show", "p-1"), ("list",), ("library",)):
+            with self.subTest(verb=argv[0]):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                # And the reason reaches a machine reader, which an escaped exception did
+                # not — PR4 and PR8 shell out with --json and would get nothing at all.
+                self.assertIn("not readable JSON", json.loads(out)["data"]["error"])
+                self.assertEqual(self._file().read_bytes(), before)
+
+        # A broken TEMPLATE file is narrower again: it reaches the two verbs that read that
+        # directory and nothing else.
+        (self.catalogue("library") / "broken.json").unlink()
+        (self.catalogue("templates") / "broken.json").write_text("[]")
+        self.ok("plugin", "plans", "show", "p-1")
+        for argv in (("template", "list"), ("template", "use", "pr")):
+            with self.subTest(verb="template " + argv[1]):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn("where a definition should be",
+                              json.loads(out)["data"]["error"])
+                self.assertEqual(self._file().read_bytes(), before)
+
+    def test_a_broken_catalogue_file_leaves_a_plan_that_named_nothing_alone(self):
+        """Refusing the verbs that resolve a definition is right; refusing `show` on a plan
+        that never named one is a typo in a shipped JSON file taking down every plan in the
+        repo. The catalogue is not opened at all when there is no link to resolve."""
+        self.ok("plugin", "plans", "create", "a job", "--step", "just words")
+        (self.catalogue("library") / "broken.json").write_text("{nope")
+
+        for argv in (("show", "p-1"), ("list",), ("changelog", "p-1"),
+                     ("tick", "s-1"), ("add-step", "p-1", "another"),
+                     ("create", "a second job"), ("template", "list")):
+            with self.subTest(verb=argv[0]):
+                self.ok("plugin", "plans", *argv)
+        self.assertEqual(self.steps()[0]["progress"], "done")
+
+    def test_a_definition_list_written_as_a_string_is_refused_by_name(self):
+        """`"obliges": "merge-review"` iterates one letter at a time. It was refused before
+        this — with `'x' obliges 'm', which is not in the step library`, which is a refusal
+        that sends whoever has to fix the file looking in the wrong place."""
+        self.define("x", name="a step", obliges="merge-review")
+        self.ok("plugin", "plans", "create", "a job")
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "x", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("read one letter at a time", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps(), [])
+
+    def test_a_definition_with_no_name_renders_as_its_own_key(self):
+        """Not as "no such definition in the library", which is a lie about a file sitting
+        right there and sends its reader looking for the wrong thing."""
+        self.define("groundwork", about="a step somebody forgot to name")
+        self.ok("plugin", "plans", "create", "a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "groundwork")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("groundwork", shown)
+        self.assertNotIn("no such definition", shown)
+
     # -- an almost-empty catalogue ---------------------------------------------
 
     def test_the_system_works_with_the_catalogue_empty(self):
