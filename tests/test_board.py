@@ -929,7 +929,6 @@ def a_plugin_repo(tmp: Path, *, enabled: str, plugins: dict) -> Path:
     (repo / ".switchboard" / "plugins.toml").write_text(f"enabled = {enabled}\n")
     for name, kw in plugins.items():
         a_plugin(repo / ".switchboard" / "plugins", name, **kw)
-        (repo / ".git" / "agentflow" / "plugins" / name).mkdir(parents=True)
     return repo
 
 
@@ -1012,6 +1011,51 @@ class PluginSeamTest(unittest.TestCase):
                                return_value=board.board_hooks(repo)):
             self.assertEqual(board.group_extras([agent("a")])[0],
                              ["one", "two", "three"])
+
+    def test_a_drawers_control_characters_never_reach_the_terminal(self):
+        """The guard the docstring promises, kept by the BOARD and not by the plugin.
+
+        The seam is a generic extension point, so the manners of code nobody in this repo
+        wrote are not a guarantee. Two characters and two different disasters: `ESC [ 2J`
+        is not SGR, so `_ANSI` never sees it and `_fit` hands it to the terminal, which
+        clears the pane; a TAB measures 0 to `_visible_len` and 8 to the terminal, so a
+        line that fits wraps — and a wrap moves every row below it and misaims the next
+        click. Each becomes one space, which is the only substitution that leaves the
+        column count the plugin lined up on honest.
+        """
+        hook = ("def board_lines(*a):\n"
+                "    return ['\\x1b[2J\\x1b[Hgotcha', 'a\\tb', 'bell\\x07', 'nel\\x85x']\n")
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+                             plugins={"drawer": {"hook": hook}})
+        rows = [agent("solo")]
+        with mock.patch.object(board, "board_hooks",
+                               return_value=board.board_hooks(repo)):
+            block = board.group_extras(rows)[0]
+            drawn = [t for t, _ in board.layout(snap(*rows), top=0, height=14,
+                                                width=100, msg="")]
+            rich = [str(t) for t, _ in richboard.layout(snap(*rows), top=0, height=14,
+                                                        width=100, msg="")]
+        # `nel` splits rather than becoming a space: NEL is a line break to
+        # `str.splitlines`, and one line is one row here — the same rule as a newline.
+        self.assertEqual(block, [" [2J [Hgotcha", "a b", "bell ", "nel", "x"])
+        for line in drawn + rich:
+            self.assertNotIn("\x1b[2J", line)
+            self.assertNotIn("\t", line)
+            self.assertNotIn("\x07", line)
+
+    def test_a_workspace_split_into_two_runs_is_drawn_once(self):
+        """`group_runs` brackets CONSECUTIVE rows, and one workspace can hold two runs — a
+        lead that delegated one child elsewhere and kept another at home. Asked per run,
+        that workspace said the same thing twice and paid the drawer twice for it."""
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]', plugins={"drawer": {}})
+        rows = [agent("lead"), agent("away", depth=1, parent="lead", workspace="web"),
+                agent("home", depth=1, parent="lead")]
+        with mock.patch.object(board, "board_hooks",
+                               return_value=board.board_hooks(repo)):
+            extras = board.group_extras(rows)
+        # Once, under the LAST row of the workspace — and the drawer was handed every row
+        # of it, both runs, rather than one run's worth.
+        self.assertEqual(extras, [[], ["web: 1 rows"], ["api: 2 rows"]])
 
     def test_a_runaway_plugin_is_cut_off(self):
         hook = "def board_lines(*a):\n    return [str(i) for i in range(500)]\n"
@@ -1152,6 +1196,27 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn("(dead-one — dead)", by_step["s-2"])
         self.assertIn("(elsewhere — unknown)", by_step["s-3"])
 
+    def test_a_plan_created_after_the_board_opened_appears_on_the_next_frame(self):
+        """THE ORDINARY FIRST USE, and the one this could most easily get wrong.
+
+        A plugin's state directory is made by its first COMMAND, not by the board. So the
+        normal sequence is: Andrew opens the board with no plan anywhere, a lead runs
+        `sb plugin plans create`, and the plan must appear. A discovery pass that took
+        "no state directory" as "nothing to draw" and cached it for the life of the pane
+        would never show it, and nothing on screen would say why. Here the directory does
+        not exist for the first frame at all.
+        """
+        shutil.rmtree(self.state)
+        hooks = board.board_hooks(self.repo)
+        self.assertEqual([n for n, _, _ in hooks], ["plans"])
+        rows = [agent("lead")]
+        with mock.patch.object(board, "board_hooks", return_value=hooks):
+            self.assertEqual(board.group_extras(rows), [[]])     # nothing yet, and no error
+            self.state.mkdir(parents=True)                       # `plans create` happens
+            self.write(self.plan("p-1", "api", "guardrails",
+                                 [{"id": "s-1", "name": "build", "progress": "open"}]))
+            self.assertIn("guardrails", board.group_extras(rows)[0][0])
+
     def test_drawing_a_plan_shells_out_to_nothing(self):
         """`list` and `show` build a `_Live` and spend seconds of `sb status` on it. A
         board redraws every couple of seconds, per group, and must not — which is the
@@ -1192,15 +1257,23 @@ class SeamWindowTest(unittest.TestCase):
                                       if r is rows[-1] else [] for r in rows])
 
     def test_neither_renderer_ever_draws_past_the_bottom_of_the_pane(self):
-        s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None)
+        """SCROLLED TOPS TOO, and `rich` is required to draw rather than allowed to
+        decline. `richboard.layout` returns None for a frame whose line count did not come
+        back the way it was built, which is a legitimate fallback and also exactly what a
+        window-math regression looks like — so a block that broke the arithmetic would
+        pass this sweep as "not drawn" if None were tolerated. At these sizes it draws."""
+        s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None,
+                         workspace=["api", "web", "db"][i % 3])
                    for i in range(6)])
         for height in range(6, 30):
             for n in (0, 1, 5, 40):
-                with self.subTest(height=height, block=n), self.tall(n):
-                    plain = board.layout(s, top=0, height=height, width=100, msg="")
-                    self.assertEqual(len(plain), height)
-                    rich = richboard.layout(s, top=0, height=height, width=100, msg="")
-                    if rich is not None:
+                for top in (0, 1, 3, 7):
+                    with self.subTest(height=height, block=n, top=top), self.tall(n):
+                        plain = board.layout(s, top=top, height=height, width=100, msg="")
+                        self.assertEqual(len(plain), height)
+                        rich = richboard.layout(s, top=top, height=height, width=100,
+                                                msg="")
+                        self.assertIsNotNone(rich)
                         self.assertEqual(len(rich), height)
 
     def test_the_agent_row_outranks_its_own_block(self):
@@ -1308,8 +1381,14 @@ class SeamPathsTest(unittest.TestCase):
         want = plugins.state_root("repo", repo) / "plans"
         want.mkdir(parents=True)
         self.assertEqual(board._state_dir(repo, "plans", "repo"), want)
-        # Never created here: a board draws, it does not initialise.
-        self.assertIsNone(board._state_dir(repo, "never-run", "repo"))
+        # Named whether or not it is there, and never created: a plugin's directory is
+        # made by its first command, and a board that refused the hook until then would
+        # never show the first plan. `_read` answers an empty document for a missing file.
+        never = want.parent / "never-run"
+        self.assertEqual(board._state_dir(repo, "never-run", "repo"), never)
+        self.assertFalse(never.exists())
+        # No repo, no path to name.
+        self.assertIsNone(board._state_dir(tmp / "not-a-repo", "plans", "repo"))
 
 
 if __name__ == "__main__":

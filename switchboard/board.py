@@ -660,6 +660,12 @@ _MODULE_PREFIX = "sb_plugin_"
 # plugin whose state grew unbounded turning every frame into a thousand-line list to slice.
 HOOK_LINES = 40
 
+# What a line a plugin hands over may not contain: C0, DEL, C1, and the two separators that
+# end a line in some readers and not others. The same class the plans plugin escapes on the
+# way IN (`_CONTROL` there) — one rule for "this is not part of a line", stated twice
+# because the board has to hold it for plugins that never thought about it.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
 # The subdirectory a plugin's state lives in under the store — `plugins._STATE_SUBDIR`.
 # Named again here because `_state_dir` below resolves the path the renderer-safe way and
 # so cannot go through the function that owns the constant; `tests/test_board.py` pins the
@@ -671,6 +677,13 @@ PLUGIN_STATE_SUBDIR = "plugins"
 # is that enabling a plugin reaches an already-open board only when it is reopened, and
 # that is the right way round: a directory that changes almost never must not be re-globbed
 # and re-imported sixty times a minute.
+#
+# WHAT IS CACHED IS THE PLUGIN, NEVER ITS STATE. The path is fixed for a worktree and is
+# resolved once with it; whether anything is IN it is asked at draw time and never here.
+# A state directory is made by a plugin's first COMMAND, so the ordinary first use of this
+# whole feature — open the board, then create the first plan — is exactly the case where
+# it does not exist yet, and a cache that wrote "nothing to draw" then would keep saying so
+# until the pane was closed. Nothing on screen would have said why.
 _HOOKS: dict[str, list[tuple[str, Callable, Path]]] = {}
 
 
@@ -777,8 +790,16 @@ def _state_dir(worktree: Path, name: str, scope: str) -> Optional[Path]:
     `tests/test_panel.py`; `tests/test_board.py` pins this against `plugins.state_root`, so
     the two spellings of one path cannot come apart.
 
-    None when there is nothing to read: no repo, or a plugin that has never been run and so
-    has no directory. Nothing here creates one — a board draws, it does not initialise.
+    THE DIRECTORY IS NOT REQUIRED TO EXIST, and this is the one place that could quietly
+    make the feature not work. sb makes a plugin's state directory when the plugin's first
+    COMMAND runs, so a board opened before the first `sb plugin plans create` is looking at
+    a path that is not there yet — and refusing the hook on that basis, once, into a cache
+    that lives as long as the pane, is a plan that never appears. The path is what is
+    fixed; its contents are what change, and reading them is the drawer's job on every
+    frame. Nothing here creates it either — a board draws, it does not initialise.
+
+    None only when there is no path to name: not a repo, or a setting that will not
+    resolve.
     """
     try:
         if scope == "user":
@@ -787,17 +808,24 @@ def _state_dir(worktree: Path, name: str, scope: str) -> Optional[Path]:
             root = panel.git_common_dir(worktree) / config.setting("paths.store_dirname")
     except (RuntimeError, OSError, KeyError):
         return None
-    d = root / PLUGIN_STATE_SUBDIR / name
-    return d if d.is_dir() else None
+    return root / PLUGIN_STATE_SUBDIR / name
 
 
 def group_extras(rows: list) -> list[list[str]]:
     """Per display row: the lines plugins draw under it. Aligned with `rows`, one entry each.
 
-    THE BOARD'S ONE EXTENSION POINT, and it knows nothing about what the lines say. Each
-    run of consecutive rows sharing a workspace — `richboard.group_runs`, the grouping the
-    gutter already draws — is offered to every plugin that draws, and the answer is hung on
-    the run's LAST row, which is where a block reads as belonging to the group above it.
+    THE BOARD'S ONE EXTENSION POINT, and it knows nothing about what the lines say. Every
+    plugin that draws is asked about each WORKSPACE on screen, and the answer is hung on
+    the last row of that workspace's last run, which is where a block reads as belonging to
+    the rows above it.
+
+    ONCE PER WORKSPACE AND NOT ONCE PER RUN, which is the distinction that matters.
+    `richboard.group_runs` brackets runs of CONSECUTIVE rows sharing a workspace, and one
+    workspace can hold two of them — a lead that delegated one child elsewhere and kept
+    another at home puts its own workspace on both sides of the other one. Asking per run
+    drew that workspace's block twice, said the same plan twice, and paid the drawer twice
+    for it. So the runs are collected first: the rows handed over are every row of the
+    workspace, in screen order, and the block is drawn under the last of them.
 
     Per ROW rather than per group so the window arithmetic has one number for each thing it
     windows: a row costs its own line plus whatever hangs off it, and `_max_top` never has
@@ -811,13 +839,15 @@ def group_extras(rows: list) -> list[list[str]]:
         return out                              # today's board, and nothing imported
     from . import richboard
 
+    workspaces: dict[str, list[int]] = {}
     for first, last in richboard.group_runs(rows):
-        ws = rows[first].workspace
-        group = rows[first:last + 1]
+        workspaces.setdefault(rows[first].workspace, []).extend(range(first, last + 1))
+    for ws, idx in workspaces.items():
+        group = [rows[i] for i in idx]
         lines: list[str] = []
-        for name, hook, state in hooks:
+        for _name, hook, state in hooks:
             lines.extend(_hook_lines(hook, state, ws, group))
-        out[last] = lines
+        out[idx[-1]] = lines
     return out
 
 
@@ -828,6 +858,18 @@ def _hook_lines(hook: Callable, state: Path, workspace: str, group: list) -> lis
     back a newline in a string it called a line is drawing on a HUMAN'S ONLY LIVE VIEW of
     the fleet, and the board losing a row to it — or wrapping, which moves every row below
     and misaims the next click — is a worse outcome than a plan going unshown.
+
+    That guarantee is kept HERE and not asked of the plugin, because the seam is a generic
+    extension point and the manners of code nobody in this repo wrote are not a guarantee.
+    A control character is the sharp end of it: `ESC [ 2J` clears the pane and `ESC [ H`
+    moves the cursor, and neither is SGR, so `_ANSI` does not see them and `_fit` carries
+    them to the terminal intact. A raw TAB is the same class — `_visible_len` scores it 0, the
+    terminal expands it to the next multiple of eight, and the line that "fits" wraps.
+
+    Not a timeout, though, and the omission is deliberate rather than missed: a drawer that
+    HANGS holds the render thread and the board with it, and there is no way to bound a
+    synchronous in-process call without a thread per frame. The contract is that a drawer
+    is cheap, and it is a contract rather than an enforcement.
     """
     try:
         given = hook(state, workspace, group)
@@ -842,9 +884,13 @@ def _hook_lines(hook: Callable, state: Path, workspace: str, group: list) -> lis
         if not isinstance(item, str):
             continue
         # Split rather than refused: one line is one row here, and a plugin that put a
-        # newline in a string is describing two rows however it meant it.
-        out.extend(part for part in item.splitlines() or [""])
+        # newline in a string is describing two rows however it meant it. Then everything
+        # left with no glyph becomes ONE SPACE — one rule, and the only one that keeps the
+        # count of columns honest: a dropped character would shift a plugin's own alignment
+        # and a kept one is a character this board cannot measure.
+        out.extend(_CONTROL.sub(" ", part) for part in item.splitlines() or [""])
     return out[:HOOK_LINES]
+
 
 
 def _block_line(text: str) -> str:
