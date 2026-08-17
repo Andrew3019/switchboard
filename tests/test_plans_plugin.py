@@ -367,7 +367,7 @@ class PlansTest(PlansSandbox):
 class StepsTest(PlansSandbox):
     """The verbs that move a step: assign, tick, skip, note, checkpoint, rework, add-step, dep.
 
-    Thirteen tests, and what each pins is a decision that could have gone the other way,
+    Fourteen tests, and what each pins is a decision that could have gone the other way,
     not that a dict got a key. The ones that matter most are the refusals: a skip without a reason and
     a checkpoint carrying content are both things the design forbids in prose, and prose is
     not what an agent at 3am reads.
@@ -501,6 +501,28 @@ class StepsTest(PlansSandbox):
         for text in ("the parser was the hard part", "this job was mostly reading"):
             self.assertIn(text, shown)
         self.assertEqual(self.actions(), ["create", "note", "note", "note"])
+
+    def test_a_note_carries_a_reason_into_the_changelog_like_every_other_verb(self):
+        """`note` is a mutating verb, so its changelog entry says why like the rest of them.
+        Optional, because a note's text is usually its own reason and the callers that pass
+        only `--text` predate the flag — what is pinned is that a reason, when given, lands
+        on the entry for a step note and a plan note alike."""
+        self.plan("write it")
+        self.ok("plugin", "plans", "note", "s-1", "--text", "the parser was the hard part",
+                "--reason", "so the next one knows where the time went")
+        self.ok("plugin", "plans", "note", "p-1", "--text", "this job was mostly reading",
+                "--reason", "the analysis pass reads this cold")
+        self.ok("plugin", "plans", "note", "s-1", "--text", "and the tests were not")
+
+        entries = self.data("plugin", "plans", "changelog", "p-1")
+        self.assertEqual([e["reason"] for e in entries[1:]],
+                         ["so the next one knows where the time went",
+                          "the analysis pass reads this cold", None])
+        self.assertIn("— so the next one knows where the time went",
+                      self.ok("plugin", "plans", "changelog", "p-1"))
+        # The note's own text is untouched by the reason: two fields, two jobs.
+        self.assertEqual([n["text"] for n in self.step("s-1")["notes"]],
+                         ["the parser was the hard part", "and the tests were not"])
 
     def test_a_checkpoint_is_a_reference_and_never_content(self):
         """A path, a URL or an id, and a paste is refused. The cost of the other way is not

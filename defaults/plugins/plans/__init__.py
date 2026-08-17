@@ -412,7 +412,8 @@ def register(reg):
     reg.command(
         "note", note, audience="both", help="append a note to a step, or to a plan",
         args=[reg.arg("target", help="a step id (s-1) or a plan id (p-1)"),
-              reg.arg("--text", help="the note")])
+              reg.arg("--text", help="the note"),
+              reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "checkpoint", checkpoint, audience="both",
         help="point a step at a brief or artifact — a path, URL or id, never its content",
@@ -835,15 +836,19 @@ def note(ctx, args) -> Result:
     for the same reason it does everywhere else in this file: every other verb addresses a
     step by its number alone, and the one place that would read it as a plan is the place
     it would be a surprise.
+
+    `--text` is the note; `--reason` is the audit reason every other mutating verb carries
+    into the changelog, and it is here for the same reason it is there — a changelog whose
+    entries mostly say why, with one verb's entries silent, reads as a gap in the record.
     """
     text = (args.text or "").strip()
     if not text:
         return _needs("--text", "a note is the text somebody reads back later")
-    bad = _cap(text)
+    bad = _cap(text, args.reason)
     if bad:
         return bad
     if not str(args.target or "").strip().lower().startswith("p"):
-        return _on_step(ctx, args.target, "note", None,
+        return _on_step(ctx, args.target, "note", args.reason,
                         lambda step, who: _add_note(step, text, who))
 
     doc, seal = _read(ctx.state_dir)
@@ -855,7 +860,7 @@ def note(ctx, args) -> Result:
         return bad
     who = ctx.agent or "human"
     plan.setdefault("notes", []).append(_note(text, who))
-    _log(plan, who, "note", None, f"on {plan['id']}: {_clip(text)}")
+    _log(plan, who, "note", args.reason, f"on {plan['id']}: {_clip(text)}")
     _write(ctx.state_dir, doc, seal)
     shown = _shown(plan, lib)
     return Result(human=_full(shown), data=shown)
