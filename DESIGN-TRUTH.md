@@ -100,8 +100,11 @@ worker, and where a worker is directly under it, that agent pushes and opens its
 it was told to; the dispatcher blocks for it either way, since being told his work has
 landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
 and reports done, and the parent cleans up — a lead on its own judgement, a dispatcher on
-Andrew's. — confirmed 2026-08-09, the dispatcher's report restated 2026-08-14, the
-lead-or-worker spawn and the dispatcher's cleanup 2026-08-15
+Andrew's. The plans plugin can override how work lands: where a plan is running, its merge
+gate decides pushing, opening the PR and merging, on one approval — see the entry on
+pushing and merging below. — confirmed 2026-08-09, the dispatcher's report restated
+2026-08-14, the lead-or-worker spawn and the dispatcher's cleanup 2026-08-15, the plans
+plugin's merge-gate override 2026-08-17
 
 **A follow-up on a child's report is a handoff, not another relay.** A parent may report a
 child's work once; it may not become the channel for the conversation about it. "When work
@@ -418,12 +421,15 @@ literally every agent that is done. Cleaning up a lead always cleans its childre
 stays open below a dispatcher is still decided by the person watching the board, and never
 by the dispatcher sweeping on its own judgement — what changes is that the dispatcher
 carries that decision out. It closes children when Andrew tells it to, and when a child
-reports its task fully done it may ask him to approve closing it. The automatic worktree
+reports its task fully done it may ask him to approve closing it. The plans plugin can
+override that ask: where a plan is running, its merge gate is the one approval and cleanup
+follows it, so a finished child is not a separate ask. The automatic worktree
 sweep is not an exception to that and not a judgement anybody is making: it closes whole
 workspaces rather than agents, it only reaches one where every agent has already finished,
 and an agent still working or blocked holds its worktree open. — confirmed 2026-08-09,
 the dispatcher half 2026-08-15, superseding the 2026-08-14 wording that left closing
-below a dispatcher entirely off it; the sweep's place in it 2026-08-16
+below a dispatcher entirely off it; the sweep's place in it 2026-08-16; the plans plugin's
+merge-gate override of the separate close-approval 2026-08-17
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 parent, which then decides whether to close it. It always uses the **when idle**
@@ -533,9 +539,12 @@ be brought up again.** — confirmed 2026-08-09
 agent can push if its parent says so; a lead can push if the dispatcher says so;
 any agent can merge if Andrew tells some dispatcher and it passes that instruction
 down. So it is never merge without asking your parent. The default shape of shipping work
-is branch named for the workspace, push, open the PR, and put its URL in the summary. —
-confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
-explicit approval and that no agent merges without asking first
+is branch named for the workspace, push, open the PR, and put its URL in the summary. The
+plans plugin can override this: where a plan is running, its merge gate decides pushing and
+merging — the agent asks once, and once approved merges and cleans up without asking again.
+— confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
+explicit approval and that no agent merges without asking first; the plans plugin's
+merge-gate override 2026-08-17
 
 **`sb workspace new` is deleted, provided the other commands cover it fully and it is
 clear how to use them.** — confirmed 2026-08-09
