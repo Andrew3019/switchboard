@@ -110,7 +110,7 @@ class PlansTest(PlansSandbox):
         self.assertEqual(made["id"], "p-2")
         self.assertEqual([s["id"] for s in made["steps"]], ["s-1", "s-2"])
         self.assertEqual(made["steps"][0],
-                         {"id": "s-1", "name": "write it", "progress": "open",
+                         {"id": "s-1", "name": "write it", "progress": "open", "why": None,
                           "owner": None, "tries": 1, "notes": [], "deps": [],
                           "checkpoints": []})
         self.assertEqual(made["notes"][0]["text"], "PR1 only")
@@ -324,6 +324,285 @@ class PlansTest(PlansSandbox):
         self.assertEqual(held, [True, True])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")],
                          ["p-1", "p-2"])
+
+
+class StepsTest(PlansSandbox):
+    """The verbs that move a step: assign, tick, skip, note, checkpoint, rework, add-step, dep.
+
+    Ten tests, and what each pins is a decision that could have gone the other way, not that
+    a dict got a key. The ones that matter most are the refusals: a skip without a reason and
+    a checkpoint carrying content are both things the design forbids in prose, and prose is
+    not what an agent at 3am reads.
+
+    Unproven here: that a lead actually ticks its steps, and that two `sb` processes moving
+    two steps at once interleave correctly — the first is a workflow question and the second
+    is `test_the_state_lock_is_held_while_a_command_writes` plus the lock, not a race this
+    suite provokes.
+    """
+
+    def plan(self, *steps: str) -> dict:
+        """One plan with its steps already in it, which is what every test here starts from."""
+        argv = ["plugin", "plans", "create", "a job"]
+        for s in steps:
+            argv += ["--step", s]
+        return self.data(*argv)
+
+    def step(self, sid: str) -> dict:
+        """One step, read back out of the file rather than out of a verb's own answer."""
+        return next(s for p in self._doc()["plans"] for s in p["steps"] if s["id"] == sid)
+
+    def actions(self, plan: str = "p-1") -> list[str]:
+        return [e["action"] for e in self.data("plugin", "plans", "changelog", plan)]
+
+    # -- assign and tick -------------------------------------------------------
+
+    def test_assign_then_tick_is_the_whole_normal_path(self):
+        """A lead assigns, the owner works, somebody ticks. Both write the step they name
+        and both leave the changelog carrying the reason the agent supplied — which is the
+        record the analysis pass reads, and the only place the old shape of the plan survives.
+        """
+        self.plan("write it", "review it")
+        self.as_agent("lead-1")
+        self.ok("plugin", "plans", "assign", "s-1", "w1", "--reason", "w1 knows this file")
+        shown = self.ok("plugin", "plans", "tick", "s-1", "--reason", "the diff is in")
+
+        self.assertEqual(self.step("s-1")["owner"], "w1")
+        self.assertEqual(self.step("s-1")["progress"], "done")
+        self.assertEqual(self.step("s-2")["progress"], "open")   # only the step it named
+        self.assertIn("s-1", shown)
+        self.assertIn("done", shown)
+
+        self.assertEqual(self.actions(), ["create", "assign", "tick"])
+        entries = self.data("plugin", "plans", "changelog", "p-1")
+        self.assertEqual(entries[1]["reason"], "w1 knows this file")
+        self.assertEqual(entries[1]["by"], "lead-1")
+        self.assertIn("w1", entries[1]["detail"])
+        self.assertIn("open → done", entries[2]["detail"])
+
+    def test_reassigning_overwrites_and_tells_nobody(self):
+        """The design's rule, and the reason it is a rule: there is no core verb that can
+        tell a running agent anything, so a notification here would be a promise this
+        system cannot keep. The old name goes to the changelog and nowhere else — which
+        also means this verb shells out to nothing, and that is what is asserted."""
+        self.plan("write it")
+        self.ok("plugin", "plans", "assign", "s-1", "w1")
+
+        # sb's own `git rev-parse` calls are its business; what must not happen is this
+        # plugin reaching for `sb` itself — an `sb tell` to the agent that lost the step.
+        calls, real = [], subprocess.run
+        with mock.patch("subprocess.run",
+                        lambda argv, *a, **k: (calls.append(list(argv)),
+                                               real(argv, *a, **k))[1]):
+            self.ok("plugin", "plans", "assign", "s-1", "w2", "--reason", "w1 died")
+        self.assertEqual([c for c in calls if Path(str(c[0])).name == "sb"], [])
+
+        self.assertEqual(self.step("s-1")["owner"], "w2")
+        self.assertIn("was w1", self.data("plugin", "plans", "changelog", "p-1")[2]["detail"])
+
+    # -- skip ------------------------------------------------------------------
+
+    def test_a_skip_without_a_reason_is_refused(self):
+        """A skip is a state rather than an absence, and that is only true if the state
+        arrives with a sentence explaining it. Refused before anything is read or written,
+        and the refusal says why it is required rather than merely that it is."""
+        self.plan("run the design gate")
+        code, out, _ = self.sb("plugin", "plans", "skip", "s-1", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("never an absence", json.loads(out)["data"]["error"])
+        self.assertEqual(self.step("s-1")["progress"], "open")
+        self.assertEqual(self.actions(), ["create"])
+
+    def test_a_skip_keeps_its_reason_where_the_state_is(self):
+        """On the step as well as in the changelog. A skipped step whose reason is twenty
+        lines below in the changelog is an absence again by the time anybody scans the
+        plan — the board is where a bad call has to be visible to be questioned."""
+        self.plan("run the design gate")
+        self.ok("plugin", "plans", "skip", "s-1", "--reason", "a one-line typo fix")
+        self.assertEqual(self.step("s-1")["progress"], "skipped")
+        self.assertEqual(self.step("s-1")["why"], "a one-line typo fix")
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("skipped", shown)
+        self.assertIn("a one-line typo fix", shown)
+        self.assertEqual(self.data("plugin", "plans", "changelog", "p-1")[1]["reason"],
+                         "a one-line typo fix")
+
+    def test_a_step_is_complete_or_skipped_and_never_both(self):
+        """Structural, not checked: `progress` is one string, so the second verb replaces
+        what the first wrote instead of joining it. What the changelog carries is which way
+        the correction went — and the stale reason does not survive the correction, or a
+        ticked step would still be carrying the sentence explaining why it was skipped."""
+        self.plan("write it")
+        self.ok("plugin", "plans", "skip", "s-1", "--reason", "not needed after all")
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "it turned out to be needed")
+
+        self.assertEqual(self.step("s-1")["progress"], "done")
+        self.assertEqual(self.step("s-1")["why"], "it turned out to be needed")
+        self.assertIn("skipped → done",
+                      self.data("plugin", "plans", "changelog", "p-1")[2]["detail"])
+
+    # -- note, checkpoint ------------------------------------------------------
+
+    def test_notes_land_on_a_step_and_on_the_plan(self):
+        """Both, because the design names both moments — the lead as it creates the plan,
+        and whoever finishes a step as it is ticked. `p-1` is the plan; `s-1` and a bare
+        `1` are the step, since every other verb here addresses a step by its number."""
+        self.plan("write it")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "note", "s-1", "--text", "the parser was the hard part")
+        self.ok("plugin", "plans", "note", "1", "--text", "and the tests were not")
+        self.ok("plugin", "plans", "note", "p-1", "--text", "this job was mostly reading")
+
+        self.assertEqual([n["text"] for n in self.step("s-1")["notes"]],
+                         ["the parser was the hard part", "and the tests were not"])
+        self.assertEqual(self.step("s-1")["notes"][0]["by"], "w1")
+        self.assertEqual([n["text"] for n in self._doc()["plans"][0]["notes"]],
+                         ["this job was mostly reading"])
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        for text in ("the parser was the hard part", "this job was mostly reading"):
+            self.assertIn(text, shown)
+        self.assertEqual(self.actions(), ["create", "note", "note", "note"])
+
+    def test_a_checkpoint_is_a_reference_and_never_content(self):
+        """A path, a URL or an id, and a paste is refused. The cost of the other way is not
+        disk: a plan holding a copy of a brief is a second copy that goes stale, and a
+        record read cold cannot tell which of the two the job actually used."""
+        self.plan("write it")
+        self.ok("plugin", "plans", "checkpoint", "s-1",
+                "--ref", ".switchboard/briefs/pr2-verbs/brief.md", "--reason", "the brief")
+        self.assertEqual([c["ref"] for c in self.step("s-1")["checkpoints"]],
+                         [".switchboard/briefs/pr2-verbs/brief.md"])
+        self.assertIn("briefs/pr2-verbs/brief.md", self.ok("plugin", "plans", "show", "p-1"))
+
+        for argv, expected in (
+                (("checkpoint", "s-1", "--ref", "# a brief\n\nwith its body in it"),
+                 "never content"),
+                (("checkpoint", "s-1"), "--ref is required")):
+            with self.subTest(expected=expected):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn(expected, json.loads(out)["data"]["error"])
+        self.assertEqual(len(self.step("s-1")["checkpoints"]), 1)
+
+    # -- rework, add-step, dep -------------------------------------------------
+
+    def test_rework_bumps_the_try_count_and_reopens_the_step(self):
+        """Rework is a number on the step, never an edge: a failed review sends its step
+        back, and modelling that as a loop would make the plan cyclic to say something a
+        counter says better. A count above one is what renders, so a first try shows no
+        number at all and a second one does."""
+        self.plan("write it", "review it")
+        self.ok("plugin", "plans", "tick", "s-1")
+        self.assertNotIn("try ", self.ok("plugin", "plans", "show", "p-1"))
+
+        self.ok("plugin", "plans", "rework", "s-1", "--reason", "the review found a bug")
+        self.assertEqual(self.step("s-1")["tries"], 2)
+        self.assertEqual(self.step("s-1")["progress"], "open")
+        self.assertIn("try 2", self.ok("plugin", "plans", "show", "p-1"))
+
+        # Nothing downstream is un-ticked: the design makes that the lead's judgement, and
+        # a rule here would either merge unreviewed work or throw away good review.
+        self.ok("plugin", "plans", "rework", "s-1", "--reason", "and another")
+        self.assertEqual(self.step("s-1")["tries"], 3)
+        self.assertEqual(self.step("s-2")["progress"], "open")
+        self.assertEqual(self.actions(), ["create", "tick", "rework", "rework"])
+
+    def test_add_step_mints_a_fresh_id_from_the_one_counter(self):
+        """A step invented while the job runs is numbered from the same counter as every
+        other step in the file, so "your step is s-3" names one thing across two plans. The
+        reason matters more here than anywhere: rework leaves either a try count or an
+        added step, and only the changelog can tell the analysis pass which happened."""
+        self.plan("write it")
+        self.ok("plugin", "plans", "create", "another job", "--step", "elsewhere")
+        made = self.data("plugin", "plans", "add-step", "p-1", "fix", "what", "review",
+                         "found", "--reason", "rework, as an added step")
+
+        self.assertEqual(made["step"]["id"], "s-3")
+        self.assertEqual(made["step"]["name"], "fix what review found")
+        self.assertEqual(made["plan"], "p-1")
+        self.assertEqual([s["id"] for s in self._doc()["plans"][0]["steps"]], ["s-1", "s-3"])
+        self.assertEqual(self.data("plugin", "plans", "changelog", "p-1")[1]["reason"],
+                         "rework, as an added step")
+
+        code, out, _ = self.sb("plugin", "plans", "add-step", "p-9", "nowhere", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("the highest is p-2", json.loads(out)["data"]["error"])
+
+    def test_dep_records_an_edge_that_show_renders(self):
+        """Fan-out and join, stored as data. Nothing traverses these, waits on them or
+        orders anything by them — a join waits because the lead does not start it. So the
+        whole of this verb is that the edge is stored, rendered, and points at a step that
+        is really there."""
+        self.plan("design", "build", "review", "merge")
+        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
+        self.ok("plugin", "plans", "dep", "s-4", "--after", "s-2", "--after", "3",
+                "--reason", "the join")
+
+        self.assertEqual(self.step("s-2")["deps"], ["s-1"])
+        self.assertEqual(self.step("s-4")["deps"], ["s-2", "s-3"])
+        self.assertIn("after s-2, s-3", self.ok("plugin", "plans", "show", "p-1"))
+
+        # Repeating an edge is not an error and does not double it; the plan is the same shape.
+        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
+        self.assertEqual(self.step("s-2")["deps"], ["s-1"])
+
+    def test_an_edge_that_names_nothing_is_refused(self):
+        """A cycle is not refused — nothing traverses an edge, so a cycle is a lead's
+        mistake to read rather than a hang. An edge pointing at a step that does not exist,
+        or lives in another plan, is a typo, and it renders as a wait that never ends."""
+        self.plan("design", "build")
+        self.ok("plugin", "plans", "create", "another job", "--step", "elsewhere")
+        for argv, expected in ((("dep", "s-2", "--after", "s-9"), "no step s-9"),
+                               (("dep", "s-2", "--after", "s-2"), "cannot come after itself"),
+                               (("dep", "s-2", "--after", "s-3"), "is not in p-1"),
+                               (("dep", "s-2",), "--after is required")):
+            with self.subTest(expected=expected):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn(expected, json.loads(out)["data"]["error"])
+                self.assertEqual(self.step("s-2")["deps"], [])
+
+        # And a cycle, which is allowed, stays readable rather than hanging anything.
+        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
+        self.ok("plugin", "plans", "dep", "s-1", "--after", "s-2")
+        self.assertIn("after s-2", self.ok("plugin", "plans", "show", "p-1"))
+
+    # -- what every one of them owes -------------------------------------------
+
+    def test_every_step_verb_logs_and_none_rewrites_the_plan(self):
+        """The cross-cutting rule, checked once over all eight verbs rather than eight
+        times. `_write` refuses a document whose changelog is shorter than the one that was
+        read, so a verb that rewrote a plan wholesale would fail here rather than quietly
+        lose the story — running the whole set in sequence is what proves none of them does.
+        """
+        self.plan("write it", "review it")
+        for argv in (("assign", "s-1", "w1"), ("tick", "s-1"),
+                     ("rework", "s-1", "--reason", "again"),
+                     ("skip", "s-2", "--reason", "no reviewer free"),
+                     ("note", "s-1", "--text", "a note"), ("note", "p-1", "--text", "and one"),
+                     ("checkpoint", "s-1", "--ref", "notes/x.md"),
+                     ("add-step", "p-1", "a third"), ("dep", "s-3", "--after", "s-1")):
+            with self.subTest(verb=argv[0]):
+                self.ok("plugin", "plans", *argv)
+        self.assertEqual(self.actions(),
+                         ["create", "assign", "tick", "rework", "skip", "note", "note",
+                          "checkpoint", "add-step", "dep"])
+        self.assertTrue(all(e["at"] for e in self.data("plugin", "plans", "changelog", "p-1")))
+
+    def test_a_step_verb_on_a_step_that_is_not_there_is_refused_by_name(self):
+        """Ids are never reused, so "there is no s-9 yet" and "s-9 was here and is gone" are
+        different things and only the first can happen — which is what makes naming the
+        highest a useful thing to say rather than a leak. Reaches a machine reader too."""
+        self.plan("write it")
+        for argv, expected in ((("tick", "s-9"), "the highest is s-1"),
+                               (("assign", "banana", "w1"), "is not a step id"),
+                               (("note", "s-9", "--text", "x"), "the highest is s-1")):
+            with self.subTest(verb=argv[0]):
+                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn(expected, json.loads(out)["data"]["error"])
+        self.assertEqual(self.actions(), ["create"])
 
 
 def _plans():
