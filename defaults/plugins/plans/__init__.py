@@ -1144,7 +1144,11 @@ def _mint(doc: dict, lib: dict, key: str) -> list[dict]:
         k, _, chain = wanted[i]
         for ob in _names(k, lib.get(k) or {}, "obliges"):
             if ob == k or ob in chain:
-                raise _BadDef(f"'{k}' obliges itself: {' → '.join((*chain, k, ob))}. "
+                # `dict.fromkeys` for the path only: a step's chain ends with the definition
+                # that obliged it, so writing it out beside `k` repeats one name. What is
+                # wanted is the route, and a route says each stop once.
+                route = " → ".join(dict.fromkeys((*chain, k, ob)))
+                raise _BadDef(f"'{k}' obliges itself: {route}. "
                               f"An obligation is materialised when the step is added, so a "
                               f"cycle in one cannot stand.")
             if ob not in lib:
