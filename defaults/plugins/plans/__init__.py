@@ -175,6 +175,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -1563,17 +1564,27 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     for ob in _obliges(lib, key):
         lines.append(f"    obliges     {ob} — added with it, skippable with a reason, "
                      f"never omitted")
-    if full and str(spec.get("about") or "").strip():
-        lines.append(f"    {str(spec['about']).strip()}")
+    if full:
+        lines.extend(_about(spec))
     return "\n".join(lines)
 
 
 def _template_lines(key: str, spec: dict) -> str:
-    steps = spec.get("steps") or []
-    return (f"{key:<16}{str(spec.get('title') or '').strip() or '(untitled)'}\n"
-            f"    {_count(steps)}"
-            + (f" — {str(spec['about']).strip()}" if str(spec.get("about") or "").strip()
-               else ""))
+    lines = [f"{key:<16}{str(spec.get('title') or '').strip() or '(untitled)'}",
+             f"    {_count(spec.get('steps') or [])}"]
+    lines.extend(_about(spec))
+    return "\n".join(lines)
+
+
+def _about(spec: dict) -> list[str]:
+    """A definition's or a template's prose, wrapped. Written in the file, not in this one.
+
+    Wrapped here rather than kept short in the catalogue, because a definition is where the
+    thinking behind a step lives and a rendering that punished a paragraph would push that
+    thinking back out into agents' heads — which is what the library exists to stop.
+    """
+    text = " ".join(str(spec.get("about") or "").split())
+    return [f"    {line}" for line in textwrap.wrap(text, 84)] if text else []
 
 
 def _no_def(lib: dict, name: str) -> Result:
