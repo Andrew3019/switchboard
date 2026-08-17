@@ -108,11 +108,13 @@ both skips the second with that as the reason, which is visible where a dedupe w
 Composition may repeat a definition; obligation never merges one. What stops obligation
 running forever is not a dedupe but a cycle check, the same one composition gets.
 
-A definition that both composes and obliges is REFUSED where it is read. An obligation
+A definition that both composes and obliges is REFUSED when it is expanded. An obligation
 attaches to a step, and a composite is not a step in a plan — only its parts ever appear —
 so there is no step for `obliged_by` to name. Dropping the obligation instead, which is what
 an earlier draft did, loses one silently, and losing one silently is the single thing this
-mechanism exists to prevent.
+mechanism exists to prevent. Refused at expansion rather than at the load, so that one
+malformed definition takes down only the commands that actually reach it: a catalogue is
+edited by hand, and a typo in it must not be able to make every plan in the repo unreadable.
 
 Templates are `templates/*.json`: preconfigured plans, COPIED on use and never linked back.
 `template list` browses them, because nobody knows at the start of a job that a template
@@ -702,9 +704,15 @@ def library(ctx, args) -> Result:
     if not picked:
         return Result(human="(the step library is empty — every step is invented on the "
                             "fly, which is a shape this design expects)", data={})
-    return Result(human="\n".join(_def_lines(k, picked[k], lib, full=bool(wanted))
-                                  for k in picked),
-                  data=picked)
+    try:
+        # The one place a malformed `steps` or `obliges` is READ without being expanded,
+        # so it is also the one read-only verb that can meet one. Refusing here is right:
+        # this verb's whole subject is the catalogue, so a broken file in it is the answer
+        # rather than an interruption — and it is a refusal, not an escaped exception.
+        human = "\n".join(_def_lines(k, picked[k], lib, full=bool(wanted)) for k in picked)
+    except _BadDef as e:
+        return e.refusal()
+    return Result(human=human, data=picked)
 
 
 def name_step(ctx, args) -> Result:
@@ -1013,7 +1021,7 @@ def _lib(plans: Optional[list] = None) -> tuple[dict, Optional[Result]]:
                                      for s in (p.get("steps") or ())):
         return {}, None
     try:
-        return _library(), None
+        return _catalogue(LIBRARY), None
     except _BadDef as e:
         return {}, e.refusal()
 
@@ -1024,32 +1032,6 @@ def _kept() -> tuple[dict, Optional[Result]]:
         return _catalogue(TEMPLATES), None
     except _BadDef as e:
         return {}, e.refusal()
-
-
-def _library() -> dict:
-    """The step definitions, read and checked once so that nothing downstream can raise.
-
-    Every shape the expansion and the rendering assume is checked HERE, at the load, for the
-    same reason `_check` does it for `plans.json`: this is the one moment when nothing has
-    been written yet, and a check anywhere further in is a check that can fail after a
-    mutation has landed. Past this point `_flatten`, `_mint` and `_def_lines` are working
-    with data they can trust.
-    """
-    lib = _catalogue(LIBRARY)
-    for key, spec in lib.items():
-        parts, obliged = _names(key, spec, "steps"), _names(key, spec, "obliges")
-        if parts and obliged:
-            # An obligation attaches to a STEP — the design is explicit that what carries a
-            # skip and what an obligation attaches to is always the step. A composite is not
-            # a step in a plan; it never appears in one, only its parts do, so there is no
-            # step for `obliged_by` to name and no honest place to hang this. Refused rather
-            # than dropped: silently losing an obligation is the one failure the whole
-            # mechanism exists to prevent, and it would be invisible.
-            raise _BadDef(f"'{key}' both composes ({', '.join(parts)}) and obliges "
-                          f"({', '.join(obliged)}). An obligation attaches to a step, and a "
-                          f"composite is not a step in a plan — put it on the part it "
-                          f"belongs to.")
-    return lib
 
 
 def _names(key: str, spec: dict, field: str) -> list[str]:
@@ -1113,6 +1095,18 @@ def _flatten(lib: dict, key: str, path: tuple = ()) -> list[str]:
     parts = _names(key, lib.get(key) or {}, "steps")
     if not parts:
         return [key]                     # a leaf: the definition itself is the step
+    obliged = _names(key, lib.get(key) or {}, "obliges")
+    if obliged:
+        # An obligation attaches to a STEP — the design is explicit that what carries a skip
+        # and what an obligation attaches to is always the step. A composite is not a step in
+        # a plan; it never appears in one, only its parts do, so there is no step for
+        # `obliged_by` to name and no honest place to hang this. Refused rather than dropped:
+        # silently losing an obligation is the one failure the whole mechanism exists to
+        # prevent, and dropping it is invisible to whoever wrote the file.
+        raise _BadDef(f"'{key}' both composes ({', '.join(parts)}) and obliges "
+                      f"({', '.join(obliged)}). An obligation attaches to a step, and a "
+                      f"composite is not a step in a plan — put it on the part it "
+                      f"belongs to.")
     out: list[str] = []
     for part in parts:
         if part not in lib:
@@ -1707,8 +1701,9 @@ def _added(plan: dict, steps: list, lib: dict) -> Result:
 def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     """One definition as the library renders it: its name, and what naming it does."""
     lines = [f"{key:<16}{str(spec.get('name') or '').strip() or '(unnamed)'}"]
-    if spec.get("steps"):
-        lines.append(f"    composes    {', '.join(str(s) for s in spec['steps'])}")
+    parts = _names(key, spec, "steps")
+    if parts:
+        lines.append(f"    composes    {', '.join(parts)}")
     for ob in _obliges(lib, key):
         lines.append(f"    obliges     {ob} — added with it, skippable with a reason, "
                      f"never omitted")

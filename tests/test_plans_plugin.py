@@ -866,6 +866,12 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("both composes", json.loads(out)["data"]["error"])
         self.assertEqual(self.steps(), [])
 
+        # And it is refused when it is EXPANDED, not when the catalogue is loaded, so the
+        # one bad definition takes down only what reaches it. A catalogue is edited by hand;
+        # a typo in one file must not make every other definition unusable.
+        self.ok("plugin", "plans", "name-step", "p-1", "merge")
+        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-review"])
+
         # An obligation that reaches back into its own chain is refused for the same reason
         # composition's cycle is: it is materialised, so it is walked.
         self.define("landing", name="land it", obliges=["signoff"])
@@ -873,7 +879,7 @@ class CatalogueTest(PlansSandbox):
         code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "landing", "--json")
         self.assertEqual(code, 1)
         self.assertIn("obliges itself", json.loads(out)["data"]["error"])
-        self.assertEqual(self.steps(), [])
+        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-review"])
 
     def test_every_obliging_step_gets_its_own_obliged_step(self):
         """No dedupe, anywhere: two merges are two diffs and therefore two reviews, whether
