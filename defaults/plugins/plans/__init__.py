@@ -549,9 +549,11 @@ THE TWO GATES
   it, it is exact. Point at a fuller artifact for anything that does not fit, and name the
   other plan where the change spans two worktrees. Then block.
 
-  THE MERGE GATE, at the end. Create the PR and write the description first — he is not
-  asked whether to create it. Say what you have already tested; give him testing steps only
-  where they are actually needed. Then block for the one approval.
+  THE MERGE GATE, at the end. Its step is the merge step, and `merge` from the library is
+  not gated for you — mark it as you plan, the way you mark any other gate. Create the PR
+  and write the description first — he is not asked whether to create it. Say what you have
+  already tested; give him testing steps only where they are actually needed. Then block
+  for the one approval.
 
   On his approval the rest runs without asking again — merge, cleanup, delete the worktree,
   close the agents. That collapse is the point of the gate, so do not stop and ask at each
@@ -559,6 +561,16 @@ THE TWO GATES
   checks, a teardown that does not complete — any of those and you block with it. His
   approval was given before the merge was attempted, so the failure is the one thing it
   cannot have covered.
+
+  WHO RUNS WHICH PART OF THAT CHAIN is worth being exact about, because half of it is
+  teardown and no agent can tear itself down. The step's owner merges, ticks the step, and
+  cleans up beneath itself — `sb cleanup` reaches its own children and no further. Deleting
+  the worktree it is standing in, and closing the agents above it, are the LEAD's: the
+  owner reports that the merge is in and what is left to tear down, and the lead carries
+  those out as the last agent standing. So the owner does not stop half way and does not
+  block a second time on a routine step, and nothing is left half torn down. Where the
+  owner IS the lead — a sole worker, or a lead that took the merge step itself — it is all
+  one agent's, and the ordering below is what keeps it honest.
 
   TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. The step that closes the last agent or
   deletes the worktree takes with it whatever was going to tick it, so a tick that waits

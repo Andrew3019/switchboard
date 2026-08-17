@@ -23,6 +23,14 @@ something to copy is set aside here, and the spec says so in as many words: a st
 specify an output format exactly. This is that exception, and it is the only reason a file
 this prescriptive is allowed to exist.
 
+The three markers are INDENT LEVELS here, and a bullet at every level carries text. That
+reading is deliberate and is the one to keep: `design/PLANS-AND-STEPS-IMPLEMENTATION.md`
+renders the same three markers as bare separator lines between groups, so the two are not
+the same shape, and an earlier version of the example in this file was written that way and
+contradicted the sentence above it. What a gate message is for is a contract, and a
+contract is a proposition with things hanging under it — which is what depth says and a
+separator cannot.
+
 The bullet rule is the standing human-facing one, not a tighter one — around twelve words,
 up to about twenty where a point genuinely branches. It is written down rather than
 assumed because the case that needs the loose end of the range is exactly the case a
@@ -39,14 +47,31 @@ Two sections and no more. First what is causing the problem. Then what the fix w
 its behavioural contract, ordered step by step for his understanding, rather than a
 step-by-step capture of the implementation.
 
-Bullets indent in three levels, `-`, then `---`, then `-----`:
+Bullets indent in three levels, and the marker IS the level: `-` for a point of its own,
+`---` for one hanging under the point above it, `-----` for a detail under that. They are
+never separator lines, and every one of them carries text. Two sections, headed, exactly
+like this:
 
-    - The plan's steps are held on the plan, and read nowhere else.
-    ---
-    - A gate is a step's exit condition, so no second step holds it.
-    - Where a gate needs him the owner blocks, and answering it clears both.
-    -----
-    - A gate that is skipped keeps its reason on the step, where a scan sees it.
+    What is causing it
+
+    - A gate needing a human has no representation on a step at all.
+    --- A lead marks one in prose, and nothing renders it where the work is read.
+    - A child blocking at a gate stands its lead down, per the protocol.
+    --- The plan then has nobody to assign the next step once the gate clears.
+
+    What the fix will be
+
+    - A gate is a field on the step whose exit condition it is, never a step of its own.
+    --- Its owner blocks; the step renders that owner blocked, read live and stored nowhere.
+    ----- Answering the agent clears both, so no verb clears a gate through the plan.
+    - A step is complete or skipped, and a trivially small change skips its gate with a
+      reason rather than being blocked on a contract nobody wants.
+    - The lead stays until its plan completes, and says who is waiting instead of standing
+      down; a child at a gate is waiting for the plan, not for itself.
+
+Depth is meaning and not decoration: a `---` bullet is a condition, a consequence or a
+qualification of the `-` above it, and a `-----` is the same one level further down. Do not
+go deeper than three, and do not use a level to group things that are simply a list.
 
 Bullets run short — around twelve words, and up to about twenty where the point genuinely
 branches. A condition with its fallback stays in one bullet: splitting it into two loses
