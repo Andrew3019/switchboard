@@ -55,11 +55,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from switchboard import cli  # noqa: E402
 from switchboard import plugins  # noqa: E402
 from switchboard import store  # noqa: E402
 
 from test_fork_lock import _held  # noqa: E402
 from test_shipped_plugins import ShippedSandbox  # noqa: E402
+from test_workspace import FakeHerdr  # noqa: E402
 
 
 class PlansSandbox(ShippedSandbox):
@@ -1255,6 +1257,91 @@ class LivenessTest(PlansSandbox):
             why = json.loads(out)["data"]["error"]
             self.assertEqual(len(why.splitlines()), 1)
             self.assertIn("\\n", why)
+
+
+class TriggerTest(PlansSandbox):
+    """The two halves of "an agent knows plans exist": the spawn trigger and the guide.
+
+    The design splits them on cost. The trigger is one bullet paid on every spawn forever
+    and says only the condition that makes an agent look; the instruction is the whole of
+    how a plan is made and is read when a job comes up. So the properties worth pinning are
+    that the trigger travels, that the instruction does NOT travel with it, and that
+    deleting the plugin folder takes both away without stopping the fleet spawning — which
+    is what the spec means by "delete = off = no agent is told plans exist".
+
+    Spawning runs through `cli.main` against `test_workspace.FakeHerdr`, the same way
+    `test_plugins`' injection tests do: what a fragment does at spawn is only observable in
+    the prompt list herdr is handed, and asserting on `presets.resolve` instead would be
+    asserting that a function this test does not exercise was called.
+
+    Unproven here: that a model reads the trigger and acts on it. That is the workflow
+    question the whole design rests on and no test can answer it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The sandbox's own `enabled = ["plans"]` is what a repo adopting the plugin early
+        # would write; these tests are about what SHIPS, so it goes and the shipped
+        # `defaults/plugins.toml` answers instead.
+        (self.sw / "plugins.toml").unlink()
+        self.h = FakeHerdr(self.repo / "worktrees")
+
+    def spawn(self, *argv) -> tuple[int, str, str]:
+        with mock.patch.object(cli, "Herdr", lambda **kw: self.h):
+            return self.sb("delegate", *argv)
+
+    def prompts(self) -> list[str]:
+        return self.h.started[-1]["prompts"]
+
+    def test_the_guide_prints_the_plan_making_instruction(self):
+        """The condition, the owner and the route to a template — the three things knowing
+        plans exist does not tell you. Asserted on the rendered text rather than on the
+        constant, because the constant is what a test would trivially agree with itself
+        about and the printed block is what an agent reads."""
+        out = self.ok("plugin", "plans", "guide")
+        self.assertIn("heading for a change that will land", out)
+        self.assertIn("sole worker", out)
+        self.assertIn("counts as a lead", out)
+        self.assertIn("sb plugin plans template list", out)
+        self.assertEqual(json.loads(self.ok("plugin", "plans", "guide", "--json"))
+                         ["data"]["guide"].strip(), out.strip())
+        # Reads nothing and writes nothing: no state file exists after it runs.
+        self.assertFalse(self._file().exists())
+
+    def test_a_fresh_spawn_carries_the_trigger_and_not_the_guide(self):
+        """Both halves of the split, in one assertion each. A spawn that carried the guide
+        would be paying for the instruction on every agent forever, which is the thing the
+        two-part shape exists to avoid."""
+        code, _, err = self.spawn("do a thing")
+        self.assertEqual(code, 0, err)
+        prompts = self.prompts()
+        self.assertIn(plugins.fragment(self.repo, "plans"), prompts)
+        self.assertTrue(any("sb plugin plans guide" in p for p in prompts))
+        for p in prompts:
+            self.assertNotIn("WHEN A PLAN EXISTS", p)
+            self.assertNotIn("\n", p)
+
+    def test_deleting_the_plugin_folder_tells_nobody_and_stops_nothing(self):
+        """"Off" for this design is "no agent is told", and the trigger lives in the folder
+        precisely so that deleting it is that. The binding left behind in `presets.toml` is
+        the shipped one, so this is also the asymmetry check: a binding that fails is
+        skipped with a warning and the spawn goes ahead.
+
+        The "no prompt names a plans command" sweep covers the role files too, and that is
+        the point of asserting it on the whole prompt list rather than on the fragment
+        alone: `lead.md` and `worker.md` say a plan is written down and who writes it, and
+        they survive the plugin being deleted — so neither may name a verb that would then
+        not dispatch. Naming one there is the same mistake as putting the trigger in
+        `protocol.md`, and this is what catches it."""
+        shutil.rmtree(self.defaults / "plugins" / "plans")
+        code, _, err = self.spawn("do a thing")
+        self.assertEqual(code, 0, err)
+        self.assertIn("@plans", err)
+        self.assertIn("skipped", err)
+        for p in self.prompts():
+            self.assertNotIn("sb plugin plans", p)
+        code, _, err = self.sb("plugin", "plans", "guide")
+        self.assertNotEqual(code, 0)
 
 
 def _plans_commands() -> list[str]:
