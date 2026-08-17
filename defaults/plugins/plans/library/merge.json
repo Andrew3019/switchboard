@@ -1,0 +1,5 @@
+{
+  "name": "merge the pull request",
+  "about": "Land the branch. The PR is open and review has come back; this step is the act of merging it, and its exit condition is a gate — merging is Andrew's call unless he has said otherwise.",
+  "obliges": ["merge-review"]
+}

@@ -1,10 +1,11 @@
 """Plans and steps — the live state of one job, held where a lead can show it.
 
 The design is `design/PLANS-AND-STEPS.md`; this is the state model, the verbs that make a
-plan (`create`, `list`, `show`, `changelog`) and the verbs that move one along — `assign`,
-`tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep`. What is still not
-here is anything that decides for itself: library steps, obliged steps, liveness and gates
-all come later, and none of them changes the shape written below.
+plan (`create`, `list`, `show`, `changelog`), the verbs that move one along — `assign`,
+`tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep` — and the catalogue a
+plan is built from: `library`, `name-step` and `template`. What is still not here is
+anything that decides for itself: liveness and gates come later, and neither changes the
+shape written below.
 
 The records
 -----------
@@ -14,8 +15,9 @@ The records
            "steps": [...], "changelog": [...], "notes": [...],
            "created_by": "lead", "created_at": 1754570000}
 
-    step  {"id": "s-1", "name": "…", "progress": "open", "why": null, "owner": null,
-           "tries": 1, "notes": [], "deps": [], "checkpoints": []}
+    step  {"id": "s-1", "name": "…", "def": null, "obliged_by": null, "progress": "open",
+           "why": null, "owner": null, "tries": 1, "notes": [], "deps": [],
+           "checkpoints": []}
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
 writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here is an enum
@@ -65,6 +67,52 @@ not itself, since an edge to nothing is a typo rather than a shape.
 Reassigning tells nobody. `assign` writes a name onto a step and stops there: the plan never
 pushes to a running agent, and the old owner learns it lost the step from its parent or not
 at all. Two agents believing they own one step is the collision the design accepts.
+
+The catalogue
+-------------
+
+A step is either invented on the fly — `add-step`, `create --step`, a name and nothing else
+— or NAMED from the library, which is `library/*.json` shipped beside this file. Both are
+first class, and the difference is one field: a named step stores `def` and leaves `name`
+null, and the text is resolved out of the library every time the plan is rendered.
+
+That is the whole point and the one thing not to get wrong. A named step is a LINK plus its
+own run object: the plan owns progress, owner, tries, notes, checkpoints and deps, and the
+library owns the name, the composition and the obligations. Nothing is snapshotted, so
+editing a definition reaches every plan naming it — live ones included — which is what the
+design buys by saying steps are units and there is little about a definition to change. A
+lead that wants something else writes an on-the-fly step; there is no forking a link, and no
+verb here edits the library, because the library is files and files are edited in an editor.
+
+A definition may COMPOSE — `{"steps": ["a", "b"]}` — and naming it puts a and b in the plan,
+flat. What a plan holds is always flat: no step contains another, because a step that did
+would be a plan by another name. Composition is the one edge in this file that is actually
+traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps` is not: a
+`dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
+hang. Expansion mints fresh ids from the same counter as everything else.
+
+A definition may also OBLIGE another — `merge` obliges `merge-review` — and naming it adds
+both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
+be skipped with a reason like any other. What it cannot be is omitted: the obligation is a
+property of the definition rather than a rule an agent remembers, so there is no way to name
+a merge step and end up without its review on the board. A skip is a state with a sentence
+beside it and a bad call can be questioned; an omission is invisible, which is enforcement in
+appearance only. An on-the-fly step called "merge the PR" obliges nothing, and that is not a
+hole — it is a word-only step, and the obligation belongs to the definition, not to the word.
+
+Templates are `templates/*.json`: preconfigured plans, COPIED on use and never linked back.
+`template list` browses them, because nobody knows at the start of a job that a template
+exists for it — the lead looks once the work is shaped. A copy holds no reference to what it
+came from and deleting the template file changes nothing about it. What a copy does carry is
+the links: a named step inside a template stays a name, so it is still resolved live. Copies
+and links are the two halves of this design and they point opposite ways on purpose.
+
+Templates hold no `deps`. A template entry may expand into several steps, so an edge written
+against an entry would have nothing single to attach to; edges are added with `dep` once the
+copy exists. The catalogue is deliberately nearly empty — a merge, its review and one
+template — because the design says what to promote into it is read off real runs rather than
+decided up front, and the system has to work with it almost bare. It does: with no `library`
+directory at all every verb here still works and only `name-step` has nothing to offer.
 
 Ids are `p-<n>` and `s-<n>`, monotonic across the whole file and never reused, so a spawn
 prompt or a changelog entry citing `s-7` stays true for the life of the repo. Step numbers
@@ -155,6 +203,14 @@ OPEN, DONE, SKIPPED = "open", "done", "skipped"
 # matter are the two that both leave `workspace` null — see `_workspace`.
 BY_AGENT, BY_LIST, NONE, UNAVAILABLE = "agent", "workspace-list", "none", "unavailable"
 
+# The catalogue, shipped beside this file rather than kept in per-repo state: definitions
+# and templates are what the plugin KNOWS, not what a repo has done, and a repo that wants
+# its own puts a whole `plans` plugin under `.switchboard/plugins/` — which replaces this one
+# wholesale, folders and all. Nothing here writes into either directory; a definition is
+# edited in an editor, which is also what makes "editing one reaches live plans" true with no
+# verb to implement it.
+LIBRARY, TEMPLATES = "library", "templates"
+
 # `p-1`, `P-1` and a bare `1` all name the same plan; likewise `s-1` for a step. An id is
 # read out of a board or a spawn prompt and retyped, and being strict buys nothing.
 _PLAN_ID = re.compile(r"^(?:p-)?(\d+)$", re.IGNORECASE)
@@ -220,6 +276,24 @@ def register(reg):
               reg.arg("name", repeat=True, help="what the step is"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
+        "library", library, audience="both",
+        help="browse the step definitions a plan can name, or read one in full",
+        args=[reg.arg("name", repeat=True,
+                      help="a definition to read; omit for all of them")])
+    reg.command(
+        "name-step", name_step, audience="both",
+        help="add a step from the library — a link to its definition, never a copy",
+        args=[reg.arg("plan", help="a plan id, e.g. p-1"),
+              reg.arg("name", help="a library definition, e.g. merge"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "template", template, audience="both",
+        help="browse the preconfigured plans, or start one — `list`, or `use <name>`",
+        args=[reg.arg("action", choices=("list", "use"), help="list them, or use one"),
+              reg.arg("name", repeat=True, help="which template, for `use`"),
+              reg.arg("--title", help="a title for the copy; the template's is the default"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
         "dep", dep, audience="both",
         help="record that a step comes after others — data the lead reads, not control flow",
         args=[reg.arg("step", help="a step id, e.g. s-2"),
@@ -269,7 +343,8 @@ def create(ctx, args) -> Result:
     _log(plan, who, "create", args.reason, detail)
     doc["plans"].append(plan)
     _write(ctx.state_dir, doc, seal)
-    return Result(human=_full(plan), data=plan)
+    shown = _shown(plan)
+    return Result(human=_full(shown), data=shown)
 
 
 def ls(ctx, args) -> Result:
@@ -291,7 +366,11 @@ def ls(ctx, args) -> Result:
     if not plans:
         return Result(human="(no plans on this worktree)" if not args.all
                             else "(no plans in this repo)", data=[])
-    return Result(human="\n".join(_line(p, workspace=args.all) for p in plans), data=plans)
+    # Resolved even though the list does not print step names: `data` is what PR4 and PR8
+    # read, and a machine reader handed a step whose name is null has been handed a puzzle.
+    lib = _catalogue(LIBRARY)
+    return Result(human="\n".join(_line(p, workspace=args.all) for p in plans),
+                  data=[_shown(p, lib) for p in plans])
 
 
 def show(ctx, args) -> Result:
@@ -299,7 +378,10 @@ def show(ctx, args) -> Result:
     plan = _find(doc, args.id)
     if plan is None:
         return _missing(doc, args.id)
-    return Result(human=_full(plan), data=plan)
+    # Resolved HERE and never in the file: this is the moment a link becomes text, which is
+    # why an edit to a definition reaches a plan that was made last week and is running now.
+    shown = _shown(plan)
+    return Result(human=_full(shown), data=shown)
 
 
 def changelog(ctx, args) -> Result:
@@ -415,7 +497,8 @@ def note(ctx, args) -> Result:
     plan.setdefault("notes", []).append(_note(text, who))
     _log(plan, who, "note", None, f"on {plan['id']}: {_clip(text)}")
     _write(ctx.state_dir, doc, seal)
-    return Result(human=_full(plan), data=plan)
+    shown = _shown(plan)
+    return Result(human=_full(shown), data=shown)
 
 
 def checkpoint(ctx, args) -> Result:
@@ -560,6 +643,158 @@ def dep(ctx, args) -> Result:
     return _changed(plan, step)
 
 
+# -- the catalogue -------------------------------------------------------------
+#
+# Three verbs over two directories of JSON shipped beside this file. Read-only, all of them:
+# `library` and `template list` render what is there, `name-step` and `template use` put
+# LINKS and COPIES into the state file respectively, and nothing writes a definition.
+
+
+def library(ctx, args) -> Result:
+    """Browse the definitions a plan can name, or read one of them in full.
+
+    Browsable for the same reason templates are: nobody knows at the start of a job which
+    steps already exist, and a catalogue you have to know the contents of before you can
+    look at it is a catalogue nobody uses. It may be nearly empty and that is expected —
+    the design says what belongs in it is read off real runs, not decided up front.
+    """
+    lib = _catalogue(LIBRARY)
+    wanted = [str(n).strip() for n in (args.name or ()) if str(n).strip()]
+    for name in wanted:
+        if name not in lib:
+            return _no_def(lib, name)
+    picked = {k: lib[k] for k in wanted} if wanted else lib
+    if not picked:
+        return Result(human="(the step library is empty — every step is invented on the "
+                            "fly, which is a shape this design expects)", data={})
+    return Result(human="\n".join(_def_lines(k, picked[k], lib, full=bool(wanted))
+                                  for k in picked),
+                  data=picked)
+
+
+def name_step(ctx, args) -> Result:
+    """Name a library step into a plan: a link to its definition, and its own run object.
+
+    The plan stores `def` and leaves `name` null, so the text comes out of the library
+    every time the plan is rendered and an edit to a definition reaches this plan even
+    while it is running. Copying the name in here would be the same code with the design's
+    central claim quietly deleted from it.
+
+    What lands may be more than one step. A composite expands flat, and whatever the
+    resulting steps oblige is added beside them — which is the whole of "obliged, not
+    optional": there is no argument to this verb that turns it off, and the merge step and
+    its review are added by the same act.
+    """
+    wanted = str(args.name or "").strip()
+    if not wanted:
+        return _needs("name", "a named step is named after a definition in the library")
+    bad = _cap(wanted, args.reason)
+    if bad:
+        return bad
+    lib = _catalogue(LIBRARY)
+    if wanted not in lib:
+        return _no_def(lib, wanted)
+
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    try:
+        added = _mint(doc, lib, wanted)
+    except _BadDef as e:
+        return e.refusal()
+    plan.setdefault("steps", []).extend(added)
+    who = ctx.agent or "human"
+    _log(plan, who, "name-step", args.reason, _minted(added, lib))
+    _write(ctx.state_dir, doc, seal)
+    return _added(plan, added, lib)
+
+
+def template(ctx, args) -> Result:
+    """`list` browses the preconfigured plans; `use` copies one into a plan of your own.
+
+    Copy and paste, in the ordinary sense of the word, and nothing links the copy back —
+    there is no field naming the template, and deleting the template file afterwards
+    changes nothing about a plan made from it. The changelog says where it came from
+    because that is the story of how the job ran, which is not the same as a reference the
+    copy resolves through.
+
+    What the copy DOES carry is the links: a named step inside a template stays a name, so
+    it is still resolved live and still obliges what it obliges. Copies and links point
+    opposite ways, and a template that flattened its names into copies would be the design's
+    two mechanisms collapsed into one.
+    """
+    kept = _catalogue(TEMPLATES)
+    wanted = " ".join(str(w) for w in (args.name or ())).strip()
+    if args.action == "list":
+        if not kept:
+            return Result(human="(no templates — a plan starts empty or from `create`)",
+                          data={})
+        return Result(human="\n".join(_template_lines(k, kept[k]) for k in kept), data=kept)
+
+    if not wanted:
+        return _needs("name", "`template use` copies one template; `template list` shows "
+                              "which are there")
+    if wanted not in kept:
+        why = (f"no template '{wanted}'" + (f" — there is {', '.join(kept)}" if kept
+                                            else " — there are none"))
+        return Result(ok=False, human=why, data={"error": why, "name": wanted})
+    spec = kept[wanted]
+    title = (args.title or spec.get("title") or "").strip()
+    bad = _cap(title, args.reason)
+    if bad:
+        return bad
+
+    lib = _catalogue(LIBRARY)
+    doc, seal = _read(ctx.state_dir)
+    who = ctx.agent or "human"
+    where, how = _workspace(ctx)
+    plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
+            "checkout": str(_here(ctx)), "title": title,
+            "steps": [], "changelog": [],
+            "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
+                      if str(n).strip()],
+            "created_by": who, "created_at": int(time.time())}
+    doc["next_plan"] += 1
+    try:
+        for entry in (spec.get("steps") or ()):
+            plan["steps"].extend(_from_template(doc, lib, entry))
+    except _BadDef as e:
+        return e.refusal()
+
+    detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
+    if how == UNAVAILABLE:
+        detail += "; workspace unresolved — sb did not answer"
+    _log(plan, who, "template", args.reason, detail)
+    doc["plans"].append(plan)
+    _write(ctx.state_dir, doc, seal)
+    shown = _shown(plan, lib)
+    return Result(human=_full(shown), data=shown)
+
+
+def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
+    """One template entry, as the steps it puts in the copy. A name, or a link.
+
+    An entry that says `def` is a link and goes through the same expansion `name-step`
+    does — obligations included, since a template naming a merge and forgetting its review
+    is exactly the memory this obligation exists to replace.
+    """
+    if not isinstance(entry, dict):
+        raise _BadDef(f"a template's steps are objects, not {type(entry).__name__}")
+    key = str(entry.get("def") or "").strip()
+    if key:
+        if key not in lib:
+            raise _BadDef(f"a template names '{key}', which is not in the step "
+                          f"library")
+        return _mint(doc, lib, key)
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        raise _BadDef("a template holds a step with neither a name nor a def")
+    step = _step(f"s-{doc['next_step']}", name)
+    doc["next_step"] += 1
+    return [step]
+
+
 def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Result:
     """Read, change the one step named, log, write. Every step verb is this.
 
@@ -660,7 +895,8 @@ def _cap(*texts: Optional[str]) -> Optional[Result]:
 # -- the records ---------------------------------------------------------------
 
 
-def _step(sid: str, name: str) -> dict:
+def _step(sid: str, name: Optional[str], *, key: Optional[str] = None,
+          obliged_by: Optional[str] = None) -> dict:
     """One step, with every field the design names it carries and nothing more.
 
     `tries` starts at 1 rather than 0: a step being worked is on its first try, and a count
@@ -669,13 +905,174 @@ def _step(sid: str, name: str) -> dict:
     whatever `progress` currently says, and is here as an explicit null rather than a key
     that appears the first time something is skipped: the shape of a step is documented, and
     a field that exists only sometimes is a field every reader has to guess about.
+
+    `name` and `def` are the two ways a step says what it is, and exactly one of them is
+    filled. An on-the-fly step owns its words; a named one owns a LINK, and its `name` stays
+    null so that there is no copy of the definition here to go stale — the text is resolved
+    at render time and an edit to the library reaches this step wherever it is. `obliged_by`
+    is the id of the step that brought this one, which is how a review says which merge it
+    belongs to and how PR7's gate will find it. Both are explicit nulls for the same reason
+    `why` is.
     """
-    return {"id": sid, "name": name, "progress": OPEN, "why": None, "owner": None,
+    return {"id": sid, "name": name, "def": key, "obliged_by": obliged_by,
+            "progress": OPEN, "why": None, "owner": None,
             "tries": 1, "notes": [], "deps": [], "checkpoints": []}
 
 
 def _note(text: str, who: str) -> dict:
     return {"text": text, "by": who, "at": int(time.time())}
+
+
+# -- the library and the templates ---------------------------------------------
+#
+# Read from disk on every command rather than cached in the module. sb runs one command per
+# process so a cache would buy nothing real, and it would buy something wrong: a test — or a
+# long-lived caller — that edits a definition and then renders a plan has to see the edit,
+# because "editing a definition reaches every plan naming it" is the claim, not a hope.
+
+
+class _BadDef(ValueError):
+    """A definition or a template this file cannot use, said so a machine reader hears it.
+
+    An exception rather than a returned `Result` because it is raised three recursions deep
+    inside expansion; `refusal()` is where it turns back into the plugin's normal shape, and
+    the two verbs that expand anything are the only places that catch it. Nothing has been
+    written when one of these is raised — expansion happens before `_write`.
+    """
+
+    def refusal(self) -> Result:
+        return Result(ok=False, human=str(self), data={"error": str(self)})
+
+
+def _catalogue(which: str) -> dict:
+    """`library/` or `templates/`, as `{stem: spec}`. Missing is empty and empty is fine.
+
+    Keyed on the FILENAME, so a definition is renamed by renaming its file and a plan
+    linking to the old name says so plainly rather than resolving to something else. A
+    directory that is not there at all is an empty catalogue and not an error: the design
+    says the system must work with the catalogue almost bare, and a plugin that refused to
+    run without one would be a catalogue nobody could ship without.
+
+    A file that IS there and is not readable is refused, with its path, exactly as
+    `plans.json` is. Silently skipping it would leave a plan resolving a link to nothing
+    with no sign that the answer came from a typo in a JSON file.
+    """
+    d = Path(__file__).resolve().parent / which
+    out: dict[str, dict] = {}
+    try:
+        files = sorted(d.glob("*.json"))
+    except OSError:
+        return out
+    for f in files:
+        try:
+            spec = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError, OSError) as e:
+            raise _BadDef(f"{f} is not readable JSON ({e}); fix it or move it aside") from e
+        if not isinstance(spec, dict):
+            raise _BadDef(f"{f} holds a {type(spec).__name__} where a definition should be")
+        out[f.stem] = spec
+    return out
+
+
+def _flatten(lib: dict, key: str, path: tuple = ()) -> list[str]:
+    """A definition as the flat list of definitions naming it puts in a plan.
+
+    Composition is the one edge in this file that is TRAVERSED, and that is the whole reason
+    a cycle in it is refused where a cycle in a plan's `deps` is not. Nothing walks a `dep`,
+    so a cycle there is a lead's mistake to read; this walks, so a composite that reaches
+    itself is a hang, and the refusal names the path so the file to fix is obvious.
+    """
+    if key in path:
+        raise _BadDef(f"'{key}' composes into itself: {' → '.join((*path, key))}. "
+                      f"Library composition is traversed, so a cycle in it cannot stand.")
+    parts = [str(p).strip() for p in ((lib.get(key) or {}).get("steps") or ())
+             if str(p).strip()]
+    if not parts:
+        return [key]                     # a leaf: the definition itself is the step
+    out: list[str] = []
+    for part in parts:
+        if part not in lib:
+            raise _BadDef(f"'{key}' composes into '{part}', which is not in the step "
+                          f"library")
+        out.extend(_flatten(lib, part, (*path, key)))
+    return out
+
+
+def _mint(doc: dict, lib: dict, key: str) -> list[dict]:
+    """The steps naming one definition puts in a plan: its expansion, then its obligations.
+
+    Two walks, and they are different on purpose. Composition expands first and may repeat a
+    definition, because what it is saying is "this is several steps". Obligations are then
+    added over the result once each: a definition already in this batch is not obliged into
+    it a second time, which is what makes `a` obliging `b` obliging `a` terminate instead of
+    running forever. Naming a second merge LATER still brings a second review — the dedupe
+    is within one act, not across a plan, because two merges are two things to review.
+
+    Every id is minted from the one counter, in the order the steps will appear. Nothing is
+    reused and nothing is renumbered, so `obliged_by` can point at a sibling by id.
+    """
+    wanted: list[tuple[str, Optional[int]]] = [(k, None) for k in _flatten(lib, key)]
+    obliged = {k for k, _ in wanted}
+    i = 0
+    while i < len(wanted):
+        for ob in _obliges(lib, wanted[i][0]):
+            if ob in obliged:
+                continue
+            obliged.add(ob)
+            if ob not in lib:
+                raise _BadDef(f"'{wanted[i][0]}' obliges '{ob}', which is not in the step "
+                              f"library")
+            wanted.extend((k, i) for k in _flatten(lib, ob))
+        i += 1
+
+    steps: list[dict] = []
+    for k, by in wanted:
+        steps.append(_step(f"s-{doc['next_step']}", None, key=k,
+                           obliged_by=steps[by]["id"] if by is not None else None))
+        doc["next_step"] += 1
+    return steps
+
+
+def _obliges(lib: dict, key: str) -> list[str]:
+    return [str(o).strip() for o in ((lib.get(key) or {}).get("obliges") or ())
+            if str(o).strip()]
+
+
+def _defkey(step: dict) -> Optional[str]:
+    """The definition a step links to, or None for one that owns its own words."""
+    key = step.get("def")
+    return str(key).strip() or None if key else None
+
+
+def _resolve(step: dict, lib: dict) -> dict:
+    """A step as it is READ: a linked one with its name filled in from the library.
+
+    A copy, and only for rendering. The stored step keeps `name` null, which is what makes
+    the link live — resolving into the record instead would be a snapshot, and the next edit
+    to the definition would reach every plan except the ones already using it.
+    """
+    key = _defkey(step)
+    if not key:
+        return step
+    name = str((lib.get(key) or {}).get("name") or "").strip()
+    return dict(step, name=name or f"{key} — no such definition in the library")
+
+
+def _shown(plan: dict, lib: Optional[dict] = None) -> dict:
+    """A plan as it is read: the same record with every link resolved. Never written back."""
+    lib = _catalogue(LIBRARY) if lib is None else lib
+    return dict(plan, steps=[_resolve(s, lib) for s in (plan.get("steps") or ())])
+
+
+def _minted(steps: list, lib: dict) -> str:
+    """What landed, for the changelog: the ids, what each is, and what obliged it."""
+    bits = []
+    for s in steps:
+        bit = f"{s['id']} {_defkey(s) or s.get('name') or ''}".rstrip()
+        if s.get("obliged_by"):
+            bit += f" (obliged by {s['obliged_by']})"
+        bits.append(bit)
+    return ", ".join(bits)
 
 
 def _log(plan: dict, who: str, action: str, reason: Optional[str], detail: str = "") -> None:
@@ -1071,7 +1468,12 @@ def _line(p: dict, *, workspace: bool) -> str:
 
 
 def _full(p: dict) -> str:
-    """A plan as a lead reads it: what it is, its steps and their edges, then the story."""
+    """A plan as a lead reads it: what it is, its steps and their edges, then the story.
+
+    Handed a RESOLVED plan — `_shown` — so that a named step renders as the words in the
+    library rather than as a null. Nothing in here reaches for the catalogue itself: the
+    resolution happens once, at the verb, and this stays a function of what it was given.
+    """
     lines = [f"{p['id']}  {p.get('title') or '(untitled)'}",
              f"  workspace   {_where(p)}",
              f"  checkout    {p.get('checkout') or '—'}",
@@ -1100,7 +1502,14 @@ def _step_lines(steps: list) -> list[str]:
     """
     out = []
     for s in steps:
-        bits = [f"{s.get('id', '?'):<6}{s.get('progress', '?'):<10}{s.get('name', '')}"]
+        bits = [f"{s.get('id', '?'):<6}{s.get('progress', '?'):<10}{s.get('name') or ''}"]
+        if _defkey(s):
+            # The link is shown, not just what it resolves to: a lead deciding whether to
+            # edit a definition or write a variant has to be able to see which steps are
+            # links, and a resolved name looks exactly like a step somebody typed.
+            bits.append(f"[{_defkey(s)}]")
+        if s.get("obliged_by"):
+            bits.append(f"obliged by {s['obliged_by']}")
         if s.get("owner"):
             bits.append(f"({s['owner']})")
         if s.get("deps"):
@@ -1123,11 +1532,55 @@ def _changed(plan: dict, step: dict) -> Result:
     The step alone, not the whole plan — a tick that printed the entire plan back would
     bury the one line that changed, and `show` is a command away. `data` names the plan
     anyway, because a machine reader given only a step has lost which plan it belongs to
-    and there is no verb that maps one back to the other.
+    and there is no verb that maps one back to the other. Resolved, like every other read:
+    a tick on a named step should say what it ticked and not print a null.
     """
+    shown = _resolve(step, _catalogue(LIBRARY))
     lines = [f"{plan['id']}  {plan.get('title') or '(untitled)'}"]
-    lines.extend(f"  {ln}" for ln in _step_lines([step]))
-    return Result(human="\n".join(lines), data={"plan": plan["id"], "step": step})
+    lines.extend(f"  {ln}" for ln in _step_lines([shown]))
+    return Result(human="\n".join(lines), data={"plan": plan["id"], "step": shown})
+
+
+def _added(plan: dict, steps: list, lib: dict) -> Result:
+    """`_changed` for the verb that adds several at once. `steps`, plural, and on purpose.
+
+    Naming one definition can land three steps — a composite, plus what it obliges — so a
+    caller handed a single `step` would be told about one of them and left to discover the
+    rest. The key is different from `_changed`'s for the same reason: a reader that gets
+    `steps` knows it is looking at everything the command did.
+    """
+    shown = [_resolve(s, lib) for s in steps]
+    lines = [f"{plan['id']}  {plan.get('title') or '(untitled)'}"]
+    lines.extend(f"  {ln}" for ln in _step_lines(shown))
+    return Result(human="\n".join(lines), data={"plan": plan["id"], "steps": shown})
+
+
+def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
+    """One definition as the library renders it: its name, and what naming it does."""
+    lines = [f"{key:<16}{str(spec.get('name') or '').strip() or '(unnamed)'}"]
+    if spec.get("steps"):
+        lines.append(f"    composes    {', '.join(str(s) for s in spec['steps'])}")
+    for ob in _obliges(lib, key):
+        lines.append(f"    obliges     {ob} — added with it, skippable with a reason, "
+                     f"never omitted")
+    if full and str(spec.get("about") or "").strip():
+        lines.append(f"    {str(spec['about']).strip()}")
+    return "\n".join(lines)
+
+
+def _template_lines(key: str, spec: dict) -> str:
+    steps = spec.get("steps") or []
+    return (f"{key:<16}{str(spec.get('title') or '').strip() or '(untitled)'}\n"
+            f"    {_count(steps)}"
+            + (f" — {str(spec['about']).strip()}" if str(spec.get("about") or "").strip()
+               else ""))
+
+
+def _no_def(lib: dict, name: str) -> Result:
+    why = (f"no step definition '{name}' — the library holds {', '.join(lib)}" if lib
+           else f"no step definition '{name}' — the library is empty, so every step is "
+                f"invented on the fly")
+    return Result(ok=False, human=why, data={"error": why, "name": name})
 
 
 def _clip(text: str, n: int = 60) -> str:
