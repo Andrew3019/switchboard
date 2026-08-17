@@ -993,6 +993,270 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("not in the step library", json.loads(out)["data"]["error"])
 
 
+class LivenessTest(PlansSandbox):
+    """What `show` and `list` READ rather than hold: an owner's status, a plan's condition.
+
+    The whole subject of this class is a negative — that none of it is ever written down —
+    so every test here asserts the file as well as the rendering. The rest is the one
+    asymmetry the derivation has to keep: an sb that does not answer produces `unknown`,
+    never `dead` and never `abandoned`, because a plan is read cold by the analysis pass
+    and a healthy job that read as abandoned for one instant leaves the same mark as one
+    that fell apart.
+
+    Driven against a real `sb` subprocess and a real store, the way the workspace tests
+    above are — agent rows are written into the sandbox's own store and the plugin shells
+    out to the sandbox's own build. There is no fake sb anywhere in here.
+
+    Unproven, and not provable at this level: what an owner reads as while it is ALIVE
+    depends on whether a herdr is answering on the machine the tests run on (`working` with
+    none, `idle` with one that has never heard of a sandbox agent), so these assert the
+    distinction — alive is not `dead`, and renders differently — rather than the word. And
+    a worktree that is genuinely deleted under a running job is simulated by deleting the
+    directory a plan's `checkout` names, which is the same fact the plugin reads but not
+    the same act as `sb workspace close`.
+    """
+
+    def agent(self, name: str, *, workspace: str = "ws-1", state: str = "working") -> None:
+        db = store.connect(self.repo)
+        store.create_agent(db, name=name, role="worker", workspace=workspace,
+                           cwd=str(self.repo))
+        store.set_state(db, name, state)
+        db.close()
+
+    def moves(self, name: str, state: str) -> None:
+        db = store.connect(self.repo)
+        store.set_state(db, name, state)
+        db.close()
+
+    def test_an_owner_that_is_alive_and_one_that_is_dead_render_differently(self):
+        """A step shows two things and only one of them is ticked: its progress, which a
+        lead or the owner sets, and its owner's status, which is read off the agent. The
+        lead learns of a death by reading the plan — switchboard's own failure notice goes
+        to the dead agent's parent, which may be neither the lead nor anybody on the plan."""
+        self.workspace("ws-1", self.repo, agent="lead-1")
+        self.agent("w1")
+        self.as_agent("lead-1")
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        self.ok("plugin", "plans", "assign", "s-1", "w1")
+
+        alive = self.data("plugin", "plans", "show", "p-1")["steps"][0]
+        self.assertNotEqual(alive["owner_status"], "dead")
+        self.assertIn(alive["owner_status"], ("working", "idle"))
+        living = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn(f"(w1 — {alive['owner_status']})", living)
+
+        self.moves("w1", "failed")
+        dead = self.data("plugin", "plans", "show", "p-1")["steps"][0]
+        self.assertEqual(dead["owner_status"], "dead")
+        self.assertIn("(w1 — dead)", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertNotEqual(living, self.ok("plugin", "plans", "show", "p-1"))
+        # And the step is untouched by all of it: progress is still what the lifecycle
+        # verbs wrote, and nothing about the owner's death is anywhere in the file.
+        self.assertEqual(dead["progress"], "open")
+        step = self._doc()["plans"][0]["steps"][0]
+        self.assertEqual(step["owner"], "w1")
+        self.assertNotIn("owner_status", step)
+        self.assertNotIn("dead", self._file().read_text())
+
+    def test_a_plan_goes_dormant_when_its_agents_close_and_comes_back_when_one_returns(self):
+        """Every agent on the worktree closed is dormant, and dormant is a state a plan
+        comes back from — nothing is deleted at any point, because cleanup means dropping
+        out of a UI and never erasing a record."""
+        self.workspace("ws-1", self.repo, agent="lead-1")
+        self.agent("w1")
+        self.as_agent("lead-1")
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "live")
+
+        for name in ("lead-1", "w1"):
+            self.moves(name, "done")
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "dormant")
+        self.assertIn("dormant", self.ok("plugin", "plans", "list"))
+
+        self.moves("w1", "working")          # restored, and the plan is live again
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "live")
+        # None of the three readings left a mark: the record says what it always said.
+        self.assertNotIn("condition", self._doc()["plans"][0])
+        for word in ("dormant", "live"):
+            self.assertNotIn(f'"{word}"', self._file().read_text())
+
+    def test_a_workspace_with_no_agents_at_all_is_not_dormant(self):
+        """No agent is not the same fact as every agent closed, and `any()` over an empty
+        list would call it one. Two ways in: a human makes a plan before anything is
+        spawned into the worktree, and `sb status` is scoped to the caller's own tree so
+        the agents on a worktree may belong to another. Neither is a dormancy."""
+        self.workspace("ws-1", self.repo)               # a workspace, and nobody in it
+        made = self.data("plugin", "plans", "create", "a job", "--step", "write it")
+        self.assertEqual(made["workspace"], "ws-1")     # resolved, so `mine` is empty
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "live")
+
+        # And it still goes dormant once there IS somebody and they close.
+        self.agent("w1")
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "live")
+        self.moves("w1", "done")
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "dormant")
+
+    def test_a_checkout_under_a_missing_ancestor_is_unknown_and_not_abandoned(self):
+        """`os.stat` gives one ENOENT for a worktree that was deleted and for one whose
+        parent went away under it — an unmounted volume, a moved `worktrees/` directory.
+        The first is a job that fell apart and the second is a machine that moved, and
+        `abandoned` is the verdict that never lifts once the analysis pass reads it."""
+        root = Path(self.tmp.name) / "volume"
+        (root / "spaces" / "co").mkdir(parents=True)
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        doc = self._doc()
+        doc["plans"][0]["checkout"] = str(root / "spaces" / "co")
+        self._file().write_text(json.dumps(doc))
+
+        shutil.rmtree(root / "spaces" / "co")           # the worktree itself was deleted
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"],
+                         "abandoned")
+
+        shutil.rmtree(root)                             # the ground moved instead
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual(shown["worktree"], "unknown")
+        self.assertEqual(shown["condition"], "unknown")
+        self.assertNotIn("abandoned", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_worktree_that_is_gone_is_abandoned_with_steps_open_and_finished_without(self):
+        """The difference the sweep cannot make for itself. It deletes a worktree on gates
+        that cannot see a plan, so if the record does not tell these apart afterwards the
+        analysis pass reads every job that fell apart as a job that went well."""
+        gone = Path(self.tmp.name) / "gone"
+        gone.mkdir()
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        doc = self._doc()
+        doc["plans"][0]["checkout"] = str(gone)
+        self._file().write_text(json.dumps(doc))
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "live")
+
+        shutil.rmtree(gone)
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"],
+                         "abandoned")
+        self.assertIn("worktree is gone", self.ok("plugin", "plans", "show", "p-1"))
+
+        self.ok("plugin", "plans", "tick", "s-1")
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"],
+                         "finished")
+        # Neither word is in the file, and the plan is still there to be read: a dormant or
+        # dead plan is never deleted.
+        self.assertNotIn("abandoned", self._file().read_text())
+        self.assertEqual(self._doc()["plans"][0]["id"], "p-1")
+
+    def test_an_sb_that_cannot_be_reached_is_unknown_and_never_abandoned(self):
+        """The bug this was written against. PR1 stores a null workspace for BOTH `none`
+        and `unavailable`, so a derivation that read the null would let one timeout, at one
+        instant, mark a healthy job abandoned for the rest of its life — nothing recomputes
+        `workspace_from`, so the verdict would never lift. The worktree question is asked
+        of the checkout PATH, which needs nobody's cooperation to answer."""
+        (Path(self.tmp.name) / "bin").unlink()          # no build beside the plugin
+        real = shutil.which
+        with mock.patch("shutil.which",                 # and none on PATH either
+                        lambda name, *a, **k: None if name == "sb" else real(name, *a, **k)):
+            made = self.data("plugin", "plans", "create", "during an outage",
+                             "--step", "write it")
+            self.assertEqual(made["workspace_from"], "unavailable")
+            self.ok("plugin", "plans", "assign", "s-1", "w1")
+
+            shown = self.data("plugin", "plans", "show", "p-1")
+            # Unknown, and every other word is the bug: `abandoned` would be a lie the
+            # record keeps, and `dormant` would be a claim about agents nothing looked at.
+            # The worktree is still answered — that half needs no sb at all.
+            self.assertEqual(shown["condition"], "unknown")
+            self.assertEqual(shown["worktree"], "here")
+            self.assertNotIn("abandoned", self.ok("plugin", "plans", "show", "p-1"))
+            # And an owner nothing could be asked about is unknown, not dead. A lead that
+            # read this as a death would dispatch a replacement for an agent that is fine.
+            self.assertEqual(shown["steps"][0]["owner_status"], "unknown")
+            self.assertNotIn("dead", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_read_is_bounded_when_sb_hangs(self):
+        """`show` runs with the plans lock held, so an sb that has wedged must cost seconds
+        and a page of honest unknowns — never a hung `show`, and never every other plans
+        command in the repo queued behind it."""
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        wedged = Path(self.tmp.name) / "bin"
+        wedged.unlink()
+        wedged.mkdir()
+        (wedged / "sb").write_text("#!/bin/sh\nsleep 60\n")
+        (wedged / "sb").chmod(0o755)
+
+        started = time.monotonic()
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(shown["condition"], "unknown")
+        self.assertIn("not the same as nobody working",
+                      self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_crafted_name_cannot_forge_a_row(self):
+        """A plan renders as rows and a row is a line, so a newline in a step name or an
+        owner draws a step, or a status, that nobody wrote. Refused at the door — and
+        escaped at the render as well, because a hand-edited `plans.json` never came
+        through a verb at all."""
+        forged = "write it\ns-9     done      merged and shipped"
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--step", forged,
+                               "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("one line", json.loads(out)["data"]["error"])
+        for argv in (("create", "a job", "--step", "fine", "--reason", "why\nnot"),
+                     ("create", "a job\nsecond line")):
+            self.assertEqual(self.sb("plugin", "plans", *argv, "--json")[0], 1)
+
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        code, _, _ = self.sb("plugin", "plans", "assign", "s-1", "w1\ns-9  done  merged",
+                             "--json")
+        self.assertEqual(code, 1)
+
+        # And the same name arriving the other way — somebody editing the file — renders
+        # as the one line it was always entitled to, with the newline visible as itself.
+        doc = self._doc()
+        doc["plans"][0]["steps"][0]["name"] = forged
+        doc["plans"][0]["steps"][0]["owner"] = "w1\nx"
+        self._file().write_text(json.dumps(doc))
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("\\ns-9", shown)
+        self.assertNotIn("\ns-9", shown)
+        self.assertFalse([ln for ln in shown.splitlines() if ln.startswith("s-9")])
+
+    def test_nothing_that_splits_a_line_survives_either_door(self):
+        """The guarantee is a PROPERTY and not a list, so it is checked against the thing
+        that defines it. A C0/C1 range misses U+2028 and U+2029, which `str.splitlines()`
+        splits on — and a consumer that splits a rendering into rows is exactly what a
+        board is, so a step name carrying one drew a row nobody added."""
+        forged = "write it\u2028s-9     done      merged and shipped"
+        self.assertEqual(self.sb("plugin", "plans", "create", "a job", "--step", forged,
+                                 "--json")[0], 1)
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+
+        breaks = [chr(c) for c in range(0x110000) if len(f"a{chr(c)}b".splitlines()) > 1]
+        self.assertIn("\u2028", breaks)         # the sweep found what a range would miss
+        plugin = _plans()                       # imported by the commands above
+        for c in breaks:
+            self.assertTrue(plugin._CONTROL.search(c), f"U+{ord(c):04X} is not refused")
+            self.assertEqual(len(plugin._flat(f"a{c}b").splitlines()), 1,
+                             f"U+{ord(c):04X} survives _flat")
+
+        doc = self._doc()
+        doc["plans"][0]["steps"][0]["name"] = forged
+        self._file().write_text(json.dumps(doc))
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertFalse([ln for ln in shown.splitlines() if ln.startswith("s-9")])
+
+    def test_a_refusal_cannot_forge_a_row_either(self):
+        """An id is the one value a message here is built out of that nothing vetted — the
+        refusal IS what happens when it fails to validate — so it is escaped where every
+        other text is capped."""
+        self.ok("plugin", "plans", "create", "a job", "--step", "write it")
+        for argv in (("show", "p-2\np-9   1 step   finished   forged"),
+                     ("tick", "s-2\ns-9   done      merged"),
+                     ("changelog", "p-2\np-9   forged")):
+            code, out, _ = self.sb("plugin", "plans", *argv, "--json")
+            self.assertEqual(code, 1)
+            why = json.loads(out)["data"]["error"]
+            self.assertEqual(len(why.splitlines()), 1)
+            self.assertIn("\\n", why)
+
+
 def _plans_commands() -> list[str]:
     """The verbs the plugin declares, read off the registry rather than off a docstring."""
     reg = plugins.Registry()
