@@ -604,12 +604,21 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # IN ORDER: the numbers first, the tree's own header last, the board's title never. And
     # only if a row actually comes of it — `_window` charges for its own `↑ N above` and
     # `+ N more below` lines, so a line given back does not always buy one.
-    first, last = _window(len(rows), max(0, top), max(0, room))
+    #
+    # A row is one line PLUS whatever a plugin draws under its worktree group
+    # (`board.group_extras`), so what is windowed here is lines and not rows. Each block is
+    # cut to what a pane this size could hold at all — the row itself and the two scroll
+    # lines are what it is cut against — so that no single row can be taller than the
+    # window and starve the tree of the screen. `room` only ever grows below, so a cap
+    # measured against it here stays a cap.
+    extras = [e[:max(0, room - 3)] for e in board.group_extras(rows)]
+    costs = [1 + len(e) for e in extras]
+    first, last = _window(len(rows), max(0, top), max(0, room), costs)
     if rows and first == last:
         n = len(stats_block)
         for give_stats, give_bar in (((n, 0), (n, 1)) if n else ((0, 1),)):
             give = give_stats + give_bar
-            grown = _window(len(rows), max(0, top), max(0, room + give))
+            grown = _window(len(rows), max(0, top), max(0, room + give), costs)
             if grown[0] == grown[1]:
                 continue
             head_lines, room = head_lines - give, room + give
@@ -656,6 +665,16 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on),
                  rows[i])
             drawn += 1
+            # The worktree group's block, under the last row of the group. Dim, clipped
+            # like every other line here, and owned by NOBODY: it is not an agent, and a
+            # click on it must miss rather than focus whatever row is nearest.
+            for extra in extras[i]:
+                # `_clipw` and not `_clip`: a block is columns a plugin lined up on
+                # purpose, and `board._clip` flattens runs of whitespace — right for a
+                # task head, wrong for anything whose spaces are a column.
+                emit(Text(_clipw(board._block_line(extra), inner), style=DIM,
+                          no_wrap=True, overflow="crop"))
+                drawn += 1
         if last < len(rows):
             emit(Text(_clip(f"  + {len(rows) - last} more below", inner), style=DIM,
                       no_wrap=True, overflow="crop"))
@@ -681,26 +700,43 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     return list(zip(out, owners))
 
 
-def _window(n: int, top: int, room: int) -> tuple[int, int]:
+def _window(n: int, top: int, room: int,
+            costs: Optional[list[int]] = None) -> tuple[int, int]:
     """Which display rows are on screen: `[first, last)`.
 
-    In ROWS, which is also in lines — this renderer draws no blank line between agents, so
-    a display row costs exactly one. What is not free is saying so: a window with anything
-    above it spends a line on `↑ N above`, and one with anything below it a line on
-    `+ N more below`, and both are charged here rather than discovered afterwards.
+    In LINES, which used to be the same number as rows and no longer always is. This
+    renderer draws no blank line between agents, so a row costs one — plus whatever a
+    plugin draws under it (`board.group_extras`), which is what `costs` carries. `None`
+    means one line each, the shape this took before the seam existed.
+
+    What is not free is saying so: a window with anything above it spends a line on
+    `↑ N above`, and one with anything below it a line on `+ N more below`, and both are
+    charged here rather than discovered afterwards.
 
     `top` is clamped to the first row of the last full screenful, so scrolling to the
     bottom lands on a full screen rather than on one row with blank space under it.
     """
     if room <= 0 or n == 0:
         return 0, 0
-    max_top = 0 if n <= room else max(0, n - (room - 1))
+    costs = list(costs) if costs is not None else [1] * n
+    # `board._max_top` counts backwards through the same list this does; the `- 1` is the
+    # `↑ N above` line, which the last screenful always spends and the whole list never
+    # does. Not called at all when everything fits, or it would charge for a line that is
+    # not going to be drawn.
+    max_top = 0 if sum(costs) <= room else board._max_top(costs, max(0, room - 1))
     top = min(max(0, top), max(0, min(max_top, n - 1)))
     avail = room - (1 if top else 0)
-    take = min(max(0, avail), n - top)
-    if top + take < n:                           # room for the `+ N more below` line
-        take = max(0, take - 1)
-    return top, top + take
+    used, last = 0, top
+    while last < n and used + costs[last] <= avail:
+        used += costs[last]
+        last += 1
+    if last < n:
+        # Room for the `+ N more below` line, bought back a whole ROW at a time: half a
+        # group's block on screen with the row it hangs off is worse than none of it.
+        while last > top and used + 1 > avail:
+            last -= 1
+            used -= costs[last]
+    return top, last
 
 
 def _row_budget(window: list[Any], inner: int) -> tuple[int, int, bool, int]:

@@ -12,6 +12,10 @@ last class is the exception, and says why it has to be.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,7 +30,7 @@ from switchboard import board, panel, richboard, status  # noqa: E402
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
           summary=None, parent=None, archived=False, undelivered=0, undelivered_age=0,
-          idle_excuse=None, pane_id=None):
+          idle_excuse=None, pane_id=None, workspace="api"):
     """One agent. `archived=True` sets what being absent from herdr past the spawn
     grace actually looks like, so the real `AgentStatus.archived` decides — nothing
     here mocks the predicate."""
@@ -36,7 +40,7 @@ def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
         alive=False if archived else alive,
         stalled=stalled, gone=gone, unread=unread,
         age=int(status.SPAWN_GRACE) + 1 if archived else 10,
-        idle=5, last_activity=0, workspace="api", task=task,
+        idle=5, last_activity=0, workspace=workspace, task=task,
         blocked_why=blocked_why, summary=summary,
         undelivered=undelivered, undelivered_age=undelivered_age,
         idle_excuse=idle_excuse, pane_id=pane_id,
@@ -884,6 +888,507 @@ class YouAreHereTest(unittest.TestCase):
         self.assertFalse(outside.enabled)
         self.assertFalse(outside.tick(at=1000.0))
         self.assertIsNone(outside.name(self.ROWS))
+
+
+HOOK_PY = """
+def board_lines(state_dir, workspace, rows):
+    return [f"{workspace}: {len(rows)} rows"]
+"""
+
+MARK_PY = """
+import os
+open(os.environ["PR8_MARK"], "a").write("imported\\n")
+API = 1
+VERSION = "0"
+def register(reg):
+    pass
+"""
+
+
+def a_plugin(root: Path, name: str, *, draws: bool = True, hook: str = HOOK_PY) -> Path:
+    """A plugin on disk, with or without the `board.py` the seam looks for."""
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "__init__.py").write_text(MARK_PY)
+    if draws:
+        (d / "board.py").write_text(hook)
+    return d
+
+
+def a_plugin_repo(tmp: Path, *, enabled: str, plugins: dict) -> Path:
+    """A checkout with a `.git` directory, an enablement file, and plugins of its own.
+
+    A plain directory rather than a real repo, because `panel.git_common_dir` resolves
+    `.git` in Python and never spawns anything — which is exactly the property the seam
+    leans on. `SeamPathsTest` is where a real checkout is used, to pin this against the
+    path `switchboard.plugins` would have computed.
+    """
+    repo = tmp / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".switchboard").mkdir()
+    (repo / ".switchboard" / "plugins.toml").write_text(f"enabled = {enabled}\n")
+    for name, kw in plugins.items():
+        a_plugin(repo / ".switchboard" / "plugins", name, **kw)
+    return repo
+
+
+class PluginSeamTest(unittest.TestCase):
+    """The board's one extension point: is it generic, and is it free when nothing uses it?
+
+    Both halves matter and the second one more. The seam is on the path of every frame of
+    every board in every repo — `report-bug` and `suggestions` ship enabled — so "a plugin
+    that draws nothing costs nothing" has to be a fact about what the code does, not a
+    hope. What is pinned here is that a plugin which is disabled, or which ships no
+    `board.py`, is NEVER IMPORTED: proved by a plugin whose `__init__.py` writes a file
+    when it runs.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.mark = self.tmp / "imported"
+        patch = mock.patch.dict(os.environ, {"PR8_MARK": str(self.mark)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        board._HOOKS.clear()
+        self.addCleanup(board._HOOKS.clear)
+        for name in [m for m in sys.modules if m.startswith(board._MODULE_PREFIX)]:
+            del sys.modules[name]
+
+    def test_a_disabled_plugin_is_not_asked_and_is_never_imported(self):
+        """`enabled` is read out of config — files, no subprocess — and a name that is not
+        in it never reaches an import. The board a repo has today is the board it keeps."""
+        repo = a_plugin_repo(self.tmp, enabled='["!reset"]', plugins={"drawer": {}})
+        self.assertEqual(board.board_hooks(repo), [])
+        self.assertFalse(self.mark.exists())
+
+    def test_a_plugin_that_ships_no_board_file_is_never_imported(self):
+        """The whole cost of an enabled plugin that draws nothing: one `is_file`. This is
+        every plugin that ships today, so it is the ordinary case and not the corner."""
+        repo = a_plugin_repo(self.tmp, enabled='["quiet"]',
+                             plugins={"quiet": {"draws": False}})
+        self.assertEqual(board.board_hooks(repo), [])
+        self.assertFalse(self.mark.exists())
+
+    def test_an_enabled_plugin_that_draws_is_asked_for_each_worktree_group(self):
+        """The seam itself, and nothing about plans: board.py knows only that something
+        was enabled and had lines for a group."""
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]', plugins={"drawer": {}})
+        hooks = board.board_hooks(repo)
+        self.assertEqual([n for n, _, _ in hooks], ["drawer"])
+        self.assertTrue(self.mark.exists())
+        rows = [agent("a"), agent("b", depth=1, parent="a"),
+                agent("c", workspace="web")]
+        with mock.patch.object(board, "board_hooks", return_value=hooks):
+            self.assertEqual(board.group_extras(rows),
+                             [[], ["api: 2 rows"], ["web: 1 rows"]])
+
+    def test_a_plugin_that_breaks_costs_the_board_nothing(self):
+        """Four ways to be wrong — raising at import, raising when asked, answering with
+        something that is not a list of lines — and all four are silence. A board is what
+        a human looks at to find out something has gone wrong; it must not be the thing."""
+        for body in ("raise RuntimeError('boom')\n",
+                     "def board_lines(*a):\n    raise RuntimeError('boom')\n",
+                     "def board_lines(*a):\n    return 'not a list'\n",
+                     "board_lines = 3\n"):
+            with self.subTest(body=body.splitlines()[0]):
+                board._HOOKS.clear()
+                tmp = Path(tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, tmp, True)
+                repo = a_plugin_repo(tmp, enabled='["drawer"]',
+                                     plugins={"drawer": {"hook": body}})
+                hooks = board.board_hooks(repo)
+                with mock.patch.object(board, "board_hooks", return_value=hooks):
+                    self.assertEqual(board.group_extras([agent("a")]), [[]])
+
+    def test_a_line_with_a_newline_in_it_becomes_two_lines_and_never_wraps(self):
+        """One line is one row here. A plugin that put a newline in a string is describing
+        two rows however it meant it, and a string that wraps moves every row below it."""
+        hook = "def board_lines(*a):\n    return ['one\\ntwo', 'three']\n"
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+                             plugins={"drawer": {"hook": hook}})
+        with mock.patch.object(board, "board_hooks",
+                               return_value=board.board_hooks(repo)):
+            self.assertEqual(board.group_extras([agent("a")])[0],
+                             ["one", "two", "three"])
+
+    def test_a_drawers_control_characters_never_reach_the_terminal(self):
+        """The guard the docstring promises, kept by the BOARD and not by the plugin.
+
+        The seam is a generic extension point, so the manners of code nobody in this repo
+        wrote are not a guarantee. Two characters and two different disasters: `ESC [ 2J`
+        is not SGR, so `_ANSI` never sees it and `_fit` hands it to the terminal, which
+        clears the pane; a TAB measures 0 to `_visible_len` and 8 to the terminal, so a
+        line that fits wraps — and a wrap moves every row below it and misaims the next
+        click. Each becomes one space, which is the only substitution that leaves the
+        column count the plugin lined up on honest.
+        """
+        hook = ("def board_lines(*a):\n"
+                "    return ['\\x1b[2J\\x1b[Hgotcha', 'a\\tb', 'bell\\x07', 'nel\\x85x']\n")
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+                             plugins={"drawer": {"hook": hook}})
+        rows = [agent("solo")]
+        with mock.patch.object(board, "board_hooks",
+                               return_value=board.board_hooks(repo)):
+            block = board.group_extras(rows)[0]
+            drawn = [t for t, _ in board.layout(snap(*rows), top=0, height=14,
+                                                width=100, msg="")]
+            rich = [str(t) for t, _ in richboard.layout(snap(*rows), top=0, height=14,
+                                                        width=100, msg="")]
+        # `nel` splits rather than becoming a space: NEL is a line break to
+        # `str.splitlines`, and one line is one row here — the same rule as a newline.
+        self.assertEqual(block, [" [2J [Hgotcha", "a b", "bell ", "nel", "x"])
+        for line in drawn + rich:
+            self.assertNotIn("\x1b[2J", line)
+            self.assertNotIn("\t", line)
+            self.assertNotIn("\x07", line)
+
+    def test_a_workspace_split_into_two_runs_is_drawn_once(self):
+        """`group_runs` brackets CONSECUTIVE rows, and one workspace can hold two runs — a
+        lead that delegated one child elsewhere and kept another at home. Asked per run,
+        that workspace said the same thing twice and paid the drawer twice for it."""
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]', plugins={"drawer": {}})
+        rows = [agent("lead"), agent("away", depth=1, parent="lead", workspace="web"),
+                agent("home", depth=1, parent="lead")]
+        with mock.patch.object(board, "board_hooks",
+                               return_value=board.board_hooks(repo)):
+            extras = board.group_extras(rows)
+        # Once, under the LAST row of the workspace — and the drawer was handed every row
+        # of it, both runs, rather than one run's worth.
+        self.assertEqual(extras, [[], ["web: 1 rows"], ["api: 2 rows"]])
+
+    def test_a_runaway_plugin_is_cut_off(self):
+        hook = "def board_lines(*a):\n    return [str(i) for i in range(500)]\n"
+        repo = a_plugin_repo(self.tmp, enabled='["drawer"]',
+                             plugins={"drawer": {"hook": hook}})
+        with mock.patch.object(board, "board_hooks",
+                               return_value=board.board_hooks(repo)):
+            self.assertEqual(len(board.group_extras([agent("a")])[0]), board.HOOK_LINES)
+
+
+class SeamOffIsTodaysBoardTest(unittest.TestCase):
+    """The hard requirement: with nothing drawing, both renderers draw what they drew.
+
+    Said as an equality rather than as a golden file, in the two places a difference could
+    come from. `group_extras` returns one empty list per row, so the `costs` the window
+    math is built on are the `2 if brk else 1` they always were; and the frame is line for
+    line and owner for owner the frame drawn with the seam short-circuited entirely.
+    """
+
+    SNAP = None
+
+    def setUp(self):
+        board._HOOKS.clear()
+        self.addCleanup(board._HOOKS.clear)
+        self.snap = snap(agent("top"), agent("kid", depth=1, parent="top"),
+                         agent("other", workspace="web"))
+
+    def test_no_row_costs_more_than_it_did(self):
+        with mock.patch.object(board, "board_hooks", return_value=[]):
+            rows = status.display_rows(self.snap.agents, show_archived=False)
+            self.assertEqual(board.group_extras(rows), [[] for _ in rows])
+
+    def test_both_renderers_draw_the_frame_they_drew_before_the_seam(self):
+        kw = dict(top=0, height=24, width=100, msg="", show_archived=False)
+        with mock.patch.object(board, "board_hooks", return_value=[]):
+            plain_off = board.layout(self.snap, **kw)
+            rich_off = richboard.layout(self.snap, **kw)
+        # The seam removed rather than merely quiet: `group_extras` never consulted, which
+        # is the shape of this code before PR8 existed.
+        with mock.patch.object(board, "group_extras",
+                               side_effect=lambda rows: [[] for _ in rows]) as never:
+            plain_none = board.layout(self.snap, **kw)
+            rich_none = richboard.layout(self.snap, **kw)
+        self.assertTrue(never.called)
+        self.assertEqual(plain_off, plain_none)
+        self.assertEqual([str(t) for t, _ in rich_off],
+                         [str(t) for t, _ in rich_none])
+        self.assertEqual([o for _, o in rich_off], [o for _, o in rich_none])
+
+
+class PlanBlockTest(unittest.TestCase):
+    """The plans plugin, drawn under its own worktree, in both renderers.
+
+    The end of the wire and the only test here that knows what a plan is. It runs the
+    SHIPPED plugin against a real `plans.json`, so what it pins is the whole path: the
+    board finds `defaults/plugins/plans/board.py`, hands it the rows of one group, and
+    gets back the plugin's own `_line` and `_step_lines` output.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        board._HOOKS.clear()
+        self.addCleanup(board._HOOKS.clear)
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        (self.repo / ".switchboard").mkdir()
+        (self.repo / ".switchboard" / "plugins.toml").write_text('enabled = ["plans"]\n')
+        self.state = self.repo / ".git" / "agentflow" / "plugins" / "plans"
+        self.state.mkdir(parents=True)
+
+    def write(self, *plans):
+        (self.state / "plans.json").write_text(json.dumps(
+            {"format": 1, "next_plan": 9, "next_step": 9, "plans": list(plans)}))
+
+    def plan(self, pid, workspace, title, steps, checkout=None):
+        return {"id": pid, "title": title, "workspace": workspace,
+                "checkout": str(self.repo if checkout is None else checkout),
+                "created_at": 0, "created_by": "lead", "changelog": [], "notes": [],
+                "steps": steps}
+
+    def hooks(self):
+        h = board.board_hooks(self.repo)
+        self.assertEqual([n for n, _, _ in h], ["plans"], "the shipped plans plugin")
+        return mock.patch.object(board, "board_hooks", return_value=h)
+
+    def test_a_plan_renders_under_its_own_worktree_group_in_both_renderers(self):
+        self.write(self.plan("p-1", "api", "guardrails",
+                             [{"id": "s-1", "name": "design", "progress": "done"},
+                              {"id": "s-2", "name": "build it", "progress": "open"}]),
+                   self.plan("p-2", "web", "the other one",
+                             [{"id": "s-3", "name": "ship", "progress": "open"}]))
+        rows = [agent("lead"), agent("kid", depth=1, parent="lead"),
+                agent("web-1", workspace="web")]
+        s = snap(*rows)
+        with self.hooks():
+            extras = board.group_extras(rows)
+            plain = [t for t, _ in board.layout(s, top=0, height=24, width=110, msg="")]
+            rich = [str(t) for t, _ in richboard.layout(
+                s, top=0, height=24, width=110, msg="")]
+        # Hung on the LAST row of each run, which is where a block reads as belonging to
+        # the group above it — and never on a group it is not part of.
+        self.assertEqual(extras[0], [])
+        self.assertIn("guardrails", extras[1][0])
+        self.assertIn("the other one", extras[2][0])
+        for lines in (plain, rich):
+            body = [board._ANSI.sub("", x) for x in lines]
+            kid = next(i for i, x in enumerate(body) if "kid" in x)
+            self.assertIn("guardrails", body[kid + 1])
+            self.assertIn("s-2", body[kid + 2])
+            # A done step says nothing to somebody scanning for what is stuck.
+            self.assertNotIn("s-1", " ".join(body))
+            web = next(i for i, x in enumerate(body) if "web-1" in x)
+            self.assertIn("the other one", body[web + 1])
+
+    def test_an_owners_liveness_is_the_row_the_board_already_has(self):
+        """The rule the design turns on: a step's owner is read off the agent and never
+        copied onto the step. Here that means the SAME `AgentStatus` the row was drawn
+        from — no second channel, and nothing shelled out per frame.
+
+        Three answers and the difference between them is the point. A working owner reads
+        what its own row reads; an owner sb has marked `gone` is dead the moment somebody
+        looks; and an owner that is not on this board at all is UNKNOWN and never dead —
+        a snapshot scoped elsewhere is a fact about who is looking.
+        """
+        self.write(self.plan("p-1", "api", "guardrails", [
+            {"id": "s-1", "name": "build", "progress": "open", "owner": "kid"},
+            {"id": "s-2", "name": "review", "progress": "open", "owner": "dead-one"},
+            {"id": "s-3", "name": "later", "progress": "open", "owner": "elsewhere"}]))
+        rows = [agent("lead"),
+                agent("kid", depth=1, parent="lead", state="blocked",
+                      blocked_why="waiting"),
+                agent("dead-one", depth=1, parent="lead", gone=True)]
+        with self.hooks():
+            block = board.group_extras(rows)[-1]
+        by_step = {line.split()[0]: line for line in block[1:]}
+        self.assertIn(f"(kid — {rows[1].display_state})", by_step["s-1"])
+        self.assertIn("(dead-one — dead)", by_step["s-2"])
+        self.assertIn("(elsewhere — unknown)", by_step["s-3"])
+
+    def test_a_plan_created_after_the_board_opened_appears_on_the_next_frame(self):
+        """THE ORDINARY FIRST USE, and the one this could most easily get wrong.
+
+        A plugin's state directory is made by its first COMMAND, not by the board. So the
+        normal sequence is: Andrew opens the board with no plan anywhere, a lead runs
+        `sb plugin plans create`, and the plan must appear. A discovery pass that took
+        "no state directory" as "nothing to draw" and cached it for the life of the pane
+        would never show it, and nothing on screen would say why. Here the directory does
+        not exist for the first frame at all.
+        """
+        shutil.rmtree(self.state)
+        hooks = board.board_hooks(self.repo)
+        self.assertEqual([n for n, _, _ in hooks], ["plans"])
+        rows = [agent("lead")]
+        with mock.patch.object(board, "board_hooks", return_value=hooks):
+            self.assertEqual(board.group_extras(rows), [[]])     # nothing yet, and no error
+            self.state.mkdir(parents=True)                       # `plans create` happens
+            self.write(self.plan("p-1", "api", "guardrails",
+                                 [{"id": "s-1", "name": "build", "progress": "open"}]))
+            self.assertIn("guardrails", board.group_extras(rows)[0][0])
+
+    def test_drawing_a_plan_shells_out_to_nothing(self):
+        """`list` and `show` build a `_Live` and spend seconds of `sb status` on it. A
+        board redraws every couple of seconds, per group, and must not — which is the
+        whole reason the rows are handed in. Pinned by making `subprocess.run` explode."""
+        self.write(self.plan("p-1", "api", "guardrails", [
+            {"id": "s-1", "name": "build", "progress": "open", "owner": "lead"}]))
+        with self.hooks(), mock.patch(
+                "subprocess.run", side_effect=AssertionError("the board shelled out")):
+            block = board.group_extras([agent("lead")])[0]
+        self.assertIn("guardrails", block[0])
+
+    def test_a_plan_on_another_worktree_is_drawn_by_nobody(self):
+        self.write(self.plan("p-1", "somewhere-else", "not here",
+                             [{"id": "s-1", "name": "x", "progress": "open"}]))
+        with self.hooks():
+            self.assertEqual(board.group_extras([agent("lead")]), [[]])
+
+    def test_a_plans_file_that_cannot_be_read_costs_the_board_nothing(self):
+        (self.state / "plans.json").write_text("{ not json")
+        with self.hooks():
+            self.assertEqual(board.group_extras([agent("lead")]), [[]])
+
+
+class SeamWindowTest(unittest.TestCase):
+    """Variable-height blocks and the window arithmetic, which is where this could hurt.
+
+    A block is lines, and every renderer counts lines: the plain board charges them into
+    `costs`, and `richboard._window`, which was written when a row was exactly one line,
+    now takes the same list. What must never happen is a frame taller than the pane —
+    a line over the edge pushes nothing off screen, it wraps, and the next click focuses
+    the wrong agent.
+    """
+
+    def tall(self, n):
+        return mock.patch.object(
+            board, "group_extras",
+            side_effect=lambda rows: [[f"plan line {i}" for i in range(n)]
+                                      if r is rows[-1] else [] for r in rows])
+
+    def test_neither_renderer_ever_draws_past_the_bottom_of_the_pane(self):
+        """SCROLLED TOPS TOO, and `rich` is required to draw rather than allowed to
+        decline. `richboard.layout` returns None for a frame whose line count did not come
+        back the way it was built, which is a legitimate fallback and also exactly what a
+        window-math regression looks like — so a block that broke the arithmetic would
+        pass this sweep as "not drawn" if None were tolerated. At these sizes it draws."""
+        s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None,
+                         workspace=["api", "web", "db"][i % 3])
+                   for i in range(6)])
+        for height in range(6, 30):
+            for n in (0, 1, 5, 40):
+                for top in (0, 1, 3, 7):
+                    with self.subTest(height=height, block=n, top=top), self.tall(n):
+                        plain = board.layout(s, top=top, height=height, width=100, msg="")
+                        self.assertEqual(len(plain), height)
+                        rich = richboard.layout(s, top=top, height=height, width=100,
+                                                msg="")
+                        self.assertIsNotNone(rich)
+                        self.assertEqual(len(rich), height)
+
+    def test_the_agent_row_outranks_its_own_block(self):
+        """A plan tall enough to fill a pane must not push the agent it hangs off it."""
+        s = snap(agent("solo"))
+        with self.tall(50):
+            body = [board._ANSI.sub("", t) for t, _ in
+                    board.layout(s, top=0, height=12, width=80, msg="")]
+        self.assertTrue(any("solo" in x for x in body))
+        self.assertTrue(any("plan line 0" in x for x in body))
+
+    def test_scrolling_counts_the_block_lines_and_not_just_the_rows(self):
+        """`_max_top` is in LINES. With five lines hanging off the last row, the last
+        screenful starts higher up than it would with rows alone — and a board that
+        scrolled past that would claim rows were on screen that are not."""
+        rows = [agent(f"a{i}", depth=1, parent="a0") for i in range(8)]
+        rows[0] = agent("a0")
+        plain = [2 if b else 1 for b in
+                 [board._starts_group(rows, i) for i in range(len(rows))]]
+        with_block = list(plain)
+        with_block[-1] += 5
+        self.assertLess(board._max_top(plain, 10), board._max_top(with_block, 10))
+
+    def test_the_rich_window_is_unchanged_when_every_row_is_one_line(self):
+        """`_window` grew a `costs` argument; with `None`, or with a list of ones, it must
+        answer exactly what it answered before — every scroll position, every room."""
+        for n in range(0, 9):
+            for room in range(0, 12):
+                for top in range(0, 10):
+                    with self.subTest(n=n, room=room, top=top):
+                        self.assertEqual(richboard._window(n, top, room),
+                                         richboard._window(n, top, room, [1] * n))
+
+    def test_the_rich_window_never_hands_back_more_lines_than_the_room(self):
+        costs = [1, 1, 4, 1, 6, 1]
+        for room in range(1, 16):
+            for top in range(0, 6):
+                first, last = richboard._window(len(costs), top, room, costs)
+                if first == last:
+                    continue        # no row fits at all; `layout` gives head lines back
+                spent = sum(costs[first:last]) + (1 if first else 0) \
+                    + (1 if last < len(costs) else 0)
+                with self.subTest(room=room, top=top):
+                    self.assertLessEqual(spent, room)
+
+
+class SeamPathsTest(unittest.TestCase):
+    """The two paths `board.py` resolves itself, pinned against the module that owns them.
+
+    `switchboard.plugins` imports `store`, and a renderer may not — `tests/test_panel.py`
+    is that guarantee and `report-bug` and `suggestions` ship enabled, so the seam runs in
+    every repo and cannot reach for it. So the board globs the plugin roots itself and
+    computes the state directory itself, and these two tests are what stop the copies
+    drifting from the originals.
+    """
+
+    def test_the_board_finds_exactly_the_plugins_that_plugins_available_finds(self):
+        from switchboard import plugins
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        repo = a_plugin_repo(tmp, enabled='["own", "plans"]',
+                             plugins={"own": {}, "notaplugin": {}})
+        (repo / ".switchboard" / "plugins" / "notaplugin" / "__init__.py").unlink()
+        (repo / ".switchboard" / "plugins" / "a-preset.md").write_text("not a plugin")
+        # `plans` is shipped and not the repo's, and it has a state directory here, so it
+        # is found through the OTHER root — which is the half a one-root glob would miss.
+        (repo / ".git" / "agentflow" / "plugins" / "plans").mkdir(parents=True)
+        board._HOOKS.clear()
+        self.addCleanup(board._HOOKS.clear)
+        with mock.patch.dict(os.environ, {"PR8_MARK": str(tmp / "m")}):
+            found = {n for n, _, _ in board.board_hooks(repo)}
+        self.assertLessEqual(found, set(plugins.available(repo)))
+        self.assertEqual(found, {"own", "plans"})
+
+    def test_drawing_a_plugins_lines_does_not_hand_the_board_a_database(self):
+        """`RendererImports` in `tests/test_panel.py` proves the renderer MODULES cannot
+        reach `store`. This is the half PR8 added and could have broken: the board now
+        imports plugin packages, and a plugin imports `switchboard.plugins` for `Result`,
+        so a `store` at the top of that module would have put `store.connect` two
+        attribute lookups from the process drawing Andrew's board. A fresh interpreter,
+        because this one has imported the store to run the rest of the file."""
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import switchboard.plugins, sys; "
+             "print('switchboard.store' in sys.modules)"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout.strip(), "False")
+
+    def test_the_state_directory_is_the_one_the_plugin_itself_would_write_to(self):
+        """Two spellings of one path — `plugins.state_root` goes through
+        `store.repo_root()`, which spawns `git`, and the board goes through
+        `panel.git_common_dir`, which does not. A real checkout, because that is the only
+        way to ask the first one at all."""
+        from switchboard import plugins
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        repo = tmp / "repo"
+        repo.mkdir()
+        for cmd in (["init", "-q", "-b", "main"],
+                    ["-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(["git", *cmd], cwd=repo, check=True,
+                           capture_output=True)
+        want = plugins.state_root("repo", repo) / "plans"
+        want.mkdir(parents=True)
+        self.assertEqual(board._state_dir(repo, "plans", "repo"), want)
+        # Named whether or not it is there, and never created: a plugin's directory is
+        # made by its first command, and a board that refused the hook until then would
+        # never show the first plan. `_read` answers an empty document for a missing file.
+        never = want.parent / "never-run"
+        self.assertEqual(board._state_dir(repo, "never-run", "repo"), never)
+        self.assertFalse(never.exists())
+        # No repo, no path to name.
+        self.assertIsNone(board._state_dir(tmp / "not-a-repo", "plans", "repo"))
 
 
 if __name__ == "__main__":
