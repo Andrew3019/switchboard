@@ -573,10 +573,23 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # — is counted off it; which pieces that number is made of is only decided where the
     # head is drawn, and only ever by the two give-backs below.
     stats_block = _stats_block(stats, inner)
+    # Whatever a plugin draws as a section of its own, under the tree and above NEEDS YOU.
+    # Sized here with the other fixed blocks because it is what the body has to share the
+    # pane with, and it carries its own blank line above so that the padding travels with
+    # the section rather than being remembered separately where it is drawn.
+    below = _plugin_sections(rows, inner)
     bar = True                                   # is the AGENTS section header drawn?
     head_lines = 2 + len(stats_block)
     gap_min = 1 if needs else 0
-    room = capacity - head_lines - 1 - len(needs) - gap_min          # head, footer
+    room = capacity - head_lines - 1 - len(needs) - gap_min - len(below)   # head, footer
+    if room < 1 and below:
+        # FIRST TO GIVE ITS LINES BACK, before the numbers and long before the tree. A
+        # plugin's section is the most decorative thing on this board and the only one a
+        # human can get in full with one command; what he opened the board for is the
+        # tree. All of it at once rather than a line at a time: half a flowchart is not a
+        # smaller picture, it is a wrong one.
+        room += len(below)
+        below = []
     if room < 1 and stats_block:
         # THE NUMBERS GO BEFORE THE SUMMONS DOES. A pane this short has room for the
         # board's real work and nothing else, and NEEDS YOU is the section a human is
@@ -614,6 +627,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     extras = [e[:max(0, room - 3)] for e in board.group_extras(rows)]
     costs = [1 + len(e) for e in extras]
     first, last = _window(len(rows), max(0, top), max(0, room), costs)
+    if rows and first == last and below:
+        # No agent fits, and a plugin's section is holding lines the tree needs. Handed
+        # back before the numbers are, for the reason stated where `below` is sized — and
+        # unconditionally, without checking whether it buys a row, because a section
+        # drawn over an empty tree is the one arrangement this board has no use for.
+        room, below = room + len(below), []
+        first, last = _window(len(rows), max(0, top), max(0, room), costs)
     if rows and first == last:
         n = len(stats_block)
         for give_stats, give_bar in (((n, 0), (n, 1)) if n else ((0, 1),)):
@@ -669,11 +689,21 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             # like every other line here, and owned by NOBODY: it is not an agent, and a
             # click on it must miss rather than focus whatever row is nearest.
             for extra in extras[i]:
-                # `_clipw` and not `_clip`: a block is columns a plugin lined up on
-                # purpose, and `board._clip` flattens runs of whitespace — right for a
-                # task head, wrong for anything whose spaces are a column.
-                emit(Text(_clipw(board._block_line(extra), inner), style=DIM,
-                          no_wrap=True, overflow="crop"))
+                # `from_ansi` and not `Text(...)`: the seam lets a plugin colour its own
+                # words (`board._colour_only`), and a plain `Text` would print the escape
+                # sequences as characters. Parsed into spans instead, over `DIM` as the
+                # base style — so a plugin that colours nothing reads exactly as this
+                # block always has, and one that colours something is drawn rather than
+                # spelled out. Truncated by rich for the same reason: the spans have to
+                # survive the cut, which a string clip cannot promise.
+                #
+                # `_clipw`'s rule still holds and is why nothing here flattens whitespace:
+                # a block is columns a plugin lined up on purpose, and `board._clip` would
+                # collapse the runs of spaces that ARE those columns.
+                block = Text.from_ansi(board._block_line(extra), style=DIM,
+                                       no_wrap=True, overflow="crop")
+                block.truncate(inner, overflow="crop")
+                emit(block)
                 drawn += 1
         if last < len(rows):
             emit(Text(_clip(f"  + {len(rows) - last} more below", inner), style=DIM,
@@ -685,7 +715,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # and all the slack goes in ONE run between them. The blank line above NEEDS YOU is
     # that run's last line rather than a line added on top of it, so it is exactly one
     # when the board is full and the slack when it is not, and never multiplies.
-    gap = max(gap_min, capacity - head_lines - drawn - len(needs) - 1)
+    # Plugin sections, under the whole tree and above the slack. Owned by NOBODY — a click
+    # on a plan is a miss, exactly as a click on a statistic is — and already carrying
+    # their own blank line above, so there is nothing to remember here about padding.
+    for line in below:
+        emit(line)
+    gap = max(gap_min, capacity - head_lines - drawn - len(below) - len(needs) - 1)
     for _ in range(gap):
         emit(Text(""))
     for line, owner in needs:
@@ -924,6 +959,40 @@ def _stats_block(stats: Optional[dict], inner: int):
             line.append(_clip(board.STATS_NONE, room), style=DIM)
         out.append(line)
     out.append(Text(""))                         # the space between STATS and AGENTS
+    return out
+
+
+def _plugin_sections(rows: list[Any], inner: int) -> list[Any]:
+    """Every plugin section as rich lines: a blank, a bar, and the plugin's own lines.
+
+    A BAR IN `SECTION_STYLE`, like `STATS`, `AGENTS` and `NEEDS YOU`, because that is what
+    a section looks like on this board and one drawn any other way reads as a section that
+    is missing something. The blank line above it belongs to the block and travels with
+    it, so `layout` has one number for the section and never has to remember the padding
+    separately.
+
+    The lines themselves are `Text.from_ansi` for the same reason the group block is: the
+    seam lets a plugin colour its own words (`board._colour_only`), and a plain `Text`
+    would print the escape sequences as characters. Base style is NOT `DIM` here, unlike
+    the group block — a block hanging under a group is a footnote to those agents and is
+    dimmed to say so, and a section is not a footnote to anything.
+
+    Undimmed also means a plugin's own colours land at full strength, which is the point
+    of having let them through at all.
+    """
+    from rich.text import Text
+
+    out: list[Any] = []
+    for title, lines in board.section_extras(rows):
+        out.append(Text(""))
+        out.append(_bar(" " + title, inner, SECTION_STYLE))
+        for text in lines:
+            # `_clipw`'s rule: a plugin's spaces are columns it lined up on purpose, so
+            # nothing here flattens whitespace. Truncated by rich rather than by a string
+            # clip so the colour spans survive the cut.
+            line = Text.from_ansi("  " + text, no_wrap=True, overflow="crop")
+            line.truncate(inner, overflow="crop")
+            out.append(line)
     return out
 
 

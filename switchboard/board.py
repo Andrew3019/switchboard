@@ -650,6 +650,30 @@ BOARD_FILE = "board.py"
 _STEM = "board"                                 # `BOARD_FILE` without its extension
 BOARD_HOOK = "board_lines"
 
+# WHERE a plugin's lines go, and the whole of that half of the contract: a `board.py` that
+# also sets a module-level `SECTION = "PLANS"` is drawn as its own SECTION UNDER THE TREE,
+# in the same place and the same vocabulary as `STATS` and `AGENTS`, instead of hanging
+# under the worktree group its lines came from. Both renderers put it directly after the
+# agents, with one blank line above it.
+#
+# ONE HOOK AND NOT TWO. `board_lines` is still called exactly as before — once per
+# worktree, handed that worktree's rows — and a section is that same answer collected and
+# labelled rather than a second thing a plugin has to implement. So a plugin moves between
+# the two placements by adding or deleting one line, and the seam has one contract to be
+# right about instead of two that must not drift.
+#
+# Why a plugin would want it: a block under a group reads as a FOOTNOTE to those agents,
+# which is right for a line or two about them and wrong for something with a shape of its
+# own. The plans plugin draws a flowchart per plan; a picture wants a section and a
+# heading, not a hanging indent under the last row of a tree.
+BOARD_SECTION = "SECTION"
+
+# What a section title may be, once a plugin has been asked for one: short, printable, and
+# drawn in the same voice as the board's own labels. A plugin that sets something else
+# gets no section — its lines fall back to hanging under their group, which is what the
+# seam did before sections existed and is never worse than a wrecked heading.
+SECTION_MAX = 24
+
 # The name a plugin package is imported under — `plugins._MODULE_PREFIX`, the same string
 # deliberately, so a plugin already imported by an `sb plugin` call in this process is
 # found rather than executed a second time under a second name.
@@ -664,7 +688,15 @@ HOOK_LINES = 40
 # end a line in some readers and not others. The same class the plans plugin escapes on the
 # way IN (`_CONTROL` there) — one rule for "this is not part of a line", stated twice
 # because the board has to hold it for plugins that never thought about it.
+#
+# `ESC` is in that range and is NO LONGER stripped wholesale: `_colour_only` lifts the SGR
+# sequences out first and runs this over what is left, so a plugin may colour a word and
+# still may not move the cursor. See that function for why the two were worth separating.
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+# Closed after any line a plugin coloured, so an unbalanced sequence cannot leak into the
+# rows below it. See `_colour_only`.
+_SGR_RESET = "\033[0m"
 
 # The subdirectory a plugin's state lives in under the store — `plugins._STATE_SUBDIR`.
 # Named again here because `_state_dir` below resolves the path the renderer-safe way and
@@ -672,7 +704,8 @@ _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 # whole path against `plugins.state_root`, which is what keeps the two from drifting.
 PLUGIN_STATE_SUBDIR = "plugins"
 
-# `{worktree: [(name, board_lines, state_dir)]}`. Discovered ONCE per process, because
+# `{worktree: [(name, board_lines, state_dir, section)]}`. Discovered ONCE per process,
+# because
 # importing is the expensive half and a board redraws every couple of seconds. The price
 # is that enabling a plugin reaches an already-open board only when it is reopened, and
 # that is the right way round: a directory that changes almost never must not be re-globbed
@@ -684,10 +717,11 @@ PLUGIN_STATE_SUBDIR = "plugins"
 # whole feature — open the board, then create the first plan — is exactly the case where
 # it does not exist yet, and a cache that wrote "nothing to draw" then would keep saying so
 # until the pane was closed. Nothing on screen would have said why.
-_HOOKS: dict[str, list[tuple[str, Callable, Path]]] = {}
+_HOOKS: dict[str, list[tuple[str, Callable, Path, Optional[str]]]] = {}
 
 
-def board_hooks(worktree: Optional[Path] = None) -> list[tuple[str, Callable, Path]]:
+def board_hooks(worktree: Optional[Path] = None
+                ) -> list[tuple[str, Callable, Path, Optional[str]]]:
     """Every enabled plugin that draws on the board, resolved and cached.
 
     Nothing here can fail loudly. A board is what a human looks at to find out that
@@ -703,7 +737,7 @@ def board_hooks(worktree: Optional[Path] = None) -> list[tuple[str, Callable, Pa
     return _HOOKS[key]
 
 
-def _discover(worktree: Path) -> list[tuple[str, Callable, Path]]:
+def _discover(worktree: Path) -> list[tuple[str, Callable, Path, Optional[str]]]:
     """Import the `board.py` of every enabled plugin that has one.
 
     `switchboard.plugins` IS NOT IMPORTED HERE, and that is why this globs two directories
@@ -732,7 +766,7 @@ def _discover(worktree: Path) -> list[tuple[str, Callable, Path]]:
             if d.is_dir() and (d / "__init__.py").is_file():
                 found[d.name] = d
 
-    out: list[tuple[str, Callable, Path]] = []
+    out: list[tuple[str, Callable, Path, Optional[str]]] = []
     for name in enabled:
         d = found.get(name)
         # THE WHOLE COST OF A PLUGIN THAT DRAWS NOTHING: one `is_file`. Nothing is
@@ -741,7 +775,7 @@ def _discover(worktree: Path) -> list[tuple[str, Callable, Path]]:
         if d is None or not (d / BOARD_FILE).is_file():
             continue
         try:
-            mod, hook = _load_drawer(name, d)
+            mod, hook, section = _load_drawer(name, d)
         except KeyboardInterrupt:
             raise
         except BaseException:                   # noqa: BLE001 — a broken plugin costs the
@@ -751,12 +785,12 @@ def _discover(worktree: Path) -> list[tuple[str, Callable, Path]]:
         state = _state_dir(worktree, name, str(getattr(mod, "SCOPE", "repo")))
         if state is None:
             continue
-        out.append((name, hook, state))
+        out.append((name, hook, state, section))
     return out
 
 
-def _load_drawer(name: str, d: Path) -> tuple[object, object]:
-    """The plugin package, then its `board.py`, then the hook on it.
+def _load_drawer(name: str, d: Path) -> tuple[object, object, Optional[str]]:
+    """The plugin package, then its `board.py`, then the hook and the section title on it.
 
     The PACKAGE first and under the same module name `plugins._import` gives it
     (`sb_plugin_<name>`), so that `board.py`'s own `from . import …` reaches the plugin it
@@ -777,7 +811,28 @@ def _load_drawer(name: str, d: Path) -> tuple[object, object]:
         except BaseException:
             sys.modules.pop(modname, None)
             raise
-    return mod, getattr(importlib.import_module(f"{modname}.{_STEM}"), BOARD_HOOK, None)
+    drawer = importlib.import_module(f"{modname}.{_STEM}")
+    return (mod, getattr(drawer, BOARD_HOOK, None),
+            _section_title(getattr(drawer, BOARD_SECTION, None)))
+
+
+def _section_title(given: object) -> Optional[str]:
+    """A plugin's `SECTION`, vetted, or None — which means "hang under the group".
+
+    Vetted HERE, once at discovery, rather than where the heading is drawn: a title is
+    read from a plugin at import time and never changes, and a renderer asking the same
+    question sixty times a minute is the cost this whole seam is arranged to avoid.
+
+    Upper-cased because the two headings it stands beside are `STATS` and `AGENTS` and a
+    section that shouted differently would read as a different KIND of thing. Flattened
+    and length-capped for `_hook_lines`' reason, one register up: a heading is drawn into
+    a filled bar in one renderer, and a control character or a title wider than the pane
+    breaks the bar rather than merely looking wrong.
+    """
+    if not isinstance(given, str):
+        return None
+    text = " ".join(_CONTROL.sub(" ", given).split()).upper()
+    return text[:SECTION_MAX] or None
 
 
 def _state_dir(worktree: Path, name: str, scope: str) -> Optional[Path]:
@@ -832,22 +887,73 @@ def group_extras(rows: list) -> list[list[str]]:
     to learn what a group is. A run cut in half by the window keeps its block off screen
     with the row it hangs on, which is right — a block under a group whose tail is not
     drawn would be a block under nothing.
+
+    A plugin that declared a `SECTION` is skipped here entirely: its lines are drawn once,
+    below the tree, by `section_extras`. Skipped rather than drawn in both places, which
+    would be the same plan said twice on one screen.
     """
     out: list[list[str]] = [[] for _ in rows]
-    hooks = board_hooks()
+    hooks = [h for h in board_hooks() if not h[3]]
     if not hooks or not rows:
         return out                              # today's board, and nothing imported
-    from . import richboard
-
-    workspaces: dict[str, list[int]] = {}
-    for first, last in richboard.group_runs(rows):
-        workspaces.setdefault(rows[first].workspace, []).extend(range(first, last + 1))
-    for ws, idx in workspaces.items():
+    for ws, idx in _by_workspace(rows).items():
         group = [rows[i] for i in idx]
         lines: list[str] = []
-        for _name, hook, state in hooks:
+        for _name, hook, state, _section in hooks:
             lines.extend(_hook_lines(hook, state, ws, group))
         out[idx[-1]] = lines
+    return out
+
+
+def section_extras(rows: list) -> list[tuple[str, list[str]]]:
+    """The sections plugins draw BELOW the tree: `[(title, lines), ...]`, in plugin order.
+
+    The same hook and the same per-workspace questions `group_extras` asks — see
+    `BOARD_SECTION` for why one hook serves both placements. What differs is only where
+    the answers go: collected across every workspace on screen into one titled block,
+    instead of hung on the last row of each group.
+
+    IN SCREEN ORDER, and the workspaces are still asked one at a time, so a section reads
+    top to bottom in the order the tree above it does. Nothing is inserted between one
+    workspace's lines and the next: what a section says about which worktree a line came
+    from is the PLUGIN'S editorial problem, not the board's, and a board that started
+    captioning a plugin's output would be deciding what the plugin meant.
+
+    A section with no lines is not returned at all, so a plugin with nothing to say costs
+    no heading and no blank — the same rule the group block has always followed.
+
+    Not windowed here. `HOOK_LINES` still caps each plugin per workspace, and the two
+    renderers cut the block to what their pane has left; this only says what there is.
+    """
+    hooks = [h for h in board_hooks() if h[3]]
+    if not hooks or not rows:
+        return []
+    groups = _by_workspace(rows)
+    out: list[tuple[str, list[str]]] = []
+    for _name, hook, state, section in hooks:
+        lines: list[str] = []
+        for ws, idx in groups.items():
+            lines.extend(_hook_lines(hook, state, ws, [rows[i] for i in idx]))
+        if lines:
+            out.append((str(section), lines))
+    return out
+
+
+def _by_workspace(rows: list) -> dict:
+    """`{workspace: [row index, ...]}` in screen order — every row of it, runs merged.
+
+    ONCE PER WORKSPACE AND NOT ONCE PER RUN, which is the distinction that matters and the
+    reason this is a function rather than two loops. `richboard.group_runs` brackets runs
+    of CONSECUTIVE rows sharing a workspace, and one workspace can hold two of them — a
+    lead that delegated one child elsewhere and kept another at home puts its own
+    workspace on both sides of the other one. Asking per run drew that workspace's block
+    twice, said the same plan twice, and paid the drawer twice for it.
+    """
+    from . import richboard
+
+    out: dict[str, list[int]] = {}
+    for first, last in richboard.group_runs(rows):
+        out.setdefault(rows[first].workspace, []).extend(range(first, last + 1))
     return out
 
 
@@ -888,8 +994,42 @@ def _hook_lines(hook: Callable, state: Path, workspace: str, group: list) -> lis
         # left with no glyph becomes ONE SPACE — one rule, and the only one that keeps the
         # count of columns honest: a dropped character would shift a plugin's own alignment
         # and a kept one is a character this board cannot measure.
-        out.extend(_CONTROL.sub(" ", part) for part in item.splitlines() or [""])
+        out.extend(_colour_only(part) for part in item.splitlines() or [""])
     return out[:HOOK_LINES]
+
+
+def _colour_only(line: str) -> str:
+    """A plugin's line with its COLOUR kept and every other escape flattened to a space.
+
+    The seam used to strip `\\x1b` with the rest of C0, which made "a plugin may not move
+    the cursor or clear the pane" and "a plugin may not use colour" the same rule. They
+    are not the same rule. `ESC [ 2J` is a plugin reaching past its own lines and into the
+    human's only live view of the fleet; `ESC [ 32m` is a plugin saying which of its words
+    matter, on a board whose every other line is already coloured, and where a plugin's
+    alternative is spending a COLUMN on what a colour says for free.
+
+    So the split is by sequence rather than by character: `_ANSI` matches select-graphic-
+    rendition and nothing else — no cursor motion, no erase, no mode set, no OSC — and
+    what falls between the matches goes through `_CONTROL` exactly as the whole line did
+    before. Everything the old rule protected is still protected, and the board's own
+    `_visible_len`, `_pad` and `_fit` already measure and cut around SGR, so a coloured
+    line costs the layout nothing.
+
+    A RESET IS APPENDED to any line that coloured anything, and this is the part that is
+    not optional: a plugin that opens green and forgets to close it would otherwise paint
+    the footer, the next agent's row, and everything else the terminal draws after it.
+    The board is not entitled to trust that a plugin balanced its own sequences.
+    """
+    parts: list[str] = []
+    painted = False
+    at = 0
+    for m in _ANSI.finditer(line):
+        parts.append(_CONTROL.sub(" ", line[at:m.start()]))
+        parts.append(m.group())
+        painted = True
+        at = m.end()
+    parts.append(_CONTROL.sub(" ", line[at:]))
+    return "".join(parts) + (_SGR_RESET if painted else "")
 
 
 
@@ -998,7 +1138,30 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     top_lines = ([_c(" STATS", DIM)]
                  + [_stats_line(label, pieces, width) for label, pieces in stats_rows(stats)]
                  + [""])
-    capacity = height - CHROME
+    # Whatever a plugin draws as a section of its own, sized BEFORE the tree is windowed
+    # because it is what the tree has to share the pane with. A blank line above each
+    # heading, so the section is held off the last agent the way `STATS` is held off the
+    # first — the padding belongs to the section and travels with it, so a section that
+    # gives its lines back gives the blank back too.
+    #
+    # NOT `_block_line` and NOT `DIM`, which is the difference between a section and the
+    # block that hangs under a group. That indent is a hanging one — it says "this belongs
+    # to the rows above" — and the dim says the same thing again; a section belongs to the
+    # board, sits under its own heading, and is drawn at the shallow indent every other
+    # section's body uses. Undimmed also means a plugin's own colours land at full
+    # strength, which is the point of having let them through the seam at all.
+    below: list[str] = []
+    for title, lines in section_extras(agents):
+        below.extend([""] + [_c(" " + title, DIM)] + ["  " + x for x in lines])
+    capacity = height - CHROME - len(below)
+    # WHO GIVES LINES BACK FIRST, on a pane too short for all of it: the plugin section,
+    # then the fleet's numbers, and the tree never. A section under the tree is the most
+    # decorative thing on this screen and the only one a human can get in full with one
+    # command; the board is the tree, and a board with no agent row on it has stopped
+    # being the thing anybody opened.
+    if capacity < 1:
+        capacity += len(below)
+        below = []
     if capacity < 1:
         capacity += len(top_lines)
         top_lines = []
@@ -1138,6 +1301,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             # agent happens to be nearest.
             for extra in block:
                 emit(_c(_block_line(extra), DIM))
+
+    # Plugin sections, under the whole tree and owned by NOBODY — a click on a plan is a
+    # miss, exactly as a click on a statistic is. Already carrying their own blank line
+    # above (see `below`), so there is nothing to remember here about padding.
+    for line in below:
+        emit(line)
 
     while len(rows) < height - 2:
         emit("")
