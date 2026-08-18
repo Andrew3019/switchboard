@@ -685,7 +685,8 @@ class CatalogueTest(PlansSandbox):
     of the design — which is why the tests here assert what is in the FILE and not only what
     `show` prints.
 
-    The shipped catalogue is deliberately almost bare — a merge, its review, one template —
+    The shipped catalogue is deliberately almost bare — `create-pr`, `merge`,
+    `merge-human-review`, one template —
     so most of these write their own definitions into the sandbox's `defaults/`, which is
     also the honest way to test a catalogue whose contents PR9 is supposed to grow.
 
