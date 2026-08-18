@@ -26,6 +26,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import board, panel, richboard, status  # noqa: E402
 
+# `rich` is optional — `richboard.available()` is asked rather than assumed, and where the
+# answer is no `richboard.layout` returns None by contract and the plain renderer draws.
+# The tests below that compare the two renderers therefore check the plain half always and
+# the rich half only where there is a rich renderer to check, exactly as
+# `tests/test_richboard.py` does. CI installs the test runner and nothing else, so this is
+# the ordinary case there rather than an exotic one.
+HAVE_RICH = richboard.available()
+
 
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
@@ -1039,7 +1047,8 @@ class PluginSeamTest(unittest.TestCase):
             drawn = [t for t, _ in board.layout(snap(*rows), top=0, height=14,
                                                 width=100, msg="")]
             rich = [str(t) for t, _ in richboard.layout(snap(*rows), top=0, height=14,
-                                                        width=100, msg="")]
+                                                        width=100, msg="")] \
+                if HAVE_RICH else []
         # `nel` splits rather than becoming a space: NEL is a line break to
         # `str.splitlines`, and one line is one row here — the same rule as a newline.
         self.assertEqual(block, [" [2J [Hgotcha", "a b", "bell ", "nel", "x"])
@@ -1106,9 +1115,10 @@ class SeamOffIsTodaysBoardTest(unittest.TestCase):
             rich_none = richboard.layout(self.snap, **kw)
         self.assertTrue(never.called)
         self.assertEqual(plain_off, plain_none)
-        self.assertEqual([str(t) for t, _ in rich_off],
-                         [str(t) for t, _ in rich_none])
-        self.assertEqual([o for _, o in rich_off], [o for _, o in rich_none])
+        if HAVE_RICH:
+            self.assertEqual([str(t) for t, _ in rich_off],
+                             [str(t) for t, _ in rich_none])
+            self.assertEqual([o for _, o in rich_off], [o for _, o in rich_none])
 
 
 class PlanBlockTest(unittest.TestCase):
@@ -1160,13 +1170,13 @@ class PlanBlockTest(unittest.TestCase):
             extras = board.group_extras(rows)
             plain = [t for t, _ in board.layout(s, top=0, height=24, width=110, msg="")]
             rich = [str(t) for t, _ in richboard.layout(
-                s, top=0, height=24, width=110, msg="")]
+                s, top=0, height=24, width=110, msg="")] if HAVE_RICH else None
         # Hung on the LAST row of each run, which is where a block reads as belonging to
         # the group above it — and never on a group it is not part of.
         self.assertEqual(extras[0], [])
         self.assertIn("guardrails", extras[1][0])
         self.assertIn("the other one", extras[2][0])
-        for lines in (plain, rich):
+        for lines in ([plain, rich] if HAVE_RICH else [plain]):
             body = [board._ANSI.sub("", x) for x in lines]
             kid = next(i for i, x in enumerate(body) if "kid" in x)
             self.assertIn("guardrails", body[kid + 1])
@@ -1266,7 +1276,11 @@ class SeamWindowTest(unittest.TestCase):
         decline. `richboard.layout` returns None for a frame whose line count did not come
         back the way it was built, which is a legitimate fallback and also exactly what a
         window-math regression looks like — so a block that broke the arithmetic would
-        pass this sweep as "not drawn" if None were tolerated. At these sizes it draws."""
+        pass this sweep as "not drawn" if None were tolerated. At these sizes it draws.
+
+        Where `rich` is not installed there is no rich renderer to hold to that, and the
+        plain half of the sweep is the whole test — see `HAVE_RICH` at the top of the
+        file."""
         s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None,
                          workspace=["api", "web", "db"][i % 3])
                    for i in range(6)])
@@ -1276,10 +1290,11 @@ class SeamWindowTest(unittest.TestCase):
                     with self.subTest(height=height, block=n, top=top), self.tall(n):
                         plain = board.layout(s, top=top, height=height, width=100, msg="")
                         self.assertEqual(len(plain), height)
-                        rich = richboard.layout(s, top=top, height=height, width=100,
-                                                msg="")
-                        self.assertIsNotNone(rich)
-                        self.assertEqual(len(rich), height)
+                        if HAVE_RICH:
+                            rich = richboard.layout(s, top=top, height=height, width=100,
+                                                    msg="")
+                            self.assertIsNotNone(rich)
+                            self.assertEqual(len(rich), height)
 
     def test_the_agent_row_outranks_its_own_block(self):
         """A plan tall enough to fill a pane must not push the agent it hangs off it."""
