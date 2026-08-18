@@ -473,16 +473,17 @@ def register(reg):
 # to; leaving the trigger out would leave this text unreachable, because nobody looks up an
 # instruction they were never told exists.
 #
-# It states the condition, the owner, the route — and the two gates, which are the one
-# thing here that is a PROCEDURE rather than a pointer. That is deliberate: the plugin
-# represents a gate and renders it, and everything that actually happens at one is an
-# agent following prose. The prose has to live where the verbs do, or an agent reaches a
-# gate holding a field it can see and no account of what to do about it. The design gate's
-# FORMAT is the exception and is a preset (`sb presets design-gate`), because a format is
-# long, exact, and read at one step by one agent.
+# It states the condition, the owner, the route, and the fact that there are two gates. It
+# does NOT state what happens at one, what any named step involves, or what any verb does.
+# Every one of those has a home that is read at the moment it applies — a definition's own
+# `about` for a step, `sb presets` for a format, `sb plugin plans` for the verbs — and a
+# second copy here would be a copy going stale against the thing it describes. This text is
+# a pointer to those homes and a small number of rules that have nowhere else to live.
 #
-# What a step IS, and what each verb does to one, is `sb plugin plans` and the design doc —
-# repeating it here would be a second copy going stale against the verbs in this same file.
+# So what stays is what is true about EVERY plan and about no particular step: when one
+# exists, who is allowed to write to it, what to build it out of, and how to edit the file
+# without losing the record. The gate procedures used to be here in full and are not any
+# more; they belong on the step whose exit condition the gate is.
 GUIDE = """\
 Plan-making — read this when a job comes up, not before.
 
@@ -493,95 +494,86 @@ WHEN A PLAN EXISTS
 
   Everything else runs without one — investigation, questions, scouting, review-only work,
   anything a single agent answers and reports, and everything a dispatcher does.
+  Investigation PRODUCES a plan rather than living inside one; it is a step only when it is
+  one piece of an already-shaped job.
 
-  Investigation produces a plan rather than living inside one. Make it once the outcome is
-  known and there is a clear path from what was found through to a merged PR. Investigation
-  is a step only when it is one piece of an already-shaped job.
+WHO WRITES TO IT
 
-WHO MAKES IT
+  The worktree's owner: the lead, or the sole worker where there is no lead. A sole worker
+  counts as a lead for this and nothing else — planning the work you were given is how the
+  task is carried, not work you took on.
 
-  The worktree's owner: the lead of that worktree, or the sole worker where there is no
-  lead. A sole worker counts as a lead for this and nothing else — making the plan for the
-  work you were given is not going beyond your task, it is how the task is carried.
+  The owner makes every edit. A child that wants one ASKS — `sb tell parent` — and does not
+  touch the plan itself, beyond ticking and noting the step it was given. One writer is
+  what makes editing this file by hand safe, and it is the only thing that does.
 
   A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
   it does not plan, own, tick or read one.
 
-HOW TO MAKE IT
+WHAT TO BUILD IT FROM
 
-  Look for a template first — you are not expected to know one exists:
+  Look before inventing — you are not expected to know what already exists:
 
-      sb plugin plans template list          browse them
-      sb plugin plans template use <name>    start a plan from one
+      sb plugin plans library                the named steps, and what each one is
+      sb plugin plans template list          the preconfigured plans
+      sb plugin plans template use <name>    start from one
+      sb plugin plans create "<what for>"    start from nothing, empty or with --step
 
-  Take a template if it fits and start from `create` if none does:
+  A definition carries its own account of how that step is run — what it obliges, what it
+  gates, what finishing it means. Read it there. Nothing about any particular step is
+  repeated here, so that nothing here can be out of date about one.
 
-      sb plugin plans create "<what this plan is for>" --step "…" --step "…"
+  Then re-plan on what you now know, rather than executing a split you decided before you
+  knew anything.
 
-  A plan may be created with some of its steps already done — but not a step whose exit
-  condition is a gate. Skip that one with the reason, which is visible, rather than
-  starting it complete, which is not.
+EDITING IT
 
-  Then keep it honest. Nothing infers progress: `tick` when a step is done, `skip` with the
-  reason when it will not be, `rework` when it comes back, and re-plan on what you now know
-  rather than executing a split you decided before you knew anything.
+  The plan is a JSON file, and past the commands above you edit it the way you edit any
+  file — steps, owners, gates, deps, order, progress, all of it, in an editor:
 
-  `sb plugin plans` lists every verb; `sb plugin plans show <id>` renders one plan in full.
+      $(git rev-parse --git-common-dir)/agentflow/plugins/plans/plans.json
 
-THE TWO GATES
+  `sb plugin plans show <id> --json` gives you the shape to write against. Three rules:
 
-  A gate is a step's EXIT CONDITION that requires a human — never a step of its own. Mark
-  it on the step whose end he has to answer:
+    - APPEND a changelog entry for what you changed, in the shape the ones already there
+      have. Nothing infers it, and the record is read later to decide what the catalogue
+      should hold — an edit with no entry behind it counts as nothing.
+    - NEVER drop or rewrite an entry that is already there, or a plan. Records are kept and
+      never erased; cleanup means dropping out of the UI.
+    - ADD A LIBRARY STEP with `name-step`, not by hand. It pulls in what the definition
+      composes and obliges; a `def` you typed yourself silently brings neither.
 
-      sb plugin plans gate s-3 --needs "he confirms the behavioural contract"
+  Two verbs are worth typing rather than editing, being frequent and small — `tick <step>`
+  when a step is done, and `note <step> --text` for what happened. They write the changelog
+  entry for you, which is the whole of what they buy. `sb plugin plans` lists the rest.
 
-  At a gate you block. `show` then renders your step's owner as blocked, because that is
-  read off you at the moment somebody looks. Answering you clears both the block and the
-  gate: there is nothing to type against the plan, and no verb here clears one. You tick
-  the step once he has answered.
-
-  A job that lands a change has two of these and everything else resolves without him. A
-  trivially small change may skip one — `skip --reason` — and a behavioural contract for a
-  typo is exactly that case. Never route round a gate by not creating the step: a skip is
-  on the board with its reason and can be questioned, an omission is invisible.
-
-  THE DESIGN GATE, after planning and before implementing. Summarise what is causing the
-  problem and what the fix will be, in the format `sb presets design-gate` prints — read
-  it, it is exact. Point at a fuller artifact for anything that does not fit, and name the
-  other plan where the change spans two worktrees. Then block.
-
-  THE MERGE GATE, at the end. Its step is the merge step, and `merge` from the library is
-  not gated for you — mark it as you plan, the way you mark any other gate. Create the PR
-  and write the description first — he is not asked whether to create it. Say what you have
-  already tested; give him testing steps only where they are actually needed. Then block
-  for the one approval.
-
-  On his approval the rest runs without asking again — merge, cleanup, delete the worktree,
-  close the agents. That collapse is the point of the gate, so do not stop and ask at each
-  step. What "no further questions" does NOT cover is failure: a merge conflict, red
-  checks, a teardown that does not complete — any of those and you block with it. His
-  approval was given before the merge was attempted, so the failure is the one thing it
-  cannot have covered.
-
-  WHO RUNS WHICH PART OF THAT CHAIN is worth being exact about, because half of it is
-  teardown and no agent can tear itself down. The step's owner merges, ticks the step, and
-  cleans up beneath itself — `sb cleanup` reaches its own children and no further. Deleting
-  the worktree it is standing in, and closing the agents above it, are the LEAD's: the
-  owner reports that the merge is in and what is left to tear down, and the lead carries
-  those out as the last agent standing. So the owner does not stop half way and does not
-  block a second time on a routine step, and nothing is left half torn down. Where the
-  owner IS the lead — a sole worker, or a lead that took the merge step itself — it is all
-  one agent's, and the ordering below is what keeps it honest.
-
-  TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. The step that closes the last agent or
+  TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. A step that closes the last agent or
   deletes the worktree takes with it whatever was going to tick it, so a tick that waits
   for the command to finish is a tick that does not happen.
 
+THE TWO GATES
+
+  A gate is a step's EXIT CONDITION that requires a human — never a step of its own. Put
+  the sentence on the step whose end he has to answer, then block when you reach it.
+  Answering you clears it: there is nothing to type against the plan and no verb clears
+  one. You tick the step after he has answered.
+
+  A job that lands a change has two, and everything else resolves without him:
+
+      THE DESIGN GATE   after planning, before implementing.  `sb presets design-gate`
+                        is the format — read it, it is exact.
+      THE MERGE GATE    at the end, on the merge step.  What that step needs of you is on
+                        the step: `sb plugin plans library`.
+
+  A trivially small change may skip one, with the reason on the step. Never route round a
+  gate by leaving its step out: a skip is on the board and can be questioned, an omission
+  is invisible.
+
   A CHILD AT A GATE DOES NOT FINISH THE PLAN. The protocol has a parent report and step
-  aside when a child blocks, so that only one agent waits on a person — that is right for a
-  child's own question and wrong here. A gate is the plan's, and the lead is what assigns
-  the next step once it clears. So the lead stays until its plan is complete, and says who
-  is waiting and what for without standing down.
+  aside when a child blocks, so only one agent waits on a person — right for a child's own
+  question, wrong here. The gate is the plan's, and the lead is what assigns the next step
+  once it clears. So the lead stays until its plan is complete, and says who is waiting and
+  what for without standing down.
 """
 
 
