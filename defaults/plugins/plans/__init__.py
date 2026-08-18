@@ -2373,9 +2373,19 @@ def _added(plan: dict, steps: list, lib: dict) -> Result:
     return Result(human="\n".join(lines), data={"plan": plan["id"], "steps": shown})
 
 
+def _key_col(key: str) -> str:
+    """A catalogue key in its column, with a gap even when the key overruns the column.
+
+    `f"{key:<16}"` pads a short key and does nothing at all to a long one, which glued
+    `merge-human-review` to its name. Two spaces is the floor, the column is the aim.
+    """
+    flat = _flat(key)
+    return f"{flat:<16}" if len(flat) < 16 else f"{flat}  "
+
+
 def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     """One definition as the library renders it: its name, and what naming it does."""
-    lines = [f"{_flat(key):<16}"
+    lines = [f"{_key_col(key)}"
              f"{_flat(str(spec.get('name') or '').strip() or '(unnamed)')}"]
     display = str(spec.get("display") or "").strip()
     if display:
@@ -2394,7 +2404,7 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
 
 
 def _template_lines(key: str, spec: dict) -> str:
-    lines = [f"{_flat(key):<16}"
+    lines = [f"{_key_col(key)}"
              f"{_flat(str(spec.get('title') or '').strip() or '(untitled)')}",
              f"    {_count(spec.get('steps') or [])}"]
     lines.extend(_about(spec))
