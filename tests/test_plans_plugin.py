@@ -748,6 +748,27 @@ class CatalogueTest(PlansSandbox):
         lib = self.ok("plugin", "plans", "library", "scan")
         self.assertIn("grep it", lib)
 
+    def test_a_key_too_long_for_its_column_still_keeps_a_gap_before_the_name(self):
+        """`merge-human-reviewlist what only a human can check` was the render before this.
+
+        The key column pads a short key and could not pad a long one, so an 18-character key
+        ran straight into its name. Long keys now get a two-space floor, and short keys still
+        start their name at the same column they always did — both catalogues render the same
+        way, so a long template key cannot bring the defect back.
+        """
+        self.define("merge-human-review", name="list what only a human can check")
+        self.define("scan", name="scan the whole codebase")
+        lib = self.ok("plugin", "plans", "library")
+        self.assertIn("merge-human-review  list what only a human can check", lib)
+        self.assertIn("scan            scan the whole codebase", lib)
+
+        d = self.catalogue("templates")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a-very-long-template-key.json").write_text(
+            json.dumps({"title": "a job", "steps": [{"name": "do it"}]}))
+        self.assertIn("a-very-long-template-key  a job",
+                      self.ok("plugin", "plans", "template", "list"))
+
     def test_editing_a_definition_reaches_a_plan_already_naming_it(self):
         """The point of the link, and the design's own words: editing a library step
         reaches every plan naming it, live ones included. The plan here is mid-flight — its
