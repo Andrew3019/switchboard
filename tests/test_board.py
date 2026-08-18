@@ -988,7 +988,7 @@ class PluginSeamTest(unittest.TestCase):
         was enabled and had lines for a group."""
         repo = a_plugin_repo(self.tmp, enabled='["!reset", "drawer"]', plugins={"drawer": {}})
         hooks = board.board_hooks(repo)
-        self.assertEqual([n for n, _, _ in hooks], ["drawer"])
+        self.assertEqual([n for n, _, _, _ in hooks], ["drawer"])
         self.assertTrue(self.mark.exists())
         rows = [agent("a"), agent("b", depth=1, parent="a"),
                 agent("c", workspace="web")]
@@ -1122,12 +1122,12 @@ class SeamOffIsTodaysBoardTest(unittest.TestCase):
 
 
 class PlanBlockTest(unittest.TestCase):
-    """The plans plugin, drawn under its own worktree, in both renderers.
+    """The plans plugin, drawn as its own section, in both renderers.
 
     The end of the wire and the only test here that knows what a plan is. It runs the
     SHIPPED plugin against a real `plans.json`, so what it pins is the whole path: the
-    board finds `defaults/plugins/plans/board.py`, hands it the rows of one group, and
-    gets back the plugin's own `_line` and `_step_lines` output.
+    board finds `defaults/plugins/plans/board.py`, reads the `SECTION` on it, hands it the
+    rows of each group, and draws the header and flowchart it gets back under one heading.
     """
 
     def setUp(self):
@@ -1154,62 +1154,134 @@ class PlanBlockTest(unittest.TestCase):
 
     def hooks(self):
         h = board.board_hooks(self.repo)
-        self.assertEqual([n for n, _, _ in h], ["plans"], "the shipped plans plugin")
+        self.assertEqual([n for n, _, _, _ in h], ["plans"], "the shipped plans plugin")
         return mock.patch.object(board, "board_hooks", return_value=h)
 
-    def test_a_plan_renders_under_its_own_worktree_group_in_both_renderers(self):
+    def test_plans_are_a_section_under_the_tree_in_both_renderers(self):
+        """WHERE the plugin's lines go, which is the whole of what `SECTION` changes.
+
+        Under the AGENTS tree and not under the worktree group they came from, with a
+        heading of its own and one blank line above it — the same shape `STATS` has. Both
+        renderers, because a section drawn in one and a hanging block in the other would
+        be two boards showing one fleet differently.
+        """
         self.write(self.plan("p-1", "api", "guardrails",
                              [{"id": "s-1", "name": "design", "progress": "done"},
-                              {"id": "s-2", "name": "build it", "progress": "open"}]),
+                              {"id": "s-2", "name": "build it", "progress": "open",
+                               "deps": ["s-1"]}]),
                    self.plan("p-2", "web", "the other one",
                              [{"id": "s-3", "name": "ship", "progress": "open"}]))
         rows = [agent("lead"), agent("kid", depth=1, parent="lead"),
                 agent("web-1", workspace="web")]
         s = snap(*rows)
         with self.hooks():
-            extras = board.group_extras(rows)
+            # Nothing hangs under a group any more: a section-drawing plugin is skipped
+            # there, or the same plan would be on the screen twice.
+            self.assertEqual(board.group_extras(rows), [[] for _ in rows])
+            sections = board.section_extras(rows)
             plain = [t for t, _ in board.layout(s, top=0, height=24, width=110, msg="")]
             rich = [str(t) for t, _ in richboard.layout(
                 s, top=0, height=24, width=110, msg="")] if HAVE_RICH else None
-        # Hung on the LAST row of each run, which is where a block reads as belonging to
-        # the group above it — and never on a group it is not part of.
-        self.assertEqual(extras[0], [])
-        self.assertIn("guardrails", extras[1][0])
-        self.assertIn("the other one", extras[2][0])
+        self.assertEqual([title for title, _ in sections], ["PLANS"])
+        # Every workspace on screen, in screen order, in ONE block.
+        self.assertIn("guardrails", sections[0][1][0])
+        self.assertIn("the other one", " ".join(sections[0][1]))
         for lines in ([plain, rich] if HAVE_RICH else [plain]):
-            body = [board._ANSI.sub("", x) for x in lines]
-            kid = next(i for i, x in enumerate(body) if "kid" in x)
-            self.assertIn("guardrails", body[kid + 1])
-            self.assertIn("s-2", body[kid + 2])
-            # A done step says nothing to somebody scanning for what is stuck.
+            # Stripped of colour and of the panel's border, so one set of assertions can
+            # ask both renderers the same question about where the section sits.
+            body = [board._ANSI.sub("", x).strip(" │╭╮╰╯─") for x in lines]
+            head = next(i for i, x in enumerate(body) if x.startswith("PLANS"))
+            self.assertEqual(body[head - 1], "", "one blank line above it")
+            # Below every agent row, which is what "after agents" means.
+            self.assertGreater(head, max(i for i, x in enumerate(body)
+                                         if "web-1" in x or "kid" in x))
+            self.assertIn("guardrails", body[head + 1])
+            self.assertIn("design", body[head + 2])
+            # Names and arrows, and no step ids anywhere: progress is colour now.
+            self.assertIn("→", body[head + 2])
             self.assertNotIn("s-1", " ".join(body))
-            web = next(i for i, x in enumerate(body) if "web-1" in x)
-            self.assertIn("the other one", body[web + 1])
+            self.assertNotIn("s-2", " ".join(body))
 
-    def test_an_owners_liveness_is_the_row_the_board_already_has(self):
-        """The rule the design turns on: a step's owner is read off the agent and never
-        copied onto the step. Here that means the SAME `AgentStatus` the row was drawn
-        from — no second channel, and nothing shelled out per frame.
+    def test_a_plans_condition_is_read_off_the_rows_the_board_already_has(self):
+        """The rule the design turns on: liveness is read off the agent rows and never
+        copied onto the plan. The chart shows no owners, so the CONDITION is where that
+        reading now surfaces — and it is the one a human scans for.
 
-        Three answers and the difference between them is the point. A working owner reads
-        what its own row reads; an owner sb has marked `gone` is dead the moment somebody
-        looks; and an owner that is not on this board at all is UNKNOWN and never dead —
-        a snapshot scoped elsewhere is a fact about who is looking.
+        Three answers and the difference between them is the point. A worktree somebody
+        is working on is `live`; one whose every agent is closed is `dormant`; and a
+        worktree that is GONE with steps still open is `abandoned`. None of it is stored.
         """
-        self.write(self.plan("p-1", "api", "guardrails", [
-            {"id": "s-1", "name": "build", "progress": "open", "owner": "kid"},
-            {"id": "s-2", "name": "review", "progress": "open", "owner": "dead-one"},
-            {"id": "s-3", "name": "later", "progress": "open", "owner": "elsewhere"}]))
+        def step(n):
+            return [{"id": f"s-{n}", "name": "build", "progress": "open", "owner": "kid"}]
+        self.write(self.plan("p-1", "api", "guardrails", step(1)),
+                   self.plan("p-2", "web", "asleep", step(2), checkout=str(self.repo)),
+                   self.plan("p-3", "vanished", "gone away", step(3),
+                             checkout=str(self.repo / "not-a-checkout")))
         rows = [agent("lead"),
                 agent("kid", depth=1, parent="lead", state="blocked",
                       blocked_why="waiting"),
-                agent("dead-one", depth=1, parent="lead", gone=True)]
+                agent("web-1", workspace="web", state="done", gone=True),
+                agent("ghost", workspace="vanished", state="done", gone=True)]
         with self.hooks():
-            block = board.group_extras(rows)[-1]
-        by_step = {line.split()[0]: line for line in block[1:]}
-        self.assertIn(f"(kid — {rows[1].display_state})", by_step["s-1"])
-        self.assertIn("(dead-one — dead)", by_step["s-2"])
-        self.assertIn("(elsewhere — unknown)", by_step["s-3"])
+            lines = board.section_extras(rows)[0][1]
+        by_plan = {x.split()[0]: board._ANSI.sub("", x)
+                   for x in lines if x.split() and x.split()[0].startswith("p-")}
+        self.assertIn("live", by_plan["p-1"])
+        self.assertIn("dormant", by_plan["p-2"])
+        self.assertIn("abandoned", by_plan["p-3"])
+
+    def test_a_plans_steps_are_drawn_as_the_graph_they_are(self):
+        """`after s-1, s-2` is a DAG spelled out in words. The board draws the DAG.
+
+        A diamond, which is the shape that catches a router that only knows chains: two
+        steps that both wait on the first and are both waited on by the last. What must
+        come out is one line per row, names in dependency order left to right, and the
+        two branches closing back onto the last step.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "scope", "progress": "open"},
+            {"id": "s-2", "name": "build", "progress": "open", "deps": ["s-1"]},
+            {"id": "s-3", "name": "docs", "progress": "open", "deps": ["s-1"]},
+            {"id": "s-4", "name": "ship", "progress": "open", "deps": ["s-2", "s-3"]}]))
+        with self.hooks():
+            lines = [board._ANSI.sub("", x)
+                     for x in board.section_extras([agent("lead")])[0][1]]
+        self.assertEqual([x.rstrip() for x in lines[1:]],
+                         ["  scope ──┬→ build ──┬→ ship",
+                          "          └→ docs  ──┘"])
+
+    def test_progress_is_colour_and_the_seam_carries_it(self):
+        """The other half of the drawing: no progress column, and colour instead.
+
+        Which is a claim about the SEAM as much as about the plugin — `_colour_only` has
+        to let SGR through while still flattening everything else, or the plugin's colours
+        arrive as literal escape characters in the middle of a line.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "scope", "progress": "skipped"},
+            {"id": "s-2", "name": "build", "progress": "done", "deps": ["s-1"]},
+            {"id": "s-3", "name": "ship", "progress": "open", "deps": ["s-2"]}]))
+        with self.hooks():
+            chart = board.section_extras([agent("lead")])[0][1][1]
+        self.assertNotIn("skipped", chart)
+        self.assertNotIn("done", chart)
+        self.assertIn("\033[32mbuild\033[0m", chart, "done is green")
+        self.assertIn("\033[90mscope\033[0m", chart, "skipped is grey")
+        self.assertIn(" ship", board._ANSI.sub("", chart), "open is left unpainted")
+        self.assertTrue(chart.endswith("\033[0m"), "and never leaks past its own line")
+
+    def test_a_plugin_may_colour_a_word_and_still_may_not_move_the_cursor(self):
+        """The seam's rule, now that it is two rules. SGR through, everything else flat —
+        `ESC [ 2J` clears the pane and `ESC [ H` moves the cursor, and neither is SGR."""
+        got = board._colour_only("\033[31mred\033[0m\033[2Jwiped\033[Hhome\ttab")
+        self.assertIn("\033[31mred", got)
+        self.assertNotIn("\033[2J", got)
+        self.assertNotIn("\033[H", got)
+        # The ESC becomes a space and the rest of the sequence is left as the harmless
+        # text it now is — one character out for one character in, which is what keeps a
+        # plugin's own alignment honest. See `_hook_lines`.
+        self.assertEqual(board._ANSI.sub("", got), "red [2Jwiped [Hhome tab")
+        self.assertNotIn("\t", got)
 
     def test_a_plan_created_after_the_board_opened_appears_on_the_next_frame(self):
         """THE ORDINARY FIRST USE, and the one this could most easily get wrong.
@@ -1223,14 +1295,14 @@ class PlanBlockTest(unittest.TestCase):
         """
         shutil.rmtree(self.state)
         hooks = board.board_hooks(self.repo)
-        self.assertEqual([n for n, _, _ in hooks], ["plans"])
+        self.assertEqual([n for n, _, _, _ in hooks], ["plans"])
         rows = [agent("lead")]
         with mock.patch.object(board, "board_hooks", return_value=hooks):
-            self.assertEqual(board.group_extras(rows), [[]])     # nothing yet, and no error
+            self.assertEqual(board.section_extras(rows), [])      # nothing yet, no error
             self.state.mkdir(parents=True)                       # `plans create` happens
             self.write(self.plan("p-1", "api", "guardrails",
                                  [{"id": "s-1", "name": "build", "progress": "open"}]))
-            self.assertIn("guardrails", board.group_extras(rows)[0][0])
+            self.assertIn("guardrails", board.section_extras(rows)[0][1][0])
 
     def test_drawing_a_plan_shells_out_to_nothing(self):
         """`list` and `show` build a `_Live` and spend seconds of `sb status` on it. A
@@ -1240,19 +1312,19 @@ class PlanBlockTest(unittest.TestCase):
             {"id": "s-1", "name": "build", "progress": "open", "owner": "lead"}]))
         with self.hooks(), mock.patch(
                 "subprocess.run", side_effect=AssertionError("the board shelled out")):
-            block = board.group_extras([agent("lead")])[0]
+            block = board.section_extras([agent("lead")])[0][1]
         self.assertIn("guardrails", block[0])
 
     def test_a_plan_on_another_worktree_is_drawn_by_nobody(self):
         self.write(self.plan("p-1", "somewhere-else", "not here",
                              [{"id": "s-1", "name": "x", "progress": "open"}]))
         with self.hooks():
-            self.assertEqual(board.group_extras([agent("lead")]), [[]])
+            self.assertEqual(board.section_extras([agent("lead")]), [])
 
     def test_a_plans_file_that_cannot_be_read_costs_the_board_nothing(self):
         (self.state / "plans.json").write_text("{ not json")
         with self.hooks():
-            self.assertEqual(board.group_extras([agent("lead")]), [[]])
+            self.assertEqual(board.section_extras([agent("lead")]), [])
 
 
 class SeamWindowTest(unittest.TestCase):
@@ -1295,6 +1367,44 @@ class SeamWindowTest(unittest.TestCase):
                                                     msg="")
                             self.assertIsNotNone(rich)
                             self.assertEqual(len(rich), height)
+
+    def deep(self, n):
+        """A plugin section `n` lines tall, on top of whatever else the pane holds."""
+        return mock.patch.object(
+            board, "section_extras",
+            return_value=[("PLANS", [f"plan line {i}" for i in range(n)])] if n else [])
+
+    def test_a_section_never_pushes_the_frame_past_the_bottom_of_the_pane(self):
+        """The same sweep for the other placement, which has its own arithmetic.
+
+        A section is sized before the tree is windowed and is the FIRST thing to give its
+        lines back, so the two things that could go wrong are opposite: a frame taller
+        than the pane, and a board that spent its last line on a heading instead of an
+        agent. Both are checked here, at every height a pane can be.
+
+        Where `rich` is not installed the plain half is the whole test, exactly as in the
+        sweep above — see `HAVE_RICH` at the top of the file.
+        """
+        s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None,
+                         workspace=["api", "web"][i % 2]) for i in range(4)])
+        for height in range(6, 30):
+            for n in (0, 1, 5, 40):
+                for top in (0, 3):
+                    with self.subTest(height=height, section=n, top=top), self.deep(n):
+                        plain = board.layout(s, top=top, height=height, width=100, msg="")
+                        self.assertEqual(len(plain), height)
+                        frames = [[t for t, _ in plain]]
+                        if HAVE_RICH:
+                            rich = richboard.layout(s, top=top, height=height, width=100,
+                                                    msg="")
+                            self.assertIsNotNone(rich)
+                            self.assertEqual(len(rich), height)
+                            frames.append([str(t) for t, _ in rich])
+                        # The tree outranks the section, always and in every renderer.
+                        for lines in frames:
+                            body = " ".join(lines)
+                            self.assertTrue(any(f"a{i}" in body for i in range(4)),
+                                            "an agent row survived")
 
     def test_the_agent_row_outranks_its_own_block(self):
         """A plan tall enough to fill a pane must not push the agent it hangs off it."""
@@ -1364,7 +1474,7 @@ class SeamPathsTest(unittest.TestCase):
         board._HOOKS.clear()
         self.addCleanup(board._HOOKS.clear)
         with mock.patch.dict(os.environ, {"PR8_MARK": str(tmp / "m")}):
-            found = {n for n, _, _ in board.board_hooks(repo)}
+            found = {n for n, _, _, _ in board.board_hooks(repo)}
         self.assertLessEqual(found, set(plugins.available(repo)))
         self.assertEqual(found, {"own", "plans"})
 
