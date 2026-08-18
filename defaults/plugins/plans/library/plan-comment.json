@@ -1,0 +1,4 @@
+{
+  "name": "post the plan onto the PR",
+  "about": "Dump the plan into a comment on the pull request: `sb plugin plans show <plan> --json`, the whole thing, in a fenced block. No summarising, no reformatting, no picking out the interesting steps — the raw record is the point, and anyone reading the PR gets the same state the lead has. Completeness beats tidiness here; the shape of this comment is not settled yet and will be tuned once real PRs have carried one. Obliged by `create-pr`: it appears with every PR step named from the library, and it may be skipped with a reason, but never left out."
+}

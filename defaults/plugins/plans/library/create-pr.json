@@ -1,4 +1,5 @@
 {
   "name": "open the pull request",
-  "about": "Push the branch and open the PR. Write the description first: what changed, why, and what has already been tested — it is the first thing every reader meets, and a PR without one costs each of them the same reconstruction. Nobody is asked whether to open it."
+  "about": "Push the branch and open the PR. Write the description first: what changed, why, and what has already been tested — it is the first thing every reader meets, and a PR without one costs each of them the same reconstruction. Nobody is asked whether to open it.",
+  "obliges": ["plan-comment"]
 }
