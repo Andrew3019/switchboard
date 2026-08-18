@@ -25,6 +25,13 @@ in this repo, because everything else may be inferred and this may not.
   entries merged, anything redundant removed. Where two statements disagree, the newest
   one wins and the older goes — and Andrew is told what was dropped.
 
+**`design/PLANS-AND-STEPS.md` is the only other file held to this bar.** It carries these
+same rules — only Andrew edits it, nothing arrives by inference, absence is not a decision —
+for one subject: plans, steps and templates. That file is where the detail of that subject
+lives, and this file stays the authority wherever the two meet, so the entries under Plans
+below are what it is read against. Every other doc, README and code comment in the repo
+stays untrusted until checked against the code. — confirmed 2026-08-18
+
 Entry format: one short claim, plus the date it was confirmed.
 
 ---
@@ -85,6 +92,17 @@ tab in the lead's space, and its whole subtree stays in that one space. — conf
 that lead's worktree, since a lead's spawns are tabs in it. A bare agent gets its own
 worktree because it gets its own space. — confirmed 2026-08-09, read-only exception
 dropped 2026-08-12
+
+**Work heading for a change that will land gets a plan.** That is the whole trigger, and
+small is not exempt: a one-line docs change bound for a PR gets a plan, only a short one.
+Everything else runs without one — investigation, questions, scouting, review-only work,
+anything a single agent answers and reports, and everything a dispatcher does. Investigation
+produces a plan rather than living inside one: the plan is written once the outcome is known
+and there is a path from what was found through to a merged PR, and investigation is a step
+only where it is one piece of an already-shaped job. Every agent is told that one line at
+spawn even though the plan-making instruction itself is not carried there — knowing plans
+exist is not the same as knowing when to make one, and an agent left to infer the second will
+not. What a plan is, and who writes it, are under Plans below. — confirmed 2026-08-18
 
 **While the work runs.** The dispatcher is just idle. It should not be monitoring. It
 persists until Andrew closes it. — confirmed 2026-08-09
@@ -367,6 +385,48 @@ enough — see Explicitly rejected. — confirmed 2026-08-09, prompt-is-enough c
 `lead`, resolving all the way through — so a stale `--role orchestrator` gets a lead
 rather than falling through to a role that cannot delegate at all. — confirmed 2026-08-14
 
+### Plans
+
+*When a plan exists at all is a CUJ, above. What one is, and who may touch it, is here. How
+a plan lands its work is under Commands, in the entries on pushing, merging and cleanup. The
+detail behind all of it lives in `design/PLANS-AND-STEPS.md`.*
+
+**Plans, steps and templates — three words, and no others were available.** A **step** is
+the unit: what an agent owns, what gets ticked, what carries a try count and notes. A **plan**
+is a group of steps with an identity of its own, a worktree, a changelog and a kept record —
+a DAG, semi-structured, changeable at any time, and interpreted by an agent rather than
+executed by anything; there is no workflow engine around it. A **template** is a preconfigured
+plan in the ordinary sense of the word: a starting point that is copied and then edited as the
+job needs, with nothing linking the copy back to it. `task` was taken — it is already the
+agent's own task — and so was `preset`, which is already prompt text injected at spawn. —
+confirmed 2026-08-18
+
+**Only the worktree's owner writes to a plan's shape.** That is the lead of the worktree, or
+the sole worker standing in as one where there is no lead — standing in for this and nothing
+else, since planning the work you were given is how the task is carried rather than work you
+took on. Shape is the steps, their order, their owners, the gates and the deps. A child that
+wants any of it changed asks its parent and does not edit the file itself. One writer is what
+makes a file that is edited by hand safe, and it is the only thing that does. — confirmed
+2026-08-18
+
+**Ticking a step is not a shape edit.** Any agent ticks the step it did, and is trusted to
+tick that one and no other. An agent that reports back without ticking leaves the tick to the
+lead, which does it on the report — or, where the step is not actually done, does something
+else about it instead. — confirmed 2026-08-18
+
+**A dispatcher is never involved in a plan.** It does not plan one, own one, tick one or read
+one. It relays work and orchestrates the creation of agents and worktrees, which is the same
+scope as "A dispatcher relays; it does not interpret" above: a plan belongs to a worktree, and
+worktrees are below it. — confirmed 2026-08-18
+
+**A step may carry a short display name for the board, separate from its full name.** A step's
+name is a sentence and a board cell is a few columns, so a step named "list every claim the
+document makes about the code" draws as "list claims" in the flowchart. It is optional, and it
+pairs with the name exactly: a named step's display name lives in its definition and an edit
+to it reaches every plan naming that step, an on-the-fly step's lives on the step, and a step
+without one falls back to its name clipped. It is the same split the board already makes —
+the board is a picture, the plan's own listing is the full text. — confirmed 2026-08-18
+
 ### Scope
 
 **Siblings are not invisible to each other; any other dispatcher's entire tree is
@@ -392,6 +452,11 @@ the tree brings that agent into focus automatically — it is like a fake UI to 
 around quickly. That is all it needs for now; the rest of what it has works fine and
 auditing it comes later. — confirmed 2026-08-09
 
+**The click is not working sometimes.** Andrew first suspected the side panel; the
+evidenced cause is that board rows are measured in characters rather than terminal
+columns, so one wide character (an emoji, CJK) wraps a row and every row below it is off
+by one — the narrow default pane is why it looked like the panel. — confirmed 2026-08-09
+
 **A plugin may draw its own section on the board, and the plans plugin draws PLANS.**
 Rendering plans under the tree is the one thing the plugin cannot do from outside, so the
 board grows an extension point — a seam that reads a `board.py` beside the plugin, hands it
@@ -400,10 +465,7 @@ own naming. The plans plugin uses it to draw each plan as a header and its steps
 left-to-right flowchart, coloured by progress rather than columned, with the short display
 name of each step in the cell. A board that ships no such plugin, or a plugin that ships no
 `board.py`, costs nothing: the seam imports neither unless both are there. — confirmed
-2026-08-17 Andrew first suspected the side panel; the
-evidenced cause is that board rows are measured in characters rather than terminal
-columns, so one wide character (an emoji, CJK) wraps a row and every row below it is off
-by one — the narrow default pane is why it looked like the panel. — confirmed 2026-08-09
+2026-08-17
 
 **`sb start` focuses the pane. Nothing else ever focuses on spawn.** Clicking a name on
 the board is navigation, not a spawn, and does bring that agent into focus. — confirmed
