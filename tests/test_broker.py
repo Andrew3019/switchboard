@@ -3023,17 +3023,33 @@ class BrokerTest(unittest.TestCase):
         self.b.start()
         self.assertEqual(self.b.start(name="triage"), "triage")
 
-    # -- start --name: the way back ---------------------------------------
+    # -- start --name: a name is a place, not a session --------------------
 
-    def test_naming_a_closed_orchestrator_restores_it(self):
-        """Not running is not the same as gone — and now this is the only spelling of
-        "take me back"."""
+    def test_naming_a_closed_orchestrator_opens_a_fresh_one(self):
+        """A top-level name is somewhere a human comes back to, and the session that
+        stood there has ended — so typing it opens a new one, not the old one again.
+
+        `sb restore <name>` is the way back, and it is now the only one."""
         self.h.focus = lambda n: None
         self.h.list_agents = lambda: []
         self.b.start()
-        store.update_agent(self.db, MAIN_NAME, session_id="sess-main")
+        store.update_agent(self.db, MAIN_NAME, session_id="sess-old")
         self.assertEqual(self.restart_sb().start(name=MAIN_NAME), MAIN_NAME)
-        self.assertEqual(self.h.started[-1]["resume"], "sess-main")
+        self.assertIsNone(self.h.started[-1]["resume"])          # a session, not a resume
+        # The row under the name is the new agent's, not the one that ended.
+        self.assertNotEqual(store.get_agent(self.db, MAIN_NAME)["session_id"], "sess-old")
+
+    def test_reopening_a_name_does_not_hand_over_the_dead_agent_mail(self):
+        """`unread_for` keys on the name alone, so a fresh session would otherwise open
+        its first inbox onto instructions addressed to the agent it replaced."""
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        self.b.start()
+        store.update_agent(self.db, MAIN_NAME, session_id="sess-old")
+        store.put_message(self.db, from_agent="child", to_agent=MAIN_NAME,
+                          kind="tell", body="the old summary")
+        self.restart_sb().start(name=MAIN_NAME)
+        self.assertEqual(store.unread_for(self.db, MAIN_NAME), [])
 
     def test_naming_a_running_orchestrator_hands_it_the_task(self):
         from switchboard.herdr import Agent as HAgent

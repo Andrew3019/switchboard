@@ -103,8 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = cmd("start", help="start a top-level dispatcher in a workspace of its own")
     st.add_argument("task", nargs="?", help="optional first instruction")
-    st.add_argument("--name", help="name it — and, if that name is already yours, "
-                                   "return to it instead of starting another")
+    st.add_argument("--name", help="name it — and, if an orchestrator of that name is "
+                                   "running, hand the task to that one instead of "
+                                   "starting another")
 
     # Hidden on purpose. The board is a human's screen, and `sb` is the vocabulary
     # agents are handed — see the refusal in main(). SUPPRESS keeps it out of

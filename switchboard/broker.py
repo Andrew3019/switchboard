@@ -1121,9 +1121,13 @@ class Broker:
         workspace, so a line of work stays in one findable place.
 
         It used to mean "take me back", reusing or restoring the last orchestrator unless
-        told otherwise. That is a different intent and now has a different spelling: name
-        the one you want, `sb start --name main`, which still reuses, restores and hands
-        it a task. Unnamed, `sb start` is only ever the start of something.
+        told otherwise. That intent is `sb restore <name>` now, and `sb start` is only ever
+        the start of something — named or not.
+
+        A NAME, then, is a place rather than a session. `--name general` joins the general
+        orchestrator if one is running and hands it the task; if none is, it opens a fresh
+        session standing under that name (see `_reopen_name`). So typing it every morning
+        gives a new `general` each morning, and never a resumed one.
 
         Refused from inside a worktree — see `_refuse_outside_main_checkout`.
         """
@@ -1131,6 +1135,29 @@ class Broker:
         if name:
             return self._top(name, task)
         return self._top(self._next_top_name(), task)
+
+    def _reopen_name(self, name: str) -> None:
+        """Retire the row standing under a top-level name so the name can be spawned into.
+
+        The row is DELETED, exactly as the husk branch above deletes one, and for the same
+        reason: `agents.name` is the primary key, so there is no way to put a second agent
+        under a name while the first row is still there. What that costs is honest and
+        worth saying — the ended session's id goes with the row, so `sb restore <name>` is
+        no longer a route back to it once the name has been reopened. Coming back to that
+        session is `sb restore` BEFORE typing `sb start --name` again, not after.
+
+        Its unread mail is marked read first, and that is not tidiness. `unread_for` keys
+        on the NAME alone, so mail written to the agent that has ended would otherwise be
+        handed to the fresh session's first `sb inbox` — a new agent reading a dead one's
+        instructions as its own. Marked read rather than deleted: the messages keep their
+        bodies, their senders and their place in `sb log`, and it is only the claim on
+        somebody's attention that ends with the session it was addressed to.
+        """
+        unread = store.unread_for(self.db, name)     # marks them read in the same call
+        if unread:
+            store.log_event(self.db, kind="mail_closed", agent=name, count=len(unread))
+        store.drop_agent(self.db, name)
+        store.log_event(self.db, kind="name_reopened", agent=name)
 
     def _refuse_outside_main_checkout(self) -> None:
         """`sb start` belongs in the main checkout, and nowhere else.
@@ -1224,7 +1251,20 @@ class Broker:
                 store.drop_agent(self.db, name)
                 return self._top(name, task)
             if a["session_id"] and not self._alive_or_unknown(name):
-                self.restore(name)
+                # The name is free again. A top-level name is a PLACE a human comes back
+                # to — `general`, `triage` — and the session that last stood there has
+                # ended, so typing it opens a NEW session there rather than resuming the
+                # old one. This used to `restore`, which made `sb start --name general`
+                # the spelling of "take me back" and left no spelling at all for "give me
+                # a fresh general". Those two intents now have one each: this, and `sb
+                # restore <name>` for the way back.
+                #
+                # It reads as dead only when herdr says so. `_alive_or_unknown` fails
+                # OPEN, and that direction matters MORE here than it did under restore: a
+                # wrong "dead" no longer costs a second pane on the same session, it costs
+                # the row itself, and nothing brings that back.
+                self._reopen_name(name)
+                return self._top(name, task)
             elif task:
                 # Alive, or a pane we cannot see an agent in yet — a claim somebody made
                 # moments ago and is still spawning into. Either way the name is somebody
@@ -2800,14 +2840,15 @@ class Broker:
 
         Asked on one path only: `sb start --name <existing>`, where `_top` found a row
         carrying a session id and is choosing between re-focusing that orchestrator and
-        restoring it. A bare `sb start` never arrives here — it always spawns, under a name
+        reopening the name as a fresh session. A bare `sb start` never arrives here — it always spawns, under a name
         `_next_top_name` proves was never used, so there is no row to ask about.
 
         On that path the two mistakes cost very different things, so take the reversible
         one, which is what `design-c.md` asks of an unknown. Guessing alive costs an
         `sb start --name` that only re-focuses, and the human types it again. Guessing dead
-        means `restore`, which spawns: a live agent's session resumed in a second pane, and
-        no command undoes that.
+        means `_reopen_name`, which DROPS the row and spawns a rival under the name: a live
+        agent's own row deleted out from under it, and no command undoes that. The asymmetry
+        got wider when this path stopped restoring and started replacing, never narrower.
 
         No pane is not an unknown — that is our own row, not herdr's answer.
 
