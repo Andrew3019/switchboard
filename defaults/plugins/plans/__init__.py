@@ -75,9 +75,11 @@ vocabulary like `progress`, for the same reason: the agent is the interpreter, a
 with a gate this file has never heard of gets it without a release.
 
 Nothing here waits, blocks, merges or tears anything down, and that boundary is the whole
-of the mechanism. The PROCEDURE at a gate is prose an agent follows — `sb presets
-design-gate` for the design gate's format, `guide` below for both — and the agent runs it
-with the tools it already has. This file's entire job is to REPRESENT the gate: to hold
+of the mechanism. The PROCEDURE at a gate is prose an agent follows, kept with the thing
+that gates rather than in one list of gates — a definition's own `about` for a named step,
+`sb presets design-gate` for that gate's format — and the agent runs it with the tools it
+already has. `guide` does not carry it and does not name the gates: an agent reaches a gate
+by reaching the step that has one, so the step is where it will look. This file's entire job is to REPRESENT the gate: to hold
 the sentence, to render it, and to make sure a gate cannot be got past without leaving a
 mark. A plugin that shelled out to `gh` or `git merge` on a plan's behalf would be the
 evaluator this design deliberately does not have, and it would be one on the only path
@@ -368,8 +370,8 @@ _ESCAPED = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x1b": "\\e",
 def register(reg):
     reg.command(
         "guide", guide, audience="both",
-        help="how plan-making is done — when a plan exists, who makes it, what goes in "
-             "it, and what to do at each of the two gates")
+        help="how plan-making is done — when a plan exists, who writes to it, what to "
+             "build it from, and how to edit one")
     reg.command(
         "create", create, audience="both",
         help="start a plan on this worktree, empty or with its steps already in it",
@@ -473,17 +475,19 @@ def register(reg):
 # to; leaving the trigger out would leave this text unreachable, because nobody looks up an
 # instruction they were never told exists.
 #
-# It states the condition, the owner, the route, and the fact that there are two gates. It
-# does NOT state what happens at one, what any named step involves, or what any verb does.
-# Every one of those has a home that is read at the moment it applies — a definition's own
-# `about` for a step, `sb presets` for a format, `sb plugin plans` for the verbs — and a
-# second copy here would be a copy going stale against the thing it describes. This text is
-# a pointer to those homes and a small number of rules that have nowhere else to live.
+# It states the condition, the owner and the route, and stops. It does NOT state what any
+# named step involves, what happens at a gate, or what any verb does. Every one of those
+# has a home that is read at the moment it applies — a definition's own `about` for a step,
+# `sb presets` for a format, `sb plugin plans` for the verbs — and a second copy here would
+# be a copy going stale against the thing it describes. This text is a pointer to those
+# homes plus the few rules that have nowhere else to live.
 #
 # So what stays is what is true about EVERY plan and about no particular step: when one
 # exists, who is allowed to write to it, what to build it out of, and how to edit the file
-# without losing the record. The gate procedures used to be here in full and are not any
-# more; they belong on the step whose exit condition the gate is.
+# without losing the record. Gates used to be here at length and are not any more, not even
+# named: a gate is a property of the step whose exit condition it is, so the step that
+# carries one is where an agent that has reached it will look, and naming them here just
+# put a second, staler account in front of every agent that had not.
 GUIDE = """\
 Plan-making — read this when a job comes up, not before.
 
@@ -503,9 +507,13 @@ WHO WRITES TO IT
   counts as a lead for this and nothing else — planning the work you were given is how the
   task is carried, not work you took on.
 
-  The owner makes every edit. A child that wants one ASKS — `sb tell parent` — and does not
-  touch the plan itself, beyond ticking and noting the step it was given. One writer is
-  what makes editing this file by hand safe, and it is the only thing that does.
+  The owner makes every edit to the SHAPE of the plan — steps, order, owners, gates, deps.
+  A child that wants one ASKS, with `sb tell parent`, and does not edit the file. One
+  writer is what makes editing this file by hand safe, and it is the only thing that does.
+
+  TICKING IS NOT THAT. Any agent ticks the step it did, and is trusted to tick only that
+  one. An agent that reports back without ticking leaves the tick to the lead, who does it
+  on the report — or, if the step is not actually done, does something else about it.
 
   A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
   it does not plan, own, tick or read one.
@@ -550,30 +558,6 @@ EDITING IT
   TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. A step that closes the last agent or
   deletes the worktree takes with it whatever was going to tick it, so a tick that waits
   for the command to finish is a tick that does not happen.
-
-THE TWO GATES
-
-  A gate is a step's EXIT CONDITION that requires a human — never a step of its own. Put
-  the sentence on the step whose end he has to answer, then block when you reach it.
-  Answering you clears it: there is nothing to type against the plan and no verb clears
-  one. You tick the step after he has answered.
-
-  A job that lands a change has two, and everything else resolves without him:
-
-      THE DESIGN GATE   after planning, before implementing.  `sb presets design-gate`
-                        is the format — read it, it is exact.
-      THE MERGE GATE    at the end, on the merge step.  What that step needs of you is on
-                        the step: `sb plugin plans library`.
-
-  A trivially small change may skip one, with the reason on the step. Never route round a
-  gate by leaving its step out: a skip is on the board and can be questioned, an omission
-  is invisible.
-
-  A CHILD AT A GATE DOES NOT FINISH THE PLAN. The protocol has a parent report and step
-  aside when a child blocks, so only one agent waits on a person — right for a child's own
-  question, wrong here. The gate is the plan's, and the lead is what assigns the next step
-  once it clears. So the lead stays until its plan is complete, and says who is waiting and
-  what for without standing down.
 """
 
 
@@ -777,8 +761,8 @@ def gate(ctx, args) -> Result:
     This is the whole of what the plugin does about a gate, and the omissions are the
     design rather than a shortcut. It does not block, does not wait, does not ask sb
     anything and does not run the procedure at the gate — the agent that owns the step does
-    that, following `sb presets design-gate` or the merge gate in `guide`, with the tools it
-    already has. What this buys is that the exit condition is written down on the step
+    that, following `sb presets design-gate` or the step definition's own account of what
+    the gate on it needs, with the tools it already has. What this buys is that the exit condition is written down on the step
     instead of remembered, so it renders where the work is read and cannot quietly not
     happen.
 
@@ -2295,9 +2279,10 @@ def _step_lines(steps: list) -> list[str]:
         if s.get("why"):
             out.append(f"    — {_flat(s['why'])}")
         if s.get("gate"):
-            # Said where the gate is read, and not only in the guide: the two things
-            # somebody meeting one has to know are what he is being asked and that there is
-            # nothing here to type when he answers. A step whose owner shows `blocked` on
+            # Said where the gate is read, which since the guide stopped naming gates is
+            # the ONLY place it is said: the two things somebody meeting one has to know
+            # are what he is being asked and that there is nothing here to type when he
+            # answers. A step whose owner shows `blocked` on
             # the line above is this gate being reached, which is the only signal there is.
             out.append(f"    gate  {_flat(s['gate'])}"
                        f" — its owner blocks; answering the owner clears it, and no verb "

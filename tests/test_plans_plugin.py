@@ -1564,37 +1564,46 @@ class GateTest(PlansSandbox):
         self.assertIn("What is causing it", body)
         self.assertIn("What the fix will be", body)
 
-    def test_the_guide_names_both_gates_and_points_at_each_procedure(self):
-        """The guide says a gate EXISTS and where its procedure is kept; it does not carry
-        the procedure. A gate's steps are read at the gate, by one agent, once — so they
-        live with the thing they gate (a definition's own `about`, a preset) and a second
-        copy in the guide would be a copy going stale against it.
+    def test_the_guide_points_at_the_catalogue_and_says_nothing_about_gates(self):
+        """The guide is a pointer, and a gate is not one of the things it points at.
 
-        What is asserted is therefore the pointers, plus the two rules that have nowhere
-        else to live: tick-before-teardown, which is about the verb rather than about any
-        step, and a child at a gate not standing its lead down, which is about the plan.
+        A gate is a property of the step whose exit condition it is, so an agent meets one
+        by reaching that step — where the definition's own `about` and `show`'s rendering
+        of the field both say what it needs. Naming the gates in the guide as well put a
+        second account, staler than those and read earlier, in front of every agent that
+        had not reached one. So what is asserted is the route into the catalogue, the file
+        and its rules, and the absence of a gate section.
+
         Asserted on the printed block rather than on the constant, like the guide test
         above — the constant is what a test would trivially agree with itself about."""
         out = self.ok("plugin", "plans", "guide")
         # Wrapping is layout and these are claims, so the claims are matched against the
         # text as one run: an assertion that also pinned where the line breaks fall would
-        # fail the next time somebody reflows a paragraph and say nothing about the gates.
+        # fail the next time somebody reflows a paragraph and say nothing about the claims.
         said = " ".join(out.split())
-        for expected in ("A gate is a step's EXIT CONDITION that requires a human",
-                         "THE DESIGN GATE",
-                         "THE MERGE GATE",
-                         # The two pointers. Without them an agent reaches a gate holding a
-                         # field it can see and no route to what to do about it.
-                         "sb presets design-gate",
-                         "sb plugin plans library",
-                         "TICK A STEP BEFORE ITS TEARDOWN RUNS, never after",
-                         "A CHILD AT A GATE DOES NOT FINISH THE PLAN"):
+        for expected in (
+                # The catalogue, which is the only account of any particular step.
+                "sb plugin plans library",
+                "sb plugin plans template list",
+                # The file, since past `create` the plan is edited rather than commanded.
+                "agentflow/plugins/plans/plans.json",
+                # The three things hand-editing can silently lose.
+                "APPEND a changelog entry",
+                "NEVER drop or rewrite an entry",
+                "ADD A LIBRARY STEP with `name-step`, not by hand",
+                # Who writes what. Shape is the lead's; a tick is whoever did the step.
+                "The owner makes every edit to the SHAPE of the plan",
+                "TICKING IS NOT THAT",
+                "TICK A STEP BEFORE ITS TEARDOWN RUNS, never after"):
             self.assertIn(expected, said)
-        # And the merge gate's own procedure is NOT here. Named on the one line that would
-        # come back first if somebody re-inlined it: the guide points at the merge step,
-        # and what happens at that step is the step's to say.
-        self.assertNotIn("Create the PR and write the description first", said)
-        # Still reads nothing and writes nothing, gates or no gates.
+        # And no account of a gate. `gate` itself still appears, in the list of fields a
+        # lead edits, which is the point: the guide knows the field exists and says nothing
+        # about what any particular one needs. What must not come back is a section, so the
+        # headings and the pointer that only a gate section would carry are what is pinned.
+        for gone in ("THE TWO GATES", "THE DESIGN GATE", "THE MERGE GATE",
+                     "sb presets design-gate"):
+            self.assertNotIn(gone, said)
+        # Still reads nothing and writes nothing.
         self.assertFalse(self._file().exists())
 
 
