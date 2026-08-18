@@ -704,19 +704,19 @@ class CatalogueTest(PlansSandbox):
         library at render time. A copy would render identically today and stop tracking the
         definition tomorrow, which is exactly the failure nobody would notice."""
         self.ok("plugin", "plans", "create", "a job")
-        made = self.data("plugin", "plans", "name-step", "p-1", "merge-review",
+        made = self.data("plugin", "plans", "name-step", "p-1", "merge-human-review",
                          "--reason", "this one is reviewed properly")
 
         (step,) = made["steps"]
-        self.assertEqual(step["def"], "merge-review")
+        self.assertEqual(step["def"], "merge-human-review")
         self.assertEqual(step["id"], "s-1")
         self.assertIsNone(self.steps()[0]["name"])      # nothing copied into the record
-        self.assertEqual(self.steps()[0]["def"], "merge-review")
+        self.assertEqual(self.steps()[0]["def"], "merge-human-review")
         self.assertEqual(self.steps()[0]["progress"], "open")   # its own run object
 
         shown = self.ok("plugin", "plans", "show", "p-1")
-        self.assertIn("review the diff that is about to land", shown)
-        self.assertIn("[merge-review]", shown)          # and it says that it IS a link
+        self.assertIn("list what only a human can check", shown)
+        self.assertIn("[merge-human-review]", shown)          # and it says that it IS a link
 
     def test_editing_a_definition_reaches_a_plan_already_naming_it(self):
         """The point of the link, and the design's own words: editing a library step
@@ -729,7 +729,7 @@ class CatalogueTest(PlansSandbox):
         self.ok("plugin", "plans", "rework", "s-1", "--reason", "the branch moved")
 
         self.define("merge", name="land the branch, once Andrew says so",
-                    obliges=["merge-review"])
+                    obliges=["merge-human-review"])
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("land the branch, once Andrew says so", shown)
         self.assertNotIn("merge the pull request", shown)
@@ -748,12 +748,12 @@ class CatalogueTest(PlansSandbox):
         for one: `add-step`. The two live side by side in one plan — one owning its words,
         one owning a link — which is what "both are first class" means."""
         self.ok("plugin", "plans", "create", "a job")
-        self.ok("plugin", "plans", "name-step", "p-1", "merge-review")
+        self.ok("plugin", "plans", "name-step", "p-1", "merge-human-review")
         self.ok("plugin", "plans", "add-step", "p-1", "review it twice, it is a migration",
                 "--reason", "a variant, not a forked link")
 
         stored = self.steps()
-        self.assertEqual([s["def"] for s in stored], ["merge-review", None])
+        self.assertEqual([s["def"] for s in stored], ["merge-human-review", None])
         self.assertEqual(stored[1]["name"], "review it twice, it is a migration")
         # No verb takes a definition and rewrites it for one plan; the library is files.
         self.assertNotIn("edit", _plans_commands())
@@ -772,9 +772,9 @@ class CatalogueTest(PlansSandbox):
         # build, merge, and the review merge obliges — flat, in order, ids minted onwards
         # from the on-the-fly step that was already there.
         self.assertEqual([(s["id"], s["def"]) for s in made["steps"]],
-                         [("s-2", "build"), ("s-3", "merge"), ("s-4", "merge-review")])
+                         [("s-2", "build"), ("s-3", "merge"), ("s-4", "merge-human-review")])
         self.assertEqual([s["def"] for s in self.steps()],
-                         [None, "build", "merge", "merge-review"])
+                         [None, "build", "merge", "merge-human-review"])
         self.assertTrue(all("steps" not in s for s in self.steps()))
 
     def test_a_circular_composite_is_refused(self):
@@ -824,9 +824,9 @@ class CatalogueTest(PlansSandbox):
         self.data("plugin", "plans", "template", "use", "docs")
         stored = self.steps()
         self.assertEqual([s["def"] for s in stored],
-                         [None, None, None, None, "merge", "merge-review"])
+                         [None, None, None, None, "merge", "merge-human-review"])
 
-        self.define("merge", name="land it, once Andrew says so", obliges=["merge-review"])
+        self.define("merge", name="land it, once Andrew says so", obliges=["merge-human-review"])
         self.assertIn("land it, once Andrew says so", self.ok("plugin", "plans", "show", "p-1"))
         self.assertIsNone(self.steps()[4]["name"])
 
@@ -844,18 +844,19 @@ class CatalogueTest(PlansSandbox):
         self.ok("plugin", "plans", "create", "a job")
         self.data("plugin", "plans", "name-step", "p-1", "merge")
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
-                         [("merge", None), ("merge-review", "s-1")])
+                         [("merge", None), ("merge-human-review", "s-1")])
 
         # A second merge is a second thing to review: the dedupe is inside one act, not
         # across a plan, or the second merge would land with nothing reading its diff.
         self.data("plugin", "plans", "name-step", "p-1", "merge")
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
-                         [("merge", None), ("merge-review", "s-1"),
-                          ("merge", None), ("merge-review", "s-3")])
+                         [("merge", None), ("merge-human-review", "s-1"),
+                          ("merge", None), ("merge-human-review", "s-3")])
 
         # And the other route in. `--reason` and nothing else: no flag turns this off.
         self.data("plugin", "plans", "template", "use", "docs")
-        self.assertEqual([s["def"] for s in self.steps("p-2")][-2:], ["merge", "merge-review"])
+        self.assertEqual([s["def"] for s in self.steps("p-2")][-2:],
+                         ["merge", "merge-human-review"])
         self.assertEqual(sorted(_plans_args("name-step")), ["--reason", "name", "plan"])
 
     def test_an_obliged_step_is_skipped_with_a_reason_never_omitted(self):
@@ -896,7 +897,7 @@ class CatalogueTest(PlansSandbox):
         # one bad definition takes down only what reaches it. A catalogue is edited by hand;
         # a typo in one file must not make every other definition unusable.
         self.ok("plugin", "plans", "name-step", "p-1", "merge")
-        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-review"])
+        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-human-review"])
 
         # An obligation that reaches back into its own chain is refused for the same reason
         # composition's cycle is: it is materialised, so it is walked.
@@ -905,7 +906,7 @@ class CatalogueTest(PlansSandbox):
         code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "landing", "--json")
         self.assertEqual(code, 1)
         self.assertIn("obliges itself", json.loads(out)["data"]["error"])
-        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-review"])
+        self.assertEqual([s["def"] for s in self.steps()], ["merge", "merge-human-review"])
 
     def test_every_obliging_step_gets_its_own_obliged_step(self):
         """No dedupe, anywhere: two merges are two diffs and therefore two reviews, whether
@@ -919,7 +920,7 @@ class CatalogueTest(PlansSandbox):
 
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
                          [("merge", None), ("merge", None),
-                          ("merge-review", "s-1"), ("merge-review", "s-2")])
+                          ("merge-human-review", "s-1"), ("merge-human-review", "s-2")])
 
     # -- a broken catalogue ----------------------------------------------------
 
@@ -975,10 +976,10 @@ class CatalogueTest(PlansSandbox):
         self.assertEqual(self.steps()[0]["progress"], "done")
 
     def test_a_definition_list_written_as_a_string_is_refused_by_name(self):
-        """`"obliges": "merge-review"` iterates one letter at a time. It was refused before
+        """`"obliges": "merge-human-review"` iterates one letter at a time. It was refused before
         this — with `'x' obliges 'm', which is not in the step library`, which is a refusal
         that sends whoever has to fix the file looking in the wrong place."""
-        self.define("x", name="a step", obliges="merge-review")
+        self.define("x", name="a step", obliges="merge-human-review")
         self.ok("plugin", "plans", "create", "a job")
         code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "x", "--json")
         self.assertEqual(code, 1)

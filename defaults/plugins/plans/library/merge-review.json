@@ -1,4 +1,0 @@
-{
-  "name": "review the diff that is about to land",
-  "about": "Read the change on its own terms before it merges. Obliged by `merge`: it appears with every merge step that is named from the library, and it may be skipped with a reason — a one-line docs change should not be reviewed as if it were a migration — but never left out."
-}
