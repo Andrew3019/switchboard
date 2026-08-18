@@ -1,0 +1,14 @@
+{
+  "title": "bring a document back in line with the code",
+  "about": "One narrow job written out: a document claims things the code no longer does, and this is the shape of putting that right. It is here as a worked example of what a template IS — steps of your own, plus `merge` named from the library so its review comes along — and not as the shape a job takes. Most jobs look nothing like this one. Take it when the job is this job, and write your own steps when it is not.",
+  "steps": [
+    {"name": "list every claim the document makes about the code"},
+    {"name": "check each claim against the code; write down which have drifted and how"},
+    {"name": "rewrite what drifted, and cut what the code no longer does at all"},
+    {"name": "run every example and command the document gives"},
+    {"def": "merge"}
+  ],
+  "notes": [
+    "Copied from the `docs` template. Add, drop and reshape steps as the job turns out — nothing links this plan back to what it came from."
+  ]
+}
