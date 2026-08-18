@@ -278,8 +278,10 @@ whole record of how a job actually ran: a plan gets reshaped as it goes, and wit
 the file keeps only the final shape. `_write` refuses a document whose changelog is shorter
 than the one that was read, or whose existing entries have changed — so a bug in a future
 verb that rewrites a plan wholesale fails loudly here instead of quietly losing the story.
-It cannot stop somebody editing `plans.json` in an editor; nothing can, and the answer to
-that is that every mutation goes through a command.
+It cannot police a raw editor write of `plans.json`; nothing can. The answer is not that
+every mutation goes through a command — the guide sanctions hand-editing — but that the one
+writer editing by hand appends the entry itself, the way a command would, and every command's
+own write is held to the check above.
 
 Storage is one JSON file, rewritten whole via tmp + `os.replace` under the lock sb already
 holds around the handler. Whole-file rewrite is correct precisely because of that lock: a
