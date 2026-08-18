@@ -1230,6 +1230,95 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn("dormant", by_plan["p-2"])
         self.assertIn("abandoned", by_plan["p-3"])
 
+    def test_a_plan_whose_agents_were_all_archived_reads_dormant_and_not_live(self):
+        """The board and `show` must not disagree about one plan, and this is where they did.
+
+        `sb cleanup` is the ordinary end of a job: every agent on the worktree is archived
+        and the tree collapses them into one `+ N archived` row. That row carries no agent,
+        so dropping it left the board with no agents for the workspace at all — which
+        `condition` reads as "nobody was ever here" and answers `live`, while `list`/`show`
+        ask `sb status`, see the archived rows themselves, and say `dormant`.
+
+        Built through the REAL `display_rows`, so what is pinned is the collapse the board
+        actually gets rather than a hand-made row, and asserted against the same fleet drawn
+        uncollapsed: one answer, whichever way the tree is being shown.
+        """
+        self.write(self.plan("p-1", "api", "guardrails",
+                             [{"id": "s-1", "name": "build", "progress": "open"}]))
+        fleet = [agent("lead", workspace="home"),
+                 agent("kid", depth=1, parent="lead", state="done", archived=True)]
+        collapsed = status.display_rows(fleet, show_archived=False)
+        self.assertTrue(any(isinstance(r, status.Collapsed) for r in collapsed),
+                        "the cleaned-up subtree is one collapsed row")
+        with self.hooks():
+            hidden = board.section_extras(collapsed)[0][1]
+            shown = board.section_extras(
+                status.display_rows(fleet, show_archived=True))[0][1]
+        self.assertIn("dormant", board._ANSI.sub("", hidden[0]))
+        self.assertNotIn("live", board._ANSI.sub("", hidden[0]))
+        # The same fleet with the archived rows drawn one by one — which is what `show`
+        # sees — already read dormant, and is what the collapsed answer must match.
+        self.assertEqual(board._ANSI.sub("", hidden[0]), board._ANSI.sub("", shown[0]))
+
+    def test_a_wide_display_name_is_measured_in_columns_and_not_in_characters(self):
+        """A CJK name is drawn twice as wide as it is counted, unless it is counted right.
+
+        The core fixed this once for its own rows (`_visible_len`: "measuring in characters
+        is the bug this whole section exists to close") and the chart pads and clips by the
+        same measure. What breaks otherwise is the chart's own alignment: the column is
+        padded to four when the name occupies eight, and every connector in the gap lands
+        four columns left of the name it leaves.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "scope", "display": "检查代码", "progress": "open"},
+            {"id": "s-2", "name": "build", "progress": "open", "deps": ["s-1"]},
+            {"id": "s-3", "name": "ccc", "progress": "open", "deps": ["s-1"]}]))
+        with self.hooks():
+            lines = [board._ANSI.sub("", x)
+                     for x in board.section_extras([agent("lead")])[0][1]]
+        arrows = [board._visible_len(x.split("→")[0]) for x in lines[1:]]
+        self.assertEqual(arrows[0], arrows[1],
+                         f"the fan-out arrives at one column: {lines[1:]!r}")
+        # Eight columns of name and the air after it, not four — the block's own indent
+        # and the cell's leading space are the other two.
+        self.assertEqual(board._visible_len(lines[1].split("─")[0]), 11)
+
+    def test_a_name_too_wide_for_a_cell_is_clipped_to_columns(self):
+        """The clip is 22 COLUMNS. Counted in characters it let 44 through.
+
+        21 and not 22, and that is `_clip_cols`'s own rule rather than an off-by-one: the
+        next ideograph is two columns wide and only one is left, so it comes up short by
+        one rather than over by one. Short is a cosmetic gap; over is what this fixes.
+        """
+        self.write(self.plan("p-1", "api", "shape",
+                             [{"id": "s-1", "name": "x", "display": "检" * 30,
+                               "progress": "open"}]))
+        with self.hooks():
+            lines = [board._ANSI.sub("", x)
+                     for x in board.section_extras([agent("lead")])[0][1]]
+        self.assertEqual(board._visible_len(lines[1].strip()), 21)
+        self.assertTrue(lines[1].rstrip().endswith("…"))
+
+    def test_a_dep_written_as_a_bare_number_is_the_edge_show_says_it_is(self):
+        """Ids compare as NUMBERS everywhere else in the plugin, and now here too.
+
+        `plans.json` is hand-edited by a lead, `_check` accepts a bare `1` in `deps`, and
+        `show` renders it as `after 1` — so a board matching the strings drew no edge for
+        exactly the dep a hand-edit is most likely to write. The same slip let a self-dep
+        written as `1` past the guard and out as an arrow into nothing.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "scope", "progress": "open"},
+            {"id": "s-2", "name": "build", "progress": "open", "deps": ["1"]}]),
+                   self.plan("p-2", "api", "loop", [
+                       {"id": "s-3", "name": "alone", "progress": "open", "deps": ["3"]}]))
+        with self.hooks():
+            lines = [board._ANSI.sub("", x).rstrip()
+                     for x in board.section_extras([agent("lead")])[0][1]]
+        self.assertEqual(lines[1], "  scope ───→ build")
+        # And a step depending on ITSELF by number is still no edge at all.
+        self.assertEqual(lines[3], "  alone")
+
     def test_a_plans_steps_are_drawn_as_the_graph_they_are(self):
         """`after s-1, s-2` is a DAG spelled out in words. The board draws the DAG.
 

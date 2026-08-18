@@ -21,10 +21,10 @@ one, unchanged and unduplicated. The only thing this file touches is `plans.json
 how a plan reads reached the board for free. That rule bought consistency and cost the
 board the one thing it is for: a plan's SHAPE. A plan is a DAG, `after s-1, s-2` is that
 DAG spelled out in words, and a human glancing at a board to see where a job has got to
-should not have to reassemble a graph in his head from a column of trailing clauses. So
-the board now draws its own view — a header per plan, and its steps as a flowchart — and
-`show` remains the place a plan is read in full, line by line, with its whys, refs, notes
-and gates. Two views of one record, deliberately, rather than one view twice.
+should not have to reassemble a graph in their head from a column of trailing clauses.
+So the board now draws its own view — a header per plan, and its steps as a flowchart —
+and `show` remains the place a plan is read in full, line by line, with its whys, refs,
+notes and gates. Two views of one record, deliberately, rather than one view twice.
 
 What that view shows is the second editorial decision, and it is deliberately thin:
 
@@ -54,7 +54,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import DONE, OPEN, SKIPPED, _flat, _lib, _read, _shown, _viewed, _Live
+from switchboard.board import _clip_cols, _visible_len
+
+from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _flat, _lib, _num, _read,
+               _shown, _viewed, _Live)
 
 
 # A SECTION OF THE BOARD'S OWN, under the tree, rather than a block hanging off the last
@@ -89,7 +92,10 @@ DIM = "\x1b[2m"
 
 # The most steps one plan's chart is drawn for. A backstop and not a layout rule: the grid
 # below is O(rows × columns) and a plan nobody pruned should not be able to make a board
-# redraw expensive. Past this the chart is dropped and the header says so.
+# redraw expensive. Past this the chart is simply DROPPED and nothing says it was: the
+# header renders exactly as always, so a plan over the cap draws as a bare header with no
+# picture under it. Said plainly here because it is the one thing about this constant a
+# reader would otherwise have to discover from a screen that looks like a rendering bug.
 MAX_STEPS = 40
 
 
@@ -167,22 +173,53 @@ def _chart(steps: list) -> list[str]:
          gaps between them — and joins it into lines.
 
     A step with no `deps` is a root and starts at the left. Deps naming a step that is not
-    in this plan are dropped, and so is a step depending on itself: both are data errors
-    that `show` reports, and neither may be a reason the board draws nothing.
+    in this plan are dropped, and so is a step depending on itself: both are data errors,
+    and neither may be a reason the board draws nothing. NOTHING REPORTS THEM — `show`
+    prints `after s-99` verbatim and `_check` does not resolve a dep — so what the reader
+    sees of either is a missing edge and no explanation. Dropping is still right (a board
+    is not where a data error is diagnosed) but it is silent, and this docstring used to
+    claim otherwise.
     """
     ids = [str(s.get("id")) for s in steps if s.get("id")]
     if not ids or len(ids) > MAX_STEPS:
         return []
     by_id = {str(s["id"]): s for s in steps if s.get("id")}
-    known = set(ids)
-    deps = {i: [d for d in (str(x) for x in (by_id[i].get("deps") or ()))
-                if d in known and d != i]
-            for i in ids}
+    deps = {i: _deps(by_id[i], i, by_id) for i in ids}
 
     layer = _layers(ids, deps)
     nodes, edges = _route(ids, deps, layer)
     row = _place(nodes, edges, layer)
     return _draw(nodes, edges, layer, row, by_id)
+
+
+def _deps(step: dict, i: str, by_id: dict) -> list[str]:
+    """One step's deps as the ids of steps in this plan: resolved, de-duplicated, in order.
+
+    RESOLVED AS NUMBERS, which is how every other id comparison in this plugin works —
+    `dep` says so where it writes one (`__init__.py`): "`s-1` and a bare `1` are one edge".
+    A lead edits `plans.json` in an editor, `_check` accepts a bare `1` in `deps`, and
+    `show` renders it as `after 1`, so matching the STRINGS here drew no edge for exactly
+    the dep a hand-edit is most likely to write — a board saying something different from
+    `show` about one record. It also let a self-dep written as `1` past the `d != i` guard
+    below and out into the next column as a spurious arrow.
+
+    An id `_num` cannot read a number out of is matched literally instead, which is the
+    old behaviour and the only one available: nothing can compare `abc` as a number.
+    De-duplicated because `s-1` and `1` now resolve to one node, and two copies of one
+    edge would be laid out and drawn twice.
+    """
+    num = {}
+    for other in by_id:
+        n = _num(_STEP_ID, other)
+        if n is not None:
+            num.setdefault(n, other)
+    out: list[str] = []
+    for raw in (step.get("deps") or ()):
+        n = _num(_STEP_ID, raw)
+        d = num.get(n) if n is not None else (str(raw) if str(raw) in by_id else None)
+        if d is not None and d != i and d not in out:
+            out.append(d)
+    return out
 
 
 def _layers(ids: list[str], deps: dict[str, list[str]]) -> dict[str, int]:
@@ -325,8 +362,15 @@ def _draw(nodes: dict, edges: list, layer: dict, row: dict, by_id: dict) -> list
 
 
 def _cell_w(node: Any, by_id: dict) -> int:
-    """How wide a node's cell is. A placeholder has no name and takes no room of its own."""
-    return 0 if not isinstance(node, str) else len(_label(by_id[node]))
+    """How wide a node's cell is, in COLUMNS. A placeholder takes no room of its own.
+
+    `_visible_len` and not `len`, and it is the core's own — `switchboard/board.py` fixed
+    this exact bug once and says why there: "measuring in characters is the bug this whole
+    section exists to close". One CJK ideograph is two columns, so a name counted in
+    characters and drawn in columns puts every connector in this gap somewhere other than
+    where the name ends, and the whole flowchart below it stops lining up.
+    """
+    return 0 if not isinstance(node, str) else _visible_len(_label(by_id[node]))
 
 
 def _cell(node: Any, by_id: dict, width: int) -> str:
@@ -347,7 +391,7 @@ def _cell(node: Any, by_id: dict, width: int) -> str:
         return "─" * (width + 2)
     name = _label(by_id[node])
     return (" " + _paint(name, by_id[node].get("progress"))
-            + " " * (width - len(name)) + " ")
+            + " " * (width - _visible_len(name)) + " ")
 
 
 def _label(step: dict) -> str:
@@ -364,9 +408,16 @@ def _label(step: dict) -> str:
     node with nothing in it looks like a bug in the chart, and it is a bug in the plan. The
     clip stays even with a display name: a label is meant to be short, but nothing enforces
     it, and a chart whose cells are two lines tall stops being a chart.
+
+    `NAME_W` is COLUMNS and the clip counts columns, through the core's own `_clip_cols`.
+    Counting characters let a name of thirty ideographs through as "22" and drew it 44
+    columns wide. What is chosen rather than fitted is the NUMBER 22 (see `NAME_W`); the
+    unit was never a choice.
     """
     name = _flat(step.get("display") or step.get("name") or "") or "?"
-    return name if len(name) <= NAME_W else name[:NAME_W - 1] + "…"
+    if _visible_len(name) <= NAME_W:
+        return name
+    return _clip_cols(name, NAME_W - 1) + "…"
 
 
 def _paint(name: str, progress: Any) -> str:
@@ -457,17 +508,54 @@ class _Rows(_Live):
     reconciliation of the state column against what the pane is doing and is passed
     through rather than re-derived — the same contract `_Live.owner` relies on.
 
-    Collapsed rows carry a workspace and a depth and no agent, so they are dropped: a row
-    standing for an archived tail is not an agent whose state anything may read.
+    A COLLAPSED ROW IS COUNTED, not dropped, and that is the one place this class had to
+    do more than hand its rows over. `status.Collapsed` stands in for a whole archived
+    subtree and carries no agent — but archived is what every agent on a worktree looks
+    like after `sb cleanup`, which is the ordinary end of a job and precisely when a human
+    glances at the board. Dropping those rows left `agents()` empty, and `condition()`
+    reads empty as "no agent was ever here" and answers `live`: a plan whose every agent
+    was cleaned up drew as live on the board while `sb plugin plans list`/`show`, which
+    ask `sb status` and see the archived rows themselves, said `dormant` about the same
+    plan at the same instant. The board must not disagree with `show` about one record.
+
+    So a collapsed row contributes `count` closed agents in its own workspace, which is
+    what the seam hands over and all it hands over. Closed and not unknown: what a
+    collapse stands for is a finished delegation, and `sb cleanup` only takes rows that
+    ended. The residue is an agent archived while its state was still open — a blocked
+    agent whose pane died — which this reads as dormant where `show` would still say live.
+    That is a narrower disagreement than the one it replaces and it corrects itself the
+    moment the row is restored or the state is written.
+
+    A `workspace` of None is the seam saying the hidden agents were in more than one, and
+    those are counted for nobody: `condition` matches on the plan's workspace name, so an
+    unattributable row is not evidence about this plan and is not made into some.
     """
 
+    # Not an agent name and not able to become one: `switchboard/validate.py`'s
+    # `AGENT_NAME` starts at `[a-z]`, so a synthetic key can never shadow a real row in
+    # `_Live.owner`'s lookup by name. Only `condition` ever looks at these, and it looks
+    # at values.
+    ARCHIVED = "+archived-%d"
+
     def __init__(self, rows: list) -> None:
-        self._agents: Any = {
-            str(r.name): {"state": getattr(r, "state", None),
-                          "display_state": getattr(r, "display_state", None),
-                          "gone": getattr(r, "gone", False),
-                          "workspace": getattr(r, "workspace", None)}
-            for r in rows if getattr(r, "name", None) and hasattr(r, "state")}
+        agents: dict[str, Any] = {}
+        for r in rows:
+            name = getattr(r, "name", None)
+            if name and hasattr(r, "state"):
+                agents[str(name)] = {"state": getattr(r, "state", None),
+                                     "display_state": getattr(r, "display_state", None),
+                                     "gone": getattr(r, "gone", False),
+                                     "workspace": getattr(r, "workspace", None)}
+                continue
+            count = getattr(r, "count", None)
+            if hasattr(r, "state") or not isinstance(count, int):
+                continue                        # not an agent row and not a collapse
+            ws = getattr(r, "workspace", None)
+            for _ in range(max(count, 0)):
+                agents[self.ARCHIVED % len(agents)] = {
+                    "state": CLOSED[0], "display_state": None,
+                    "gone": False, "workspace": ws}
+        self._agents: Any = agents
 
     def agents(self) -> dict:
         """The board's own rows, and never a question. See the class docstring.
