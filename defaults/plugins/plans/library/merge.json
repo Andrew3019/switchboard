@@ -1,5 +1,5 @@
 {
   "name": "merge the pull request",
-  "about": "Land the branch. The PR is open and review has come back; this step is the act of merging it. Its exit condition is a gate: merging is a human's call unless they have said otherwise.",
+  "about": "Land the branch. The PR is open and review has come back; this step is the act of merging it. Its exit condition is a gate: merging is a human's call unless they have said otherwise. Once merged and this step is ticked, update the plan comment `create-pr` left on the PR — edit that same comment in place and replace its body with the final `sb plugin plans show <plan> --json`, so the PR carries the state the plan ended in rather than the one it started from. Edit it, never add a second comment: two dumps of the same plan leave a reader working out which one is current.",
   "obliges": ["merge-human-review"]
 }
