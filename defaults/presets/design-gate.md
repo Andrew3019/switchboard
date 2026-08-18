@@ -3,9 +3,9 @@ The format a design gate's message is written in, and nothing else.
 
 AUDIENCE: the agent that owns a step whose exit condition is the design gate. It reads
 this when it reaches that step — `sb presets design-gate` — writes its summary in this
-shape, and blocks. Nothing here says when to run a design gate or what a gate is; that is
-`sb plugin plans guide`, which is where the procedure lives. This file is the format the
-procedure names.
+shape, and blocks. Nothing here says when to run a design gate or what a gate is; a gate is a property of
+the step whose exit condition it is, so that step and its definition's own `about` are
+where to read what is being asked. This file is only the format the answer is written in.
 
 BINDING: none, deliberately, and this is the shipped example of a preset that exists ONLY
 for a step to name. It is not in any `presets.toml` list, so no spawn carries it and no

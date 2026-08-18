@@ -66,9 +66,9 @@ Gates
 -----
 
 `gate` is a step's exit condition when that condition is A HUMAN: the sentence saying what
-he has to answer before this step is finished. It is a FIELD ON A STEP and never a step of
+they have to answer before this step is finished. It is a FIELD ON A STEP and never a step of
 its own, which is the design's first rule about gates and the one thing here not to get
-wrong. A design step ending in "no implementation until he confirms" needs no second step
+wrong. A design step ending in "no implementation until they confirm" needs no second step
 for the confirmation; what shows on a board, what carries a skip and its reason, and what
 an obligation attaches to is always the step whose exit condition the gate is. Open
 vocabulary like `progress`, for the same reason: the agent is the interpreter, and a job
@@ -180,10 +180,11 @@ and links are the two halves of this design and they point opposite ways on purp
 
 Templates hold no `deps`. A template entry may expand into several steps, so an edge written
 against an entry would have nothing single to attach to; edges are added with `dep` once the
-copy exists. The catalogue is deliberately nearly empty — a merge, its review and one
-template — because the design says what to promote into it is read off real runs rather than
-decided up front, and the system has to work with it almost bare. It does: with no `library`
-directory at all every verb here still works and only `name-step` has nothing to offer.
+copy exists. The catalogue is deliberately nearly empty — `create-pr`, `merge`,
+`merge-human-review` and one template — because the design says what to promote into it is
+read off real runs rather than decided up front, and the system has to work with it almost
+bare. It does: with no `library` directory at all every verb here still works and only
+`name-step` has nothing to offer.
 
 Ids are `p-<n>` and `s-<n>`, monotonic across the whole file and never reused, so a spawn
 prompt or a changelog entry citing `s-7` stays true for the life of the repo. Step numbers
@@ -416,7 +417,7 @@ def register(reg):
     reg.command(
         "gate", gate, audience="both",
         help="say a step's exit condition is a human — a gate is not a step of its own, "
-             "and nothing here clears one: he answers the blocked owner",
+             "and nothing here clears one: they answer the blocked owner",
         args=[reg.arg("step", help="a step id, e.g. s-1"),
               reg.arg("--needs", help="what the human has to answer before this is done"),
               reg.arg("--reason", help="why, for the changelog")])
@@ -550,7 +551,9 @@ EDITING IT
 
       $(git rev-parse --git-common-dir)/agentflow/plugins/plans/plans.json
 
-  `sb plugin plans show <plan> --json` gives you the shape to write against. Three rules:
+  The file itself is the shape to write against. `sb plugin plans show <plan> --json` is
+  the same plan with the library resolved in, so what it prints for a `def` step is not
+  what that step holds and never goes back into the file. Three rules:
 
     - APPEND a changelog entry for what you changed, in the shape the ones already there
       have. Nothing infers it, and the record is read later to decide what the catalogue
@@ -562,7 +565,7 @@ EDITING IT
 
   Two verbs are worth typing rather than editing, being frequent and small — `tick <step>`
   when a step is done, and `note <step> --text` for what happened. They write the changelog
-  entry for you, which is the whole of what they buy. `sb plugin plans` lists the rest.
+  entry for you, which is the whole of what they buy. `sb plugin plans --help` lists the rest.
 
   TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. A step that closes the last agent or
   deletes the worktree takes with it whatever was going to tick it, so a tick that waits
@@ -787,7 +790,7 @@ def gate(ctx, args) -> Result:
     """
     needs = (args.needs or "").strip()
     if not needs:
-        return _needs("--needs", "a gate says what the human has to answer — 'he confirms "
+        return _needs("--needs", "a gate says what the human has to answer — 'they confirm "
                                  "the contract', not merely that somebody must. There is "
                                  "no argument that clears one: a gate is answered, or "
                                  "skipped with a reason")
@@ -1343,7 +1346,7 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     a field that exists only sometimes is a field every reader has to guess about.
 
     `gate` is the same, one field along: null on a step nobody has to be asked about, and
-    the sentence saying what he has to answer on one where a human is the exit condition.
+    the sentence saying what they have to answer on one where a human is the exit condition.
     Explicit here so that "this step has no gate" is a thing the record SAYS rather than a
     key it happens not to have — a reader deciding whether a plan has a gate at all should
     not have to tell a step made before this field existed from a step that has none.
@@ -2306,7 +2309,7 @@ def _step_lines(steps: list) -> list[str]:
         if s.get("gate"):
             # Said where the gate is read, which since the guide stopped naming gates is
             # the ONLY place it is said: the two things somebody meeting one has to know
-            # are what he is being asked and that there is nothing here to type when he
+            # are what they are being asked and that there is nothing here to type when they
             # answers. A step whose owner shows `blocked` on
             # the line above is this gate being reached, which is the only signal there is.
             out.append(f"    gate  {_flat(s['gate'])}"

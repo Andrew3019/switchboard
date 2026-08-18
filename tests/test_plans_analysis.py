@@ -273,7 +273,7 @@ class ProposalTest(unittest.TestCase):
 
         skipped = [_plan(f"p-3{i}", "ship it", "finished",
                          [named(f"s-3{i}0", "merge", "merge"),
-                          named(f"s-3{i}1", "merge-review", "merge review",
+                          named(f"s-3{i}1", "merge-human-review", "merge human review",
                                 progress="skipped", why="one review covered both",
                                 obliged_by=f"s-3{i}0")],
                          [_entry("name-step", f"s-3{i}0 merge", "landing")])
@@ -281,7 +281,7 @@ class ProposalTest(unittest.TestCase):
         s = ev.survey(skipped)
         review = [p for p in s["proposals"] if p["kind"] == "catalogue review"]
         self.assertTrue(review, s["proposals"])
-        self.assertIn("merge-review", review[0]["propose"])
+        self.assertIn("merge-human-review", review[0]["propose"])
         self.assertIn("one review covered both", " ".join(review[0]["caveats"]))
 
 
