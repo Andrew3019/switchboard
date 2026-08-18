@@ -128,7 +128,7 @@ Verify: assign an owner, tick, skip with reason, add a note, bump a try count.
 Depends: PR1, PR2
 Files: `defaults/plugins/plans/__init__.py`, `defaults/plugins/plans/library/*`,
 `defaults/plugins/plans/templates/*`, `tests/test_plans_plugin.py`
-Verify: name a library step; copy a template; add a merge step and see merge-review appear.
+Verify: name a library step; copy a template; add a merge step and see merge-human-review appear.
 
 ### Problem
 
@@ -151,7 +151,7 @@ Verify: name a library step; copy a template; add a merge step and see merge-rev
 - Nothing links a copy back to its template; named steps inside stay names.
 - `template list` browses templates; the lead finds one once the work is shaped.
 ---
-- Adding a merge step automatically adds its merge-review step; this is obliged, not optional.
+- Adding a merge step automatically adds its merge-human-review step; this is obliged, not optional.
 - An obliged step may be skipped with a reason, never silently omitted.
 - The catalogue may be nearly empty and the system still works.
 

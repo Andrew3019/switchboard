@@ -19,9 +19,9 @@ The records
            "steps": [...], "changelog": [...], "notes": [...],
            "created_by": "lead", "created_at": 1754570000}
 
-    step  {"id": "s-1", "name": "…", "def": null, "obliged_by": null, "progress": "open",
-           "why": null, "gate": null, "owner": null, "tries": 1, "notes": [], "deps": [],
-           "checkpoints": []}
+    step  {"id": "s-1", "name": "…", "display": null, "def": null, "obliged_by": null,
+           "progress": "open", "why": null, "gate": null, "owner": null, "tries": 1,
+           "notes": [], "deps": [], "checkpoints": []}
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
 writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here is an enum
@@ -130,6 +130,15 @@ design buys by saying steps are units and there is little about a definition to 
 lead that wants something else writes an on-the-fly step; there is no forking a link, and no
 verb here edits the library, because the library is files and files are edited in an editor.
 
+A step also carries a `display` — a name AS SHORT AS POSSIBLE, `scan code` where the name is
+"list every claim the document makes about the code". It is what the board draws, because a
+board is a flowchart of names read along one line and a full name is a sentence: the two are
+the same "two views of one record" the board and `show` already are. Optional, and resolved
+exactly as `name` is — a named step's `display` lives in its definition and an edit reaches
+every plan naming it, an on-the-fly step's lives on the step. Absent, the board falls back to
+the name and clips it; the fallback is why every step still draws without one, and why the
+field is worth authoring only where the name is too long to read in a cell.
+
 A definition may COMPOSE — `{"steps": ["a", "b"]}` — and naming it puts a and b in the plan,
 flat. What a plan holds is always flat: no step contains another, because a step that did
 would be a plan by another name. Composition is the one edge in this file that is actually
@@ -137,8 +146,8 @@ traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps
 `dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
 hang. Expansion mints fresh ids from the same counter as everything else.
 
-A definition may also OBLIGE another — `merge` obliges `merge-review` — and naming it adds
-both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
+A definition may also OBLIGE another — `merge` obliges `merge-human-review` — and naming it
+adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
 be skipped with a reason like any other. What it cannot be is omitted: the obligation is a
 property of the definition rather than a rule an agent remembers, so there is no way to name
 a merge step and end up without its review on the board. A skip is a state with a sentence
@@ -541,7 +550,7 @@ EDITING IT
 
       $(git rev-parse --git-common-dir)/agentflow/plugins/plans/plans.json
 
-  `sb plugin plans show <id> --json` gives you the shape to write against. Three rules:
+  `sb plugin plans show <plan> --json` gives you the shape to write against. Three rules:
 
     - APPEND a changelog entry for what you changed, in the shape the ones already there
       have. Nothing infers it, and the record is read later to decide what the catalogue
@@ -1154,7 +1163,11 @@ def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
     name = str(entry.get("name") or "").strip()
     if not name:
         raise _BadDef("a template holds a step with neither a name nor a def")
-    step = _step(f"s-{doc['next_step']}", name)
+    # A template's own step carries its `display` into the copy, since a template writes the
+    # long name and so is exactly where a short board label is worth authoring. A `def` entry
+    # needs none — its display resolves live from the definition, like its name.
+    display = str(entry.get("display") or "").strip() or None
+    step = _step(f"s-{doc['next_step']}", name, display=display)
     doc["next_step"] += 1
     return [step]
 
@@ -1318,8 +1331,8 @@ def _escape(m: "re.Match") -> str:
 # -- the records ---------------------------------------------------------------
 
 
-def _step(sid: str, name: Optional[str], *, key: Optional[str] = None,
-          obliged_by: Optional[str] = None) -> dict:
+def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
+          key: Optional[str] = None, obliged_by: Optional[str] = None) -> dict:
     """One step, with every field the design names it carries and nothing more.
 
     `tries` starts at 1 rather than 0: a step being worked is on its first try, and a count
@@ -1342,10 +1355,16 @@ def _step(sid: str, name: Optional[str], *, key: Optional[str] = None,
     is the id of the step that brought this one, which is how a review says which merge it
     belongs to and how PR7's gate will find it. Both are explicit nulls for the same reason
     `why` is.
+
+    `display` is the short name the board draws, and it pairs with `name` exactly as they do:
+    a named step leaves it null and resolves it live from the definition, an on-the-fly step
+    carries its own. Explicit null, like `name`, so "this step has no shorter board label" is
+    a thing the record says rather than a key it happens to lack — the board reads the field
+    and falls back to the name when it is null.
     """
-    return {"id": sid, "name": name, "def": key, "obliged_by": obliged_by,
-            "progress": OPEN, "why": None, "gate": None, "owner": None,
-            "tries": 1, "notes": [], "deps": [], "checkpoints": []}
+    return {"id": sid, "name": name, "display": display, "def": key,
+            "obliged_by": obliged_by, "progress": OPEN, "why": None, "gate": None,
+            "owner": None, "tries": 1, "notes": [], "deps": [], "checkpoints": []}
 
 
 def _note(text: str, who: str) -> dict:
@@ -1418,9 +1437,9 @@ def _kept() -> tuple[dict, Optional[Result]]:
 def _names(key: str, spec: dict, field: str) -> list[str]:
     """A definition's list of names, refused rather than misread if it is a bare string.
 
-    `"obliges": "merge-review"` iterates one letter at a time, and what came out of that was
-    a refusal saying `'merge' obliges 'm', which is not in the step library` — technically a
-    refusal, and useless to whoever has to fix the file.
+    `"obliges": "merge-human-review"` iterates one letter at a time, and what came out of that
+    was a refusal saying `'merge' obliges 'm', which is not in the step library` — technically
+    a refusal, and useless to whoever has to fix the file.
     """
     given = spec.get(field)
     if given is None:
@@ -1572,7 +1591,13 @@ def _resolve(step: dict, lib: dict) -> dict:
     # A definition that is there but names nothing renders as its own key rather than as
     # the sentence above: saying "no such definition" about a file sitting right there
     # sends whoever reads it looking for the wrong thing.
-    return dict(step, name=str(spec.get("name") or "").strip() or key)
+    #
+    # `display` comes from the definition too, and is resolved here for the same reason
+    # `name` is: it is part of what the library owns about a step, so an edit to the short
+    # board label reaches every plan naming it. Null when the definition sets none, and the
+    # board falls back to the name.
+    return dict(step, name=str(spec.get("name") or "").strip() or key,
+                display=str(spec.get("display") or "").strip() or None)
 
 
 def _shown(plan: dict, lib: dict) -> dict:
@@ -2349,6 +2374,11 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     """One definition as the library renders it: its name, and what naming it does."""
     lines = [f"{_flat(key):<16}"
              f"{_flat(str(spec.get('name') or '').strip() or '(unnamed)')}"]
+    display = str(spec.get("display") or "").strip()
+    if display:
+        # What the board draws for this step, shown so an author can see the short label the
+        # long name above collapses to rather than having to open a board to find out.
+        lines.append(f"    board       {_flat(display)}")
     parts = _names(key, spec, "steps")
     if parts:
         lines.append(f"    composes    {', '.join(_flat(x) for x in parts)}")

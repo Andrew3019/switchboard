@@ -1250,6 +1250,25 @@ class PlanBlockTest(unittest.TestCase):
                          ["  scope ──┬→ build ──┬→ ship",
                           "          └→ docs  ──┘"])
 
+    def test_a_step_draws_its_display_name_and_falls_back_to_its_full_name(self):
+        """The short board label a step carries, or its name where it has none.
+
+        A cell in a flowchart is a few columns and a full step name is a sentence, so a step
+        authored with a `display` draws that and a step without one falls back to its `name`.
+        Both on one chart, so what is pinned is the choice per step and not a mode.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "list every claim the document makes",
+             "display": "list claims", "progress": "open"},
+            {"id": "s-2", "name": "ship", "progress": "open", "deps": ["s-1"]}]))
+        with self.hooks():
+            lines = [board._ANSI.sub("", x)
+                     for x in board.section_extras([agent("lead")])[0][1]]
+        chart = " ".join(x.strip() for x in lines[1:])
+        self.assertIn("list claims", chart, "the display name is drawn")
+        self.assertNotIn("list every claim", chart, "and never the long name behind it")
+        self.assertIn("ship", chart, "a step with no display name falls back to its name")
+
     def test_progress_is_colour_and_the_seam_carries_it(self):
         """The other half of the drawing: no progress column, and colour instead.
 
