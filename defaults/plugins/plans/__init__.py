@@ -543,6 +543,10 @@ WHAT TO BUILD IT FROM
   gates, what finishing it means. Read it there. Nothing about any particular step is
   repeated here, so that nothing here can be out of date about one.
 
+  A template brings steps but no order between them — the board draws a plan from its deps,
+  so record the order you want with `dep <step> --after <step>` or the plan renders as a
+  loose stack.
+
   Then re-plan on what you now know, rather than executing a split you decided before you
   knew anything.
 

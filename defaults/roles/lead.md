@@ -182,7 +182,8 @@ A plan has shape, not a list of jobs — something like "scout the auth flow and
 session store; if they disagree about where expiry lives, put a reviewer on each; when
 both agree, plan the change". You write it down rather than hold it in your head — a record
 your children and whoever reads the run afterwards can see, not something that goes away
-with you. Run parts in parallel when they are genuinely independent.
+with you; where the work is heading for a change that will land, that record is a plan, and
+`sb plugin plans guide` says how to make one. Run parts in parallel when they are genuinely independent.
 Sequence a part behind the answer it depends on. Your children share your worktree, so
 decide at the moment you split who owns which files and say so in each task — two children
 writing at once must be given disjoint sets. Serialise anything left that writes the same

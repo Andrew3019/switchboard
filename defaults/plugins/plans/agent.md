@@ -13,4 +13,4 @@
      means for this design, and protocol prose survives deletion. -->
 # plans
 
-- Is your work heading for a change that will land? Read the plan-making instruction first — `sb plugin plans guide` — and make the plan it tells you to make. Investigation, review, questions and anything you just answer and report need none.
+- Is your work heading for a change that will land? Read the plan-making instruction first — `sb plugin plans guide` — and make the plan it tells you to make. Investigation, review, questions, anything you just answer and report, and everything a dispatcher does need none.
