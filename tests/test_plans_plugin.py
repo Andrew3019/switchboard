@@ -801,18 +801,19 @@ class CatalogueTest(PlansSandbox):
         one is copy and paste: the copy holds no reference to what it came from, and
         deleting the template afterwards changes nothing about the plan."""
         listed = self.ok("plugin", "plans", "template", "list")
-        self.assertIn("pr", listed)
-        self.assertIn("ship a change as a pull request", listed)
+        self.assertIn("docs", listed)
+        self.assertIn("bring a document back in line with the code", listed)
 
-        made = self.data("plugin", "plans", "template", "use", "pr",
-                         "--title", "PR3 of the plans plugin", "--reason", "the usual shape")
+        made = self.data("plugin", "plans", "template", "use", "docs",
+                         "--title", "PR3 of the plans plugin", "--reason", "the job is this job")
         self.assertEqual(made["title"], "PR3 of the plans plugin")
         self.assertEqual(made["notes"][0]["text"][:7], "Copied ")
         # Nothing anywhere in the record points back at the template it came from.
         self.assertNotIn("template", set(made) | {k for s in made["steps"] for k in s})
 
         shutil.rmtree(self.catalogue("templates"))
-        self.assertIn("shape the work", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertIn("every claim the document makes",
+                      self.ok("plugin", "plans", "show", "p-1"))
         self.assertIn("(no templates", self.ok("plugin", "plans", "template", "list"))
 
     def test_a_named_step_inside_a_template_stays_a_name(self):
@@ -820,14 +821,14 @@ class CatalogueTest(PlansSandbox):
         and the merge step inside it is still a LINK. Flattening the names into copies at
         template time would be a plan that stops tracking its definitions the moment it is
         made, which is the same bug as snapshotting and harder to see."""
-        self.data("plugin", "plans", "template", "use", "pr")
+        self.data("plugin", "plans", "template", "use", "docs")
         stored = self.steps()
         self.assertEqual([s["def"] for s in stored],
-                         [None, None, None, "merge", "merge-review"])
+                         [None, None, None, None, "merge", "merge-review"])
 
         self.define("merge", name="land it, once Andrew says so", obliges=["merge-review"])
         self.assertIn("land it, once Andrew says so", self.ok("plugin", "plans", "show", "p-1"))
-        self.assertIsNone(self.steps()[3]["name"])
+        self.assertIsNone(self.steps()[4]["name"])
 
         code, out, _ = self.sb("plugin", "plans", "template", "use", "nope", "--json")
         self.assertEqual(code, 1)
@@ -853,7 +854,7 @@ class CatalogueTest(PlansSandbox):
                           ("merge", None), ("merge-review", "s-3")])
 
         # And the other route in. `--reason` and nothing else: no flag turns this off.
-        self.data("plugin", "plans", "template", "use", "pr")
+        self.data("plugin", "plans", "template", "use", "docs")
         self.assertEqual([s["def"] for s in self.steps("p-2")][-2:], ["merge", "merge-review"])
         self.assertEqual(sorted(_plans_args("name-step")), ["--reason", "name", "plan"])
 
@@ -936,7 +937,7 @@ class CatalogueTest(PlansSandbox):
         for argv in (("tick", "s-1"), ("skip", "s-2", "--reason", "docs only"),
                      ("add-step", "p-1", "and one more"),
                      ("note", "p-1", "--text", "a note"),
-                     ("name-step", "p-1", "merge"), ("template", "use", "pr"),
+                     ("name-step", "p-1", "merge"), ("template", "use", "docs"),
                      ("show", "p-1"), ("list",), ("library",)):
             with self.subTest(verb=argv[0]):
                 code, out, _ = self.sb("plugin", "plans", *argv, "--json")
@@ -951,7 +952,7 @@ class CatalogueTest(PlansSandbox):
         (self.catalogue("library") / "broken.json").unlink()
         (self.catalogue("templates") / "broken.json").write_text("[]")
         self.ok("plugin", "plans", "show", "p-1")
-        for argv in (("template", "list"), ("template", "use", "pr")):
+        for argv in (("template", "list"), ("template", "use", "docs")):
             with self.subTest(verb="template " + argv[1]):
                 code, out, _ = self.sb("plugin", "plans", *argv, "--json")
                 self.assertEqual(code, 1)
@@ -1013,7 +1014,7 @@ class CatalogueTest(PlansSandbox):
 
         # A template naming a definition that is no longer there is refused too, rather
         # than copied in with a link that resolves to nothing.
-        code, out, _ = self.sb("plugin", "plans", "template", "use", "pr", "--json")
+        code, out, _ = self.sb("plugin", "plans", "template", "use", "docs", "--json")
         self.assertEqual(code, 1)
         self.assertIn("not in the step library", json.loads(out)["data"]["error"])
 
