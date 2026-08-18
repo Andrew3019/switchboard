@@ -33,7 +33,9 @@ What that view shows is the second editorial decision, and it is deliberately th
     going and how big it is. Nothing else: the workspace is the group this hangs under,
     and the checkout and the changelog are what `show` is for.
 
-  * THE STEPS AS A FLOWCHART, names only, laid out left to right in dependency order.
+  * THE STEPS AS A FLOWCHART, their DISPLAY NAMES only — the short board label a step
+    carries, falling back to its full name where it has none — laid out left to right in
+    dependency order.
     Progress is COLOUR rather than a column, because a column of `open`/`done` down the
     side of a graph is the same word eight times and the graph is what carries the
     meaning. Nothing else on a step — no id, no owner, no try count, no `why`. Those are
@@ -349,13 +351,21 @@ def _cell(node: Any, by_id: dict, width: int) -> str:
 
 
 def _label(step: dict) -> str:
-    """A step's name as the chart draws it: flattened, clipped, and never empty.
+    """A step's name as the chart draws it: its DISPLAY name, flattened, clipped, never empty.
 
-    `_flat` first, which is what keeps this file's own colour the only escape sequence in
-    a line the seam is asked to carry. An unnamed step is `?` rather than a blank cell —
-    a node with nothing in it looks like a bug in the chart, and it is a bug in the plan.
+    The `display` first and the `name` behind it, because that is the whole reason `display`
+    exists — a cell in a flowchart is a handful of columns and a step's full name is a
+    sentence, so a step authored with a short board label draws it and one without falls back
+    to the name. Resolved upstream (`_resolve`), so a named step's `display` is already its
+    definition's by the time this sees it.
+
+    `_flat` either way, which is what keeps this file's own colour the only escape sequence in
+    a line the seam is asked to carry. An unnamed step is `?` rather than a blank cell — a
+    node with nothing in it looks like a bug in the chart, and it is a bug in the plan. The
+    clip stays even with a display name: a label is meant to be short, but nothing enforces
+    it, and a chart whose cells are two lines tall stops being a chart.
     """
-    name = _flat(step.get("name") or "") or "?"
+    name = _flat(step.get("display") or step.get("name") or "") or "?"
     return name if len(name) <= NAME_W else name[:NAME_W - 1] + "…"
 
 

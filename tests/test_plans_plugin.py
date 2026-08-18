@@ -136,9 +136,10 @@ class PlansTest(PlansSandbox):
         # round is a library step, and the whole schema is asserted here so that a field
         # added by a later PR has to be added deliberately rather than noticed later.
         self.assertEqual(made["steps"][0],
-                         {"id": "s-1", "name": "write it", "def": None, "obliged_by": None,
-                          "progress": "open", "why": None, "gate": None, "owner": None,
-                          "tries": 1, "notes": [], "deps": [], "checkpoints": []})
+                         {"id": "s-1", "name": "write it", "display": None, "def": None,
+                          "obliged_by": None, "progress": "open", "why": None, "gate": None,
+                          "owner": None, "tries": 1, "notes": [], "deps": [],
+                          "checkpoints": []})
         self.assertEqual(made["notes"][0]["text"], "PR1 only")
 
         shown = self.ok("plugin", "plans", "show", "p-2")
@@ -718,6 +719,34 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("list what only a human can check", shown)
         self.assertIn("[merge-human-review]", shown)          # and it says that it IS a link
 
+    def test_a_display_name_is_a_live_link_like_the_name_and_shows_in_the_library(self):
+        """The short board label the library owns, resolved the same way the name is.
+
+        A named step stores neither its name nor its display — both come out of the
+        definition at render time, so editing the label reaches a plan already running. And
+        `library` prints the label under the definition, so an author can see what the long
+        name collapses to on the board without opening one.
+        """
+        self.define("scan", name="scan the whole codebase for the pattern", display="scan code")
+        self.ok("plugin", "plans", "create", "a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "scan", "--reason", "look first")
+
+        # Stored as a link: neither the name nor the display is copied into the record.
+        self.assertIsNone(self.steps()[0]["name"])
+        self.assertIsNone(self.steps()[0].get("display"))
+        # Resolved live in the read: `show --json` carries both, off the definition.
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual(shown["steps"][0]["display"], "scan code")
+
+        # Editing the label reaches the running plan, exactly as editing the name does.
+        self.define("scan", name="scan the whole codebase for the pattern", display="grep it")
+        self.assertEqual(
+            self.data("plugin", "plans", "show", "p-1")["steps"][0]["display"], "grep it")
+
+        # And the library verb shows the board label under the definition.
+        lib = self.ok("plugin", "plans", "library", "scan")
+        self.assertIn("grep it", lib)
+
     def test_editing_a_definition_reaches_a_plan_already_naming_it(self):
         """The point of the link, and the design's own words: editing a library step
         reaches every plan naming it, live ones included. The plan here is mid-flight — its
@@ -833,6 +862,19 @@ class CatalogueTest(PlansSandbox):
         code, out, _ = self.sb("plugin", "plans", "template", "use", "nope", "--json")
         self.assertEqual(code, 1)
         self.assertIn("no template 'nope'", json.loads(out)["data"]["error"])
+
+    def test_a_templates_own_step_copies_its_display_name(self):
+        """A template writes the long name, so it is where a short board label is authored —
+        and unlike the name of a `def` entry, an own step's label is COPIED into the plan,
+        because the step itself is a copy. So it is on the record and not resolved from
+        anywhere: the shipped `docs` template's first step is `list every claim…`, drawn as
+        `list claims`."""
+        self.data("plugin", "plans", "template", "use", "docs")
+        first = self.steps()[0]
+        self.assertIn("every claim the document makes", first["name"])
+        self.assertEqual(first["display"], "list claims")
+        # The `def` entry carries no copied label; its display resolves live, like its name.
+        self.assertIsNone(self.steps()[4]["display"])
 
     # -- the obligation --------------------------------------------------------
 

@@ -392,7 +392,15 @@ the tree brings that agent into focus automatically — it is like a fake UI to 
 around quickly. That is all it needs for now; the rest of what it has works fine and
 auditing it comes later. — confirmed 2026-08-09
 
-**The click is not working sometimes.** Andrew first suspected the side panel; the
+**A plugin may draw its own section on the board, and the plans plugin draws PLANS.**
+Rendering plans under the tree is the one thing the plugin cannot do from outside, so the
+board grows an extension point — a seam that reads a `board.py` beside the plugin, hands it
+the rows of each worktree group, and draws what it returns under a heading of the plugin's
+own naming. The plans plugin uses it to draw each plan as a header and its steps as a
+left-to-right flowchart, coloured by progress rather than columned, with the short display
+name of each step in the cell. A board that ships no such plugin, or a plugin that ships no
+`board.py`, costs nothing: the seam imports neither unless both are there. — confirmed
+2026-08-17 Andrew first suspected the side panel; the
 evidenced cause is that board rows are measured in characters rather than terminal
 columns, so one wide character (an emoji, CJK) wraps a row and every row below it is off
 by one — the narrow default pane is why it looked like the panel. — confirmed 2026-08-09
