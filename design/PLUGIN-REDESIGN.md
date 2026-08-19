@@ -1,15 +1,13 @@
 # Plugin redesign — the design of record
 
-Adjudicates `history/proposal-a.md` (thin/minimum-machinery) and `history/proposal-b.md`
-(explicit contract) against `history/decisions.md`, which is binding. This document
-supersedes both. It is
+Adjudicates two earlier proposals — thin/minimum-machinery and explicit contract —
+against the binding decisions record. This document supersedes both. It is
 self-contained: nothing here requires reading the proposals or the current-state survey.
 
 Design only. No implementation. Where a proposal lost, §12 records why.
 
 **This document has been verified against the codebase.** Every claim it makes about
-existing code was checked against source; the report is `verification.md`, alongside this file.
-Two claims came back wrong and are corrected here:
+existing code was checked against source. Two claims came back wrong and are corrected here:
 
 - **§5.4 reason 1 was false.** An added column is precisely the case that *migrates in
   place*, not the case that wipes the store. The reason is deleted and §5.4 is rebuilt on
