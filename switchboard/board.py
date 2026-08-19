@@ -1829,11 +1829,11 @@ def open_report_files(name: Optional[str]) -> str:
         for f in files:
             _editor("-r", "-g", f)
     except FileNotFoundError:
-        return f"{_EDITOR} not on PATH"
+        return f"{name}: {_EDITOR} not on PATH"
     except PermissionError:
         # A command that is there and cannot be run: a wrapper script nobody chmodded,
         # or `command` naming the .app bundle rather than the CLI inside it.
-        return f"{_EDITOR} is not executable"
+        return f"{name}: {_EDITOR} is not executable"
     except subprocess.TimeoutExpired:
         return f"{name}: {_EDITOR} timed out"
     except (OSError, subprocess.SubprocessError) as e:
@@ -1845,20 +1845,48 @@ def open_report_files(name: Optional[str]) -> str:
     return f"→ {name}: opened {len(files)} file(s)"
 
 
-def open_tick(name: Optional[str], note: list, running: Optional[threading.Thread]):
-    """Start an open off the drawing thread. -> (the thread now running, a line to show).
+def open_tick(name: Optional[str], note: list, running):
+    """Start an open off the drawing thread. -> (what is running now, a line to show).
+
+    `running` is the `(thread, agent name)` this returned last, or None.
 
     One at a time. Leaning on `o` re-fires once per read, and each fire is up to eight
     subprocesses; without this the bursts would pile up behind each other and every one
     of them would open the same tabs again.
+
+    A refusal NAMES BOTH AGENTS, because the request is dropped rather than queued and
+    the board must not imply otherwise: asking for B while A is still opening leaves A's
+    line to arrive afterwards, and a bare "still opening…" followed by "→ A: opened 3
+    file(s)" reads, to somebody who just asked for B, like B.
     """
     if not name:
         return running, "press o on a highlighted agent"
-    if running is not None and running.is_alive():
-        return running, "still opening…"
+    if running is not None and running[0].is_alive():
+        return running, f"still opening {running[1]} — {name} not started, press oo again"
     t = threading.Thread(target=_open, args=(name, note), daemon=True)
-    t.start()
-    return t, f"opening {name}…"
+    try:
+        t.start()
+    except RuntimeError as e:
+        # Thread exhaustion. Vanishingly rare and `sweep_tick` has the same exposure,
+        # but this one is on a keypress, and a keypress may not end the board.
+        return running, f"{name}: could not start: {status_mod.clip(str(e), 40)}"
+    return (t, name), f"opening {name}…"
+
+
+def drain(msg: str, *boxes: list):
+    """Take one line from each worker mailbox. -> (the line to show, anything taken?).
+
+    Oldest first within a box, so two lines that arrived together are shown in the order
+    they happened; and LAST BOX WINS across boxes, which is why the caller passes the
+    open's mailbox last — a sweep landing in the same pass must not swallow the answer to
+    a key somebody just pressed.
+    """
+    drained = False
+    for box in boxes:
+        if box:
+            msg = box.pop(0)
+            drained = True
+    return msg, drained
 
 
 def _open(name: Optional[str], note: list) -> None:
@@ -1866,7 +1894,7 @@ def _open(name: Optional[str], note: list) -> None:
     try:
         note.append(open_report_files(name))
     except BaseException as e:                  # noqa: BLE001 — a dead thread that says
-        note.append(f"open failed: {e}")        # nothing is the one outcome worth ruling
+        note.append(f"{name}: open failed: {e}")        # nothing is the one outcome worth ruling
                                                 # out; `open_report_files` catches its own
 
 
@@ -2160,6 +2188,15 @@ def main() -> int:
         last = time.time()
 
         while True:
+            # Both worker mailboxes, drained BEFORE this pass reads the keyboard and in
+            # this order, which is what keeps the status line honest. Oldest first, so
+            # two lines that arrived together are shown in the order they happened. The
+            # open drains last of the two, so a sweep landing in the same pass cannot
+            # swallow the answer to a key somebody just pressed. And both drain ahead of
+            # the keypress handler, so a result that arrived since the last pass cannot
+            # overwrite the "opening…" that this pass is about to set.
+            msg, drained = drain(msg, sweep_note, open_note)
+            dirty[0] = dirty[0] or drained
             r, _, _ = select.select([fd], [], [], 0.25)
             if r:
                 data = os.read(fd, 1024)
@@ -2219,12 +2256,6 @@ def main() -> int:
                 # declined by the throttle is work for nothing. `Locator` holds the real
                 # cadence; this just gives it chances to fire.
                 where.tick()
-            if open_note:
-                msg = open_note.pop()
-                dirty[0] = True
-            if sweep_note:
-                msg = sweep_note.pop()
-                dirty[0] = True
             if dirty[0]:
                 # Asked HERE, on the frame being drawn, rather than when the pane list came
                 # back: the cached answer is a set of pane IDS, and turning those into the

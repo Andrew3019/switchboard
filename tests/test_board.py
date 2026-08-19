@@ -1768,13 +1768,14 @@ class OpenReportFilesTest(unittest.TestCase):
         cmd.chmod(0o644)
         with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
              mock.patch.object(board, "_EDITOR", str(cmd)):
-            self.assertEqual(board.open_report_files("w1"), f"{cmd} is not executable")
+            self.assertEqual(board.open_report_files("w1"),
+                             f"w1: {cmd} is not executable")
 
     def test_an_editor_that_is_not_there_says_so(self):
         with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
              mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
             self.assertEqual(board.open_report_files("w1"),
-                             "no-such-editor-xyz not on PATH")
+                             "w1: no-such-editor-xyz not on PATH")
 
     def test_a_transcript_record_whose_message_is_not_a_dict_does_not_raise(self):
         # Not a shape Claude Code writes; the file is not one switchboard writes either.
@@ -1786,7 +1787,7 @@ class OpenReportFilesTest(unittest.TestCase):
                                lambda n: self.detail(self.transcript)), \
              mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
             self.assertEqual(board.open_report_files("w1"),
-                             "no-such-editor-xyz not on PATH")
+                             "w1: no-such-editor-xyz not on PATH")
 
     def test_no_highlighted_agent_is_a_line_not_an_open(self):
         self.assertEqual(board.open_report_files(None),
@@ -1808,31 +1809,75 @@ class OpenTickTest(unittest.TestCase):
 
         note = []
         with mock.patch.object(board, "open_report_files", slow):
-            t, msg = board.open_tick("w1", note, None)
+            run, msg = board.open_tick("w1", note, None)
             self.assertEqual(msg, "opening w1…")
             self.assertTrue(started.wait(5))
             self.assertEqual(note, [])                 # still working
             # A second double-press while the first is still going does not stack.
-            again, busy = board.open_tick("w1", note, t)
-            self.assertIs(again, t)
-            self.assertEqual(busy, "still opening…")
+            again, busy = board.open_tick("w1", note, run)
+            self.assertIs(again, run)
+            self.assertEqual(busy,
+                             "still opening w1 — w1 not started, press oo again")
             release.set()
-            t.join(5)
+            run[0].join(5)
         self.assertEqual(note, ["→ w1: opened 1 file(s)"])
 
     def test_a_thread_that_dies_still_says_something(self):
         note = []
         with mock.patch.object(board, "open_report_files",
                                mock.Mock(side_effect=RuntimeError("boom"))):
-            t, _ = board.open_tick("w1", note, None)
-            t.join(5)
-        self.assertEqual(note, ["open failed: boom"])
+            run, _ = board.open_tick("w1", note, None)
+            run[0].join(5)
+        self.assertEqual(note, ["w1: open failed: boom"])
 
     def test_no_highlighted_agent_starts_no_thread(self):
         note = []
-        t, msg = board.open_tick(None, note, None)
-        self.assertIsNone(t)
+        run, msg = board.open_tick(None, note, None)
+        self.assertIsNone(run)
         self.assertEqual(msg, "press o on a highlighted agent")
+
+
+class BusyOpenNamesBothAgentsTest(unittest.TestCase):
+    """`oo` on A, then on B while A is still going. B is DROPPED, not queued — so the
+    line has to say so, or A's success line arriving a moment later reads as B's."""
+
+    def test_the_refusal_names_the_one_running_and_the_one_not_started(self):
+        release = threading.Event()
+        note = []
+        def slow(name):
+            release.wait(5)
+            return f"→ {name}: opened"
+
+        with mock.patch.object(board, "open_report_files", slow):
+            run, first = board.open_tick("A", note, None)
+            still, second = board.open_tick("B", note, run)
+            self.assertEqual(first, "opening A…")
+            self.assertEqual(second, "still opening A — B not started, press oo again")
+            self.assertIs(still, run)
+            release.set()
+            run[0].join(5)
+        # And what arrives afterwards names A, so it cannot be read as B's result.
+        self.assertEqual(note, ["→ A: opened"])
+
+
+class DrainTest(unittest.TestCase):
+    """One status line, two worker mailboxes, and an order that keeps it honest."""
+
+    def test_the_open_wins_a_pass_it_shares_with_the_sweep(self):
+        # A sweep line landing in the same pass must not swallow the answer to a key
+        # somebody just pressed.
+        msg, drained = board.drain("", ["sweep: nothing to do"], ["→ w1: opened 2"])
+        self.assertEqual(msg, "→ w1: opened 2")
+        self.assertTrue(drained)
+
+    def test_lines_come_out_oldest_first(self):
+        box = ["first", "second"]
+        msg, _ = board.drain("", box)
+        self.assertEqual(msg, "first")
+        self.assertEqual(box, ["second"])
+
+    def test_nothing_waiting_leaves_the_line_and_the_frame_alone(self):
+        self.assertEqual(board.drain("opening w1…", [], []), ("opening w1…", False))
 
 
 class DoublePressTest(unittest.TestCase):
