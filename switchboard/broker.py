@@ -3991,10 +3991,37 @@ class Broker:
         straight into the agent's pane restarts the agent itself, and its next `sb` command
         is what clears the block (`_revive`). The second is the one people actually do, and
         it used to leave the row blocked forever with the question already answered.
+
+        **REFUSED WHILE A DESCENDANT IS ALREADY BLOCKED.** Only one agent ever waits on a
+        person for one question, and until now nothing enforced it: a dispatcher relayed a
+        child's question and blocked on top of the child's own row, so one decision sat on
+        the board twice and answering the parent left the child still waiting (bug
+        2026-08-16-152345). The protocol has said the rule since the beginning and a live
+        dispatcher walked past it, which is what makes this a gate rather than more wording.
+
+        The gate is a READ at the moment of the call, not a notification: "a parent is not
+        told that its child blocked" still holds — nothing rings the parent when a child
+        blocks, and a parent that never blocks never hears about it. It only learns of the
+        row when it tries to make a second one.
+
+        No `--force`, deliberately. The refusal is not permanent and does not need an escape
+        hatch: the child's row clears the moment the person answers it, and the parent may
+        block then. What it costs is a parent with a genuinely unrelated question, and the
+        answer for that one is the protocol's — report `sb done` naming who is waiting and
+        what for, which is the shape the human wanted in the first place. A flag here would
+        be the flag every double-block reaches for.
         """
         me = me or self.whoami()
         if me == HUMAN:
             raise ValueError("`sb block` is for agents")
+        waiting = self.blocked_descendants(me)
+        if waiting:
+            # Logged as well as refused: a double-block attempt is the shape this gate
+            # exists for, and one that is only ever a stderr line in a pane nobody reads is
+            # a shape nobody can count afterwards.
+            store.log_event(self.db, kind="block_refused_descendant_waiting", agent=me,
+                            waiting=",".join(waiting), why=why[:EVENT_CLIP])
+            raise ValueError(self._someone_below_is_waiting(waiting))
         store.set_state(self.db, me, "blocked")
         # NOTHING is reported to herdr here, and that silence is the whole of what makes a
         # block answerable (see `_binding_lost` for what it costs when it is not).
@@ -4850,6 +4877,52 @@ class Broker:
         """
         return [a["name"] for a in self._descendants(name)
                 if a["state"] in store.LIVE_STATES and not a["ended_at"]]
+
+    def blocked_descendants(self, name: str) -> list[str]:
+        """Descendants that are already waiting on a person. The one-row rule's predicate.
+
+        Sibling of `live_descendants`, and the same store-only reading for the same reason:
+        `block` reports nothing to herdr at all, so our own row is the only place a blocked
+        agent differs from an idle one (`_is_blocked`).
+
+        A blocked agent is live by `live_descendants`' own test, so `ended_at` is checked
+        here too — an archived row that never cleared its block is not somebody the person
+        is still being asked by, and refusing a parent on account of it would be a gate
+        nothing could open.
+        """
+        return [a["name"] for a in self._descendants(name)
+                if a["state"] == "blocked" and not a["ended_at"]]
+
+    def _someone_below_is_waiting(self, waiting: Sequence[str]) -> str:
+        """The refusal text for a second block on one question — says whose row it is.
+
+        Names the agent and quotes its `why`, because the caller's next move depends on
+        whether that row is its own question already asked. One line per waiting agent,
+        then what to do instead: this is read by an agent that was about to reach a person
+        and now cannot, and a refusal with no route is how an agent starts inventing one.
+        """
+        rows = []
+        for who in waiting:
+            # The `why` lives in the event log and nowhere else — there is no column for it
+            # (`status._block_reasons` reads the same place for the board). Latest by `id`,
+            # not by timestamp: whole-second stamps make two blocks in one second a coin
+            # toss. A missing reason is not an error, only a barer line.
+            why = ""
+            row = self.db.execute(
+                "SELECT payload FROM events WHERE kind='blocked' AND agent=? "
+                "ORDER BY id DESC LIMIT 1", (who,)).fetchone()
+            if row:
+                try:
+                    why = (json.loads(row["payload"] or "{}") or {}).get("why") or ""
+                except json.JSONDecodeError:
+                    why = ""
+            rows.append(f"  {who}" + (f" — {why}" if why else ""))
+        return ("refused: somebody below you is already waiting on a person:\n"
+                + "\n".join(rows)
+                + "\nOnly one agent ever waits on a person for one question, so that row "
+                  "is theirs and not yours. Report `sb done` instead, saying who is "
+                  "waiting and what for. If your question is a different one, block once "
+                  "their row clears.")
 
     def pane_holding_descendants(self, name: str) -> list[str]:
         """Descendants that still hold a pane — why a closed row is still on the board.

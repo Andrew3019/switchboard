@@ -849,6 +849,62 @@ class BrokerTest(unittest.TestCase):
         self.assertTrue(self.h.notifications)
         self.assertEqual(store.unread_for(self.db, "orch"), [])   # parent context untouched
 
+    def test_block_is_refused_while_a_descendant_is_already_waiting(self):
+        """One question, one row — the rule the protocol states and nothing enforced.
+
+        The observed failure (bug 2026-08-16-152345): a child blocked on a decision, its
+        dispatcher relayed the same question and blocked on top of it, and the board carried
+        two human-waiting rows for one decision. The refusal names the waiting agent and
+        quotes its reason, because the caller's next move turns on whether that row is
+        already its own question.
+        """
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
+        self.b.block("which branch?", me="kid")
+
+        with self.assertRaises(ValueError) as e:
+            self.b.block("kid needs to know which branch", me="orch")
+
+        self.assertIn("kid", str(e.exception))
+        self.assertIn("which branch?", str(e.exception))
+        self.assertIn("sb done", str(e.exception))
+        self.assertEqual(store.get_agent(self.db, "orch")["state"], "working")  # not blocked
+        refused = [r for r in store.recent_events(self.db, agent="orch")
+                   if r["kind"] == "block_refused_descendant_waiting"]
+        self.assertEqual(len(refused), 1)
+
+    def test_the_refusal_lifts_once_the_childs_row_clears(self):
+        """Not a permanent gate, which is why it needs no escape hatch.
+
+        A parent with a genuinely different question is not locked out — it is made to wait
+        its turn. The moment the person answers the child (which clears its block), the
+        parent may reach them itself.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
+        self.b.block("which branch?", me="kid")
+        self.b.tell(["kid"], "use main", me=HUMAN)               # the human answers the child
+
+        self.b.block("and now a different question", me="orch")
+
+        self.assertEqual(store.get_agent(self.db, "orch")["state"], "blocked")
+
+    def test_a_dead_descendant_never_holds_the_gate_shut(self):
+        """A child that died holding a block is nobody the person is waiting on.
+
+        The dangerous direction here is the opposite of `live_descendants`': a gate held by
+        a row nothing can clear would take away the parent's only way to reach a person, for
+        good. A block that ended with its agent is not a question anybody is still holding.
+        """
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
+        self.b.block("which branch?", me="kid")
+        store.set_state(self.db, "kid", "failed")     # its session died under the block
+
+        self.b.block("nobody below me is waiting now", me="orch")
+
+        self.assertEqual(store.get_agent(self.db, "orch")["state"], "blocked")
+
     def test_a_block_writes_no_mail_but_keeps_a_durable_record(self):
         """The human has no mailbox, and the record must survive anyway.
 
