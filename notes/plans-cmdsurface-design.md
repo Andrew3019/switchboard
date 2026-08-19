@@ -98,13 +98,12 @@ currently push middle-vowel stripping. Soften to: shorten by abbreviating and cu
 the title already implies — short but READABLE, no vowel-mangling. Replace the `invstgt`-style
 example with a readable one (e.g. "list every claim…" → "list claims").
 
-**Doc debt to clear in the #4 DESIGN-TRUTH follow-up** (both slipped through / were out of
-scope earlier):
-- `DESIGN-TRUTH.md` line ~425 still says "abbreviating and dropping middle vowels where that
-  helps" — PR #123 merged before the vowel redirect reached the worker. Remove the vowel
-  phrase here too.
+**Doc debt to clear in the #4 follow-up:**
+- `DESIGN-TRUTH.md` vowel phrasing — ALREADY FIXED on main by PR #124 ("not vowel-stripped").
+- The CODE-side vowel guidance still stands: `__init__.py` GUIDE + the `_SHORTEN`/`_no_display`
+  refusal example (`invstgt`) still push vowel-stripping — soften in the #4 code PR.
 - `design/PLANS-AND-STEPS.md` ~198-204 still carries the old "optional / falls back to its
-  name clipped" wording — stale after the required-display change. Update it.
+  name clipped" wording — stale after the required-display change. Update it in #4's doc pass.
 
 ---
 
