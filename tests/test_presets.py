@@ -236,6 +236,20 @@ class ReadingAPresetTest(unittest.TestCase):
         self.assertFalse(any("adversarial" in ps for ps in per_role.values()))
         self.assertIn("adversarial", presets.text(bare, "adversarial")[1])
 
+    def test_the_shipped_adversarial_procedure_names_the_reader_that_cannot_spawn(self):
+        """Pins the decision, which is the one thing prose here is allowed to be pinned on.
+
+        Every round of the procedure is a spawn, so a reader without delegate rights — the
+        workers briefs routinely point at it — has to be told to ask its parent for a lead
+        rather than attempt rounds `sb delegate` will refuse. Matched on the two words that
+        carry the decision, not on a sentence, so rewording the paragraph does not fail it.
+        """
+        bare = Path(self.tmp.name) / "empty-repo-2"
+        bare.mkdir()
+        body = presets.text(bare, "adversarial")[1]
+        self.assertIn("cannot spawn", body)
+        self.assertIn("parent", body)
+
     def test_the_verb_takes_an_optional_name(self):
         """`sb presets` still lists; `sb presets <name>` reaches the reading path. Pinned
         because the two share one verb and an argparse slip would break listing silently."""
