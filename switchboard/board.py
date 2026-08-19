@@ -1802,8 +1802,15 @@ def open_report_files(name: Optional[str]) -> str:
     `sb inspect --json` process, exactly as a click already asks `herdr` to focus a
     pane: out of process, on a keypress, never on the drawing path.
 
-    Returns a line for the status bar and never raises: this runs inside the event
-    loop, where an exception would take the board down over a missing binary.
+    NOT ON THE DRAWING THREAD — `open_tick` runs this in one of its own, for
+    `Locator`'s reason and more of it. Eight subprocesses at ten seconds each is eighty
+    seconds a synchronous version could freeze the loop for, and a frozen board is worse
+    than it sounds: raw mode has cleared ISIG, so ctrl-C is a byte in a buffer and not a
+    signal, and nothing the human types would end it. Off the thread the loop keeps
+    drawing and the answer arrives in the status bar when it arrives.
+
+    Returns a line for the status bar and never raises: an exception here would take the
+    board down over a missing binary, which is a thing a settings file can cause.
     """
     if not name:
         return "press o on a highlighted agent"
@@ -1823,11 +1830,44 @@ def open_report_files(name: Optional[str]) -> str:
             _editor("-r", "-g", f)
     except FileNotFoundError:
         return f"{_EDITOR} not on PATH"
+    except PermissionError:
+        # A command that is there and cannot be run: a wrapper script nobody chmodded,
+        # or `command` naming the .app bundle rather than the CLI inside it.
+        return f"{_EDITOR} is not executable"
     except subprocess.TimeoutExpired:
         return f"{name}: {_EDITOR} timed out"
+    except (OSError, subprocess.SubprocessError) as e:
+        # Everything else the exec can fail with — a fork that runs out of memory, a
+        # bad interpreter line. A setting must not be able to end the board.
+        return f"{name}: {_EDITOR} failed: {status_mod.clip(str(e), 40)}"
     if not files:
         return f"{name}: no files found in recent messages"
     return f"→ {name}: opened {len(files)} file(s)"
+
+
+def open_tick(name: Optional[str], note: list, running: Optional[threading.Thread]):
+    """Start an open off the drawing thread. -> (the thread now running, a line to show).
+
+    One at a time. Leaning on `o` re-fires once per read, and each fire is up to eight
+    subprocesses; without this the bursts would pile up behind each other and every one
+    of them would open the same tabs again.
+    """
+    if not name:
+        return running, "press o on a highlighted agent"
+    if running is not None and running.is_alive():
+        return running, "still opening…"
+    t = threading.Thread(target=_open, args=(name, note), daemon=True)
+    t.start()
+    return t, f"opening {name}…"
+
+
+def _open(name: Optional[str], note: list) -> None:
+    """The open itself, off the drawing thread. Never raises into it."""
+    try:
+        note.append(open_report_files(name))
+    except BaseException as e:                  # noqa: BLE001 — a dead thread that says
+        note.append(f"open failed: {e}")        # nothing is the one outcome worth ruling
+                                                # out; `open_report_files` catches its own
 
 
 # How far back a transcript is read. One JSONL record is one content block, not one
@@ -1857,7 +1897,10 @@ def last_assistant_texts(path: Path, n: int = 3) -> list[str]:
             continue          # a torn last line on a live session, not a failure
         if not isinstance(rec, dict) or rec.get("type") != "assistant":
             continue          # user turns, and the meta records with no role at all
-        content = (rec.get("message") or {}).get("content")
+        message = rec.get("message")
+        # isinstance, like every other field here: this file is not one switchboard
+        # writes, and a `message` that is a string raises where `.get` is assumed.
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
         texts = [part["text"] for part in content
@@ -2093,8 +2136,10 @@ def main() -> int:
     # When `o` was last pressed on its own, on the monotonic clock. One float is the
     # whole double-press state: a single `o` is not a command, so nothing happens until
     # a second one lands inside `DOUBLE_PRESS` — see `double_press_run`, which is where
-    # a pair arriving in ONE read is handled.
-    last_o = 0.0
+    # a pair arriving in ONE read is handled. `open_note` is that worker thread's
+    # one-slot mailbox, `sweep_note`'s shape and for its reason: the open shells out,
+    # and this pane may not be written to by anything but the frame loop.
+    last_o, open_note, opening = 0.0, [], None
     show_archived = status_mod.SHOW_ARCHIVED
     # Which agent shares this pane's tab — the row this board highlights. Built here and
     # not at import, so the environment it reads is this process's own, and asked again per
@@ -2135,7 +2180,8 @@ def main() -> int:
                             fire, last_o = double_press_run(
                                 last_o, ev["raw"].count("o"), time.monotonic())
                             if fire:
-                                msg = open_report_files(where.name(snap.agents))
+                                opening, msg = open_tick(
+                                    where.name(snap.agents), open_note, opening)
                                 dirty[0] = True
                         continue
                     step = wheel(ev)
@@ -2173,6 +2219,9 @@ def main() -> int:
                 # declined by the throttle is work for nothing. `Locator` holds the real
                 # cadence; this just gives it chances to fire.
                 where.tick()
+            if open_note:
+                msg = open_note.pop()
+                dirty[0] = True
             if sweep_note:
                 msg = sweep_note.pop()
                 dirty[0] = True

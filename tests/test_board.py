@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tty
 import unittest
@@ -1742,6 +1743,96 @@ class LastAssistantTextsTest(unittest.TestCase):
 
     def test_a_missing_transcript_is_not_an_error(self):
         self.assertEqual(board.last_assistant_texts(Path("/nope/nothing.jsonl")), [])
+
+
+class OpenReportFilesTest(unittest.TestCase):
+    """The failure paths, which are the ones that matter: this runs inside the event
+    loop, and anything that escapes it takes the board down — permanently, if the cause
+    is a settings file, because the same key kills it again on the next start."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "notes.md").write_text("x")
+        self.transcript = self.tmp / "t.jsonl"
+
+    def detail(self, transcript=None):
+        return {"cwd": str(self.tmp),
+                "transcript": str(transcript) if transcript else None}
+
+    def test_an_editor_that_is_there_and_cannot_be_run_does_not_raise(self):
+        # A wrapper script nobody chmodded — the shape that would otherwise kill the
+        # board on every restart until the setting is fixed.
+        cmd = self.tmp / "cursor"
+        cmd.write_text("#!/bin/sh\n")
+        cmd.chmod(0o644)
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", str(cmd)):
+            self.assertEqual(board.open_report_files("w1"), f"{cmd} is not executable")
+
+    def test_an_editor_that_is_not_there_says_so(self):
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
+            self.assertEqual(board.open_report_files("w1"),
+                             "no-such-editor-xyz not on PATH")
+
+    def test_a_transcript_record_whose_message_is_not_a_dict_does_not_raise(self):
+        # Not a shape Claude Code writes; the file is not one switchboard writes either.
+        self.transcript.write_text(
+            '{"type": "assistant", "message": "hello"}\n'
+            '{"type": "assistant", "message": [{"type": "text", "text": "hi"}]}\n')
+        self.assertEqual(board.last_assistant_texts(self.transcript), [])
+        with mock.patch.object(board, "_inspect",
+                               lambda n: self.detail(self.transcript)), \
+             mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
+            self.assertEqual(board.open_report_files("w1"),
+                             "no-such-editor-xyz not on PATH")
+
+    def test_no_highlighted_agent_is_a_line_not_an_open(self):
+        self.assertEqual(board.open_report_files(None),
+                         "press o on a highlighted agent")
+
+
+class OpenTickTest(unittest.TestCase):
+    """The open runs off the drawing thread, because a synchronous one could freeze the
+    board for the length of eight subprocess timeouts — and in raw mode ctrl-C is a byte
+    in a buffer, not a signal, so nothing the human types would end it."""
+
+    def test_the_keypress_returns_at_once_and_the_line_arrives_in_the_note(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow(name):
+            started.set()
+            release.wait(5)
+            return f"→ {name}: opened 1 file(s)"
+
+        note = []
+        with mock.patch.object(board, "open_report_files", slow):
+            t, msg = board.open_tick("w1", note, None)
+            self.assertEqual(msg, "opening w1…")
+            self.assertTrue(started.wait(5))
+            self.assertEqual(note, [])                 # still working
+            # A second double-press while the first is still going does not stack.
+            again, busy = board.open_tick("w1", note, t)
+            self.assertIs(again, t)
+            self.assertEqual(busy, "still opening…")
+            release.set()
+            t.join(5)
+        self.assertEqual(note, ["→ w1: opened 1 file(s)"])
+
+    def test_a_thread_that_dies_still_says_something(self):
+        note = []
+        with mock.patch.object(board, "open_report_files",
+                               mock.Mock(side_effect=RuntimeError("boom"))):
+            t, _ = board.open_tick("w1", note, None)
+            t.join(5)
+        self.assertEqual(note, ["open failed: boom"])
+
+    def test_no_highlighted_agent_starts_no_thread(self):
+        note = []
+        t, msg = board.open_tick(None, note, None)
+        self.assertIsNone(t)
+        self.assertEqual(msg, "press o on a highlighted agent")
 
 
 class DoublePressTest(unittest.TestCase):
