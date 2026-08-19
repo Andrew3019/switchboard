@@ -207,6 +207,45 @@ def _has_live_child(db: sqlite3.Connection, name: str) -> bool:
         (name,),
     ).fetchone() is not None
 
+def _awaiting_reply(db: sqlite3.Connection, name: str) -> bool:
+    """Has this agent asked a question that has not been answered yet?
+
+    `sb tell <who> "..." --needs-reply` is how the protocol says to ask another agent
+    something, and it says in the same breath that nothing waits: you send, you end your
+    turn, you are poked when the answer comes. An agent doing exactly that had no verb —
+    `done` reads as finished and `block` summons a person to a row whose only fault was
+    following the instructions — so the gate demanded a report there was nothing to make.
+    There is no third verb to invent: the right end for that turn is simply the end of it.
+
+    The same three conditions `status._awaiting_reply` excuses a STALLED row on, asked of
+    one agent, and deliberately the same so the two cannot disagree about one state:
+
+    - a `needs_reply` message from this agent with nothing back from its recipient since.
+      A later question supersedes an answered earlier one, so only the most recent
+      unanswered question excuses anything.
+    - the recipient is still open. An agent whose `sb done` has landed will never answer.
+    - the question is still deliverable (`undeliverable_at`), which is the same sentence
+      one step earlier: nothing is coming.
+
+    When any of those stops holding, the excuse ends and the agent is a silent finish like
+    any other — the reconciler carries it from there, which is why this may excuse a turn
+    without bound in time.
+
+    `>=` on the timestamps for `status._awaiting_reply`'s reason: they are whole seconds,
+    and a reply written in the same second as the question would otherwise never count.
+    """
+    return db.execute(
+        "SELECT 1 FROM messages q JOIN agents a ON a.name = q.to_agent "
+        " WHERE q.from_agent = ? AND q.needs_reply = 1 "
+        "   AND q.undeliverable_at IS NULL AND a.ended_at IS NULL "
+        "   AND NOT EXISTS (SELECT 1 FROM messages r "
+        "                    WHERE r.from_agent = q.to_agent "
+        "                      AND r.to_agent = q.from_agent "
+        "                      AND r.id <> q.id AND r.created_at >= q.created_at) "
+        " LIMIT 1",
+        (name,),
+    ).fetchone() is not None
+
 
 def _already_nudged(db: sqlite3.Connection, name: str) -> bool:
     """Has this agent been stopped once already, with nothing reported since?
@@ -289,10 +328,12 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
 
     **An unresolvable caller ends its turn.** Not one of ours, or one we cannot name yet.
 
-    **Three legitimate ends without a report**, and only three: an agent still holding its
-    placeholder task (`awaiting_task`) was told to wait for one; a parent with a live child
-    was told to delegate and end its turn, and blocking that would push it to report `done`
-    over work still running; and an agent that already reported has nothing to add.
+    **Four legitimate ends without a report**, and only four: an agent still holding its
+    placeholder task (`awaiting_task`) was told to wait for one; an agent that asked another
+    agent a question with `tell --needs-reply` was told to end its turn and be poked with the
+    answer (`_awaiting_reply`); a parent with a live child was told to delegate and end its
+    turn, and blocking that would push it to report `done` over work still running; and an
+    agent that already reported has nothing to add.
 
     Anything else is the silent finish this exists to stop.
     """
@@ -304,6 +345,13 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
     if a["state"] in REPORTED:
         return None
     if a["awaiting_task"]:
+        return None
+    if _awaiting_reply(db, a["name"]):
+        # Logged against NO agent, with the target in the payload, for `stop_gate_capped`'s
+        # reason: `status._last_activity` counts every event that names an agent, so writing
+        # this against the waiting agent would reset the idle clock that carries it once the
+        # excuse ends. The waiver is history; the state lives in the unanswered message.
+        store.log_event(db, kind="stop_gate_waived", target=a["name"], reason="awaiting_reply")
         return None
     if _has_live_child(db, a["name"]):
         # Logged rather than silent: this is the one exemption that could hide a real

@@ -92,6 +92,36 @@ class StopGateTest(unittest.TestCase):
         store.set_state(self.db, "w1", "working")       # revived by a person in its pane
         self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
 
+    def test_an_agent_waiting_on_a_reply_it_asked_for_ends_its_turn(self):
+        """The state that had no verb. `tell --needs-reply` says end your turn and be poked
+        with the answer, and the gate used to demand a report there was nothing to make."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        store.create_agent(self.db, name="lead", role="lead")
+        store.put_message(self.db, from_agent="w1", to_agent="lead", kind="tell",
+                          body="which one?", needs_reply=True)
+        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
+
+    def test_the_answer_ends_the_excuse(self):
+        """Any message back from whoever was asked, and the next silent end is a silence
+        like any other — nothing here excuses a row for the rest of its life."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        store.create_agent(self.db, name="lead", role="lead")
+        store.put_message(self.db, from_agent="w1", to_agent="lead", kind="tell",
+                          body="which one?", needs_reply=True)
+        store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
+                          body="the second one")
+        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
+
+    def test_a_question_nobody_is_left_to_answer_excuses_nothing(self):
+        """The recipient's `sb done` has landed, so no answer is coming and waiting on it
+        is a silent finish like any other."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        store.create_agent(self.db, name="lead", role="lead")
+        store.put_message(self.db, from_agent="w1", to_agent="lead", kind="tell",
+                          body="which one?", needs_reply=True)
+        store.set_state(self.db, "lead", "done")   # its `sb done` landed; no answer is coming
+        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
+
 
 class ActivitySignalTest(unittest.TestCase):
     """The two edges — `agents.turn`. What a test can pin is the WRITE; that Claude Code
