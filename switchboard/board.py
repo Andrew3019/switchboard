@@ -1686,11 +1686,15 @@ def focus(name: str) -> str:
 
 # What double-`o` opens, and how it decides. Prose fences a path in backticks nearly
 # every time it names one, so that is the first cut; the rest is there because prose
-# also cites code — `board.py:1914-1929` is a citation, not a file to open, and the
-# line range is what says so.
+# also CITES code it merely read — `board.py:1914-1929` is a citation, not a file to
+# open, and the line range is what says so. So a line range REJECTS a candidate; it
+# used to be stripped, which admitted the very thing it identified.
 _BACKTICKED = re.compile(r"`([^`]+)`")
 _LINE_SUFFIX = re.compile(r":\d[\d-]*$")
-_PATHLIKE = re.compile(r"^[\w.][\w./-]*\.[a-zA-Z0-9]{1,5}$")
+# Relative, absolute or `~`-rooted, and it must end in a short extension. Where it
+# points is decided below, not here: an absolute path outside the agent's worktree is
+# admitted by this and dropped by the containment check.
+_PATHLIKE = re.compile(r"^(~/|/)?[\w.][\w./-]*\.[a-zA-Z0-9]{1,5}$")
 
 # Two or three messages can name a handful of paths each, and a dozen new tabs is not
 # "here is what it wrote", it is a mess to close.
@@ -1701,47 +1705,85 @@ DOUBLE_PRESS = 1.0
 
 
 def report_files(texts, cwd: str, *, limit: int = MAX_OPEN_FILES) -> list[str]:
-    """The files an agent's recent prose named, resolved against its worktree.
+    """The files an agent's recent prose named, under its worktree. Oldest named last.
 
-    A heuristic, and the deciding filter is the last one: a candidate has to EXIST
-    under the agent's cwd. Shape alone would open half the words in a sentence; the
-    filesystem answers "is this a file" better than any regex can. What survives that
-    and still should not have is a file the agent read rather than wrote — accepted,
-    because nothing in the text distinguishes the two.
+    A heuristic, and two filters carry it: a line range means the agent was citing
+    code rather than naming its own output, and everything left has to be a real file
+    UNDER the agent's cwd. Shape alone would open half the words in a sentence; the
+    filesystem answers "is this a file" better than any regex can. What survives both
+    and still should not have is a file the agent read and named without a line range —
+    accepted, because nothing in the text distinguishes that from one it wrote.
+
+    Scanned NEWEST message first, so when there are more candidates than `limit` the
+    ones that survive are the most recently named — the final summary's report file,
+    not six files an earlier message happened to cite. The list is returned in reading
+    order, so the newest lands last and is the tab the editor leaves in front.
+
+    Containment is judged on the path as written, normalised, and NOT on
+    `Path.resolve()`: `.switchboard` in a worktree is a symlink into the main checkout,
+    and resolving would put the briefs this feature exists to open outside the cwd they
+    were named relative to.
     """
-    root = Path(cwd)
+    if limit <= 0:
+        return []
+    root = Path(os.path.normpath(cwd))
     out: list[str] = []
     seen: set[str] = set()
-    for text in texts:
+    for text in reversed(list(texts)):
         for span in _BACKTICKED.findall(text):
-            cand = _LINE_SUFFIX.sub("", span.strip())
-            if not cand or cand.startswith("http") or not _PATHLIKE.match(cand):
+            cand = span.strip()
+            if not cand or cand.startswith("http") or _LINE_SUFFIX.search(cand):
+                continue
+            if not _PATHLIKE.match(cand):
                 continue
             try:
-                resolved = (root / cand).resolve()
-                if not resolved.is_file():
+                joined = Path(os.path.normpath(root / Path(cand).expanduser()))
+                if not joined.is_relative_to(root) or not joined.is_file():
                     continue
-            except OSError:
+            except (OSError, ValueError):
                 continue
-            key = str(resolved)
+            key = str(joined)
             if key in seen:
                 continue
             seen.add(key)
             out.append(key)
             if len(out) >= limit:
-                return out
-    return out
+                return out[::-1]
+    return out[::-1]
 
 
 def double_press(last: float, now: float, window: float = DOUBLE_PRESS):
     """-> (fire now?, the `last` to keep). A key that does nothing on its own.
 
     Reset-after-fire, so a third press inside the window starts a new pair rather
-    than firing again off the second one.
+    than firing again off the second one. `now` is a MONOTONIC clock: on the wall
+    clock a backward step between two presses makes the gap negative, which reads as
+    "inside the window", and a single `o` would open the editor.
     """
     if now - last < window:
         return True, 0.0
     return False, now
+
+
+def double_press_run(last: float, presses: int, now: float,
+                     window: float = DOUBLE_PRESS):
+    """The same, for a RUN of presses that arrived together. -> (fire?, new `last`).
+
+    One terminal read can carry several keystrokes — `parse_sgr` hands the whole run
+    back as one event with `raw="oo"`, which is what two quick presses look like
+    whenever the loop was busy for a few tens of milliseconds (a refresh tick, or the
+    `sb inspect` this very action runs), and what key auto-repeat looks like always.
+    Membership (`"o" in raw`) counted that as ONE press, so the intended double press
+    was exactly the case that never fired.
+
+    Fires at most once per run: two pairs in one burst are a human leaning on the key,
+    not a request to open the same files twice.
+    """
+    fired = False
+    for _ in range(max(presses, 0)):
+        fire, last = double_press(last, now, window)
+        fired = fired or fire
+    return fired, last
 
 
 def open_report_files(name: Optional[str]) -> str:
@@ -2048,9 +2090,10 @@ def main() -> int:
     # setting it starts from is for. `layout` clamps `top` every call, so the row
     # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
-    # When `o` was last pressed on its own. One float is the whole double-press state:
-    # a single `o` is not a command, so nothing happens until a second one lands inside
-    # `DOUBLE_PRESS` — see `double_press`.
+    # When `o` was last pressed on its own, on the monotonic clock. One float is the
+    # whole double-press state: a single `o` is not a command, so nothing happens until
+    # a second one lands inside `DOUBLE_PRESS` — see `double_press_run`, which is where
+    # a pair arriving in ONE read is handled.
     last_o = 0.0
     show_archived = status_mod.SHOW_ARCHIVED
     # Which agent shares this pane's tab — the row this board highlights. Built here and
@@ -2089,7 +2132,8 @@ def main() -> int:
                             show_archived = not show_archived
                             dirty[0] = True
                         if "o" in ev["raw"]:
-                            fire, last_o = double_press(last_o, time.time())
+                            fire, last_o = double_press_run(
+                                last_o, ev["raw"].count("o"), time.monotonic())
                             if fire:
                                 msg = open_report_files(where.name(snap.agents))
                                 dirty[0] = True

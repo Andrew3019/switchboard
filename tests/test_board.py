@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import tty
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1632,49 +1635,72 @@ class SeamPathsTest(unittest.TestCase):
 class ReportFilesTest(unittest.TestCase):
     """What double-`o` opens, from prose that also cites code it merely read.
 
-    Both strings below are real assistant text shapes taken off transcripts in this
+    The strings below are real assistant text shapes taken off transcripts in this
     repo — the "wrote it to X" one, which is the whole point of the feature, and the
-    "`board.py:1914-1929`" citation, which is what stops it being one regex.
+    "`board.py:1914-1929`" citation, which is what stops it being one regex. The
+    citation's file EXISTS here on purpose: an earlier version of this test only
+    passed because it did not, so it pinned the existence filter and not the rule it
+    was named for.
     """
 
     def setUp(self):
-        # Resolved, because `report_files` resolves what it returns and /tmp is a
-        # symlink on macOS.
+        # Resolved, because /tmp is a symlink on macOS and `report_files` normalises
+        # the cwd it is handed.
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         (self.tmp / ".switchboard" / "briefs" / "scout").mkdir(parents=True)
         (self.tmp / ".switchboard" / "briefs" / "scout" / "findings.md").write_text("x")
         (self.tmp / "notes").mkdir()
         (self.tmp / "notes" / "x.md").write_text("x")
+        (self.tmp / "board.py").write_text("x")
 
     def files(self, *texts, **kw):
         return [str(Path(f).relative_to(self.tmp))
                 for f in board.report_files(texts, str(self.tmp), **kw)]
 
-    def test_a_written_file_is_opened_and_a_code_citation_is_not(self):
+    def test_a_written_file_is_opened(self):
         self.assertEqual(
             self.files("Task complete. I wrote full findings to "
                        "`.switchboard/briefs/scout/findings.md`, then called `sb done`."),
             [".switchboard/briefs/scout/findings.md"])
-        # It exists in this repo but not under the tmp cwd, and the line range says it
-        # was being cited anyway.
+
+    def test_a_line_range_rejects_a_citation_even_when_the_file_is_right_there(self):
         self.assertEqual(
             self.files("the board's left-click handler (`board.py:1914-1929`) does it"),
             [])
+        # The same file, named without a line range, is indistinguishable from one it
+        # wrote — and is opened. The accepted residual, pinned so a change is deliberate.
+        self.assertEqual(self.files("see `board.py`"), ["board.py"])
 
     def test_only_files_that_exist_under_the_agents_cwd_survive(self):
         self.assertEqual(self.files("wrote `notes/x.md` and `notes/gone.md`"),
                          ["notes/x.md"])
 
+    def test_absolute_and_tilde_paths_are_read_and_then_contained(self):
+        inside = self.tmp / "notes" / "x.md"
+        self.assertEqual(self.files(f"wrote `{inside}`"), ["notes/x.md"])
+        # Real, and nowhere near this agent's worktree: containment drops it.
+        self.assertEqual(board.report_files(["see `/etc/hosts` and `~/.zshrc`"],
+                                            str(self.tmp)), [])
+
     def test_urls_unfenced_prose_and_repeats_are_not_paths(self):
         self.assertEqual(self.files("see `http://example.com/a.md` and notes/x.md"), [])
-        self.assertEqual(self.files("`notes/x.md`", "again: `notes/x.md`"), ["notes/x.md"])
+        self.assertEqual(self.files("`notes/x.md`", "again: `./notes/x.md`"),
+                         ["notes/x.md"])
 
-    def test_the_count_is_capped(self):
+    def test_the_cap_keeps_the_newest_message_and_leaves_it_last(self):
         for i in range(3):
             (self.tmp / "notes" / f"f{i}.md").write_text("x")
-        self.assertEqual(len(self.files("`notes/f0.md` `notes/f1.md` `notes/f2.md`",
-                                        limit=2)), 2)
+        # An earlier message naming enough files to fill the cap must not evict the
+        # report the final message names — that file is the whole point of the action,
+        # and it goes last so it is the tab the editor leaves in front.
+        self.assertEqual(
+            self.files("read `notes/f0.md` `notes/f1.md` `notes/f2.md`",
+                       "Done. Findings in `notes/x.md`.", limit=2),
+            ["notes/f0.md", "notes/x.md"])
+
+    def test_a_cap_of_zero_opens_nothing(self):
+        self.assertEqual(self.files("`notes/x.md`", limit=0), [])
 
 
 class LastAssistantTextsTest(unittest.TestCase):
@@ -1735,6 +1761,44 @@ class DoublePressTest(unittest.TestCase):
     def test_two_presses_too_far_apart_do_not_fire(self):
         _, last = board.double_press(0.0, 1000.0)
         self.assertEqual(board.double_press(last, 1002.0), (False, 1002.0))
+
+
+class CoalescedPressTest(unittest.TestCase):
+    """The pair that arrives in ONE terminal read — the case that used to never fire.
+
+    A read carries whatever bytes were waiting, so two quick presses reach the loop as
+    one event with `raw="oo"` whenever it was busy for a few tens of milliseconds, and
+    key auto-repeat is that always. Counting, not membership, is what makes it a pair.
+    """
+
+    def test_the_boards_own_parser_hands_back_one_event_for_two_presses(self):
+        events, rest = board.parse_sgr("oo")
+        self.assertEqual(rest, "")
+        self.assertEqual([e["raw"] for e in events], ["oo"])
+        self.assertEqual(board.double_press_run(0.0, events[0]["raw"].count("o"),
+                                                1000.0), (True, 0.0))
+
+    def test_a_raw_mode_pty_really_does_coalesce_them(self):
+        """Not a mock: the same pty, raw mode and blocking read the board uses."""
+        primary, secondary = pty.openpty()
+        self.addCleanup(os.close, primary)
+        self.addCleanup(os.close, secondary)
+        tty.setraw(secondary)
+        os.write(primary, b"o")
+        os.write(primary, b"o")
+        time.sleep(0.05)                       # the loop, busy on a refresh tick
+        raw = os.read(secondary, 1024).decode()
+        self.assertEqual(raw, "oo")            # one read, both presses
+        events, _ = board.parse_sgr(raw)
+        fire, _ = board.double_press_run(0.0, events[0]["raw"].count("o"), 1000.0)
+        self.assertTrue(fire)
+
+    def test_a_lone_press_in_its_own_event_still_does_not_fire(self):
+        self.assertEqual(board.double_press_run(0.0, 1, 1000.0), (False, 1000.0))
+
+    def test_a_longer_burst_fires_once_not_once_per_pair(self):
+        # Somebody leaning on the key wants the files open, not opened twice.
+        self.assertEqual(board.double_press_run(0.0, 5, 1000.0), (True, 1000.0))
 
 
 if __name__ == "__main__":
