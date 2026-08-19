@@ -650,3 +650,12 @@ agent_kind = "claude"
 # The provider CLI's default is manual, under which every agent stalls on its first tool
 # call waiting for a human who is not watching.
 permission_mode = "auto"
+
+
+[editor]
+# The CLI the board's double-`o` action shells out to. Not a preference so much as a
+# claim about the binary: it must take `<folder>` to focus (or create) that folder's
+# window, and `-r -g <file>` to add a file to the most-recently-active window as a tab
+# rather than opening a window of its own. `cursor` and `code` both do; something else
+# may not. See `board.open_report_files`.
+command = "cursor"

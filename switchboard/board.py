@@ -48,6 +48,7 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -56,6 +57,7 @@ import threading
 import time
 import tty
 import unicodedata
+from collections import deque
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -82,6 +84,7 @@ CHROME = config.setting("display.board_chrome")      # header, STATS, two stats 
                                                      # lines of this renderer that are
                                                      # not agent rows
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+_EDITOR = config.setting("editor.command")   # `[editor]`, and see `open_report_files`
 
 # How much of the width the board takes when it opens beside an agent — THE ONLY
 # board width there is. Every board pane is the same board showing the same fleet,
@@ -1323,7 +1326,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # first, because it is the least useful thing on the line to somebody who already
     # knows. See `_frame`.
     from . import richboard
-    line = (_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
+    line = (_c("click a row to focus it · scroll to pan · oo opens files · a archived · q quits", DIM)
             + ("   " + msg if msg else ""))
     if not richboard.available():
         # AFTER the message, so it is this note that a narrow pane clips and never the
@@ -1681,6 +1684,182 @@ def focus(name: str) -> str:
     return f"→ {name}"
 
 
+# What double-`o` opens, and how it decides. Prose fences a path in backticks nearly
+# every time it names one, so that is the first cut; the rest is there because prose
+# also cites code — `board.py:1914-1929` is a citation, not a file to open, and the
+# line range is what says so.
+_BACKTICKED = re.compile(r"`([^`]+)`")
+_LINE_SUFFIX = re.compile(r":\d[\d-]*$")
+_PATHLIKE = re.compile(r"^[\w.][\w./-]*\.[a-zA-Z0-9]{1,5}$")
+
+# Two or three messages can name a handful of paths each, and a dozen new tabs is not
+# "here is what it wrote", it is a mess to close.
+MAX_OPEN_FILES = 6
+
+# How long after an `o` a second one still counts as a double press, in seconds.
+DOUBLE_PRESS = 1.0
+
+
+def report_files(texts, cwd: str, *, limit: int = MAX_OPEN_FILES) -> list[str]:
+    """The files an agent's recent prose named, resolved against its worktree.
+
+    A heuristic, and the deciding filter is the last one: a candidate has to EXIST
+    under the agent's cwd. Shape alone would open half the words in a sentence; the
+    filesystem answers "is this a file" better than any regex can. What survives that
+    and still should not have is a file the agent read rather than wrote — accepted,
+    because nothing in the text distinguishes the two.
+    """
+    root = Path(cwd)
+    out: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for span in _BACKTICKED.findall(text):
+            cand = _LINE_SUFFIX.sub("", span.strip())
+            if not cand or cand.startswith("http") or not _PATHLIKE.match(cand):
+                continue
+            try:
+                resolved = (root / cand).resolve()
+                if not resolved.is_file():
+                    continue
+            except OSError:
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def double_press(last: float, now: float, window: float = DOUBLE_PRESS):
+    """-> (fire now?, the `last` to keep). A key that does nothing on its own.
+
+    Reset-after-fire, so a third press inside the window starts a new pair rather
+    than firing again off the second one.
+    """
+    if now - last < window:
+        return True, 0.0
+    return False, now
+
+
+def open_report_files(name: Optional[str]) -> str:
+    """Double-`o`: the highlighted agent's worktree in the editor, and what it wrote.
+
+    Two shapes of call, and the order matters: the folder first, which focuses (or
+    creates) that worktree's window, then each file with `-r -g`, which lands it as a
+    tab in the window that is now the active one. Called again later for the same
+    worktree, the same window collects more tabs instead of a second window opening.
+
+    Where the worktree and the transcript come from is the one thing here that is not
+    the obvious way round. Both live in the store, and this module may not read the
+    store at ANY depth — a renderer that can reach `store.connect` can reach a schema
+    rebuild, which is why `tests/test_panel.py` bans the import outright rather than
+    trusting each edit to pick the read-only door. So the answer is asked of a separate
+    `sb inspect --json` process, exactly as a click already asks `herdr` to focus a
+    pane: out of process, on a keypress, never on the drawing path.
+
+    Returns a line for the status bar and never raises: this runs inside the event
+    loop, where an exception would take the board down over a missing binary.
+    """
+    if not name:
+        return "press o on a highlighted agent"
+    detail = _inspect(name)
+    if detail is None:
+        return f"{name}: could not read this agent"
+    cwd = detail.get("cwd")
+    if not cwd:
+        return f"{name}: no worktree to open"
+
+    transcript = detail.get("transcript")
+    files = report_files(last_assistant_texts(Path(transcript)) if transcript else [],
+                         cwd)
+    try:
+        _editor(cwd)
+        for f in files:
+            _editor("-r", "-g", f)
+    except FileNotFoundError:
+        return f"{_EDITOR} not on PATH"
+    except subprocess.TimeoutExpired:
+        return f"{name}: {_EDITOR} timed out"
+    if not files:
+        return f"{name}: no files found in recent messages"
+    return f"→ {name}: opened {len(files)} file(s)"
+
+
+# How far back a transcript is read. One JSONL record is one content block, not one
+# turn, so the last few things an agent SAID can sit a long run of tool calls back.
+_TRANSCRIPT_TAIL = 400
+
+
+def last_assistant_texts(path: Path, n: int = 3) -> list[str]:
+    """The agent's last `n` assistant TEXT blocks, oldest first.
+
+    `output.read_transcript` renders the same file and is deliberately not used: it
+    flattens tool calls and their results in too, so a caller scanning it for paths
+    would be scanning everything the agent READ as well as what it said — and it lives
+    in a module that imports the store, which this one may not (see `open_report_files`).
+    Only the `text` parts, which is the prose a human would have seen on screen.
+    """
+    try:
+        with path.open(errors="replace") as fh:
+            tail = deque(fh, maxlen=_TRANSCRIPT_TAIL)
+    except OSError:
+        return []
+    out: list[str] = []
+    for line in reversed(tail):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue          # a torn last line on a live session, not a failure
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue          # user turns, and the meta records with no role at all
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        texts = [part["text"] for part in content
+                 if isinstance(part, dict) and part.get("type") == "text"
+                 and isinstance(part.get("text"), str) and part["text"].strip()]
+        if not texts:
+            continue          # a thinking-only or tool_use-only record
+        out.append("\n".join(texts))
+        if len(out) >= n:
+            break
+    return list(reversed(out))
+
+
+def _inspect(name: str) -> Optional[dict]:
+    """One agent's row, as JSON, from a separate process. None if anything went wrong.
+
+    THIS build's `sb` and not whatever is on PATH, for `collector.doorbell_sb`'s reason
+    — that symlink points at the main checkout, so a board running a branch would ask a
+    different build. Its three lines are copied rather than imported: `collector` reaches
+    the store, and a renderer may not name a module that does.
+    """
+    own = Path(__file__).resolve().parent.parent / "bin" / "sb"
+    sb = str(own) if os.access(own, os.X_OK) else shutil.which("sb")
+    if not sb:
+        return None
+    try:
+        p = subprocess.run([sb, "inspect", name, "--json", "-n", "1", "--events", "1"],
+                           capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        d = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _editor(*args: str) -> None:
+    subprocess.run([_EDITOR, *args], capture_output=True, text=True,
+                   timeout=_SUBPROCESS_TIMEOUT)
+
+
 def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:
     """Split `pane_id` and run the board in the new pane. -> new pane id, or None.
 
@@ -1869,6 +2048,10 @@ def main() -> int:
     # setting it starts from is for. `layout` clamps `top` every call, so the row
     # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
+    # When `o` was last pressed on its own. One float is the whole double-press state:
+    # a single `o` is not a command, so nothing happens until a second one lands inside
+    # `DOUBLE_PRESS` — see `double_press`.
+    last_o = 0.0
     show_archived = status_mod.SHOW_ARCHIVED
     # Which agent shares this pane's tab — the row this board highlights. Built here and
     # not at import, so the environment it reads is this process's own, and asked again per
@@ -1905,6 +2088,11 @@ def main() -> int:
                         if "a" in ev["raw"]:
                             show_archived = not show_archived
                             dirty[0] = True
+                        if "o" in ev["raw"]:
+                            fire, last_o = double_press(last_o, time.time())
+                            if fire:
+                                msg = open_report_files(where.name(snap.agents))
+                                dirty[0] = True
                         continue
                     step = wheel(ev)
                     if step:

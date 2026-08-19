@@ -1629,5 +1629,113 @@ class SeamPathsTest(unittest.TestCase):
         self.assertIsNone(board._state_dir(tmp / "not-a-repo", "plans", "repo"))
 
 
+class ReportFilesTest(unittest.TestCase):
+    """What double-`o` opens, from prose that also cites code it merely read.
+
+    Both strings below are real assistant text shapes taken off transcripts in this
+    repo — the "wrote it to X" one, which is the whole point of the feature, and the
+    "`board.py:1914-1929`" citation, which is what stops it being one regex.
+    """
+
+    def setUp(self):
+        # Resolved, because `report_files` resolves what it returns and /tmp is a
+        # symlink on macOS.
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / ".switchboard" / "briefs" / "scout").mkdir(parents=True)
+        (self.tmp / ".switchboard" / "briefs" / "scout" / "findings.md").write_text("x")
+        (self.tmp / "notes").mkdir()
+        (self.tmp / "notes" / "x.md").write_text("x")
+
+    def files(self, *texts, **kw):
+        return [str(Path(f).relative_to(self.tmp))
+                for f in board.report_files(texts, str(self.tmp), **kw)]
+
+    def test_a_written_file_is_opened_and_a_code_citation_is_not(self):
+        self.assertEqual(
+            self.files("Task complete. I wrote full findings to "
+                       "`.switchboard/briefs/scout/findings.md`, then called `sb done`."),
+            [".switchboard/briefs/scout/findings.md"])
+        # It exists in this repo but not under the tmp cwd, and the line range says it
+        # was being cited anyway.
+        self.assertEqual(
+            self.files("the board's left-click handler (`board.py:1914-1929`) does it"),
+            [])
+
+    def test_only_files_that_exist_under_the_agents_cwd_survive(self):
+        self.assertEqual(self.files("wrote `notes/x.md` and `notes/gone.md`"),
+                         ["notes/x.md"])
+
+    def test_urls_unfenced_prose_and_repeats_are_not_paths(self):
+        self.assertEqual(self.files("see `http://example.com/a.md` and notes/x.md"), [])
+        self.assertEqual(self.files("`notes/x.md`", "again: `notes/x.md`"), ["notes/x.md"])
+
+    def test_the_count_is_capped(self):
+        for i in range(3):
+            (self.tmp / "notes" / f"f{i}.md").write_text("x")
+        self.assertEqual(len(self.files("`notes/f0.md` `notes/f1.md` `notes/f2.md`",
+                                        limit=2)), 2)
+
+
+class LastAssistantTextsTest(unittest.TestCase):
+    """Only what the agent SAID — the file-opener scans this, and tool arguments and
+    tool output are everything it read rather than everything it wrote."""
+
+    def entry(self, role, *parts):
+        return json.dumps({"type": role,
+                           "message": {"role": role, "content": list(parts)}})
+
+    def text(self, s):
+        return {"type": "text", "text": s}
+
+    def texts(self, *lines, n=3):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        p = tmp / "t.jsonl"
+        p.write_text("".join(l + "\n" for l in lines))
+        return board.last_assistant_texts(p, n)
+
+    def test_text_parts_only_newest_last(self):
+        got = self.texts(
+            self.entry("assistant", self.text("first")),
+            self.entry("assistant", {"type": "tool_use", "name": "Bash",
+                                     "input": {"command": "cat notes/x.md"}}),
+            self.entry("user", {"type": "tool_result", "content": "read notes/y.md"}),
+            self.entry("assistant", {"type": "thinking", "thinking": "hmm"}),
+            self.entry("assistant", self.text("second")),
+        )
+        self.assertEqual(got, ["first", "second"])
+
+    def test_stops_at_n_skips_meta_records_and_survives_a_torn_line(self):
+        got = self.texts(
+            '{"type": "last-prompt", "prompt": "x"}',
+            *[self.entry("assistant", self.text(f"m{i}")) for i in range(5)],
+            '{"type": "ai-tit',
+            n=2)
+        self.assertEqual(got, ["m3", "m4"])
+
+    def test_a_missing_transcript_is_not_an_error(self):
+        self.assertEqual(board.last_assistant_texts(Path("/nope/nothing.jsonl")), [])
+
+
+class DoublePressTest(unittest.TestCase):
+    """`o` on its own does nothing, and the third press starts a new pair."""
+
+    def test_one_press_does_not_fire(self):
+        self.assertEqual(board.double_press(0.0, 1000.0), (False, 1000.0))
+
+    def test_two_presses_inside_the_window_fire_once(self):
+        fire, last = board.double_press(0.0, 1000.0)
+        self.assertFalse(fire)
+        fire, last = board.double_press(last, 1000.4)
+        self.assertTrue(fire)
+        # Reset-after-fire: a third press is the first half of the next double press.
+        self.assertEqual(board.double_press(last, 1000.5), (False, 1000.5))
+
+    def test_two_presses_too_far_apart_do_not_fire(self):
+        _, last = board.double_press(0.0, 1000.0)
+        self.assertEqual(board.double_press(last, 1002.0), (False, 1002.0))
+
+
 if __name__ == "__main__":
     unittest.main()
