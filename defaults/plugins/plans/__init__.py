@@ -16,7 +16,7 @@ The records
 
     plan  {"id": "p-1", "workspace": "task-guardrails-build", "workspace_from": "agent",
            "checkout": "/…/worktrees/switchboard/task-guardrails-build", "title": "…",
-           "steps": [...], "changelog": [...], "notes": [...],
+           "display": "…", "steps": [...], "changelog": [...], "notes": [...],
            "created_by": "lead", "created_at": 1754570000}
 
     step  {"id": "s-1", "name": "…", "display": null, "def": null, "obliged_by": null,
@@ -133,11 +133,18 @@ verb here edits the library, because the library is files and files are edited i
 A step also carries a `display` — a name AS SHORT AS POSSIBLE, `scan code` where the name is
 "list every claim the document makes about the code". It is what the board draws, because a
 board is a flowchart of names read along one line and a full name is a sentence: the two are
-the same "two views of one record" the board and `show` already are. Optional, and resolved
-exactly as `name` is — a named step's `display` lives in its definition and an edit reaches
-every plan naming it, an on-the-fly step's lives on the step. Absent, the board falls back to
-the name and clips it; the fallback is why every step still draws without one, and why the
-field is worth authoring only where the name is too long to read in a cell.
+the same "two views of one record" the board and `show` already are. Resolved exactly as
+`name` is — a named step's `display` lives in its definition and an edit reaches every plan
+naming it, an on-the-fly step's lives on the step.
+
+REQUIRED, on every step, and so is a `deps` on every step but the plan's first; a plan
+carries a `display` of its own too, longer, since it owns the board's whole header line and
+is drawn there INSTEAD of the title. Required because optional is what was tried: not one
+plan in the live store ever set either field, so every step landed in column zero with no
+arrows and the board drew a column of half-sentences clipped at 22 columns. There is no
+length cap and no per-cell clip any more — the cap is what cut the informative half — and
+the enforcement is three doors rather than one: the shape verbs refuse, every other write
+warns and still writes, and `show`, `list` and the board draw the defect. See `_faults`.
 
 A definition may COMPOSE — `{"steps": ["a", "b"]}` — and naming it puts a and b in the plan,
 flat. What a plan holds is always flat: no step contains another, because a step that did
@@ -399,7 +406,11 @@ def register(reg):
         "create", create, audience="both",
         help="start a plan on this worktree, empty or with its steps already in it",
         args=[reg.arg("title", repeat=True, help="what this plan is for"),
-              reg.arg("--step", repeat=True, help="a step to start with; repeat for more"),
+              reg.arg("--display", help="the plan's board name — a display version of the "
+                                        "title, one line, required"),
+              reg.arg("--step", repeat=True,
+                      help="a step, as `<board name> = <what it is>`; repeat for more, "
+                           "and they are chained in the order given"),
               reg.arg("--note", repeat=True, help="a note on the plan; repeat for more"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
@@ -455,6 +466,7 @@ def register(reg):
         help="invent a step on the fly, in a plan that is already running",
         args=[reg.arg("plan", help="a plan id, e.g. p-1"),
               reg.arg("name", repeat=True, help="what the step is"),
+              reg.arg("--display", help="its board name — short, required"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "library", library, audience="both",
@@ -473,6 +485,8 @@ def register(reg):
         args=[reg.arg("action", choices=("list", "use"), help="list them, or use one"),
               reg.arg("name", repeat=True, help="which template, for `use`"),
               reg.arg("--title", help="a title for the copy; the template's is the default"),
+              reg.arg("--display", help="the copy's board name; the template's is the "
+                                        "default"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "dep", dep, audience="both",
@@ -552,18 +566,48 @@ WHAT TO BUILD IT FROM
       sb plugin plans library                the named steps, and what each one is
       sb plugin plans template list          the preconfigured plans
       sb plugin plans template use <name>    start from one
-      sb plugin plans create "<what for>"    start from nothing, empty or with --step
+      sb plugin plans create "<what for>" --display "<board name>" --step "<short> = <what it is>"
 
   A definition carries its own account of how that step is run — what it obliges, what it
   gates, what finishing it means. Read it there. Nothing about any particular step is
   repeated here, so that nothing here can be out of date about one.
 
-  A template brings steps but no order between them — the board draws a plan from its deps,
-  so record the order you want with `dep <step> --after <step>` or the plan renders as a
-  loose stack.
-
   Then re-plan on what you now know, rather than executing a split you decided before you
   knew anything.
+
+EVERY STEP HAS A BOARD NAME AND A DEP
+
+  Both are required, and both exist for the same picture: the board draws a plan as a
+  left-to-right flowchart of its steps, and it draws that out of the deps and labels the
+  file holds. Without them a plan is a column of half-sentences with no arrows, which is
+  what every plan looked like before this was required.
+
+    - A BOARD NAME on every step, written with the name in one flag so the two cannot come
+      apart: `--step "invstgt = investigate the failing assertions"`, and `add-step
+      <plan> "<what it is>" --display "<short>"` afterwards. Make it as short as it can be
+      and still be read — abbreviate, drop middle vowels, cut what the plan's own title
+      already says. `investigate the failing assertions` is `invstgt`; `human review` is
+      `hmn revw`. There is no length cap and nothing clips it; short is your judgement.
+
+    - A BOARD NAME ON THE PLAN too, and this one is LONGER — it owns the board's whole
+      header line, so it is a display version of the title rather than an abbreviation of
+      it: `create "fix the red CI on main, which has been failing since Tuesday"
+      --display "fix red CI: rich assertions on main"`. The board draws this INSTEAD of
+      the title, and `show` is where the title is read.
+
+    - A DEP on every step but the first: `dep <step> --after <step>`, which is what the
+      arrows are drawn from. `create --step … --step …` chains what you typed in the order
+      you typed it, so reshape from there rather than starting from nothing. A plan that
+      genuinely has two starts will warn about its second one — leave it; nothing can tell
+      a deliberate second root from a forgotten edge.
+
+  WHAT HAPPENS WHEN ONE IS MISSING, because it is not the same everywhere. `create`,
+  `add-step`, `name-step` and `template use` REFUSE to make a step with no board name.
+  Every other verb — `tick` included — writes what you asked and then says what is
+  incomplete underneath: a tick that would not land because of a rendering rule is worse
+  than the rendering. `show` and `list` say the same thing, and the board draws the plan
+  and the steps at fault in red. So a file edited by hand is never refused and never
+  quietly wrong either.
 
 EDITING IT
 
@@ -588,7 +632,9 @@ EDITING IT
     - NEVER drop or rewrite an entry that is already there, or a plan. Records are kept and
       never erased; cleanup means dropping out of the UI.
     - ADD A LIBRARY STEP with `name-step`, not by hand. It pulls in what the definition
-      composes and obliges; a `def` you typed yourself silently brings neither.
+      composes and obliges; a `def` you typed yourself silently brings neither. A step
+      written by hand needs its own `display` and its own `deps` — a named one draws the
+      library definition's label and needs neither.
 
   Two verbs are worth typing rather than editing, being frequent and small — `tick <step>`
   when a step is done, and `note <step> --text` for what happened. They write the changelog
@@ -619,26 +665,55 @@ def create(ctx, args) -> Result:
     Both halves matter: a plan may be defined upfront, which the design says is the point
     rather than overhead, and a lead that has not shaped the work yet still gets somewhere
     to put it. Neither is the special case.
+
+    A BOARD NAME ON THE PLAN AND ON EVERY STEP, and the step's is written in the same flag
+    as its name — `--step "invstgt = investigate the failing assertions"`. One flag because
+    `--step` repeats: a parallel `--display` list pairs by position, so a list one short
+    pairs every step after the gap with the wrong label, silently, in a field nobody
+    re-reads. The steps are then chained in the order they were given (see below).
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
-    steps = [str(s).strip() for s in (args.step or ()) if str(s).strip()]
+    display = str(args.display or "").strip()
+    given = [str(s).strip() for s in (args.step or ()) if str(s).strip()]
     notes = [str(n).strip() for n in (args.note or ()) if str(n).strip()]
     # The reason is in here with the rest: it is the field every later verb carries into
     # the changelog, and the cap is about a record staying readable when it is shown.
-    bad = _cap(title, *steps, *notes, args.reason)
+    bad = _cap(title, display, *given, *notes, args.reason)
     if bad:
         return bad
+    if not display:
+        return _no_display(
+            "a plan", "It owns the board's whole header line, so it is longer than a "
+            "step's and is a display version of the title rather than an abbreviation: "
+            "`--display \"fix red CI: rich assertions on main\"`.")
+    steps = []
+    for raw in given:
+        short, name = _authored(raw)
+        if not short or not name:
+            return _no_display(
+                "every step", "Write it in front of the name, in the one flag, so the two "
+                "cannot come apart: `--step \"invstgt = investigate the failing "
+                "assertions\"`.")
+        steps.append((short, name))
 
     doc, seal = _read(ctx.state_dir)
     who = ctx.agent or "human"
     where, how = _workspace(ctx)
     plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
-            "checkout": str(_here(ctx)), "title": title,
+            "checkout": str(_here(ctx)), "title": title, "display": display,
             "steps": [], "changelog": [], "notes": [_note(n, who) for n in notes],
             "created_by": who, "created_at": int(time.time())}
     doc["next_plan"] += 1
-    for name in steps:
-        plan["steps"].append(_step(f"s-{doc['next_step']}", name))
+    # CHAINED IN THE ORDER GIVEN, because the order they were typed in IS an order: a lead
+    # writing `--step a --step b --step c` has just said what comes after what, and the
+    # alternative — every step a root, every plan warning about itself the moment it is
+    # made — makes the one-shot `create` unusable to be pedantic about intent nobody
+    # doubts. A plan that is not a chain is reshaped with `dep`, which is the verb for it.
+    for short, name in steps:
+        step = _step(f"s-{doc['next_step']}", name, display=short)
+        if plan["steps"]:
+            step["deps"] = [plan["steps"][-1]["id"]]
+        plan["steps"].append(step)
         doc["next_step"] += 1
 
     made = ", ".join(s["id"] for s in plan["steps"])
@@ -653,8 +728,7 @@ def create(ctx, args) -> Result:
     _write(ctx.state_dir, doc, seal)
     # `{}` and not the library: every step `create` makes owns its own words, so there is
     # no link to resolve and no reason to open a file that could refuse after this write.
-    shown = _shown(plan, {})
-    return Result(human=_full(shown), data=shown)
+    return _plan_result(_shown(plan, {}))
 
 
 def ls(ctx, args) -> Result:
@@ -724,8 +798,7 @@ def show(ctx, args) -> Result:
     lib, bad = _lib([plan])
     if bad:
         return bad
-    shown = _viewed(_shown(plan, lib), _Live(ctx))
-    return Result(human=_full(shown), data=shown)
+    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx)))
 
 
 def changelog(ctx, args) -> Result:
@@ -893,8 +966,7 @@ def note(ctx, args) -> Result:
     plan.setdefault("notes", []).append(_note(text, who))
     _log(plan, who, "note", args.reason, f"on {plan['id']}: {_clip(text)}")
     _write(ctx.state_dir, doc, seal)
-    shown = _shown(plan, lib)
-    return Result(human=_full(shown), data=shown)
+    return _plan_result(_shown(plan, lib))
 
 
 def checkpoint(ctx, args) -> Result:
@@ -968,9 +1040,13 @@ def add_step(ctx, args) -> Result:
     name = " ".join(str(w) for w in (args.name or ())).strip()
     if not name:
         return _needs("name", "a step is named so somebody can be told to do it")
-    bad = _cap(name, args.reason)
+    display = str(args.display or "").strip()
+    bad = _cap(name, display, args.reason)
     if bad:
         return bad
+    if not display:
+        return _no_display("a step", "Give it with the name: "
+                                     "`--display \"invstgt\"`.")
 
     doc, seal = _read(ctx.state_dir)
     plan = _find(doc, args.plan)
@@ -979,11 +1055,11 @@ def add_step(ctx, args) -> Result:
     lib, bad = _lib([plan])             # before the write, so it cannot refuse after one
     if bad:
         return bad
-    step = _step(f"s-{doc['next_step']}", name)
+    step = _step(f"s-{doc['next_step']}", name, display=display)
     doc["next_step"] += 1
     plan.setdefault("steps", []).append(step)
     who = ctx.agent or "human"
-    _log(plan, who, "add-step", args.reason, f"{step['id']} {name}")
+    _log(plan, who, "add-step", args.reason, f"{step['id']} {display} = {name}")
     _write(ctx.state_dir, doc, seal)
     return _changed(plan, step, lib)
 
@@ -1139,6 +1215,14 @@ def name_step(ctx, args) -> Result:
         return bad
     if wanted not in lib:
         return _no_def(lib, wanted)
+    # The DEFINITION's display, since that is where a named step's board label lives and
+    # where an edit to it has to reach every plan naming it. So this refusal is about the
+    # catalogue rather than about the command: there is no argument here that could supply
+    # one, and a copy of the label on the step would be the link quietly turned into a copy.
+    if not str((lib.get(wanted) or {}).get("display") or "").strip():
+        return _no_display(f"the '{_flat(wanted)}' definition",
+                           f"A named step draws its definition's label, so add a "
+                           f"`display` to `library/{_flat(wanted)}.json`.")
 
     doc, seal = _read(ctx.state_dir)
     plan = _find(doc, args.plan)
@@ -1191,9 +1275,15 @@ def template(ctx, args) -> Result:
         return Result(ok=False, human=why, data={"error": why, "name": wanted})
     spec = kept[wanted]
     title = (args.title or spec.get("title") or "").strip()
-    bad = _cap(title, args.reason)
+    display = (args.display or spec.get("display") or "").strip()
+    bad = _cap(title, display, args.reason)
     if bad:
         return bad
+    if not display:
+        return _no_display(f"the '{_flat(wanted)}' template",
+                           f"It is the copy's board header, so give the copy one with "
+                           f"`--display`, or add a `display` to "
+                           f"`templates/{_flat(wanted)}.json`.")
 
     lib, bad = _lib()
     if bad:
@@ -1202,17 +1292,19 @@ def template(ctx, args) -> Result:
     who = ctx.agent or "human"
     where, how = _workspace(ctx)
     plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
-            "checkout": str(_here(ctx)), "title": title,
+            "checkout": str(_here(ctx)), "title": title, "display": display,
             "steps": [], "changelog": [],
             "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
                       if str(n).strip()],
             "created_by": who, "created_at": int(time.time())}
     doc["next_plan"] += 1
     try:
-        for entry in (spec.get("steps") or ()):
-            plan["steps"].extend(_from_template(doc, lib, entry))
+        landed = [_from_template(doc, lib, entry) for entry in (spec.get("steps") or ())]
+        _chain(spec.get("steps") or (), landed)
     except _BadDef as e:
         return e.refusal()
+    for made in landed:
+        plan["steps"].extend(made)
 
     detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
     if how == UNAVAILABLE:
@@ -1220,8 +1312,39 @@ def template(ctx, args) -> Result:
     _log(plan, who, "template", args.reason, detail)
     doc["plans"].append(plan)
     _write(ctx.state_dir, doc, seal)
-    shown = _shown(plan, lib)
-    return Result(human=_full(shown), data=shown)
+    return _plan_result(_shown(plan, lib))
+
+
+def _chain(entries: Any, landed: list[list[dict]]) -> None:
+    """A template's `after` — the order between its entries — as deps on the steps it made.
+
+    ONE ENTRY IS NOT ONE STEP, which is the whole reason this is not a two-line loop: a
+    `def` entry expands to a definition, whatever it composes and whatever those oblige,
+    and the order the template author wrote is between the ENTRIES they can see. So an
+    entry's `after` attaches to that entry's own roots — the steps its expansion left with
+    no dep — and points at the previous entry's sinks, the steps nothing inside it waits
+    for. A plain one-step entry is the same rule with one step at each end.
+
+    `after` holds entry POSITIONS, 1-based, as they are written in the file: a template is
+    a short hand-written list and its entries have no ids to name each other by. Out of
+    range or pointing forwards is refused, because an edge to nothing renders as an order
+    that silently is not there.
+    """
+    for n, entry in enumerate(entries):
+        after = (entry or {}).get("after") if isinstance(entry, dict) else None
+        for given in (after or ()):
+            try:
+                j = int(given)
+            except (TypeError, ValueError):
+                raise _BadDef(f"a template's `after` holds entry numbers, not {given!r}")
+            if not 1 <= j <= len(landed) or j - 1 >= n:
+                raise _BadDef(f"a template's step {n + 1} comes after {j}, which is not "
+                              f"an earlier entry in it")
+            waited = [st["id"] for st in landed[j - 1]
+                      if not any(st["id"] in x["deps"] for x in landed[j - 1])]
+            for st in landed[n]:
+                if not st["deps"]:
+                    st["deps"] = list(waited)
 
 
 def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
@@ -1238,14 +1361,28 @@ def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
         if key not in lib:
             raise _BadDef(f"a template names '{key}', which is not in the step "
                           f"library")
-        return _mint(doc, lib, key)
+        made = _mint(doc, lib, key)
+        for st in made:
+            k = _defkey(st) or ""
+            if not str((lib.get(k) or {}).get("display") or "").strip():
+                raise _BadDef(f"a template names '{k}', which has no `display` — a named "
+                              f"step draws its definition's board label, so add one to "
+                              f"`library/{k}.json`")
+        return made
     name = str(entry.get("name") or "").strip()
     if not name:
         raise _BadDef("a template holds a step with neither a name nor a def")
     # A template's own step carries its `display` into the copy, since a template writes the
-    # long name and so is exactly where a short board label is worth authoring. A `def` entry
-    # needs none — its display resolves live from the definition, like its name.
-    display = str(entry.get("display") or "").strip() or None
+    # long name and so is exactly where a short board label is worth authoring — and it is
+    # required here for the same reason it is required of `create`: a template is where a
+    # plan's steps are authored, and the shipped copy of one is what everybody starts from.
+    # A `def` entry writes none — its display resolves live from the definition, like its
+    # name — and is checked against the library above instead.
+    display = str(entry.get("display") or "").strip()
+    if not display:
+        raise _BadDef(f"a template step '{name}' has no `display` — the board draws that "
+                      f"label in its cell, and a step without one falls back to the whole "
+                      f"sentence")
     step = _step(f"s-{doc['next_step']}", name, display=display)
     doc["next_step"] += 1
     return [step]
@@ -1640,6 +1777,16 @@ def _mint(doc: dict, lib: dict, key: str) -> list[dict]:
         steps.append(_step(f"s-{doc['next_step']}", None, key=k,
                            obliged_by=steps[by]["id"] if by is not None else None))
         doc["next_step"] += 1
+    # AND THE OBLIGING STEP COMES AFTER WHAT IT OBLIGED, as an edge rather than as an
+    # order nobody wrote down. `merge` obliges the human-review list, and that list is
+    # what a person reads just before the merge — so the review is the dep and the merge
+    # is what waits. Without this every obliged step lands as a second root of the plan,
+    # which is exactly the loose stack deps became required to stop.
+    at = {st["id"]: st for st in steps}
+    for st in steps:
+        by = st.get("obliged_by")
+        if by in at:
+            at[by]["deps"].append(st["id"])
     return steps
 
 
@@ -1698,6 +1845,139 @@ def _minted(steps: list, lib: dict) -> str:
             bit += f" (obliged by {s['obliged_by']})"
         bits.append(bit)
     return ", ".join(bits)
+
+
+# -- completeness: the display names and the deps the board draws with ---------
+#
+# THREE DOORS, and this is the machinery behind the second and third of them. A step
+# without a display name and a step that says nothing about what it comes after are the
+# two ways a plan renders as a column of half-sentences with no edges — which is what the
+# board looked like before this, because nothing ever required either field.
+#
+# The first door is a refusal, and it is not here: `create`, `add-step`, `name-step` and
+# `template use` will not MINT a step with no display name, and they say what a good one
+# looks like when they refuse (`_no_display`). That door catches authoring.
+#
+# The second door is this one, and it WARNS AND STILL WRITES. Every other verb recomputes
+# completeness after the write and appends what is wrong to what it prints. Never a
+# refusal: a `tick` that will not land because of a rendering rule is worse than the
+# rendering, and this is the door a hand-edited file arrives through — the plan file is
+# meant to be edited by hand, so the requirement has to survive an author who never typed
+# a verb at all.
+#
+# The third door is `show`, `list` and the board, which draw the defect on a plan nobody
+# has run a verb against since. `board.py` reads `_defective` and paints those steps red.
+#
+# `_check` is deliberately NOT one of these doors. It refuses a FILE, and every plan
+# written before this existed is missing both fields — a completeness rule wired into
+# `_check` would take the board down to enforce a rendering preference. Structure is
+# refused; completeness is reported and survivable, always.
+
+
+def _faults(plan: dict) -> tuple[bool, list[str], list[str]]:
+    """What is incomplete about a RESOLVED plan: the plan itself, then two lists of ids.
+
+    Resolved (`_shown`) and not stored, which is the one thing a caller has to get right:
+    a named step's `display` lives in its definition and its stored `display` is correctly
+    null, so asking the stored step would report every library step in the store as
+    defective and send a lead to fix a field that must stay empty.
+
+    The FIRST step of a plan is the exempt root and every other step is expected to say
+    what it comes after. A plan with two genuine starts therefore reports its second one,
+    which is accepted rather than solved: nothing can tell a deliberate second root from a
+    missing edge, and the answer to a warning about a root you meant is to leave it there.
+    """
+    steps = plan.get("steps") or []
+    nameless = [str(s.get("id") or "?") for s in steps
+                if not str(s.get("display") or "").strip()]
+    rootless = [str(s.get("id") or "?") for s in steps[1:]
+                if not (s.get("deps") or [])]
+    return (not str(plan.get("display") or "").strip()), nameless, rootless
+
+
+def _defective(plan: dict) -> tuple[bool, set[str]]:
+    """`_faults` as the board wants it: is the plan itself short, and which steps are.
+
+    One set and not two, because red is red — a step drawn wrong is drawn wrong, and a
+    board that coloured a missing display differently from a missing dep would be asking
+    a glance to tell two shades apart to learn something the plan says in words.
+    """
+    short, nameless, rootless = _faults(plan)
+    return short, set(nameless) | set(rootless)
+
+
+def _defects(plan: dict) -> list[str]:
+    """The same faults as lines to print under whatever the verb was doing.
+
+    Names the ids and the fix, because a warning that says only "incomplete" is a warning
+    whose reader has to go and diff the file against a rule they have not read. Every line
+    is one thing wrong and the command that puts it right.
+    """
+    short, nameless, rootless = _faults(plan)
+    if not (short or nameless or rootless):
+        return []
+    out = [f"! {plan.get('id') or '?'} is incomplete — the board draws it red until this "
+           f"is fixed, and nothing here refused the write"]
+    if short:
+        out.append("    the plan has no display name — the board draws its title instead. "
+                   "A plan's display owns the whole header line, so it is a display "
+                   "version of the title rather than an abbreviation of it.")
+    if nameless:
+        out.append(f"    no display name: {', '.join(nameless)} — the board draws a step's "
+                   f"`display` in its cell, and a step without one falls back to the whole "
+                   f"sentence. {_SHORTEN}")
+    if rootless:
+        out.append(f"    no dep: {', '.join(rootless)} — every step but the plan's first "
+                   f"says what it comes after, or the board has no edge to draw and the "
+                   f"plan renders as a loose stack. Fix: "
+                   f"`sb plugin plans dep {rootless[0]} --after <step>`.")
+    return out
+
+
+def _plan_result(shown: dict) -> Result:
+    """A whole plan, printed, with anything incomplete about it said underneath.
+
+    `ok` stays TRUE and `data` keeps its shape with one key added, which is the whole
+    contract of the second door: a caller that was ticking a step ticked it, and a caller
+    reading `--json` gets `incomplete` beside the plan rather than in place of it.
+    """
+    lines = _defects(shown)
+    human = _full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
+    return Result(human=human, data=dict(shown, incomplete=lines) if lines else shown)
+
+
+# What a refusal and a warning both say about shortening, written once. The example is the
+# load-bearing half: an agent told "display is required" types the full name in again, and
+# an agent shown `investigate the failing assertions` → `invstgt` has been told what the
+# field is for. No length cap — a cap is what produced the half-sentences this replaced —
+# so what stands in for one is this sentence and the author's judgement.
+_SHORTEN = ("Make it as short as it can be and still be read: abbreviate, drop middle "
+            "vowels, cut what the plan's own title already says — `investigate the "
+            "failing assertions` is `invstgt`, `human review` is `hmn revw`.")
+
+
+def _no_display(what: str, how: str) -> Result:
+    """A shape verb refusing to mint something with no display name. See `_SHORTEN`."""
+    why = (f"{what} needs a display name — the short label the board draws for it. {how} "
+           f"{_SHORTEN}")
+    return Result(ok=False, human=why, data={"error": why, "missing": "display"})
+
+
+def _authored(given: str) -> tuple[Optional[str], str]:
+    """One `--step "invstgt = investigate the failing assertions"`, split at the first `=`.
+
+    ONE FLAG AND NOT TWO. `--step` repeats, so a parallel `--display` list would pair the
+    two by position — and a list that is one short pairs every step after the gap with the
+    wrong label, silently, in a field nobody re-reads. Written together they cannot desync.
+
+    The first `=` and not the last, so a name containing one keeps it. Returns `(None, raw)`
+    for a step written without a display name, which is what the caller refuses on.
+    """
+    if "=" not in given:
+        return None, given.strip()
+    display, name = given.split("=", 1)
+    display, name = display.strip(), name.strip()
+    return (display or None), name
 
 
 def _log(plan: dict, who: str, action: str, reason: Optional[str], detail: str = "") -> None:
@@ -2620,12 +2900,25 @@ def _where(p: dict) -> str:
 
 
 def _line(p: dict, *, workspace: bool) -> str:
-    where = f"{_where(p):<24}" if workspace else ""
+    """One plan as `list` draws it. Handed a RESOLVED plan, like everything else here.
+
+    The workspace goes through `_col`, which is `_key_col`'s two-space floor and is here
+    for the bug that function was written for: `f"{...:<24}"` pads a short value and does
+    nothing at all to a long one, so a workspace named past the column glued itself to the
+    title and the two read as one word.
+
+    `!` in front is the THIRD DOOR — a plan missing a display name or a dep, marked where
+    a lead scans for what to do next. One character, because this is a table: what is
+    wrong with it is `show`'s to say and the board's to draw in red.
+    """
+    where = _col(_where(p), 24) if workspace else ""
     # The condition is a column on the listing and not a footnote: what a lead scanning
     # `list` wants first is which of these plans anybody is still on.
     cond = f"{str(p.get('condition') or ''):<11}" if p.get("condition") else ""
-    return (f"{p['id']:<6}{_count(p.get('steps') or []):<10}{cond}{where}"
-            f"{_flat(p.get('title') or '(untitled)')}")
+    short, bad = _defective(p)
+    return (f"{'!' if short or bad else ' '}{p['id']:<6}"
+            f"{_count(p.get('steps') or []):<10}{cond}{where}"
+            f"{_flat(p.get('display') or p.get('title') or '(untitled)')}")
 
 
 def _full(p: dict) -> str:
@@ -2640,9 +2933,13 @@ def _full(p: dict) -> str:
     WRITE do not — a tick should not also pay a subprocess to say who is alive, and `show`
     is one command away.
     """
-    lines = [f"{p['id']}  {_flat(p.get('title') or '(untitled)')}",
-             f"  workspace   {_where(p)}",
-             f"  checkout    {_flat(p.get('checkout') or '—')}"]
+    lines = [f"{p['id']}  {_flat(p.get('title') or '(untitled)')}"]
+    if p.get("display"):
+        # The title is what the job is and this is what the BOARD draws instead of it, so
+        # an author reading a plan back can see the header a glance will actually get.
+        lines.append(f"  board       {_flat(p['display'])}")
+    lines += [f"  workspace   {_where(p)}",
+              f"  checkout    {_flat(p.get('checkout') or '—')}"]
     if p.get("condition"):
         lines.append(f"  condition   {_condition(p)}")
     lines.append(f"  created     {_when(p.get('created_at'))} "
@@ -2674,6 +2971,11 @@ def _step_lines(steps: list) -> list[str]:
     for s in steps:
         bits = [f"{_flat(s.get('id', '?')):<6}{_flat(s.get('progress', '?')):<10}"
                 f"{_flat(s.get('name') or '')}"]
+        if s.get("display"):
+            # The label the board draws for this step, beside the sentence it stands for —
+            # the two are authored together and a display nobody ever sees written next to
+            # its name is a display nobody notices has gone stale.
+            bits.append(f"[board {_flat(s['display'])}]")
         if _defkey(s):
             # The link is shown, not just what it resolves to: a lead deciding whether to
             # edit a definition or write a variant has to be able to see which steps are
@@ -2754,7 +3056,15 @@ def _changed(plan: dict, step: dict, lib: dict) -> Result:
     shown = _resolve(step, lib)
     lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines([shown]))
-    return Result(human="\n".join(lines), data={"plan": plan["id"], "step": shown})
+    # THE SECOND DOOR: recomputed over the whole plan after the write, appended, and never
+    # a refusal. A step verb that refused a plan for a rendering rule would be a `tick`
+    # that does not land, which is worse than the rendering it was protecting.
+    defects = _defects(_shown(plan, lib))
+    data: dict = {"plan": plan["id"], "step": shown}
+    if defects:
+        lines.extend(["", *defects])
+        data["incomplete"] = defects
+    return Result(human="\n".join(lines), data=data)
 
 
 def _added(plan: dict, steps: list, lib: dict) -> Result:
@@ -2768,17 +3078,27 @@ def _added(plan: dict, steps: list, lib: dict) -> Result:
     shown = [_resolve(s, lib) for s in steps]
     lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines(shown))
-    return Result(human="\n".join(lines), data={"plan": plan["id"], "steps": shown})
+    defects = _defects(_shown(plan, lib))       # the second door; see `_changed`
+    data: dict = {"plan": plan["id"], "steps": shown}
+    if defects:
+        lines.extend(["", *defects])
+        data["incomplete"] = defects
+    return Result(human="\n".join(lines), data=data)
 
 
 def _key_col(key: str) -> str:
-    """A catalogue key in its column, with a gap even when the key overruns the column.
+    """A catalogue key in its column. `_col`, at the width the library listing uses."""
+    return _col(_flat(key), 16)
 
-    `f"{key:<16}"` pads a short key and does nothing at all to a long one, which glued
-    `merge-human-review` to its name. Two spaces is the floor, the column is the aim.
+
+def _col(text: str, n: int) -> str:
+    """A value in its column, with a gap even when the value overruns the column.
+
+    `f"{text:<16}"` pads a short value and does nothing at all to a long one, which glued
+    `merge-human-review` to its name in the library listing and a long workspace name to
+    its plan's title in `list --all`. Two spaces is the floor, the column is the aim.
     """
-    flat = _flat(key)
-    return f"{flat:<16}" if len(flat) < 16 else f"{flat}  "
+    return f"{text:<{n}}" if len(text) < n else f"{text}  "
 
 
 def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:

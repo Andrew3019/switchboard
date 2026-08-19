@@ -28,14 +28,18 @@ notes and gates. Two views of one record, deliberately, rather than one view twi
 
 What that view shows is the second editorial decision, and it is deliberately thin:
 
-  * A HEADER per plan — id, title, condition, step count, in that order. The id is the
-    handle you type, the title is what the job is, and the two after it are how it is
-    going and how big it is. Nothing else: the workspace is the group this hangs under,
+  * A HEADER per plan — id, display name, condition, step count, in that order. The plan's
+    DISPLAY and not its title, for the reason the steps draw theirs: a heading is read at a
+    glance and a title is a sentence. The id is the
+    handle you type, the display name is what the job is, and the two after it are how it
+    is going and how big it is. Nothing else: the workspace is the group this hangs under,
     and the checkout and the changelog are what `show` is for.
 
-  * THE STEPS AS A FLOWCHART, their DISPLAY NAMES only — the short board label a step
-    carries, falling back to its full name where it has none — laid out left to right in
-    dependency order.
+  * THE STEPS AS A FLOWCHART, their DISPLAY NAMES only — the short board label every step
+    is required to carry, falling back to its full name where a hand-edit left none — laid
+    out left to right in dependency order. Nothing is clipped per cell: a display name is
+    short because its author made it short, and the pane's own clip from the right is the
+    only one left. A step missing its label or its dep is drawn RED (see `RED`).
     Progress is COLOUR rather than a column, because a column of `open`/`done` down the
     side of a graph is the same word eight times and the graph is what carries the
     meaning. Nothing else on a step — no id, no owner, no try count, no `why`. Those are
@@ -54,10 +58,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from switchboard.board import _clip_cols, _visible_len
+from switchboard.board import _visible_len
 
-from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _flat, _lib, _num, _read,
-               _shown, _viewed, _Live)
+from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _defective, _flat, _lib, _num,
+               _read, _shown, _viewed, _Live)
 
 
 # A SECTION OF THE BOARD'S OWN, under the tree, rather than a block hanging off the last
@@ -71,12 +75,16 @@ from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _flat, _lib, _num, _read,
 # hung off the end of a tree at a hanging indent is a picture nobody can see the edges of.
 SECTION = "PLANS"
 
-# How wide one step's name may be drawn. A clip and not a wrap: a flowchart whose cells
-# are two lines tall stops being a row of names with arrows between them, and the whole
-# point of the chart is that a chain reads along one line. The hook is handed no width —
-# `board_lines` gets a state directory, a workspace and rows — so this is chosen rather
-# than fitted, and the board clips the tail of a line too wide for the pane anyway.
-NAME_W = 22
+# How much bare line a dependency arrow gets before its channel. The gap between two
+# columns is this stub, then one channel per bundle of edges, then the arrowheads — so a
+# plain one-to-one hop draws as `STUB` dashes plus `→`, and `1` is what makes that `──→`.
+#
+# Named rather than left as the literal it was in two places, because the two are the same
+# number and nothing said so: `span` counts the stub to size the block and `ch` counts it
+# again to place the first channel, and an arrow shortened in one and not the other draws
+# a picture whose lines start where nothing ends. The number is the whole of the arrow
+# length knob — 0 gives `─→`, 2 gives the `───→` this was.
+STUB = 1
 
 # What a step's progress is drawn as. SGR, because the seam now carries colour and
 # nothing else: `switchboard/board.py` strips every control character a plugin hands over
@@ -89,6 +97,14 @@ NAME_W = 22
 # not know is drawn in yellow — visible, and honestly "something other than the three".
 GREEN, GREY, YELLOW, PLAIN = "\x1b[32m", "\x1b[90m", "\x1b[33m", "\x1b[0m"
 DIM = "\x1b[2m"
+
+# What an INCOMPLETE plan is drawn in — the third of the three doors the plugin puts in
+# front of a plan missing a display name or a dep (`_defects` in `__init__.py`). The other
+# two are a refusal at the shape verbs and a warning on every other write; this one is the
+# only door that reaches a plan nobody has typed a verb at since it was hand-edited. Red
+# beats the progress colour on the steps at fault and paints the header of the plan holding
+# them, because a defect the eye has to hunt for on a board is a defect nobody fixes.
+RED = "\x1b[31m"
 
 # The most steps one plan's chart is drawn for. A backstop and not a layout rule: the grid
 # below is O(rows × columns) and a plan nobody pruned should not be able to make a board
@@ -128,20 +144,30 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
     out: list[str] = []
     for p in plans:
         v = _viewed(_shown(p, lib), live)
-        out.append(_header(v))
+        # Read off the RESOLVED plan, because a named step's display lives in its
+        # definition: asking the stored step would report every library step as defective.
+        plan_bad, bad = _defective(v)
+        out.append(_header(v, plan_bad or bool(bad)))
         # One space, not two: a chart's own cells are padded (`_cell`), so the first name
         # already sits a column in from wherever this block starts.
-        out.extend(" " + line for line in _chart(v.get("steps") or []))
+        out.extend(" " + line for line in _chart(v.get("steps") or [], bad))
     return out
 
 
-def _header(p: dict) -> str:
+def _header(p: dict, bad: bool = False) -> str:
     """One plan's line: what to type, what it is, how it is going, how big it is.
 
     That order and not the listing's. `list` leads with the count and the condition
     because it is a table and a lead scans a column; this is a heading over a picture,
-    and what a heading is for is saying which job the picture is of. So the title comes
+    and what a heading is for is saying which job the picture is of. So the name comes
     second, straight after the handle, and the two facts about its state trail it.
+
+    THE PLAN'S `display`, AND NOT ITS TITLE. A title says what the job is in a sentence,
+    which is what `show` is for; this line is a heading, and a heading that wraps or gets
+    cut mid-clause has stopped being one. A plan's display is longer than a step's — it
+    owns this whole line where a step owns a cell — and it is a display VERSION of the
+    title rather than an abbreviation of it. A plan authored without one falls back to the
+    title, which is every plan made before the field was required and is drawn `bad`.
 
     The condition is drawn as the bare word rather than `_condition`'s word-plus-sentence.
     The sentence exists because `show` is read by somebody deciding what to do about a
@@ -151,11 +177,13 @@ def _header(p: dict) -> str:
     n = len(steps)
     meta = [str(p.get("condition") or "")] if p.get("condition") else []
     meta.append(f"{n} step{'' if n == 1 else 's'}" if n else "empty")
-    return (f"{_flat(p.get('id') or '?')}  {_flat(p.get('title') or '(untitled)')}"
+    name = _flat(p.get("display") or p.get("title") or "(untitled)")
+    head = f"{_flat(p.get('id') or '?')}  {name}"
+    return ((RED + head + PLAIN if bad else head)
             + DIM + "  ·  " + "  ·  ".join(meta) + PLAIN)
 
 
-def _chart(steps: list) -> list[str]:
+def _chart(steps: list, bad: set | None = None) -> list[str]:
     """A plan's steps as a left-to-right flowchart: names, arrows, and nothing else.
 
     THE WHOLE LAYOUT IN FOUR MOVES, and each one is a function below:
@@ -189,7 +217,7 @@ def _chart(steps: list) -> list[str]:
     layer = _layers(ids, deps)
     nodes, edges = _route(ids, deps, layer)
     row = _place(nodes, edges, layer)
-    return _draw(nodes, edges, layer, row, by_id)
+    return _draw(nodes, edges, layer, row, by_id, bad or set())
 
 
 def _deps(step: dict, i: str, by_id: dict) -> list[str]:
@@ -325,7 +353,8 @@ GLYPH = {
 }
 
 
-def _draw(nodes: dict, edges: list, layer: dict, row: dict, by_id: dict) -> list[str]:
+def _draw(nodes: dict, edges: list, layer: dict, row: dict, by_id: dict,
+          bad: set) -> list[str]:
     """The grid, filled and joined: name cells in the columns, box-drawing in the gaps.
 
     A GAP IS ITS OWN LITTLE GRID, and this is the whole trick. Between two columns of
@@ -353,7 +382,7 @@ def _draw(nodes: dict, edges: list, layer: dict, row: dict, by_id: dict) -> list
     for n, L in enumerate(cols):
         for r in range(height):
             here = next((x for x in nodes[L] if row[x] == r), None)
-            out[r].append(_cell(here, by_id, width[L]))
+            out[r].append(_cell(here, by_id, width[L], bad))
         if n + 1 < len(cols):
             real = {row[x] for x in nodes[cols[n + 1]] if isinstance(x, str)}
             for r, piece in enumerate(_gap(edges, row, where, L, height, real)):
@@ -373,7 +402,7 @@ def _cell_w(node: Any, by_id: dict) -> int:
     return 0 if not isinstance(node, str) else _visible_len(_label(by_id[node]))
 
 
-def _cell(node: Any, by_id: dict, width: int) -> str:
+def _cell(node: Any, by_id: dict, width: int, bad: set) -> str:
     """One column cell: a painted name padded to the column, a line through, or air.
 
     A COLUMN IS ITS WIDEST NAME PLUS TWO, and the two are the air either side of a name.
@@ -390,12 +419,12 @@ def _cell(node: Any, by_id: dict, width: int) -> str:
     if not isinstance(node, str):
         return "─" * (width + 2)
     name = _label(by_id[node])
-    return (" " + _paint(name, by_id[node].get("progress"))
+    return (" " + _paint(name, by_id[node].get("progress"), node in bad)
             + " " * (width - _visible_len(name)) + " ")
 
 
 def _label(step: dict) -> str:
-    """A step's name as the chart draws it: its DISPLAY name, flattened, clipped, never empty.
+    """A step's name as the chart draws it: its DISPLAY name, flattened, never empty.
 
     The `display` first and the `name` behind it, because that is the whole reason `display`
     exists — a cell in a flowchart is a handful of columns and a step's full name is a
@@ -403,25 +432,31 @@ def _label(step: dict) -> str:
     to the name. Resolved upstream (`_resolve`), so a named step's `display` is already its
     definition's by the time this sees it.
 
+    NOTHING IS CLIPPED HERE ANY MORE, and that is the point of display names being required
+    rather than optional. The old per-cell clip at 22 columns was what produced a column of
+    half-sentences — `Investigate: find the…` — because the fallback it clipped was the full
+    name, and the clipped half was the informative half. A display name is short because its
+    author made it short; there is no length a renderer can pick that is better than that
+    judgement, and a name too long for the pane now costs the tail of ONE line rather than
+    the meaning of every cell. The board's own clip, from the right, is the only one left.
+
     `_flat` either way, which is what keeps this file's own colour the only escape sequence in
     a line the seam is asked to carry. An unnamed step is `?` rather than a blank cell — a
-    node with nothing in it looks like a bug in the chart, and it is a bug in the plan. The
-    clip stays even with a display name: a label is meant to be short, but nothing enforces
-    it, and a chart whose cells are two lines tall stops being a chart.
-
-    `NAME_W` is COLUMNS and the clip counts columns, through the core's own `_clip_cols`.
-    Counting characters let a name of thirty ideographs through as "22" and drew it 44
-    columns wide. What is chosen rather than fitted is the NUMBER 22 (see `NAME_W`); the
-    unit was never a choice.
+    node with nothing in it looks like a bug in the chart, and it is a bug in the plan.
     """
-    name = _flat(step.get("display") or step.get("name") or "") or "?"
-    if _visible_len(name) <= NAME_W:
-        return name
-    return _clip_cols(name, NAME_W - 1) + "…"
+    return _flat(step.get("display") or step.get("name") or "") or "?"
 
 
-def _paint(name: str, progress: Any) -> str:
-    """A name in its progress's colour, or plain. See `GREEN`/`GREY`/`YELLOW` above."""
+def _paint(name: str, progress: Any, bad: bool = False) -> str:
+    """A name in its progress's colour, or plain. See `GREEN`/`GREY`/`YELLOW` above.
+
+    `bad` WINS over every progress colour, and it has to: a step missing its display name
+    or its dep is drawn wrong wherever it is drawn, and a done step in green would say the
+    one thing about it that is going well. Red is the defect, and the progress of a step
+    nobody can read is not the question.
+    """
+    if bad:
+        return RED + name + PLAIN
     p = str(progress or "")
     if p == OPEN:
         return name
@@ -445,6 +480,10 @@ def _gap(edges: list, row: dict, where: dict, left: int, height: int,
     Beyond that, channels go in ROW ORDER, top group leftmost. That is what makes a
     diamond close cleanly: the edge with furthest to travel vertically gets the channel
     nearest the targets, so it turns last and crosses least.
+
+    HOW LONG THE ARROWS ARE is `STUB` and nothing else here: a plain hop is that many
+    dashes plus its arrowhead, and everything below counts the stub through the constant
+    rather than through the literal it used to be in these two places.
     """
     out: dict[Any, set] = {}
     for a, b in edges:
@@ -459,7 +498,7 @@ def _gap(edges: list, row: dict, where: dict, left: int, height: int,
         bundles.setdefault(frozenset(targets), []).append(a)
     order = sorted(bundles, key=lambda t: min(row[a] for a in bundles[t]))
 
-    span = 2 + len(order) + 1                   # stub, one channel each, arrowheads
+    span = STUB + len(order) + 1                # stub, one channel each, arrowheads
     grid = [[0] * span for _ in range(height)]
     head: dict[int, bool] = {}                  # row -> is what it points at a real step?
 
@@ -467,7 +506,7 @@ def _gap(edges: list, row: dict, where: dict, left: int, height: int,
         grid[r][c] |= side
 
     for k, targets in enumerate(order):
-        ch = 2 + k
+        ch = STUB + k
         srows = [row[a] for a in bundles[targets]]
         for sr in srows:                        # out of each name, across to the channel
             for c in range(0, ch):
