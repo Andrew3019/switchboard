@@ -879,6 +879,11 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
         self.h.live["stranger"] = Agent(name="stranger", pane_id=agent_pane,
                                         terminal_id="term-theirs", state="working")
         self.h.close_pane = real
+        # The broker caches one `agent list` per PROCESS, and in production the next
+        # sweep is a new `sb`. One Broker across two sweeps is not, so without this the
+        # stranger is invisible to sweep 2 and the recycle this test is named for never
+        # happens — the test would pass against the wedge it exists to catch.
+        self.b._forget_agent_caches()
         self.b.cleanup(me="api")
         self.assertIn(board, self.h.closed)                 # converged, not wedged
         self.assertIsNone(self._board_pane(kid))

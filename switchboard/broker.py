@@ -2508,17 +2508,16 @@ class Broker:
                         f"deleted"
                     ) from None
                 store.log_event(self.db, kind="cleanup_pane_gone", agent=a["name"])
-            # The deferred return is deliberately not read here, and it is worth being
-            # exact about what that costs. This path raises on anything it cannot confirm
-            # and the workspace is going, so there is no next sweep to retry into: the row
-            # below ends with no pane and an `ended_at`, which sends every later cleanup
-            # down the already-closed branch — and that branch's retry finds a
-            # `board_pane:` row nobody will ever act on again. The pane leaks exactly as it
-            # leaked before this change, so no regression; the row is a dead pointer, not a
-            # way back to it. The one new hazard is narrow and worth naming: if herdr later
-            # recycles that pane id onto a live pane, the surviving row makes `_open_board`
-            # believe a restored agent under this name already has a board, and a later
-            # `_close_board` could close the stranger sitting in it.
+            # The deferred return is deliberately not read here: this path raises on
+            # anything it cannot confirm, and there is nothing useful to do with a defer
+            # inside a call that is deleting the workspace. It is not dropped on the floor
+            # either — the row below ends with no pane and an `ended_at`, which is exactly
+            # the shape `cleanup`'s already-closed branch retries, so a `board_pane:` row
+            # left here is picked up and closed by the next ordinary sweep. Until one runs,
+            # the pane sits there as it did before this change (no regression), and the
+            # narrow hazard is the window: if herdr recycles that pane id onto a live pane
+            # first, the surviving row makes `_open_board` believe a restored agent under
+            # this name already has a board, and the retry could close the stranger in it.
             self._close_board(a["name"])
             # The pane is gone, so the row must stop claiming one — a stale id has every
             # later sweep retrying release/close against a pane that is not there.
@@ -4283,6 +4282,13 @@ class Broker:
                     # recycled under it. A no-op once the meta row is gone, which it is
                     # for every row that ever closed cleanly — so every sweep may call it,
                     # and each one is another attempt until the board is down.
+                    #
+                    # `force=force` discards a pending retry rather than deferring it
+                    # again, and that is meant: `--force` is documented as the exit that
+                    # always ends the row `done` and accepts losing the pane, and a board
+                    # it cannot close is precisely a pane it is accepting the loss of.
+                    # Deferring here would give a row that is already closed a second way
+                    # to survive `--force`, which is the wedge this whole rework removed.
                     self._close_board(a["name"], force=force)
                 if set(under.get(a["name"], ())) & set(closed):
                     # `--force` on a row that was already closed, and whose subtree was
@@ -5294,6 +5300,19 @@ class Broker:
                 self._alive_unknown = True
         return self._alive_cache
 
+    def _forget_agent_caches(self) -> None:
+        """Throw away everything one `agent list` filled, so the next ask re-reads herdr.
+
+        The caches are per-`sb`-process by design — see `_agent_states` — so in production
+        the next command starts with them empty and nothing has to call this. The callers
+        that do are the ones where a single process must see herdr change under it: a
+        refusal that IS the news, and the flush that runs after panes have gone.
+        """
+        self._alive_cache = None
+        self._bound_cache = set()
+        self._pane_cache = {}
+        self._alive_unknown = False
+
     def _fill_agent_caches(self, listed) -> None:
         """Both views of one `agent list`: who is there, and whose NAME herdr will answer to.
 
@@ -5515,10 +5534,7 @@ class Broker:
         critical path is this method.
         """
         if refresh:
-            self._alive_cache = None
-            self._bound_cache = set()
-            self._pane_cache = {}
-            self._alive_unknown = False
+            self._forget_agent_caches()
         # The human is excluded because they are not an agent and have no doorbell. Nothing
         # is addressed to them any more, but a store written before the human mailbox was
         # removed still holds rows that would otherwise be retried on every command.
@@ -6044,10 +6060,7 @@ class Broker:
         a = store.get_agent(self.db, who)
         if a is None or a["state"] in FINISHED:
             return False
-        self._alive_cache = None            # ask again, now: the failure is the news
-        self._bound_cache = set()
-        self._pane_cache = {}
-        self._alive_unknown = False
+        self._forget_agent_caches()         # ask again, now: the failure is the news
         states = self._agent_states()
         return states is not None and who in states
 
