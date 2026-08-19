@@ -1907,9 +1907,7 @@ class Broker:
         self._claim(name, me)
         try:
             closed = self._stop_panes(name, me=me)
-            spaces = CleanupResult()
-            self._close_empty_spaces(self._forked_under(name), spaces, me=me,
-                                     dry_run=False)
+            spaces = self._cascade(name, me=me)
         except BaseException:
             store.release_retiring(self.db, name, me)
             raise
@@ -1918,6 +1916,42 @@ class Broker:
                         closed=",".join(closed) or None)
         return self._closed(name, None, kind="bare", worktree="none", closed=closed,
                             spaces=spaces.spaces, spaces_refused=spaces.spaces_refused)
+
+    def _cascade(self, name: str, *, me: str) -> "CleanupResult":
+        """Close the spaces this bare workspace's subtree forked. What it will not close:
+        a space whose own subtree is still working.
+
+        The live-descendants gate is the one `cleanup` has and this level would otherwise
+        lack, and lacking it was a hole rather than a simplification. Every gate below
+        here is scoped to the space itself — rows filed under it (`_filed_gate`), a cwd
+        or a process inside its checkout (`_records_gate`, `_gate`) — and a live
+        GRANDCHILD is in none of those: it sits in its own forked space, under its own
+        name. So a finished lead's checkout read as empty and was deleted while its
+        subtree was still going.
+
+        Nothing was destroyed that git could see — the inventory gate ran, and `-d` leaves
+        an unmerged branch standing — but the space a live agent's parent worked in is not
+        this command's to take: `sb restore` has only the recorded checkout to come back
+        to, so a human bringing that parent back to answer the child it is still waiting on
+        finds nothing there. `cleanup` refuses this shape (`live_descendants`, and the
+        invariant in it), and the whole claim of this cascade is that it refuses whatever
+        cleanup refuses.
+
+        Held, not skipped: it goes in `spaces_refused` with the gate's own shape of
+        reason, so the person who typed the command reads which space stayed and why,
+        exactly as they do for a dirty one.
+        """
+        spaces = CleanupResult()
+        candidates = []
+        for d in self._forked_under(name):
+            if kids := self.live_descendants(d["name"]):
+                spaces.spaces_refused.append(
+                    (d["workspace"], f"{_names(kids)} still working underneath "
+                                     f"{d['name']}, whose space this is"))
+            else:
+                candidates.append(d)
+        self._close_empty_spaces(candidates, spaces, me=me, dry_run=False)
+        return spaces
 
     def _forked_under(self, name: str) -> list:
         """The rows of this bare workspace's own subtree that FORKED a space of their own.
@@ -1956,9 +1990,10 @@ class Broker:
         space rather than minting one, and that space is already reached through the
         namesake row that did mint it.
 
-        It decides nothing about deletion. Every gate, inventory and confirmation stays
-        `_close_empty_spaces`'s and `workspace_close`'s, unchanged: a live child's space is
-        not empty, so the gates refuse it and it stays.
+        It decides nothing about deletion, and it is the candidate set only: what is then
+        held back is `_cascade`'s live-descendants gate and, below that,
+        `_close_empty_spaces`'s and `workspace_close`'s own — a live child's space is not
+        empty, so those refuse it and it stays.
         """
         seen, out = set(), []
         for r in self.db.execute("SELECT * FROM agents WHERE workspace=?",
@@ -2126,8 +2161,8 @@ class Broker:
 
         `spaces`/`spaces_refused` are the cascade one level down, and they carry
         `cleanup`'s two halves under `cleanup`'s names because they are literally its
-        lists: only the bare route fills them, and only ever with what
-        `_close_empty_spaces` did to the spaces this workspace's children forked. Present
+        lists: only the bare route fills them, and only ever with what `_cascade` did to
+        the spaces this workspace's children forked. Present
         and empty on every other route rather than absent, so a caller reading the answer
         never has to ask whether the key exists before asking what is in it.
         """

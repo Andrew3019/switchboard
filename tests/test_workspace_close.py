@@ -831,6 +831,28 @@ class BareCascadeTest(CloseHarness, unittest.TestCase):
         self.assertIn(theirs, self.registered())
         self.assertIsNone(store.get_workspace(self.db, "lead-9")["retired_at"])
 
+    def test_a_finished_childs_space_is_held_while_a_grandchild_works(self):
+        """The gate `sb cleanup` has and every gate below this one lacks.
+
+        A live grandchild sits in its OWN forked space, so no gate scoped to the parent's
+        space — rows filed under it, a cwd or a process inside it — can see it, and the
+        parent's clean checkout read as empty. It is not this command's to take: `sb
+        restore` has only the recorded checkout, so a human bringing that parent back to
+        answer the child still waiting on it would find nothing there.
+        """
+        self.dispatcher()
+        lead = self.child("lead")
+        kid = self.space("worker", commit=True)
+        self.agent("worker", workspace="worker", cwd=kid, state="working")
+        self.db.execute("UPDATE agents SET parent=? WHERE name=?", ("lead", "worker"))
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("worker", dict(r["spaces_refused"])["lead"])
+        self.assertTrue(Path(lead).is_dir())
+        self.assertIn(lead, self.registered())
+        # The grandchild's own space is held by the gates it always had.
+        self.assertTrue(Path(kid).is_dir())
+
     def test_a_live_childs_space_still_holds_itself(self):
         """Unchanged, and deliberately: this closes FINISHED children's orphaned spaces.
         A child still working is not empty, the existing gate refuses it, it stays."""
