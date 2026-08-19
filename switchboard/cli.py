@@ -1198,12 +1198,15 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "workspace" and args.wcmd == "close":
         r = b.workspace_close(args.name, me=me, resume=args.resume, confirm=args.confirm)
+        # Reshaped for `--json` on BOTH exits and not only the one that can fill the
+        # list today: two shapes for one key, decided by which branch was taken, is a
+        # divergence waiting for the day something fills it on the `already` route.
+        out = {**r, "spaces_refused": [{"name": n, "reason": why}
+                                       for n, why in r["spaces_refused"]]}
         if r["already"]:
-            _emit(args, f"{r['workspace']} was retired already — nothing left to do", r)
+            _emit(args, f"{r['workspace']} was retired already — nothing left to do", out)
             return 0
-        _emit(args, _workspace_closed(r),
-              {**r, "spaces_refused": [{"name": n, "reason": why}
-                                       for n, why in r["spaces_refused"]]})
+        _emit(args, _workspace_closed(r), out)
         return 0
 
     if cmd == "restore" and args.sweep:
@@ -1321,8 +1324,17 @@ def _workspace_closed(r: dict) -> str:
     if r["closed"]:
         lines.append(f"closed {len(r['closed'])} pane(s): {', '.join(r['closed'])}")
     if r["kind"] == "bare":
-        lines.append(f"retired {r['workspace']} — no checkout of its own, so nothing was "
-                     f"deleted")
+        # "nothing was deleted" only while that is still true of the whole command. The
+        # cascade made `bare` a route that destroys directories — somebody else's, one
+        # indented line further down — and a headline sentence written to keep "bare" and
+        # "worktree" apart becomes the wrong half of a contradiction the moment it is not
+        # revisited. The word `deleted` belongs where deletion happened.
+        if r["spaces"]:
+            lines.append(f"retired {r['workspace']} — no checkout of its own, and "
+                         f"{len(r['spaces'])} forked space(s) below it DELETED")
+        else:
+            lines.append(f"retired {r['workspace']} — no checkout of its own, so nothing "
+                         f"was deleted")
     else:
         lines.append(f"retired {r['workspace']}: worktree {r['worktree']}")
         if not r["branch"]:
@@ -1338,7 +1350,7 @@ def _workspace_closed(r: dict) -> str:
     # quiet one — this is a command a person typed about one named workspace, and a space
     # left standing is the thing they will trip over later.
     if r["spaces"]:
-        lines.append(f"  closed space(s): {', '.join(r['spaces'])}")
+        lines.append(f"  deleted space(s): {', '.join(r['spaces'])}")
     lines.extend(f"  kept space {n}: {why}" for n, why in r["spaces_refused"])
     return "\n".join(lines)
 

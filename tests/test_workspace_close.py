@@ -776,6 +776,57 @@ class BareCascadeTest(CloseHarness, unittest.TestCase):
         # reason to fail the close that did.
         self.assertTrue(store.get_workspace(self.db, "main-2")["retired_at"])
 
+    def test_the_panes_the_cascade_closed_are_counted_as_this_commands(self):
+        """A pane leaving the board without being named is the thing the report exists
+        for. The nested close returns its own `closed` list and it used to be thrown
+        away, so a run that took two panes said one and named the wrong single one."""
+        self.dispatcher()
+        store.update_agent(self.db, "main-2", pane_id="w1:p1")
+        self.h.panes.add("w1:p1")
+        self.child("worker")
+        store.update_agent(self.db, "worker", pane_id="w2:p2")
+        self.h.panes.add("w2:p2")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(sorted(self.h.closed), ["w1:p1", "w2:p2"])
+        self.assertEqual(r["closed"], ["main-2", "worker"])
+        self.assertIn("closed 2 pane(s): main-2, worker", cli._workspace_closed(r))
+
+    def test_the_headline_says_deleted_when_the_cascade_deleted(self):
+        """"nothing was deleted" sat one line above a worktree this command destroyed."""
+        self.dispatcher()
+        self.child("worker")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        out = cli._workspace_closed(r)
+        self.assertNotIn("nothing was deleted", out)
+        self.assertIn("1 forked space(s) below it DELETED", out)
+        self.assertIn("  deleted space(s): worker", out)
+
+    def test_a_bare_close_that_deleted_nothing_still_says_so(self):
+        self.dispatcher()
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertIn("nothing was deleted", cli._workspace_closed(r))
+
+    def test_the_space_the_caller_is_standing_in_is_reported_not_dropped(self):
+        """Silence about this is the sweep's posture, and it is wrong for a named close.
+
+        A human tidying a subtree up from inside one of its worktrees is the ordinary
+        place to be standing. Dropped from BOTH lists, the answer read as "that
+        dispatcher had no forked spaces at all" — and the dispatcher is retired by then,
+        so the re-run says `already` and the space is orphaned for good, silently.
+        """
+        self.dispatcher()
+        path = self.child("worker")
+        here = os.getcwd()
+        os.chdir(path)
+        try:
+            r = self.b.workspace_close("main-2", me=HUMAN)
+        finally:
+            os.chdir(here)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("standing in", dict(r["spaces_refused"])["worker"])
+        self.assertTrue(Path(path).is_dir())
+        self.assertIn("  kept space worker:", cli._workspace_closed(r))
+
     def test_a_crash_mid_cascade_leaves_the_whole_close_retryable(self):
         """The retired stamp is written last, so a failure below it can be run again.
 

@@ -475,6 +475,12 @@ class CleanupResult(list):
     one of them and `--json` reports every one of them; `expected` only says which are
     not worth a line on their own.
 
+    `panes` is the agents whose panes came down inside those closed spaces — the nested
+    close's own `closed` list, kept rather than discarded. A pane leaving the board
+    without being named is the thing this class was written about; `cleanup` closes those
+    agents itself and so never reads it, and the bare-workspace cascade closes nothing
+    itself and would otherwise report one pane while taking two.
+
     `spaces` and `spaces_refused` are the same two halves one level up: the workspaces
     this cleanup closed once nothing was left in them, and the ones it looked at and left
     standing, with the gate's own words for why. They are separate lists rather than more
@@ -487,13 +493,15 @@ class CleanupResult(list):
                  refused: Optional[list[tuple[str, str]]] = None,
                  expected: Optional[set[str]] = None,
                  spaces: Optional[list[str]] = None,
-                 spaces_refused: Optional[list[tuple[str, str]]] = None):
+                 spaces_refused: Optional[list[tuple[str, str]]] = None,
+                 panes: Optional[list[str]] = None):
         super().__init__(closed)
         self.refused: list[tuple[str, str]] = [] if refused is None else refused
         self.expected: set[str] = set() if expected is None else expected
         self.spaces: list[str] = [] if spaces is None else spaces
         self.spaces_refused: list[tuple[str, str]] = (
             [] if spaces_refused is None else spaces_refused)
+        self.panes: list[str] = [] if panes is None else panes
 
     @property
     def notable(self) -> list[tuple[str, str]]:
@@ -1908,6 +1916,8 @@ class Broker:
         try:
             closed = self._stop_panes(name, me=me)
             spaces = self._cascade(name, me=me)
+            # The cascade's panes are this command's panes: it closed them.
+            closed = list(closed) + spaces.panes
         except BaseException:
             store.release_retiring(self.db, name, me)
             raise
@@ -1950,7 +1960,7 @@ class Broker:
                                      f"{d['name']}, whose space this is"))
             else:
                 candidates.append(d)
-        self._close_empty_spaces(candidates, spaces, me=me, dry_run=False)
+        self._close_empty_spaces(candidates, spaces, me=me, dry_run=False, named=True)
         return spaces
 
     def _forked_under(self, name: str) -> list:
@@ -4660,7 +4670,7 @@ class Broker:
     # -- the space, once the agents in it are gone --------------------------------------
 
     def _close_empty_spaces(self, candidates: Sequence, closed: "CleanupResult", *,
-                            me: str, dry_run: bool) -> None:
+                            me: str, dry_run: bool, named: bool = False) -> None:
         """The second half of cleanup: close the space too, once nothing is left in it.
 
         > **Cleanup closes the agents, closes the tab, and closes the entire space and
@@ -4693,23 +4703,50 @@ class Broker:
         A refusal from a gate is recorded and never raised: the agents are already closed
         by the time this runs, and a space that will not close is not a reason to fail the
         cleanup that did.
+
+        `named` is the caller saying a PERSON asked about these spaces by name, and the
+        only thing it changes is whether standing in one is worth a line. Silence about
+        that is right for a sweep — "you are working in it" is the sweep's own posture,
+        every half hour, about a space nobody mentioned. It is wrong for `sb workspace
+        close <dispatcher>`: a human tidying a subtree up from inside one of its
+        worktrees is the ordinary place to be standing, and the answer they got was
+        indistinguishable from "that dispatcher had no forked spaces at all" — with the
+        dispatcher retired by then, so the re-run says `already` and the space is orphaned
+        for good, silently. The other silent skips stay silent under `named` too: nothing
+        recorded, already retired, or nothing there to delete is not news on any route.
         """
         seen = []
         my_names, my_dirs = self._my_spaces(me)
         for a in candidates:
             w = a["workspace"]
-            if w and w not in seen and w not in my_names:
-                seen.append(w)
+            if not w or w in seen:
+                continue
+            if w in my_names:
+                if named:
+                    closed.spaces_refused.append(
+                        (w, "it is the workspace you are working in, and a close never "
+                            "takes the space it is being run from"))
+                continue
+            seen.append(w)
         for name in seen:
             row = store.get_workspace(self.db, name)
             if row is None or row["retired_at"] or row["checkout"] is None:
                 continue                       # unrecorded, done already, or nothing to delete
             if any(live.is_under(d, row["checkout"]) for d in my_dirs):
-                continue                       # the caller's own directory under another name
+                # The caller's own directory under another name. Reported rather than
+                # skipped when a person named this close — see `named`.
+                if named:
+                    closed.spaces_refused.append(
+                        (name, f"you are standing in {row['checkout']}, and a close never "
+                               f"deletes the directory it is being run from"))
+                continue
             why = self._space_ready(name, row, me=me)
             if why is None and not dry_run:
                 try:
-                    self.workspace_close(name, me=me)
+                    # The nested close's own panes are this command's too: it closed them,
+                    # so a report that counts only the caller's workspace names one pane
+                    # and takes two off the board.
+                    closed.panes.extend(self.workspace_close(name, me=me)["closed"])
                 except ValueError as e:        # whatever arrived while we were looking
                     why = str(e)
             if why is None:
