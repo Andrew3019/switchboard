@@ -724,6 +724,198 @@ class BarePathTest(CloseHarness, unittest.TestCase):
         self.assertEqual(r["closed"], ["main-2"])
         self.assertEqual(self.h.closed, ["w1:p1"])
 
+class BareCascadeTest(CloseHarness, unittest.TestCase):
+    """Closing a bare orchestrator reaches the spaces its children forked.
+
+    The bug this pins: a top's own workspace is bare, and every direct child it delegates
+    to is forked into a worktree workspace of its own. `_close_bare`'s gate and its pane
+    step are both `WHERE workspace=?`, so those forked spaces were never so much as looked
+    at — they stayed registered until a much later, DB-wide `sb cleanup` found them, by
+    which time ignored content had usually accumulated and the gate refused them.
+
+    Three tests, for the three answers the cascade can give: the finished child's clean
+    space goes, a dirty one is KEPT and said so rather than destroyed, and a live child
+    holds its own space exactly as it always did. The gates are unchanged in all three —
+    this level only decides which spaces get looked at.
+    """
+
+    def dispatcher(self, name: str = "main-2"):
+        store.record_workspace(self.db, name, None)
+        self.row(name, workspace=name, cwd=str(self.repo), state="done")
+
+    def child(self, name: str, *, parent: str = "main-2", commit: bool = True,
+              state: str = "done") -> str:
+        """A direct child of a bare top: its own forked space, named for itself."""
+        path = self.space(name, commit=commit)
+        self.agent(name, workspace=name, cwd=path, state=state)
+        self.db.execute("UPDATE agents SET parent=? WHERE name=?", (parent, name))
+        return path
+
+    def test_a_finished_childs_forked_space_is_closed_too(self):
+        self.dispatcher()
+        path = self.child("worker")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["kind"], "bare")
+        self.assertEqual(r["spaces"], ["worker"])
+        self.assertEqual(r["spaces_refused"], [])
+        self.assertFalse(Path(path).is_dir())
+        self.assertNotIn(path, self.registered())
+        self.assertIsNotNone(store.get_workspace(self.db, "worker")["retired_at"])
+
+    def test_a_childs_dirty_space_is_kept_and_reported(self):
+        """The same gate `sb cleanup` refuses on, in the same words. Work git can see is
+        never destroyed to tidy up after the orchestrator above it."""
+        self.dispatcher()
+        path = self.child("worker")
+        Path(path, "notes.txt").write_text("half an edit")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("modified or untracked", dict(r["spaces_refused"])["worker"])
+        self.assertTrue(Path(path).is_dir())
+        # The orchestrator itself is still retired: a space that will not close is not a
+        # reason to fail the close that did.
+        self.assertTrue(store.get_workspace(self.db, "main-2")["retired_at"])
+
+    def test_the_panes_the_cascade_closed_are_counted_as_this_commands(self):
+        """A pane leaving the board without being named is the thing the report exists
+        for. The nested close returns its own `closed` list and it used to be thrown
+        away, so a run that took two panes said one and named the wrong single one."""
+        self.dispatcher()
+        store.update_agent(self.db, "main-2", pane_id="w1:p1")
+        self.h.panes.add("w1:p1")
+        self.child("worker")
+        store.update_agent(self.db, "worker", pane_id="w2:p2")
+        self.h.panes.add("w2:p2")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(sorted(self.h.closed), ["w1:p1", "w2:p2"])
+        self.assertEqual(r["closed"], ["main-2", "worker"])
+        self.assertIn("closed 2 pane(s): main-2, worker", cli._workspace_closed(r))
+
+    def test_the_headline_says_deleted_when_the_cascade_deleted(self):
+        """"nothing was deleted" sat one line above a worktree this command destroyed."""
+        self.dispatcher()
+        self.child("worker")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        out = cli._workspace_closed(r)
+        self.assertNotIn("nothing was deleted", out)
+        self.assertIn("1 forked space(s) below it DELETED", out)
+        self.assertIn("  deleted space(s): worker", out)
+
+    def test_a_bare_close_that_deleted_nothing_still_says_so(self):
+        self.dispatcher()
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertIn("nothing was deleted", cli._workspace_closed(r))
+
+    def test_the_space_the_caller_is_standing_in_is_reported_not_dropped(self):
+        """Silence about this is the sweep's posture, and it is wrong for a named close.
+
+        A human tidying a subtree up from inside one of its worktrees is the ordinary
+        place to be standing. Dropped from BOTH lists, the answer read as "that
+        dispatcher had no forked spaces at all" — and the dispatcher is retired by then,
+        so the re-run says `already` and the space is orphaned for good, silently.
+        """
+        self.dispatcher()
+        path = self.child("worker")
+        here = os.getcwd()
+        os.chdir(path)
+        try:
+            r = self.b.workspace_close("main-2", me=HUMAN)
+        finally:
+            os.chdir(here)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("standing in", dict(r["spaces_refused"])["worker"])
+        self.assertTrue(Path(path).is_dir())
+        self.assertIn("  kept space worker:", cli._workspace_closed(r))
+
+    def test_a_crash_mid_cascade_leaves_the_whole_close_retryable(self):
+        """The retired stamp is written last, so a failure below it can be run again.
+
+        `_close_empty_spaces` swallows a gate's `ValueError` and nothing else — a Ctrl-C
+        or a locked database leaves the loop. Stamped before the cascade, that orphaned
+        every space the loop had not yet reached, permanently: the retry meets
+        `workspace_close`'s `already` return and does nothing. This is the bug the whole
+        feature exists to prevent, arriving by the failure path.
+        """
+        self.dispatcher()
+        first, second = self.child("aaa"), self.child("bbb")
+        boom = self.b._deregister
+
+        def once(checkout):
+            self.b._deregister = boom
+            raise RuntimeError("herdr went away mid-cascade")
+        self.b._deregister = once
+        with self.assertRaises(RuntimeError):
+            self.b.workspace_close("main-2", me=HUMAN)
+        # Nothing stamped, no mark stranded: the command can simply be run again.
+        self.assertIsNone(store.get_workspace(self.db, "main-2")["retired_at"])
+        self.assertIsNone(self.mark("main-2"))
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertFalse(r["already"])
+        self.assertEqual(sorted(r["spaces"]), ["aaa", "bbb"])
+        self.assertFalse(Path(first).is_dir())
+        self.assertFalse(Path(second).is_dir())
+        self.assertIsNotNone(store.get_workspace(self.db, "main-2")["retired_at"])
+
+    def test_a_space_a_descendant_only_joined_is_never_touched(self):
+        """The cascade is the spaces this subtree FORKED, not every space it is filed in.
+
+        `sb delegate --workspace <name>` files a child into a space somebody else opened,
+        so a descendant of one top can carry another top's workspace on its row. Keyed on
+        that value the close would delete a sibling top's worktree — clean and idle is
+        exactly what the cascade takes, and no gate can tell whose it is. Keyed on the
+        namesake it drops out, which is the only thing standing between this command and
+        a linked worktree of the human's own.
+        """
+        self.dispatcher()
+        mine = self.child("lead-1")
+        # Another top's space, forked by ITS child, joined by a descendant of ours.
+        theirs = self.space("lead-9", commit=True)
+        self.agent("lead-9", workspace="lead-9", cwd=theirs, state="done")
+        self.agent("worker-x", workspace="lead-9", cwd=theirs, state="done")
+        self.db.execute("UPDATE agents SET parent=? WHERE name=?", ("lead-1", "worker-x"))
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], ["lead-1"])
+        self.assertEqual(r["spaces_refused"], [])
+        self.assertFalse(Path(mine).is_dir())
+        # Not deleted, not retired, not even reported: it was never ours to look at.
+        self.assertTrue(Path(theirs).is_dir())
+        self.assertIn(theirs, self.registered())
+        self.assertIsNone(store.get_workspace(self.db, "lead-9")["retired_at"])
+
+    def test_a_finished_childs_space_is_held_while_a_grandchild_works(self):
+        """The gate `sb cleanup` has and every gate below this one lacks.
+
+        A live grandchild sits in its OWN forked space, so no gate scoped to the parent's
+        space — rows filed under it, a cwd or a process inside it — can see it, and the
+        parent's clean checkout read as empty. It is not this command's to take: `sb
+        restore` has only the recorded checkout, so a human bringing that parent back to
+        answer the child still waiting on it would find nothing there.
+        """
+        self.dispatcher()
+        lead = self.child("lead")
+        kid = self.space("worker", commit=True)
+        self.agent("worker", workspace="worker", cwd=kid, state="working")
+        self.db.execute("UPDATE agents SET parent=? WHERE name=?", ("lead", "worker"))
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("worker", dict(r["spaces_refused"])["lead"])
+        self.assertTrue(Path(lead).is_dir())
+        self.assertIn(lead, self.registered())
+        # The grandchild's own space is held by the gates it always had.
+        self.assertTrue(Path(kid).is_dir())
+
+    def test_a_live_childs_space_still_holds_itself(self):
+        """Unchanged, and deliberately: this closes FINISHED children's orphaned spaces.
+        A child still working is not empty, the existing gate refuses it, it stays."""
+        self.dispatcher()
+        path = self.child("worker", state="working")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("worker", dict(r["spaces_refused"])["worker"])
+        self.assertTrue(Path(path).is_dir())
+        self.assertIn(path, self.registered())
+
+
 class CrashedMarkTest(CloseHarness, unittest.TestCase):
     """A mark is never stolen and never expires; a person takes it over, or nobody does."""
 
@@ -948,6 +1140,26 @@ class CleanupClosesTheSpaceTest(CloseHarness, unittest.TestCase):
         self.assertEqual(r.spaces_refused, [])           # skipped in silence, not refused
         self.assertTrue(Path(path).is_dir())
         self.assertIn(path, self.registered())
+
+    def test_the_directory_the_caller_stands_in_is_skipped_in_silence_too(self):
+        """The other half of the same rule, by DIRECTORY rather than by name — a human
+        has no row at all, so `os.getcwd()` is the only thing that says where the sweep
+        was typed. Silent here and reported by the bare-workspace cascade, which is the
+        one caller that passes `named`: a sweep saying "you are working in it" every half
+        hour about a space nobody mentioned is not news, and a person who typed one
+        workspace's name is owed the line."""
+        path = self.space("api")
+        self.agent("worker", workspace="api", cwd=path, pane="w2:p1")
+        here = os.getcwd()
+        os.chdir(path)
+        try:
+            r = self.b.cleanup(me=HUMAN)
+        finally:
+            os.chdir(here)
+        self.assertEqual(list(r), ["worker"])
+        self.assertEqual(r.spaces, [])
+        self.assertEqual(r.spaces_refused, [])
+        self.assertTrue(Path(path).is_dir())
 
 
 if __name__ == "__main__":
