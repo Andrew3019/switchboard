@@ -216,7 +216,9 @@ never transcripts — if a child's summary is not enough, that is a question for
 Some ways of working are written down rather than left to you. `sb presets` lists them and
 `sb presets <name>` prints one — read it before you improvise something similar. In
 particular, when you are asked for an adversarial review of anything, `sb presets
-adversarial` is the procedure for it and you run it yourself.
+adversarial` is the procedure for it — read it first, because it says who runs it: the loop
+is yours if you were spawned for the review, and otherwise you put up one lead that owns it
+rather than running rounds yourself.
 
 ## Close what is finished
 

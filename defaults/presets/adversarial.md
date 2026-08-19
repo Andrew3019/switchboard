@@ -9,15 +9,22 @@ and nothing that converged on anything.
 
 It is now a PROCEDURE FOR THE AGENT RUNNING THE REVIEW — a `lead`, since the split (it was
 "an orchestrator" when this was written, and that role is now two). Whoever asked says "run
-an adversarial review of X"; the lead reads this and runs the loop. Nothing here is
+an adversarial review of X"; a lead reads this and runs the loop. Nothing here is
 addressed to a reviewer — the reviewer gets its lens in the task string the lead writes,
 which is why the lens can be chosen for the artifact instead of being fixed in a file.
-Nothing in the body below names a role at all, which is why the rename did not reach it:
-it says "a procedure you run", and the only agent that reads it is the one told to run
-one.
 
-Three things are deliberate:
+Four things are deliberate:
 
+  - RUN BY A LEAD SPAWNED FOR IT. The body used to open "run it yourself rather than
+    delegating the running of it", which was written for an orchestrator and was true for
+    exactly one kind of reader. Every round of this procedure is a spawn, so an agent
+    without delegate rights is told to run something `sb delegate` refuses it — and briefs
+    routinely point workers here to self-review. The named case fixes it: whoever is asked
+    and can spawn puts up ONE lead that owns the whole loop, and whoever cannot spawn asks
+    its parent for that lead instead of attempting rounds it cannot start. The lead that
+    was spawned to run the review does not spawn another — the first line of the body is
+    the test that tells the two readers apart, and it is stated as a case rather than a
+    condition buried mid-paragraph for exactly that reason.
   - SEQUENTIAL, not a fan-out. Round N reviews what round N-1 produced. Running the
     reviewers in parallel would review the same draft five times, which is five opinions
     on one artifact rather than a thing getting better.
@@ -51,13 +58,27 @@ its layout is load-bearing in a way no bound preset's is.
 
 # adversarial
 
-A procedure you run, not a mood. Use it when you are asked for an adversarial review of
-something — a design, a plan, a change — and run it yourself rather than delegating the
-running of it.
+A procedure, not a mood. Use it when you are asked for an adversarial review of something —
+a design, a plan, a change.
 
-Keep one proposer for the whole review: the agent that produced the artifact, or a fresh
-one handed it, whose job across every round is to defend or revise. Keep it alive between
-rounds so it remembers what it already tried and why it rejected it.
+Every round of it is a spawn, so it is run by a lead put up for it. Which reader you are
+decides what you do, and there are three cases:
+
+- You were spawned to run this review. You are that lead: the loop below is yours, and you
+  do not put up another lead for it.
+- You were asked for one while doing something else, and you can spawn. Delegate one lead
+  and give it the whole review — the artifact, where it is, and "read `sb presets
+  adversarial` and run it". It owns the rounds; you report from what it reports and do not
+  run rounds of your own beside it.
+- You cannot spawn — you are a worker, or any role without delegate rights. Then you cannot
+  run this and should not try: `sb delegate` refuses you, and there is nothing left of the
+  procedure once the spawns are removed. Ask your parent for an adversarial-review lead
+  over the artifact, naming where it is, and get on with the rest of your task.
+
+The loop, for the lead running it. Keep one proposer for the whole review: the agent that
+produced the artifact, or a fresh one handed it, whose job across every round is to defend
+or revise. Keep it alive between rounds so it remembers what it already tried and why it
+rejected it.
 
 Then run rounds, one at a time, never in parallel — each round has to see what the last
 one produced. In each round, spawn a NEW reviewer whose task names one specific lens to
