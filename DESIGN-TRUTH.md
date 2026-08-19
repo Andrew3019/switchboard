@@ -419,13 +419,32 @@ one. It relays work and orchestrates the creation of agents and worktrees, which
 scope as "A dispatcher relays; it does not interpret" above: a plan belongs to a worktree, and
 worktrees are below it. — confirmed 2026-08-18
 
-**A step may carry a short display name for the board, separate from its full name.** A step's
+**Every step carries a short display name for the board, and so does the plan.** A step's
 name is a sentence and a board cell is a few columns, so a step named "list every claim the
-document makes about the code" draws as "list claims" in the flowchart. It is optional, and it
-pairs with the name exactly: a named step's display name lives in its definition and an edit
-to it reaches every plan naming that step, an on-the-fly step's lives on the step, and a step
-without one falls back to its name clipped. It is the same split the board already makes —
-the board is a picture, the plan's own listing is the full text. — confirmed 2026-08-18
+document makes about the code" is authored with a display like "list claims" — as short as it
+can be made, abbreviating and dropping middle vowels where that helps. It is required on every
+step, not optional: a cell with no display drew the name clipped mid-clause and the informative
+half was the half cut, so the board was unreadable until it was authored. It pairs with the
+name exactly — a named step's display lives in its definition and an edit to it reaches every
+plan naming that step; an on-the-fly step's lives on the step. A plan carries its own display
+too, longer than a step's since it owns the whole header line, and a display *version* of the
+title rather than an abbreviation of it; the board draws it instead of the title, and a plan
+authored without one falls back to its title. There is no per-cell clip any more — display
+names are short by construction, and the only clipping left is the board's own from the right
+when the pane is narrow. It is the same split the board already makes — the board is a
+picture, the plan's own listing is the full text. — confirmed 2026-08-19
+
+**A step names what it comes after, and every step but the plan's first must.** The board is
+a DAG drawn from the deps, so a plan recording no order between its steps renders as a loose
+vertical stack with no arrows — which is what every early plan did. The first step is the
+exempt root; a plan with a genuine second start reports it, since nothing can tell a deliberate
+second root from a forgotten edge and the warning is survivable. Display and deps are required
+in more than one place, because a plan is edited by hand as often as by command: the shape
+verbs (`create`, `add-step`, `name-step`, `template use`) refuse to mint a step with no
+display; every other write warns and still writes, naming the offending steps — a `tick` that
+would not land because of a rendering rule is worse than the rendering; and the board draws
+the defect red. Completeness is never a whole-file refusal — that is `_check`'s job and it
+stays structure-only. — confirmed 2026-08-19
 
 ### Scope
 
@@ -463,9 +482,10 @@ board grows an extension point — a seam that reads a `board.py` beside the plu
 the rows of each worktree group, and draws what it returns under a heading of the plugin's
 own naming. The plans plugin uses it to draw each plan as a header and its steps as a
 left-to-right flowchart, coloured by progress rather than columned, with the short display
-name of each step in the cell. A board that ships no such plugin, or a plugin that ships no
-`board.py`, costs nothing: the seam imports neither unless both are there. — confirmed
-2026-08-17
+name of each step in the cell, the plan's own display as the header, and any plan or step
+still missing a display or a dep drawn in red. A board that ships no such plugin, or a plugin
+that ships no `board.py`, costs nothing: the seam imports neither unless both are there. —
+confirmed 2026-08-17, display-and-defect clause confirmed 2026-08-19
 
 **`sb start` focuses the pane. Nothing else ever focuses on spawn.** Clicking a name on
 the board is navigation, not a spawn, and does bring that agent into focus. — confirmed
