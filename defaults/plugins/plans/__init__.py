@@ -307,15 +307,21 @@ VERSION = "1.0.0"
 SCOPE = "repo"
 LOCK = True
 
-# One plan is one file — `p-<n>.json`, flat in the state dir, beside a small `_meta.json`
-# holding the counters and the format marker. `FILE` is the single file this store used to
-# be: kept only so `_read` can move an old one across once, and so a tombstone is left in
-# its place that a plugin from before the split refuses instead of misreading. `format` is
-# this plugin's own; sb neither reads it nor has an opinion about it.
+# TWO SHAPES, and the store is in whichever one is on the disk. `FILE` is the original:
+# every plan in one `plans.json`, format 1, which is what an older plugin reads and writes.
+# After `migrate`, one plan is one `p-<n>.json` flat in the state dir, beside a small
+# `_meta.json` holding the counters and the format marker, with a format-2 tombstone left
+# at `FILE` so an older plugin refuses the store instead of writing a second one beside it.
+#
+# The store is shared by every worktree in a repo and the worktrees update one at a time,
+# which is why nothing here flips the shape on its own: a plugin that migrated the first
+# time it read would take down every worktree still on the old code. `format` is this
+# plugin's own; sb neither reads it nor has an opinion about it.
 FILE = "plans.json"
 MIGRATED = "plans.json.migrated"
 META = "_meta.json"
 FORMAT = 2
+LEGACY_FORMAT = 1
 
 # What `create`, `tick` and `skip` write into a step's `progress`. Not an enum — see the
 # module docstring. These three are what this plugin's own verbs write; a lead that types
@@ -475,6 +481,10 @@ def register(reg):
               reg.arg("--after", repeat=True,
                       help="a step it comes after; repeat for a join"),
               reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "migrate", migrate, audience="both",
+        help="move this repo's store from one plans.json to one file per plan — ONCE, and "
+             "only when every worktree is on this version of the plugin")
 
 
 # -- the plan-making instruction -----------------------------------------------
@@ -558,9 +568,15 @@ WHAT TO BUILD IT FROM
 EDITING IT
 
   The plan is a JSON file, and past the commands above you edit it the way you edit any
-  file — steps, owners, gates, deps, order, progress, all of it, in an editor:
+  file — steps, owners, gates, deps, order, progress, all of it, in an editor. The plans
+  live here:
 
-      $(git rev-parse --git-common-dir)/agentflow/plugins/plans/p-<id>.json
+      $(git rev-parse --git-common-dir)/agentflow/plugins/plans/
+
+  One plan is one `p-<id>.json` in that directory. On a repo whose store has not been
+  moved across yet, every plan is instead in a single `plans.json` there — list the
+  directory and you can see which you have. (`sb plugin plans migrate` moves a repo to one
+  file per plan, once, and its own output says what that costs.)
 
   The file itself is the shape to write against. `sb plugin plans show <plan> --json` is
   the same plan with the library resolved in, so what it prints for a `def` step is not
@@ -1034,6 +1050,39 @@ def dep(ctx, args) -> Result:
 # Three verbs over two directories of JSON shipped beside this file. Read-only, all of them:
 # `library` and `template list` render what is there, `name-step` and `template use` put
 # LINKS and COPIES into the state file respectively, and nothing writes a definition.
+
+
+def migrate(ctx, args) -> Result:
+    """Move this repo's store from one `plans.json` to one file per plan. Once, by hand.
+
+    A verb and not a thing that happens on its own, which is the whole design. The store
+    belongs to the repo and every worktree in it shares one; the worktrees adopt a new
+    plugin one at a time. A plugin that migrated the first time it read would flip the
+    shape under every worktree still on the old code, and each of them would refuse every
+    plans command until somebody noticed — which is exactly what happened the first time
+    this was written, and why it is a verb now.
+
+    So the warning is the output, not a footnote in it: this is a one-way door on shared
+    state, and the person typing it is being asked to know that the fleet is ready. It is
+    safe in the only sense that matters — no record is lost, the old file is kept — and
+    unsafe in the sense that matters to whoever is mid-job on an old plugin.
+    """
+    moved = _migrate(ctx.state_dir)
+    if moved is None:
+        return Result(human=f"already one file per plan — nothing to move "
+                            f"({len(_files(ctx.state_dir))} plans in {ctx.state_dir})",
+                      data={"migrated": False, "plans": []})
+    return Result(human="\n".join([
+        f"moved {len(moved)} plan{'s' if len(moved) != 1 else ''} to one file each in "
+        f"{ctx.state_dir}" + (f": {', '.join(moved)}" if moved else ""),
+        f"the old file is kept as {MIGRATED} — no record was dropped",
+        "",
+        "THIS FLIPS THE STORE FOR THE WHOLE REPO. Every worktree still running the",
+        "single-file plans plugin will now REFUSE every plans command against it, and",
+        "its board will draw no plans, until it is on this version. If any worktree is",
+        f"still on the old plugin, put {MIGRATED} back as {FILE} and delete the p-<n>.json",
+        f"files and {META} — that undoes this exactly, losing nothing."]),
+        data={"migrated": True, "plans": moved, "kept": str(ctx.state_dir / MIGRATED)})
 
 
 def library(ctx, args) -> Result:
@@ -1668,18 +1717,124 @@ def _log(plan: dict, who: str, action: str, reason: Optional[str], detail: str =
 
 
 def _read(d: Path) -> tuple[dict, dict]:
-    """Every plan file in the directory, assembled, and the seal `_write` checks against.
+    """The store, whichever shape it is in, and the seal `_write` checks against.
+
+    TWO SHAPES, and which one is in use is read off the disk rather than off a version
+    number: a directory holding `p-<n>.json` files or a `_meta.json` is a split store, and
+    anything else — a single `plans.json`, or nothing at all — is the one-file store this
+    plugin started with. Reading NEVER changes which; only `migrate` does.
+
+    That is the whole of how a fleet crosses over. The store is shared by every worktree in
+    a repo, and the worktrees update one at a time, so a plugin that flipped the shape the
+    first time it read would take every worktree still on the old code down with it — which
+    is exactly what an earlier version of this did. A new plugin on an un-migrated store
+    reads and writes format 1 byte for byte, indistinguishably from an old one, for as long
+    as it takes the fleet to catch up. Somebody then types `migrate`, once, deliberately.
 
     Never raises for a directory that is not there yet. The two counters are recomputed as
-    floors over every id present — including the ids of files that did not load — so a
-    store that lost its `_meta.json` still cannot mint an id that has already been written
-    down somewhere else.
+    floors over every id present, so a store that lost its counters still cannot mint an id
+    that has already been written down somewhere else.
+    """
+    return _read_split(d) if _split(d) else _read_one(d)
 
-    One plan is one file, and that is the whole point: an unreadable `p-7.json` costs p-7
-    and nothing else. It is left exactly where it is and listed in `doc["broken"]` for
-    whoever is drawing; the other plans load and the board still shows them. A board that
-    stopped drawing because one file was malformed would hide the nine things that are
-    fine, and a verb that refused every plan because of one would too.
+
+def _split(d: Path) -> bool:
+    """Is this store one file per plan? Asked of the disk, never of a version number.
+
+    Either half is enough: the plan files, or the counters sidecar that a store with no
+    plans in it still has. A version marker could not answer this — the whole point is
+    that an un-migrated store keeps the format an older plugin reads, so the format says
+    nothing about which shape is in front of you.
+    """
+    return bool(_files(d)) or (d / META).exists()
+
+
+def _read_one(d: Path) -> tuple[dict, dict]:
+    """The single-file store, read the way it has always been read. Format 1, unchanged.
+
+    A file that is there and unreadable is a REFUSAL, naming the path, rather than a fresh
+    empty document: starting over would silently replace every plan in the repo on the next
+    `create`, and the records are the whole point of keeping them. The failing verb stops,
+    nothing is written, and a human fixes or moves the file. That one bad file costs every
+    plan is the cost of the shape, and the reason `migrate` exists.
+
+    Unreadable is checked all the way down, not just at the top level, and the reason is
+    the seal rather than tidiness: it is keyed on the plan id, so two plans sharing an id —
+    or two with no id at all — collapse into one entry and `_write`'s drop check passes
+    over the plan whose changelog is no longer in it.
+
+    `broken` comes back empty and not absent, so that nothing downstream has to know which
+    shape it was handed: in this one, a plan that did not load means none of them did.
+    """
+    f = d / FILE
+    if f.exists():
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise ValueError(f"{f} is not readable JSON ({e}); nothing here will overwrite "
+                             f"it. Fix it or move it aside.") from e
+        if not isinstance(doc, dict) or not isinstance(doc.get("plans", []), list):
+            raise _refuse(f, "is not a plans file — a JSON object with a 'plans' list")
+        if _counter(doc.get("format", LEGACY_FORMAT)) > LEGACY_FORMAT:
+            # A single file stamped 2 is the tombstone `migrate` leaves behind, or a store
+            # from a newer plugin. Either way this is not a file to read as plans, and
+            # writing it back in this shape is how the plans beside it would be lost.
+            raise _refuse(f, f"was written by a newer plans plugin (format "
+                             f"{doc.get('format')}; a single-file store is format "
+                             f"{LEGACY_FORMAT}, and one plan per file is what came after "
+                             f"it — the plans may be the p-<n>.json files beside this)")
+        _check_all(f, doc.get("plans") or [])
+    else:
+        doc = {"format": LEGACY_FORMAT, "next_plan": 1, "next_step": 1, "plans": []}
+    doc.setdefault("format", LEGACY_FORMAT)
+    doc.setdefault("plans", [])
+    doc["broken"] = []
+    plans = doc["plans"]
+    doc["next_plan"] = max(_counter(doc.get("next_plan")),
+                           _high(_PLAN_ID, (p.get("id") for p in plans)) + 1)
+    doc["next_step"] = max(_counter(doc.get("next_step")),
+                           _high(_STEP_ID, (s.get("id") for p in plans
+                                            for s in (p.get("steps") or ()))) + 1)
+    return doc, _seal(doc)
+
+
+def _check_all(f: Path, plans: list) -> None:
+    """One file's worth of plans, checked — the per-plan checks plus the two global ones.
+
+    The single-file store cannot isolate anything: every plan in it shares one file, so a
+    refusal is a refusal of all of them. What this does is run the same `_check` the split
+    store runs per file, and then the two questions no single plan can answer — a twin plan
+    id and a twin step id — over the lot.
+    """
+    seen: set[int] = set()
+    steps_seen: set[int] = set()
+    for plan in plans:
+        if not isinstance(plan, dict):
+            raise _refuse(f, f"holds a {type(plan).__name__} where a plan should be")
+        _check(f, plan)
+        n = _num(_PLAN_ID, plan.get("id"))
+        if n in seen:
+            raise _refuse(f, f"holds two plans called p-{n}, and ids are never reused")
+        seen.add(n)
+        for step in plan.get("steps") or ():
+            # Checked across the whole file, not per plan, because there is one step
+            # counter for the whole store — and because everything past PR1 addresses a
+            # step by its number alone. A twin `s-1` would take a tick meant for the other
+            # one and neither would say so.
+            m = _num(_STEP_ID, step.get("id"))
+            if m in steps_seen:
+                raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
+            steps_seen.add(m)
+
+
+def _read_split(d: Path) -> tuple[dict, dict]:
+    """One plan per file, assembled. The shape `migrate` moves a store to.
+
+    The point of it: an unreadable `p-7.json` costs p-7 and nothing else. It is left
+    exactly where it is and listed in `doc["broken"]` for whoever is drawing; the other
+    plans load and the board still shows them. A board that stopped drawing because one
+    file was malformed would hide the nine things that are fine, and a verb that refused
+    every plan because of one would too.
 
     Nothing here ever overwrites a file it could not read: a plan that did not load is not
     in `doc["plans"]`, so `_write` has nothing to write back over it, and the counters know
@@ -1690,7 +1845,6 @@ def _read(d: Path) -> tuple[dict, dict]:
     whole store. The second is a UX contract — `tick s-7` names no plan — so it survives
     the split by being checked over the assembled set, which is cheap over ten files.
     """
-    _migrate(d)
     meta = _meta(d)
     plans: list = []
     broken: list = []
@@ -1781,23 +1935,33 @@ def _meta(d: Path) -> dict:
     return m
 
 
-def _migrate(d: Path) -> None:
+def _migrate(d: Path) -> Optional[list[str]]:
     """The one-time move from a single `plans.json` to one file per plan.
 
-    Eager and whole: every plan is written out, the counters are carried across, and only
-    then is the old file moved aside — to `plans.json.migrated`, not deleted, because
-    records are kept. Idempotent by the check at the top: an old file next to a store that
-    is already split is not moved again, so two processes racing this write the same bytes
-    from the same source and whichever renames second finds it gone and carries on.
+    Reached ONLY from the `migrate` verb. Nothing that merely reads or writes calls this,
+    which is the point: the store is shared by every worktree in the repo, and the shape it
+    is in is what an older plugin can or cannot read. Flipping it is a decision somebody
+    makes once the fleet is on this code, not a side effect of drawing a board.
+
+    Whole, and then the old file is moved aside — to `plans.json.migrated`, not deleted,
+    because records are kept and this is exactly the moment somebody would want it back.
+    `None` for a store that is already split, so the verb can say so instead of pretending
+    to have done something; otherwise the ids that moved.
 
     A legacy file that will not parse, or that holds a shape the split cannot represent —
     two plans claiming one id would collapse into one filename — is REFUSED rather than
-    half-moved. Half a store in each format is the one outcome worth failing loudly to
-    avoid, and it is the same refusal the old `_read` gave for the same file.
+    half-moved. Half a store in each shape is the one outcome worth failing loudly to
+    avoid, and it is the same refusal `_read_one` gives for the same file.
     """
+    if _split(d):
+        return None
     legacy = d / FILE
-    if not legacy.exists() or _files(d) or (d / META).exists():
-        return
+    if not legacy.exists():
+        # An empty store still moves: writing the counters is what puts it in the new
+        # shape, so a repo that migrates before its first plan does not silently stay old.
+        _atomic(d, META, _text({"format": FORMAT, "next_plan": 1, "next_step": 1}))
+        _tomb(d)
+        return []
     try:
         doc = json.loads(legacy.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as e:
@@ -1805,31 +1969,18 @@ def _migrate(d: Path) -> None:
                          f"overwrite it. Fix it or move it aside.") from e
     if not isinstance(doc, dict):
         raise _refuse(legacy, "is not a plans file — a JSON object with a 'plans' list")
-    if "plans" not in doc:
-        return                          # the tombstone below, or somebody else's file
-    if not isinstance(doc["plans"], list):
+    if "plans" not in doc or not isinstance(doc["plans"], list):
         raise _refuse(legacy, "is not a plans file — a JSON object with a 'plans' list")
-    if _counter(doc.get("format", 1)) > FORMAT:
-        raise _refuse(legacy, f"was written by a newer plans plugin (format "
-                              f"{doc.get('format')}; this one speaks {FORMAT})")
-    seen: set[int] = set()
-    steps_seen: set[int] = set()
-    for plan in doc["plans"]:
-        if not isinstance(plan, dict):
-            raise _refuse(legacy, f"holds a {type(plan).__name__} where a plan should be")
-        n = _num(_PLAN_ID, plan.get("id"))
-        if n is None:
-            raise _refuse(legacy, f"holds a plan with no usable id ({plan.get('id')!r})")
-        if n in seen:
-            raise _refuse(legacy, f"holds two plans called p-{n}, and ids are never reused")
-        seen.add(n)
-        _check(legacy, plan)
-        for step in plan.get("steps") or ():
-            m = _num(_STEP_ID, step.get("id"))
-            if m in steps_seen:
-                raise _refuse(legacy, f"holds two steps called s-{m}, and ids are never "
-                                      f"reused")
-            steps_seen.add(m)
+    if _counter(doc.get("format", LEGACY_FORMAT)) > LEGACY_FORMAT:
+        raise _refuse(legacy, f"is not a single-file store to move (format "
+                              f"{doc.get('format')}; a single-file store is format "
+                              f"{LEGACY_FORMAT})")
+    # The same check the single-file store is read under, run before anything is written:
+    # a twin plan id would collapse two plans into one filename and lose one of them.
+    _check_all(legacy, doc["plans"])
+    seen = {_num(_PLAN_ID, plan["id"]) for plan in doc["plans"]}
+    steps_seen = {_num(_STEP_ID, step.get("id")) for plan in doc["plans"]
+                  for step in plan.get("steps") or ()}
     for plan in doc["plans"]:
         # The plan as it stands, byte for byte through `json.dumps` — the changelog comes
         # across whole because nothing here reads it, edits it, or rebuilds it.
@@ -1838,11 +1989,9 @@ def _migrate(d: Path) -> None:
         "format": FORMAT,
         "next_plan": max(_counter(doc.get("next_plan")), max(seen, default=0) + 1),
         "next_step": max(_counter(doc.get("next_step")), max(steps_seen, default=0) + 1)}))
-    try:
-        os.replace(legacy, d / MIGRATED)
-    except OSError:
-        pass                            # another process got there first; same bytes
+    os.replace(legacy, d / MIGRATED)
     _tomb(d)
+    return [f"p-{n}" for n in sorted(seen)]
 
 
 def _refuse(f: Path, what: str) -> ValueError:
@@ -1984,21 +2133,22 @@ def _tomb(d: Path) -> None:
 
 
 def _write(d: Path, doc: dict, seal: dict) -> None:
-    """The plans this command actually touched, each to its own file. Nothing else.
+    """The store back to disk, in whichever shape it is already in. Never the other one.
 
-    A tick on one step of one plan writes one plan's file, and the other nine are not
-    opened — which is also what keeps a plan that failed to load safe, since it is not in
-    `doc["plans"]` and so is never a file this writes.
+    Writing does not migrate, for the same reason reading does not: the store is shared,
+    the worktrees update one at a time, and a write that changed the shape would take every
+    worktree still on the old plugin down as a side effect of a tick. `migrate` is the only
+    thing that changes the shape, and somebody types it.
 
-    The append-only check is here, at the single write, rather than trusted to each verb.
-    A command changes the steps it names; if one ever rewrites a plan wholesale it will
-    take the changelog with it, and that failure is silent everywhere except here.
+    The append-only check is here, at the single write, rather than trusted to each verb,
+    and it is the same check in both shapes. A command changes the steps it names; if one
+    ever rewrites a plan wholesale it will take the changelog with it, and that failure is
+    silent everywhere except here.
 
     Both halves of "append-only" are checked, because dropping the plan is the easier way
     to lose a changelog than editing one: a plan that was read and is not being written
     back has lost every entry it had, and the design says records are kept and never
-    erased — cleanup means dropping out of the UI. Per file now, which changes nothing
-    about the rule: a file IS one plan, so the seal is keyed on the file it came from.
+    erased — cleanup means dropping out of the UI.
 
     What `os.replace` buys is readers, not crashes: a power loss between the rename and
     the blocks reaching disk can still cost the last write, and there is no `fsync` here.
@@ -2012,7 +2162,7 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
             raise ValueError(f"this write would have filed a plan with no usable id "
                              f"({plan.get('id')!r}); a plan is addressed by its number")
         if n in here:
-            raise ValueError(f"this write would have put two plans in p-{n}.json, and one "
+            raise ValueError(f"this write would have put two plans under p-{n}, and one "
                              f"of them would be gone; ids are never reused")
         here[n] = plan
     gone = [n for n in seal if n not in here]
@@ -2022,13 +2172,40 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
                          f"plans are kept, never erased")
     for n, plan in sorted(here.items()):
         was = seal.get(n)
-        if was is not None:
-            old = json.loads(was["log"])
-            now = plan.get("changelog") or []
-            if not isinstance(now, list) or now[:len(old)] != old:
-                raise ValueError(f"p-{n}'s changelog is append-only, and this write would "
-                                 f"have dropped or rewritten {len(old)} entries")
-        body = _text(plan)
+        if was is None:
+            continue                    # a plan created by this command; nothing to keep
+        old = json.loads(was["log"])
+        now = plan.get("changelog") or []
+        if not isinstance(now, list) or now[:len(old)] != old:
+            raise ValueError(f"p-{n}'s changelog is append-only, and this write would "
+                             f"have dropped or rewritten {len(old)} entries")
+    (_write_split if _split(d) else _write_one)(d, doc, seal, here)
+
+
+def _write_one(d: Path, doc: dict, seal: dict, here: dict) -> None:
+    """The whole store, one file, format 1 — byte for byte what an older plugin writes.
+
+    A whole-file rewrite for a tick on one step, which is the cost of the shape and the
+    reason `migrate` exists. What matters more while a fleet is crossing over is that this
+    leaves nothing behind that an older plugin would refuse: the format on disk stays 1,
+    and `broken` — which only the split shape can populate — is dropped rather than
+    written down as a field nothing else knows about.
+    """
+    out = {k: v for k, v in doc.items() if k != "broken"}
+    out["format"] = LEGACY_FORMAT
+    _atomic(d, FILE, _text(out))
+
+
+def _write_split(d: Path, doc: dict, seal: dict, here: dict) -> None:
+    """Only the plans this command actually touched, each to its own file. Nothing else.
+
+    A tick on one step of one plan writes one plan's file and the other nine are not
+    opened. Touched is decided by comparing against the text `_read` saw, which is also
+    what keeps a plan that failed to load safe: it is not in `doc["plans"]`, so it is never
+    a file this writes.
+    """
+    for n, plan in sorted(here.items()):
+        was, body = seal.get(n), _text(plan)
         if was is not None and body == was["raw"]:
             continue                    # untouched by this command; leave the file alone
         _atomic(d, f"p-{n}.json", body)

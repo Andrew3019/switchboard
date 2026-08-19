@@ -112,7 +112,7 @@ class PlansSandbox(ShippedSandbox):
         return plugins.state_root("repo", self.repo) / "plans"
 
     def _file(self, plan: str = "p-1") -> Path:
-        """One plan's own file. The store is one file per plan, flat in the state dir."""
+        """One plan's own file, once the store has been moved to one file per plan."""
         return self._dir() / f"{plan}.json"
 
     def _files(self) -> list:
@@ -120,23 +120,45 @@ class PlansSandbox(ShippedSandbox):
         and not between `p-1` and `p-2`, which is what sorting by name would give."""
         return sorted(self._dir().glob("p-*.json"), key=lambda f: int(f.stem[2:]))
 
+    def _split(self) -> bool:
+        """Is this sandbox's store one file per plan yet? The plugin asks the disk too."""
+        return bool(self._files()) or (self._dir() / "_meta.json").exists()
+
+    def migrate(self) -> str:
+        """Move the sandbox's store to one file per plan, the only way anything does."""
+        return self.ok("plugin", "plans", "migrate")
+
+    def _stored(self) -> list:
+        """Every file the store is actually kept in, whichever shape it is in."""
+        d = self._dir()
+        if not d.exists():
+            return []
+        return self._files() if self._split() else [f for f in [d / "plans.json"]
+                                                    if f.exists()]
+
     def _raw(self) -> str:
-        """Every plan file's text, run together. For asserting what is NOT written down."""
-        return "".join(f.read_text() for f in self._files())
+        """The store's text, run together. For asserting what is NOT written down."""
+        return "".join(f.read_text() for f in self._stored())
 
     def _doc(self) -> dict:
-        """The store assembled the way `_read` assembles it, for tests that want one doc.
+        """The store assembled the way `_read` assembles it, in whichever shape it is in.
 
-        A helper and not the format: the plugin has no whole-store file any more, so a test
-        that wants "the plans" builds the list the same way the plugin does — off the files.
+        A helper and not the format: once a store is split there is no whole-store file, so
+        a test that wants "the plans" builds the list the same way the plugin does.
         """
+        if not self._split():
+            f = self._dir() / "plans.json"
+            return json.loads(f.read_text()) if f.exists() else {"plans": []}
         meta = self._dir() / "_meta.json"
         doc = json.loads(meta.read_text()) if meta.exists() else {}
         doc["plans"] = [json.loads(f.read_text()) for f in self._files()]
         return doc
 
     def _save(self, doc: dict) -> None:
-        """A hand-edit, written back the way a person would: each plan to its own file."""
+        """A hand-edit, written back the way a person would, into the shape on disk."""
+        if not self._split():
+            (self._dir() / "plans.json").write_text(json.dumps(doc))
+            return
         for plan in doc["plans"]:
             (self._dir() / f"p-{int(str(plan['id']).lstrip('pP-'))}.json").write_text(
                 json.dumps(plan))
@@ -302,6 +324,7 @@ class PlansTest(PlansSandbox):
         """
         self.ok("plugin", "plans", "create", "a job")
         self.ok("plugin", "plans", "create", "another job")
+        self.migrate()
         self._file("p-1").write_text("{ this is not json")
 
         out = self.ok("plugin", "plans", "list")
@@ -357,6 +380,7 @@ class PlansTest(PlansSandbox):
                       {"id": "s-9", "checkpoints": "notes/x.md"}]},
                   "has a p-9 whose notes is not a list": {"id": "p-9", "notes": None}}
         self.ok("plugin", "plans", "create", "the plan that is fine")
+        self.migrate()
         for expected, wreck in wrecks.items():
             with self.subTest(expected=expected):
                 self._file("p-9").write_text(json.dumps(wreck))
@@ -375,6 +399,7 @@ class PlansTest(PlansSandbox):
         over the assembled set — and refuses the file that arrived second rather than both,
         so the plan that had the id first is untouched by somebody else's mistake."""
         self.ok("plugin", "plans", "create", "first", "--step", "do it")
+        self.migrate()
         self._file("p-9").write_text(json.dumps(
             {"id": "p-9", "steps": [{"id": "s-1", "name": "a twin"}]}))
         out = self.ok("plugin", "plans", "list")
@@ -387,6 +412,7 @@ class PlansTest(PlansSandbox):
         and not per file, because the marker is the store's: a plugin that does not speak
         the format cannot know which of these files it would be misreading."""
         self.ok("plugin", "plans", "create", "a job")
+        self.migrate()
         (self._dir() / "_meta.json").write_text(json.dumps({"format": 99}))
         code, _, err = self.sb("plugin", "plans", "list")
         self.assertEqual(code, 1)
@@ -425,7 +451,7 @@ class PlansTest(PlansSandbox):
             # Watched at `os.replace` rather than at the plugin's own `_write`: sb imports
             # a plugin afresh on every invocation, so a patch on the module object is
             # already stale by the time the command under test runs.
-            if re.fullmatch(r"p-\d+\.json", Path(dst).name):
+            if re.fullmatch(r"p-\d+\.json|plans\.json", Path(dst).name):
                 held.append(_held(self._dir() / ".lock"))
             real(src, dst)
 
@@ -437,17 +463,80 @@ class PlansTest(PlansSandbox):
                          ["p-1", "p-2"])
 
 
+class LegacyStoreTest(PlansSandbox):
+    """The single-file store, which a new plugin must go on reading AND writing untouched.
+
+    This is the coexistence half of the change, and the reason the first attempt at it was
+    wrong. The store belongs to the repo, every worktree shares one, and the worktrees pick
+    up a new plugin one at a time. So a plugin that moved the store to one file per plan the
+    first time it read one would flip the shape under every worktree still on the old code,
+    and each of them would refuse every plans command until somebody noticed. It did.
+
+    What these pin is the fix: reading does not migrate, writing does not migrate, and the
+    format on disk stays 1 — so an old plugin and this one are still looking at the same
+    store afterwards.
+    """
+
+    def test_a_fresh_store_is_the_single_file_an_older_plugin_reads(self):
+        """The default for a repo that has never had a plan. A new store in the new shape
+        would be a new store an old plugin cannot read, which is the same break arriving by
+        a different door."""
+        self.ok("plugin", "plans", "create", "a job")
+        self.assertEqual(self._files(), [])
+        self.assertFalse((self._dir() / "_meta.json").exists())
+        self.assertEqual(json.loads((self._dir() / "plans.json").read_text())["format"], 1)
+
+    def test_reading_a_legacy_store_never_moves_it(self):
+        """Every read path, including the board's, which does not hold the lock. The verbs
+        that only read are the ones that would have flipped a shared store silently."""
+        self.ok("plugin", "plans", "create", "a job", "--step", "do it")
+        before = (self._dir() / "plans.json").read_bytes()
+        for argv in (("list",), ("list", "--all"), ("show", "p-1"), ("changelog", "p-1"),
+                     ("library",), ("guide",)):
+            with self.subTest(verb=argv[0]):
+                self.ok("plugin", "plans", *argv)
+                self.assertEqual(self._files(), [], "a read moved the store")
+        self.assertEqual((self._dir() / "plans.json").read_bytes(), before)
+
+    def test_writing_a_legacy_store_keeps_it_legacy_and_keeps_format_1(self):
+        """A tick is a whole-file rewrite in this shape — the cost of it, and the reason
+        `migrate` exists. What must not change is the shape or the stamp: format 1 on disk
+        is the only thing telling an old plugin it may still read this."""
+        self.ok("plugin", "plans", "create", "a job", "--step", "do it")
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "done")
+        self.ok("plugin", "plans", "note", "s-1", "--text", "and a note")
+        self.assertEqual(self._files(), [])
+        doc = json.loads((self._dir() / "plans.json").read_text())
+        self.assertEqual(doc["format"], 1)
+        self.assertEqual(doc["plans"][0]["steps"][0]["progress"], "done")
+        # `broken` is the split store's answer to a file that did not load, and there is no
+        # such thing here. Writing it down would put a field in a shared file that the
+        # plugin on the next worktree has never heard of.
+        self.assertNotIn("broken", doc)
+
+    def test_a_legacy_store_still_refuses_whole_when_it_cannot_be_read(self):
+        """One file means one blast radius, and that is honest rather than fixed here:
+        starting over on a corrupt file would replace every plan in the repo on the next
+        `create`. `migrate` is what makes a bad file cost one plan."""
+        self.ok("plugin", "plans", "create", "a job")
+        (self._dir() / "plans.json").write_text("{ this is not json")
+        code, _, err = self.sb("plugin", "plans", "list")
+        self.assertEqual(code, 1)
+        self.assertIn("not readable JSON", err)
+        self.assertIn("will overwrite", err)
+        self.assertEqual((self._dir() / "plans.json").read_text(), "{ this is not json")
+
+
 class MigrationTest(PlansSandbox):
-    """The one-time move from a single `plans.json` to one file per plan.
+    """`migrate`: the one-time, hand-typed move from one `plans.json` to one file per plan.
 
     Three things have to survive it and one has to stop: every plan and its changelog come
     across untouched, the two counters come across, the old file is kept rather than
-    deleted — and a store that has already moved is never moved again, however many old
-    files somebody drops back beside it.
+    deleted — and nothing but this verb ever performs it.
 
-    Unproven here: two processes racing the migration. It runs under the state lock sb
-    already holds for every plans command, and both would write the same bytes from the
-    same source, but nothing in this suite provokes the race.
+    Unproven here: two processes racing the verb. It runs under the state lock sb already
+    holds for every plans command, and it is a thing a person types once, but nothing in
+    this suite provokes the race.
     """
 
     LEGACY = {"format": 1, "next_plan": 12, "next_step": 61, "plans": [
@@ -470,27 +559,64 @@ class MigrationTest(PlansSandbox):
         f.write_text(json.dumps(doc if doc is not None else self.LEGACY, indent=2))
         return f
 
+    def test_nothing_but_the_verb_moves_a_store(self):
+        """The whole revision, in one assertion. Every verb runs against the old store and
+        leaves it exactly as it was; then `migrate` moves it, and only then."""
+        self.legacy()
+        self.ok("plugin", "plans", "list", "--all")
+        self.ok("plugin", "plans", "show", "p-2")
+        self.ok("plugin", "plans", "tick", "s-3", "--reason", "done")
+        self.ok("plugin", "plans", "create", "one more")
+        self.assertEqual(self._files(), [])
+        self.assertEqual(json.loads((self._dir() / "plans.json").read_text())["format"], 1)
+        self.migrate()
+        self.assertEqual([f.name for f in self._files()],
+                         ["p-2.json", "p-11.json", "p-12.json"])
+
     def test_an_old_store_moves_across_whole_and_the_old_file_is_kept(self):
         self.legacy()
+        out = self.migrate()
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
                          ["p-2", "p-11"])
         self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
         # Every plan, and every changelog entry in it, exactly as it was. The records are
         # the reason any of this is careful, so they are compared whole and not counted.
         for was in self.LEGACY["plans"]:
-            self.assertEqual(json.loads(
-                self._file(was["id"]).read_text())["changelog"], was["changelog"])
             self.assertEqual(json.loads(self._file(was["id"]).read_text()), was)
         # Moved aside, never deleted: records are kept, and a migration is exactly the
         # moment somebody would want the file back.
         self.assertEqual(json.loads((self._dir() / "plans.json.migrated").read_text()),
                          self.LEGACY)
+        self.assertIn("plans.json.migrated", out)
+
+    def test_the_verb_says_out_loud_what_it_costs_the_rest_of_the_fleet(self):
+        """A one-way door on state the whole repo shares. The warning is the output and not
+        a footnote in it, because the failure it is warning about is silent: an old plugin
+        on another worktree just starts refusing, and nothing connects that to this."""
+        self.legacy()
+        out = self.migrate()
+        self.assertIn("THIS FLIPS THE STORE FOR THE WHOLE REPO", out)
+        self.assertIn("REFUSE every plans command", out)
+        # And how to put it back, in the same breath — a warning with no way out of it is
+        # a warning nobody can act on once they have read it too late.
+        self.assertIn("plans.json.migrated", out)
+        self.assertTrue(self.data("plugin", "plans", "migrate")["migrated"] is False)
+
+    def test_migrating_twice_says_so_rather_than_doing_it_again(self):
+        self.legacy()
+        self.migrate()
+        after = self._file("p-2").read_text()
+        again = self.data("plugin", "plans", "migrate")
+        self.assertEqual(again, {"migrated": False, "plans": []})
+        self.assertEqual(self._file("p-2").read_text(), after)
+        self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
 
     def test_the_counters_come_across_and_are_not_recomputed_downwards(self):
         """`next_plan` is 12 with the highest plan at p-11, and `next_step` is 61 with the
         highest step at s-60 — ids are never reused, so a migration that recomputed them
         off what is present would be free to hand out one that a deleted plan once had."""
         self.legacy()
+        self.migrate()
         self.assertEqual(self.data("plugin", "plans", "create", "a fresh one")["id"],
                          "p-12")
         self.assertEqual(json.loads((self._dir() / "_meta.json").read_text())["format"], 2)
@@ -498,27 +624,26 @@ class MigrationTest(PlansSandbox):
                          "--reason", "because")
         self.assertEqual(made["step"]["id"], "s-61")
 
-    def test_a_store_that_already_moved_is_never_moved_again(self):
-        """Idempotence, and the shape of it that actually happens: somebody restores an old
-        `plans.json` from a backup next to a store that has already split. Merging it would
-        overwrite plans that have moved on since; the split store is the one that is live.
-        """
+    def test_an_old_file_restored_beside_a_moved_store_is_left_alone(self):
+        """Somebody restores a `plans.json` from a backup next to a store that has already
+        moved. Merging it would overwrite plans that have moved on since; the split store
+        is the one that is live, and the verb says it has nothing to do."""
         self.legacy()
-        self.ok("plugin", "plans", "list", "--all")
+        self.migrate()
         self.ok("plugin", "plans", "tick", "s-3", "--reason", "done now")
         after = self._file("p-2").read_text()
         self.legacy()                   # the old file, back again
         self.ok("plugin", "plans", "list", "--all")
+        self.assertFalse(self.data("plugin", "plans", "migrate")["migrated"])
         self.assertEqual(self._file("p-2").read_text(), after)
         self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
 
     def test_a_store_that_moved_leaves_an_older_plugin_something_it_refuses(self):
-        """Without this there is no `plans.json` at all, and a plugin from before the split
-        reads a store full of plans as an empty repo and writes a second one beside it.
-        What it finds instead is a format it does not speak, which is the one thing a
-        version marker can do."""
+        """After the deliberate flip — and only after it — an old plugin must refuse rather
+        than misread. Without the tombstone it would find no `plans.json` in a store full of
+        plans, read the repo as empty, and write a second store beside the real one."""
         self.legacy()
-        self.ok("plugin", "plans", "list", "--all")
+        self.migrate()
         tomb = json.loads((self._dir() / "plans.json").read_text())
         self.assertEqual(tomb["format"], 2)
         self.assertNotIn("plans", tomb)
@@ -528,15 +653,22 @@ class MigrationTest(PlansSandbox):
 
     def test_an_old_store_that_cannot_be_split_is_refused_rather_than_half_moved(self):
         """Two plans claiming one id would collapse into one filename and one of them would
-        be gone. Half a store in each format is the one outcome worth failing loudly for,
-        so the migration refuses and the old file is left exactly where it is."""
+        be gone. Half a store in each shape is the one outcome worth failing loudly for, so
+        the migration refuses and the old file is left exactly where it is."""
         self.legacy({"format": 1, "plans": [{"id": "p-1"}, {"id": "1"}]})
-        code, _, err = self.sb("plugin", "plans", "list")
+        code, _, err = self.sb("plugin", "plans", "migrate")
         self.assertEqual(code, 1)
         self.assertIn("holds two plans called p-1", err)
         self.assertIn("will overwrite", err)
         self.assertEqual(self._files(), [])
         self.assertTrue((self._dir() / "plans.json").exists())
+
+    def test_a_repo_with_no_plans_yet_still_moves_when_it_is_told_to(self):
+        """Otherwise a repo that migrates before its first plan silently stays old, and the
+        next `create` puts a single-file store back where the fleet just left."""
+        self.assertTrue(self.data("plugin", "plans", "migrate")["migrated"])
+        self.ok("plugin", "plans", "create", "the first plan")
+        self.assertEqual([f.name for f in self._files()], ["p-1.json"])
 
 
 class StepsTest(PlansSandbox):
@@ -1826,7 +1958,9 @@ class GateTest(PlansSandbox):
                 "sb plugin plans library",
                 "sb plugin plans template list",
                 # The file, since past `create` the plan is edited rather than commanded.
-                "agentflow/plugins/plans/p-<id>.json",
+                "agentflow/plugins/plans/",
+                "One plan is one `p-<id>.json`",
+                "sb plugin plans migrate",
                 # The three things hand-editing can silently lose.
                 "APPEND a changelog entry",
                 "NEVER drop or rewrite an entry",

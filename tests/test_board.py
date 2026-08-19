@@ -1432,6 +1432,19 @@ class PlanBlockTest(unittest.TestCase):
         with self.hooks():
             self.assertEqual(board.section_extras([agent("lead")]), [])
 
+    def test_the_board_draws_a_store_that_has_not_been_moved_across_yet(self):
+        """The shape most repos are still in, and the one the board must not disturb: it
+        reads without the plugin framework's lock, so a read that migrated would flip a
+        shared store from a poll loop."""
+        (self.state / "plans.json").write_text(json.dumps(
+            {"format": 1, "next_plan": 9, "next_step": 9, "plans": [
+                self.plan("p-1", "api", "the old shape",
+                          [{"id": "s-1", "name": "x", "progress": "open"}])]}))
+        with self.hooks():
+            sections = board.section_extras([agent("lead")])
+        self.assertIn("the old shape", " ".join(sections[0][1]))
+        self.assertEqual(sorted(f.name for f in self.state.iterdir()), ["plans.json"])
+
     def test_a_plans_file_that_cannot_be_read_costs_the_board_nothing(self):
         (self.state / "plans.json").write_text("{ not json")
         with self.hooks():
