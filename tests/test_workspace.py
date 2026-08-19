@@ -851,18 +851,38 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
         """The stray-pane leak. A close that failed for a reason saying nothing about
         whether the pane is still ours used to drop the meta row anyway — and that row is
         the only thing pointing at the pane, so the pane was orphaned for good. Keep it,
-        hold the agent open, and let the next sweep close it."""
+        and let a later sweep close it."""
         kid, board, _pane = self._finished_kid()
         real = self._board_close_fails(board, HerdrError("close_failed", "herdr said no"))
-        self.assertEqual(self.b.cleanup([kid], me="api"), [])
-        self.assertEqual(self._board_pane(kid), board)      # still pointed at
-        # Held open: keeping the row is only half a retry. Clearing `pane_id` is what
-        # takes a row out of every future sweep, so the kept row would never be read.
-        self.assertIsNotNone(store.get_agent(self.db, kid)["pane_id"])
-        self.h.close_pane = real                            # herdr comes back
         self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
+        self.assertEqual(self._board_pane(kid), board)      # still pointed at
+        self.h.close_pane = real                            # herdr comes back
+        self.b.cleanup(me="api")                            # a bare sweep is enough
         self.assertIn(board, self.h.closed)
         self.assertIsNone(self._board_pane(kid))
+
+    def test_the_deferred_agent_row_is_not_held_open_on_its_dead_pane(self):
+        """The retry must not ride on the agent's `pane_id`. Holding the row open would
+        leave it pointing at a pane this sweep already closed — and herdr hands a freed
+        pane id straight back out. The stranger who inherits it reads as a recycled-id
+        mismatch, which refuses the row BEFORE the board is ever reached, forever, with
+        `--force` the only way out: worse than the leak this fixes. So the row ends
+        `done` with no pane, and the board is retried from the already-closed branch."""
+        kid, board, agent_pane = self._finished_kid()
+        real = self._board_close_fails(board, HerdrError("close_failed", "herdr said no"))
+        self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
+        row = store.get_agent(self.db, kid)
+        self.assertIsNone(row["pane_id"])                   # nothing left to recycle
+        self.assertEqual(self._board_pane(kid), board)      # but the board is remembered
+        # herdr forgets the agent and hands its pane id to somebody else, as it does.
+        del self.h.live[kid]
+        self.h.live["stranger"] = Agent(name="stranger", pane_id=agent_pane,
+                                        terminal_id="term-theirs", state="working")
+        self.h.close_pane = real
+        self.b.cleanup(me="api")
+        self.assertIn(board, self.h.closed)                 # converged, not wedged
+        self.assertIsNone(self._board_pane(kid))
+        self.assertEqual(self.h.closed.count(agent_pane), 1)  # never the stranger's
 
     def test_a_herdr_that_cannot_be_asked_defers_the_board(self):
         """`_close_target`'s no-answer refusal is not a refusal about this pane at all —
