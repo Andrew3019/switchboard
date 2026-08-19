@@ -1,15 +1,23 @@
 """Plans and steps — the live state of one job, held where a lead can show it.
 
 The design is `design/PLANS-AND-STEPS.md`; this is the state model, the verbs that make a
-plan (`create`, `list`, `show`, `changelog`), the verbs that move one along — `assign`,
-`tick`, `skip`, `note`, `checkpoint`, `rework`, `add-step` and `dep` — the catalogue a
-plan is built from (`library`, `name-step` and `template`), the two things that are
-READ every time a plan is displayed and written down nowhere — a step owner's status, and
-the plan's own condition — the instruction that says when to make a plan at all (`guide`),
-and the one mark a step carries that says a human is what finishes it (`gate`). What is
-still not here is anything that decides for itself: nothing in this file blocks, merges,
-tears down or watches for a human's answer, and the section on gates below says why that
-is the design rather than a gap.
+plan (`create`, `template use`, `name-step`, `add-step`), the verbs that read one (`list`,
+`show`, `changelog`, `library`, `validate`), the three small ones worth typing while a job
+runs (`tick`, `note`, `dep`), the two things that are READ every time a plan is displayed
+and written down nowhere — a step owner's status, and the plan's own condition — and the
+instruction that says when to make a plan at all (`guide`). What is still not here is
+anything that decides for itself: nothing in this file blocks, merges, tears down or
+watches for a human's answer, and the section on gates below says why that is the design
+rather than a gap.
+
+THE FILE IS THE INTERFACE, and the verb list above is short because of it. An owner, a
+gate, a skip and its reason, a checkpoint, a reworked step were each a verb once and each
+wrote ONE FIELD; what a lead does to a plan is shape it, which is what an editor is for,
+and a verb per field was a surface nobody could hold in their head to do that worse.
+`create` and `template use` print the path of the file they made, the file is edited, and
+`validate` says what the edit broke. What those verbs did enforce is not gone with them —
+see `_wrong`, where their three refusals became warnings that reach a hand-edit too, which
+is more than the verbs ever covered.
 
 The records
 -----------
@@ -33,18 +41,18 @@ fields the design names and leaves everything else alone.
 Moving a step
 -------------
 
-Progress is moved by three verbs and only three: `tick` writes `done`, `skip` writes
-`skipped`, and `rework` puts a step back to `open`. Nothing infers it, `sb done` does not
-touch it, no verb moves it as a side effect of doing something else, and nothing in this
-file ever writes `done` on a step's behalf — which is the design's first rule about progress
-and the reason `tick` exists as a verb at all. Rework belongs on that list rather than
-beside it: re-entering a step is a progress move like the other two, made by an agent that
-typed the verb, and it is `open` it writes and never a completion.
+`tick` is the one verb that writes progress, and what it writes is `done`. Nothing infers
+it, `sb done` does not touch it, no verb moves it as a side effect of doing something else,
+and nothing in this file ever writes `done` on a step's behalf — which is the design's
+first rule about progress and the reason `tick` exists as a verb at all when the field
+beside it is edited by hand. The other two moves are the file: `skipped` with the reason in
+`why`, and back to `open` with `tries` bumped for a step being redone.
 
 Complete-or-skipped-but-never-both is structural rather than checked: `progress` is ONE
-string, so `skip` on a ticked step replaces the tick instead of joining it. A verb that
-overwrites what another verb wrote is a correction, and the changelog is what says which it
-was — every one of these entries records the progress it moved a step FROM.
+string, so a skip written over a ticked step replaces the tick instead of joining it. What
+overwrites what another agent wrote is a correction, and the changelog is what says which
+it was — a `tick` records the progress it moved a step FROM, and a hand-edit says so in the
+entry its author appends.
 
 `why` is the reason for the step's current progress, kept on the step so that a skipped step
 renders with the reason beside it rather than twenty lines below in the changelog. The
@@ -52,27 +60,29 @@ design's "a skip is a state rather than an absence" is only true if the reason i
 where the state is. It is overwritten by whatever changes progress next, so a step ticked
 after a skip does not keep the sentence explaining why it was skipped.
 
-`tries` is rework: `rework` re-enters a step, bumping the count and putting progress back to
-`open`. Repetition is a number on the step and never an edge, so nothing here creates a
-cycle to represent a second attempt. Nothing downstream is un-ticked either — the design
-makes that the lead's judgement, and a rule here would either merge unreviewed work or throw
-away a day of good review.
+`tries` is rework: re-entering a step bumps the count and puts progress back to `open`.
+Repetition is a number on the step and never an edge, so nothing here creates a cycle to
+represent a second attempt. Nothing downstream is un-ticked either — the design makes that
+the lead's judgement, and a rule here would either merge unreviewed work or throw away a
+day of good review.
 
-`checkpoints` are references — a path, a URL, an id — and never content. A ref with a
-newline in it is refused, because the only way one gets there is somebody pasting the brief
-instead of pointing at it.
+`checkpoints` are references — a path, a URL, an id — and never content. A ref with a line
+break in it is WARNED ABOUT (`_wrong`), because the only way one gets there is somebody
+pasting the brief instead of pointing at it, and a plan holding a copy of a brief is a
+second copy that goes stale.
 
 Gates
 -----
 
 `gate` is a step's exit condition when that condition is A HUMAN: the sentence saying what
-they have to answer before this step is finished. It is a FIELD ON A STEP and never a step of
-its own, which is the design's first rule about gates and the one thing here not to get
-wrong. A design step ending in "no implementation until they confirm" needs no second step
-for the confirmation; what shows on a board, what carries a skip and its reason, and what
-an obligation attaches to is always the step whose exit condition the gate is. Open
-vocabulary like `progress`, for the same reason: the agent is the interpreter, and a job
-with a gate this file has never heard of gets it without a release.
+they have to answer before this step is finished. It is a FIELD ON A STEP — written into
+the file, with no verb of its own — and never a step of its own, which is the design's
+first rule about gates and the one thing here not to get wrong. A design step ending in
+"no implementation until they confirm" needs no second step for the confirmation; what
+shows on a board, what carries a skip and its reason, and what an obligation attaches to
+is always the step whose exit condition the gate is. Open vocabulary like `progress`, for
+the same reason: the agent is the interpreter, and a job with a gate this file has never
+heard of gets it without a release.
 
 Nothing here waits, blocks, merges or tears anything down, and that boundary is the whole
 of the mechanism. The PROCEDURE at a gate is prose an agent follows, kept with the thing
@@ -85,34 +95,38 @@ mark. A plugin that shelled out to `gh` or `git merge` on a plan's behalf would 
 evaluator this design deliberately does not have, and it would be one on the only path
 where being wrong lands a merge nobody asked for.
 
-Which is why there is NO verb that clears a gate. At a gate the owning agent blocks, the
-step renders its owner as blocked — read off `sb status` at the instant of drawing, like
-every other liveness fact here, and stored nowhere — and the human answering that agent
-clears both the block and the gate. A verb to clear one through the plan would make the
-plan a control surface, and the design says plainly that Andrew talks only to agents and
-never edits a plan. `tick` is what records that the step then finished, by the agent that
-was there; `skip --reason` is the other way past, for a change too small to be worth a
-block. Both leave a mark, and there is no third way — a gate that could be dropped from a
-step would be the silent bypass the whole obligation mechanism already exists to prevent,
-so `gate` sets and corrects the sentence and cannot erase it.
+Which is why NOTHING here clears a gate. At a gate the owning agent blocks, the step
+renders its owner as blocked — read off `sb status` at the instant of drawing, like every
+other liveness fact here, and stored nowhere — and the human answering that agent clears
+both the block and the gate. A command to clear one through the plan would make the plan a
+control surface, and the design says plainly that Andrew talks only to agents and never
+edits a plan. `tick` is what records that the step then finished, by the agent that was
+there; a skip with its reason is the other way past, for a change too small to be worth a
+block. Both leave a mark. Deleting the sentence from the file is a third way, and it is the
+one thing the record cannot show — which is what the changelog entry an editor's author
+appends is for, and why a gate is corrected rather than emptied.
 
-A gate cannot be put on a step that is already DONE. The design allows a plan to be
-created with some of its steps already complete but not a step whose exit condition is a
-gate: a gate exists to be reached before the work it guards, so a plan authored after the
-fact does not get to mark one already passed. If the work is genuinely past that point the
-step is skipped with the reason — visible — rather than born complete, which is not. A
-SKIPPED step may gain one, and that is the same rule from the other side: it is exactly
-how a lead replacing a dead one records a gate the previous plan cleared.
+A gate does not belong on a step that is already DONE, and a plan carrying one is drawn
+red (`_wrong`). The design allows a plan to be created with some of its steps already
+complete but not a step whose exit condition is a gate: a gate exists to be reached before
+the work it guards, so a plan authored after the fact does not get to mark one already
+passed. If the work is genuinely past that point the step is skipped with the reason —
+visible — rather than born complete, which is not. A SKIPPED step may carry one, and that
+is the same rule from the other side: it is exactly how a lead replacing a dead one records
+a gate the previous plan cleared.
 
 `deps` are what a step comes after: data the lead reads, and this file's only interest in
-them is that they are storable and renderable. Nothing traverses them, waits on them,
+them is that they are storable and renderable. `dep` keeps its verb where the other small
+ones lost theirs, because an edge is the one field whose value is another record's id —
+the typo it catches is one an editor cannot see and the board would draw as a wait nobody
+is ever released from. Nothing traverses them, waits on them,
 orders anything by them or refuses a cycle in them — a join waits because the lead does not
 start it. What IS checked is that an edge names a step that exists, in the same plan, and
 not itself, since an edge to nothing is a typo rather than a shape.
 
-Reassigning tells nobody. `assign` writes a name onto a step and stops there: the plan never
-pushes to a running agent, and the old owner learns it lost the step from its parent or not
-at all. Two agents believing they own one step is the collision the design accepts.
+Reassigning tells nobody. `owner` is a name written onto a step and nothing more: the plan
+never pushes to a running agent, and the old owner learns it lost the step from its parent
+or not at all. Two agents believing they own one step is the collision the design accepts.
 
 The catalogue
 -------------
@@ -290,13 +304,19 @@ every mutation goes through a command — the guide sanctions hand-editing — b
 writer editing by hand appends the entry itself, the way a command would, and every command's
 own write is held to the check above.
 
-Storage is one JSON file, rewritten whole via tmp + `os.replace` under the lock sb already
-holds around the handler. Whole-file rewrite is correct precisely because of that lock: a
-command reads, changes the steps it names, and writes, with nothing able to interleave.
+Storage is one file per plan, each rewritten whole via tmp + `os.replace`, and NO coarse
+lock — see `LOCK` above and `_minting`. `os.replace` is atomic within a directory, so a
+reader sees one version of a plan or the other and never half of one; two commands touching
+two different plans were never in each other's way; and the one thing per-file storage does
+not answer by itself — two `create`s minting one id — is what the short mint lock is for.
+Two writers on ONE plan is a convention rather than a mechanism, because a hand-edit in an
+editor takes no lock and never could.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -312,7 +332,22 @@ from switchboard.plugins import Result
 API = 1
 VERSION = "1.0.0"
 SCOPE = "repo"
-LOCK = True
+
+# NO COARSE LOCK. sb offers one — an exclusive flock around the whole handler — and this
+# plugin used to take it for every command, including the reads. One plan is one file now,
+# and the shape is what makes the lock unnecessary rather than a preference: a write is
+# tmp + `os.replace`, which is atomic within a directory, so a reader sees one version of a
+# file or the other and never half of one, and two commands touching two different plans
+# were never in each other's way to begin with.
+#
+# What is left is `_minting` — a short lock the four verbs that ALLOCATE AN ID take, and
+# nothing else does. Ids come from counters shared by the whole store, so that one is a
+# real race and is the only one this file can fix. What it cannot fix, and does not
+# pretend to: two writers on the SAME plan, where the second read the file before the
+# first wrote it and its write is the one that survives. That is the design's "one writer
+# per plan — the worktree's owner" convention, stated in `guide`, and no lock this file
+# takes would make a hand-edit in an editor participate in it anyway.
+LOCK = False
 
 # TWO SHAPES, and the store is in whichever one is on the disk. `FILE` is the original:
 # every plan in one `plans.json`, format 1, which is what an older plugin reads and writes.
@@ -427,44 +462,21 @@ def register(reg):
         "changelog", changelog, audience="both", help="what has been done to one plan",
         args=[reg.arg("id", help="a plan id, e.g. p-1")])
     reg.command(
-        "assign", assign, audience="both",
-        help="give a step an owner; reassigning overwrites it and tells nobody",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
-              reg.arg("agent", help="the agent that owns it from now on"),
-              reg.arg("--reason", help="why, for the changelog")])
+        "validate", validate, audience="both",
+        help="check a plan after editing it by hand — what will not load, and what is "
+             "incomplete; it reports and refuses nothing",
+        args=[reg.arg("id", repeat=True,
+                      help="a plan id, e.g. p-1; omit for every plan in the repo")])
     reg.command(
         "tick", tick, audience="both",
         help="mark a step done — nothing infers progress and nothing else writes it",
         args=[reg.arg("step", help="a step id, e.g. s-1"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
-        "skip", skip, audience="both",
-        help="mark a step skipped, with the reason; a skip is a state, never an absence",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
-              reg.arg("--reason", help="why it is being skipped — required")])
-    reg.command(
-        "gate", gate, audience="both",
-        help="say a step's exit condition is a human — a gate is not a step of its own, "
-             "and nothing here clears one: they answer the blocked owner",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
-              reg.arg("--needs", help="what the human has to answer before this is done"),
-              reg.arg("--reason", help="why, for the changelog")])
-    reg.command(
         "note", note, audience="both", help="append a note to a step, or to a plan",
         args=[reg.arg("target", help="a step id (s-1) or a plan id (p-1)"),
               reg.arg("--text", help="the note"),
               reg.arg("--reason", help="why, for the changelog")])
-    reg.command(
-        "checkpoint", checkpoint, audience="both",
-        help="point a step at a brief or artifact — a path, URL or id, never its content",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
-              reg.arg("--ref", help="where the thing is: a path, a URL, an id"),
-              reg.arg("--reason", help="why, for the changelog")])
-    reg.command(
-        "rework", rework, audience="both",
-        help="re-enter a step: its try count goes up and its progress goes back to open",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
-              reg.arg("--reason", help="why it is being redone")])
     reg.command(
         "add-step", add_step, audience="both",
         help="invent a step on the fly, in a plan that is already running",
@@ -587,11 +599,12 @@ EVERY STEP HAS A BOARD NAME AND A DEP
   what every plan looked like before this was required.
 
     - A BOARD NAME on every step, written with the name in one flag so the two cannot come
-      apart: `--step "invstgt = investigate the failing assertions"`, and `add-step
+      apart: `--step "list claims = list every claim the document makes"`, and `add-step
       <plan> "<what it is>" --display "<short>"` afterwards. Make it as short as it can be
-      and still be read — abbreviate, drop middle vowels, cut what the plan's own title
-      already says. `investigate the failing assertions` is `invstgt`; `human review` is
-      `hmn revw`. There is no length cap and nothing clips it; short is your judgement.
+      and still READ as words — abbreviate, and cut what the plan's own title already
+      says, which is on the line above it. `list every claim the document makes` is `list
+      claims`; `human review` is `review`. No length cap and nothing clips it, and no
+      vowel-stripping either: a label nobody can pronounce is not a label.
 
     - A BOARD NAME ON THE PLAN too, and this one is LONGER — it owns the board's whole
       header line, so it is a display version of the title rather than an abbreviation of
@@ -613,11 +626,20 @@ EVERY STEP HAS A BOARD NAME AND A DEP
   and the steps at fault in red. So a file edited by hand is never refused and never
   quietly wrong either.
 
-EDITING IT
+EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
 
-  The plan is a JSON file, and past the commands above you edit it the way you edit any
-  file — steps, owners, gates, deps, order, progress, all of it, in an editor. The plans
-  live here:
+  The plan is a JSON file and editing it IS the interface. There is no verb for most of
+  what a lead does to a plan — an owner, a gate, a skip and its reason, a checkpoint, a
+  reworked step — because each of them was one field, and a verb per field is a surface
+  nobody can hold in their head to do something an editor does better. The shape of the
+  job is:
+
+      sb plugin plans create … / template use …    makes it, and prints the file
+      $EDITOR <that file>                          shape it: steps, owners, gates, deps
+      sb plugin plans validate <plan>              ask what you broke
+
+  `create` and `template use` print the path of the file they just wrote, so there is
+  nothing to derive. If you have lost it, the plans live here:
 
       $(git rev-parse --git-common-dir)/agentflow/plugins/plans/
 
@@ -640,9 +662,17 @@ EDITING IT
       written by hand needs its own `display` and its own `deps` — a named one draws the
       library definition's label and needs neither.
 
-  Two verbs are worth typing rather than editing, being frequent and small — `tick <step>`
-  when a step is done, and `note <step> --text` for what happened. They write the changelog
-  entry for you, which is the whole of what they buy. `sb plugin plans --help` lists the rest.
+  Three verbs are worth typing rather than editing, being frequent and small — `tick
+  <step>` when a step is done, `note <step> --text` for what happened, and `dep <step>
+  --after <step>` for an edge, which refuses one pointing at a step that is not there.
+  They write the changelog entry for you, which is most of what they buy. `sb plugin plans
+  --help` lists the rest.
+
+  WHAT VALIDATE IS FOR. Nothing watches the file, so an edit is noticed when something
+  next reads the store — the next command, or the board, which redraws every few seconds
+  and paints a plan and the steps at fault in red. `validate` is that same check asked for
+  on purpose, at the moment you close the editor: it names what will not load and what is
+  incomplete, on one plan or on all of them, and it refuses nothing whatever it finds.
 
   TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. A step that closes the last agent or
   deletes the worktree takes with it whatever was going to tick it, so a tick that waits
@@ -671,9 +701,9 @@ def create(ctx, args) -> Result:
     to put it. Neither is the special case.
 
     A BOARD NAME ON THE PLAN AND ON EVERY STEP, and the step's is written in the same flag
-    as its name — `--step "invstgt = investigate the failing assertions"`. One flag because
-    `--step` repeats: a parallel `--display` list pairs by position, so a list one short
-    pairs every step after the gap with the wrong label, silently, in a field nobody
+    as its name — `--step "list claims = list every claim the document makes"`. One flag
+    because `--step` repeats: a parallel `--display` list pairs by position, so a list one
+    short pairs every step after the gap with the wrong label, silently, in a field nobody
     re-reads. The steps are then chained in the order they were given (see below).
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
@@ -696,43 +726,49 @@ def create(ctx, args) -> Result:
         if not short or not name:
             return _no_display(
                 "every step", "Write it in front of the name, in the one flag, so the two "
-                "cannot come apart: `--step \"invstgt = investigate the failing "
-                "assertions\"`.")
+                "cannot come apart: `--step \"list claims = list every claim the "
+                "document makes\"`.")
         steps.append((short, name))
 
-    doc, seal = _read(ctx.state_dir)
-    who = ctx.agent or "human"
-    where, how = _workspace(ctx)
-    plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
-            "checkout": str(_here(ctx)), "title": title, "display": display,
-            "steps": [], "changelog": [], "notes": [_note(n, who) for n in notes],
-            "created_by": who, "created_at": int(time.time())}
-    doc["next_plan"] += 1
-    # CHAINED IN THE ORDER GIVEN, because the order they were typed in IS an order: a lead
-    # writing `--step a --step b --step c` has just said what comes after what, and the
-    # alternative — every step a root, every plan warning about itself the moment it is
-    # made — makes the one-shot `create` unusable to be pedantic about intent nobody
-    # doubts. A plan that is not a chain is reshaped with `dep`, which is the verb for it.
-    for short, name in steps:
-        step = _step(f"s-{doc['next_step']}", name, display=short)
-        if plan["steps"]:
-            step["deps"] = [plan["steps"][-1]["id"]]
-        plan["steps"].append(step)
-        doc["next_step"] += 1
+    # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
+    # `_minting` for why the other verbs need none and what is left unguarded.
+    with _minting(ctx.state_dir):
+        doc, seal = _read(ctx.state_dir)
+        who = ctx.agent or "human"
+        where, how = _workspace(ctx)
+        plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
+                "checkout": str(_here(ctx)), "title": title, "display": display,
+                "steps": [], "changelog": [], "notes": [_note(n, who) for n in notes],
+                "created_by": who, "created_at": int(time.time())}
+        doc["next_plan"] += 1
+        # CHAINED IN THE ORDER GIVEN, because the order they were typed in IS an order: a
+        # lead writing `--step a --step b --step c` has just said what comes after what,
+        # and the alternative — every step a root, every plan warning about itself the
+        # moment it is made — makes the one-shot `create` unusable to be pedantic about
+        # intent nobody doubts. A plan that is not a chain is reshaped with `dep`.
+        for short, name in steps:
+            step = _step(f"s-{doc['next_step']}", name, display=short)
+            if plan["steps"]:
+                step["deps"] = [plan["steps"][-1]["id"]]
+            plan["steps"].append(step)
+            doc["next_step"] += 1
 
-    made = ", ".join(s["id"] for s in plan["steps"])
-    detail = f"{_count(plan['steps'])} ({made})" if made else "empty"
-    if how == UNAVAILABLE:
-        # In the append-only record as well as in the field, because this is the one thing
-        # about a plan that was never true of the job and cannot be re-derived later: sb
-        # was not reachable at the moment this plan was made.
-        detail += "; workspace unresolved — sb did not answer"
-    _log(plan, who, "create", args.reason, detail)
-    doc["plans"].append(plan)
-    _write(ctx.state_dir, doc, seal)
+        made = ", ".join(s["id"] for s in plan["steps"])
+        detail = f"{_count(plan['steps'])} ({made})" if made else "empty"
+        if how == UNAVAILABLE:
+            # In the append-only record as well as in the field, because this is the one
+            # thing about a plan that was never true of the job and cannot be re-derived
+            # later: sb was not reachable at the moment this plan was made.
+            detail += "; workspace unresolved — sb did not answer"
+        _log(plan, who, "create", args.reason, detail)
+        # The file, claimed with `O_EXCL` before it is filled: the second lock on the id,
+        # and the only one that holds where `flock` does not. See `_reserve`.
+        _reserve(ctx.state_dir, doc, plan)
+        doc["plans"].append(plan)
+        _write(ctx.state_dir, doc, seal)
     # `{}` and not the library: every step `create` makes owns its own words, so there is
     # no link to resolve and no reason to open a file that could refuse after this write.
-    return _plan_result(_shown(plan, {}))
+    return _plan_result(_shown(plan, {}), path=_path(ctx, plan))
 
 
 def ls(ctx, args) -> Result:
@@ -819,38 +855,89 @@ def changelog(ctx, args) -> Result:
     return Result(human="\n".join(_entry(e) for e in entries), data=entries)
 
 
+def validate(ctx, args) -> Result:
+    """Ask, on purpose, what is wrong with a plan — after editing the file by hand.
+
+    Nothing new is checked here. Every one of these checks already runs: `_read` refuses a
+    malformed file on any command that touches the store, `_defects` recomputes
+    completeness after every write, and the board redraws both every few seconds. What
+    this adds is a MOMENT to run them at — the one right after an editor was closed, with
+    no board open and no other command to type — which is the whole difference between a
+    rule that is enforced and a rule that is eventually noticed.
+
+    It never refuses, whatever it finds, and that is not a technicality: this is the verb a
+    lead types when it already suspects the file is wrong, so a non-zero exit would be the
+    tool refusing to answer the question it was asked. A file that will not load is
+    reported as the thing that is wrong with it, not raised.
+    """
+    wanted = [str(w).strip() for w in (args.id or ()) if str(w).strip()]
+    try:
+        doc, _ = _read(ctx.state_dir)
+    except ValueError as e:
+        # The store itself, not one plan: a legacy single file that will not parse, or a
+        # counters sidecar from a newer plugin. Reported rather than raised — see above.
+        return Result(human=f"! {e}", data={"ok": False, "store": str(e), "plans": []})
+
+    lines = list(_broke(doc))
+    found: list[dict] = []
+    plans = doc["plans"]
+    if wanted:
+        picked = []
+        for given in wanted:
+            plan = _find(doc, given)
+            if plan is None:
+                lines.append(f"! no plan {_flat(given)} in this repo")
+                continue
+            picked.append(plan)
+        plans = picked
+    for plan in plans:
+        lib, bad = _lib([plan])
+        if bad:
+            # A catalogue this plan links into is broken, which is a defect OF THIS PLAN
+            # from where a lead is standing: the plan renders as nothing until it is fixed.
+            lines.append(f"! {plan['id']} does not render — {bad.human}")
+            found.append({"id": plan["id"], "file": _path(ctx, plan),
+                          "defects": [str(bad.human)]})
+            continue
+        defects = _defects(_shown(plan, lib))
+        found.append({"id": plan["id"], "file": _path(ctx, plan), "defects": defects})
+        lines.extend(defects)
+    bad_ones = [f for f in found if f["defects"]] + list(doc.get("broken") or ())
+    if not lines:
+        n = len(found)
+        lines = [f"no defects in {n} plan{'s' if n != 1 else ''}"
+                 if found else "(no plans to check)"]
+    return Result(human="\n".join(lines),
+                  data={"ok": not bad_ones, "plans": found,
+                        "broken": doc.get("broken") or []})
+
+
+def _path(ctx, plan: dict) -> Optional[str]:
+    """The file this plan lives in — what a lead about to edit it needs to be told.
+
+    Computed rather than stored, from the id and the state dir sb handed us, because the
+    filename IS the id: `p-7.json` and nowhere else, which `_read_split` enforces.
+
+    A store that has not been migrated has no such file — every plan is in one
+    `plans.json` — so that is what it says, and it never invents a `p-<n>.json` that does
+    not exist. Asked of the disk on the way out, after the write, so it answers about the
+    shape the plan was actually filed in.
+    """
+    d = ctx.state_dir
+    if not _split(d):
+        return str(d / FILE)
+    n = _num(_PLAN_ID, plan.get("id"))
+    return str(d / f"p-{n}.json") if n is not None else None
+
+
 # -- the step lifecycle --------------------------------------------------------
 #
-# Nine verbs, and every one of them is `_on_step` (or, for the two that address a plan,
-# the same three moves written out): read, change the ONE step named, log, write. Nothing
-# here rewrites a plan wholesale — a re-plan and a tick can land in either order and the
-# loser is still in the file — and the single `_log` call per verb is why the changelog is
-# the record of how the job ran rather than of what the file ended up looking like.
-
-
-def assign(ctx, args) -> Result:
-    """Give a step an owner. Reassigning is the same act as assigning the first time.
-
-    The design says so plainly: when an owner dies the lead dispatches a replacement and
-    assigns the step to it, which is not a special case and gets no special handling. What
-    it also says is that this tells the old owner NOTHING — there is no core verb that can
-    tell a running agent anything, and inventing a notification here would be a second
-    thing that believes it knows who is working. So the old name goes into the changelog
-    and nowhere else, and closing the agent it came from is the lead's job.
-    """
-    agent = str(args.agent or "").strip()
-    if not agent:
-        return _needs("agent", "a step's owner is an agent name")
-    bad = _cap(agent, args.reason)
-    if bad:
-        return bad
-
-    def change(step: dict, who: str) -> str:
-        was = step.get("owner")
-        step["owner"] = agent
-        return f"{step['id']} → {agent}" + (f", was {was}" if was and was != agent else "")
-
-    return _on_step(ctx, args.step, "assign", args.reason, change)
+# Four verbs left, and every one of them is `_on_step` (or, where it addresses a plan, the
+# same three moves written out): read, change the ONE step named, log, write. Nothing here
+# rewrites a plan wholesale — a re-plan and a tick can land in either order and the loser
+# is still in the file — and the single `_log` call per verb is why the changelog is the
+# record of how the job ran rather than of what the file ended up looking like. The rest of
+# what used to be here is a field in the file now; `_wrong` is where their checks went.
 
 
 def tick(ctx, args) -> Result:
@@ -866,71 +953,6 @@ def tick(ctx, args) -> Result:
         return bad
     return _on_step(ctx, args.step, "tick", args.reason,
                     lambda step, who: _progress(step, DONE, args.reason))
-
-
-def skip(ctx, args) -> Result:
-    """Skipped, with the reason — the half of progress that is not a tick.
-
-    The reason is required, and that is the exchange the design makes: a step may be
-    skipped rather than done, so a gate can be got past without a human, and what is paid
-    for that is a state on the board with a sentence beside it. Skipping without one would
-    be an omission wearing a state's clothes, and an omitted step is invisible — which is
-    exactly what the design is buying its way out of.
-    """
-    reason = (args.reason or "").strip()
-    if not reason:
-        return _needs("--reason", "a skip is a state with a reason, never an absence — a "
-                                  "bad call has to be visible to be questioned")
-    bad = _cap(reason)
-    if bad:
-        return bad
-    return _on_step(ctx, args.step, "skip", reason,
-                    lambda step, who: _progress(step, SKIPPED, reason))
-
-
-def gate(ctx, args) -> Result:
-    """Mark a step's exit condition as one that requires a human. A field, not a step.
-
-    This is the whole of what the plugin does about a gate, and the omissions are the
-    design rather than a shortcut. It does not block, does not wait, does not ask sb
-    anything and does not run the procedure at the gate — the agent that owns the step does
-    that, following `sb presets design-gate` or the step definition's own account of what
-    the gate on it needs, with the tools it already has. What this buys is that the exit condition is written down on the step
-    instead of remembered, so it renders where the work is read and cannot quietly not
-    happen.
-
-    There is no argument that removes one. A gate is got past by being answered — the owner
-    blocks, the human answers the agent, the agent ticks — or by `skip --reason`, and both
-    of those leave something on the board to question. A `--needs ""` that cleared the field
-    would be the silent bypass with a verb's name on it, and it would be the only way in
-    this file to make a step's history say less than it did a moment ago.
-
-    Setting one on a step that already has one is a CORRECTION, and is allowed: what the
-    gate asks for is a sentence somebody wrote, and the changelog carries what it said
-    before. Setting one on a step that is DONE is refused — see the module docstring.
-    """
-    needs = (args.needs or "").strip()
-    if not needs:
-        return _needs("--needs", "a gate says what the human has to answer — 'they confirm "
-                                 "the contract', not merely that somebody must. There is "
-                                 "no argument that clears one: a gate is answered, or "
-                                 "skipped with a reason")
-    bad = _cap(needs, args.reason)
-    if bad:
-        return bad
-
-    def change(step: dict, who: str) -> str:
-        if str(step.get("progress") or "") == DONE:
-            why = (f"{step['id']} is already done, and a gate exists to be reached before "
-                   f"the work it guards — a plan does not get to mark one already passed. "
-                   f"Rework it if the gate is still ahead, or skip it with the reason "
-                   f"naming what cleared it.")
-            return Result(ok=False, human=why, data={"error": why, "id": step["id"]})
-        was = str(step.get("gate") or "").strip()
-        step["gate"] = needs
-        return f"{step['id']} gate: {_clip(needs)}" + (f", was {_clip(was)}" if was else "")
-
-    return _on_step(ctx, args.step, "gate", args.reason, change)
 
 
 def note(ctx, args) -> Result:
@@ -974,65 +996,6 @@ def note(ctx, args) -> Result:
     return _plan_result(_shown(plan, lib))
 
 
-def checkpoint(ctx, args) -> Result:
-    """Point a step at a brief or an artifact. A reference, and never the thing itself.
-
-    The design says references, never content, and this is where that is kept honest: a
-    ref carrying a newline is a paste and is refused. The cost of the other way is not
-    disk — it is that a plan holding a copy of a brief is a second copy that goes stale,
-    and a record read cold months later cannot tell which of the two was the real one.
-    """
-    ref = (args.ref or "").strip()
-    if not ref:
-        return _needs("--ref", "a checkpoint points at something: a path, a URL, an id")
-    if "\n" in ref or "\r" in ref:
-        why = ("a checkpoint is a reference, never content — that is more than one line. "
-               "Write it to a file and point at the file.")
-        return Result(ok=False, human=why, data={"error": why, "ref": _clip(ref)})
-    bad = _cap(ref, args.reason)
-    if bad:
-        return bad
-
-    def change(step: dict, who: str) -> str:
-        step.setdefault("checkpoints", []).append(
-            {"ref": ref, "by": who, "at": int(time.time())})
-        return f"{step['id']} → {ref}"
-
-    return _on_step(ctx, args.step, "checkpoint", args.reason, change)
-
-
-def rework(ctx, args) -> Result:
-    """Re-enter a step. Its try count goes up and its progress goes back to open.
-
-    Rework is a number on a step, not an edge in the graph: a failed review sends its step
-    back, and modelling that as a loop would make the plan cyclic to say something a
-    counter says better. There is no ceiling on it — a loop that will not converge ends
-    the way everything else does, with the lead blocking.
-
-    A step that was never done can be reworked too, and that is not policed. `progress` is
-    an open vocabulary, so this file cannot tell a step that is `done` from one a lead has
-    parked in `waiting on Andrew`, and a verb that refused what it could not identify
-    would refuse the interesting half. What it moved the step FROM is in the changelog, so
-    a rework of an already-open step reads as exactly that.
-
-    What this deliberately does NOT do is un-tick anything downstream. The design makes
-    that the lead's judgement and says why: a rule that reopened everything reachable
-    throws away good review, and one that reopened nothing merges work nothing reviewed.
-    """
-    bad = _cap(args.reason)
-    if bad:
-        return bad
-
-    def change(step: dict, who: str) -> str:
-        was = step.get("progress")
-        step["tries"] = _counter(step.get("tries")) + 1
-        step["progress"] = OPEN
-        step["why"] = (args.reason or "").strip() or None
-        return f"{step['id']} {was} → {OPEN}, try {step['tries']}"
-
-    return _on_step(ctx, args.step, "rework", args.reason, change)
-
-
 def add_step(ctx, args) -> Result:
     """A step invented while the job runs, in a plan that already exists.
 
@@ -1051,21 +1014,24 @@ def add_step(ctx, args) -> Result:
         return bad
     if not display:
         return _no_display("a step", "Give it with the name: "
-                                     "`--display \"invstgt\"`.")
+                                     "`--display \"list claims\"`.")
 
-    doc, seal = _read(ctx.state_dir)
-    plan = _find(doc, args.plan)
-    if plan is None:
-        return _missing(doc, args.plan)
-    lib, bad = _lib([plan])             # before the write, so it cannot refuse after one
-    if bad:
-        return bad
-    step = _step(f"s-{doc['next_step']}", name, display=display)
-    doc["next_step"] += 1
-    plan.setdefault("steps", []).append(step)
-    who = ctx.agent or "human"
-    _log(plan, who, "add-step", args.reason, f"{step['id']} {display} = {name}")
-    _write(ctx.state_dir, doc, seal)
+    # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
+    # `_minting` for why the other verbs need none and what is left unguarded.
+    with _minting(ctx.state_dir):
+        doc, seal = _read(ctx.state_dir)
+        plan = _find(doc, args.plan)
+        if plan is None:
+            return _missing(doc, args.plan)
+        lib, bad = _lib([plan])         # before the write, so it cannot refuse after one
+        if bad:
+            return bad
+        step = _step(f"s-{doc['next_step']}", name, display=display)
+        doc["next_step"] += 1
+        plan.setdefault("steps", []).append(step)
+        who = ctx.agent or "human"
+        _log(plan, who, "add-step", args.reason, f"{step['id']} {display} = {name}")
+        _write(ctx.state_dir, doc, seal)
     return _changed(plan, step, lib)
 
 
@@ -1229,18 +1195,21 @@ def name_step(ctx, args) -> Result:
                            f"A named step draws its definition's label, so add a "
                            f"`display` to `library/{_flat(wanted)}.json`.")
 
-    doc, seal = _read(ctx.state_dir)
-    plan = _find(doc, args.plan)
-    if plan is None:
-        return _missing(doc, args.plan)
-    try:
-        added = _mint(doc, lib, wanted, after=tuple(_sinks(plan)))
-    except _BadDef as e:
-        return e.refusal()
-    plan.setdefault("steps", []).extend(added)
-    who = ctx.agent or "human"
-    _log(plan, who, "name-step", args.reason, _minted(added, lib))
-    _write(ctx.state_dir, doc, seal)
+    # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
+    # `_minting` for why the other verbs need none and what is left unguarded.
+    with _minting(ctx.state_dir):
+        doc, seal = _read(ctx.state_dir)
+        plan = _find(doc, args.plan)
+        if plan is None:
+            return _missing(doc, args.plan)
+        try:
+            added = _mint(doc, lib, wanted, after=tuple(_sinks(plan)))
+        except _BadDef as e:
+            return e.refusal()
+        plan.setdefault("steps", []).extend(added)
+        who = ctx.agent or "human"
+        _log(plan, who, "name-step", args.reason, _minted(added, lib))
+        _write(ctx.state_dir, doc, seal)
     return _added(plan, added, lib)
 
 
@@ -1293,31 +1262,35 @@ def template(ctx, args) -> Result:
     lib, bad = _lib()
     if bad:
         return bad
-    doc, seal = _read(ctx.state_dir)
-    who = ctx.agent or "human"
-    where, how = _workspace(ctx)
-    plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
-            "checkout": str(_here(ctx)), "title": title, "display": display,
-            "steps": [], "changelog": [],
-            "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
-                      if str(n).strip()],
-            "created_by": who, "created_at": int(time.time())}
-    doc["next_plan"] += 1
-    try:
-        landed = [_from_template(doc, lib, entry) for entry in (spec.get("steps") or ())]
-        _chain(spec.get("steps") or (), landed)
-    except _BadDef as e:
-        return e.refusal()
-    for made in landed:
-        plan["steps"].extend(made)
+    # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
+    # `_minting` for why the other verbs need none and what is left unguarded.
+    with _minting(ctx.state_dir):
+        doc, seal = _read(ctx.state_dir)
+        who = ctx.agent or "human"
+        where, how = _workspace(ctx)
+        plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
+                "checkout": str(_here(ctx)), "title": title, "display": display,
+                "steps": [], "changelog": [],
+                "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
+                          if str(n).strip()],
+                "created_by": who, "created_at": int(time.time())}
+        doc["next_plan"] += 1
+        try:
+            landed = [_from_template(doc, lib, e) for e in (spec.get("steps") or ())]
+            _chain(spec.get("steps") or (), landed)
+        except _BadDef as e:
+            return e.refusal()
+        for made in landed:
+            plan["steps"].extend(made)
 
-    detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
-    if how == UNAVAILABLE:
-        detail += "; workspace unresolved — sb did not answer"
-    _log(plan, who, "template", args.reason, detail)
-    doc["plans"].append(plan)
-    _write(ctx.state_dir, doc, seal)
-    return _plan_result(_shown(plan, lib))
+        detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
+        if how == UNAVAILABLE:
+            detail += "; workspace unresolved — sb did not answer"
+        _log(plan, who, "template", args.reason, detail)
+        _reserve(ctx.state_dir, doc, plan)          # the id, claimed; see `create`
+        doc["plans"].append(plan)
+        _write(ctx.state_dir, doc, seal)
+    return _plan_result(_shown(plan, lib), path=_path(ctx, plan))
 
 
 def _sinks(plan: dict) -> list[str]:
@@ -1447,12 +1420,12 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Res
 
 
 def _progress(step: dict, to: str, why: Optional[str]) -> str:
-    """Move a step's progress, and say what it moved from. `tick` and `skip` share this.
+    """Move a step's progress, and say what it moved from. `tick` is what calls this.
 
-    One field, so complete and skipped cannot both be true — the second verb replaces the
-    first rather than joining it, and the changelog is what says a correction happened.
-    `why` is overwritten too, including with nothing: a step ticked after a skip must not
-    keep the sentence explaining why it was skipped.
+    One field, so complete and skipped cannot both be true — whatever moves it second
+    replaces the first rather than joining it, and the changelog is what says a correction
+    happened. `why` is overwritten too, including with nothing: a step ticked after a skip
+    must not keep the sentence explaining why it was skipped.
     """
     was = step.get("progress")
     step["progress"] = to
@@ -1943,6 +1916,45 @@ def _faults(plan: dict) -> tuple[bool, list[str], list[str]]:
     return (not str(plan.get("display") or "").strip()), nameless, rootless
 
 
+def _wrong(plan: dict) -> list[tuple[str, str]]:
+    """The three rules the removed verbs used to keep, checked against the file instead.
+
+    `gate`, `skip` and `checkpoint` each refused one thing before they were verbs nobody
+    should have to type: a gate on a step already done, a skip with no reason, a checkpoint
+    ref carrying a line break. Those refusals were the whole of what those verbs bought
+    over editing the field, and the rule has to outlive the verb or removing it would be
+    removing the rule — so they live HERE now, in the warn door, and reach a hand-edit as
+    well as a command, which the verbs never did.
+
+    A WARNING AND NOT A REFUSAL, deliberately, for the same reason nothing else in this
+    door refuses: the plan file is meant to be edited, and a file that bricks the board
+    because one step's gate reads wrong is a file nobody dares open. Each one is
+    `(step id, what is wrong)`, so the board can paint the step and `_defects` can name it.
+    """
+    out: list[tuple[str, str]] = []
+    for step in plan.get("steps") or []:
+        sid = str(step.get("id") or "?")
+        if str(step.get("gate") or "").strip() and str(step.get("progress") or "") == DONE:
+            out.append((sid, "a gate on a step that is already done — a gate is reached "
+                             "before the work it guards, so a plan does not get to mark "
+                             "one already passed. Reopen the step, or record the skip and "
+                             "the reason that cleared it."))
+        skipped = str(step.get("progress") or "") == SKIPPED
+        if skipped and not str(step.get("why") or "").strip():
+            out.append((sid, "skipped with no reason — a skip is a state with a sentence "
+                             "beside it, never an absence. Put the reason in `why`, where "
+                             "it renders next to the state."))
+        for cp in step.get("checkpoints") or []:
+            ref = str((cp or {}).get("ref") or "") if isinstance(cp, dict) else str(cp)
+            if _CONTROL.search(ref) or "|" in ref:
+                out.append((sid, "a checkpoint that is not one line — a checkpoint is a "
+                                 "reference (a path, a URL, an id) and never content, and "
+                                 "a row on a board is a line. Write it to a file and point "
+                                 "the checkpoint at the file."))
+                break
+    return out
+
+
 def _defective(plan: dict) -> tuple[bool, set[str]]:
     """`_faults` as the board wants it: is the plan itself short, and which steps are.
 
@@ -1951,7 +1963,7 @@ def _defective(plan: dict) -> tuple[bool, set[str]]:
     a glance to tell two shades apart to learn something the plan says in words.
     """
     short, nameless, rootless = _faults(plan)
-    return short, set(nameless) | set(rootless)
+    return short, set(nameless) | set(rootless) | {sid for sid, _ in _wrong(plan)}
 
 
 def _defects(plan: dict) -> list[str]:
@@ -1962,10 +1974,16 @@ def _defects(plan: dict) -> list[str]:
     is one thing wrong and the command that puts it right.
     """
     short, nameless, rootless = _faults(plan)
-    if not (short or nameless or rootless):
+    wrong = _wrong(plan)
+    if not (short or nameless or rootless or wrong):
         return []
-    out = [f"! {plan.get('id') or '?'} is incomplete — the board draws it red until this "
-           f"is fixed, and nothing here refused the write"]
+    # "incomplete" while anything is MISSING, which is what the word means and what the
+    # three doors were built for; "wrong" for the rules that came out of the removed verbs,
+    # where the field is filled in and says something it may not. Both sentences end the
+    # same way, because the promise is the same one: drawn red, and never refused.
+    what = "is incomplete" if (short or nameless or rootless) else "has something wrong"
+    out = [f"! {plan.get('id') or '?'} {what} — the board draws it red until this is "
+           f"fixed, and nothing here refused the write"]
     if short:
         out.append("    the plan has no display name — the board draws its title instead. "
                    "A plan's display owns the whole header line, so it is a display "
@@ -1979,11 +1997,18 @@ def _defects(plan: dict) -> list[str]:
                    f"says what it comes after, or the board has no edge to draw and the "
                    f"plan renders as a loose stack. Fix: "
                    f"`sb plugin plans dep {rootless[0]} --after <step>`.")
+    out.extend(f"    {sid}: {why}" for sid, why in wrong)
     return out
 
 
-def _plan_result(shown: dict, markdown: bool = False) -> Result:
+def _plan_result(shown: dict, markdown: bool = False,
+                 path: Optional[str] = None) -> Result:
     """A whole plan, printed, with anything incomplete about it said underneath.
+
+    `path` is the file the plan was just filed in, and only the two verbs that MAKE a plan
+    pass one. A lead's next move after `create` is to open the plan and shape it, and the
+    id alone leaves it deriving a filename from a convention it has to have read first —
+    so the command that made the file says where the file is, once, where the plan is.
 
     `ok` stays TRUE and `data` keeps its shape with one key added, which is the whole
     contract of the second door: a caller that was ticking a step ticked it, and a caller
@@ -1997,20 +2022,31 @@ def _plan_result(shown: dict, markdown: bool = False) -> Result:
     """
     lines = _defects(shown)
     doc = dict(shown, incomplete=lines) if lines else shown
+    if path:
+        doc = dict(doc, file=path)
     if markdown:
         return Result(human=_markdown(doc), data=doc)
     human = _full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
+    if path:
+        human += f"\n\nthe plan is {path} — edit it there, then `sb plugin plans validate`"
     return Result(human=human, data=doc)
 
 
 # What a refusal and a warning both say about shortening, written once. The example is the
 # load-bearing half: an agent told "display is required" types the full name in again, and
-# an agent shown `investigate the failing assertions` → `invstgt` has been told what the
-# field is for. No length cap — a cap is what produced the half-sentences this replaced —
-# so what stands in for one is this sentence and the author's judgement.
-_SHORTEN = ("Make it as short as it can be and still be read: abbreviate, drop middle "
-            "vowels, cut what the plan's own title already says — `investigate the "
-            "failing assertions` is `invstgt`, `human review` is `hmn revw`.")
+# an agent shown `list every claim the document makes` → `list claims` has been told what
+# the field is for. No length cap — a cap is what produced the half-sentences this
+# replaced — so what stands in for one is this sentence and the author's judgement.
+#
+# SHORT BUT READABLE, and the examples are what enforce it. An earlier version of this
+# asked for middle vowels to be dropped and got `invstgt` on real boards: shorter by four
+# characters and no longer a word, which is a trade nothing was asking for. What actually
+# shortens a label is cutting the words the plan's own title already says, since the title
+# is on the header line directly above it.
+_SHORTEN = ("Make it as short as it can be and still READ as words: abbreviate, and cut "
+            "what the plan's own title already says — `list every claim the document "
+            "makes` is `list claims`, `human review` is `review`. Short, not mangled: a "
+            "label nobody can pronounce is not a label.")
 
 
 def _no_display(what: str, how: str) -> Result:
@@ -2021,7 +2057,7 @@ def _no_display(what: str, how: str) -> Result:
 
 
 def _authored(given: str) -> tuple[Optional[str], str]:
-    """One `--step "invstgt = investigate the failing assertions"`, split at the first `=`.
+    """One `--step "list claims = list every claim it makes"`, split at the first `=`.
 
     ONE FLAG AND NOT TWO. `--step` repeats, so a parallel `--display` list would pair the
     two by position — and a list that is one short pairs every step after the gap with the
@@ -2051,6 +2087,80 @@ def _log(plan: dict, who: str, action: str, reason: Optional[str], detail: str =
 
 
 # -- the file ------------------------------------------------------------------
+
+
+MINT = ".mint.lock"
+
+
+@contextlib.contextmanager
+def _minting(d: Path):
+    """The one lock left: held while an id is allocated, and over nothing else.
+
+    Ids are minted from counters that belong to the whole store — `next_plan` and
+    `next_step` in `_meta.json`, floored on read by the highest id actually on disk — so
+    two `create`s that read at the same instant read the same number and mint it twice.
+    That is the one race per-file storage does not answer by itself, and it is not a race
+    that fails quietly: the twin lands and `_check` refuses one of the two files on the
+    next read, which costs a plan somebody just wrote. So it is prevented rather than
+    detected, and the four verbs that allocate — `create`, `add-step`, `name-step`,
+    `template use` — hold this across their read, their mint and their write.
+
+    Every other verb takes nothing. `tick`, `note`, `dep` and every read run concurrently
+    with each other and with an editor, which is the concurrency the per-file split was
+    for.
+
+    WHAT IS STILL UNGUARDED, said here rather than left to be discovered:
+
+      - Two writers on ONE plan. The later read wins and the earlier write is lost, lock
+        or no lock, because a hand-edit in an editor never took one. The answer is the
+        design's convention — one writer per plan — and not a lock.
+      - An UN-MIGRATED store, where every plan is in one `plans.json`. There, any two
+        concurrent writes are two writers on one file, so the above applies to the whole
+        repo rather than to one plan. That is the transitional cost of the old shape and
+        the reason `migrate` exists; a store that has moved across does not have it.
+      - A filesystem where `flock` does not work (some network mounts). `_reserve` is the
+        second lock on the plan-id half of that door, and it needs no cooperation at all.
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / MINT, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)                    # closing releases it
+
+
+def _reserve(d: Path, doc: dict, plan: dict) -> None:
+    """Claim the new plan's FILE before anything is written into it, or take the next one.
+
+    `O_EXCL` is the whole mechanism: creating a file that already exists fails, so two
+    processes racing for `p-3.json` cannot both have it and the loser moves to `p-4`. This
+    is what makes a plan id safe without anybody's cooperation — no lock to take, no
+    counter to agree on, and it holds against a plugin from another checkout, another
+    version, or a filesystem where `flock` is a no-op.
+
+    Written with the plan's final text rather than as an empty placeholder, so a crash
+    between here and `_write` leaves a readable plan and not a zero-byte file the board
+    would draw as broken. `_write` then writes the same bytes over the top, which costs
+    one write and keeps the single write path the only thing that knows about seals.
+
+    Nothing to do on an un-migrated store: there is no per-plan file to claim there, and
+    the id comes back out of the one `plans.json` that `_minting` is serialising anyway.
+    """
+    if not _split(d):
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    while True:
+        n = _num(_PLAN_ID, plan.get("id")) or 1
+        try:
+            fd = os.open(d / f"p-{n}.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            plan["id"] = f"p-{n + 1}"
+            doc["next_plan"] = max(_counter(doc.get("next_plan")), n + 2)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(_text(plan))
+        return
 
 
 def _read(d: Path) -> tuple[dict, dict]:

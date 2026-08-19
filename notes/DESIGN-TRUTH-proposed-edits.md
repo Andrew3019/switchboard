@@ -23,7 +23,8 @@ entry there today, and it does not contradict anything in the doc.
 > **Every step carries a short display name for the board, and so does the plan.** A step's
 > name is a sentence and a board cell is a few columns, so a step named "list every claim the
 > document makes about the code" is authored with a display like "list claims" — as short as
-> it can be made, abbreviating and dropping middle vowels where that helps. It is **required**
+> it can be made, abbreviating and cutting words the title already implies — short but
+> readable, not vowel-stripped. It is **required**
 > on every step, not optional: a cell with no display drew the name clipped mid-clause and the
 > informative half was the half cut, so the board was unreadable until it was authored. It
 > pairs with the name exactly — a named step's display lives in its definition and an edit to
