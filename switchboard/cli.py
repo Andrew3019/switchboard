@@ -1201,7 +1201,9 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         if r["already"]:
             _emit(args, f"{r['workspace']} was retired already — nothing left to do", r)
             return 0
-        _emit(args, _workspace_closed(r), r)
+        _emit(args, _workspace_closed(r),
+              {**r, "spaces_refused": [{"name": n, "reason": why}
+                                       for n, why in r["spaces_refused"]]})
         return 0
 
     if cmd == "restore" and args.sweep:
@@ -1330,6 +1332,14 @@ def _workspace_closed(r: dict) -> str:
         elif not r["branch_deleted"]:
             lines.append(f"  branch {r['branch']} kept — git will not delete an unmerged "
                          f"branch, and it stays until somebody decides otherwise")
+    # The cascade, in `cleanup`'s own words because it is `cleanup`'s own machinery: a
+    # bare orchestrator's children forked spaces of their own, and what happened to them
+    # is not implied by "retired <name>". Both halves get a line, unlike the sweep's
+    # quiet one — this is a command a person typed about one named workspace, and a space
+    # left standing is the thing they will trip over later.
+    if r["spaces"]:
+        lines.append(f"  closed space(s): {', '.join(r['spaces'])}")
+    lines.extend(f"  kept space {n}: {why}" for n, why in r["spaces_refused"])
     return "\n".join(lines)
 
 

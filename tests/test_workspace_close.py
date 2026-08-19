@@ -724,6 +724,70 @@ class BarePathTest(CloseHarness, unittest.TestCase):
         self.assertEqual(r["closed"], ["main-2"])
         self.assertEqual(self.h.closed, ["w1:p1"])
 
+class BareCascadeTest(CloseHarness, unittest.TestCase):
+    """Closing a bare orchestrator reaches the spaces its children forked.
+
+    The bug this pins: a top's own workspace is bare, and every direct child it delegates
+    to is forked into a worktree workspace of its own. `_close_bare`'s gate and its pane
+    step are both `WHERE workspace=?`, so those forked spaces were never so much as looked
+    at — they stayed registered until a much later, DB-wide `sb cleanup` found them, by
+    which time ignored content had usually accumulated and the gate refused them.
+
+    Three tests, for the three answers the cascade can give: the finished child's clean
+    space goes, a dirty one is KEPT and said so rather than destroyed, and a live child
+    holds its own space exactly as it always did. The gates are unchanged in all three —
+    this level only decides which spaces get looked at.
+    """
+
+    def dispatcher(self, name: str = "main-2"):
+        store.record_workspace(self.db, name, None)
+        self.row(name, workspace=name, cwd=str(self.repo), state="done")
+
+    def child(self, name: str, *, parent: str = "main-2", commit: bool = True,
+              state: str = "done") -> str:
+        """A direct child of a bare top: its own forked space, named for itself."""
+        path = self.space(name, commit=commit)
+        self.agent(name, workspace=name, cwd=path, state=state)
+        self.db.execute("UPDATE agents SET parent=? WHERE name=?", (parent, name))
+        return path
+
+    def test_a_finished_childs_forked_space_is_closed_too(self):
+        self.dispatcher()
+        path = self.child("worker")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["kind"], "bare")
+        self.assertEqual(r["spaces"], ["worker"])
+        self.assertEqual(r["spaces_refused"], [])
+        self.assertFalse(Path(path).is_dir())
+        self.assertNotIn(path, self.registered())
+        self.assertIsNotNone(store.get_workspace(self.db, "worker")["retired_at"])
+
+    def test_a_childs_dirty_space_is_kept_and_reported(self):
+        """The same gate `sb cleanup` refuses on, in the same words. Work git can see is
+        never destroyed to tidy up after the orchestrator above it."""
+        self.dispatcher()
+        path = self.child("worker")
+        Path(path, "notes.txt").write_text("half an edit")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("modified or untracked", dict(r["spaces_refused"])["worker"])
+        self.assertTrue(Path(path).is_dir())
+        # The orchestrator itself is still retired: a space that will not close is not a
+        # reason to fail the close that did.
+        self.assertTrue(store.get_workspace(self.db, "main-2")["retired_at"])
+
+    def test_a_live_childs_space_still_holds_itself(self):
+        """Unchanged, and deliberately: this closes FINISHED children's orphaned spaces.
+        A child still working is not empty, the existing gate refuses it, it stays."""
+        self.dispatcher()
+        path = self.child("worker", state="working")
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], [])
+        self.assertIn("worker", dict(r["spaces_refused"])["worker"])
+        self.assertTrue(Path(path).is_dir())
+        self.assertIn(path, self.registered())
+
+
 class CrashedMarkTest(CloseHarness, unittest.TestCase):
     """A mark is never stolen and never expires; a person takes it over, or nobody does."""
 

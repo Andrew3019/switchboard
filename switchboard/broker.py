@@ -1903,7 +1903,42 @@ class Broker:
         store.retire_workspace(self.db, name)
         store.log_event(self.db, kind="workspace_retired", workspace=name, bare=True,
                         closed=",".join(closed) or None)
-        return self._closed(name, None, kind="bare", worktree="none", closed=closed)
+        spaces = CleanupResult()
+        self._close_empty_spaces(self._forked_under(name), spaces, me=me, dry_run=False)
+        return self._closed(name, None, kind="bare", worktree="none", closed=closed,
+                            spaces=spaces.spaces, spaces_refused=spaces.spaces_refused)
+
+    def _forked_under(self, name: str) -> list:
+        """The agent rows of this bare workspace's own subtree, for the cascade below it.
+
+        A bare workspace is what a top orchestrator gets, and a top is the only thing that
+        MINTS spaces: every direct child it delegates to is forked into a worktree
+        workspace of its own, named for the child (`_fork_for`). So a dispatcher's subtree
+        is never one workspace — it is this bare one plus one per direct child, and rows
+        in those carry a different `workspace` value entirely. `_close_bare`'s own gate is
+        `WHERE workspace=?` and is deliberately so (see it for the bug sharing the general
+        gate was), which is exactly why those forked spaces are structurally invisible to
+        it and were left registered forever, to be found much later by a DB-wide
+        `sb cleanup` — usually too dirty by then to auto-delete.
+
+        This is the second scope, and it is keyed on PARENTAGE rather than on a workspace
+        name, because parentage is the only thing that relates a dispatcher to the spaces
+        its children forked. Started from the workspace's own rows rather than from the
+        name so that it holds for any bare workspace, not only the one whose top happens
+        to share its name.
+
+        It decides nothing about deletion. Every gate, inventory and confirmation stays
+        `_close_empty_spaces`'s and `workspace_close`'s, unchanged: a live child's space is
+        not empty, so the gates refuse it and it stays.
+        """
+        seen, out = set(), []
+        for r in self.db.execute("SELECT * FROM agents WHERE workspace=?",
+                                 (name,)).fetchall():
+            for d in self._descendants(r["name"]):
+                if d["name"] not in seen:
+                    seen.add(d["name"])
+                    out.append(d)
+        return out
 
     def _close_gone(self, name: str, checkout: str, *, me: str) -> dict:
         """Close a workspace whose checkout is already gone: deregister it, drop its branch.
@@ -2055,11 +2090,22 @@ class Broker:
     @staticmethod
     def _closed(name: str, checkout: Optional[str], *, kind: str, worktree: str,
                 already: bool = False, branch: Optional[str] = None,
-                branch_deleted: bool = False, closed: Sequence[str] = ()) -> dict:
-        """What the caller gets. `kind` is which of the three routes this workspace took."""
+                branch_deleted: bool = False, closed: Sequence[str] = (),
+                spaces: Sequence[str] = (),
+                spaces_refused: Sequence[tuple] = ()) -> dict:
+        """What the caller gets. `kind` is which of the three routes this workspace took.
+
+        `spaces`/`spaces_refused` are the cascade one level down, and they carry
+        `cleanup`'s two halves under `cleanup`'s names because they are literally its
+        lists: only the bare route fills them, and only ever with what
+        `_close_empty_spaces` did to the spaces this workspace's children forked. Present
+        and empty on every other route rather than absent, so a caller reading the answer
+        never has to ask whether the key exists before asking what is in it.
+        """
         return {"workspace": name, "checkout": checkout, "already": already, "kind": kind,
                 "worktree": worktree, "branch": branch, "branch_deleted": branch_deleted,
-                "closed": list(closed)}
+                "closed": list(closed), "spaces": list(spaces),
+                "spaces_refused": [tuple(s) for s in spaces_refused]}
 
     # -- the gate ---------------------------------------------------------------------
 
