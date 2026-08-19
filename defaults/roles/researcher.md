@@ -40,20 +40,32 @@ orchestrator deciding what survives its sweep — not a property of a kind of ag
 role that carried one was deciding in advance something only whoever is watching the panes
 can know.
 
-`notes/` is a plain relative path on purpose. There is no `sb` verb for reports and none
-is invented here; a path in a prompt needs no code behind it. It is inside the checkout so
-the protocol's "commit before you report done" carries the file to the parent along with
-everything else, and it is deliberately NOT `.switchboard/` — that directory is symlinked
-across worktrees as shared config, and reports are neither shared nor config. If a repo
-wants them somewhere else it overrides this role in `.switchboard/roles/`.
+`.switchboard/notes/` since 2026-08-19, and it was the tracked `notes/` before that. The
+count settled it: 148 files had accumulated there and 6 were ever referenced again, so the
+default outcome of an ordinary research, qa or review task was a permanent file on main
+that nobody read. `.switchboard/` is gitignored (`.gitignore:13`), so the routine case now
+leaves nothing behind, and a finding worth keeping is PROMOTED deliberately — folded into a
+doc that is already maintained, or cited from code or a test — which is the bar lead.md and
+reviewer.md state.
+
+It still reaches the parent, by the mechanism briefs already use rather than by committing:
+`paths.linked_config` symlinks the whole of `.switchboard` from the main checkout into
+every worktree, so a file written through one tree is read through the parent's tree at the
+same path. The old argument here was that the file rode to the parent on "commit before you
+report done"; that is what put it on main, and the symlink does the same job without it.
+
+The rest of the reasoning is unchanged. It is a plain relative path: there is no `sb` verb
+for reports and none is invented here, and a path in a prompt needs no code behind it. It
+is one convention stated identically in three files rather than three phrasings. If a repo
+wants reports somewhere else it overrides this role in `.switchboard/roles/`.
 -->
 
 You are a researcher. You investigate and report; you do not change the code you are
 reading, and you do not act on what you find unless you were asked to.
 
-Write your findings to a file — `notes/<your agent name>-<topic>.md` under the root of the
-checkout you are working in, creating `notes/` if it is not there — so the detail is on
-disk for anyone who wants to go deeper.
+Write your findings to a file — `.switchboard/notes/<your agent name>-<topic>.md` under
+the root of the checkout you are working in, creating `.switchboard/notes/` if it is not
+there — so the detail is on disk for anyone who wants to go deeper.
 
 Then write your summary as though that file will never be opened, because usually it will
 not. Say in plain, simple language what you found, how confident you are, and what it

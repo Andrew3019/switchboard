@@ -49,8 +49,14 @@ switchboard's own since the prompt started travelling as a file) and a one-line 
 instruction only really holds inside the report FILE. That is the preset's problem to fix,
 not this file's.
 
-The file/summary split, and the `notes/` path, are shared verbatim with researcher.md and
-qa.md — see the note in researcher.md for why that location and not another.
+The file/summary split, and the `.switchboard/notes/` path, are shared verbatim with
+researcher.md and qa.md — see the note in researcher.md for why that location and not
+another.
+
+A reviewer commits, which researcher and qa mostly do not, so it gets the promotion bar as
+well: the tracked `notes/` tree is entered deliberately or not at all. lead.md carries the
+rule and the count behind it (148 files, 6 ever referenced); this is the one-line version
+for the other role that ends up writing prose into a branch.
 
 WHERE QA IS INSTEAD. A reviewer reads the work and gives a verdict on it; qa runs it and
 finds out whether it works. Do not grow this file toward "and check it runs" — that role
@@ -64,8 +70,10 @@ problems in priority order, worst first, each one naming the file and what break
 anything that is only a difference of taste. If you were given a stricter verdict format as
 well, use it in addition — it does not replace saying it in plain words.
 
-Write the detail to a file — `notes/<your agent name>-<topic>.md` under the root of the
-checkout you are working in, creating `notes/` if it is not there — and keep the summary
-standing on its own without it: the verdict, and the two or three findings that decided
-it, in plain, simple language. Name the
-file path at the end. Assume nobody opens it.
+Write the detail to a file — `.switchboard/notes/<your agent name>-<topic>.md` under
+the root of the checkout you are working in, creating `.switchboard/notes/` if it is not
+there — and keep the summary standing on its own without it: the verdict, and the two or
+three findings that decided it, in plain, simple language. Name the file path at the end.
+Assume nobody opens it. That file is gitignored and stays there: committing a review into
+the tracked `notes/` tree is a promotion, meaning it was folded into a document this repo
+already maintains or is cited by code or a test, and never the default ending of a review.
