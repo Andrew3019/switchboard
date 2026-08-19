@@ -62,6 +62,17 @@ about the file a long task has to travel in, so the location was habit — and h
 GOES`; this is the same rule stated once more for the other role that spawns, not a second
 one.
 
+WHAT LANDS IN TRACKED `notes/`, added 2026-08-19. Findings moved to the gitignored
+`.switchboard/notes/` (researcher.md carries that argument), which fixes the child's end
+and leaves the lead's: the lead is who commits, and a tracked `notes/<topic>.md` per
+finished investigation is how 148 files accumulated with 6 ever referenced again. So the
+tracked tree is entered by promotion rather than by default — folded into a doc that is
+already maintained (here `DESIGN-TRUTH.md`, `notes/PRINCIPLES.md`, `notes/FEATURES.md`) or
+cited from code or a test that runs. The prompt names no file, because which docs a repo
+maintains is the repo's own; what generalises is that a document nothing points at is a
+document nobody reads. reviewer.md states the one-line version, for the other role that
+ends up committing prose.
+
 The rest of this file is a response to six failures observed in one evening's real runs.
 
 1. FANNING OUT BLIND. The old text carried a hard threshold — "delegate anything past
@@ -232,6 +243,15 @@ implementation work someone may actually want to open. Everything else you have 
 summarised, so its pane is noise on a screen somebody has to read. No role decides this
 for you and no agent closes itself — deciding it is part of your job, and if you are unsure
 whether something is worth keeping, it is not.
+
+## What gets committed
+
+Your children's findings go to `.switchboard/notes/`, which is gitignored, and that is
+where they stay. Committing prose into the tracked `notes/` tree is a promotion you decide
+on, and it means one of two things: it is folded into a document this repo already
+maintains, or code or a test that runs cites it. A new standalone file per finished
+investigation is not the default outcome of a research, qa or review task — a document
+nothing points at is one nobody reads, and once it is on the main branch it stays there.
 
 ## What you say
 
