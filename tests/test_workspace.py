@@ -837,6 +837,54 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
         self.assertEqual(self.b.cleanup([kid], me="api"), [])
         self.assertEqual(self._board_pane(kid), board)
 
+    def _board_close_fails(self, board, exc):
+        """Let every pane close except the board's, which fails with `exc`."""
+        real = self.h.close_pane
+        def sometimes(pane):
+            if pane == board:
+                raise exc
+            real(pane)
+        self.h.close_pane = sometimes
+        return real
+
+    def test_a_board_close_that_proves_nothing_is_retried_not_forgotten(self):
+        """The stray-pane leak. A close that failed for a reason saying nothing about
+        whether the pane is still ours used to drop the meta row anyway — and that row is
+        the only thing pointing at the pane, so the pane was orphaned for good. Keep it,
+        hold the agent open, and let the next sweep close it."""
+        kid, board, _pane = self._finished_kid()
+        real = self._board_close_fails(board, HerdrError("close_failed", "herdr said no"))
+        self.assertEqual(self.b.cleanup([kid], me="api"), [])
+        self.assertEqual(self._board_pane(kid), board)      # still pointed at
+        # Held open: keeping the row is only half a retry. Clearing `pane_id` is what
+        # takes a row out of every future sweep, so the kept row would never be read.
+        self.assertIsNotNone(store.get_agent(self.db, kid)["pane_id"])
+        self.h.close_pane = real                            # herdr comes back
+        self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
+        self.assertIn(board, self.h.closed)
+        self.assertIsNone(self._board_pane(kid))
+
+    def test_a_herdr_that_cannot_be_asked_defers_the_board(self):
+        """`_close_target`'s no-answer refusal is not a refusal about this pane at all —
+        herdr was unreachable. Reading it as "not ours" is how the record got dropped."""
+        kid, board, _pane = self._finished_kid()
+        self.b._alive_cache, self.b._alive_unknown = None, False
+        def down():
+            raise HerdrError("herdr_down", "no herdr")
+        self.h.list_agents = down
+        self.assertFalse(self.b._close_board(kid))          # deferred, not settled
+        self.assertEqual(self._board_pane(kid), board)
+        self.assertNotIn(board, self.h.closed)
+
+    def test_force_drops_a_board_it_could_not_close(self):
+        """`--force` is the escape hatch for things that cannot be closed, so a board
+        that defers must not wedge it: the row goes and the agent ends `done` anyway."""
+        kid, board, _pane = self._finished_kid()
+        self._board_close_fails(board, HerdrError("close_failed", "herdr said no"))
+        self.assertEqual(self.b.cleanup([kid], me="api", force=True), [kid])
+        self.assertIsNone(self._board_pane(kid))
+        self.assertIsNone(store.get_agent(self.db, kid)["pane_id"])
+
 class WorktreeIsAFactTest(Fixture, unittest.TestCase):
     """"Does this agent have a worktree?" is read from the store, never from the name.
 
