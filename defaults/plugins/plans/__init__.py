@@ -1080,8 +1080,8 @@ def migrate(ctx, args) -> Result:
         "THIS FLIPS THE STORE FOR THE WHOLE REPO. Every worktree still running the",
         "single-file plans plugin will now REFUSE every plans command against it, and",
         "its board will draw no plans, until it is on this version. If any worktree is",
-        f"still on the old plugin, put {MIGRATED} back as {FILE} and delete the p-<n>.json",
-        f"files and {META} — that undoes this exactly, losing nothing."]),
+        f"still on the old plugin, put {MIGRATED} back as {FILE} and delete the",
+        f"p-<n>.json files and {META} — that undoes this exactly, losing nothing."]),
         data={"migrated": True, "plans": moved, "kept": str(ctx.state_dir / MIGRATED)})
 
 
