@@ -1722,14 +1722,28 @@ def report_files(texts, cwd: str, *, limit: int = MAX_OPEN_FILES) -> list[str]:
     Containment is judged on the path as written, normalised, and NOT on
     `Path.resolve()`: `.switchboard` in a worktree is a symlink into the main checkout,
     and resolving would put the briefs this feature exists to open outside the cwd they
-    were named relative to.
+    were named relative to. KNOWN AND ACCEPTED COST of that choice: a symlink inside the
+    worktree pointing out of it satisfies containment, so `evidence/id_rsa.pub` behind
+    `evidence -> ~/.ssh` would open. It escalates nothing — the agent that could plant
+    that symlink can already read the file — and the harm is a file being presented as
+    the agent's own output when it is not. Resolving would close it and would break the
+    ordinary case, so this is a limitation, not an oversight.
+
+    Every path returned is ABSOLUTE, and that is load-bearing rather than incidental: an
+    editor argument that came back relative could begin with a dash, and a file named
+    `-g.py` would then reach `cursor -r -g` as an option instead of a path.
     """
     if limit <= 0:
         return []
-    root = Path(os.path.normpath(cwd))
-    out: list[str] = []
+    # abspath, not normpath: a relative cwd would otherwise carry through to every path
+    # this returns. `cwd` is stored absolute by every writer today, so this enforces
+    # what is currently only inherited.
+    root = Path(os.path.abspath(cwd))
+    groups: list[list[str]] = []
     seen: set[str] = set()
+    total = 0
     for text in reversed(list(texts)):
+        group: list[str] = []
         for span in _BACKTICKED.findall(text):
             cand = span.strip()
             if not cand or cand.startswith("http") or _LINE_SUFFIX.search(cand):
@@ -1738,7 +1752,9 @@ def report_files(texts, cwd: str, *, limit: int = MAX_OPEN_FILES) -> list[str]:
                 continue
             try:
                 joined = Path(os.path.normpath(root / Path(cand).expanduser()))
-                if not joined.is_relative_to(root) or not joined.is_file():
+                if not joined.is_absolute() or not joined.is_relative_to(root):
+                    continue
+                if not joined.is_file():
                     continue
             except (OSError, ValueError):
                 continue
@@ -1746,10 +1762,17 @@ def report_files(texts, cwd: str, *, limit: int = MAX_OPEN_FILES) -> list[str]:
             if key in seen:
                 continue
             seen.add(key)
-            out.append(key)
-            if len(out) >= limit:
-                return out[::-1]
-    return out[::-1]
+            group.append(key)
+            total += 1
+            if total >= limit:
+                break
+        if group:
+            groups.append(group)
+        if total >= limit:
+            break
+    # A message at a time, so the cap is spent newest-first while each message keeps the
+    # order it named things in.
+    return [f for group in reversed(groups) for f in group]
 
 
 def double_press(last: float, now: float, window: float = DOUBLE_PRESS):
@@ -1820,6 +1843,9 @@ def open_report_files(name: Optional[str]) -> str:
     cwd = detail.get("cwd")
     if not cwd:
         return f"{name}: no worktree to open"
+    # Absolute before anything is handed to the editor, for `report_files`' reason: an
+    # argument that starts with a dash is an option, not a path.
+    cwd = os.path.abspath(cwd)
 
     transcript = detail.get("transcript")
     files = report_files(last_assistant_texts(Path(transcript)) if transcript else [],

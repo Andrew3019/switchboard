@@ -1700,6 +1700,18 @@ class ReportFilesTest(unittest.TestCase):
                        "Done. Findings in `notes/x.md`.", limit=2),
             ["notes/f0.md", "notes/x.md"])
 
+    def test_every_path_comes_back_absolute_even_from_a_relative_cwd(self):
+        """The one thing standing between a file named `-g.py` and `cursor -r -g -g.py`
+        is that what reaches the editor is absolute. Enforced here, not inherited from
+        the fact that the store happens to keep cwd absolute today."""
+        (self.tmp / "-g.py").write_text("x")
+        here = Path.cwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(self.tmp)
+        got = board.report_files(["see `./-g.py` and `notes/x.md`"], ".")
+        self.assertTrue(all(Path(f).is_absolute() for f in got), got)
+        self.assertEqual([Path(f).name for f in got], ["-g.py", "x.md"])
+
     def test_a_cap_of_zero_opens_nothing(self):
         self.assertEqual(self.files("`notes/x.md`", limit=0), [])
 
