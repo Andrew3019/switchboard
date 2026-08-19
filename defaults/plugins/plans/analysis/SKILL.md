@@ -18,9 +18,10 @@ ids the claim rests on. Somebody else decides, and the catalogue is edited in an
 person.
 
 Concretely, for the whole of this pass: no `sb plugin plans` verb but `list`, `show`,
-`changelog`, `library` and `template list`. No `tick`, `skip`, `note`, `rework`, `add-step`,
-`name-step`, `dep`, `assign`, `checkpoint`, `create` or `template use` — not even on a plan
-you own, not even to "record that the analysis ran". No `Write`, no `Edit`, no `git commit`.
+`changelog`, `library`, `template list` and `validate`. No `tick`, `note`, `add-step`,
+`name-step`, `dep`, `create` or `template use` — not even on a plan you own, not even to
+"record that the analysis ran". No editing a plan file either, which is how most of a plan
+is written now. No `Write`, no `Edit`, no `git commit`.
 
 ## Running it
 

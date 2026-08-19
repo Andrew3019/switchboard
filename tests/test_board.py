@@ -1410,6 +1410,28 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn(" build", board._ANSI.sub("", chart), "the sound step is left alone")
         self.assertTrue(lines[0].startswith("\033[31m"), "and the header says so too")
 
+    def test_a_hand_edit_that_broke_a_removed_verbs_rule_is_drawn_red_too(self):
+        """The same door, widened. Five verbs went away in #4 and their refusals became
+        warnings on the file, which only means anything if the board paints them: a gate on
+        a step already done, a skip carrying no reason, and a checkpoint that is not one
+        line are all things only a hand-edit can produce now, and the board is where
+        somebody is looking when they matter.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "scope", "display": "scope", "progress": "done",
+             "gate": "he confirms the contract"},
+            {"id": "s-2", "name": "build", "display": "build", "progress": "skipped",
+             "why": None, "deps": ["s-1"]},
+            {"id": "s-3", "name": "ship", "display": "ship", "progress": "open",
+             "deps": ["s-2"]}], display="shape"))
+        with self.hooks():
+            lines = board.section_extras([agent("lead")])[0][1]
+        chart = "".join(lines[1:])
+        self.assertIn("\033[31mscope\033[0m", chart, "a gate on a done step: red")
+        self.assertIn("\033[31mbuild\033[0m", chart, "skipped with no reason: red")
+        self.assertIn(" ship", board._ANSI.sub("", chart), "the sound step is left alone")
+        self.assertNotIn("\033[32m", chart, "and red beats the progress colour")
+
     def test_progress_is_colour_and_the_seam_carries_it(self):
         """The other half of the drawing: no progress column, and colour instead.
 
@@ -1418,7 +1440,8 @@ class PlanBlockTest(unittest.TestCase):
         arrive as literal escape characters in the middle of a line.
         """
         self.write(self.plan("p-1", "api", "shape", [
-            {"id": "s-1", "name": "scope", "display": "scope", "progress": "skipped"},
+            {"id": "s-1", "name": "scope", "display": "scope", "progress": "skipped",
+             "why": "already scoped by p-0"},        # with its reason, or it draws red
             {"id": "s-2", "name": "build", "display": "build", "progress": "done",
              "deps": ["s-1"]},
             {"id": "s-3", "name": "ship", "display": "ship", "progress": "open",
