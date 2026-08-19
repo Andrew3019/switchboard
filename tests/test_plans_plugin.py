@@ -634,6 +634,47 @@ class MigrationTest(PlansSandbox):
                          self.LEGACY)
         self.assertIn("plans.json.migrated", out)
 
+    def test_a_migration_that_died_half_way_still_reads_as_the_store_it_was(self):
+        """THE CRASH THIS VERB IS ORDERED AROUND. Half-done has to read as not-done.
+
+        `migrate` writes the per-plan files first. If it dies there — power, a kill, a full
+        disk — the directory holds some plan files AND the complete format-1 `plans.json`
+        every other worktree in the repo is still reading. Deciding "split" off the files
+        alone made this plugin read a different store from every older one, each holding a
+        different subset, with `migrate` refusing to re-run because it thought it was done.
+
+        So the counters sidecar is what says split, and it is written LAST — after the
+        legacy file has been moved aside. Every state before that reads as legacy, which is
+        the state the fleet is actually in, and re-running the verb finishes the job.
+        """
+        self.legacy()
+        d = self._dir()
+        # Exactly what a crash after the first plan file leaves behind.
+        (d / "p-2.json").write_text(json.dumps(self.LEGACY["plans"][0]))
+        self.assertFalse((d / "_meta.json").exists())
+
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
+                         ["p-2", "p-11"], "both plans, out of the file that still holds them")
+        self.assertEqual(json.loads((d / "plans.json").read_text())["format"], 1,
+                         "and an older plugin reads the same store it always did")
+
+        self.migrate()
+        self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
+                         ["p-2", "p-11"])
+        self.assertEqual(json.loads((d / "plans.json.migrated").read_text()), self.LEGACY)
+
+    def test_the_counters_sidecar_is_written_after_the_legacy_file_is_moved_aside(self):
+        """The ordering itself, pinned rather than left to be re-derived from the crash
+        test above: a store holding the plan files and the sidecar but still holding a
+        format-1 `plans.json` is a state this verb must never leave behind."""
+        self.legacy()
+        self.migrate()
+        d = self._dir()
+        self.assertTrue((d / "_meta.json").exists())
+        self.assertEqual(json.loads((d / "plans.json").read_text())["format"], 2,
+                         "what is left at the old path is the tombstone, not a store")
+
     def test_the_verb_says_out_loud_what_it_costs_the_rest_of_the_fleet(self):
         """A one-way door on state the whole repo shares. The warning is the output and not
         a footnote in it, because the failure it is warning about is silent: an old plugin
@@ -1595,6 +1636,60 @@ class CompletenessTest(PlansSandbox):
         self.assertEqual(plan["title"], "fix the red CI on main, failing since Tuesday")
         self.assertIn("fix red CI: rich assertions on main",
                       self.ok("plugin", "plans", "list"), "the listing draws the display")
+
+    def test_name_step_hangs_what_it_adds_off_the_plans_current_tail(self):
+        """The flagship path: work, then `name-step merge`, and nothing complains.
+
+        The obliged review used to land as a second root — no dep of its own — so the one
+        command nearly every plan runs made that plan trip this file's own incompleteness
+        door and draw red on the board from the moment it was typed. What lands now is the
+        chain a lead would have written: the work, then the review, then the merge that
+        waits on it.
+        """
+        self.define("merge", name="merge the pull request", obliges=["merge-human-review"])
+        self.define("merge-human-review", name="list what only a human can check")
+        self.data(*_create("a job", "write it", "review it"))
+        added = self.data("plugin", "plans", "name-step", "p-1", "merge")
+
+        self.assertNotIn("incomplete", added, f"no warning: {added}")
+        self.assertNotIn("is incomplete", self.ok("plugin", "plans", "show", "p-1"))
+        by_def = {s["def"]: s for s in added["steps"]}
+        review, merge = by_def["merge-human-review"], by_def["merge"]
+        self.assertEqual(review["deps"], ["s-2"], "the review comes after the work")
+        self.assertEqual(merge["deps"], [review["id"]], "and the merge after the review")
+
+    def test_a_library_step_named_into_an_empty_plan_is_the_root_it_really_is(self):
+        """The other half of the same rule: there is nothing to hang off, so it is a root
+        and that is not a defect. A warning here would be this file inventing an edge to a
+        step that does not exist."""
+        self.define("merge", name="merge the pull request", obliges=["merge-human-review"])
+        self.define("merge-human-review", name="list what only a human can check")
+        self.ok(*_create("a job"))
+        added = self.data("plugin", "plans", "name-step", "p-1", "merge")
+        self.assertNotIn("incomplete", added)
+        by_def = {s["def"]: s for s in added["steps"]}
+        self.assertEqual(by_def["merge-human-review"]["deps"], [])
+
+    def test_a_template_entry_joining_two_earlier_ones_records_both_edges(self):
+        """A join is `"after": [1, 2]`, and both halves of it have to land.
+
+        Asking "has this step a dep yet" per edge made the second one a no-op — the first
+        filled the field the second was testing — so a template that fanned out and joined
+        back recorded a chain instead, silently, in the one file a lead cannot see the DAG
+        of without drawing it.
+        """
+        d = self.catalogue("templates")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "fork.json").write_text(json.dumps(
+            {"title": "fork and join", "display": "fork and join",
+             "steps": [{"name": "scope it", "display": "scope"},
+                       {"name": "build it", "display": "build", "after": [1]},
+                       {"name": "document it", "display": "docs", "after": [1]},
+                       {"name": "ship it", "display": "ship", "after": [2, 3]}]}))
+        made = self.data("plugin", "plans", "template", "use", "fork")
+        self.assertEqual([s["deps"] for s in made["steps"]],
+                         [[], ["s-1"], ["s-1"], ["s-2", "s-3"]])
+        self.assertNotIn("incomplete", made)
 
     def test_a_template_carries_its_own_display_names_and_the_order_between_its_steps(self):
         """The shipped `docs` template, used, which is the one plan a lead gets for free.

@@ -1229,7 +1229,7 @@ def name_step(ctx, args) -> Result:
     if plan is None:
         return _missing(doc, args.plan)
     try:
-        added = _mint(doc, lib, wanted)
+        added = _mint(doc, lib, wanted, after=tuple(_sinks(plan)))
     except _BadDef as e:
         return e.refusal()
     plan.setdefault("steps", []).extend(added)
@@ -1315,6 +1315,28 @@ def template(ctx, args) -> Result:
     return _plan_result(_shown(plan, lib))
 
 
+def _sinks(plan: dict) -> list[str]:
+    """The ids a plan currently ENDS with: its steps that nothing else waits for.
+
+    What a step added to a running plan comes after, unless its author says otherwise. Read
+    by number like every other id comparison here, so a hand-edited `deps: [1]` counts as
+    the edge it is and its target is not reported as a loose end.
+
+    Several, in a plan that forked and never joined, and the answer is then all of them: a
+    step added to a plan with two open ends waits for both, which is the join a lead would
+    have written and is reshaped with `dep` where it is not what they meant.
+    """
+    steps = plan.get("steps") or []
+    waited: set[int] = set()
+    for st in steps:
+        for d in st.get("deps") or ():
+            n = _num(_STEP_ID, d)
+            if n is not None:
+                waited.add(n)
+    return [str(st.get("id")) for st in steps
+            if _num(_STEP_ID, st.get("id")) not in waited and st.get("id")]
+
+
 def _chain(entries: Any, landed: list[list[dict]]) -> None:
     """A template's `after` — the order between its entries — as deps on the steps it made.
 
@@ -1332,7 +1354,14 @@ def _chain(entries: Any, landed: list[list[dict]]) -> None:
     """
     for n, entry in enumerate(entries):
         after = (entry or {}).get("after") if isinstance(entry, dict) else None
-        for given in (after or ()):
+        if not after:
+            continue
+        # The roots are read ONCE, before any of this entry's edges are added. Asking
+        # "which steps have no deps yet" inside the loop made the second `after` a no-op —
+        # the first edge filled the field the second was testing — so a join written as
+        # `"after": [1, 2]` silently recorded one of its two edges.
+        roots = [st for st in landed[n] if not st["deps"]]
+        for given in after:
             try:
                 j = int(given)
             except (TypeError, ValueError):
@@ -1342,9 +1371,8 @@ def _chain(entries: Any, landed: list[list[dict]]) -> None:
                               f"an earlier entry in it")
             waited = [st["id"] for st in landed[j - 1]
                       if not any(st["id"] in x["deps"] for x in landed[j - 1])]
-            for st in landed[n]:
-                if not st["deps"]:
-                    st["deps"] = list(waited)
+            for st in roots:
+                st["deps"] += [w for w in waited if w not in st["deps"]]
 
 
 def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
@@ -1732,7 +1760,7 @@ def _flatten(lib: dict, key: str, path: tuple = ()) -> list[str]:
     return out
 
 
-def _mint(doc: dict, lib: dict, key: str) -> list[dict]:
+def _mint(doc: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
     """The steps naming one definition puts in a plan: its expansion, then its obligations.
 
     Two walks. Composition expands first and may repeat a definition, because what a
@@ -1752,6 +1780,13 @@ def _mint(doc: dict, lib: dict, key: str) -> list[dict]:
 
     Every id is minted from the one counter, in the order the steps will appear. Nothing is
     reused and nothing is renumbered, so `obliged_by` can point at a sibling by id.
+
+    `after` is what the expansion HANGS OFF: the ids in the plan that nothing else already
+    waits for, which `name-step` reads off the plan it is adding to. Without it the whole
+    expansion lands as a second root — `name-step merge` on a plan with work in it drew a
+    detached `review → merge` pair beside the chain and tripped the incompleteness door on
+    the flagship path. Empty for a template, which records its own order (`_chain`), and
+    empty for the first thing added to an empty plan, where a root is what this genuinely is.
     """
     wanted: list[tuple[str, Optional[int], tuple]] = [
         (k, None, ()) for k in _flatten(lib, key)]
@@ -1787,6 +1822,12 @@ def _mint(doc: dict, lib: dict, key: str) -> list[dict]:
         by = st.get("obliged_by")
         if by in at:
             at[by]["deps"].append(st["id"])
+    # Then the whole expansion hangs off what the plan already ends with. Its roots and not
+    # every step of it: the review is the root here, because the merge waits on the review,
+    # so the chain that lands is `…work → review → merge` and not a fan-in on both.
+    for st in steps:
+        if not st["deps"]:
+            st["deps"] = list(after)
     return steps
 
 
@@ -1882,16 +1923,18 @@ def _faults(plan: dict) -> tuple[bool, list[str], list[str]]:
     null, so asking the stored step would report every library step in the store as
     defective and send a lead to fix a field that must stay empty.
 
-    The FIRST step of a plan is the exempt root and every other step is expected to say
-    what it comes after. A plan with two genuine starts therefore reports its second one,
-    which is accepted rather than solved: nothing can tell a deliberate second root from a
-    missing edge, and the answer to a warning about a root you meant is to leave it there.
+    ONE ROOT IS FREE, and it is the first step that has no dep rather than the first step
+    in the file. Those are usually the same step and sometimes are not: `name-step merge`
+    lands the merge before the review it waits for, so the plan's only real start is second
+    in the list, and a positional rule reported the flagship path as defective. A plan with
+    two genuine starts still reports its second one, which is accepted rather than solved:
+    nothing can tell a deliberate second root from a missing edge, and the answer to a
+    warning about a root you meant is to leave it there.
     """
     steps = plan.get("steps") or []
     nameless = [str(s.get("id") or "?") for s in steps
                 if not str(s.get("display") or "").strip()]
-    rootless = [str(s.get("id") or "?") for s in steps[1:]
-                if not (s.get("deps") or [])]
+    rootless = [str(s.get("id") or "?") for s in steps if not (s.get("deps") or [])][1:]
     return (not str(plan.get("display") or "").strip()), nameless, rootless
 
 
@@ -2021,12 +2064,49 @@ def _read(d: Path) -> tuple[dict, dict]:
 def _split(d: Path) -> bool:
     """Is this store one file per plan? Asked of the disk, never of a version number.
 
-    Either half is enough: the plan files, or the counters sidecar that a store with no
-    plans in it still has. A version marker could not answer this — the whole point is
-    that an un-migrated store keeps the format an older plugin reads, so the format says
-    nothing about which shape is in front of you.
+    `_meta.json` is the flag, and `migrate` writes it LAST — after the legacy file has been
+    moved aside — precisely so that this question has one answer at every instant of a
+    migration. A version marker could not answer it: the whole point is that an un-migrated
+    store keeps the format an older plugin reads, so the format says nothing about which
+    shape is in front of you.
+
+    PLAN FILES ALONE ARE NOT ENOUGH, and that is the crash this closes. `migrate` writes
+    the per-plan files first; a crash there used to leave a store that read as split to
+    this plugin while a complete format-1 `plans.json` sat beside it for every older one —
+    two stores, each holding a different subset, and `migrate` refusing to re-run because
+    it thought the job was done. So while a real single-file store is still present this
+    says LEGACY, whatever else is in the directory: the half-written files are ignored, the
+    plans are all read out of the file that still holds them, and re-running `migrate`
+    finishes the job. The counters sidecar without them is still split — that is an empty
+    store that migrated before its first plan.
     """
-    return bool(_files(d)) or (d / META).exists()
+    if (d / META).exists():
+        return True
+    return bool(_files(d)) and not _legacy(d)
+
+
+def _legacy(d: Path) -> bool:
+    """Is a real single-file store sitting at `plans.json` — as opposed to the tombstone?
+
+    The tombstone `migrate` leaves is a `plans.json` too (`_tomb`), stamped with a format
+    an older plugin refuses, so the file EXISTING is not the question and its format is.
+
+    A file that will not parse counts as one, deliberately: the alternative is reading past
+    a store this plugin cannot make sense of and answering as if it were not there, and
+    everything else in this file refuses rather than guesses when a record is unreadable.
+    `_read_one` then gives the refusal, naming the path, which is the message a human can
+    act on.
+    """
+    f = d / FILE
+    try:
+        doc = json.loads(f.read_text(encoding="utf-8"))
+    except OSError:
+        return False                    # not there at all, or unreachable
+    except (ValueError, UnicodeDecodeError):
+        return True                     # there and unreadable — see the docstring
+    if not isinstance(doc, dict) or not isinstance(doc.get("plans", []), list):
+        return True
+    return _counter(doc.get("format", LEGACY_FORMAT)) <= LEGACY_FORMAT
 
 
 def _read_one(d: Path) -> tuple[dict, dict]:
@@ -2117,8 +2197,13 @@ def _read_split(d: Path) -> tuple[dict, dict]:
     every plan because of one would too.
 
     Nothing here ever overwrites a file it could not read: a plan that did not load is not
-    in `doc["plans"]`, so `_write` has nothing to write back over it, and the counters know
-    its id is taken from the filename alone.
+    in `doc["plans"]`, so `_write` has nothing to write back over it, and `next_plan` still
+    counts past it — its PLAN id is readable from the filename whether or not the contents
+    are. Its STEP ids are not: they are inside the file, so a broken plan stops reserving
+    them and only the sidecar's `next_step` keeps them from being minted again. That is a
+    real gap and it takes two hand-edit disasters at once — a corrupt `p-<n>.json` AND a
+    lost `_meta.json` — to reach, at which point a step id may be reused. Said here rather
+    than papered over, because nothing in the file can recover an id it cannot parse.
 
     The two invariants that do not fit in one file are checked here rather than in
     `_check`: a plan lives in the file its id names, and a step id is unique across the
@@ -2265,12 +2350,20 @@ def _migrate(d: Path) -> Optional[list[str]]:
         # The plan as it stands, byte for byte through `json.dumps` — the changelog comes
         # across whole because nothing here reads it, edits it, or rebuilds it.
         _atomic(d, f"p-{_num(_PLAN_ID, plan['id'])}.json", _text(plan))
+    # THE ORDER OF THESE FOUR LINES IS THE WHOLE CRASH SAFETY, and it is the reverse of
+    # the obvious one. `_split` calls a store split when the counters sidecar is there, so
+    # the sidecar is written LAST — after every plan file has landed and after the legacy
+    # store has been moved aside. A crash anywhere before that leaves a directory that
+    # still reads as legacy (`_split` ignores plan files while a format-1 `plans.json` is
+    # present), so this plugin and an older one see the same complete store and re-running
+    # `migrate` finishes the job. Writing it first left half a store in each shape, which
+    # is the one outcome this verb exists to avoid.
+    os.replace(legacy, d / MIGRATED)
+    _tomb(d)
     _atomic(d, META, _text({
         "format": FORMAT,
         "next_plan": max(_counter(doc.get("next_plan")), max(seen, default=0) + 1),
         "next_step": max(_counter(doc.get("next_step")), max(steps_seen, default=0) + 1)}))
-    os.replace(legacy, d / MIGRATED)
-    _tomb(d)
     return [f"p-{n}" for n in sorted(seen)]
 
 
