@@ -5337,6 +5337,20 @@ class Broker:
             raise
         store.update_agent(self.db, name, pane_id=agent.pane_id or pane,
                            terminal_id=agent.terminal_id)
+        # A restored agent comes back into the same two panes a spawned one opens in.
+        # `delegate` is the one place every SPAWN passes through, and restore is not a
+        # spawn — it makes its own tab and starts its own agent — so the split it never
+        # asked for was the whole of the difference: `sb restore` handed back a single
+        # full-width pane with no board beside it, and only an agent restored under a
+        # top-level name got one, from `_top`'s second call.
+        #
+        # `where`, not the repo root, for `_open_board`'s own reason: the board must read
+        # the checkout this agent actually lives in. `where` is the directory restore has
+        # just proven exists, several lines above.
+        #
+        # The pane herdr actually put the agent in, not the one we asked for — the same
+        # value the row above was updated with, and the same choice `delegate` makes.
+        self._open_board(name, agent.pane_id or pane, cwd=where)
         # Bring it back to life, not just back on screen. whoami() matches on
         # `pane_id AND ended_at IS NULL`, so leaving ended_at set makes a restored agent
         # resolve to HUMAN — everything it sends is then attributed to the human, and it
