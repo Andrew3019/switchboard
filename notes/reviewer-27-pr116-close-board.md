@@ -140,3 +140,89 @@ rather than live documentation; flagged, not asked to be changed.
 `/Users/andrew/anaconda3/bin/python -m pytest tests -q` on this branch: **1515 passed**
 in 162s. The three new tests in `ClosingTakesTheBoardWithItTest` pass and test what they
 claim. None of them covers the recycled-pane-id sweep in finding 1.
+
+---
+
+# Re-review — the rework (commit `52234fe`)
+
+**Verdict: clear to merge.** The blocker is genuinely fixed, not papered over, and I could
+not break the new mechanism. Two cosmetic notes below; neither holds the merge.
+
+## The blocker is gone, verified against the recycle
+
+`broker.py:4273-4284` puts the retry in the already-closed branch, and `broker.py:4459`
+lets a defer fall straight through to `set_state("done")` / `pane_id=None`. So the row
+ends honestly and there is no pane id left to be recycled under it.
+
+Confirmed by re-running my own repro (scratch probe, not committed) — and, unlike the
+committed test, with the broker's herdr caches cleared between sweeps so it actually
+*observes* the recycle:
+
+```
+sweep1: pane_id=None board_row=w1:p3s4
+sweep2: closed=[] refused=[('worker-1','already closed')] board_closed=True
+        board_row=None agent_pane_closes=1
+```
+
+Converges on the next sweep, and the stranger who inherited the freed pane id is never
+touched. Old mechanism on the same input wedged forever.
+
+## The re-review questions
+
+1. **Convergence / candidate-set.** A `done` row with no pane is still a candidate:
+   `candidates = scope` (`broker.py:4141`), and `scope` is every agent for a human or
+   `_descendants(me)` otherwise (`broker.py:4119-4123`) — neither filters on state or
+   `ended_at`. Probed a board that never closes: sweeps 2 and 3 both retry, both refuse
+   `already closed` with `expected=True`, so the sweep stays quiet and the row is already
+   `done` — a leak that cannot wedge anything. Both exits also reach a retry: a row with
+   `ended_at` takes `broker.py:4284`, and a hypothetical `done` row without one falls
+   through to `broker.py:4459` with `target=None`. No path leaves the meta row with
+   nothing ever calling `_close_board` again — including `_stop_panes`'s rows, which the
+   next sweep now reaps (see below).
+2. **Safe for done agents.** True no-op once the row is gone: `broker.py:1490-1492`
+   returns on the first `SELECT`. Where a row *does* survive, the pane is resolved through
+   `_close_target`'s no-identity rule (`broker.py:5387-5399`) — an occupied pane is
+   refused and the row dropped, an empty one may be closed. Same-store collisions are
+   caught earlier by `_board_is_only_for` (`broker.py:1532-1541`): another *live* agent's
+   board row over the same pane forgets ours instead of closing. The residual is a
+   cross-store recycle onto an unoccupied foreign pane, which is inherent to "keep the row
+   and retry later" — the approved direction — and is the exposure `_close_target` was
+   written to bound. Not new to this diff.
+3. **Cost.** One primary-key `SELECT` on `meta` per ended row per sweep, returning on the
+   first statement in the overwhelmingly common case. Cleanup already does `_descendants`
+   and `live_descendants` per candidate. Not a regression.
+4. **The new test.** `tests/test_workspace.py:864-886` reproduces my exact break — agent
+   dropped from `h.live`, stranger with a different `terminal_id` on the freed pane id —
+   and asserts the three things that matter: `pane_id` is None after sweep 1, the board
+   row survives, and a later bare sweep closes the board with
+   `self.h.closed.count(agent_pane) == 1`. It fails against the old mechanism at its very
+   first assertion (old sweep 1 returned `[]`, not `[kid]`). One weakness, worth knowing
+   rather than fixing: `Broker` caches `agent list` per process (`broker.py:5262-5276`),
+   and the test never clears `_alive_cache`/`_pane_cache`, so the injected stranger is
+   invisible to sweep 2 — the test proves "the row is not held open on a dead pane", not
+   "the recycle is resolved correctly". My probe covers the second half and it passes.
+5. **`_stop_panes` comment** (`broker.py:2511-2521`) — now names the real hazard, but one
+   clause is still false: "that branch's retry finds a `board_pane:` row nobody will ever
+   act on again". The retry *does* act on it — it calls `_close_board`, the workspace's
+   pane is gone by then, `close_pane` answers `pane_not_found` and the row is reaped
+   (`broker.py:1507-1511`). The code is better than the comment claims: the stale row
+   lives for one sweep, not forever, which narrows the very hazard the next sentence
+   warns about. Cosmetic; the comment oversells the cost, it does not hide one.
+6. **Findings 2 and 4 are actually gone.** No `release_agent`/`close_pane` is re-issued —
+   a retry enters at `broker.py:4273` and never reaches `broker.py:4396`. The defer
+   refusal that named no way out is deleted outright; nothing new refuses.
+
+## One new wrinkle (minor, not blocking)
+
+`broker.py:4284` passes `force=force`, so `sb cleanup --force <name>` on a row that is
+already `done` silently **discards** a pending board retry (`_close_board` drops the row
+without closing the pane) while refusing the row as `already closed`. Probed: `refused=[
+('worker-1','already closed')]`, `board_row=None`, pane still open. Defensible — `--force`
+is documented to stop caring what herdr did — but under `--force <parent>` it applies to
+the whole subtree via `_leaves_up`, and the operator is told only "already closed". If
+that is not intended, `force=False` at that one call site keeps the retry alive; the
+first-close path at `broker.py:4459` is where `--force` needs to drop it.
+
+## Suite (rework)
+
+`pytest tests -q` on `52234fe`: **1516 passed** in 161s — the worker's count, confirmed.
