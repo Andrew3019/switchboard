@@ -195,14 +195,20 @@ template copies the plan, and a named step inside it stays a name.
 **A step may be word-only.** Nothing has to be defined behind it; the name alone is worth
 having.
 
-**A step may carry a display name — a short label the board draws in place of the full one.**
-A name is a sentence and a board cell is a few columns, so a step whose name is "list every
-claim the document makes about the code" draws as "list claims" where a flowchart has room
-for it. It is optional and it pairs with the name exactly: a named step's display name lives
-in its definition and an edit reaches every plan naming it, an on-the-fly step's lives on the
-step, and a step with none falls back to its name clipped. This is the same "the board is a
-picture and `show` is the full listing" split the board already makes — the display name is
-what makes a picture of a real plan legible rather than a row of ellipses.
+**Every step carries a display name — a short label the board draws in place of the full one
+— and so does the plan.** A name is a sentence and a board cell is a few columns, so a step
+whose name is "list every claim the document makes about the code" is authored with a display
+like "list claims" — short but readable, abbreviating and cutting words the title already
+implies. It is required, not optional: without one the board drew the name clipped mid-clause,
+and the informative half was the half cut. It pairs with the name exactly: a named step's
+display name lives in its definition and an edit reaches every plan naming it, an on-the-fly
+step's lives on the step. The plan carries its own display too — longer, since it owns the
+whole header line — and the board draws it in place of the title, falling back to the title
+when there is none. There is no per-cell clip any more: display names are short by
+construction, and the only clip left is the board's own from the right when the pane is
+narrow. This is the same "the board is a picture and `show` is the full listing" split the
+board already makes — the display name is what makes a picture of a real plan legible rather
+than a row of ellipses.
 
 **Effort and scale flex inside a step; the shape does not.** The same step covers a trivial
 change and a large one.
