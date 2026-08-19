@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -110,11 +111,35 @@ class PlansSandbox(ShippedSandbox):
     def _dir(self) -> Path:
         return plugins.state_root("repo", self.repo) / "plans"
 
-    def _file(self) -> Path:
-        return self._dir() / "plans.json"
+    def _file(self, plan: str = "p-1") -> Path:
+        """One plan's own file. The store is one file per plan, flat in the state dir."""
+        return self._dir() / f"{plan}.json"
+
+    def _files(self) -> list:
+        """The plan files in id order, the way the plugin reads them — `p-10` after `p-2`
+        and not between `p-1` and `p-2`, which is what sorting by name would give."""
+        return sorted(self._dir().glob("p-*.json"), key=lambda f: int(f.stem[2:]))
+
+    def _raw(self) -> str:
+        """Every plan file's text, run together. For asserting what is NOT written down."""
+        return "".join(f.read_text() for f in self._files())
 
     def _doc(self) -> dict:
-        return json.loads(self._file().read_text())
+        """The store assembled the way `_read` assembles it, for tests that want one doc.
+
+        A helper and not the format: the plugin has no whole-store file any more, so a test
+        that wants "the plans" builds the list the same way the plugin does — off the files.
+        """
+        meta = self._dir() / "_meta.json"
+        doc = json.loads(meta.read_text()) if meta.exists() else {}
+        doc["plans"] = [json.loads(f.read_text()) for f in self._files()]
+        return doc
+
+    def _save(self, doc: dict) -> None:
+        """A hand-edit, written back the way a person would: each plan to its own file."""
+        for plan in doc["plans"]:
+            (self._dir() / f"p-{int(str(plan['id']).lstrip('pP-'))}.json").write_text(
+                json.dumps(plan))
 
 
 class PlansTest(PlansSandbox):
@@ -158,7 +183,7 @@ class PlansTest(PlansSandbox):
         self.ok("plugin", "plans", "create", "here")
         doc = self._doc()
         doc["plans"][0]["checkout"] = "/somewhere/else"
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
         self.assertEqual(self.data("plugin", "plans", "list"), [])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
                          ["p-1"])
@@ -232,7 +257,7 @@ class PlansTest(PlansSandbox):
 
         doc = self._doc()
         doc["plans"] = [p for p in doc["plans"] if p["id"] != "p-2"]
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
 
         made = self.data("plugin", "plans", "create", "three", "--step", "d")
         self.assertEqual(made["id"], "p-3")
@@ -264,63 +289,109 @@ class PlansTest(PlansSandbox):
                 self.assertIn(expected, str(caught.exception))
         self.assertEqual(len(self._doc()["plans"][0]["changelog"]), 1)
 
-    def test_an_unreadable_file_is_refused_rather_than_replaced(self):
-        """Starting over on a corrupt file would silently replace every plan in the repo on
-        the next `create`, and the records are the whole reason for keeping them.
+    def test_an_unreadable_plan_costs_that_plan_and_nothing_else(self):
+        """One plan is one file, and that is what a corrupt one costs: the plan in it.
 
-        Every verb, and the message names the path and says the file is safe: a refusal
-        that only says no sends a human looking for a bug in sb instead of at the file."""
+        The whole reason for the layout. Before it, a malformed store refused every verb
+        and blanked the board, so one bad file hid every good one. Now p-1 is skipped and
+        SAID — a skipped file that nobody is told about is how a plan quietly stops
+        existing — and the rest of the store answers normally.
+
+        And nothing overwrites it: the file is byte-identical afterwards, and the next
+        `create` mints p-3 rather than reusing the id of a plan it could not read.
+        """
         self.ok("plugin", "plans", "create", "a job")
-        self._file().write_text("{ this is not json")
-        for argv in (("create", "another"), ("list",), ("show", "p-1"), ("changelog", "p-1")):
-            with self.subTest(verb=argv[0]):
-                code, _, err = self.sb("plugin", "plans", *argv)
-                self.assertEqual(code, 1)
-                self.assertIn("not readable JSON", err)
-                self.assertIn("plans.json", err)
-                self.assertIn("will overwrite", err)
-        self.assertEqual(self._file().read_text(), "{ this is not json")
+        self.ok("plugin", "plans", "create", "another job")
+        self._file("p-1").write_text("{ this is not json")
 
-    def test_a_file_malformed_inside_the_plans_list_is_refused_by_name(self):
-        """Checked all the way down, not just at the top level — and the seal is why, not
-        tidiness. It is keyed on the plan id, so two plans sharing one (or one with none)
-        collapse to a single entry and `_write`'s drop check passes over the plan whose
-        changelog is no longer in it. Refusing here is refusing before anything is written.
+        out = self.ok("plugin", "plans", "list")
+        self.assertIn("p-2", out)
+        # Named, with the path and the promise, so a human knows which file to go and fix.
+        self.assertIn("p-1 did not load", out)
+        self.assertIn("not readable JSON", out)
+        self.assertIn("will overwrite", out)
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-2"])
+        self.ok("plugin", "plans", "show", "p-2")
+
+        code, _, err = self.sb("plugin", "plans", "show", "p-1")
+        self.assertEqual(code, 1)
+        self.assertIn("no plan p-1", err)
+        # Never "the highest is p-2" while a p-1 sits on the disk unread — but the id is
+        # still taken, so the counter must not hand it out again either.
+        self.assertEqual(self.data("plugin", "plans", "create", "a third")["id"], "p-3")
+        self.assertEqual(self._file("p-1").read_text(), "{ this is not json")
+
+    def test_a_plan_file_malformed_inside_is_refused_by_name_and_alone(self):
+        """`_check` is per file now, so each of these refuses one plan rather than the lot.
+
+        Checked all the way down, not just at the top level — and the seal is why, not
+        tidiness. It is keyed on the plan id, so a plan with none collapses into another's
+        entry and `_write`'s drop check passes over the plan whose changelog is no longer
+        in it. Refusing here is refusing before anything is written.
+
+        What each wreck must do is two things at once: say what is wrong, naming the file,
+        AND leave the good plan next to it readable. The second half is the whole change.
         """
         twins = [{"id": "s-1", "name": "one"}, {"id": "s-1", "name": "a twin"}]
-        wrecks = {"holds a str where a plan should be": {"plans": ["hello"]},
-                  "holds a NoneType where a plan should be": {"plans": [None]},
-                  "holds a plan with no usable id": {"plans": [{"title": "nameless"}]},
-                  "holds two plans called p-1": {"plans": [{"id": "p-1"}, {"id": "1"}]},
-                  "whose steps are not a list": {"plans": [{"id": "p-1", "steps": "nope"}]},
-                  "whose changelog is not a list": {"plans": [{"id": "p-1",
-                                                               "changelog": {}}]},
+        wrecks = {"holds a str where a plan should be": "hello",
+                  "holds a NoneType where a plan should be": None,
+                  "holds a plan with no usable id": {"title": "nameless"},
+                  # The filename is the address, so a file whose plan says otherwise is a
+                  # plan that two things disagree about where to find.
+                  "a plan lives in the file its id names": {"id": "p-7"},
+                  "whose steps are not a list": {"id": "p-9", "steps": "nope"},
+                  "whose changelog is not a list": {"id": "p-9", "changelog": {}},
                   # A twin step takes a tick meant for the other and neither says so; a
-                  # step with no id cannot be ticked at all. Both are PR2's bug to inherit.
-                  "holds two steps called s-1": {"plans": [{"id": "p-1", "steps": twins}]},
-                  "with no usable id": {"plans": [{"id": "p-1",
-                                                   "steps": [{"name": "nameless"}]}]},
+                  # step with no id cannot be ticked at all.
+                  "holds two steps called s-1": {"id": "p-9", "steps": twins},
+                  "with no usable id": {"id": "p-9", "steps": [{"name": "nameless"}]},
                   # The containers the lifecycle verbs APPEND to. A null gives a raw
                   # AttributeError naming no file; a STRING is worse than a crash, because
                   # `in` degrades to a substring test and `dep s-2 --after s-1` would
                   # report the edge already present in a deps of "s-10" and drop it.
-                  "whose deps are not a list": {"plans": [{"id": "p-1", "steps": [
-                      {"id": "s-1", "deps": "s-10"}]}]},
-                  "whose notes are not a list": {"plans": [{"id": "p-1", "steps": [
-                      {"id": "s-1", "notes": None}]}]},
-                  "whose checkpoints are not a list": {"plans": [{"id": "p-1", "steps": [
-                      {"id": "s-1", "checkpoints": "notes/x.md"}]}]},
-                  "has a p-1 whose notes is not a list": {"plans": [{"id": "p-1",
-                                                                    "notes": None}]},
-                  "was written by a newer plans plugin": {"format": 99, "plans": []}}
-        for expected, doc in wrecks.items():
+                  "whose deps are not a list": {"id": "p-9", "steps": [
+                      {"id": "s-9", "deps": "s-10"}]},
+                  "whose notes are not a list": {"id": "p-9", "steps": [
+                      {"id": "s-9", "notes": None}]},
+                  "whose checkpoints are not a list": {"id": "p-9", "steps": [
+                      {"id": "s-9", "checkpoints": "notes/x.md"}]},
+                  "has a p-9 whose notes is not a list": {"id": "p-9", "notes": None}}
+        self.ok("plugin", "plans", "create", "the plan that is fine")
+        for expected, wreck in wrecks.items():
             with self.subTest(expected=expected):
-                self._dir().mkdir(parents=True, exist_ok=True)
-                self._file().write_text(json.dumps(doc))
-                code, _, err = self.sb("plugin", "plans", "create", "should not land")
-                self.assertEqual(code, 1)
-                self.assertIn(expected, err)
-                self.assertEqual(json.loads(self._file().read_text()), doc)
+                self._file("p-9").write_text(json.dumps(wreck))
+                out = self.ok("plugin", "plans", "list")
+                self.assertIn(expected, out)
+                self.assertIn("p-9 did not load", out)
+                # The good plan is still there, which is the point of the split.
+                self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")],
+                                 ["p-1"])
+                self.assertEqual(json.loads(self._file("p-9").read_text()), wreck)
+        self._file("p-9").unlink()
+
+    def test_a_step_id_claimed_by_two_files_refuses_the_second(self):
+        """Step ids are unique across the STORE and not within a file, because `tick s-7`
+        names no plan. One file per plan cannot see that on its own, so `_read` checks it
+        over the assembled set — and refuses the file that arrived second rather than both,
+        so the plan that had the id first is untouched by somebody else's mistake."""
+        self.ok("plugin", "plans", "create", "first", "--step", "do it")
+        self._file("p-9").write_text(json.dumps(
+            {"id": "p-9", "steps": [{"id": "s-1", "name": "a twin"}]}))
+        out = self.ok("plugin", "plans", "list")
+        self.assertIn("p-9 did not load", out)
+        self.assertIn("p-1.json holds as well", out)
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
+
+    def test_a_store_from_a_newer_plugin_is_refused_whole(self):
+        """The one thing a version marker can do, and the only moment it can do it. Whole
+        and not per file, because the marker is the store's: a plugin that does not speak
+        the format cannot know which of these files it would be misreading."""
+        self.ok("plugin", "plans", "create", "a job")
+        (self._dir() / "_meta.json").write_text(json.dumps({"format": 99}))
+        code, _, err = self.sb("plugin", "plans", "list")
+        self.assertEqual(code, 1)
+        self.assertIn("was written by a newer plans plugin", err)
+        self.assertIn("will overwrite", err)
 
     def test_a_refusal_reaches_a_machine_reader_too(self):
         """sb prints `data` under `--json` and not `human`, so a reason that lives only in
@@ -344,16 +415,17 @@ class PlansTest(PlansSandbox):
 
     def test_the_state_lock_is_held_while_a_command_writes(self):
         """Two commands touching different steps are safe because each reads, changes and
-        writes with the lock held — so the whole-file rewrite cannot lose the other's
-        write. Asserted at the write, on a fresh fd, which conflicts with sb's own even
-        inside this process."""
+        writes with the lock held — one plan per file narrows what a write touches, but the
+        lock is what makes two commands safe and it is still the whole state dir's.
+        Asserted at the write of a plan file, on a fresh fd, which conflicts with sb's own
+        even inside this process."""
         held, real = [], os.replace
 
         def watched(src, dst):
             # Watched at `os.replace` rather than at the plugin's own `_write`: sb imports
             # a plugin afresh on every invocation, so a patch on the module object is
             # already stale by the time the command under test runs.
-            if str(dst).endswith("plans.json"):
+            if re.fullmatch(r"p-\d+\.json", Path(dst).name):
                 held.append(_held(self._dir() / ".lock"))
             real(src, dst)
 
@@ -363,6 +435,108 @@ class PlansTest(PlansSandbox):
         self.assertEqual(held, [True, True])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")],
                          ["p-1", "p-2"])
+
+
+class MigrationTest(PlansSandbox):
+    """The one-time move from a single `plans.json` to one file per plan.
+
+    Three things have to survive it and one has to stop: every plan and its changelog come
+    across untouched, the two counters come across, the old file is kept rather than
+    deleted — and a store that has already moved is never moved again, however many old
+    files somebody drops back beside it.
+
+    Unproven here: two processes racing the migration. It runs under the state lock sb
+    already holds for every plans command, and both would write the same bytes from the
+    same source, but nothing in this suite provokes the race.
+    """
+
+    LEGACY = {"format": 1, "next_plan": 12, "next_step": 61, "plans": [
+        {"id": "p-2", "title": "an old plan", "workspace": "ws", "created_at": 1,
+         "created_by": "lead", "steps": [{"id": "s-3", "name": "do it",
+                                          "progress": "open"}],
+         "notes": [], "changelog": [{"at": 1, "by": "lead", "action": "created",
+                                     "reason": "because", "detail": None}]},
+        {"id": "p-11", "title": "a newer one", "workspace": "ws", "created_at": 2,
+         "created_by": "lead", "steps": [{"id": "s-60", "name": "and this",
+                                          "progress": "done"}],
+         "notes": [], "changelog": [{"at": 2, "by": "lead", "action": "created",
+                                     "reason": None, "detail": "x"},
+                                    {"at": 3, "by": "worker", "action": "ticked",
+                                     "reason": "landed", "detail": "s-60"}]}]}
+
+    def legacy(self, doc=None) -> Path:
+        self._dir().mkdir(parents=True, exist_ok=True)
+        f = self._dir() / "plans.json"
+        f.write_text(json.dumps(doc if doc is not None else self.LEGACY, indent=2))
+        return f
+
+    def test_an_old_store_moves_across_whole_and_the_old_file_is_kept(self):
+        self.legacy()
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
+                         ["p-2", "p-11"])
+        self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
+        # Every plan, and every changelog entry in it, exactly as it was. The records are
+        # the reason any of this is careful, so they are compared whole and not counted.
+        for was in self.LEGACY["plans"]:
+            self.assertEqual(json.loads(
+                self._file(was["id"]).read_text())["changelog"], was["changelog"])
+            self.assertEqual(json.loads(self._file(was["id"]).read_text()), was)
+        # Moved aside, never deleted: records are kept, and a migration is exactly the
+        # moment somebody would want the file back.
+        self.assertEqual(json.loads((self._dir() / "plans.json.migrated").read_text()),
+                         self.LEGACY)
+
+    def test_the_counters_come_across_and_are_not_recomputed_downwards(self):
+        """`next_plan` is 12 with the highest plan at p-11, and `next_step` is 61 with the
+        highest step at s-60 — ids are never reused, so a migration that recomputed them
+        off what is present would be free to hand out one that a deleted plan once had."""
+        self.legacy()
+        self.assertEqual(self.data("plugin", "plans", "create", "a fresh one")["id"],
+                         "p-12")
+        self.assertEqual(json.loads((self._dir() / "_meta.json").read_text())["format"], 2)
+        made = self.data("plugin", "plans", "add-step", "p-12", "next",
+                         "--reason", "because")
+        self.assertEqual(made["step"]["id"], "s-61")
+
+    def test_a_store_that_already_moved_is_never_moved_again(self):
+        """Idempotence, and the shape of it that actually happens: somebody restores an old
+        `plans.json` from a backup next to a store that has already split. Merging it would
+        overwrite plans that have moved on since; the split store is the one that is live.
+        """
+        self.legacy()
+        self.ok("plugin", "plans", "list", "--all")
+        self.ok("plugin", "plans", "tick", "s-3", "--reason", "done now")
+        after = self._file("p-2").read_text()
+        self.legacy()                   # the old file, back again
+        self.ok("plugin", "plans", "list", "--all")
+        self.assertEqual(self._file("p-2").read_text(), after)
+        self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
+
+    def test_a_store_that_moved_leaves_an_older_plugin_something_it_refuses(self):
+        """Without this there is no `plans.json` at all, and a plugin from before the split
+        reads a store full of plans as an empty repo and writes a second one beside it.
+        What it finds instead is a format it does not speak, which is the one thing a
+        version marker can do."""
+        self.legacy()
+        self.ok("plugin", "plans", "list", "--all")
+        tomb = json.loads((self._dir() / "plans.json").read_text())
+        self.assertEqual(tomb["format"], 2)
+        self.assertNotIn("plans", tomb)
+        # And this plugin reads its own tombstone as what it is, not as a store to move.
+        self.ok("plugin", "plans", "list", "--all")
+        self.assertEqual([f.name for f in self._files()], ["p-2.json", "p-11.json"])
+
+    def test_an_old_store_that_cannot_be_split_is_refused_rather_than_half_moved(self):
+        """Two plans claiming one id would collapse into one filename and one of them would
+        be gone. Half a store in each format is the one outcome worth failing loudly for,
+        so the migration refuses and the old file is left exactly where it is."""
+        self.legacy({"format": 1, "plans": [{"id": "p-1"}, {"id": "1"}]})
+        code, _, err = self.sb("plugin", "plans", "list")
+        self.assertEqual(code, 1)
+        self.assertIn("holds two plans called p-1", err)
+        self.assertIn("will overwrite", err)
+        self.assertEqual(self._files(), [])
+        self.assertTrue((self._dir() / "plans.json").exists())
 
 
 class StepsTest(PlansSandbox):
@@ -612,7 +786,7 @@ class StepsTest(PlansSandbox):
         # here, so a bare `1` written by hand is the edge it names rather than a new one.
         doc = self._doc()
         doc["plans"][0]["steps"][2]["deps"] = ["1"]
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
         self.ok("plugin", "plans", "dep", "s-3", "--after", "s-1")
         self.assertEqual(self.step("s-3")["deps"], ["1"])
 
@@ -995,7 +1169,7 @@ class CatalogueTest(PlansSandbox):
         read on the way IN, and the state file is byte-identical after a refusal."""
         self.ok("plugin", "plans", "create", "a job")
         self.data("plugin", "plans", "name-step", "p-1", "merge")
-        before = self._file().read_bytes()
+        before = self._raw()
         (self.catalogue("library") / "broken.json").write_text("{nope")
 
         # p-1 names a definition, so every verb that would render it has to resolve one.
@@ -1010,7 +1184,7 @@ class CatalogueTest(PlansSandbox):
                 # And the reason reaches a machine reader, which an escaped exception did
                 # not — PR4 and PR8 shell out with --json and would get nothing at all.
                 self.assertIn("not readable JSON", json.loads(out)["data"]["error"])
-                self.assertEqual(self._file().read_bytes(), before)
+                self.assertEqual(self._raw(), before)
 
         # A broken TEMPLATE file is narrower again: it reaches the two verbs that read that
         # directory and nothing else.
@@ -1023,7 +1197,7 @@ class CatalogueTest(PlansSandbox):
                 self.assertEqual(code, 1)
                 self.assertIn("where a definition should be",
                               json.loads(out)["data"]["error"])
-                self.assertEqual(self._file().read_bytes(), before)
+                self.assertEqual(self._raw(), before)
 
     def test_a_broken_catalogue_file_leaves_a_plan_that_named_nothing_alone(self):
         """Refusing the verbs that resolve a definition is right; refusing `show` on a plan
@@ -1147,7 +1321,7 @@ class LivenessTest(PlansSandbox):
         step = self._doc()["plans"][0]["steps"][0]
         self.assertEqual(step["owner"], "w1")
         self.assertNotIn("owner_status", step)
-        self.assertNotIn("dead", self._file().read_text())
+        self.assertNotIn("dead", self._raw())
 
     def test_a_plan_goes_dormant_when_its_agents_close_and_comes_back_when_one_returns(self):
         """Every agent on the worktree closed is dormant, and dormant is a state a plan
@@ -1169,7 +1343,7 @@ class LivenessTest(PlansSandbox):
         # None of the three readings left a mark: the record says what it always said.
         self.assertNotIn("condition", self._doc()["plans"][0])
         for word in ("dormant", "live"):
-            self.assertNotIn(f'"{word}"', self._file().read_text())
+            self.assertNotIn(f'"{word}"', self._raw())
 
     def test_a_workspace_with_no_agents_at_all_is_not_dormant(self):
         """No agent is not the same fact as every agent closed, and `any()` over an empty
@@ -1197,7 +1371,7 @@ class LivenessTest(PlansSandbox):
         self.ok("plugin", "plans", "create", "a job", "--step", "write it")
         doc = self._doc()
         doc["plans"][0]["checkout"] = str(root / "spaces" / "co")
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
 
         shutil.rmtree(root / "spaces" / "co")           # the worktree itself was deleted
         self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"],
@@ -1218,7 +1392,7 @@ class LivenessTest(PlansSandbox):
         self.ok("plugin", "plans", "create", "a job", "--step", "write it")
         doc = self._doc()
         doc["plans"][0]["checkout"] = str(gone)
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
         self.assertEqual(self.data("plugin", "plans", "show", "p-1")["condition"], "live")
 
         shutil.rmtree(gone)
@@ -1231,7 +1405,7 @@ class LivenessTest(PlansSandbox):
                          "finished")
         # Neither word is in the file, and the plan is still there to be read: a dormant or
         # dead plan is never deleted.
-        self.assertNotIn("abandoned", self._file().read_text())
+        self.assertNotIn("abandoned", self._raw())
         self.assertEqual(self._doc()["plans"][0]["id"], "p-1")
 
     def test_an_sb_that_cannot_be_reached_is_unknown_and_never_abandoned(self):
@@ -1303,7 +1477,7 @@ class LivenessTest(PlansSandbox):
         doc = self._doc()
         doc["plans"][0]["steps"][0]["name"] = forged
         doc["plans"][0]["steps"][0]["owner"] = "w1\nx"
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("\\ns-9", shown)
         self.assertNotIn("\ns-9", shown)
@@ -1329,7 +1503,7 @@ class LivenessTest(PlansSandbox):
 
         doc = self._doc()
         doc["plans"][0]["steps"][0]["name"] = forged
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertFalse([ln for ln in shown.splitlines() if ln.startswith("s-9")])
 
@@ -1395,7 +1569,7 @@ class TriggerTest(PlansSandbox):
         self.assertEqual(json.loads(self.ok("plugin", "plans", "guide", "--json"))
                          ["data"]["guide"].strip(), out.strip())
         # Reads nothing and writes nothing: no state file exists after it runs.
-        self.assertFalse(self._file().exists())
+        self.assertEqual(self._files(), [])
 
     def test_a_fresh_spawn_carries_the_trigger_and_not_the_guide(self):
         """Both halves of the split, in one assertion each. A spawn that carried the guide
@@ -1515,7 +1689,7 @@ class GateTest(PlansSandbox):
 
         self.assertEqual(self.step("s-1")["progress"], "open")
         self.assertNotIn("owner_status", self.step("s-1"))
-        self.assertNotIn("blocked", self._file().read_text())
+        self.assertNotIn("blocked", self._raw())
 
     def test_a_gate_is_skipped_with_a_reason_and_no_verb_clears_one(self):
         """The only two ways past a gate, and the absence of a third. A trivially small
@@ -1569,7 +1743,7 @@ class GateTest(PlansSandbox):
         # first: `show` draws it as the escape it is, on the one line it was entitled to.
         doc = self._doc()
         doc["plans"][0]["steps"][0]["gate"] = "he approves\ns-9   done      merged"
-        self._file().write_text(json.dumps(doc))
+        self._save(doc)
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("\\ns-9", shown)
         self.assertNotIn("\ns-9   done", shown)
@@ -1652,7 +1826,7 @@ class GateTest(PlansSandbox):
                 "sb plugin plans library",
                 "sb plugin plans template list",
                 # The file, since past `create` the plan is edited rather than commanded.
-                "agentflow/plugins/plans/plans.json",
+                "agentflow/plugins/plans/p-<id>.json",
                 # The three things hand-editing can silently lose.
                 "APPEND a changelog entry",
                 "NEVER drop or rewrite an entry",
@@ -1670,7 +1844,7 @@ class GateTest(PlansSandbox):
                      "sb presets design-gate"):
             self.assertNotIn(gone, said)
         # Still reads nothing and writes nothing.
-        self.assertFalse(self._file().exists())
+        self.assertEqual(self._files(), [])
 
 
 def _plans_commands() -> list[str]:

@@ -1143,8 +1143,11 @@ class PlanBlockTest(unittest.TestCase):
         self.state.mkdir(parents=True)
 
     def write(self, *plans):
-        (self.state / "plans.json").write_text(json.dumps(
-            {"format": 1, "next_plan": 9, "next_step": 9, "plans": list(plans)}))
+        """The store as it is on disk: one file per plan, and the counters beside them."""
+        for plan in plans:
+            (self.state / f"{plan['id']}.json").write_text(json.dumps(plan))
+        (self.state / "_meta.json").write_text(json.dumps(
+            {"format": 2, "next_plan": 9, "next_step": 9}))
 
     def plan(self, pid, workspace, title, steps, checkout=None):
         return {"id": pid, "title": title, "workspace": workspace,
@@ -1433,6 +1436,17 @@ class PlanBlockTest(unittest.TestCase):
         (self.state / "plans.json").write_text("{ not json")
         with self.hooks():
             self.assertEqual(board.section_extras([agent("lead")]), [])
+
+    def test_one_unreadable_plan_does_not_stop_the_board_drawing_the_others(self):
+        """The reason plans are one file each. Before it, a malformed store blanked the
+        whole section, so one bad file hid every good one — on the screen a human looks at
+        to find out that something has gone wrong."""
+        self.write(self.plan("p-1", "api", "the good one",
+                             [{"id": "s-1", "name": "x", "progress": "open"}]))
+        (self.state / "p-2.json").write_text("{ not json")
+        with self.hooks():
+            sections = board.section_extras([agent("lead")])
+        self.assertIn("the good one", " ".join(sections[0][1]))
 
 
 class SeamWindowTest(unittest.TestCase):

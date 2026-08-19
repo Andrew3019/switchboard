@@ -261,7 +261,7 @@ Everything a row is drawn from is escaped on the way out (`_flat`), and every ve
 a control character in the text it is handed. A row on a board is a LINE, so a step called
 "write it\\ns-9  done  merged" would otherwise draw a step nobody added — and the same
 newline in an owner draws a status nobody read. Refusing at the door is the good error
-message; escaping at the render is what also covers a hand-edited `plans.json`, a name in
+message; escaping at the render is what also covers a hand-edited plan file, a name in
 the library and the refusals themselves, none of which came through a verb. An id is the
 sharpest of those: a refusal is what HAPPENS when an id fails to validate, so the message
 is built out of the one value nothing has vetted.
@@ -278,7 +278,7 @@ whole record of how a job actually ran: a plan gets reshaped as it goes, and wit
 the file keeps only the final shape. `_write` refuses a document whose changelog is shorter
 than the one that was read, or whose existing entries have changed — so a bug in a future
 verb that rewrites a plan wholesale fails loudly here instead of quietly losing the story.
-It cannot police a raw editor write of `plans.json`; nothing can. The answer is not that
+It cannot police a raw editor write of a plan file; nothing can. The answer is not that
 every mutation goes through a command — the guide sanctions hand-editing — but that the one
 writer editing by hand appends the entry itself, the way a command would, and every command's
 own write is held to the check above.
@@ -307,10 +307,15 @@ VERSION = "1.0.0"
 SCOPE = "repo"
 LOCK = True
 
-# The file, and the shape written into it. `format` is this plugin's own; sb neither reads
-# it nor has an opinion about it.
+# One plan is one file — `p-<n>.json`, flat in the state dir, beside a small `_meta.json`
+# holding the counters and the format marker. `FILE` is the single file this store used to
+# be: kept only so `_read` can move an old one across once, and so a tombstone is left in
+# its place that a plugin from before the split refuses instead of misreading. `format` is
+# this plugin's own; sb neither reads it nor has an opinion about it.
 FILE = "plans.json"
-FORMAT = 1
+MIGRATED = "plans.json.migrated"
+META = "_meta.json"
+FORMAT = 2
 
 # What `create`, `tick` and `skip` write into a step's `progress`. Not an enum — see the
 # module docstring. These three are what this plugin's own verbs write; a lead that types
@@ -555,7 +560,7 @@ EDITING IT
   The plan is a JSON file, and past the commands above you edit it the way you edit any
   file — steps, owners, gates, deps, order, progress, all of it, in an editor:
 
-      $(git rev-parse --git-common-dir)/agentflow/plugins/plans/plans.json
+      $(git rev-parse --git-common-dir)/agentflow/plugins/plans/p-<id>.json
 
   The file itself is the shape to write against. `sb plugin plans show <plan> --json` is
   the same plan with the library resolved in, so what it prints for a `def` step is not
@@ -648,13 +653,15 @@ def ls(ctx, args) -> Result:
     A plan with no `checkout` — one written by hand — is only ever shown by `--all`, which
     is the honest answer to "is this here?" when the record does not say.
     """
-    plans = _read(ctx.state_dir)[0]["plans"]
-    here = _here(ctx)
+    doc = _read(ctx.state_dir)[0]
+    plans, here = doc["plans"], _here(ctx)
     if not args.all:
         plans = [p for p in plans if _same(p.get("checkout"), here)]
     if not plans:
-        return Result(human="(no plans on this worktree)" if not args.all
-                            else "(no plans in this repo)", data=[])
+        return Result(human="\n".join(_broke(doc) + ["(no plans on this worktree)"
+                                                     if not args.all
+                                                     else "(no plans in this repo)"]),
+                      data=[])
     # Resolved even though the list does not print step names: `data` is what PR4 and PR8
     # read, and a machine reader handed a step whose name is null has been handed a puzzle.
     # Only if some plan here holds a link, though — a repo whose plans never named one is
@@ -667,7 +674,21 @@ def ls(ctx, args) -> Result:
     # per row.
     live = _Live(ctx)
     views = [_viewed(_shown(p, lib), live) for p in plans]
-    return Result(human="\n".join(_line(p, workspace=args.all) for p in views), data=views)
+    return Result(human="\n".join(_broke(doc) + [_line(p, workspace=args.all)
+                                                 for p in views]), data=views)
+
+
+def _broke(doc: dict) -> str:
+    """The plans that did not load, one line each, above the ones that did.
+
+    One plan per file means a malformed one costs only itself — that is the point of the
+    layout. But "costs only itself" and "is never mentioned" are different things, and the
+    second is how a plan quietly stops existing: every verb would carry on, the board would
+    draw the rest, and nobody would be told which file to go and fix. `data` is left alone,
+    being the list of plans a machine reader asked for; this is the line for the terminal.
+    """
+    return [f"! {b['id']} did not load, and nothing here will overwrite it — {b['why']}"
+            for b in doc.get("broken") or ()]
 
 
 def show(ctx, args) -> Result:
@@ -1317,7 +1338,7 @@ def _flat(text: Any) -> str:
     """Any stored text, as one line. The other half of `_cap`, and the load-bearing half.
 
     Every renderer in this file goes through this, including for text `_cap` never saw: a
-    `plans.json` somebody edited by hand, and a `name` out of a definition in the library.
+    a plan file somebody edited by hand, and a `name` out of a definition in the library.
     Escaped rather than stripped, so what is there is still visible — a forged row shows up
     as the `\\n` it actually is, on the one line it was always entitled to.
     """
@@ -1469,8 +1490,8 @@ def _catalogue(which: str) -> dict:
     says the system must work with the catalogue almost bare, and a plugin that refused to
     run without one would be a catalogue nobody could ship without.
 
-    A file that IS there and is not readable is refused, with its path, exactly as
-    `plans.json` is. Silently skipping it would leave a plan resolving a link to nothing
+    A file that IS there and is not readable is refused, with its path, exactly as a
+    plan's own file is. Silently skipping it would leave a plan resolving a link to nothing
     with no sign that the answer came from a typo in a JSON file.
     """
     d = Path(__file__).resolve().parent / which
@@ -1647,52 +1668,181 @@ def _log(plan: dict, who: str, action: str, reason: Optional[str], detail: str =
 
 
 def _read(d: Path) -> tuple[dict, dict]:
-    """The whole file and its seal — the changelogs as they were, for `_write` to check.
+    """Every plan file in the directory, assembled, and the seal `_write` checks against.
 
-    Never raises for a file that is not there yet. The two counters are recomputed as
-    floors over every id present, so a hand-edited file that lost one still cannot mint an
-    id that has already been written down somewhere else.
+    Never raises for a directory that is not there yet. The two counters are recomputed as
+    floors over every id present — including the ids of files that did not load — so a
+    store that lost its `_meta.json` still cannot mint an id that has already been written
+    down somewhere else.
 
-    A file that is there and unreadable is a REFUSAL, naming the path, rather than a fresh
-    empty document: starting over would silently replace every plan in the repo on the next
-    `create`, and the records are the whole point of keeping them. The failing verb stops,
-    nothing is written, and a human fixes or moves the file.
+    One plan is one file, and that is the whole point: an unreadable `p-7.json` costs p-7
+    and nothing else. It is left exactly where it is and listed in `doc["broken"]` for
+    whoever is drawing; the other plans load and the board still shows them. A board that
+    stopped drawing because one file was malformed would hide the nine things that are
+    fine, and a verb that refused every plan because of one would too.
 
-    Unreadable is checked all the way down, not just at the top level, and the reason is
-    the seal rather than tidiness: it is keyed on the plan id, so two plans sharing an id —
-    or two with no id at all — collapse into one entry and `_write`'s drop check passes
-    over the plan whose changelog is no longer in it. Every shape that would break that
-    assumption is refused here, where nothing has been written yet, which is cheaper than
-    a `_write` that has to be right about a file it was already lied to about.
+    Nothing here ever overwrites a file it could not read: a plan that did not load is not
+    in `doc["plans"]`, so `_write` has nothing to write back over it, and the counters know
+    its id is taken from the filename alone.
+
+    The two invariants that do not fit in one file are checked here rather than in
+    `_check`: a plan lives in the file its id names, and a step id is unique across the
+    whole store. The second is a UX contract — `tick s-7` names no plan — so it survives
+    the split by being checked over the assembled set, which is cheap over ten files.
     """
-    f = d / FILE
-    if f.exists():
+    _migrate(d)
+    meta = _meta(d)
+    plans: list = []
+    broken: list = []
+    seen: dict[int, Path] = {}
+    steps_seen: dict[int, Path] = {}
+    for f in _files(d):
         try:
-            doc = json.loads(f.read_text(encoding="utf-8"))
-        except (ValueError, UnicodeDecodeError) as e:
-            raise ValueError(f"{f} is not readable JSON ({e}); nothing here will overwrite "
-                             f"it. Fix it or move it aside.") from e
-        if not isinstance(doc, dict) or not isinstance(doc.get("plans", []), list):
-            raise _refuse(f, "is not a plans file — a JSON object with a 'plans' list")
-        if _counter(doc.get("format", FORMAT)) > FORMAT:
-            # The one thing a version marker can do, and the only moment it can do it: a
-            # file from a newer plans plugin is refused rather than written back in this
-            # one's shape. Stamped and never checked, it would be a field that only ever
-            # documented the damage afterwards.
-            raise _refuse(f, f"was written by a newer plans plugin (format "
-                             f"{doc.get('format')}; this one speaks {FORMAT})")
-        _check(f, doc.get("plans") or [])
-    else:
-        doc = {"format": FORMAT, "next_plan": 1, "next_step": 1, "plans": []}
-    doc.setdefault("format", FORMAT)
-    doc.setdefault("plans", [])
-    plans = doc["plans"]
-    doc["next_plan"] = max(_counter(doc.get("next_plan")),
+            plan = _load(f)
+            _check(f, plan)
+            n = _num(_PLAN_ID, plan.get("id"))
+            if n != _fnum(f):
+                raise _refuse(f, f"holds p-{n}, and a plan lives in the file its id names")
+            if n in seen:
+                raise _refuse(f, f"holds p-{n}, which {seen[n].name} holds as well, and "
+                                 f"ids are never reused")
+            mine = [_num(_STEP_ID, s.get("id")) for s in plan.get("steps") or ()]
+            twin = next((m for m in mine if m in steps_seen), None)
+            if twin is not None:
+                raise _refuse(f, f"holds an s-{twin} that {steps_seen[twin].name} holds as "
+                                 f"well, and ids are never reused")
+        except ValueError as e:
+            broken.append({"id": f"p-{_fnum(f)}", "file": str(f), "why": str(e)})
+            continue
+        seen[n] = f
+        for m in mine:
+            steps_seen[m] = f
+        plans.append(plan)
+    doc = {"format": FORMAT, "plans": plans, "broken": broken}
+    doc["next_plan"] = max(_counter(meta.get("next_plan")),
+                           max((_fnum(f) for f in _files(d)), default=0) + 1,
                            _high(_PLAN_ID, (p.get("id") for p in plans)) + 1)
-    doc["next_step"] = max(_counter(doc.get("next_step")),
+    doc["next_step"] = max(_counter(meta.get("next_step")),
                            _high(_STEP_ID, (s.get("id") for p in plans
                                             for s in (p.get("steps") or ()))) + 1)
     return doc, _seal(doc)
+
+
+def _files(d: Path) -> list[Path]:
+    """The plan files, in id order. The one answer to "what plans exist".
+
+    Sorted by number rather than by name, so the store is read in the order the plans were
+    minted and `p-10` does not land between `p-1` and `p-2`. The glob is deliberately
+    narrow — anything in this directory that is not `p-<digits>.json` (the lock, the meta
+    file, a tmp file, an old store moved aside) is not a plan and is not read as one.
+    """
+    try:
+        found = list(d.glob("p-*.json"))
+    except OSError:
+        return []
+    return sorted((f for f in found if _fnum(f)), key=_fnum)
+
+
+def _fnum(f: Path) -> int:
+    """The plan number a filename claims, or 0 for a name that claims none."""
+    return _num(_PLAN_ID, f.name[:-len(".json")]) or 0
+
+
+def _load(f: Path) -> dict:
+    """One plan file, parsed. Raises the refusal; the caller decides what it costs."""
+    try:
+        plan = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        raise ValueError(f"{f} is not readable JSON ({e}); nothing here will overwrite "
+                         f"it. Fix it or move it aside.") from e
+    if not isinstance(plan, dict):
+        raise _refuse(f, f"holds a {type(plan).__name__} where a plan should be")
+    return plan
+
+
+def _meta(d: Path) -> dict:
+    """The counters sidecar, or an empty dict when there is nothing usable there.
+
+    Missing or mangled is not a refusal, because it is not a record: everything in it is
+    derivable from the plan files themselves, and `_read` takes the higher of what it says
+    and what is actually on disk. The one thing it can refuse is a store from a newer
+    plugin — the version marker lives here now that no single file carries it.
+    """
+    f = d / META
+    try:
+        m = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    if not isinstance(m, dict):
+        return {}
+    if _counter(m.get("format", FORMAT)) > FORMAT:
+        raise _refuse(f, f"was written by a newer plans plugin (format "
+                         f"{m.get('format')}; this one speaks {FORMAT})")
+    return m
+
+
+def _migrate(d: Path) -> None:
+    """The one-time move from a single `plans.json` to one file per plan.
+
+    Eager and whole: every plan is written out, the counters are carried across, and only
+    then is the old file moved aside — to `plans.json.migrated`, not deleted, because
+    records are kept. Idempotent by the check at the top: an old file next to a store that
+    is already split is not moved again, so two processes racing this write the same bytes
+    from the same source and whichever renames second finds it gone and carries on.
+
+    A legacy file that will not parse, or that holds a shape the split cannot represent —
+    two plans claiming one id would collapse into one filename — is REFUSED rather than
+    half-moved. Half a store in each format is the one outcome worth failing loudly to
+    avoid, and it is the same refusal the old `_read` gave for the same file.
+    """
+    legacy = d / FILE
+    if not legacy.exists() or _files(d) or (d / META).exists():
+        return
+    try:
+        doc = json.loads(legacy.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        raise ValueError(f"{legacy} is not readable JSON ({e}); nothing here will "
+                         f"overwrite it. Fix it or move it aside.") from e
+    if not isinstance(doc, dict):
+        raise _refuse(legacy, "is not a plans file — a JSON object with a 'plans' list")
+    if "plans" not in doc:
+        return                          # the tombstone below, or somebody else's file
+    if not isinstance(doc["plans"], list):
+        raise _refuse(legacy, "is not a plans file — a JSON object with a 'plans' list")
+    if _counter(doc.get("format", 1)) > FORMAT:
+        raise _refuse(legacy, f"was written by a newer plans plugin (format "
+                              f"{doc.get('format')}; this one speaks {FORMAT})")
+    seen: set[int] = set()
+    steps_seen: set[int] = set()
+    for plan in doc["plans"]:
+        if not isinstance(plan, dict):
+            raise _refuse(legacy, f"holds a {type(plan).__name__} where a plan should be")
+        n = _num(_PLAN_ID, plan.get("id"))
+        if n is None:
+            raise _refuse(legacy, f"holds a plan with no usable id ({plan.get('id')!r})")
+        if n in seen:
+            raise _refuse(legacy, f"holds two plans called p-{n}, and ids are never reused")
+        seen.add(n)
+        _check(legacy, plan)
+        for step in plan.get("steps") or ():
+            m = _num(_STEP_ID, step.get("id"))
+            if m in steps_seen:
+                raise _refuse(legacy, f"holds two steps called s-{m}, and ids are never "
+                                      f"reused")
+            steps_seen.add(m)
+    for plan in doc["plans"]:
+        # The plan as it stands, byte for byte through `json.dumps` — the changelog comes
+        # across whole because nothing here reads it, edits it, or rebuilds it.
+        _atomic(d, f"p-{_num(_PLAN_ID, plan['id'])}.json", _text(plan))
+    _atomic(d, META, _text({
+        "format": FORMAT,
+        "next_plan": max(_counter(doc.get("next_plan")), max(seen, default=0) + 1),
+        "next_step": max(_counter(doc.get("next_step")), max(steps_seen, default=0) + 1)}))
+    try:
+        os.replace(legacy, d / MIGRATED)
+    except OSError:
+        pass                            # another process got there first; same bytes
+    _tomb(d)
 
 
 def _refuse(f: Path, what: str) -> ValueError:
@@ -1706,13 +1856,18 @@ def _refuse(f: Path, what: str) -> ValueError:
                       f"aside.")
 
 
-def _check(f: Path, plans: list) -> None:
-    """Every shape inside `plans` that the rest of this module assumes, checked once.
+def _check(f: Path, plan: dict) -> None:
+    """Every shape inside ONE plan that the rest of this module assumes, checked once.
 
-    Plan ids are checked for BEING there and for being distinct, because both are load
-    bearing: the seal is keyed on the id, and `_write` decides a plan was dropped by
-    looking its id up. Compared as numbers, so `p-1` and a bare `1` are the one plan they
-    name rather than two rows that pass a string comparison.
+    Per file, which is what makes a broken plan cost only itself: this raises about the
+    one plan it was handed and `_read` drops that file alone. What it cannot see from
+    here — a twin plan id, a step id another file also claims — is checked by `_read`
+    over the assembled store, because neither question can be answered from one file.
+
+    The plan id is checked for BEING there and for being a number, because both are load
+    bearing: the seal is keyed on it, `_write` decides a plan was dropped by looking it up,
+    and the filename is derived from it. Compared as numbers, so `p-1` and a bare `1` are
+    the one plan they name rather than two rows that pass a string comparison.
 
     Every container a verb APPENDS to is checked for being a list, for the same reason the
     ids are: not tidiness, but that the code after this point assumes it. A `notes` that is
@@ -1721,45 +1876,37 @@ def _check(f: Path, plans: list) -> None:
     substring test, so `s-1` reads as already present in `"s-10"` and the edge is silently
     dropped. Refusing here is refusing before anything is written.
     """
-    seen: set[int] = set()
+    n = _num(_PLAN_ID, plan.get("id"))
+    if n is None:
+        raise _refuse(f, f"holds a plan with no usable id ({plan.get('id')!r})")
+    steps = plan.get("steps", [])
+    if not isinstance(steps, list) or any(not isinstance(s, dict) for s in steps):
+        raise _refuse(f, f"has a p-{n} whose steps are not a list of steps")
     steps_seen: set[int] = set()
-    for plan in plans:
-        if not isinstance(plan, dict):
-            raise _refuse(f, f"holds a {type(plan).__name__} where a plan should be")
-        n = _num(_PLAN_ID, plan.get("id"))
-        if n is None:
-            raise _refuse(f, f"holds a plan with no usable id ({plan.get('id')!r})")
-        if n in seen:
-            raise _refuse(f, f"holds two plans called p-{n}, and ids are never reused")
-        seen.add(n)
-        steps = plan.get("steps", [])
-        if not isinstance(steps, list) or any(not isinstance(s, dict) for s in steps):
-            raise _refuse(f, f"has a p-{n} whose steps are not a list of steps")
-        for step in steps:
-            # Checked across the whole file, not per plan, because there is one step
-            # counter for the whole file — and because everything after PR1 addresses a
-            # step by its number alone. A twin `s-1` would take a tick meant for the other
-            # one and neither would say so; a step with no id cannot be ticked at all.
-            m = _num(_STEP_ID, step.get("id"))
-            if m is None:
-                raise _refuse(f, f"has a step in p-{n} with no usable id "
-                                 f"({step.get('id')!r})")
-            if m in steps_seen:
-                raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
-            steps_seen.add(m)
-            for key in ("deps", "notes", "checkpoints"):
-                if not isinstance(step.get(key, []), list):
-                    raise _refuse(f, f"has an s-{m} whose {key} are not a list")
-            # The two fields that are looked up rather than merely rendered: `def` keys the
-            # library and `obliged_by` names a step. A dict in either renders as itself and
-            # resolves to nothing — `s-1 open {'oops': 1} — no such definition` is not a
-            # message anybody can act on, and this is where the file gets refused instead.
-            for key in ("def", "obliged_by"):
-                if step.get(key) is not None and not isinstance(step.get(key), str):
-                    raise _refuse(f, f"has an s-{m} whose {key} is not a name")
-        for key in ("changelog", "notes"):
-            if not isinstance(plan.get(key, []), list):
-                raise _refuse(f, f"has a p-{n} whose {key} is not a list")
+    for step in steps:
+        # A twin `s-1` would take a tick meant for the other one and neither would say so;
+        # a step with no id cannot be ticked at all. Everything past PR1 addresses a step
+        # by its number alone, which is why this is checked and not merely rendered.
+        m = _num(_STEP_ID, step.get("id"))
+        if m is None:
+            raise _refuse(f, f"has a step in p-{n} with no usable id "
+                             f"({step.get('id')!r})")
+        if m in steps_seen:
+            raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
+        steps_seen.add(m)
+        for key in ("deps", "notes", "checkpoints"):
+            if not isinstance(step.get(key, []), list):
+                raise _refuse(f, f"has an s-{m} whose {key} are not a list")
+        # The two fields that are looked up rather than merely rendered: `def` keys the
+        # library and `obliged_by` names a step. A dict in either renders as itself and
+        # resolves to nothing — `s-1 open {'oops': 1} — no such definition` is not a
+        # message anybody can act on, and this is where the file gets refused instead.
+        for key in ("def", "obliged_by"):
+            if step.get(key) is not None and not isinstance(step.get(key), str):
+                raise _refuse(f, f"has an s-{m} whose {key} is not a name")
+    for key in ("changelog", "notes"):
+        if not isinstance(plan.get(key, []), list):
+            raise _refuse(f, f"has a p-{n} whose {key} is not a list")
 
 
 def _counter(given: Any) -> int:
@@ -1775,23 +1922,73 @@ def _counter(given: Any) -> int:
         return 1
 
 
+def _text(obj: Any) -> str:
+    """One file's worth of JSON. The single speller, so `_seal` and `_write` agree.
+
+    They have to agree byte for byte: `_write` decides a plan was not touched by comparing
+    what it would write against what `_read` saw, and a second speller would make every
+    plan look dirty and rewrite the whole store on every tick — the thing this layout
+    exists to stop.
+    """
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
 def _seal(doc: dict) -> dict:
-    """Every plan's changelog as it stands, keyed by plan NUMBER. Compared on the way out.
+    """Every loaded plan as it stands, keyed by plan NUMBER. Compared on the way out.
+
+    Two things per plan, for two different jobs: the changelog, which `_write` refuses to
+    let shrink, and the whole plan as text, which `_write` compares to decide whether this
+    file needs writing at all. A plan nobody touched is a file nobody rewrites.
 
     The number rather than the string, so that `p-1` and a bare `1` cannot seal one plan
-    and be looked up as another. `_read` has already refused a file where two plans share
+    and be looked up as another. `_read` has already dropped a file where two plans share
     one, which is what makes a dict safe to key on it at all.
     """
-    return {_num(_PLAN_ID, p.get("id")): json.dumps(p.get("changelog") or [], sort_keys=True)
+    return {_num(_PLAN_ID, p.get("id")):
+            {"log": json.dumps(p.get("changelog") or [], sort_keys=True), "raw": _text(p)}
             for p in doc["plans"]}
 
 
-def _write(d: Path, doc: dict, seal: dict) -> None:
-    """Whole-file rewrite via tmp + `os.replace`, under the lock sb is already holding.
+def _atomic(d: Path, name: str, text: str) -> None:
+    """One file, written via tmp + `os.replace`, under the lock sb is already holding.
 
     `os.replace` is atomic within a directory, so a reader sees the old file or the new one
-    and never half of one — which matters even though sb serialises the writers, because
-    `plans.json` is a plain file somebody may well `cat` while a job is running.
+    and never half of one — which matters even though sb serialises the writers, because a
+    plan is a plain file somebody may well `cat` while a job is running. The tmp name is a
+    dotfile so that a crash between the two steps cannot leave something the plan glob
+    reads as a plan.
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".{name}.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, d / name)
+
+
+def _tomb(d: Path) -> None:
+    """Leave a `plans.json` an OLDER plans plugin refuses instead of one it misreads.
+
+    Without this, a plugin from before the split finds no `plans.json` in a store full of
+    plans, concludes the repo has none, and writes a fresh single-file store next to them —
+    two stores, each invisible to the other. What it finds instead is a file stamped with a
+    format it does not speak, which is the one thing a version marker can do.
+    """
+    if not (d / FILE).exists():
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / FILE).write_text(_text({
+                "format": FORMAT,
+                "moved": f"plans are one file each now — see p-<n>.json beside this one"}),
+                encoding="utf-8")
+        except OSError:
+            pass                        # a marker, not a record; never worth a failed verb
+
+
+def _write(d: Path, doc: dict, seal: dict) -> None:
+    """The plans this command actually touched, each to its own file. Nothing else.
+
+    A tick on one step of one plan writes one plan's file, and the other nine are not
+    opened — which is also what keeps a plan that failed to load safe, since it is not in
+    `doc["plans"]` and so is never a file this writes.
 
     The append-only check is here, at the single write, rather than trusted to each verb.
     A command changes the steps it names; if one ever rewrites a plan wholesale it will
@@ -1800,32 +1997,50 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
     Both halves of "append-only" are checked, because dropping the plan is the easier way
     to lose a changelog than editing one: a plan that was read and is not being written
     back has lost every entry it had, and the design says records are kept and never
-    erased — cleanup means dropping out of the UI.
+    erased — cleanup means dropping out of the UI. Per file now, which changes nothing
+    about the rule: a file IS one plan, so the seal is keyed on the file it came from.
 
     What `os.replace` buys is readers, not crashes: a power loss between the rename and
     the blocks reaching disk can still cost the last write, and there is no `fsync` here.
     That is `todo`'s trade taken deliberately, and the cost is one command's worth of
-    changelog, not the file.
+    changelog, not the store.
     """
-    here = {_num(_PLAN_ID, plan.get("id")) for plan in doc["plans"]}
+    here: dict[int, dict] = {}
+    for plan in doc["plans"]:
+        n = _num(_PLAN_ID, plan.get("id"))
+        if n is None:
+            raise ValueError(f"this write would have filed a plan with no usable id "
+                             f"({plan.get('id')!r}); a plan is addressed by its number")
+        if n in here:
+            raise ValueError(f"this write would have put two plans in p-{n}.json, and one "
+                             f"of them would be gone; ids are never reused")
+        here[n] = plan
     gone = [n for n in seal if n not in here]
     if gone:
         raise ValueError(f"this write would have dropped "
                          f"{', '.join(f'p-{n}' for n in sorted(gone))} and its changelog; "
                          f"plans are kept, never erased")
-    for plan in doc["plans"]:
-        n = _num(_PLAN_ID, plan.get("id"))
+    for n, plan in sorted(here.items()):
         was = seal.get(n)
-        if was is None:
-            continue                    # a plan created by this command; nothing to keep
-        old = json.loads(was)
-        now = plan.get("changelog") or []
-        if not isinstance(now, list) or now[:len(old)] != old:
-            raise ValueError(f"p-{n}'s changelog is append-only, and this write would have "
-                             f"dropped or rewritten {len(old)} entries")
-    tmp = d / f".{FILE}.tmp"
-    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, d / FILE)
+        if was is not None:
+            old = json.loads(was["log"])
+            now = plan.get("changelog") or []
+            if not isinstance(now, list) or now[:len(old)] != old:
+                raise ValueError(f"p-{n}'s changelog is append-only, and this write would "
+                                 f"have dropped or rewritten {len(old)} entries")
+        body = _text(plan)
+        if was is not None and body == was["raw"]:
+            continue                    # untouched by this command; leave the file alone
+        _atomic(d, f"p-{n}.json", body)
+    meta = _text({"format": FORMAT, "next_plan": _counter(doc.get("next_plan")),
+                  "next_step": _counter(doc.get("next_step"))})
+    try:
+        stale = (d / META).read_text(encoding="utf-8") != meta
+    except OSError:
+        stale = True
+    if stale:
+        _atomic(d, META, meta)
+    _tomb(d)
 
 
 def _here(ctx) -> Path:
@@ -2157,7 +2372,7 @@ def _viewed(shown: dict, live: _Live) -> dict:
 
     This is where "never stored" is actually kept, so it is worth being explicit about the
     one trap in it: `_resolve` hands BACK THE STORED DICT for a step that owns its own
-    words, so annotating a step in place would write an owner's status into `plans.json` on
+    words, so annotating a step in place would write an owner's status into the plan's file on
     the next command that happens to write. Every step is copied again here, and there is
     no path from anything below to `_write` at all.
     """
@@ -2469,6 +2684,10 @@ def _no_such(doc: dict, given: str) -> str:
         return f"'{said}' is not a plan id — they look like p-1"
     # Named rather than merely denied: ids are never reused, so "there is no p-9 yet" and
     # "p-9 was there and is gone" are different things, and only the first can happen.
-    high = _high(_PLAN_ID, (p.get("id") for p in doc["plans"]))
+    # Counting the files that did not load as well: "the highest is p-8" while a broken
+    # `p-9.json` sits in the directory is the plugin telling a human the opposite of what
+    # is on their disk, and p-9 is exactly the plan they are asking about.
+    high = _high(_PLAN_ID, [p.get("id") for p in doc["plans"]]
+                 + [b["id"] for b in doc.get("broken") or ()])
     return (f"no plan {said} — none has been made yet" if not high
             else f"no plan {said} — the highest is p-{high}")

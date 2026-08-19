@@ -13,7 +13,7 @@ worktree being drawn, and those rows already carry `state`, `gone` and `display_
 reconciled once per snapshot by the collector, which is the one process that asks. So
 `_Rows` below is `_Live` with its single question already answered off what was handed in,
 and every derivation on top of it — an owner's status, a plan's condition — is the shared
-one, unchanged and unduplicated. The only thing this file touches is `plans.json` and one
+one, unchanged and unduplicated. The only thing this file touches is the plan files and one
 `os.stat` of a checkout, both of which `_Live` already treats as free.
 
 **A board is a picture and a listing is a listing.** This file used to draw `_line` and
@@ -197,7 +197,7 @@ def _deps(step: dict, i: str, by_id: dict) -> list[str]:
 
     RESOLVED AS NUMBERS, which is how every other id comparison in this plugin works —
     `dep` says so where it writes one (`__init__.py`): "`s-1` and a bare `1` are one edge".
-    A lead edits `plans.json` in an editor, `_check` accepts a bare `1` in `deps`, and
+    A lead edits a plan file in an editor, `_check` accepts a bare `1` in `deps`, and
     `show` renders it as `after 1`, so matching the STRINGS here drew no edge for exactly
     the dep a hand-edit is most likely to write — a board saying something different from
     `show` about one record. It also let a self-dep written as `1` past the `d != i` guard
