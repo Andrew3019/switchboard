@@ -587,6 +587,13 @@ def _ancestry(pid: int, parents: dict) -> set:
     return chain
 
 
+# `_close_target`'s one refusal that proves nothing about the pane: herdr could not be
+# reached, so it said neither "that pane is somebody else's" nor "it is yours". Callers
+# that have to tell a proven mismatch from a blackout compare against this exact reason,
+# so it lives here rather than being written out twice and drifting apart.
+NO_HERDR_ANSWER = "herdr could not be asked whose pane that is"
+
+
 class Broker:
     def __init__(self, db, herdr: Herdr, repo: Optional[Path] = None):
         self.db = db
@@ -1456,8 +1463,24 @@ class Broker:
             store.log_event(self.db, kind="board_open_failed", agent=name,
                             error="herdr would not split the pane")
 
-    def _close_board(self, name: str) -> None:
+    def _close_board(self, name: str, force: bool = False) -> bool:
         """Close the board pane opened beside `name`, and forget it.
+
+        Returns True when there is nothing left to do for this board — closed, already
+        gone, or proven not ours — and False when the close was DEFERRED: herdr could not
+        say, so the `board_pane:` row is kept and a later sweep should call this again.
+        Returning False is not an error; it is the board asking to be retried. The retry
+        is `cleanup`'s already-closed branch, which calls this for every ended row and
+        finds nothing to do the moment the row is gone; a deferred board is therefore
+        retried without the agent row being held open, which is the point. Callers with
+        no next sweep to retry into may ignore the return — see `_stop_panes`.
+
+        `force` is `cleanup --force`, and it turns every defer back into the old
+        behaviour: drop the row, report True, let the caller finish. That loses the pane
+        the same way this method used to, and deliberately — the row it would keep is only
+        ever read by a sweep that will never come, because `--force` is documented to end
+        the agent `done` whatever herdr did. A board nobody can close must not be able to
+        wedge the one command that exists for things that cannot be closed.
 
         The other half of `_open_board`, and it has to exist for the same reason that
         one records the pane at all: the board is a pane switchboard opened, so it is a
@@ -1482,45 +1505,69 @@ class Broker:
         is what herdr can be asked about; a board id recycled onto another board is
         invisible to it, and left unproven rather than claimed.
 
-        A refusal leaves the pane alone and still drops the meta row, like every other
-        path out of here: the record is of a pane we have just failed to prove is ours,
-        and keeping it would have the next `_open_board` — or a `restore` under this same
-        name — believe a stranger's pane is our board.
+        Whether a failure drops the meta row turns on what the failure PROVED, and that
+        asymmetry is the whole point. A refusal that names somebody else in the pane, or a
+        `pane_not_found`, is proof the pane is not ours to close: the row goes, because
+        keeping it would have the next `_open_board` — or a `restore` under this same name
+        — believe a stranger's pane is our board. A failure that proves nothing — herdr
+        unreachable, a close that timed out, any other error — says only that we could not
+        find out, and dropping the row there is how a board pane got orphaned for good:
+        the row was the only thing pointing at it. So that case KEEPS the row and reports
+        the defer, and the pane is closed by whichever sweep next reaches herdr.
 
         Tolerates a board that is already gone — closed by hand, crashed, never opened —
-        because all three are ordinary. The meta row is dropped either way: it is a
+        because all three are ordinary, and all three are proof enough: the meta row is a
         record of a pane we no longer own, and leaving it would make the next
         `_open_board` for this name believe a board is up.
 
-        Never raises. A close that half-happened is worse than a board left behind.
+        Never raises. A close that half-happened is worse than a board left behind — but
+        a board left behind with nothing pointing at it is worse than either, which is
+        what the deferred return is for.
         """
         key = f"board_pane:{name}"
         try:
             row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         except Exception:
-            return
+            return True
         pane = row["value"] if row else None
         if not pane:
-            return
+            return True
         if not self._board_is_only_for(name, pane):
             self._forget_board(key)
-            return
+            return True
         target, wrong = self._close_target({"pane_id": pane, "terminal_id": None})
         if wrong is not None:
             store.log_event(self.db, kind="board_close_refused", agent=name,
                             pane=pane, error=wrong)
+            if wrong == NO_HERDR_ANSWER and not force:
+                # Not a refusal about this pane at all — herdr was unreachable, so it
+                # told us nothing about who is in it. Keep the row and ask to be retried.
+                return False
             self._forget_board(key)
-            return
+            return True
         try:
             self.h.close_pane(target)
+        except HerdrError as e:
+            if e.code == "pane_not_found":
+                # The pane is already gone. That is this close having happened, not
+                # having failed — the reading the agent-pane path gives it too.
+                store.log_event(self.db, kind="board_close_gone", agent=name, pane=pane)
+            else:
+                store.log_event(self.db, kind="board_close_failed", agent=name,
+                                pane=pane, error=str(e))
+                if not force:
+                    return False
         except Exception as e:
-            # Including a pane herdr no longer has: "already closed" and "would not
-            # close" arrive the same way, and neither is worth failing a cleanup over.
+            # Anything else — a timeout, an adapter blowing up — says only that we could
+            # not find out whether the pane is still there. Keep the row; retry later.
             store.log_event(self.db, kind="board_close_failed", agent=name,
                             pane=pane, error=str(e))
+            if not force:
+                return False
         else:
             store.log_event(self.db, kind="board_close", agent=name, pane=pane)
         self._forget_board(key)
+        return True
 
     def _board_is_only_for(self, name: str, pane: str) -> bool:
         """Is `pane` this agent's board alone, or is a still-live agent also on it?"""
@@ -2501,6 +2548,16 @@ class Broker:
                         f"deleted"
                     ) from None
                 store.log_event(self.db, kind="cleanup_pane_gone", agent=a["name"])
+            # The deferred return is deliberately not read here: this path raises on
+            # anything it cannot confirm, and there is nothing useful to do with a defer
+            # inside a call that is deleting the workspace. It is not dropped on the floor
+            # either — the row below ends with no pane and an `ended_at`, which is exactly
+            # the shape `cleanup`'s already-closed branch retries, so a `board_pane:` row
+            # left here is picked up and closed by the next ordinary sweep. Until one runs,
+            # the pane sits there as it did before this change (no regression), and the
+            # narrow hazard is the window: if herdr recycles that pane id onto a live pane
+            # first, the surviving row makes `_open_board` believe a restored agent under
+            # this name already has a board, and the retry could close the stranger in it.
             self._close_board(a["name"])
             # The pane is gone, so the row must stop claiming one — a stale id has every
             # later sweep retrying release/close against a pane that is not there.
@@ -4280,6 +4337,27 @@ class Broker:
                 refuse(a, "that is you — an agent cannot close its own pane")
                 continue
             if a["ended_at"] and not a["pane_id"]:
+                if not dry_run:
+                    # The retry half of a deferred board close, and the ONLY place it can
+                    # live. A defer keeps the `board_pane:` row but ends the agent row
+                    # honestly — `done`, no pane — because holding the row open instead
+                    # would hold a `pane_id` pointing at a pane this sweep already closed,
+                    # and a pane id herdr had handed back out. `_close_target` would then
+                    # read the stranger who inherited it as a recycled-id mismatch and
+                    # refuse the row before ever reaching the board, forever, with
+                    # `--force` the only exit. So the row leaves cleanly and the board
+                    # comes back to be closed HERE, where there is no pane id left to be
+                    # recycled under it. A no-op once the meta row is gone, which it is
+                    # for every row that ever closed cleanly — so every sweep may call it,
+                    # and each one is another attempt until the board is down.
+                    #
+                    # `force=force` discards a pending retry rather than deferring it
+                    # again, and that is meant: `--force` is documented as the exit that
+                    # always ends the row `done` and accepts losing the pane, and a board
+                    # it cannot close is precisely a pane it is accepting the loss of.
+                    # Deferring here would give a row that is already closed a second way
+                    # to survive `--force`, which is the wedge this whole rework removed.
+                    self._close_board(a["name"], force=force)
                 if set(under.get(a["name"], ())) & set(closed):
                     # `--force` on a row that was already closed, and whose subtree was
                     # still holding it on the board — issue #53's exact repro. The subtree
@@ -4452,7 +4530,13 @@ class Broker:
             # The board went up beside this agent, so it comes down with it — otherwise
             # closing an agent leaves an empty tab behind, once per agent. After the
             # skip above, so a close we abandoned leaves the board with its live pane.
-            self._close_board(a["name"])
+            # A defer here is NOT a reason to hold this row back. The agent's own pane is
+            # closed and its row ends `done` with no pane, exactly as it always did; only
+            # the `board_pane:` row survives, and the already-closed branch above retries
+            # it every later sweep. Refusing instead would leave a `pane_id` on the row
+            # pointing at a pane that is gone and whose id herdr can hand out again —
+            # see there. `force=force` so `--force` drops the board rather than deferring.
+            self._close_board(a["name"], force=force)
             # Same rule for the file its system prompt was read from: it is this agent's
             # state, written by the spawn, so it goes when the pane does rather than
             # accumulating one file per agent ever spawned. After the skip above too — a
@@ -5330,6 +5414,19 @@ class Broker:
                 self._alive_unknown = True
         return self._alive_cache
 
+    def _forget_agent_caches(self) -> None:
+        """Throw away everything one `agent list` filled, so the next ask re-reads herdr.
+
+        The caches are per-`sb`-process by design — see `_agent_states` — so in production
+        the next command starts with them empty and nothing has to call this. The callers
+        that do are the ones where a single process must see herdr change under it: a
+        refusal that IS the news, and the flush that runs after panes have gone.
+        """
+        self._alive_cache = None
+        self._bound_cache = set()
+        self._pane_cache = {}
+        self._alive_unknown = False
+
     def _fill_agent_caches(self, listed) -> None:
         """Both views of one `agent list`: who is there, and whose NAME herdr will answer to.
 
@@ -5430,7 +5527,7 @@ class Broker:
         if not pane:
             return None, None                # nothing to close; the caller skips herdr
         if self._agent_states() is None:
-            return None, "herdr could not be asked whose pane that is"
+            return None, NO_HERDR_ANSWER
         mine = _column(a, "terminal_id")
         if mine:
             live = next((x for x in self._pane_cache.values()
@@ -5551,10 +5648,7 @@ class Broker:
         critical path is this method.
         """
         if refresh:
-            self._alive_cache = None
-            self._bound_cache = set()
-            self._pane_cache = {}
-            self._alive_unknown = False
+            self._forget_agent_caches()
         # The human is excluded because they are not an agent and have no doorbell. Nothing
         # is addressed to them any more, but a store written before the human mailbox was
         # removed still holds rows that would otherwise be retried on every command.
@@ -6080,10 +6174,7 @@ class Broker:
         a = store.get_agent(self.db, who)
         if a is None or a["state"] in FINISHED:
             return False
-        self._alive_cache = None            # ask again, now: the failure is the news
-        self._bound_cache = set()
-        self._pane_cache = {}
-        self._alive_unknown = False
+        self._forget_agent_caches()         # ask again, now: the failure is the news
         states = self._agent_states()
         return states is not None and who in states
 
