@@ -1431,5 +1431,54 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         self.assertIn("preset text", str(cm.exception))
 
 
+class RestoreOpensTheBoardTest(Fixture, unittest.TestCase):
+    """A restored agent comes back into the same two panes a spawned one opens in.
+
+    `delegate` is the one place every SPAWN passes through, and restore is not a spawn —
+    it makes its own tab and starts its own agent — so it was the one door that opened a
+    single full-width pane with no board beside it.
+    """
+
+    def _closed_kid(self) -> str:
+        """A child that has been closed: row and session kept, panes gone."""
+        self._open("api")
+        kid = self.b.delegate("t", role="worker", me="api")
+        store.set_state(self.db, kid, "done")
+        self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
+        # The fake keeps a closed agent in `live`; real herdr drops it with its pane,
+        # and `restore` refuses an agent herdr still lists as running.
+        self.h.live.pop(kid, None)
+        self.h.splits.clear()
+        self.h.split_cwds.clear()
+        self.h.pane_prompts.clear()
+        return kid
+
+    def test_a_restored_agent_gets_a_board_beside_it(self):
+        kid = self._closed_kid()
+        self.b.restore(kid, me=HUMAN)
+        pane = store.get_agent(self.db, kid)["pane_id"]
+        self.assertEqual([(p, d) for p, d, _r in self.h.splits], [(pane, "right")])
+        self.assertIn("switchboard.board", _board_line(self.h)[1])
+
+    def test_the_restored_board_reads_the_agents_own_checkout(self):
+        """A board pointed at the main checkout looks right and reports the wrong tree."""
+        kid = self._closed_kid()
+        self.b.restore(kid, me=HUMAN)
+        where = store.get_agent(self.db, kid)["cwd"]
+        self.assertEqual(self.h.split_cwds, [where])
+        self.assertNotEqual(where, str(self.repo))
+
+    def test_a_restore_still_succeeds_when_the_split_fails(self):
+        """The board is a view; restore must not fail because one would not open."""
+        kid = self._closed_kid()
+        def boom(*a, **kw):
+            raise HerdrError("split_failed", "no panes left")
+        self.h.split_pane = boom
+        self.b.restore(kid, me=HUMAN)
+        self.assertIn(kid, self.h.live)
+        self.assertTrue(any(e["kind"] == "board_open_failed"
+                            for e in store.recent_events(self.db)))
+
+
 if __name__ == "__main__":
     unittest.main()
