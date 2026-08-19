@@ -1,5 +1,5 @@
 {
   "name": "open the pull request and post the plan on it",
   "display": "open PR",
-  "about": "Push the branch and open the PR. Write the description first: what changed, why, and what has already been tested — it is the first thing every reader meets, and a PR without one costs each of them the same reconstruction. Then comment the plan onto it: `sb plugin plans show <plan> --json`, the whole thing, in a fenced block, with no summarising and no reformatting. The raw record is the point — anyone reading the PR gets the same state the lead has, and completeness beats tidiness while the shape of that comment is still unsettled. Nobody is asked whether to do any of this."
+  "about": "Push the branch and open the PR. Write the description first: what changed, why, and what has already been tested — it is the first thing every reader meets, and a PR without one costs each of them the same reconstruction. Then comment the plan onto it: `sb plugin plans show <plan> --markdown`, that ONE plan and never the store, posted as the markdown it gives you — no fenced block, no summarising, no reformatting. The whole record is the point: anyone reading the PR gets the state the lead has, rendered so they can actually read it. Nobody is asked whether to do any of this."
 }

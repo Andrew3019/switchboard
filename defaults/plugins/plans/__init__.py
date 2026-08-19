@@ -418,7 +418,11 @@ def register(reg):
         args=[reg.arg("--all", flag=True, help="every plan, on every workspace")])
     reg.command(
         "show", show, audience="both", help="one plan in full — steps, deps, changelog",
-        args=[reg.arg("id", help="a plan id, e.g. p-1")])
+        args=[reg.arg("id", help="a plan id, e.g. p-1"),
+              reg.arg("--markdown", flag=True,
+                      help="render that one plan as markdown, for posting where a human "
+                           "reads it — a PR comment. Walked, not templated: it survives "
+                           "the schema changing")])
     reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
         args=[reg.arg("id", help="a plan id, e.g. p-1")])
@@ -798,7 +802,8 @@ def show(ctx, args) -> Result:
     lib, bad = _lib([plan])
     if bad:
         return bad
-    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx)))
+    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx)),
+                        markdown=bool(getattr(args, "markdown", False)))
 
 
 def changelog(ctx, args) -> Result:
@@ -1977,16 +1982,25 @@ def _defects(plan: dict) -> list[str]:
     return out
 
 
-def _plan_result(shown: dict) -> Result:
+def _plan_result(shown: dict, markdown: bool = False) -> Result:
     """A whole plan, printed, with anything incomplete about it said underneath.
 
     `ok` stays TRUE and `data` keeps its shape with one key added, which is the whole
     contract of the second door: a caller that was ticking a step ticked it, and a caller
     reading `--json` gets `incomplete` beside the plan rather than in place of it.
+
+    `markdown` swaps the terminal rendering for the one that goes on a pull request, and
+    swaps nothing else: `data` is the same record either way, so `--json` means what it
+    always meant and a reader of it cannot tell which rendering was asked for. What is
+    incomplete follows the plan into the markdown too — it is a key on the record by then,
+    so the generic renderer picks it up without being told, which is the point of it.
     """
     lines = _defects(shown)
+    doc = dict(shown, incomplete=lines) if lines else shown
+    if markdown:
+        return Result(human=_markdown(doc), data=doc)
     human = _full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
-    return Result(human=human, data=dict(shown, incomplete=lines) if lines else shown)
+    return Result(human=human, data=doc)
 
 
 # What a refusal and a warning both say about shortening, written once. The example is the
@@ -3112,6 +3126,164 @@ def _step_lines(steps: list) -> list[str]:
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
                    f"{_when(n.get('at'))})"
                    for n in (s.get("notes") or ()))
+    return out
+
+
+# -- the plan as markdown ------------------------------------------------------
+#
+# WALKED, NOT TEMPLATED. `_full` above is the terminal rendering and knows every field by
+# name. This one deliberately does not, because of where it goes: a pull request comment,
+# posted by one step definition and rewritten by another, read by whoever turns up. A
+# rendering with the schema written into it stops being true the week a field is added and
+# raises the week one is dropped — in front of somebody's merge, from a step that is only
+# supposed to be reporting. So this walks the record instead: a new field appears here on
+# its own, a removed one vanishes, and neither costs an edit to this function.
+#
+# What it does know about the schema is two things, and both fall back rather than fail:
+# the keys that might name the plan in its heading (`_HEADS`), and that a key called `at`
+# or ending `_at` holding an integer is a timestamp. Everything else is shape — scalar,
+# list, dict — and the shape decides the rendering:
+#
+#   scalar fields          one `field | value` table under the heading
+#   list of flat dicts     a table, columns being the union of the keys actually used
+#   anything else          nested bullets, each item labelled by its first scalar field
+#
+# ONE PLAN. It is handed the single resolved plan dict `show` already has and has no path
+# to the store, so there is nothing here that could widen into every plan in the repo.
+
+_HEADS = ("display", "title")            # what names the plan, best first; both optional
+
+
+def _markdown(p: dict) -> str:
+    """One plan as markdown: a heading, its scalar fields, then a section per collection."""
+    used = next((k for k in _HEADS if _some(p.get(k))), None)
+    head = " — ".join(x for x in (_cell("id", p.get("id")) if _some(p.get("id")) else "",
+                                  _cell(used, p[used]) if used else "") if x)
+    lines = ["# " + (head or "plan")]
+    skip = {"id"} | ({used} if used else set())
+    rows = {k: v for k, v in p.items() if k not in skip and _scalar(v) and _some(v)}
+    if rows:
+        lines += ["", "| field | value |", "| --- | --- |"]
+        lines += [f"| {_title(k)} | {_cell(k, v)} |" for k, v in rows.items()]
+    for k, v in p.items():
+        if k in skip or _scalar(v) or not _some(v):
+            continue
+        lines += ["", f"## {_title(k)}", ""]
+        lines += _table(v) if _tabular(v) else _bullets(v)
+    return "\n".join(lines)
+
+
+def _scalar(v) -> bool:
+    """Is this a value rather than a collection? The only type question asked here."""
+    return not isinstance(v, (dict, list, tuple))
+
+
+def _some(v) -> bool:
+    """Is there anything here to render at all?
+
+    A null, an empty string and an empty list are the same absence, and all three are
+    dropped rather than drawn as an em dash: this rendering is read by somebody who has
+    never seen the schema, and a row saying `gate —` invites them to wonder what a gate is
+    and why this one is missing. `False` and `0` are values and survive.
+    """
+    if isinstance(v, (dict, list, tuple)):
+        return bool(v)
+    return v is not None and str(v) != ""
+
+
+def _inline(v) -> bool:
+    """Does this fit on the end of its own bullet, or does it need bullets of its own?"""
+    if _scalar(v):
+        return True
+    return all(_scalar(x) for x in (v.values() if isinstance(v, dict) else v))
+
+
+def _tabular(v) -> bool:
+    """A list of dicts with nothing nested in any of them — the one shape a table suits.
+
+    Asked of the values that are actually there, so a step carrying an empty `notes` list
+    is still flat: an absent collection is not a nested one.
+    """
+    return (isinstance(v, list) and bool(v) and all(isinstance(i, dict) for i in v)
+            and all(_scalar(x) or not _some(x) for i in v for x in i.values()))
+
+
+def _title(key: str) -> str:
+    """A key as a human word. Nothing is renamed — underscores are just not read aloud."""
+    return _flat(key).replace("_", " ")
+
+
+def _cell(key: str, v) -> str:
+    """One value as one line of markdown text.
+
+    Through `_flat` like every other renderer in this file, so a newline somebody stored in
+    a field shows as the `\\n` it is rather than as the extra table row it was aiming to
+    be — the forged-row property this file holds everywhere else holds here too, and a
+    markdown table is exactly the kind of thing a row-forger is written for. The pipe is
+    escaped for the same reason and only for markdown's sake.
+    """
+    if isinstance(v, (list, tuple)):
+        return ", ".join(_cell(key, x) for x in v)
+    if isinstance(v, dict):
+        return "; ".join(f"{_title(k)}: {_cell(k, x)}" for k, x in v.items() if _some(x))
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, int) and (key == "at" or key.endswith("_at")):
+        return _when(v)
+    return _flat(v).replace("|", "\\|")
+
+
+def _table(items: list) -> list[str]:
+    """A list of flat dicts as a table: the columns are the keys that carry something.
+
+    The union across every row and in the order they are first met, so a field only some
+    rows have still gets a column and a field nothing fills gets none. Nothing is dropped
+    for width — a table narrow enough to read but missing a column is the failure mode
+    this rendering exists to avoid.
+    """
+    cols: list = []
+    for i in items:
+        cols += [k for k in i
+                 if k not in cols and any(_some(x.get(k)) for x in items)]
+    if not cols:
+        return []
+    out = ["| " + " | ".join(_title(c) for c in cols) + " |",
+           "| " + " | ".join("---" for _ in cols) + " |"]
+    for i in items:
+        out.append("| " + " | ".join(
+            _cell(c, i.get(c)) if _some(i.get(c)) else "" for c in cols) + " |")
+    return out
+
+
+def _bullets(value, depth: int = 0) -> list[str]:
+    """Anything else, as nested bullets. Recursive, so depth is a property of the record.
+
+    A dict item is labelled by its FIRST scalar field rather than by a field named here —
+    which is `id` for a step, and stays sensible for a record this file has never seen,
+    since whatever an author put first is what they thought identified it.
+    """
+    pad = "  " * depth
+    out: list[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not _some(v):
+                continue
+            if _inline(v):
+                out.append(f"{pad}- {_title(k)}: {_cell(k, v)}")
+            else:
+                out.append(f"{pad}- {_title(k)}")
+                out.extend(_bullets(v, depth + 1))
+        return out
+    for item in value:
+        if _scalar(item):
+            out.append(f"{pad}- {_cell('', item)}")
+        elif isinstance(item, dict):
+            keys = [k for k in item if _some(item[k])]
+            lead = next((k for k in keys if _scalar(item[k])), None)
+            out.append(f"{pad}- **{_cell(lead, item[lead])}**" if lead else f"{pad}-")
+            out.extend(_bullets({k: item[k] for k in keys if k != lead}, depth + 1))
+        else:
+            out.extend(_bullets(item, depth))
     return out
 
 

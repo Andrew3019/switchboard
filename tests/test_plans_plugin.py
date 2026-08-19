@@ -2312,6 +2312,108 @@ class GateTest(PlansSandbox):
         self.assertEqual(self._files(), [])
 
 
+class MarkdownTest(PlansSandbox):
+    """`show --markdown` — the rendering that goes on a pull request.
+
+    Two decisions, and both are about what the comment on a PR must survive:
+
+    1. It is ONE plan. The comment is posted by a step definition on a repo whose store
+       holds every plan in the fleet, and the failure it is written against is a whole-store
+       dump landing on somebody's PR.
+    2. It is WALKED, not templated. The plan schema has moved twice already; a rendering
+       with the fields written into it either raises or quietly drops one the week it moves
+       again — from a step whose only job is to report, in front of a merge. So a field
+       nothing here has ever seen appears on its own, and a field that goes away vanishes.
+
+    Not pinned, deliberately: the layout. Asserting the exact table shape would be the
+    per-field template these tests exist to say the renderer does not have.
+    """
+
+    def _plan(self) -> None:
+        """A plan with something in every kind of field, on a second plan's store."""
+        self.ok("plugin", "plans", "create", "the other job",
+                "--display", "board: the other job", "--step", "othr = a step nobody wants")
+        self.ok(*_create("render the plan", "write the renderer", "merge it"))
+        self.ok("plugin", "plans", "note", "s-2", "--text", "waits on review")
+        self.ok("plugin", "plans", "tick", "s-2", "--reason", "the diff is in")
+
+    def test_markdown_renders_one_plan_and_never_the_store(self):
+        """The plan asked for, in markdown, with no trace of the plan beside it."""
+        self._plan()
+        md = self.ok("plugin", "plans", "show", "p-2", "--markdown")
+        self.assertTrue(md.lstrip().startswith("#"), md)
+        for expected in ("p-2", "render the plan", "s-2", "write the renderer",
+                         "waits on review", "the diff is in"):
+            self.assertIn(expected, md)
+        # The other plan is in the same store and none of it is here.
+        for gone in ("p-1", "the other job", "a step nobody wants"):
+            self.assertNotIn(gone, md)
+        # And `--json` is what it always was: the plan record, untouched by the flag.
+        self.assertEqual(self.data("plugin", "plans", "show", "p-2", "--markdown")["id"],
+                         self.data("plugin", "plans", "show", "p-2")["id"])
+        self.assertEqual(self.data("plugin", "plans", "show", "p-2", "--markdown"),
+                         self.data("plugin", "plans", "show", "p-2"))
+
+    def test_a_field_nobody_wrote_this_renderer_for_still_renders(self):
+        """Schema drift, forwards: a plan carrying fields this code has never heard of —
+        a scalar, a list of records, a nested map — renders them rather than dropping them
+        or raising. This is what a plan written by a LATER plugin looks like to this one."""
+        self._plan()
+        doc = self._doc()
+        plan = [p for p in doc["plans"] if p["id"] == "p-2"][0]
+        plan["risk"] = "high"
+        plan["reviews"] = [{"who": "andrew", "verdict": "ship it"}]
+        plan["budget"] = {"agents": 3, "tokens": 900}
+        plan["steps"][0]["mood"] = "cheerful"
+        self._save(doc)
+
+        md = self.ok("plugin", "plans", "show", "p-2", "--markdown")
+        for expected in ("risk", "high", "reviews", "andrew", "ship it",
+                         "budget", "agents", "900", "mood", "cheerful"):
+            self.assertIn(expected, md)
+
+    def test_a_plan_missing_the_fields_this_one_has_renders_too(self):
+        """Schema drift, backwards: every optional field gone — no display, no notes, no
+        changelog, a step that is an id and a name and nothing else. A plan hand-written by
+        somebody, or made by an older plugin, still renders and still says which plan it
+        is."""
+        self._plan()
+        doc = self._doc()
+        doc["plans"] = [{"id": "p-2", "title": "a bare plan", "checkout": str(self.repo),
+                         "steps": [{"id": "s-9", "name": "do the thing"}]}
+                        if p["id"] == "p-2" else p for p in doc["plans"]]
+        self._save(doc)
+
+        md = self.ok("plugin", "plans", "show", "p-2", "--markdown")
+        self.assertIn("p-2", md)
+        self.assertIn("a bare plan", md)
+        self.assertIn("do the thing", md)
+        # And the empty plan, which is the far end of the same axis: a record with an id
+        # and nothing else is a heading, not a traceback.
+        self.assertIn("p-3", _plans()._markdown({"id": "p-3"}))
+
+    def test_a_forged_row_cannot_forge_one_here_either(self):
+        """A newline stored in a field is escaped, like everywhere else in this plugin —
+        a markdown table is exactly what a stored `\\n` would be aiming at, and the pipe
+        that would split a cell is escaped for the same reason."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        md = _plans()._markdown(
+            {"id": "p-1", "title": "t",
+             "changelog": [{"by": "a\nb", "action": "c|d", "reason": "e"}]})
+        self.assertIn("a\\nb", md)
+        self.assertNotIn("a\nb", md)
+        self.assertIn("c\\|d", md)
+
+    def test_the_flag_is_declared_on_show_and_nowhere_else(self):
+        """One command renders a plan for a PR, and it is the one that reads a single plan
+        by id — so there is no verb that could render the whole store as markdown."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        self.assertIn("--markdown", _plans_args("show"))
+        for command in _plans_commands():
+            if command != "show":
+                self.assertNotIn("--markdown", _plans_args(command))
+
+
 def _plans_commands() -> list[str]:
     """The verbs the plugin declares, read off the registry rather than off a docstring."""
     reg = plugins.Registry()
