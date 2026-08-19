@@ -776,6 +776,35 @@ class BareCascadeTest(CloseHarness, unittest.TestCase):
         # reason to fail the close that did.
         self.assertTrue(store.get_workspace(self.db, "main-2")["retired_at"])
 
+    def test_a_crash_mid_cascade_leaves_the_whole_close_retryable(self):
+        """The retired stamp is written last, so a failure below it can be run again.
+
+        `_close_empty_spaces` swallows a gate's `ValueError` and nothing else — a Ctrl-C
+        or a locked database leaves the loop. Stamped before the cascade, that orphaned
+        every space the loop had not yet reached, permanently: the retry meets
+        `workspace_close`'s `already` return and does nothing. This is the bug the whole
+        feature exists to prevent, arriving by the failure path.
+        """
+        self.dispatcher()
+        first, second = self.child("aaa"), self.child("bbb")
+        boom = self.b._deregister
+
+        def once(checkout):
+            self.b._deregister = boom
+            raise RuntimeError("herdr went away mid-cascade")
+        self.b._deregister = once
+        with self.assertRaises(RuntimeError):
+            self.b.workspace_close("main-2", me=HUMAN)
+        # Nothing stamped, no mark stranded: the command can simply be run again.
+        self.assertIsNone(store.get_workspace(self.db, "main-2")["retired_at"])
+        self.assertIsNone(self.mark("main-2"))
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertFalse(r["already"])
+        self.assertEqual(sorted(r["spaces"]), ["aaa", "bbb"])
+        self.assertFalse(Path(first).is_dir())
+        self.assertFalse(Path(second).is_dir())
+        self.assertIsNotNone(store.get_workspace(self.db, "main-2")["retired_at"])
+
     def test_a_space_a_descendant_only_joined_is_never_touched(self):
         """The cascade is the spaces this subtree FORKED, not every space it is filed in.
 

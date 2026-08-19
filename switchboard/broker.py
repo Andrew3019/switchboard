@@ -1887,6 +1887,16 @@ class Broker:
 
         Retiring is the entire operation, and it is still worth having: "this orchestrator
         is finished" is a fact worth recording whether or not a directory goes with it.
+
+        It is also the LAST step, after the cascade below it, for the same reason `_finish`
+        retires last on the destructive route: the retired stamp is what makes this command
+        a no-op ever after (`workspace_close`'s `already` return), so anything stamped
+        before the work is finished is work that can never be retried. `_close_empty_spaces`
+        swallows a gate's `ValueError` and nothing else, so a Ctrl-C or a locked database
+        mid-cascade leaves the loop — and with the stamp written first that left the
+        remaining child spaces orphaned permanently, by the one command that was supposed
+        to take them. Retired last, the same failure leaves the whole close retryable and
+        the mark released, and a second run picks up the spaces the first did not reach.
         """
         busy = [r["name"] for r in self._unfinished_in(name, exclude=me)]
         if busy:
@@ -1897,14 +1907,15 @@ class Broker:
         self._claim(name, me)
         try:
             closed = self._stop_panes(name, me=me)
+            spaces = CleanupResult()
+            self._close_empty_spaces(self._forked_under(name), spaces, me=me,
+                                     dry_run=False)
         except BaseException:
             store.release_retiring(self.db, name, me)
             raise
         store.retire_workspace(self.db, name)
         store.log_event(self.db, kind="workspace_retired", workspace=name, bare=True,
                         closed=",".join(closed) or None)
-        spaces = CleanupResult()
-        self._close_empty_spaces(self._forked_under(name), spaces, me=me, dry_run=False)
         return self._closed(name, None, kind="bare", worktree="none", closed=closed,
                             spaces=spaces.spaces, spaces_refused=spaces.spaces_refused)
 
