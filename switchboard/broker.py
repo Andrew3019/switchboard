@@ -1909,7 +1909,7 @@ class Broker:
                             spaces=spaces.spaces, spaces_refused=spaces.spaces_refused)
 
     def _forked_under(self, name: str) -> list:
-        """The agent rows of this bare workspace's own subtree, for the cascade below it.
+        """The rows of this bare workspace's own subtree that FORKED a space of their own.
 
         A bare workspace is what a top orchestrator gets, and a top is the only thing that
         MINTS spaces: every direct child it delegates to is forked into a worktree
@@ -1927,6 +1927,24 @@ class Broker:
         name so that it holds for any bare workspace, not only the one whose top happens
         to share its name.
 
+        Only rows that are their own space's NAMESAKE are returned, and that is the whole
+        difference between "the spaces this subtree forked" and "every space anybody in
+        this subtree is filed under". A row's `workspace` is not proof its subtree minted
+        that space: `sb delegate --workspace <name>` files a child into an EXISTING space
+        somebody else opened (`join_workspace`), which is what people type precisely when
+        a fork was refused. Keyed on the row's own workspace value, one such join is
+        enough for `sb workspace close main-2` to delete a worktree `main-3`'s child
+        forked and is still using — silently, by the one command in here that cannot be
+        undone, and reaching a linked worktree of the human's own by the same route since
+        only the PRIMARY one is refused outright.
+
+        The namesake test is exact rather than a heuristic: `_fork_for` names a forked
+        space for the child that forked it, verbatim and with no prefix or suffix, so
+        `name == workspace` holds for every space this cascade is meant to reach and for
+        nothing else. Nothing intended is lost by it — a grandchild inherits its parent's
+        space rather than minting one, and that space is already reached through the
+        namesake row that did mint it.
+
         It decides nothing about deletion. Every gate, inventory and confirmation stays
         `_close_empty_spaces`'s and `workspace_close`'s, unchanged: a live child's space is
         not empty, so the gates refuse it and it stays.
@@ -1935,7 +1953,7 @@ class Broker:
         for r in self.db.execute("SELECT * FROM agents WHERE workspace=?",
                                  (name,)).fetchall():
             for d in self._descendants(r["name"]):
-                if d["name"] not in seen:
+                if d["name"] not in seen and d["name"] == d["workspace"]:
                     seen.add(d["name"])
                     out.append(d)
         return out

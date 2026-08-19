@@ -776,6 +776,32 @@ class BareCascadeTest(CloseHarness, unittest.TestCase):
         # reason to fail the close that did.
         self.assertTrue(store.get_workspace(self.db, "main-2")["retired_at"])
 
+    def test_a_space_a_descendant_only_joined_is_never_touched(self):
+        """The cascade is the spaces this subtree FORKED, not every space it is filed in.
+
+        `sb delegate --workspace <name>` files a child into a space somebody else opened,
+        so a descendant of one top can carry another top's workspace on its row. Keyed on
+        that value the close would delete a sibling top's worktree — clean and idle is
+        exactly what the cascade takes, and no gate can tell whose it is. Keyed on the
+        namesake it drops out, which is the only thing standing between this command and
+        a linked worktree of the human's own.
+        """
+        self.dispatcher()
+        mine = self.child("lead-1")
+        # Another top's space, forked by ITS child, joined by a descendant of ours.
+        theirs = self.space("lead-9", commit=True)
+        self.agent("lead-9", workspace="lead-9", cwd=theirs, state="done")
+        self.agent("worker-x", workspace="lead-9", cwd=theirs, state="done")
+        self.db.execute("UPDATE agents SET parent=? WHERE name=?", ("lead-1", "worker-x"))
+        r = self.b.workspace_close("main-2", me=HUMAN)
+        self.assertEqual(r["spaces"], ["lead-1"])
+        self.assertEqual(r["spaces_refused"], [])
+        self.assertFalse(Path(mine).is_dir())
+        # Not deleted, not retired, not even reported: it was never ours to look at.
+        self.assertTrue(Path(theirs).is_dir())
+        self.assertIn(theirs, self.registered())
+        self.assertIsNone(store.get_workspace(self.db, "lead-9")["retired_at"])
+
     def test_a_live_childs_space_still_holds_itself(self):
         """Unchanged, and deliberately: this closes FINISHED children's orphaned spaces.
         A child still working is not empty, the existing gate refuses it, it stays."""
