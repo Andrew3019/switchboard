@@ -310,11 +310,45 @@ class RolesTest(unittest.TestCase):
         children too and hits the same newline refusal — so for a lead the path was pure
         habit, and the habit was the tracked `notes/` that put ~48 briefs on main. Same
         rule, stated for the other role that delegates; the prompt is again the whole
-        mechanism, so the prompt is what gets asserted."""
+        mechanism, so the prompt is what gets asserted.
+
+        The "not notes/" half is scoped to the sentence that says where a brief goes,
+        rather than to the whole prompt: since 2026-08-19 the lead is also told what may be
+        committed to the tracked `notes/` tree, which is a different rule about the same
+        directory and would otherwise have to be worded around this assertion."""
         prompt = roles.load(self.repo)["lead"].prompt
         self.assertIn(".switchboard/briefs/", prompt)
         self.assertIn("brief.md", prompt)
-        self.assertNotIn("notes/", prompt)
+        brief = next(s for s in prompt.split(". ") if "brief.md" in s)
+        self.assertNotIn("notes/", brief)
+
+    def test_findings_go_under_gitignored_switchboard_notes_in_all_three_reporting_roles(self):
+        """Andrew, 2026-08-19. The tracked `notes/` tree had 148 files and 6 of them were
+        ever referenced again, so an ordinary research, qa or review task left a permanent
+        file on main that nobody read. Findings now go where briefs already go: gitignored,
+        and symlinked into every worktree so the parent still reads the same path. The
+        prompt is the whole mechanism, as with briefs, so the prompt is what gets asserted
+        — and the sentence is shared verbatim across the three roles on purpose."""
+        r = roles.load(self.repo)
+        shared = ("`.switchboard/notes/<your agent name>-<topic>.md` under\n"
+                  "the root of the checkout you are working in, creating "
+                  "`.switchboard/notes/` if it is not\nthere")
+        for name in ("researcher", "qa", "reviewer"):
+            with self.subTest(role=name):
+                self.assertIn(" ".join(shared.split()), " ".join(r[name].prompt.split()))
+
+    def test_a_lead_and_a_reviewer_are_told_tracked_notes_is_entered_by_promotion(self):
+        """The move above fixes the child's end; the lead and the reviewer are who COMMIT,
+        and a standalone tracked file per finished investigation is how the 148 accrued. So
+        both are told the tracked tree is entered deliberately — folded into a doc that is
+        already maintained, or cited by code or a test — and never as the default outcome
+        of a research, qa or review task."""
+        r = roles.load(self.repo)
+        for name in ("lead", "reviewer"):
+            with self.subTest(role=name):
+                prompt = " ".join(r[name].prompt.split())
+                self.assertIn("is a promotion", prompt)
+                self.assertIn("tracked `notes/` tree", prompt)
 
     def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
         """The roles fragment every agent gets is generated from the role table, so it
