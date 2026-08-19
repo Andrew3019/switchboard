@@ -1141,6 +1141,26 @@ class CleanupClosesTheSpaceTest(CloseHarness, unittest.TestCase):
         self.assertTrue(Path(path).is_dir())
         self.assertIn(path, self.registered())
 
+    def test_the_directory_the_caller_stands_in_is_skipped_in_silence_too(self):
+        """The other half of the same rule, by DIRECTORY rather than by name — a human
+        has no row at all, so `os.getcwd()` is the only thing that says where the sweep
+        was typed. Silent here and reported by the bare-workspace cascade, which is the
+        one caller that passes `named`: a sweep saying "you are working in it" every half
+        hour about a space nobody mentioned is not news, and a person who typed one
+        workspace's name is owed the line."""
+        path = self.space("api")
+        self.agent("worker", workspace="api", cwd=path, pane="w2:p1")
+        here = os.getcwd()
+        os.chdir(path)
+        try:
+            r = self.b.cleanup(me=HUMAN)
+        finally:
+            os.chdir(here)
+        self.assertEqual(list(r), ["worker"])
+        self.assertEqual(r.spaces, [])
+        self.assertEqual(r.spaces_refused, [])
+        self.assertTrue(Path(path).is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

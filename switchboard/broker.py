@@ -477,9 +477,14 @@ class CleanupResult(list):
 
     `panes` is the agents whose panes came down inside those closed spaces — the nested
     close's own `closed` list, kept rather than discarded. A pane leaving the board
-    without being named is the thing this class was written about; `cleanup` closes those
-    agents itself and so never reads it, and the bare-workspace cascade closes nothing
-    itself and would otherwise report one pane while taking two.
+    without being named is the thing this class was written about; the bare-workspace
+    cascade closes nothing itself and would otherwise report one pane while taking two.
+
+    It is filled on every path and read on one, and a future reader must not simply add it
+    to `closed`: on the `cleanup` path those agents are ones cleanup closed itself and
+    already named there, so the two lists overlap and a report that sums them counts the
+    same pane twice. The cascade is the case where they cannot overlap — it closes no
+    agents of its own — which is why it is the one that folds them in.
 
     `spaces` and `spaces_refused` are the same two halves one level up: the workspaces
     this cleanup closed once nothing was left in them, and the ones it looked at and left
@@ -4715,13 +4720,16 @@ class Broker:
         for good, silently. The other silent skips stay silent under `named` too: nothing
         recorded, already retired, or nothing there to delete is not news on any route.
         """
-        seen = []
+        seen, said = [], set()
         my_names, my_dirs = self._my_spaces(me)
         for a in candidates:
             w = a["workspace"]
-            if not w or w in seen:
+            if not w or w in seen or w in said:
                 continue
             if w in my_names:
+                # Deduped like `seen` and for the same reason: one space is one line,
+                # however many candidate rows are filed under it.
+                said.add(w)
                 if named:
                     closed.spaces_refused.append(
                         (w, "it is the workspace you are working in, and a close never "
