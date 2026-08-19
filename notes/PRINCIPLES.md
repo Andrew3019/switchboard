@@ -3,8 +3,8 @@
 Engineering principles for this system. What it is, what it refuses to be, and what
 follows mechanically from each choice.
 
-Evidence for the empirical claims lives in `research/`; `research/00-synthesis.md` is the
-index, and Appendix A compresses the failure evidence. Report refs look like `[02]`.
+Evidence for the empirical claims lives in `research/`, and Appendix A compresses the
+failure evidence. Report refs look like `[02]`.
 
 ---
 

@@ -1,9 +1,7 @@
 # Model selection: what switchboard uses, what it should use
 
-Answers the brief in `notes/model-selection-brief.md`. Three scouts: the model
-landscape and cost (`notes/scratch-model-landscape.md`), community sentiment
-(`notes/scratch-model-sentiment.md`), and what this repo actually does today
-(`notes/scratch-current-models.md`). Detail and file:line citations live in those.
+Three scouts fed this: the model landscape and cost, community sentiment, and what
+this repo actually does today.
 
 Dated 2026-08-16. Opus 5 is three weeks old, so all sentiment here is fresh and unsettled.
 

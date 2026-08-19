@@ -1,6 +1,6 @@
 # Proof of concept — M1 ∪ M2 ∪ M3
 
-Scope for review. Everything else (`PLAN.md`) attaches to this later without redesign.
+Scope for review. Everything else attaches to this later without redesign.
 
 **Goal:** an agent can spawn a second agent, hand it a task, block until it reports back —
 and both transcripts are irrelevant, because the store alone says what happened.
@@ -12,8 +12,8 @@ and both transcripts are irrelevant, because the store alone says what happened.
 > rather than deleted — the wrong turns are the useful part. Two global corrections apply
 > throughout and are not repeated at every mention:
 >
-> - **The command is `sb`, not `wf`.** `wf` was always a placeholder (`PLAN.md` says so),
->   and nothing depended on it. Read every `wf x` below as `sb x`.
+> - **The command is `sb`, not `wf`.** `wf` was always a placeholder, and nothing
+>   depended on it. Read every `wf x` below as `sb x`.
 > - **Plugins and skills ARE in, and Codex is not.** What shipped in M3 as `--with`
 >   "plugins" is now called **presets** (`switchboard/presets.py`) — prompt text, no code.
 >   The word "plugin" was later taken for the other thing: Python that sb imports

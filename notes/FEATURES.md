@@ -2,7 +2,7 @@
 
 This is the maintained inventory of switchboard's features. It is derived from reading
 `switchboard/*.py` and `defaults/*` directly, and from `DESIGN-TRUTH.md`, which is the
-record of the decisions behind them — not from `PLAN.md`/`POC.md`/`PRINCIPLES.md`, which
+record of the decisions behind them — not from `POC.md`/`PRINCIPLES.md`, which
 describe intent and are known to be partly stale or retracted. Entry point for
 everything below: `bin/sb` → `switchboard.cli.main()` (there is no pip install; the repo
 is not packaged, `bin/sb` just puts the repo root on `sys.path`).
