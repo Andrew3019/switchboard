@@ -175,7 +175,14 @@ def build_parser() -> argparse.ArgumentParser:
     dn = cmd("done", help="you have finished")
     dn.add_argument("summary")
 
-    bl = cmd("block", help="stop and surface to the human (they answer with `sb tell`)")
+    bl = cmd(
+        "block", help="stop and surface to the human (they answer with `sb tell`)",
+        # Says the gate exists before a caller trips it. The rule is the protocol's — one
+        # agent waits on a person for one question — and `broker.block` is what enforces
+        # it; this only keeps the refusal from being a surprise, like the `why` note below.
+        description="Refused while somebody below you is already waiting on a person: that "
+                    "row is theirs, and the report to make instead is `sb done` naming who "
+                    "is waiting and what for.")
     # The help string is where a caller looks before its first block, so it states the
     # split rather than just naming the field: the full text goes in the chat, one line
     # comes here. Enforced in validate.reason — this only stops the enforcement being a
