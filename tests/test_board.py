@@ -1125,7 +1125,7 @@ class PlanBlockTest(unittest.TestCase):
     """The plans plugin, drawn as its own section, in both renderers.
 
     The end of the wire and the only test here that knows what a plan is. It runs the
-    SHIPPED plugin against a real `plans.json`, so what it pins is the whole path: the
+    SHIPPED plugin against a real store on disk, so what it pins is the whole path: the
     board finds `defaults/plugins/plans/board.py`, reads the `SECTION` on it, hands it the
     rows of each group, and draws the header and flowchart it gets back under one heading.
     """
@@ -1143,11 +1143,18 @@ class PlanBlockTest(unittest.TestCase):
         self.state.mkdir(parents=True)
 
     def write(self, *plans):
-        (self.state / "plans.json").write_text(json.dumps(
-            {"format": 1, "next_plan": 9, "next_step": 9, "plans": list(plans)}))
+        """The store as it is on disk: one file per plan, and the counters beside them."""
+        for plan in plans:
+            (self.state / f"{plan['id']}.json").write_text(json.dumps(plan))
+        (self.state / "_meta.json").write_text(json.dumps(
+            {"format": 2, "next_plan": 9, "next_step": 9}))
 
-    def plan(self, pid, workspace, title, steps, checkout=None):
-        return {"id": pid, "title": title, "workspace": workspace,
+    def plan(self, pid, workspace, title, steps, checkout=None, display=None):
+        """One plan on disk. `display` defaults to the title, which is what a plan made
+        through `create` has — the board draws it INSTEAD of the title, and a plan with
+        none is incomplete and drawn red, which is its own test below."""
+        return {"id": pid, "title": title, "display": title if display is None else display,
+                "workspace": workspace,
                 "checkout": str(self.repo if checkout is None else checkout),
                 "created_at": 0, "created_by": "lead", "changelog": [], "notes": [],
                 "steps": steps}
@@ -1224,8 +1231,9 @@ class PlanBlockTest(unittest.TestCase):
                 agent("ghost", workspace="vanished", state="done", gone=True)]
         with self.hooks():
             lines = board.section_extras(rows)[0][1]
-        by_plan = {x.split()[0]: board._ANSI.sub("", x)
-                   for x in lines if x.split() and x.split()[0].startswith("p-")}
+        flat = [board._ANSI.sub("", x) for x in lines]
+        by_plan = {x.split()[0]: x for x in flat if x.split()
+                   and x.split()[0].startswith("p-")}
         self.assertIn("live", by_plan["p-1"])
         self.assertIn("dormant", by_plan["p-2"])
         self.assertIn("abandoned", by_plan["p-3"])
@@ -1283,12 +1291,14 @@ class PlanBlockTest(unittest.TestCase):
         # and the cell's leading space are the other two.
         self.assertEqual(board._visible_len(lines[1].split("─")[0]), 11)
 
-    def test_a_name_too_wide_for_a_cell_is_clipped_to_columns(self):
-        """The clip is 22 COLUMNS. Counted in characters it let 44 through.
+    def test_a_long_display_name_is_drawn_whole_and_the_pane_is_the_only_clip(self):
+        """THE PER-CELL CLIP IS GONE, and that is the point of display names being required.
 
-        21 and not 22, and that is `_clip_cols`'s own rule rather than an off-by-one: the
-        next ideograph is two columns wide and only one is left, so it comes up short by
-        one rather than over by one. Short is a cosmetic gap; over is what this fixes.
+        Clipping at 22 columns is what produced a column of half-sentences: what it clipped
+        was the fallback — a step's whole name — and the informative half was the half it
+        cut. A display name is short because its author made it short, so nothing here
+        second-guesses the length, and a name too wide for the pane costs the tail of one
+        line rather than the meaning of every cell.
         """
         self.write(self.plan("p-1", "api", "shape",
                              [{"id": "s-1", "name": "x", "display": "检" * 30,
@@ -1296,13 +1306,13 @@ class PlanBlockTest(unittest.TestCase):
         with self.hooks():
             lines = [board._ANSI.sub("", x)
                      for x in board.section_extras([agent("lead")])[0][1]]
-        self.assertEqual(board._visible_len(lines[1].strip()), 21)
-        self.assertTrue(lines[1].rstrip().endswith("…"))
+        self.assertEqual(board._visible_len(lines[1].strip()), 60, "30 ideographs, whole")
+        self.assertNotIn("…", lines[1])
 
     def test_a_dep_written_as_a_bare_number_is_the_edge_show_says_it_is(self):
         """Ids compare as NUMBERS everywhere else in the plugin, and now here too.
 
-        `plans.json` is hand-edited by a lead, `_check` accepts a bare `1` in `deps`, and
+        a plan file is hand-edited by a lead, `_check` accepts a bare `1` in `deps`, and
         `show` renders it as `after 1` — so a board matching the strings drew no edge for
         exactly the dep a hand-edit is most likely to write. The same slip let a self-dep
         written as `1` past the guard and out as an arrow into nothing.
@@ -1315,7 +1325,7 @@ class PlanBlockTest(unittest.TestCase):
         with self.hooks():
             lines = [board._ANSI.sub("", x).rstrip()
                      for x in board.section_extras([agent("lead")])[0][1]]
-        self.assertEqual(lines[1], "  scope ───→ build")
+        self.assertEqual(lines[1], "  scope ──→ build")
         # And a step depending on ITSELF by number is still no edge at all.
         self.assertEqual(lines[3], "  alone")
 
@@ -1336,8 +1346,8 @@ class PlanBlockTest(unittest.TestCase):
             lines = [board._ANSI.sub("", x)
                      for x in board.section_extras([agent("lead")])[0][1]]
         self.assertEqual([x.rstrip() for x in lines[1:]],
-                         ["  scope ──┬→ build ──┬→ ship",
-                          "          └→ docs  ──┘"])
+                         ["  scope ─┬→ build ─┬→ ship",
+                          "         └→ docs  ─┘"])
 
     def test_a_step_draws_its_display_name_and_falls_back_to_its_full_name(self):
         """The short board label a step carries, or its name where it has none.
@@ -1358,6 +1368,48 @@ class PlanBlockTest(unittest.TestCase):
         self.assertNotIn("list every claim", chart, "and never the long name behind it")
         self.assertIn("ship", chart, "a step with no display name falls back to its name")
 
+    def test_a_plans_header_is_its_display_name_and_not_its_title(self):
+        """The header is a HEADING over a picture, so it draws the plan's board name.
+
+        A title says what the job is in a sentence and that is `show`'s to print; a heading
+        that wraps or gets cut mid-clause has stopped being one. A plan authored before the
+        field existed falls back to its title rather than drawing nothing.
+        """
+        self.write(self.plan("p-1", "api", "fix the red CI on main, failing since Tuesday",
+                             [{"id": "s-1", "name": "scope", "display": "scope",
+                               "progress": "open"}],
+                             display="fix red CI: rich assertions on main"),
+                   self.plan("p-2", "api", "an older plan", [], display=""))
+        with self.hooks():
+            lines = [board._ANSI.sub("", x)
+                     for x in board.section_extras([agent("lead")])[0][1]]
+        self.assertIn("fix red CI: rich assertions on main", lines[0])
+        self.assertNotIn("failing since Tuesday", " ".join(lines))
+        self.assertIn("an older plan", lines[2], "no display: the title, rather than blank")
+
+    def test_an_incomplete_plan_and_its_steps_are_drawn_red(self):
+        """THE THIRD DOOR. A plan hand-edited and never run against a verb is still wrong,
+        and the board is where somebody is looking when it matters.
+
+        Red beats the progress colour on the steps at fault, deliberately: a done step
+        drawn green would report the one thing about it that is going well. Only the steps
+        at fault — a plan is not painted wholesale, or the eye has nothing to go to.
+        """
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "scope the work", "progress": "done"},
+            {"id": "s-2", "name": "build", "display": "build", "progress": "open",
+             "deps": ["s-1"]},
+            {"id": "s-3", "name": "ship", "display": "ship", "progress": "open"}],
+            display=""))
+        with self.hooks():
+            lines = board.section_extras([agent("lead")])[0][1]
+        chart = "".join(lines[1:])
+        self.assertIn("\033[31mscope the work\033[0m", chart, "no display name: red")
+        self.assertIn("\033[31mship\033[0m", chart, "no dep and not the first step: red")
+        self.assertNotIn("\033[32m", chart, "and red beats the progress colour")
+        self.assertIn(" build", board._ANSI.sub("", chart), "the sound step is left alone")
+        self.assertTrue(lines[0].startswith("\033[31m"), "and the header says so too")
+
     def test_progress_is_colour_and_the_seam_carries_it(self):
         """The other half of the drawing: no progress column, and colour instead.
 
@@ -1366,9 +1418,11 @@ class PlanBlockTest(unittest.TestCase):
         arrive as literal escape characters in the middle of a line.
         """
         self.write(self.plan("p-1", "api", "shape", [
-            {"id": "s-1", "name": "scope", "progress": "skipped"},
-            {"id": "s-2", "name": "build", "progress": "done", "deps": ["s-1"]},
-            {"id": "s-3", "name": "ship", "progress": "open", "deps": ["s-2"]}]))
+            {"id": "s-1", "name": "scope", "display": "scope", "progress": "skipped"},
+            {"id": "s-2", "name": "build", "display": "build", "progress": "done",
+             "deps": ["s-1"]},
+            {"id": "s-3", "name": "ship", "display": "ship", "progress": "open",
+             "deps": ["s-2"]}]))
         with self.hooks():
             chart = board.section_extras([agent("lead")])[0][1][1]
         self.assertNotIn("skipped", chart)
@@ -1429,10 +1483,34 @@ class PlanBlockTest(unittest.TestCase):
         with self.hooks():
             self.assertEqual(board.section_extras([agent("lead")]), [])
 
+    def test_the_board_draws_a_store_that_has_not_been_moved_across_yet(self):
+        """The shape most repos are still in, and the one the board must not disturb: it
+        reads without the plugin framework's lock, so a read that migrated would flip a
+        shared store from a poll loop."""
+        (self.state / "plans.json").write_text(json.dumps(
+            {"format": 1, "next_plan": 9, "next_step": 9, "plans": [
+                self.plan("p-1", "api", "the old shape",
+                          [{"id": "s-1", "name": "x", "progress": "open"}])]}))
+        with self.hooks():
+            sections = board.section_extras([agent("lead")])
+        self.assertIn("the old shape", " ".join(sections[0][1]))
+        self.assertEqual(sorted(f.name for f in self.state.iterdir()), ["plans.json"])
+
     def test_a_plans_file_that_cannot_be_read_costs_the_board_nothing(self):
         (self.state / "plans.json").write_text("{ not json")
         with self.hooks():
             self.assertEqual(board.section_extras([agent("lead")]), [])
+
+    def test_one_unreadable_plan_does_not_stop_the_board_drawing_the_others(self):
+        """The reason plans are one file each. Before it, a malformed store blanked the
+        whole section, so one bad file hid every good one — on the screen a human looks at
+        to find out that something has gone wrong."""
+        self.write(self.plan("p-1", "api", "the good one",
+                             [{"id": "s-1", "name": "x", "progress": "open"}]))
+        (self.state / "p-2.json").write_text("{ not json")
+        with self.hooks():
+            sections = board.section_extras([agent("lead")])
+        self.assertIn("the good one", " ".join(sections[0][1]))
 
 
 class SeamWindowTest(unittest.TestCase):
