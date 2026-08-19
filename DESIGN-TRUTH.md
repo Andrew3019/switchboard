@@ -422,9 +422,10 @@ worktrees are below it. — confirmed 2026-08-18
 **Every step carries a short display name for the board, and so does the plan.** A step's
 name is a sentence and a board cell is a few columns, so a step named "list every claim the
 document makes about the code" is authored with a display like "list claims" — as short as it
-can be made, abbreviating and dropping middle vowels where that helps. It is required on every
-step, not optional: a cell with no display drew the name clipped mid-clause and the informative
-half was the half cut, so the board was unreadable until it was authored. It pairs with the
+can be made, abbreviating and cutting words the title already implies — short but readable,
+not vowel-stripped. It is required on every step, not optional: a cell with no display drew
+the name clipped mid-clause and the informative half was the half cut, so the board was
+unreadable until it was authored. It pairs with the
 name exactly — a named step's display lives in its definition and an edit to it reaches every
 plan naming that step; an on-the-fly step's lives on the step. A plan carries its own display
 too, longer than a step's since it owns the whole header line, and a display *version* of the
