@@ -1456,7 +1456,7 @@ class LivenessTest(PlansSandbox):
     def test_a_crafted_name_cannot_forge_a_row(self):
         """A plan renders as rows and a row is a line, so a newline in a step name or an
         owner draws a step, or a status, that nobody wrote. Refused at the door — and
-        escaped at the render as well, because a hand-edited `plans.json` never came
+        escaped at the render as well, because a hand-edited plan file never came
         through a verb at all."""
         forged = "write it\ns-9     done      merged and shipped"
         code, out, _ = self.sb("plugin", "plans", "create", "a job", "--step", forged,

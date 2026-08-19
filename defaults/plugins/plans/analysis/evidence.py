@@ -19,7 +19,7 @@ argument, and a test pins that. That is the whole of "it only proposes; it never
 not a rule the reader is asked to keep, but the absence of anything that could break it.
 
 The records are read through the plugin's own read surface rather than by re-parsing
-`plans.json`, so this cannot drift from the format. What `list --all --json` hands back is
+the plan files, so this cannot drift from the format. What `list --all --json` hands back is
 already resolved — a named step carries the library's words, and every plan carries the
 `condition` and `worktree` PR4 derives at read time and stores nowhere. Deriving those here
 a second time is how the two answers start disagreeing.
@@ -102,7 +102,7 @@ def records(sb: str = "sb", *, source: Optional[str] = None) -> list[dict]:
     `source` is a file (or `-` for stdin) holding what `sb plugin plans list --all --json`
     printed earlier — for analysing a corpus captured elsewhere, and for the tests, which
     have synthetic records and no store to put them in. Either way the shape is the
-    plugin's own output and never a re-parse of `plans.json`.
+    plugin's own output and never a re-parse of the store.
     """
     if source is not None:
         text = sys.stdin.read() if source == "-" else open(source, encoding="utf-8").read()

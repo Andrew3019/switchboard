@@ -1125,7 +1125,7 @@ class PlanBlockTest(unittest.TestCase):
     """The plans plugin, drawn as its own section, in both renderers.
 
     The end of the wire and the only test here that knows what a plan is. It runs the
-    SHIPPED plugin against a real `plans.json`, so what it pins is the whole path: the
+    SHIPPED plugin against a real store on disk, so what it pins is the whole path: the
     board finds `defaults/plugins/plans/board.py`, reads the `SECTION` on it, hands it the
     rows of each group, and draws the header and flowchart it gets back under one heading.
     """
@@ -1305,7 +1305,7 @@ class PlanBlockTest(unittest.TestCase):
     def test_a_dep_written_as_a_bare_number_is_the_edge_show_says_it_is(self):
         """Ids compare as NUMBERS everywhere else in the plugin, and now here too.
 
-        `plans.json` is hand-edited by a lead, `_check` accepts a bare `1` in `deps`, and
+        a plan file is hand-edited by a lead, `_check` accepts a bare `1` in `deps`, and
         `show` renders it as `after 1` — so a board matching the strings drew no edge for
         exactly the dep a hand-edit is most likely to write. The same slip let a self-dep
         written as `1` past the guard and out as an arrow into nothing.

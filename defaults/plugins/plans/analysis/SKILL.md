@@ -11,7 +11,7 @@ has happened since.
 
 ## The hard rule
 
-**Propose only. Never edit.** Nothing in this pass writes to `plans.json`, to a plan, to
+**Propose only. Never edit.** Nothing in this pass writes to the plan files, to a plan, to
 `library/`, to `templates/`, to `presets.toml`, to a preset file or to a role file. Not "ask
 first" — do not. The output of this pass is a message: what you would add, why, and the plan
 ids the claim rests on. Somebody else decides, and the catalogue is edited in an editor by a
