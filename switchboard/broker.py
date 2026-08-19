@@ -475,6 +475,17 @@ class CleanupResult(list):
     one of them and `--json` reports every one of them; `expected` only says which are
     not worth a line on their own.
 
+    `panes` is the agents whose panes came down inside those closed spaces — the nested
+    close's own `closed` list, kept rather than discarded. A pane leaving the board
+    without being named is the thing this class was written about; the bare-workspace
+    cascade closes nothing itself and would otherwise report one pane while taking two.
+
+    It is filled on every path and read on one, and a future reader must not simply add it
+    to `closed`: on the `cleanup` path those agents are ones cleanup closed itself and
+    already named there, so the two lists overlap and a report that sums them counts the
+    same pane twice. The cascade is the case where they cannot overlap — it closes no
+    agents of its own — which is why it is the one that folds them in.
+
     `spaces` and `spaces_refused` are the same two halves one level up: the workspaces
     this cleanup closed once nothing was left in them, and the ones it looked at and left
     standing, with the gate's own words for why. They are separate lists rather than more
@@ -487,13 +498,15 @@ class CleanupResult(list):
                  refused: Optional[list[tuple[str, str]]] = None,
                  expected: Optional[set[str]] = None,
                  spaces: Optional[list[str]] = None,
-                 spaces_refused: Optional[list[tuple[str, str]]] = None):
+                 spaces_refused: Optional[list[tuple[str, str]]] = None,
+                 panes: Optional[list[str]] = None):
         super().__init__(closed)
         self.refused: list[tuple[str, str]] = [] if refused is None else refused
         self.expected: set[str] = set() if expected is None else expected
         self.spaces: list[str] = [] if spaces is None else spaces
         self.spaces_refused: list[tuple[str, str]] = (
             [] if spaces_refused is None else spaces_refused)
+        self.panes: list[str] = [] if panes is None else panes
 
     @property
     def notable(self) -> list[tuple[str, str]]:
@@ -585,6 +598,13 @@ def _ancestry(pid: int, parents: dict) -> set:
         chain.add(pid)
         pid = parents.get(pid, 0)
     return chain
+
+
+# `_close_target`'s one refusal that proves nothing about the pane: herdr could not be
+# reached, so it said neither "that pane is somebody else's" nor "it is yours". Callers
+# that have to tell a proven mismatch from a blackout compare against this exact reason,
+# so it lives here rather than being written out twice and drifting apart.
+NO_HERDR_ANSWER = "herdr could not be asked whose pane that is"
 
 
 class Broker:
@@ -1456,8 +1476,24 @@ class Broker:
             store.log_event(self.db, kind="board_open_failed", agent=name,
                             error="herdr would not split the pane")
 
-    def _close_board(self, name: str) -> None:
+    def _close_board(self, name: str, force: bool = False) -> bool:
         """Close the board pane opened beside `name`, and forget it.
+
+        Returns True when there is nothing left to do for this board — closed, already
+        gone, or proven not ours — and False when the close was DEFERRED: herdr could not
+        say, so the `board_pane:` row is kept and a later sweep should call this again.
+        Returning False is not an error; it is the board asking to be retried. The retry
+        is `cleanup`'s already-closed branch, which calls this for every ended row and
+        finds nothing to do the moment the row is gone; a deferred board is therefore
+        retried without the agent row being held open, which is the point. Callers with
+        no next sweep to retry into may ignore the return — see `_stop_panes`.
+
+        `force` is `cleanup --force`, and it turns every defer back into the old
+        behaviour: drop the row, report True, let the caller finish. That loses the pane
+        the same way this method used to, and deliberately — the row it would keep is only
+        ever read by a sweep that will never come, because `--force` is documented to end
+        the agent `done` whatever herdr did. A board nobody can close must not be able to
+        wedge the one command that exists for things that cannot be closed.
 
         The other half of `_open_board`, and it has to exist for the same reason that
         one records the pane at all: the board is a pane switchboard opened, so it is a
@@ -1482,45 +1518,69 @@ class Broker:
         is what herdr can be asked about; a board id recycled onto another board is
         invisible to it, and left unproven rather than claimed.
 
-        A refusal leaves the pane alone and still drops the meta row, like every other
-        path out of here: the record is of a pane we have just failed to prove is ours,
-        and keeping it would have the next `_open_board` — or a `restore` under this same
-        name — believe a stranger's pane is our board.
+        Whether a failure drops the meta row turns on what the failure PROVED, and that
+        asymmetry is the whole point. A refusal that names somebody else in the pane, or a
+        `pane_not_found`, is proof the pane is not ours to close: the row goes, because
+        keeping it would have the next `_open_board` — or a `restore` under this same name
+        — believe a stranger's pane is our board. A failure that proves nothing — herdr
+        unreachable, a close that timed out, any other error — says only that we could not
+        find out, and dropping the row there is how a board pane got orphaned for good:
+        the row was the only thing pointing at it. So that case KEEPS the row and reports
+        the defer, and the pane is closed by whichever sweep next reaches herdr.
 
         Tolerates a board that is already gone — closed by hand, crashed, never opened —
-        because all three are ordinary. The meta row is dropped either way: it is a
+        because all three are ordinary, and all three are proof enough: the meta row is a
         record of a pane we no longer own, and leaving it would make the next
         `_open_board` for this name believe a board is up.
 
-        Never raises. A close that half-happened is worse than a board left behind.
+        Never raises. A close that half-happened is worse than a board left behind — but
+        a board left behind with nothing pointing at it is worse than either, which is
+        what the deferred return is for.
         """
         key = f"board_pane:{name}"
         try:
             row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         except Exception:
-            return
+            return True
         pane = row["value"] if row else None
         if not pane:
-            return
+            return True
         if not self._board_is_only_for(name, pane):
             self._forget_board(key)
-            return
+            return True
         target, wrong = self._close_target({"pane_id": pane, "terminal_id": None})
         if wrong is not None:
             store.log_event(self.db, kind="board_close_refused", agent=name,
                             pane=pane, error=wrong)
+            if wrong == NO_HERDR_ANSWER and not force:
+                # Not a refusal about this pane at all — herdr was unreachable, so it
+                # told us nothing about who is in it. Keep the row and ask to be retried.
+                return False
             self._forget_board(key)
-            return
+            return True
         try:
             self.h.close_pane(target)
+        except HerdrError as e:
+            if e.code == "pane_not_found":
+                # The pane is already gone. That is this close having happened, not
+                # having failed — the reading the agent-pane path gives it too.
+                store.log_event(self.db, kind="board_close_gone", agent=name, pane=pane)
+            else:
+                store.log_event(self.db, kind="board_close_failed", agent=name,
+                                pane=pane, error=str(e))
+                if not force:
+                    return False
         except Exception as e:
-            # Including a pane herdr no longer has: "already closed" and "would not
-            # close" arrive the same way, and neither is worth failing a cleanup over.
+            # Anything else — a timeout, an adapter blowing up — says only that we could
+            # not find out whether the pane is still there. Keep the row; retry later.
             store.log_event(self.db, kind="board_close_failed", agent=name,
                             pane=pane, error=str(e))
+            if not force:
+                return False
         else:
             store.log_event(self.db, kind="board_close", agent=name, pane=pane)
         self._forget_board(key)
+        return True
 
     def _board_is_only_for(self, name: str, pane: str) -> bool:
         """Is `pane` this agent's board alone, or is a still-live agent also on it?"""
@@ -1887,6 +1947,16 @@ class Broker:
 
         Retiring is the entire operation, and it is still worth having: "this orchestrator
         is finished" is a fact worth recording whether or not a directory goes with it.
+
+        It is also the LAST step, after the cascade below it, for the same reason `_finish`
+        retires last on the destructive route: the retired stamp is what makes this command
+        a no-op ever after (`workspace_close`'s `already` return), so anything stamped
+        before the work is finished is work that can never be retried. `_close_empty_spaces`
+        swallows a gate's `ValueError` and nothing else, so a Ctrl-C or a locked database
+        mid-cascade leaves the loop — and with the stamp written first that left the
+        remaining child spaces orphaned permanently, by the one command that was supposed
+        to take them. Retired last, the same failure leaves the whole close retryable and
+        the mark released, and a second run picks up the spaces the first did not reach.
         """
         busy = [r["name"] for r in self._unfinished_in(name, exclude=me)]
         if busy:
@@ -1897,13 +1967,104 @@ class Broker:
         self._claim(name, me)
         try:
             closed = self._stop_panes(name, me=me)
+            spaces = self._cascade(name, me=me)
+            # The cascade's panes are this command's panes: it closed them.
+            closed = list(closed) + spaces.panes
         except BaseException:
             store.release_retiring(self.db, name, me)
             raise
         store.retire_workspace(self.db, name)
         store.log_event(self.db, kind="workspace_retired", workspace=name, bare=True,
                         closed=",".join(closed) or None)
-        return self._closed(name, None, kind="bare", worktree="none", closed=closed)
+        return self._closed(name, None, kind="bare", worktree="none", closed=closed,
+                            spaces=spaces.spaces, spaces_refused=spaces.spaces_refused)
+
+    def _cascade(self, name: str, *, me: str) -> "CleanupResult":
+        """Close the spaces this bare workspace's subtree forked. What it will not close:
+        a space whose own subtree is still working.
+
+        The live-descendants gate is the one `cleanup` has and this level would otherwise
+        lack, and lacking it was a hole rather than a simplification. Every gate below
+        here is scoped to the space itself — rows filed under it (`_filed_gate`), a cwd
+        or a process inside its checkout (`_records_gate`, `_gate`) — and a live
+        GRANDCHILD is in none of those: it sits in its own forked space, under its own
+        name. So a finished lead's checkout read as empty and was deleted while its
+        subtree was still going.
+
+        Nothing was destroyed that git could see — the inventory gate ran, and `-d` leaves
+        an unmerged branch standing — but the space a live agent's parent worked in is not
+        this command's to take: `sb restore` has only the recorded checkout to come back
+        to, so a human bringing that parent back to answer the child it is still waiting on
+        finds nothing there. `cleanup` refuses this shape (`live_descendants`, and the
+        invariant in it), and the whole claim of this cascade is that it refuses whatever
+        cleanup refuses.
+
+        Held, not skipped: it goes in `spaces_refused` with the gate's own shape of
+        reason, so the person who typed the command reads which space stayed and why,
+        exactly as they do for a dirty one.
+        """
+        spaces = CleanupResult()
+        candidates = []
+        for d in self._forked_under(name):
+            if kids := self.live_descendants(d["name"]):
+                spaces.spaces_refused.append(
+                    (d["workspace"], f"{_names(kids)} still working underneath "
+                                     f"{d['name']}, whose space this is"))
+            else:
+                candidates.append(d)
+        self._close_empty_spaces(candidates, spaces, me=me, dry_run=False, named=True)
+        return spaces
+
+    def _forked_under(self, name: str) -> list:
+        """The rows of this bare workspace's own subtree that FORKED a space of their own.
+
+        A bare workspace is what a top orchestrator gets, and a top is the only thing that
+        MINTS spaces: every direct child it delegates to is forked into a worktree
+        workspace of its own, named for the child (`_fork_for`). So a dispatcher's subtree
+        is never one workspace — it is this bare one plus one per direct child, and rows
+        in those carry a different `workspace` value entirely. `_close_bare`'s own gate is
+        `WHERE workspace=?` and is deliberately so (see it for the bug sharing the general
+        gate was), which is exactly why those forked spaces are structurally invisible to
+        it and were left registered forever, to be found much later by a DB-wide
+        `sb cleanup` — usually too dirty by then to auto-delete.
+
+        This is the second scope, and it is keyed on PARENTAGE rather than on a workspace
+        name, because parentage is the only thing that relates a dispatcher to the spaces
+        its children forked. Started from the workspace's own rows rather than from the
+        name so that it holds for any bare workspace, not only the one whose top happens
+        to share its name.
+
+        Only rows that are their own space's NAMESAKE are returned, and that is the whole
+        difference between "the spaces this subtree forked" and "every space anybody in
+        this subtree is filed under". A row's `workspace` is not proof its subtree minted
+        that space: `sb delegate --workspace <name>` files a child into an EXISTING space
+        somebody else opened (`join_workspace`), which is what people type precisely when
+        a fork was refused. Keyed on the row's own workspace value, one such join is
+        enough for `sb workspace close main-2` to delete a worktree `main-3`'s child
+        forked and is still using — silently, by the one command in here that cannot be
+        undone, and reaching a linked worktree of the human's own by the same route since
+        only the PRIMARY one is refused outright.
+
+        The namesake test is exact rather than a heuristic: `_fork_for` names a forked
+        space for the child that forked it, verbatim and with no prefix or suffix, so
+        `name == workspace` holds for every space this cascade is meant to reach and for
+        nothing else. Nothing intended is lost by it — a grandchild inherits its parent's
+        space rather than minting one, and that space is already reached through the
+        namesake row that did mint it.
+
+        It decides nothing about deletion, and it is the candidate set only: what is then
+        held back is `_cascade`'s live-descendants gate and, below that,
+        `_close_empty_spaces`'s and `workspace_close`'s own — a live child's space is not
+        empty, so those refuse it and it stays.
+        """
+        seen, out = set(), []
+        for r in self.db.execute("SELECT * FROM agents WHERE workspace=?",
+                                 (name,)).fetchall():
+            for d in self._descendants(r["name"]):
+                if d["name"] not in seen and d["name"] == d["workspace"]:
+                    seen.add(d["name"])
+                    out.append(d)
+        return out
 
     def _close_gone(self, name: str, checkout: str, *, me: str) -> dict:
         """Close a workspace whose checkout is already gone: deregister it, drop its branch.
@@ -2055,11 +2216,22 @@ class Broker:
     @staticmethod
     def _closed(name: str, checkout: Optional[str], *, kind: str, worktree: str,
                 already: bool = False, branch: Optional[str] = None,
-                branch_deleted: bool = False, closed: Sequence[str] = ()) -> dict:
-        """What the caller gets. `kind` is which of the three routes this workspace took."""
+                branch_deleted: bool = False, closed: Sequence[str] = (),
+                spaces: Sequence[str] = (),
+                spaces_refused: Sequence[tuple] = ()) -> dict:
+        """What the caller gets. `kind` is which of the three routes this workspace took.
+
+        `spaces`/`spaces_refused` are the cascade one level down, and they carry
+        `cleanup`'s two halves under `cleanup`'s names because they are literally its
+        lists: only the bare route fills them, and only ever with what `_cascade` did to
+        the spaces this workspace's children forked. Present
+        and empty on every other route rather than absent, so a caller reading the answer
+        never has to ask whether the key exists before asking what is in it.
+        """
         return {"workspace": name, "checkout": checkout, "already": already, "kind": kind,
                 "worktree": worktree, "branch": branch, "branch_deleted": branch_deleted,
-                "closed": list(closed)}
+                "closed": list(closed), "spaces": list(spaces),
+                "spaces_refused": [tuple(s) for s in spaces_refused]}
 
     # -- the gate ---------------------------------------------------------------------
 
@@ -2501,6 +2673,16 @@ class Broker:
                         f"deleted"
                     ) from None
                 store.log_event(self.db, kind="cleanup_pane_gone", agent=a["name"])
+            # The deferred return is deliberately not read here: this path raises on
+            # anything it cannot confirm, and there is nothing useful to do with a defer
+            # inside a call that is deleting the workspace. It is not dropped on the floor
+            # either — the row below ends with no pane and an `ended_at`, which is exactly
+            # the shape `cleanup`'s already-closed branch retries, so a `board_pane:` row
+            # left here is picked up and closed by the next ordinary sweep. Until one runs,
+            # the pane sits there as it did before this change (no regression), and the
+            # narrow hazard is the window: if herdr recycles that pane id onto a live pane
+            # first, the surviving row makes `_open_board` believe a restored agent under
+            # this name already has a board, and the retry could close the stranger in it.
             self._close_board(a["name"])
             # The pane is gone, so the row must stop claiming one — a stale id has every
             # later sweep retrying release/close against a pane that is not there.
@@ -4280,6 +4462,27 @@ class Broker:
                 refuse(a, "that is you — an agent cannot close its own pane")
                 continue
             if a["ended_at"] and not a["pane_id"]:
+                if not dry_run:
+                    # The retry half of a deferred board close, and the ONLY place it can
+                    # live. A defer keeps the `board_pane:` row but ends the agent row
+                    # honestly — `done`, no pane — because holding the row open instead
+                    # would hold a `pane_id` pointing at a pane this sweep already closed,
+                    # and a pane id herdr had handed back out. `_close_target` would then
+                    # read the stranger who inherited it as a recycled-id mismatch and
+                    # refuse the row before ever reaching the board, forever, with
+                    # `--force` the only exit. So the row leaves cleanly and the board
+                    # comes back to be closed HERE, where there is no pane id left to be
+                    # recycled under it. A no-op once the meta row is gone, which it is
+                    # for every row that ever closed cleanly — so every sweep may call it,
+                    # and each one is another attempt until the board is down.
+                    #
+                    # `force=force` discards a pending retry rather than deferring it
+                    # again, and that is meant: `--force` is documented as the exit that
+                    # always ends the row `done` and accepts losing the pane, and a board
+                    # it cannot close is precisely a pane it is accepting the loss of.
+                    # Deferring here would give a row that is already closed a second way
+                    # to survive `--force`, which is the wedge this whole rework removed.
+                    self._close_board(a["name"], force=force)
                 if set(under.get(a["name"], ())) & set(closed):
                     # `--force` on a row that was already closed, and whose subtree was
                     # still holding it on the board — issue #53's exact repro. The subtree
@@ -4452,7 +4655,13 @@ class Broker:
             # The board went up beside this agent, so it comes down with it — otherwise
             # closing an agent leaves an empty tab behind, once per agent. After the
             # skip above, so a close we abandoned leaves the board with its live pane.
-            self._close_board(a["name"])
+            # A defer here is NOT a reason to hold this row back. The agent's own pane is
+            # closed and its row ends `done` with no pane, exactly as it always did; only
+            # the `board_pane:` row survives, and the already-closed branch above retries
+            # it every later sweep. Refusing instead would leave a `pane_id` on the row
+            # pointing at a pane that is gone and whose id herdr can hand out again —
+            # see there. `force=force` so `--force` drops the board rather than deferring.
+            self._close_board(a["name"], force=force)
             # Same rule for the file its system prompt was read from: it is this agent's
             # state, written by the spawn, so it goes when the pane does rather than
             # accumulating one file per agent ever spawned. After the skip above too — a
@@ -4550,7 +4759,7 @@ class Broker:
     # -- the space, once the agents in it are gone --------------------------------------
 
     def _close_empty_spaces(self, candidates: Sequence, closed: "CleanupResult", *,
-                            me: str, dry_run: bool) -> None:
+                            me: str, dry_run: bool, named: bool = False) -> None:
         """The second half of cleanup: close the space too, once nothing is left in it.
 
         > **Cleanup closes the agents, closes the tab, and closes the entire space and
@@ -4583,23 +4792,53 @@ class Broker:
         A refusal from a gate is recorded and never raised: the agents are already closed
         by the time this runs, and a space that will not close is not a reason to fail the
         cleanup that did.
+
+        `named` is the caller saying a PERSON asked about these spaces by name, and the
+        only thing it changes is whether standing in one is worth a line. Silence about
+        that is right for a sweep — "you are working in it" is the sweep's own posture,
+        every half hour, about a space nobody mentioned. It is wrong for `sb workspace
+        close <dispatcher>`: a human tidying a subtree up from inside one of its
+        worktrees is the ordinary place to be standing, and the answer they got was
+        indistinguishable from "that dispatcher had no forked spaces at all" — with the
+        dispatcher retired by then, so the re-run says `already` and the space is orphaned
+        for good, silently. The other silent skips stay silent under `named` too: nothing
+        recorded, already retired, or nothing there to delete is not news on any route.
         """
-        seen = []
+        seen, said = [], set()
         my_names, my_dirs = self._my_spaces(me)
         for a in candidates:
             w = a["workspace"]
-            if w and w not in seen and w not in my_names:
-                seen.append(w)
+            if not w or w in seen or w in said:
+                continue
+            if w in my_names:
+                # Deduped like `seen` and for the same reason: one space is one line,
+                # however many candidate rows are filed under it.
+                said.add(w)
+                if named:
+                    closed.spaces_refused.append(
+                        (w, "it is the workspace you are working in, and a close never "
+                            "takes the space it is being run from"))
+                continue
+            seen.append(w)
         for name in seen:
             row = store.get_workspace(self.db, name)
             if row is None or row["retired_at"] or row["checkout"] is None:
                 continue                       # unrecorded, done already, or nothing to delete
             if any(live.is_under(d, row["checkout"]) for d in my_dirs):
-                continue                       # the caller's own directory under another name
+                # The caller's own directory under another name. Reported rather than
+                # skipped when a person named this close — see `named`.
+                if named:
+                    closed.spaces_refused.append(
+                        (name, f"you are standing in {row['checkout']}, and a close never "
+                               f"deletes the directory it is being run from"))
+                continue
             why = self._space_ready(name, row, me=me)
             if why is None and not dry_run:
                 try:
-                    self.workspace_close(name, me=me)
+                    # The nested close's own panes are this command's too: it closed them,
+                    # so a report that counts only the caller's workspace names one pane
+                    # and takes two off the board.
+                    closed.panes.extend(self.workspace_close(name, me=me)["closed"])
                 except ValueError as e:        # whatever arrived while we were looking
                     why = str(e)
             if why is None:
@@ -5330,6 +5569,19 @@ class Broker:
                 self._alive_unknown = True
         return self._alive_cache
 
+    def _forget_agent_caches(self) -> None:
+        """Throw away everything one `agent list` filled, so the next ask re-reads herdr.
+
+        The caches are per-`sb`-process by design — see `_agent_states` — so in production
+        the next command starts with them empty and nothing has to call this. The callers
+        that do are the ones where a single process must see herdr change under it: a
+        refusal that IS the news, and the flush that runs after panes have gone.
+        """
+        self._alive_cache = None
+        self._bound_cache = set()
+        self._pane_cache = {}
+        self._alive_unknown = False
+
     def _fill_agent_caches(self, listed) -> None:
         """Both views of one `agent list`: who is there, and whose NAME herdr will answer to.
 
@@ -5430,7 +5682,7 @@ class Broker:
         if not pane:
             return None, None                # nothing to close; the caller skips herdr
         if self._agent_states() is None:
-            return None, "herdr could not be asked whose pane that is"
+            return None, NO_HERDR_ANSWER
         mine = _column(a, "terminal_id")
         if mine:
             live = next((x for x in self._pane_cache.values()
@@ -5551,10 +5803,7 @@ class Broker:
         critical path is this method.
         """
         if refresh:
-            self._alive_cache = None
-            self._bound_cache = set()
-            self._pane_cache = {}
-            self._alive_unknown = False
+            self._forget_agent_caches()
         # The human is excluded because they are not an agent and have no doorbell. Nothing
         # is addressed to them any more, but a store written before the human mailbox was
         # removed still holds rows that would otherwise be retried on every command.
@@ -6080,10 +6329,7 @@ class Broker:
         a = store.get_agent(self.db, who)
         if a is None or a["state"] in FINISHED:
             return False
-        self._alive_cache = None            # ask again, now: the failure is the news
-        self._bound_cache = set()
-        self._pane_cache = {}
-        self._alive_unknown = False
+        self._forget_agent_caches()         # ask again, now: the failure is the news
         states = self._agent_states()
         return states is not None and who in states
 
