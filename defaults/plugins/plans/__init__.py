@@ -36,7 +36,10 @@ writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here 
 and a lead that wants `progress: waiting on Andrew` gets it without a release. The design
 says the agent is the interpreter and there is no schema to satisfy, so a step carrying a
 field this file has never heard of is a feature and not corruption — `_step()` fills in the
-fields the design names and leaves everything else alone.
+fields the design names and leaves everything else alone, and EVERY RENDERING SHOWS IT:
+`--json` and `--markdown` because neither knows a schema, and the terminal view because
+`_step_lines` draws what it has no name for on a line of its own under the step. A promise
+kept in two renderings out of three was one the third made a liar of.
 
 Moving a step
 -------------
@@ -223,12 +226,15 @@ and links are the two halves of this design and they point opposite ways on purp
 
 Templates hold no `deps`. A template entry may expand into several steps, so an edge written
 against an entry would have nothing single to attach to; edges are added with `dep` once the
-copy exists. The catalogue is deliberately nearly empty — `change-approval`, `create-pr`,
-`merge`, `merge-human-review`, `review` and one template — because the design says what to
-promote into it is
-read off real runs rather than decided up front, and the system has to work with it almost
-bare. It does: with no `library` directory at all every verb here still works and only
-`name-step` has nothing to offer.
+copy exists. Every OTHER key on an entry is a field on the step it mints, copied onto it
+blind (`_written`) — a gate, an owner, a checkpoint, a skip and its reason have no verb,
+so a template that could carry only a name could not show what a step really looks like.
+
+The catalogue is deliberately nearly empty — `change-approval`, `create-pr`, `merge`,
+`merge-human-review`, `review` and one template — because the design says what to promote
+into it is read off real runs rather than decided up front, and the system has to work
+with it almost bare. It does: with no `library` directory at all every verb here still
+works and only `name-step` has nothing to offer.
 
 Plan ids are `p-<n>`, monotonic across the store and never reused. STEP IDS ARE PER PLAN:
 every plan numbers its own from `step-1`, out of a `next_step` counter in its own file, so
@@ -703,6 +709,47 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
       composes and obliges; a `def` you typed yourself silently brings neither. A step
       written by hand needs its own `display` and its own `deps` — a named one draws the
       library definition's label and needs neither.
+
+  WHICH FIELDS ARE YOURS TO WRITE. Everything a verb mints is in the file already; these
+  are the ones that only ever arrive by editing it, and each says who writes it and when.
+  `sb plugin plans template use docs` is one worked example of every one of them.
+
+    owner        the plan's owner, as it hands the step out. A name, and nothing is told:
+                 the plan never pushes to a running agent, so say so yourself.
+    gate         the plan's owner, as it shapes the plan. The sentence a human has to
+                 answer before this step is finished — a FIELD on the step whose exit
+                 condition it is, never a step of its own. No verb clears it: the owning
+                 agent blocks, and the human answering that agent clears both.
+    progress     `open` at mint and `tick` writes `done`. `skipped` you write by hand,
+                 with the reason, and an open vocabulary means `waiting on Andrew` is a
+                 progress too if that is what is true.
+    why          the reason for whatever `progress` currently says, written by the same
+                 hand in the same edit — a skip with no reason is drawn red. Overwritten
+                 by whatever moves the step next, so it is never a history.
+    tries        bumped by whoever re-enters the step, with `progress` put back to `open`.
+                 Leave a `note` saying what the second run was for; a count that went up
+                 with nothing behind it is a record nobody can account for.
+    checkpoints  references — a path, a URL, an id — added by whoever produced the thing:
+                 `[{"ref": "notes/the-brief.md"}]`. Never content. A ref with a line break
+                 in it is somebody pasting a brief instead of pointing at one.
+    output       the step's own finished content, written by the AGENT THAT DID THE STEP
+                 as it ticks. The one field here that is content rather than a reference,
+                 because `create-pr` dumps it onto the pull request and a reference does
+                 not dump: an approved change contract and a review's result are what it
+                 is for, and the definitions needing one say so in their own `about`.
+                 Multi-line; replaced and never appended when a step is redone.
+    display      required on every step, and `deps` on every step but the first — see
+                 above. The minting verbs refuse a step without a board name.
+
+  `id`, `def`, `name`, `obliged_by` and the plan's `next_step` are MINTED and are not
+  yours: a `def` typed by hand brings neither what its definition composes nor what it
+  obliges, and `next_step` is the plan's own step counter, which shows up as a row in the
+  `--markdown` dump because that rendering reads the record rather than a schema. A
+  definition's `command` is not on the record at all — it is resolved out of the library
+  every time the step is drawn.
+
+  A FIELD THIS LIST HAS NEVER HEARD OF IS ALLOWED. There is no schema to satisfy: put what
+  the job needs on the step, and `show`, `--json` and the PR comment all print it.
 
   Three verbs are worth typing rather than editing, being frequent and small — `tick
   <step>` when a step is done, `note <step> --text` for what happened, and `dep <step>
@@ -1412,6 +1459,10 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
     An entry that says `def` is a link and goes through the same expansion `name-step`
     does — obligations included, since a template naming a merge and forgetting its review
     is exactly the memory this obligation exists to replace.
+
+    Either way the entry's remaining keys are written onto the step it made (`_written`),
+    which is how a template authors a gate, an owner or a checkpoint on a step that has no
+    verb to write one.
     """
     if not isinstance(entry, dict):
         raise _BadDef(f"a template's steps are objects, not {type(entry).__name__}")
@@ -1427,6 +1478,10 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
                 raise _BadDef(f"a template names '{k}', which has no `display` — a named "
                               f"step draws its definition's board label, so add one to "
                               f"`library/{k}.json`")
+        # The entry's own step is the first one its expansion minted; what it obliged is
+        # its own step and carries none of this. A gate written against `merge` belongs to
+        # the merge and not to the human review that came along with it.
+        _written(plan, entry, made[0])
         return made
     name = str(entry.get("name") or "").strip()
     if not name:
@@ -1442,7 +1497,45 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
         raise _BadDef(f"a template step '{name}' has no `display` — the board draws that "
                       f"label in its cell, and a step without one falls back to the whole "
                       f"sentence")
-    return [_step(_mint_step(plan), name, display=display)]
+    made = _step(_mint_step(plan), name, display=display)
+    _written(plan, entry, made)
+    return [made]
+
+
+# The keys a template entry owns rather than the step it mints: the two the grammar of a
+# template is written in, the two read above, and the two the minter writes. Everything
+# else on an entry is a field on the step.
+_ENTRY = frozenset({"after", "def", "name", "display", "id", "deps"})
+
+
+def _written(plan: dict, entry: dict, step: dict) -> None:
+    """A template entry's remaining keys, written onto the step it minted.
+
+    A template is where the shape of a plan is AUTHORED, so it has to be able to author
+    more than a name. A gate, an owner, a checkpoint, a skip and its reason, a count of
+    tries are fields on a step and none of them has a verb — a template that could carry
+    only a name could not be a worked example of what a plan looks like, which is the one
+    job the shipped template has.
+
+    COPIED BLIND, in the same spirit `_markdown` is walked in: this function knows none of
+    those fields by name, so a field added to a step next year is authorable in a template
+    the day it exists. What it does know is `_ENTRY`, the six keys that are the template's
+    own grammar or the minter's — `id` and `deps` especially, which a template writing
+    would be overwriting the numbering and the edges `_chain` is about to draw.
+
+    `notes` are the one shape converted rather than copied, exactly as a template's own
+    plan-level notes are: a note is `{text, by, at}` and a template author writes the
+    sentence. A list of bare strings copied through would render as a crash rather than as
+    a note.
+    """
+    who = str(plan.get("created_by") or "human")
+    for k, v in entry.items():
+        if k in _ENTRY:
+            continue
+        if k == "notes" and isinstance(v, list):
+            step[k] = [_note(str(n).strip(), who) for n in v if str(n).strip()]
+        else:
+            step[k] = v
 
 
 def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Result:
@@ -3318,6 +3411,16 @@ def _full(p: dict) -> str:
     return "\n".join(lines)
 
 
+# Every key the template below draws BY NAME, which is the one thing it has to know to
+# draw the rest: what is left over is a field this file has never heard of, and the last
+# line of a step is where one goes. `owner_status`, `condition` and `command` are in here
+# for the same reason the stored fields are — they arrive on the rendered copy (`_viewed`,
+# `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
+_DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
+                    "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
+                    "checkpoints", "command"})
+
+
 def _step_lines(steps: list) -> list[str]:
     """One line per step, plus a line each for what hangs off it.
 
@@ -3394,6 +3497,19 @@ def _step_lines(steps: list) -> list[str]:
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
                    f"{_when(n.get('at'))})"
                    for n in (s.get("notes") or ()))
+        # EVERYTHING ELSE THE STEP CARRIES, last, one line each. This template knows every
+        # field above by name, so before this a field nobody here had heard of rendered in
+        # `--json` and in `--markdown` and was silently invisible in the terminal — while
+        # the top of this file promised the opposite, that such a field is a feature and
+        # not corruption. It is the promise that was true; this is the renderer catching
+        # up, in the same falls-back-rather-than-fails spirit `_markdown` is walked for.
+        #
+        # Through `_flat` like every other value drawn here, key included, so an invented
+        # field is one line UNDER its step and can no more forge a row beside it than a
+        # gate or a name can. A non-scalar is left to `--json`: a list has no place under
+        # a step line, and this door exists to fall back rather than to raise on one.
+        out.extend(f"    {_flat(k):<6}{_flat(v)}" for k, v in s.items()
+                   if k not in _DRAWN and _scalar(v) and _some(v))
     return out
 
 

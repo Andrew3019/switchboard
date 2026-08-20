@@ -1492,6 +1492,54 @@ class CatalogueTest(PlansSandbox):
         # The `def` entry carries no copied label; its display resolves live, like its name.
         self.assertIsNone(self.steps()[4]["display"])
 
+    def test_the_shipped_template_is_a_worked_example_of_every_field_a_step_carries(self):
+        """What the template is FOR, past the steps: a step carries a gate, an owner, a
+        checkpoint, a skip with its reason, a count of tries and its own output, and not
+        one of those has a verb — they arrive by editing the file. A template that could
+        carry only a name would leave the shape of a step documented nowhere it can be
+        read, so an entry's other keys are copied onto the step it mints.
+
+        ONE WORKED EXAMPLE OF EACH, spread across the steps, and not every step carrying
+        every field: a plan where every step has a gate is not what a plan looks like.
+        The copy still validates clean — a skip has its reason, and the gate is on a step
+        nobody has ticked."""
+        self.data("plugin", "plans", "template", "use", "docs")
+        stored = self.steps()
+
+        self.assertEqual([c["ref"] for c in stored[0]["checkpoints"]],
+                         ["design/PLANS-AND-STEPS.md"])
+        self.assertTrue(stored[1]["owner"])
+        self.assertIn("Claims checked", stored[1]["output"])
+        self.assertEqual(stored[2]["tries"], 2)
+        # A note is a record, so the sentence a template author writes is turned into one
+        # rather than copied through as a bare string a renderer would trip over.
+        self.assertIn("redone as a cut", stored[2]["notes"][0]["text"])
+        self.assertEqual(stored[3]["progress"], "skipped")
+        self.assertTrue(stored[3]["why"])
+        # On the entry's own step and never on what it obliged: the gate belongs to the
+        # merge, not to the human review that came along with it.
+        self.assertEqual(stored[4]["def"], "merge")
+        self.assertIn("Andrew", stored[4]["gate"])
+        self.assertIsNone(stored[5]["gate"])
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        for text in ("design/PLANS-AND-STEPS.md", "Claims checked", "try 2",
+                     "redone as a cut", "skipped", "nothing here to run", "gate"):
+            self.assertIn(text, shown)
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+        # `id` and `deps` are the minter's, whatever a template writes: the numbering and
+        # the edges `after` draws are not a field an entry gets to author.
+        d = self.catalogue("templates")
+        (d / "forged.json").write_text(json.dumps(
+            {"title": "t", "display": "board: t",
+             "steps": [{"name": "one", "display": "one"},
+                       {"name": "two", "display": "two", "after": [1],
+                        "id": "step-99", "deps": ["step-40"]}]}))
+        made = self.data("plugin", "plans", "template", "use", "forged")
+        self.assertEqual([s["id"] for s in made["steps"]], ["step-1", "step-2"])
+        self.assertEqual(made["steps"][1]["deps"], ["step-1"])
+
     # -- the obligation --------------------------------------------------------
 
     def test_adding_a_merge_step_brings_its_review_by_every_route(self):
@@ -2220,6 +2268,53 @@ class HandEditTest(PlansSandbox):
         made = self.data(*_create("a job", "write it"))
         self.assertEqual(made["file"], str(self._dir() / "plans.json"))
         self.assertTrue((self._dir() / "plans.json").exists())
+
+    # -- a field this plugin has never heard of ---------------------------------
+
+    def test_an_invented_field_shows_in_the_terminal_and_not_only_in_the_dumps(self):
+        """The module docstring says a step carrying a field this file has never heard of
+        is a feature and not corruption. `--json` and `--markdown` kept that promise —
+        neither knows a schema — and `show` did not: it is a hand-written template that
+        draws every field by name, so an invented one was silently invisible in the one
+        view a lead actually reads. Now the leftovers are drawn on a line of their own.
+
+        Only the leftovers, which is the half worth pinning: every field the template
+        already draws by name must not appear a second time as an unknown, `output`
+        rendered as `out` and a definition's resolved `command` included."""
+        self.plan("write it")
+        self.edit_step("s-1", risk="the migration is one-way",
+                       output="what the step produced")
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("risk  the migration is one-way", shown)
+        self.assertIn("out   what the step produced", shown)
+        # Drawn once each. `output` has its own line above, so it is not a leftover, and
+        # neither is the owner status this rendering reads live and stores nowhere.
+        self.assertEqual(shown.count("what the step produced"), 1)
+        self.assertNotIn("output", shown)
+        self.assertNotIn("owner_status", shown)
+        # And it was already in the schema-blind renderings, which is what made the
+        # terminal the odd one out.
+        self.assertIn("the migration is one-way",
+                      self.ok("plugin", "plans", "show", "p-1", "--markdown"))
+
+        # A collection is left to `--json`: there is no place under a step line for one,
+        # and this door falls back rather than raising on whatever a hand-edit put there.
+        self.edit_step("s-1", attempts=["monday", "tuesday"])
+        self.assertNotIn("monday", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertIn("monday", json.dumps(self.data("plugin", "plans", "show", "p-1")))
+
+    def test_an_invented_field_cannot_forge_a_row_any_more_than_a_gate_can(self):
+        """The rule the new line has to obey to be allowed to exist. Every value drawn in
+        this plugin goes through `_flat`, and a field nobody here has heard of is the last
+        place that could have been forgotten — it is the one whose NAME is a hand-edit
+        too, so both halves of the line are escaped."""
+        self.plan("write it")
+        self.edit_step("s-1", risk="fine\ns-9   done      merged")
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("\\ns-9", shown)
+        self.assertFalse([ln for ln in shown.splitlines() if ln.startswith("s-9")])
 
 
 class LivenessTest(PlansSandbox):
