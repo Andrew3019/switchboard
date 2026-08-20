@@ -1102,8 +1102,8 @@ def collect(
         name = row["name"]
         agent = live.get(name)
         # A NAME IS NOT AN IDENTITY. herdr's `agent list` is machine-global and every
-        # switchboard store mints the same small `<role>-<n>` vocabulary independently
-        # (`broker._next_name`), so a row that died days ago in this store matches a live
+        # switchboard store mints names from the same small role vocabulary independently
+        # (`broker._compose_name`), so a row that died days ago in this store matches a live
         # agent belonging to a fleet in some other checkout — and is then drawn as alive,
         # a different ghost each time, on nothing but a shared name. Worse, the false
         # "present again" clears the gone debounce below (`_confirmed_gone`), so the row

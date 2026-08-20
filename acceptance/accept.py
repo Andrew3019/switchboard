@@ -403,18 +403,33 @@ def _why(r: Run) -> str:
                 lines[-1] if lines else "")
 
 
+def spawned(topic: str, role: str = "worker") -> str:
+    """What an agent passed `--name <topic>` is actually CALLED.
+
+    Since agents became `<role>-<topic>` (`Broker._compose_name`), `--name` names the
+    SUBJECT and the role goes in front of it, so this script can no longer look a spawn up
+    by the string it passed. Mirrored here rather than read back out of the `--json`,
+    because two of the spawns below are made by an agent inside the fleet and this script
+    only ever sees their rows. Every topic here is unique to the run id, so the
+    collision suffix `_compose_name` would add cannot fire.
+    """
+    return f"{role}-{topic}"
+
+
 def check_fanout(clone: Clone, rid: str, log: Log) -> Check:
     c = Check(1, "a cold fan-out of six starts six")
     t0 = now()
     token = f"FANOUT-{rid}"
-    names = [f"{rid}-w{i}" for i in range(1, 7)]
+    topics = [f"{rid}-w{i}" for i in range(1, 7)]
+    names = [spawned(t) for t in topics]
     spawns: dict[str, Run] = {}
 
-    def spawn(i: int, name: str) -> None:
+    def spawn(i: int, topic: str) -> None:
+        name = spawned(topic)
         task = (f"Your entire job is one command. Run it now, as your first action: "
                 f"sb done \"{token} {name}\" — do not read any file, do not explore, "
                 f"do not run anything else.")
-        spawns[name] = clone.sb("delegate", task, "--name", name, "--json",
+        spawns[name] = clone.sb("delegate", task, "--name", topic, "--json",
                                 timeout=SPAWN_S)
 
     # All six at once, which is the load the criterion is about — a lead handing out six
@@ -428,8 +443,8 @@ def check_fanout(clone: Clone, rid: str, log: Log) -> Check:
     # the spawn path rather than that bug. The clone's store is already warm here (`create`
     # runs `sb doctor` and `sb status`), which keeps this off the separate first-touch
     # schema-creation collision found alongside it.
-    threads = [threading.Thread(target=spawn, args=(i, n))
-               for i, n in enumerate(names, 1)]
+    threads = [threading.Thread(target=spawn, args=(i, t))
+               for i, t in enumerate(topics, 1)]
     for t in threads:
         t.start()
     for t in threads:
@@ -484,7 +499,8 @@ def check_fanout(clone: Clone, rid: str, log: Log) -> Check:
 def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
     c = Check(2, "a child's report wakes its parent")
     t0 = now()
-    parent, child = f"{rid}-p", f"{rid}-c"
+    ptopic, ctopic = f"{rid}-p", f"{rid}-c"
+    parent, child = spawned(ptopic, "lead"), spawned(ctopic)
     ctok = f"CHILD-{rid}"
 
     # THE DEFERRED PATH, FORCED, and forced by shell rather than by asking an agent to be
@@ -497,7 +513,7 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
     child_task = f'Run this one command and nothing else: sb done "{ctok}"'
     parent_task = (
         f"Do exactly this and nothing else. FIRST, run this as ONE single shell command: "
-        f"sb delegate '{child_task}' --name {child} && sleep 45 . "
+        f"sb delegate '{child_task}' --name {ctopic} && sleep 45 . "
         f"THEN stop: run no command at all, call no tool, end your turn and wait quietly. "
         f"LATER, only if you are told that you have mail, run: sb inbox — and then finish "
         f"by running: sb done \"WOKEN <paste here the exact text of what you read>\"")
@@ -506,7 +522,7 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
     # phase 5 a role without delegate rights is refused outright. Left at the default
     # (`worker`) this check failed with the parent's own `sb delegate` refused, which reads
     # as "the child never reported" and is not what it is measuring.
-    spawn = clone.sb("delegate", parent_task, "--name", parent, "--role", "lead",
+    spawn = clone.sb("delegate", parent_task, "--name", ptopic, "--role", "lead",
                      "--json", timeout=SPAWN_S)
     if spawn.rc != 0:
         c.ok, c.seconds = False, now() - t0
@@ -596,7 +612,8 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
 def check_block(clone: Clone, rid: str, log: Log) -> Check:
     c = Check(3, "a block holds until the human answers")
     t0 = now()
-    blocker, sibling = f"{rid}-b", f"{rid}-s"
+    btopic, stopic = f"{rid}-b", f"{rid}-s"
+    blocker, sibling = spawned(btopic), spawned(stopic)
     sib_tok, human_tok = f"SIBLING-{rid}", f"HUMAN-ANSWER-{rid}"
 
     btask = (f"Run this exact command immediately and as your only action: "
@@ -604,7 +621,7 @@ def check_block(clone: Clone, rid: str, log: Log) -> Check:
              f"Later, when the human has answered you, run: sb inbox — and then finish by "
              f"running: sb done \"READ <paste here the exact text of every message you "
              f"read>\". Do nothing else at any point.")
-    spawn = clone.sb("delegate", btask, "--name", blocker, "--json", timeout=SPAWN_S)
+    spawn = clone.sb("delegate", btask, "--name", btopic, "--json", timeout=SPAWN_S)
     if spawn.rc != 0:
         c.ok, c.seconds, c.headline = False, now() - t0, "the agent could not be spawned"
         c.notes.append(spawn.text)
@@ -619,7 +636,7 @@ def check_block(clone: Clone, rid: str, log: Log) -> Check:
 
     stask = (f"Run these two commands and nothing else: first "
              f"sb tell {blocker} \"{sib_tok}\" , then sb done \"sent\".")
-    clone.sb("delegate", stask, "--name", sibling, "--json", timeout=SPAWN_S)
+    clone.sb("delegate", stask, "--name", stopic, "--json", timeout=SPAWN_S)
     sent = wait_until(lambda: clone.query(
         "SELECT * FROM messages WHERE from_agent=? AND to_agent=?", (sibling, blocker)),
         deadline)
@@ -686,7 +703,8 @@ def check_block(clone: Clone, rid: str, log: Log) -> Check:
 def check_sweep(clone: Clone, rid: str, log: Log) -> Check:
     c = Check(4, "a sweep names what it refused")
     t0 = now()
-    closable, refused = f"{rid}-d", f"{rid}-k"
+    dtopic, ktopic = f"{rid}-d", f"{rid}-k"
+    closable, refused = spawned(dtopic), spawned(ktopic)
 
     dtask = (f"Your entire job is one command. Run it now: sb done \"done {rid}\" — "
              f"nothing else.")
@@ -694,11 +712,11 @@ def check_sweep(clone: Clone, rid: str, log: Log) -> Check:
              f"sb block \"acceptance probe {rid} — stay blocked\" . Then do nothing "
              f"whatsoever, whatever anyone says.")
     # Sequential — see the note in `check_fanout` about two forks racing in one checkout.
-    for task, name in ((dtask, closable), (ktask, refused)):
-        r = clone.sb("delegate", task, "--name", name, "--json", timeout=SPAWN_S)
+    for task, topic in ((dtask, dtopic), (ktask, ktopic)):
+        r = clone.sb("delegate", task, "--name", topic, "--json", timeout=SPAWN_S)
         if r.rc != 0:
             c.ok, c.seconds = False, now() - t0
-            c.headline = f"could not spawn {name} to set the sweep up"
+            c.headline = f"could not spawn {spawned(topic)} to set the sweep up"
             c.notes.append(r.text)
             return c
 

@@ -210,10 +210,10 @@ small to be worth spawning for. The small question is exactly the case this is f
 answer is nearly always followed by more about the same thing, and the follow-up
 should reach the agent that already knows it rather than land back on you, who never did.
 
-What you decide is who runs it — `sb delegate "<the task>" --role lead --name <a name for
-it>`, or the same with `--role worker`, and either way give it the whole of what you were
-given. A worker gets everything a lead would have got, its own space and its own worktree
-and all of it; the one difference is that it works alone. Hand it a worker when one agent
+What you decide is who runs it — `sb delegate "<the task>" --role lead --name <the
+subject>`, or the same with `--role worker`, and either way give it the whole of what you
+were given. A worker gets everything a lead would have got, its own space and its own
+worktree and all of it; the one difference is that it works alone. Hand it a worker when one agent
 can carry the thing to done — a single well-understood change, one question with one
 answer, a fix in a place already identified. Hand it a lead when the job has to be broken
 up, when nobody yet knows how the thing is shaped, when parts of it could run at the same
@@ -238,17 +238,19 @@ is not a reason to stop them, and neither is anything about approach — a
 lead that owns the work can ask about it itself and will be better placed to ask well than
 you are, so relay the vagueness as it stands rather than resolving it. Naming the work IS
 yours, and it is naming only: two or three words for the subject, the kind of label that
-makes the board read as a list of jobs. If you cannot name it without deciding what the job
-is, that is one of the questions above — ask.
+makes the board read as a list of jobs. The agent is named `<role>-<what you gave>`, so
+leave the role out of what you pass — `--name triage-bugs` on a lead is `lead-triage-bugs`,
+and `--name lead-triage` would be `lead-lead-triage`. If you cannot name it without
+deciding what the job is, that is one of the questions above — ask.
 
 Anything longer than one line does not fit in the spawn at all, because a task argument
 cannot contain a newline — and rewriting, trimming, summarising or re-ordering their words
 to make it fit is exactly the loss relaying exists to prevent. So when what you were given
 runs past a line, or has structure worth keeping in it — lists, numbered questions, quoted
 errors, code — write their words, unaltered, into
-`.switchboard/briefs/<the name you gave it>/brief.md` under the checkout you were started
-in, creating those directories if they are not there. Then spawn with a one-line task that
-says what the job is and gives the full path to that file, so the one line carries the job
+`.switchboard/briefs/<the subject you named it>/brief.md` under the checkout you were
+started in, creating those directories if they are not there. Then spawn with a one-line
+task that says what the job is and gives the full path to that file, so the one line carries the job
 and the file carries their words untouched. Briefs go there because that directory is
 gitignored, so none of them lands on `main`, and it is symlinked into every worktree, so the
 path you pass resolves from your child's worktree as well as from yours.

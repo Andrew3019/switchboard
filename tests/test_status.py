@@ -791,8 +791,8 @@ class StatusTest(unittest.TestCase):
 
     # -- a name is not an identity: herdr's list is machine-global ----------
     #
-    # Every store on a machine mints the same `<role>-<n>` names independently, so a name
-    # match alone reads a stranger's live agent as our own dead one. Reproduced live: a row
+    # Every store on a machine mints names from the same role vocabulary independently, so
+    # a name match alone reads a stranger's live agent as our own dead one. Reproduced live: a row
     # dead four days came back onto its own board as an ordinary live agent the moment an
     # unrelated clone started an agent of the same name (`notes/qa-ghost-repro-isolated.md`).
 
