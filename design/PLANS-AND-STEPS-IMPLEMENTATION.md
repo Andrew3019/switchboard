@@ -28,9 +28,11 @@ as settled; they are recommendations Andrew confirms by approving this plan.
   deletion.
 - **D4 — The plan-making instruction is a plugin command, `sb plugin plans guide`.** It
   lives in the plugin folder, so disabling or deleting the plugin removes it cleanly.
-- **D5 — The design-gate bullet-format preset ships as a nameable-but-unbound preset.**
+- **D5 — The bullet-format preset ships as a nameable-but-unbound preset.**
   Enforcement that it is spawn-only is convention, not code — consistent with the spec's
-  "no stop hook, not doing enforcement yet."
+  "no stop hook, not doing enforcement yet." It is shared machinery rather than one gate's:
+  it owns the bullet mechanics, `merge-human-review` uses the same format, and a step that
+  names it may name its own two sections.
 - **D6 — The `DESIGN-TRUTH.md` cut (PR6) is an Andrew-only edit.** The PR supplies the
   exact diff; Andrew applies it. It gates the merge gate (PR7).
 
@@ -44,16 +46,17 @@ as settled; they are recommendations Andrew confirms by approving this plan.
 - PR4 — Liveness and records derivation (live / dormant / abandoned / finished)
 - PR5 — Spawn trigger, plan-making guide, role edits
 - PR6 — Prose cuts (protocol, house-rules, DESIGN-TRUTH)
-- PR7 — Gates (design gate, merge gate, gate preset)
+- PR7 — Gates (Change Approval, merge gate, gate preset)
 - PR8 — Board hook (render plans under their worktree)
 - PR9 — Analysis pass skill
+- PR10 — Change Approval and Review as library steps
 
 ---
 -----
 - PR1 depends on nothing; PR2, PR3, PR4 depend on PR1.
 - PR5 depends on PR1 (agents told about a plugin that works).
 - PR6 depends on nothing; PR7 depends on PR3, PR5 and PR6.
-- PR8 depends on PR4; PR9 depends on PR4.
+- PR8 depends on PR4; PR9 depends on PR4; PR10 depends on PR3 and PR7.
 - PR6 may land any time; PR7 must never precede PR6.
 
 ---
@@ -247,19 +250,19 @@ Verify: the three texts no longer forbid merging; each points at the merge gate 
 
 ---
 
-## PR7 — Gates (design gate, merge gate, gate preset)
+## PR7 — Gates (Change Approval, merge gate, gate preset)
 
 Depends: PR3, PR5, PR6
-Files: `defaults/plugins/plans/__init__.py`, `defaults/presets/design-gate.md`,
-`defaults/plugins/plans/guide` text, `tests/test_plans_plugin.py`
-Verify: a design step's exit blocks the agent; approving the agent clears the step.
+Files: `defaults/plugins/plans/__init__.py`, the bullet-format preset under
+`defaults/presets/`, `defaults/plugins/plans/guide` text, `tests/test_plans_plugin.py`
+Verify: a Change Approval step's exit blocks the agent; approving the agent clears the step.
 
 ### Problem
 
 - A gate that needs a human has no representation on a step.
 - A gate must not be a control surface Andrew edits; he talks only to agents.
 - A child blocking at a gate would wrongly stand its lead down.
-- The design-gate format must be nameable without being auto-attached to spawns.
+- The bullet format must be nameable without being auto-attached to spawns.
 
 ### Behavioral contract
 
@@ -269,9 +272,10 @@ Verify: a design step's exit blocks the agent; approving the agent clears the st
 - Answering the agent clears both; there is no unblocking a gate through the plan.
 - A step is complete or skipped; a trivially small change may skip a gate with a reason.
 ---
-- The design gate: after planning, summarise problem and behavioural contract, then block.
-- Its format is the `design-gate.md` preset — nameable, unbound, convention-only spawn-only.
+- Change Approval is the design gate: summarise, block, before any implementation exists.
+- Its format is the bullet-format preset — nameable, unbound, convention-only spawn-only.
 - The bullet format is `-`/`---`/`-----`, ~12 words, ~20 where a contract branches.
+- The preset owns the bullet mechanics; the step's definition names its own two sections.
 - A gate message may point at a fuller artifact and may name the other plan.
 ---
 - The merge gate creates the PR and writes the description; he is not asked whether to create it.
@@ -336,9 +340,58 @@ Verify: run the pass over saved plans; it proposes additions without editing any
 
 ---
 
+## PR10 — Change Approval and Review as library steps
+
+Depends: PR3, PR7
+Files: `defaults/plugins/plans/library/change-approval.json`,
+`defaults/plugins/plans/library/review.json`,
+`defaults/plugins/plans/library/create-pr.json`,
+`defaults/plugins/plans/__init__.py`, the bullet-format preset under `defaults/presets/`,
+`tests/test_plans_plugin.py`
+Verify: `name-step create-pr` lands three steps; a multi-line `output` survives
+`show --markdown` line for line and forges no row.
+
+### Problem
+
+- PR7's design gate lives in convention, so a plan gets it only if someone remembers.
+- The gate and the review that checks it are not tied to the PR that needs both.
+- `show --markdown` flattens every stored newline, so no step can carry prose to a PR.
+- A `gate` field on a step that is later ticked paints the plan permanently red.
+
+### Behavioral contract
+
+- Change Approval is promoted into the step library and replaces the design gate.
+---
+- Its two sections are Scope & Objectives and Change Contract, in that order.
+- Scope is the agent's to derive; the objectives are inferred from his own words.
+- The Change Contract is high-level only, nested, and ordered for reading not building.
+- Rejection redoes the design work, not the wording; try count up, progress back to `open`.
+---
+- The gate is prose in the step's `about`, as `merge` already does; no `gate` field.
+- That is deliberate: a gate on a ticked step is a defect, and this step ends in a tick.
+- The cost is that `show` prints no gate line, so the reader must know the definition.
+---
+- Steps grow an `output` field: the step's own finished result, written by hand.
+- Change Approval puts the full approved text there; Review puts a compact verdict there.
+- `show --markdown` dumps `output` as quoted lines, so no dumped line can forge a row.
+- The terminal render prints it too, so a PR-only field is not a field nobody proofreads.
+---
+- Review is the review an agent would do anyway, plus two checks, never fewer.
+- With Change Approval in the plan it also checks objectives met and contract aligned.
+- Standing alone it is a plain review; skipping those two is not a defect.
+---
+- `create-pr` obliges Change Approval, which obliges Review — three steps in one act.
+- Obligations are never deduped, so naming `create-pr` twice is two of each, by design.
+- Minted deps are a starting shape: Change Approval is re-deped to the plan's root by hand.
+- Either step may be skipped with a reason; neither may be omitted.
+
+---
+
 ## Global acceptance (plan is done when)
 
-- With the plugin enabled and bound, a lead creates a plan, runs it through a design gate
+- With the plugin enabled and bound, a lead creates a plan, runs it through Change Approval
   and a merge gate, and a change lands with merge / cleanup / teardown automatic.
 - With the plugin deleted, no agent is told plans exist and the board renders as today.
 - The merge gate never ships in a tree where PR6's cuts have not landed.
+- `name-step create-pr` mints Change Approval and Review, and the approved contract
+  reaches the PR comment as the lines he read, not as escaped `\n`.

@@ -223,7 +223,7 @@ class PlansTest(PlansSandbox):
         self.assertEqual(made["steps"][0],
                          {"id": "s-1", "name": "write it", "display": "write", "def": None,
                           "obliged_by": None, "progress": "open", "why": None, "gate": None,
-                          "owner": None, "tries": 1, "notes": [], "deps": [],
+                          "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
                           "checkpoints": []})
         # AUTO-CHAINED: the order the steps were typed in is an order, so `create` records
         # it rather than leaving a plan that warns about itself the moment it is made.
@@ -1150,8 +1150,8 @@ class CatalogueTest(PlansSandbox):
     of the design — which is why the tests here assert what is in the FILE and not only what
     `show` prints.
 
-    The shipped catalogue is deliberately almost bare — `create-pr`, `merge`,
-    `merge-human-review`, one template —
+    The shipped catalogue is deliberately almost bare — `change-approval`, `create-pr`,
+    `merge`, `merge-human-review`, `review`, one template —
     so most of these write their own definitions into the sandbox's `defaults/`, which is
     also the honest way to test a catalogue whose contents PR9 is supposed to grow.
 
@@ -1408,6 +1408,126 @@ class CatalogueTest(PlansSandbox):
         # other — as a warning now rather than a refusal, since nothing can refuse a file.
         self.edit_step("s-2", why=None)
         self.assertIn("never an absence", self.ok("plugin", "plans", "validate", "p-1"))
+
+    # -- change approval and review, the shipped pair ---------------------------
+
+    def test_naming_create_pr_lands_change_approval_and_its_review_in_one_act(self):
+        """The chain the landing shape depends on: `create-pr` obliges `change-approval`,
+        which obliges `review`, and `_mint` walks obligations TRANSITIVELY — so an agent
+        that names the one step it knows it needs gets the gate and the review it did not
+        think of, in the same act. That transitive walk is the whole mechanism here: a
+        one-level walk would land the gate and silently lose the review under it."""
+        self.ok(*_create("ship a change", "write the code"))
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+
+        self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
+                         [(None, None), ("create-pr", None),
+                          ("change-approval", "s-2"), ("review", "s-3")])
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("get the intended change approved before implementing it", shown)
+        self.assertIn("review the implementation", shown)
+
+    def test_review_stands_alone_and_pulls_in_no_change_approval(self):
+        """The constraint from the other side: a plan may have a review with no approval
+        gate in front of it, and that is a plain review rather than half a pair. `review`
+        obliges nothing, so naming it lands ONE step — which is what makes the obligation
+        run one way only, and reversing it would make a plain review impossible to ask
+        for."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+
+        self.assertEqual([s["def"] for s in self.steps()], ["review"])
+        self.assertNotIn("change-approval", self._raw())
+
+    def test_naming_create_pr_twice_lands_six_steps_and_never_four(self):
+        """No dedupe, for the new pair as for the old one. Two PRs are two diffs and
+        therefore two contracts and two reviews; a dedupe would let one approval stand for
+        a change it never saw. A lead who thinks one covers both skips the second with
+        that as the reason, which is visible where a dedupe was not."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+
+        self.assertEqual([s["def"] for s in self.steps()],
+                         ["create-pr", "change-approval", "review",
+                          "create-pr", "change-approval", "review"])
+        self.assertEqual([s["obliged_by"] for s in self.steps()],
+                         [None, "s-1", "s-2", None, "s-4", "s-5"])
+
+    def test_each_of_the_landing_three_is_skipped_with_a_reason_never_omitted(self):
+        """The exchange, on the pair that will meet it most: a contract for a typo and a
+        review of a one-line docs change are both skips somebody should be able to make.
+        What is paid is a state on the board with a sentence beside it — so all three skip
+        clean, and none of them can be left out in the first place."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+
+        for sid, why in (("s-1", "no PR, this lands on main"),
+                         ("s-2", "a one-line typo fix needs no contract"),
+                         ("s-3", "the typo was reviewed in the pull request")):
+            self.edit_step(sid, progress="skipped", why=why)
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        for expected in ("no PR, this lands on main", "needs no contract",
+                         "obliged by s-1", "obliged by s-2"):
+            self.assertIn(expected, shown)
+        # And a skip with no reason is still called out, on these like on any other step.
+        self.edit_step("s-2", why=None)
+        self.assertIn("never an absence", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_both_new_definitions_carry_a_board_label(self):
+        """`name-step` and `template use` REFUSE a definition with no `display`, so a
+        shipped one without it is a step nobody can add. Guarding the regression rather
+        than the rule: the refusal is tested elsewhere, and what this pins is that the two
+        definitions shipped in this change are on the right side of it."""
+        (self.catalogue("templates") / "landing.json").write_text(json.dumps(
+            {"title": "land a change", "display": "land a change",
+             "steps": [{"def": "change-approval"}, {"def": "review"}]}))
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+
+        for key, label in (("change-approval", "change approval"), ("review", "review")):
+            self.data("plugin", "plans", "name-step", "p-1", key)
+            self.assertIn(f"[board {label}]", self.ok("plugin", "plans", "show", "p-1"))
+        self.ok("plugin", "plans", "template", "use", "landing")
+        self.assertEqual([s["def"] for s in self.steps("p-2")],
+                         ["change-approval", "review", "review"])
+
+    def test_the_library_lists_the_new_pair_and_prints_what_naming_one_does(self):
+        """The catalogue is browsed before it is named from, so what `library` says about a
+        definition is the whole of what a lead knows before adding it. For these two that
+        has to include the obligation — naming the approval gate adds a review as well, and
+        a listing that showed only the name would make that a surprise in the plan file."""
+        listed = self.ok("plugin", "plans", "library")
+        self.assertIn("change-approval", listed)
+        self.assertIn("get the intended change approved before implementing it", listed)
+        self.assertIn("review          review the implementation", listed)
+
+        full = self.ok("plugin", "plans", "library", "change-approval")
+        self.assertIn("obliges     review", full)
+        self.assertIn("never omitted", full)
+        self.assertIn("IN YOUR OWN CHAT", full)          # the `about`, wrapped and printed
+        self.assertIn("Scope & Objectives", full)
+
+    def test_change_approval_declares_its_gate_in_prose_and_never_in_the_field(self):
+        """The done-gate trap, pinned on the step that would spring it. A gate on a step
+        that is already DONE is a defect, and this step's whole lifecycle is gate, then
+        answered, then TICKED — so a `gate` string on it would paint every landing plan red
+        the moment the approval it describes was granted.
+
+        The way out is the one `merge` already takes: the gate lives in the definition's
+        prose, where the agent that has to block reads it, and the field stays null. What
+        is asserted is both halves — no `gate` in the shipped JSON, and a ticked approval
+        step validating clean — because either alone would let the other come back."""
+        spec = json.loads((self.catalogue("library") / "change-approval.json").read_text())
+        self.assertNotIn("gate", spec)
+        self.assertIn("sb block", spec["about"])
+
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "change-approval")
+        self.assertIsNone(self.steps()[0]["gate"])
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "he approved it")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
 
     def test_a_definition_that_both_composes_and_obliges_is_refused(self):
         """An obligation attaches to a step, and a composite is not a step in a plan — only
@@ -2445,7 +2565,12 @@ class GateTest(PlansSandbox):
         format — and leaving it out of every binding is what makes it cost nothing: no
         spawn carries it, so a format read at one step by one agent is not paid for by the
         whole fleet. Spawn-only is convention rather than code, so there is nothing here
-        that stops `--with design-gate`, and nothing asserting there is."""
+        that stops `--with design-gate`, and nothing asserting there is.
+
+        The preset is now the FORMAT and not one gate's sections — `change-approval` and
+        `merge-human-review` both name it and head their messages differently — so what is
+        pinned about the sections is that the file says they are the step's to name, and
+        that the worked example still carries the two it was written around."""
         listed = json.loads(self.ok("presets", "--json"))
         self.assertIn("design-gate", listed["presets"])
         self.assertNotIn("design-gate", listed["all"])
@@ -2466,6 +2591,12 @@ class GateTest(PlansSandbox):
             self.assertTrue(any(ln.startswith(level) and ln[len(level):].strip()
                                 for ln in marked), level)
         self.assertEqual([ln for ln in marked if ln in ("-", "---", "-----")], [])
+        # The sections belong to the step, and the file says so where the agent will read
+        # it. Pinned because the whole re-section is this sentence: without it the example
+        # below reads as two headings to copy, which is what it stopped being.
+        self.assertIn("WHICH two is the step's own to say", body)
+        self.assertIn("Scope & Objectives", body)
+        # And the worked example keeps the two it was written around, as an example.
         self.assertIn("What is causing it", body)
         self.assertIn("What the fix will be", body)
 
@@ -2605,6 +2736,123 @@ class MarkdownTest(PlansSandbox):
         self.assertIn("a\\nb", md)
         self.assertNotIn("a\nb", md)
         self.assertIn("c\\|d", md)
+
+    _DUMP = ("Scope & Objectives\n"
+             "\n"
+             "- The change adds one field to a step and one rule to the renderer.\n"
+             "  - Nothing else in the plugin moves.\n"
+             "\n"
+             "Change Contract\n"
+             "\n"
+             "- A step may carry its own finished output, and the PR comment dumps it.\n"
+             "  - The gate is prose, as it is for merge.\n")
+
+    def _approved(self) -> None:
+        """A plan whose first step holds an approved contract, written the way one arrives.
+
+        By hand into the file, because that is the only way it ever gets there: no verb
+        writes `output`, so a test that used one would be testing a door that does not
+        exist.
+        """
+        self.ok(*_create("ship a change", "get it approved", "write it"))
+        self.edit_step("s-1", output=self._DUMP, progress="done")
+
+    def test_a_dumped_output_reaches_the_pull_request_as_every_line_of_itself(self):
+        """The requirement the field exists for. A change approval is approved as prose and
+        has to arrive on the pull request as prose — so `--markdown` renders `output` as a
+        BLOCK, line by line, where every other field in this plugin is flattened to one.
+        Before this the whole contract came out as one line with its newlines spelled
+        `\\n`, which is correct for a name and useless for the one field whose reason to
+        exist is being read by whoever turns up at the PR."""
+        self._approved()
+        md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
+
+        for line in self._DUMP.strip().split("\n"):
+            self.assertIn(line.strip(), md)
+        # As separate lines and not as one escaped run — the failure this replaces.
+        self.assertNotIn("\\n", md)
+        self.assertIn("> Change Contract", md)
+        self.assertIn("  - Nothing else in the plugin moves.", md)
+
+    def test_a_dumped_output_cannot_forge_a_step_row_or_a_table_row(self):
+        """The anti-forgery property, kept by WHERE the lines go rather than by escaping
+        them. Every line of a dump is blockquoted, so a line spelled like a step row or a
+        markdown table row is a line inside a quote and draws neither. This is the property
+        `test_a_forged_row_cannot_forge_one_here_either` pins for every other field, and
+        the block is the one place in this plugin where a newline survives at all."""
+        self._approved()
+        self.edit_step("s-1", output="s-9   done      merged\n| a | b |\n| --- | --- |")
+        md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
+
+        self.assertIn("> s-9   done      merged", md)
+        self.assertIn("> | a | b |", md)
+        # Not one of those lines starts a row: the plan's own table is still there, and
+        # every line that came out of the dump is behind a `>` in somebody else's quote.
+        for line in md.splitlines():
+            self.assertFalse(line.lstrip().startswith("s-9"), line)
+            if "a | b" in line or "done      merged" in line:
+                self.assertIn("> ", line)
+
+    def test_a_step_carrying_a_dump_is_never_squeezed_into_a_table(self):
+        """A table cell is one line, so a plan whose steps happen to be flat — no deps, no
+        notes, nothing nested — must still render its steps as bullets once one of them
+        carries a block. Otherwise the shape rule would put a whole approved contract in a
+        cell and flatten exactly the field the block rule exists for."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        flat = {"id": "p-1", "title": "t",
+                "steps": [{"id": "s-1", "name": "get it approved", "output": "a\nb"},
+                          {"id": "s-2", "name": "write it"}]}
+        md = _plans()._markdown(flat)
+
+        self.assertFalse(_plans()._tabular(flat["steps"]))
+        self.assertIn("> a", md)
+        self.assertIn("> b", md)
+        self.assertNotIn("| get it approved |", md)
+        # And with no block on any step the same plan is still a table: the rule is about
+        # the block that is there, not about the field existing in the schema.
+        del flat["steps"][0]["output"]
+        self.assertTrue(_plans()._tabular(flat["steps"]))
+
+    def test_a_dump_that_is_not_a_string_takes_the_ordinary_path(self):
+        """The fallback, in the spirit of the field-nobody-wrote-this-for test above. The
+        block rule is a fact about a KEY, and a hand-edited file can put a list or a number
+        under that key — so the rule asks what the value is and hands anything but a string
+        back to the walker rather than raising in front of somebody's merge."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        for value, expected in (([{"objective": "met"}], "met"), (7, "7"),
+                                ({"aligned": "partial"}, "partial")):
+            md = _plans()._markdown(
+                {"id": "p-1", "title": "t",
+                 "steps": [{"id": "s-1", "name": "review it", "output": value,
+                            "deps": ["s-0"]}]})
+            self.assertIn(expected, md)
+
+    def test_show_prints_the_dump_too_so_somebody_proofreads_it(self):
+        """A field that only ever appeared on a pull request comment would be a field
+        nobody reads until it is posted. The terminal rendering prints it as well, one line
+        per line under the step — split first, so a line of it cannot draw a step row in
+        the view where a step row IS a line."""
+        self._approved()
+        shown = self.ok("plugin", "plans", "show", "p-1")
+
+        self.assertIn("out   Scope & Objectives", shown)
+        self.assertIn("out   Change Contract", shown)
+        self.edit_step("s-1", output="approved\ns-9   done      merged")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("out   s-9   done      merged", shown)
+        self.assertFalse([ln for ln in shown.splitlines() if ln.startswith("s-9")])
+
+    def test_json_is_unchanged_by_the_flag_when_a_dump_is_present(self):
+        """`--markdown` is a rendering and not a projection: the `--json` payload is the
+        plan record either way, with the dump in it as the string it is stored as. What
+        reads the payload is another plugin, and a flag that reshaped it for a human would
+        break that reader for the sake of the same view it already had."""
+        self._approved()
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1", "--markdown"),
+                         self.data("plugin", "plans", "show", "p-1"))
+        self.assertEqual(
+            self.data("plugin", "plans", "show", "p-1", "--markdown")["steps"][0]["output"],
+            self._DUMP)
 
     def test_the_flag_is_declared_on_show_and_nowhere_else(self):
         """One command renders a plan for a PR, and it is the one that reads a single plan

@@ -1,11 +1,21 @@
 <!--
-The format a design gate's message is written in, and nothing else.
+The BULLET FORMAT a step's message is written in, and nothing else.
 
-AUDIENCE: the agent that owns a step whose exit condition is the design gate. It reads
-this when it reaches that step — `sb presets design-gate` — writes its summary in this
-shape, and blocks. Nothing here says when to run a design gate or what a gate is; a gate is a property of
-the step whose exit condition it is, so that step and its definition's own `about` are
-where to read what is being asked. This file is only the format the answer is written in.
+AUDIENCE: the agent that owns a step whose `about` names this format — the change approval
+gate, the human-review list before a merge, anything later that wants the same shape. It
+reads this when it reaches that step — `sb presets design-gate` — writes its message in
+this shape, and does whatever its step says next. Nothing here says when to run a gate or
+what a gate is; a gate is a property of the step whose exit condition it is, so that step
+and its definition's own `about` are where to read what is being asked. This file is only
+the format the answer is written in.
+
+RE-SECTIONED: the format and the example are now separate, because the sections are NOT
+this file's to name. `change-approval` heads its two Scope & Objectives and Change
+Contract; `merge-human-review` heads its list for what it is; the worked example below is
+one gate's sections and is an example of the shape, not a set of headings to copy. What is
+shared, and the only reason this file exists, is the bullet mechanics. The file keeps its
+name because plans in flight name it, and a preset is renamed by breaking every step that
+points at it.
 
 BINDING: none, deliberately, and this is the shipped example of a preset that exists ONLY
 for a step to name. It is not in any `presets.toml` list, so no spawn carries it and no
@@ -40,34 +50,21 @@ bullets that each lose which condition governs which branch.
 
 # design-gate
 
-The format for a design gate's message: what you write after planning and before
-implementing, immediately before you block.
+The bullet format for a message written for Andrew to read once and answer: what you write
+after planning and before implementing, or the list you leave him just before a merge.
 
-Two sections and no more. First what is causing the problem. Then what the fix will be —
-its behavioural contract, ordered step by step for his understanding, rather than a
-step-by-step capture of the implementation.
+## Two sections, and the step names them
+
+Two sections and no more, each headed. WHICH two is the step's own to say, not this file's:
+read the `about` of the step that sent you here. `change-approval` heads its two
+Scope & Objectives and Change Contract; the design gate this file is named after headed its
+two "what is causing it" and "what the fix will be". The bullets are the same either way.
+
+## The bullets
 
 Bullets indent in three levels, and the marker IS the level: `-` for a point of its own,
 `---` for one hanging under the point above it, `-----` for a detail under that. They are
-never separator lines, and every one of them carries text. Two sections, headed, exactly
-like this:
-
-    What is causing it
-
-    - A gate needing a human has no representation on a step at all.
-    --- A lead marks one in prose, and nothing renders it where the work is read.
-    - A child blocking at a gate stands its lead down, per the protocol.
-    --- The plan then has nobody to assign the next step once the gate clears.
-
-    What the fix will be
-
-    - A gate is a field on the step whose exit condition it is, never a step of its own.
-    --- Its owner blocks; the step renders that owner blocked, read live and stored nowhere.
-    ----- Answering the agent clears both, so no verb clears a gate through the plan.
-    - A step is complete or skipped, and a trivially small change skips its gate with a
-      reason rather than being blocked on a contract nobody wants.
-    - The lead stays until its plan completes, and says who is waiting instead of standing
-      down; a child at a gate is waiting for the plan, not for itself.
+never separator lines, and every one of them carries text.
 
 Depth is meaning and not decoration: a `---` bullet is a condition, a consequence or a
 qualification of the `-` above it, and a `-----` is the same one level further down. Do not
@@ -86,6 +83,32 @@ Where the change spans two worktrees, name the other plan. Plans are isolated as
 that isolation must not reach this message: asking him to approve half a contract twice,
 with the sentence that would explain it ruled out, is worse than a longer message.
 
+## The shape, worked through
+
+One gate's two sections, as an example of the shape and not as headings to copy:
+
+    What is causing it
+
+    - A gate needing a human has no representation on a step at all.
+    --- A lead marks one in prose, and nothing renders it where the work is read.
+    - A child blocking at a gate stands its lead down, per the protocol.
+    --- The plan then has nobody to assign the next step once the gate clears.
+
+    What the fix will be
+
+    - A gate is a field on the step whose exit condition it is, never a step of its own.
+    --- Its owner blocks; the step renders that owner blocked, read live and stored nowhere.
+    ----- Answering the agent clears both, so no verb clears a gate through the plan.
+    - A step is complete or skipped, and a trivially small change skips its gate with a
+      reason rather than being blocked on a contract nobody wants.
+    - The lead stays until its plan completes, and says who is waiting instead of standing
+      down; a child at a gate is waiting for the plan, not for itself.
+
+## If your step is a gate
+
 Then block, and let him answer the block. Answering you is what clears the gate — there is
 no verb that clears one through the plan, and you do not tick the step until he has
-answered.
+answered. If the step also keeps its approved text in `output`, write that copy as ordinary
+markdown nesting — two-space indents under `-` — rather than as the marker levels above:
+the markers are for what he reads in chat, and `output` is dumped onto a pull request where
+markdown is what renders.

@@ -28,8 +28,8 @@ The records
            "created_by": "lead", "created_at": 1754570000}
 
     step  {"id": "s-1", "name": "…", "display": null, "def": null, "obliged_by": null,
-           "progress": "open", "why": null, "gate": null, "owner": null, "tries": 1,
-           "notes": [], "deps": [], "checkpoints": []}
+           "progress": "open", "why": null, "gate": null, "output": null, "owner": null,
+           "tries": 1, "notes": [], "deps": [], "checkpoints": []}
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
 writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here is an enum
@@ -71,6 +71,19 @@ break in it is WARNED ABOUT (`_wrong`), because the only way one gets there is s
 pasting the brief instead of pointing at it, and a plan holding a copy of a brief is a
 second copy that goes stale.
 
+`output` is the step's own finished output, and it is the ONE field in this file that is
+content rather than a reference — it is that because the whole point of it is being
+DUMPED. A change approval that a human approved has to reach the pull request in full, and
+a ref does not dump: `create-pr` posts `show --markdown` and whoever reads the PR gets
+whatever that carries. So the text is kept on the step, multi-line, and `--markdown`
+renders it as a blockquote block rather than flattening it to one line (`_BLOCK`). Written
+BY HAND by the agent that did the step, as it ticks, like `gate` and unlike `tick`: no
+verb writes it, because a verb would have to be exempted from both doors `_cap` keeps —
+`MAX_TEXT` and the control character — and an approved contract is longer than one and
+made of the other. REPLACED and never appended: a rejected contract is overwritten by the
+redone one, and what records the loop is `tries` and the changelog, which is exactly why
+this is not a note.
+
 Gates
 -----
 
@@ -87,10 +100,11 @@ heard of gets it without a release.
 Nothing here waits, blocks, merges or tears anything down, and that boundary is the whole
 of the mechanism. The PROCEDURE at a gate is prose an agent follows, kept with the thing
 that gates rather than in one list of gates — a definition's own `about` for a named step,
-`sb presets design-gate` for that gate's format — and the agent runs it with the tools it
-already has. `guide` does not carry it and does not name the gates: an agent reaches a gate
-by reaching the step that has one, so the step is where it will look. This file's entire job is to REPRESENT the gate: to hold
-the sentence, to render it, and to make sure a gate cannot be got past without leaving a
+`sb presets design-gate` for the bullet format such a message is written in — and the agent
+runs it with the tools it already has. `guide` does not carry it and does not name the
+gates: an agent reaches a gate by reaching the step that has one, so the step is where it
+will look. This file's entire job is to REPRESENT the gate: to hold the sentence, to
+render it, and to make sure a gate cannot be got past without leaving a
 mark. A plugin that shelled out to `gh` or `git merge` on a plan's behalf would be the
 evaluator this design deliberately does not have, and it would be one on the only path
 where being wrong lands a merge nobody asked for.
@@ -201,8 +215,9 @@ and links are the two halves of this design and they point opposite ways on purp
 
 Templates hold no `deps`. A template entry may expand into several steps, so an edge written
 against an entry would have nothing single to attach to; edges are added with `dep` once the
-copy exists. The catalogue is deliberately nearly empty — `create-pr`, `merge`,
-`merge-human-review` and one template — because the design says what to promote into it is
+copy exists. The catalogue is deliberately nearly empty — `change-approval`, `create-pr`,
+`merge`, `merge-human-review`, `review` and one template — because the design says what to
+promote into it is
 read off real runs rather than decided up front, and the system has to work with it almost
 bare. It does: with no `library` directory at all every verb here still works and only
 `name-step` has nothing to offer.
@@ -1537,6 +1552,20 @@ def _flat(text: Any) -> str:
     return _CONTROL.sub(_escape, str(text))
 
 
+def _lines(text: Any) -> list[str]:
+    """`_flat`, one line at a time — the variant for the one field that is a BLOCK.
+
+    Splits on the newline and then escapes each line, so the newline is the only control
+    character spared and it is spared as a SEPARATOR rather than as content. Every renderer
+    that uses this puts each line somewhere a forged row cannot reach — indented under a
+    label in the terminal, blockquoted in markdown — so the property `_flat` holds
+    everywhere else in this file is held here by where the lines go instead of by escaping
+    them. Anything that is not a string is one line, which is the fallback: this is asked
+    of a hand-edited field and must not raise on a list somebody put there.
+    """
+    return [_flat(line) for line in str(text).split("\n")]
+
+
 def _escape(m: "re.Match") -> str:
     """One character, as the shortest spelling of it that is still text.
 
@@ -1570,6 +1599,14 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     key it happens not to have — a reader deciding whether a plan has a gate at all should
     not have to tell a step made before this field existed from a step that has none.
 
+    `output` is the step's own finished output — the one field here that is CONTENT rather
+    than a reference, and it is that because the whole point of it is being dumped onto the
+    pull request `create-pr` comments the plan onto. Multi-line by construction and longer
+    than `MAX_TEXT`, so no verb writes it and it never goes through `_cap`: the agent that
+    did the step writes it into the file by hand as it ticks, exactly as `gate` arrives.
+    `--markdown` renders it as a quoted block rather than one escaped line (`_BLOCK`).
+    Explicit null for the same reason `gate` and `why` are.
+
     `name` and `def` are the two ways a step says what it is, and exactly one of them is
     filled. An on-the-fly step owns its words; a named one owns a LINK, and its `name` stays
     null so that there is no copy of the definition here to go stale — the text is resolved
@@ -1586,7 +1623,8 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     """
     return {"id": sid, "name": name, "display": display, "def": key,
             "obliged_by": obliged_by, "progress": OPEN, "why": None, "gate": None,
-            "owner": None, "tries": 1, "notes": [], "deps": [], "checkpoints": []}
+            "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
+            "checkpoints": []}
 
 
 def _note(text: str, who: str) -> dict:
@@ -3232,6 +3270,13 @@ def _step_lines(steps: list) -> list[str]:
             out.append(f"    gate  {_flat(s['gate'])}"
                        f" — its owner blocks; answering the owner clears it, and no verb "
                        f"here does")
+        if _some(s.get("output")):
+            # The other view of the same record. A field that only ever appeared on a pull
+            # request comment would be a field nobody proofreads before it is posted, and
+            # what this one carries is the text a human approved — so it is printed here
+            # too, one line per line, SPLIT FIRST so that no line of it can forge a step
+            # row the way the whole thing could if it were pasted in unbroken.
+            out.extend(f"    out   {line}" for line in _lines(s["output"]))
         out.extend(f"    ref   {_flat(c.get('ref'))}" for c in (s.get("checkpoints") or ()))
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
                    f"{_when(n.get('at'))})"
@@ -3262,6 +3307,16 @@ def _step_lines(steps: list) -> list[str]:
 # to the store, so there is nothing here that could widen into every plan in the repo.
 
 _HEADS = ("display", "title")            # what names the plan, best first; both optional
+_BLOCK = ("output",)                     # keys whose value is prose, dumped rather than
+#                                          flattened — the third schema fact, and it falls
+#                                          back like the other two: a `_BLOCK` key holding
+#                                          anything but a string takes the ordinary path.
+#
+# Every line of a dump is BLOCKQUOTED, which is what keeps the forged-row property the rest
+# of this file holds by escaping: no line inside a quote can start a step row or a markdown
+# table row, however it is spelled. It does not stop a `#` in the text becoming a heading
+# INSIDE its own quote, and that is accepted — this is the step's own text, deliberately
+# dumped, and it is visibly quoted while it does it.
 
 
 def _markdown(p: dict) -> str:
@@ -3315,6 +3370,11 @@ def _tabular(v) -> bool:
     is still flat: an absent collection is not a nested one.
     """
     return (isinstance(v, list) and bool(v) and all(isinstance(i, dict) for i in v)
+            # A block goes in bullets or it goes nowhere: a table cell is one line, so a
+            # plan whose steps happened to be flat could otherwise push a whole approved
+            # contract into one, which is the shape this rendering exists to avoid.
+            and not any(isinstance(i.get(k), str) and _some(i.get(k))
+                        for i in v for k in _BLOCK)
             and all(_scalar(x) or not _some(x) for i in v for x in i.values()))
 
 
@@ -3378,7 +3438,14 @@ def _bullets(value, depth: int = 0) -> list[str]:
         for k, v in value.items():
             if not _some(v):
                 continue
-            if _inline(v):
+            if k in _BLOCK and isinstance(v, str):
+                # The label, then the text itself, quoted line by line. `_cell` would give
+                # the whole thing back as one line with the newlines spelled `\n`, which is
+                # right for every other field here and is exactly wrong for the one field
+                # whose reason to exist is arriving on a pull request as prose.
+                out.append(f"{pad}- {_title(k)}")
+                out.extend(f"{pad}  > {line}" for line in _lines(v))
+            elif _inline(v):
                 out.append(f"{pad}- {_title(k)}: {_cell(k, v)}")
             else:
                 out.append(f"{pad}- {_title(k)}")
@@ -3389,7 +3456,12 @@ def _bullets(value, depth: int = 0) -> list[str]:
             out.append(f"{pad}- {_cell('', item)}")
         elif isinstance(item, dict):
             keys = [k for k in item if _some(item[k])]
-            lead = next((k for k in keys if _scalar(item[k])), None)
+            # A block is never the label, even on a record whose only scalar it is: a label
+            # is one line and a block is not, so a dump reaching here would be the forged
+            # row the blockquote below is what stops.
+            lead = next((k for k in keys
+                         if _scalar(item[k]) and not (k in _BLOCK
+                                                      and isinstance(item[k], str))), None)
             out.append(f"{pad}- **{_cell(lead, item[lead])}**" if lead else f"{pad}-")
             out.extend(_bullets({k: item[k] for k in keys if k != lead}, depth + 1))
         else:

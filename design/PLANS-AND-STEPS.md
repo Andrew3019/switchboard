@@ -33,7 +33,7 @@ be asked, and he accepts it deliberately.
 
 **Cost per decision goes up as the count goes down, and that is the trade.** Today's three
 sit at the end of a job, are close to yes or no, and never need him to understand the fix.
-The design gate lands mid-job, asks him to judge a behavioural contract before any code
+Change Approval lands mid-job, asks him to judge a change contract before any code
 exists, and holds the lead and everything under it while he thinks. Catching a wrong design
 before it is built is worth that; it is a trade rather than a removal.
 
@@ -183,10 +183,10 @@ one context.
 a step that already exists and invent the rest as it goes.
 
 **A named step is a link to its definition and its own object besides.** The plan holds the
-name and everything belonging to this run — progress, owner, try count, notes, checkpoints —
-while the library holds only the definition. Editing a library step therefore reaches every
-plan naming it, including live ones, which is the point: there is little about a definition
-to change once it exists, and steps are units.
+name and everything belonging to this run — progress, owner, try count, notes, checkpoints,
+its `output` — while the library holds only the definition. Editing a library step therefore
+reaches every plan naming it, including live ones, which is the point: there is little about
+a definition to change once it exists, and steps are units.
 
 **A lead that wants a variant writes an on-the-fly step, never an edited link.** There is no
 forking a library step for one job. This is also what a template copy carries: copying a
@@ -214,7 +214,7 @@ than a row of ellipses.
 change and a large one.
 
 **A preset may exist only for steps to name**, rather than being offered to spawns at
-all — the design gate's bullet format is one.
+all — Change Approval's bullet format is one.
 
 **The agent is the interpreter.** There is no compiler and no schema to satisfy: a step
 carries whatever fields are useful and an agent reads them. Inputs if it wants inputs, a
@@ -361,26 +361,63 @@ or a change spanning two worktrees asks him to approve half a contract twice wit
 that would explain it ruled out.
 
 **Two blocks is the shape of a job, not a ceiling.** A plan that lands a change has a
-design gate and a merge gate, and everything else resolves without him. Nothing enforces a
-count — several plans on one worktree means several of each, and that is fine.
+Change Approval gate and a merge gate, and everything else resolves without him. Nothing
+enforces a count — several plans on one worktree means several of each, and that is fine.
 
-### The design gate
+### Change Approval
 
-After planning and before implementing, the agent summarises the problem and the planned
-behavioural contract of the fix. Two sections, ordered step by step: what is causing the
-problem, and what the fix will be — not necessarily a step-by-step capture of the fix
-itself, but an ordered account for his understanding.
+**Change Approval is the design gate.** There is one gate before implementation, not two: it
+supersedes and replaces the older "design gate" everywhere, and it lives in the step library
+rather than in convention, so a plan gets it by naming it.
+
+After the work is shaped and before any of it is implemented, the owning agent writes the
+summary in its own chat — that is what he reads — and blocks with one short line naming what
+it is waiting for. Its whole value is that nothing has been built yet.
+
+**Two sections, in this order.** First **Scope & Objectives**: the scope is the agent's to
+derive, what the work covers; the objectives are his, inferred from what he actually asked
+for and restated so nothing he wanted goes missing. Second the **Change Contract**,
+bulletpointed and high-level only — no implementation detail, no jargon, nested where the
+nesting carries meaning. It is ordered for reading rather than for building: he goes down it
+once, and should finish it knowing what the change looks like at a high level, what behaviour
+changes, and which modules are touched, with little context on this codebase.
 
 The format is fixed: bullets indented with `-`, then `---`, then `-----`. Bullets run short —
 around twelve words, and up to about twenty where the point is genuinely tangled, which
-matches the standing human-facing rule rather than tightening it. A behavioural contract is
-where the conditions and fallbacks live, so it is the case that needs the loose end of the
-range: one proposition with three conditions should not have to fragment into four bullets
-that each lose which condition governs which branch.
+matches the standing human-facing rule rather than tightening it. A change contract is where
+the conditions and fallbacks live, so it is the case that needs the loose end of the range:
+one proposition with three conditions should not have to fragment into four bullets that each
+lose which condition governs which branch.
 
 **A gate message may point at a fuller artifact.** Anything that does not fit the format is
 referenced rather than crammed into it, so the short version is never the only version
 available to him.
+
+**He answers approve, or rejects with changes.** A rejection sends the agent back to the
+design work and not to the wording: re-derive the scope, re-infer the objectives, rebuild the
+contract, and only then summarise and block again. Rewording a summary he rejected and
+re-blocking answers a different question from the one he asked. Each time round bumps the
+step's try count and puts its progress back to `open` — the ordinary rework relief every step
+has — so the loop is recorded rather than invisible.
+
+**The gate is prose, not a field.** The step's definition says it is a gate and says what the
+block is for, the way the merge step already does; nothing writes a string into the step's
+`gate` field. That is deliberate rather than an omission: a gate left on a step that has been
+ticked is a defect the plan draws red, and Change Approval's whole lifecycle ends in a tick.
+The cost is that `show` prints no gate line for the step, and a reader has to know the
+definition.
+
+**The approved text is carried forward.** On approval the agent puts the full approved text —
+both sections, entire — in the step's `output`, and only then ticks. `output` is the one step
+field that is content rather than a reference, and it is that because it is dumped: the PR
+comment carries what he approved verbatim instead of a fresh re-summary of it.
+
+**It obliges `review`, and `create-pr` obliges it.** So naming `create-pr` lands all three in
+one act, and the contract he approved is checked against what was actually built before the
+PR is opened. A `review` standing alone, in a plan with no Change Approval step, is a plain
+review and nothing is missing from it. Change Approval is an early root of the plan whatever
+order it was added in — an obligation lands a step beside its obliger, so its deps have to be
+made to say so.
 
 **A trivially small change may skip this step, with the reason recorded.** The relief is the
 ordinary one every step has, and it is named here so nobody has to assemble it from three
@@ -394,7 +431,7 @@ Testing steps are given only when actually needed — anything the agent has alr
 does not need him, and asking wastes his time, his effort and his reading.
 
 The review-and-review-again behavioural gate has been run by this point. The message mimics
-the design gate: concise, simply explained.
+Change Approval: concise, simply explained.
 
 Once he approves, everything else happens automatically — merge, cleanup, delete worktrees,
 close agents. No further questions **means no routine ones**: if any part of that chain fails
@@ -494,7 +531,8 @@ evidence of how the work actually ran, so it is written to be read cold.
 and whoever finishes a step as it is ticked.
 
 **Steps carry references to briefs and artifacts as checkpoints** — references, never
-content.
+content. The one exception is a step's `output`, which is content because the whole point of
+it is being dumped: it is what the PR comment carries forward, and a reference does not dump.
 
 **A recurring analysis pass reads the records and proposes what to add.** Something like a
 skill run every so often — analyse switchboard usage — that looks over past jobs and says
