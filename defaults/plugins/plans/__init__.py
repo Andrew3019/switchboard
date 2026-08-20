@@ -3508,7 +3508,10 @@ def _step_lines(steps: list) -> list[str]:
         # field is one line UNDER its step and can no more forge a row beside it than a
         # gate or a name can. A non-scalar is left to `--json`: a list has no place under
         # a step line, and this door exists to fall back rather than to raise on one.
-        out.extend(f"    {_flat(k):<6}{_flat(v)}" for k, v in s.items()
+        # The key IS the label, padded to the width the labels above are drawn at and
+        # never narrower than the two spaces that separate it from its value: a field
+        # called `reviewed_by` would otherwise run straight into what it says.
+        out.extend(f"    {_flat(k) + '  ':<6}{_flat(v)}" for k, v in s.items()
                    if k not in _DRAWN and _scalar(v) and _some(v))
     return out
 

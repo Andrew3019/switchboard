@@ -2283,10 +2283,13 @@ class HandEditTest(PlansSandbox):
         rendered as `out` and a definition's resolved `command` included."""
         self.plan("write it")
         self.edit_step("s-1", risk="the migration is one-way",
-                       output="what the step produced")
+                       reviewed_by="andrew", output="what the step produced")
 
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("risk  the migration is one-way", shown)
+        # A key wider than the label column still gets its two spaces: the key is the
+        # label here, and one that ran into its own value would be unreadable.
+        self.assertIn("reviewed_by  andrew", shown)
         self.assertIn("out   what the step produced", shown)
         # Drawn once each. `output` has its own line above, so it is not a leftover, and
         # neither is the owner status this rendering reads live and stores nowhere.
