@@ -224,7 +224,7 @@ class PlansTest(PlansSandbox):
                          {"id": "s-1", "name": "write it", "display": "write", "def": None,
                           "obliged_by": None, "progress": "open", "why": None, "gate": None,
                           "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
-                          "checkpoints": []})
+                          "root": False, "checkpoints": []})
         # AUTO-CHAINED: the order the steps were typed in is an order, so `create` records
         # it rather than leaving a plan that warns about itself the moment it is made.
         self.assertEqual(made["steps"][1]["deps"], ["s-1"])
@@ -1709,6 +1709,10 @@ class CompletenessTest(PlansSandbox):
              **step})
         self._save(doc)
 
+    def _step(self, sid: str) -> dict:
+        """One step, read back out of the file rather than out of a verb's own answer."""
+        return next(s for p in self._doc()["plans"] for s in p["steps"] if s["id"] == sid)
+
     def test_the_shape_verbs_refuse_a_step_with_no_display_name(self):
         """The first door, and the refusal has to SHOW one rather than demand one.
 
@@ -1848,6 +1852,46 @@ class CompletenessTest(PlansSandbox):
         self.assertNotIn("incomplete", added)
         by_def = {s["def"]: s for s in added["steps"]}
         self.assertEqual(by_def["merge-human-review"]["deps"], [])
+
+    def test_a_deliberate_second_root_is_marked_and_then_it_is_complete(self):
+        """The answer to a plan with two real starts, which used to be a false edge.
+
+        Two steps on disjoint work, starting side by side, could only clear the warning by
+        recording an order that never happened — a lie in the record to satisfy a rendering
+        rule. `--root` says the start is meant, and a start that says so is no more
+        incomplete than the plan's first one is.
+        """
+        self.ok(*_create("a job", "build it", "document it"))
+        self.edit_step("s-2", deps=[])
+        self.assertIn("no dep: s-2", self.ok("plugin", "plans", "validate", "p-1"))
+
+        self.ok("plugin", "plans", "dep", "s-2", "--root", "--reason", "disjoint files")
+        self.assertTrue(self._step("s-2")["root"])
+        self.assertEqual(self._step("s-2")["deps"], [], "and no edge was invented")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+        self.assertIn("parallel start", self.ok("plugin", "plans", "show", "p-1"),
+                      "and `show` says which starts were authored as starts")
+
+    def test_an_unmarked_second_root_is_still_reported_and_the_fix_names_both_ways(self):
+        """The marker is the whole of what separates the two cases, so the unmarked one is
+        reported exactly as before — a bare `deps: []` is a forgotten edge and a parallel
+        start in the same bytes. What changed is that the warning now offers an answer that
+        is not an edge nobody means."""
+        self.ok(*_create("a job", "build it", "document it"))
+        self.edit_step("s-2", deps=[])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("dep s-2 --after", said)
+        self.assertIn("dep s-2 --root", said)
+
+    def test_an_edge_takes_the_root_mark_back_off(self):
+        """A step that waits for something is not a start, so the two cannot both stand:
+        the mark is undone by the verb that made it rather than only by editing the file."""
+        self.ok(*_create("a job", "build it", "document it"))
+        self.edit_step("s-2", deps=[])
+        self.ok("plugin", "plans", "dep", "s-2", "--root")
+        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
+        self.assertFalse(self._step("s-2")["root"])
+        self.assertEqual(self._step("s-2")["deps"], ["s-1"])
 
     def test_a_template_entry_joining_two_earlier_ones_records_both_edges(self):
         """A join is `"after": [1, 2]`, and both halves of it have to land.

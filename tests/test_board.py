@@ -1424,6 +1424,21 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn(" build", board._ANSI.sub("", chart), "the sound step is left alone")
         self.assertTrue(lines[0].startswith("\033[31m"), "and the header says so too")
 
+    def test_a_deliberate_second_root_is_drawn_like_any_other_step(self):
+        """The board is the whole reason the dep rule exists, so it is where the answer to
+        two real starts has to show: a start marked `root` is not a defect and is not
+        painted. Before this the only way off the red was an edge that misstated the order,
+        which put a lie in the record to satisfy a rendering rule."""
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "build", "display": "build", "progress": "open"},
+            {"id": "s-2", "name": "document", "display": "docs", "progress": "open",
+             "root": True}],
+            display="shape the work"))
+        with self.hooks():
+            lines = board.section_extras([agent("lead")])[0][1]
+        self.assertNotIn("\033[31m", "".join(lines), "nothing is red")
+        self.assertIn("docs", board._ANSI.sub("", "".join(lines)))
+
     def test_a_hand_edit_that_broke_a_removed_verbs_rule_is_drawn_red_too(self):
         """The same door, widened. Five verbs went away in #4 and their refusals became
         warnings on the file, which only means anything if the board paints them: a gate on

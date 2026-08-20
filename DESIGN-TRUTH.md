@@ -438,14 +438,19 @@ picture, the plan's own listing is the full text. — confirmed 2026-08-19
 **A step names what it comes after, and every step but the plan's first must.** The board is
 a DAG drawn from the deps, so a plan recording no order between its steps renders as a loose
 vertical stack with no arrows — which is what every early plan did. The first step is the
-exempt root; a plan with a genuine second start reports it, since nothing can tell a deliberate
-second root from a forgotten edge and the warning is survivable. Display and deps are required
-in more than one place, because a plan is edited by hand as often as by command: the shape
-verbs (`create`, `add-step`, `name-step`, `template use`) refuse to mint a step with no
-display; every other write warns and still writes, naming the offending steps — a `tick` that
-would not land because of a rendering rule is worse than the rendering; and the board draws
-the defect red. Completeness is never a whole-file refusal — that is `_check`'s job and it
-stays structure-only. — confirmed 2026-08-19
+exempt root, and a second start is exempt too where the step SAYS it is one — `root: true`,
+written by `dep <step> --root` and taken back off by any `--after`. Nothing can tell a
+deliberate second root from a forgotten edge by looking at it, so the plan says which it is:
+a marked start is complete and draws like anything else, an unmarked one still reports. The
+mark exists because the only other way off the warning was an edge nobody meant, and a plan
+that misstates its own order to satisfy a rendering rule is worse than the warning. Display
+and deps are required in more than one place, because a plan is edited by hand as often as
+by command: the shape verbs (`create`, `add-step`, `name-step`, `template use`) refuse to
+mint a step with no display; every other write warns and still writes, naming the offending
+steps — a `tick` that would not land because of a rendering rule is worse than the
+rendering; and the board draws the defect red. Completeness is never a whole-file refusal —
+that is `_check`'s job and it stays structure-only. — confirmed 2026-08-19, the deliberate
+second root confirmed 2026-08-20
 
 ### Scope
 
@@ -484,9 +489,9 @@ the rows of each worktree group, and draws what it returns under a heading of th
 own naming. The plans plugin uses it to draw each plan as a header and its steps as a
 left-to-right flowchart, coloured by progress rather than columned, with the short display
 name of each step in the cell, the plan's own display as the header, and any plan or step
-still missing a display or a dep drawn in red. A board that ships no such plugin, or a plugin
-that ships no `board.py`, costs nothing: the seam imports neither unless both are there. —
-confirmed 2026-08-17, display-and-defect clause confirmed 2026-08-19
+still missing a display or a dep it has not marked deliberate drawn in red. A board that
+ships no such plugin, or a plugin that ships no `board.py`, costs nothing: the seam imports
+neither unless both are there. — confirmed 2026-08-17, display-and-defect clause confirmed 2026-08-19
 
 **`sb start` focuses the pane. Nothing else ever focuses on spawn.** Clicking a name on
 the board is navigation, not a spawn, and does bring that agent into focus. — confirmed
