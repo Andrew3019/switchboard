@@ -101,9 +101,10 @@ Nothing here waits, blocks, merges or tears anything down, and that boundary is 
 of the mechanism. The PROCEDURE at a gate is prose an agent follows, kept with the thing
 that gates rather than in one list of gates — a definition's own `about` for a named step,
 `sb presets design-gate` for the bullet format such a message is written in — and the agent
-runs it with the tools it already has. `guide` does not carry it and does not name the gates: an agent reaches a gate
-by reaching the step that has one, so the step is where it will look. This file's entire job is to REPRESENT the gate: to hold
-the sentence, to render it, and to make sure a gate cannot be got past without leaving a
+runs it with the tools it already has. `guide` does not carry it and does not name the
+gates: an agent reaches a gate by reaching the step that has one, so the step is where it
+will look. This file's entire job is to REPRESENT the gate: to hold the sentence, to
+render it, and to make sure a gate cannot be got past without leaving a
 mark. A plugin that shelled out to `gh` or `git merge` on a plan's behalf would be the
 evaluator this design deliberately does not have, and it would be one on the only path
 where being wrong lands a merge nobody asked for.
