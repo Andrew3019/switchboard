@@ -500,11 +500,13 @@ def register(reg):
     reg.command(
         "tick", tick, audience="both",
         help="mark a step done — nothing infers progress and nothing else writes it",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
+        args=[reg.arg("step", help="a step id, e.g. step-1, or p-2/step-1 to say "
+                                   "which plan"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "note", note, audience="both", help="append a note to a step, or to a plan",
-        args=[reg.arg("target", help="a step id (s-1) or a plan id (p-1)"),
+        args=[reg.arg("target", help="a step id (step-1, or p-2/step-1) or a plan id "
+                                     "(p-1)"),
               reg.arg("--text", help="the note"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
@@ -537,9 +539,11 @@ def register(reg):
     reg.command(
         "dep", dep, audience="both",
         help="record that a step comes after others — data the lead reads, not control flow",
-        args=[reg.arg("step", help="a step id, e.g. s-2"),
+        args=[reg.arg("step", help="a step id, e.g. step-2, or p-2/step-2 to say "
+                                   "which plan"),
               reg.arg("--after", repeat=True,
-                      help="a step it comes after; repeat for a join"),
+                      help="a step in the same plan that it comes after; repeat for a "
+                           "join"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "migrate", migrate, audience="both",
