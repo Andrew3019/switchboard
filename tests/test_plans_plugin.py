@@ -1549,7 +1549,7 @@ class CatalogueTest(PlansSandbox):
 
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
                          [(None, None), ("create-pr", None),
-                          ("change-approval", "s-2"), ("review", "s-3")])
+                          ("change-approval", "step-2"), ("review", "step-3")])
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("get the intended change approved before implementing it", shown)
         self.assertIn("review the implementation", shown)
@@ -1579,7 +1579,7 @@ class CatalogueTest(PlansSandbox):
                          ["create-pr", "change-approval", "review",
                           "create-pr", "change-approval", "review"])
         self.assertEqual([s["obliged_by"] for s in self.steps()],
-                         [None, "s-1", "s-2", None, "s-4", "s-5"])
+                         [None, "step-1", "step-2", None, "step-4", "step-5"])
 
     def test_each_of_the_landing_three_is_skipped_with_a_reason_never_omitted(self):
         """The exchange, on the pair that will meet it most: a contract for a typo and a
@@ -1597,7 +1597,7 @@ class CatalogueTest(PlansSandbox):
 
         shown = self.ok("plugin", "plans", "show", "p-1")
         for expected in ("no PR, this lands on main", "needs no contract",
-                         "obliged by s-1", "obliged by s-2"):
+                         "obliged by step-1", "obliged by step-2"):
             self.assertIn(expected, shown)
         # And a skip with no reason is still called out, on these like on any other step.
         self.edit_step("s-2", why=None)

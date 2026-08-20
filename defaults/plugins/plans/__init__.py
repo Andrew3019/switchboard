@@ -3382,9 +3382,10 @@ def _step_lines(steps: list) -> list[str]:
 # supposed to be reporting. So this walks the record instead: a new field appears here on
 # its own, a removed one vanishes, and neither costs an edit to this function.
 #
-# What it does know about the schema is two things, and both fall back rather than fail:
-# the keys that might name the plan in its heading (`_HEADS`), and that a key called `at`
-# or ending `_at` holding an integer is a timestamp. Everything else is shape — scalar,
+# What it does know about the schema is three things, and every one falls back rather than
+# fails: the keys that might name the plan in its heading (`_HEADS`), the keys whose value
+# is prose to be dumped rather than flattened (`_BLOCK`), and that a key called `at` or
+# ending `_at` holding an integer is a timestamp. Everything else is shape — scalar,
 # list, dict — and the shape decides the rendering:
 #
 #   scalar fields          one `field | value` table under the heading

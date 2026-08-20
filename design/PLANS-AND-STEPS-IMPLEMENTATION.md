@@ -82,6 +82,8 @@ Verify: `sb plugin plans create`, then `show`/`list` render it; changelog append
 - State is one JSON file under `plugins.state_dir()`, tmp-write then `os.replace`.
 ---
 - Plan id `p-<n>` and step id `s-<n>` are monotonic, never reused.
+- Superseded for steps: they number per plan from `step-1`, held in the plan's own file.
+- A step is addressed `p-16/step-3`, or bare where exactly one plan holds that number.
 - A plan stores its owning worktree as the **workspace name**, nothing about its liveness.
 - A plan holds: id, workspace, steps, changelog, notes; JSON-like, open vocabulary.
 - A step holds: id, name, progress, why, owner, try-count, notes, deps, checkpoints.
