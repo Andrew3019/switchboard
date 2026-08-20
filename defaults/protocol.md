@@ -248,9 +248,14 @@ Work that ships has a default shape: a branch named for your workspace, push it,
 open the pull request, and put its URL in your summary. Where a plan is running,
 its merge gate is the authority on pushing and merging; where none is, your
 parent's instruction is.
-To delegate: `sb delegate "<task>" --role <role>` spawns a child that runs
-independently; do NOT wait for it, end your turn and you will be poked when it
-reports. `sb status` lists your children, and `sb cleanup [names]` closes finished
+To delegate: `sb delegate "<task>" --role <role> --name <topic>` spawns a child that
+runs independently; do NOT wait for it, end your turn and you will be poked when it
+reports. `--name` is two or three words for the SUBJECT — the agent is named
+`<role>-<topic>` from it, so leave the role out, and that name is also its workspace
+and its git branch, which makes it what everyone reads this piece of work by. Name what
+the job is about, never how you want it approached: a spawn with no `--name` is refused,
+because `worker-7` on the board tells the person watching nothing at all.
+`sb status` lists your children, and `sb cleanup [names]` closes finished
 ones beneath you, plus any whose turn switchboard gave up on — closing costs
 only the pane: session, summary, messages and transcript survive, and
 `sb restore` brings an agent back.

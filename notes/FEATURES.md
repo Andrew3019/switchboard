@@ -27,6 +27,12 @@ agent lands with the tree beside it (see **`sb board`**).
 - Depends on: `roles.get` (role → tier, prompt and `delegate` right),
   `presets.for_role`/`resolve` (`--with`), `models.Tiers.resolve` (`--model`),
   `store.claim_agent` (race-safe name claim), `herdr.start_agent`, `herdr.deliver`
+- **The child is named `<role>-<topic>`** (`Broker._compose_name`). `--name` gives the
+  TOPIC — two or three words for the subject — and the role goes in front of it, so one
+  string says both what the agent is and what it is for. That name is also its workspace
+  and its git branch (`_fork_for`). A spawn with no `--name` is **refused**: the old
+  `<role>-<n>` fallback is gone, having produced `worker-69` for 247 of this store's first
+  717 agents. A collision appends `-2`, `-3`, … and counts jobs on that subject.
 - **Where the spawn lands is worked out here, not passed in.** A caller stamped
   `is_top` (only `sb start` writes that stamp) forks the child a new branch, worktree
   and herdr workspace named after the child; anyone else's spawn is a tab in the
