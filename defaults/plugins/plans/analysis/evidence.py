@@ -540,7 +540,7 @@ def _named(p: dict, sid: str) -> str:
 
 
 def _sid(e: dict) -> str:
-    """The step id out of a changelog entry's detail — `s-3 …` is how every verb writes it.
+    """The step id out of a changelog entry's detail — `step-3 …` is how every verb writes it.
 
     The one place this file parses a rendered string rather than reading a field, and it is
     not a choice: a changelog entry carries `action`, `by`, `reason` and `detail`, and the
@@ -550,13 +550,16 @@ def _sid(e: dict) -> str:
     argument for the entry carrying the step id as a field of its own. Not added here: the
     schema belongs to the verbs, and this pass does not edit.
     """
-    m = re.match(r"\s*(s-\d+)", str(e.get("detail") or ""), re.IGNORECASE)
+    # Both spellings, because both are on the store: steps mint as `step-<n>` per plan now,
+    # and a plan made before that keeps the `s-<n>` ids its own changelog quotes.
+    m = re.match(r"\s*((?:s|step)-\d+)", str(e.get("detail") or ""), re.IGNORECASE)
     return m.group(1).lower() if m else "?"
 
 
 def _tail(detail: Any) -> str:
-    """An `add-step` detail is `s-4 <the name>`; the name is what is left after the id."""
-    return re.sub(r"^\s*s-\d+\s*", "", str(detail or ""), flags=re.IGNORECASE).strip()
+    """An `add-step` detail is `step-4 <the name>`; the name is what is left after the id."""
+    return re.sub(r"^\s*(?:s|step)-\d+\s*", "", str(detail or ""),
+                  flags=re.IGNORECASE).strip()
 
 
 def _from(detail: Any) -> str:

@@ -24,10 +24,10 @@ The records
 
     plan  {"id": "p-1", "workspace": "task-guardrails-build", "workspace_from": "agent",
            "checkout": "/…/worktrees/switchboard/task-guardrails-build", "title": "…",
-           "display": "…", "steps": [...], "changelog": [...], "notes": [...],
-           "created_by": "lead", "created_at": 1754570000}
+           "display": "…", "next_step": 4, "steps": [...], "changelog": [...],
+           "notes": [...], "created_by": "lead", "created_at": 1754570000}
 
-    step  {"id": "s-1", "name": "…", "display": null, "def": null, "obliged_by": null,
+    step  {"id": "step-1", "name": "…", "display": null, "def": null, "obliged_by": null,
            "progress": "open", "why": null, "gate": null, "output": null, "owner": null,
            "tries": 1, "notes": [], "deps": [], "root": false, "checkpoints": []}
 
@@ -36,7 +36,12 @@ writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here 
 and a lead that wants `progress: waiting on Andrew` gets it without a release. The design
 says the agent is the interpreter and there is no schema to satisfy, so a step carrying a
 field this file has never heard of is a feature and not corruption — `_step()` fills in the
-fields the design names and leaves everything else alone.
+fields the design names and leaves everything else alone, and EVERY RENDERING SHOWS IT:
+`--json` and `--markdown` because neither knows a schema, and the terminal view because
+`_step_lines` draws what it has no name for on a line of its own under the step — a scalar
+one, that being what a line holds; a list or an object is left to `--json`, which is the
+shape that can carry one. A promise kept in two renderings out of three was one the third
+made a liar of.
 
 Moving a step
 -------------
@@ -175,12 +180,20 @@ length cap and no per-cell clip any more — the cap is what cut the informative
 the enforcement is three doors rather than one: the shape verbs refuse, every other write
 warns and still writes, and `show`, `list` and the board draw the defect. See `_faults`.
 
+A definition may also carry a `command`: the one standard shell command that step is run
+with, `<PR>`- and `<PLAN>`-style placeholders and all, resolved onto a named step exactly as
+`name` and `display` are. It is DATA and nothing here runs it — the agent owning the step is
+what runs a command, because a plugin that fired them would be the evaluator this design does
+not have. It exists so that the command is under the step when the step is read rather than
+somewhere the owner has to go and look for it, which is the whole saving; most definitions
+have no single standard command and carry none.
+
 A definition may COMPOSE — `{"steps": ["a", "b"]}` — and naming it puts a and b in the plan,
 flat. What a plan holds is always flat: no step contains another, because a step that did
 would be a plan by another name. Composition is the one edge in this file that is actually
 traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps` is not: a
 `dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
-hang. Expansion mints fresh ids from the same counter as everything else.
+hang. Expansion mints fresh ids from the plan's own counter, like every step in it.
 
 A definition may also OBLIGE another — `merge` obliges `merge-human-review` — and naming it
 adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
@@ -216,19 +229,33 @@ and links are the two halves of this design and they point opposite ways on purp
 
 Templates hold no `deps`. A template entry may expand into several steps, so an edge written
 against an entry would have nothing single to attach to; edges are added with `dep` once the
-copy exists. The catalogue is deliberately nearly empty — `change-approval`, `create-pr`,
-`merge`, `merge-human-review`, `review` and one template — because the design says what to
-promote into it is
-read off real runs rather than decided up front, and the system has to work with it almost
-bare. It does: with no `library` directory at all every verb here still works and only
-`name-step` has nothing to offer.
+copy exists. Every OTHER key on an entry is a field on the step it mints, copied onto it
+blind (`_written`) — a gate, an owner, a checkpoint, a skip and its reason have no verb,
+so a template that could carry only a name could not show what a step really looks like.
 
-Ids are `p-<n>` and `s-<n>`, monotonic across the whole file and never reused, so a spawn
-prompt or a changelog entry citing `s-7` stays true for the life of the repo. Step numbers
-are minted from ONE counter rather than one per plan: two plans on a worktree would
-otherwise both have an `s-1`, and a lead handing a worker "your step is s-1" would be
-saying nothing. `next_plan`/`next_step` are stored, and recomputed as floors on read, so a
-hand-deleted row cannot make the next create mint an id somebody already wrote down.
+The catalogue is deliberately nearly empty — `change-approval`, `create-pr`, `merge`,
+`merge-human-review`, `review` and one template — because the design says what to promote
+into it is read off real runs rather than decided up front, and the system has to work
+with it almost bare. It does: with no `library` directory at all every verb here still
+works and only `name-step` has nothing to offer.
+
+Plan ids are `p-<n>`, monotonic across the store and never reused. STEP IDS ARE PER PLAN:
+every plan numbers its own from `step-1`, out of a `next_step` counter in its own file, so
+two plans are completely independent and nothing one does moves the other's numbers. Both
+counters are stored and recomputed as floors on read — over the ids on disk for `next_plan`
+and over that plan's own steps for its `next_step` — so a hand-deleted row cannot make the
+next mint hand out an id somebody already wrote down.
+
+What globality bought was a step id that named a plan by itself, and that is bought instead
+by addressing: `p-16/step-3` always works, and a bare `step-3` resolves when exactly one
+plan holds it and otherwise refuses naming the candidates (`_locate`). Almost every worktree
+holds one plan, so the bare form is what is typed and the qualifier is what is available.
+
+Nothing is renumbered. Plans made before this keep their `s-<n>` ids — a changelog quotes
+ids as free text and rewriting one is the thing the guide forbids — and both spellings, plus
+a bare number, resolve. `_meta.json`'s `next_step` is vestigial: it is kept written for a
+store still on format 1 and for an older plugin on the same repo, and nothing here mints
+from it.
 
 A plan is keyed on the WORKSPACE NAME — the string `agents.workspace` and `workspaces.name`
 hold, which is what the board groups by and what a later PR reads to decide a plan's
@@ -422,10 +449,14 @@ CLOSED = ("done", "failed")
 # verb to implement it.
 LIBRARY, TEMPLATES = "library", "templates"
 
-# `p-1`, `P-1` and a bare `1` all name the same plan; likewise `s-1` for a step. An id is
-# read out of a board or a spawn prompt and retyped, and being strict buys nothing.
-_PLAN_ID = re.compile(r"^(?:p-)?(\d+)$", re.IGNORECASE)
-_STEP_ID = re.compile(r"^(?:s-)?(\d+)$", re.IGNORECASE)
+# `p-1`, `P-1`, `plan-1` and a bare `1` all name the same plan; likewise `s-1`, `step-1` and
+# `1` for a step. An id is read out of a board or a spawn prompt and retyped, and being
+# strict buys nothing. The long forms are what the markdown dump renders (see `_markdown`),
+# so a reader who copies `plan-1` out of a pull request comment can type it straight back —
+# nothing MINTS a `p-`, and nothing mints a `step-` for a plan made before per-plan
+# numbering, which is exactly why both spellings have to resolve.
+_PLAN_ID = re.compile(r"^(?:p(?:lan)?-)?(\d+)$", re.IGNORECASE)
+_STEP_ID = re.compile(r"^(?:s(?:tep)?-)?(\d+)$", re.IGNORECASE)
 
 # Long enough for a real sentence, short enough that a plan stays readable when it is shown.
 # Anything longer wants a brief, and briefs are files a checkpoint can point at.
@@ -486,11 +517,13 @@ def register(reg):
     reg.command(
         "tick", tick, audience="both",
         help="mark a step done — nothing infers progress and nothing else writes it",
-        args=[reg.arg("step", help="a step id, e.g. s-1"),
+        args=[reg.arg("step", help="a step id, e.g. step-1, or p-2/step-1 to say "
+                                   "which plan"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "note", note, audience="both", help="append a note to a step, or to a plan",
-        args=[reg.arg("target", help="a step id (s-1) or a plan id (p-1)"),
+        args=[reg.arg("target", help="a step id (step-1, or p-2/step-1) or a plan id "
+                                     "(p-1)"),
               reg.arg("--text", help="the note"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
@@ -523,9 +556,11 @@ def register(reg):
     reg.command(
         "dep", dep, audience="both",
         help="record that a step comes after others — data the lead reads, not control flow",
-        args=[reg.arg("step", help="a step id, e.g. s-2"),
+        args=[reg.arg("step", help="a step id, e.g. step-2, or p-2/step-2 to say "
+                                   "which plan"),
               reg.arg("--after", repeat=True,
-                      help="a step it comes after; repeat for a join"),
+                      help="a step in the same plan that it comes after; repeat for a "
+                           "join"),
               reg.arg("--root", flag=True,
                       help="instead: this step deliberately comes after nothing — a "
                            "parallel start, not a forgotten edge"),
@@ -679,15 +714,71 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
     - NEVER drop or rewrite an entry that is already there, or a plan. Records are kept and
       never erased; cleanup means dropping out of the UI.
     - ADD A LIBRARY STEP with `name-step`, not by hand. It pulls in what the definition
-      composes and obliges; a `def` you typed yourself silently brings neither. A step
-      written by hand needs its own `display` and its own `deps` — a named one draws the
-      library definition's label and needs neither.
+      composes and obliges — and what those oblige in turn, so one name may land several
+      steps at once, and the deps it writes for them are a starting shape to fix in the
+      file. It also brings the definition's `command`, where it has one: the standard
+      shell command that step is run with, resolved onto the step every time it is drawn
+      so that it is under the step rather than somewhere its owner has to go and find. A
+      `def` you typed yourself silently brings none of it. A step written by hand needs
+      its own `display` and its own `deps` — a named one draws the library definition's
+      label and needs neither.
+
+  WHICH FIELDS ARE YOURS TO WRITE. Everything a verb mints is in the file already; these
+  are the ones that only ever arrive by editing it, and each says who writes it and when.
+  `sb plugin plans template use docs` is one worked example of every one of them.
+
+    owner        the plan's owner, as it hands the step out. A name, and nothing is told:
+                 the plan never pushes to a running agent, so say so yourself.
+    gate         the plan's owner, as it shapes the plan. The sentence a human has to
+                 answer before this step is finished — a FIELD on the step whose exit
+                 condition it is, never a step of its own. No verb clears it: the owning
+                 agent blocks, and the human answering that agent clears both.
+    progress     `open` at mint and `tick` writes `done`. `skipped` you write by hand,
+                 with the reason, and an open vocabulary means `waiting on Andrew` is a
+                 progress too if that is what is true.
+    why          the reason for whatever `progress` currently says, written by the same
+                 hand in the same edit — a skip with no reason is drawn red. Overwritten
+                 by whatever moves the step next, so it is never a history.
+    tries        bumped by whoever re-enters the step, with `progress` put back to `open`.
+                 Leave a `note` saying what the second run was for; a count that went up
+                 with nothing behind it is a record nobody can account for.
+    checkpoints  references — a path, a URL, an id — added by whoever produced the thing:
+                 `[{"ref": "notes/the-brief.md"}]`. Never content. A ref with a line break
+                 in it is somebody pasting a brief instead of pointing at one.
+    output       the step's own finished content, written by the AGENT THAT DID THE STEP
+                 as it ticks. The one field here that is content rather than a reference,
+                 because `create-pr` dumps it onto the pull request and a reference does
+                 not dump: an approved change contract and a review's result are what it
+                 is for, and the definitions needing one say so in their own `about`.
+                 Multi-line; replaced and never appended when a step is redone.
+    display      required on every step, and `deps` on every step but the first — see
+                 above. The minting verbs refuse a step without a board name.
+
+  `id`, `def`, `name`, `obliged_by` and the plan's `next_step` are MINTED and are not
+  yours: a `def` typed by hand brings neither what its definition composes nor what it
+  obliges, and `next_step` is the plan's own step counter, which shows up as a row in the
+  `--markdown` dump because that rendering reads the record rather than a schema. A
+  definition's `command` is not on the record at all — it is resolved out of the library
+  every time the step is drawn.
+
+  A FIELD THIS LIST HAS NEVER HEARD OF IS ALLOWED. There is no schema to satisfy: put what
+  the job needs on the step, and `show`, `--json` and the PR comment all print it — a
+  scalar gets its own line under the step in the terminal, and anything with a shape to it
+  is left to `--json`, which is the rendering that can carry one.
 
   Three verbs are worth typing rather than editing, being frequent and small — `tick
   <step>` when a step is done, `note <step> --text` for what happened, and `dep <step>
   --after <step>` for an edge, which refuses one pointing at a step that is not there.
   They write the changelog entry for you, which is most of what they buy. `sb plugin plans
   --help` lists the rest.
+
+  HOW A STEP IS ADDRESSED, since every one of those takes one. Each plan numbers its own
+  steps from `step-1`, so `step-3` on its own resolves while exactly one plan holds that
+  number — which is the usual case, a worktree holding one plan — and otherwise refuses,
+  naming the plans it could have meant. `p-16/step-3` names the plan on the front and
+  always works, and is what that refusal is asking you for. A plan made before per-plan
+  numbering keeps its `s-<n>` ids and nothing is renumbered; both spellings, and a bare
+  number, resolve.
 
   WHAT VALIDATE IS FOR. Nothing watches the file, so an edit is noticed when something
   next reads the store — the next command, or the board, which redraws every few seconds
@@ -759,7 +850,8 @@ def create(ctx, args) -> Result:
         where, how = _workspace(ctx)
         plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
                 "checkout": str(_here(ctx)), "title": title, "display": display,
-                "steps": [], "changelog": [], "notes": [_note(n, who) for n in notes],
+                "next_step": 1, "steps": [], "changelog": [],
+                "notes": [_note(n, who) for n in notes],
                 "created_by": who, "created_at": int(time.time())}
         doc["next_plan"] += 1
         # CHAINED IN THE ORDER GIVEN, because the order they were typed in IS an order: a
@@ -768,11 +860,10 @@ def create(ctx, args) -> Result:
         # moment it is made — makes the one-shot `create` unusable to be pedantic about
         # intent nobody doubts. A plan that is not a chain is reshaped with `dep`.
         for short, name in steps:
-            step = _step(f"s-{doc['next_step']}", name, display=short)
+            step = _step(_mint_step(plan), name, display=short)
             if plan["steps"]:
                 step["deps"] = [plan["steps"][-1]["id"]]
             plan["steps"].append(step)
-            doc["next_step"] += 1
 
         made = ", ".join(s["id"] for s in plan["steps"])
         detail = f"{_count(plan['steps'])} ({made})" if made else "empty"
@@ -984,10 +1075,14 @@ def note(ctx, args) -> Result:
     else to go — what the job turned out to be about, what was learned — and the analysis
     pass reads a record cold, so notes are most of what makes one worth reading at all.
 
-    `p-1` is the plan; `s-1` and a bare `1` are the step. A bare number means a step here
-    for the same reason it does everywhere else in this file: every other verb addresses a
-    step by its number alone, and the one place that would read it as a plan is the place
-    it would be a surprise.
+    `p-1` is the plan; `s-1`, `step-1` and a bare `1` are the step. A bare number means a
+    step here for the same reason it does everywhere else in this file: every other verb
+    addresses a step by its number alone, and the one place that would read it as a plan is
+    the place it would be a surprise.
+
+    A SLASH SETTLES IT BEFORE THE PREFIX IS READ, because `p-16/step-3` starts with a `p`
+    and is a step. The qualifier names the plan a step is in (see `_locate`), so the target
+    it qualifies is never the plan itself.
 
     `--text` is the note; `--reason` is the audit reason every other mutating verb carries
     into the changelog, and it is here for the same reason it is there — a changelog whose
@@ -999,7 +1094,8 @@ def note(ctx, args) -> Result:
     bad = _cap(text, args.reason)
     if bad:
         return bad
-    if not str(args.target or "").strip().lower().startswith("p"):
+    target = str(args.target or "").strip()
+    if "/" in target or not target.lower().startswith("p"):
         return _on_step(ctx, args.target, "note", args.reason,
                         lambda step, who: _add_note(step, text, who))
 
@@ -1037,22 +1133,21 @@ def add_step(ctx, args) -> Result:
         return _no_display("a step", "Give it with the name: "
                                      "`--display \"list claims\"`.")
 
-    # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
-    # `_minting` for why the other verbs need none and what is left unguarded.
-    with _minting(ctx.state_dir):
-        doc, seal = _read(ctx.state_dir)
-        plan = _find(doc, args.plan)
-        if plan is None:
-            return _missing(doc, args.plan)
-        lib, bad = _lib([plan])         # before the write, so it cannot refuse after one
-        if bad:
-            return bad
-        step = _step(f"s-{doc['next_step']}", name, display=display)
-        doc["next_step"] += 1
-        plan.setdefault("steps", []).append(step)
-        who = ctx.agent or "human"
-        _log(plan, who, "add-step", args.reason, f"{step['id']} {display} = {name}")
-        _write(ctx.state_dir, doc, seal)
+    # NO LOCK. The step id comes from this plan's own counter in this plan's own file, so
+    # the only race left is two writers on one plan — which the design answers with one
+    # writer per plan rather than with a lock. See `_minting`.
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    lib, bad = _lib([plan])             # before the write, so it cannot refuse after one
+    if bad:
+        return bad
+    step = _step(_mint_step(plan), name, display=display)
+    plan.setdefault("steps", []).append(step)
+    who = ctx.agent or "human"
+    _log(plan, who, "add-step", args.reason, f"{step['id']} {display} = {name}")
+    _write(ctx.state_dir, doc, seal)
     return _changed(plan, step, lib)
 
 
@@ -1069,6 +1164,13 @@ def dep(ctx, args) -> Result:
     What is refused is an edge that names nothing: a step that does not exist, a step in
     another plan, or the step itself. Those are typos, and an edge pointing at nothing
     renders as a dependency the lead will wait for forever.
+
+    `--after` IS PLAN-LOCAL, and that is what per-plan step numbers buy here: once the step
+    argument has said which plan this is about — `dep p-16/step-3 --after step-2` — a bare
+    `--after` is read inside that plan and cannot be ambiguous however many plans hold a
+    `step-2`. A qualified `--after` naming a different plan still resolves, and is still
+    refused one line below, because the refusal for a cross-plan edge is worth more than a
+    "no such step" that would be a lie.
 
     `--root` is the other thing a lead can say here, and it is the OPPOSITE of an edge: no
     dep, deliberately, because this step starts on its own beside the plan's first. It
@@ -1106,9 +1208,11 @@ def dep(ctx, args) -> Result:
         return _changed(plan, step, lib)
     added = []
     for given in after:
-        _, other = _locate(doc, given)
+        other = _in_plan(plan, given) if "/" not in str(given) else None
         if other is None:
-            return _no_step(doc, given)
+            _, other = _locate(doc, given)
+        if other is None:
+            return _no_step(doc, given, plan)
         if other is step:
             why = f"{step['id']} cannot come after itself"
             return Result(ok=False, human=why, data={"error": why, "id": given})
@@ -1238,21 +1342,19 @@ def name_step(ctx, args) -> Result:
                            f"A named step draws its definition's label, so add a "
                            f"`display` to `library/{_flat(wanted)}.json`.")
 
-    # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
-    # `_minting` for why the other verbs need none and what is left unguarded.
-    with _minting(ctx.state_dir):
-        doc, seal = _read(ctx.state_dir)
-        plan = _find(doc, args.plan)
-        if plan is None:
-            return _missing(doc, args.plan)
-        try:
-            added = _mint(doc, lib, wanted, after=tuple(_sinks(plan)))
-        except _BadDef as e:
-            return e.refusal()
-        plan.setdefault("steps", []).extend(added)
-        who = ctx.agent or "human"
-        _log(plan, who, "name-step", args.reason, _minted(added, lib))
-        _write(ctx.state_dir, doc, seal)
+    # NO LOCK, for the reason `add-step` gives: a per-plan counter in a per-plan file.
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    try:
+        added = _mint(plan, lib, wanted, after=tuple(_sinks(plan)))
+    except _BadDef as e:
+        return e.refusal()
+    plan.setdefault("steps", []).extend(added)
+    who = ctx.agent or "human"
+    _log(plan, who, "name-step", args.reason, _minted(added, lib))
+    _write(ctx.state_dir, doc, seal)
     return _added(plan, added, lib)
 
 
@@ -1313,13 +1415,13 @@ def template(ctx, args) -> Result:
         where, how = _workspace(ctx)
         plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
                 "checkout": str(_here(ctx)), "title": title, "display": display,
-                "steps": [], "changelog": [],
+                "next_step": 1, "steps": [], "changelog": [],
                 "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
                           if str(n).strip()],
                 "created_by": who, "created_at": int(time.time())}
         doc["next_plan"] += 1
         try:
-            landed = [_from_template(doc, lib, e) for e in (spec.get("steps") or ())]
+            landed = [_from_template(plan, lib, e) for e in (spec.get("steps") or ())]
             _chain(spec.get("steps") or (), landed)
         except _BadDef as e:
             return e.refusal()
@@ -1396,12 +1498,16 @@ def _chain(entries: Any, landed: list[list[dict]]) -> None:
                 st["deps"] += [w for w in waited if w not in st["deps"]]
 
 
-def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
+def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
     """One template entry, as the steps it puts in the copy. A name, or a link.
 
     An entry that says `def` is a link and goes through the same expansion `name-step`
     does — obligations included, since a template naming a merge and forgetting its review
     is exactly the memory this obligation exists to replace.
+
+    Either way the entry's remaining keys are written onto the step it made (`_written`),
+    which is how a template authors a gate, an owner or a checkpoint on a step that has no
+    verb to write one.
     """
     if not isinstance(entry, dict):
         raise _BadDef(f"a template's steps are objects, not {type(entry).__name__}")
@@ -1410,13 +1516,17 @@ def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
         if key not in lib:
             raise _BadDef(f"a template names '{key}', which is not in the step "
                           f"library")
-        made = _mint(doc, lib, key)
+        made = _mint(plan, lib, key)
         for st in made:
             k = _defkey(st) or ""
             if not str((lib.get(k) or {}).get("display") or "").strip():
                 raise _BadDef(f"a template names '{k}', which has no `display` — a named "
                               f"step draws its definition's board label, so add one to "
                               f"`library/{k}.json`")
+        # The entry's own step is the first one its expansion minted; what it obliged is
+        # its own step and carries none of this. A gate written against `merge` belongs to
+        # the merge and not to the human review that came along with it.
+        _written(plan, entry, made[0])
         return made
     name = str(entry.get("name") or "").strip()
     if not name:
@@ -1432,9 +1542,45 @@ def _from_template(doc: dict, lib: dict, entry: Any) -> list[dict]:
         raise _BadDef(f"a template step '{name}' has no `display` — the board draws that "
                       f"label in its cell, and a step without one falls back to the whole "
                       f"sentence")
-    step = _step(f"s-{doc['next_step']}", name, display=display)
-    doc["next_step"] += 1
-    return [step]
+    made = _step(_mint_step(plan), name, display=display)
+    _written(plan, entry, made)
+    return [made]
+
+
+# The keys a template entry owns rather than the step it mints: the two the grammar of a
+# template is written in, the two read above, and the two the minter writes. Everything
+# else on an entry is a field on the step.
+_ENTRY = frozenset({"after", "def", "name", "display", "id", "deps"})
+
+
+def _written(plan: dict, entry: dict, step: dict) -> None:
+    """A template entry's remaining keys, written onto the step it minted.
+
+    A template is where the shape of a plan is AUTHORED, so it has to be able to author
+    more than a name. A gate, an owner, a checkpoint, a skip and its reason, a count of
+    tries are fields on a step and none of them has a verb — a template that could carry
+    only a name could not be a worked example of what a plan looks like, which is the one
+    job the shipped template has.
+
+    COPIED BLIND, in the same spirit `_markdown` is walked in: this function knows none of
+    those fields by name, so a field added to a step next year is authorable in a template
+    the day it exists. What it does know is `_ENTRY`, the six keys that are the template's
+    own grammar or the minter's — `id` and `deps` especially, which a template writing
+    would be overwriting the numbering and the edges `_chain` is about to draw.
+
+    `notes` are the one shape converted rather than copied, exactly as a template's own
+    plan-level notes are: a note is `{text, by, at}` and a template author writes the
+    sentence. A list of bare strings copied through would render as a crash rather than as
+    a note.
+    """
+    who = str(plan.get("created_by") or "human")
+    for k, v in entry.items():
+        if k in _ENTRY:
+            continue
+        if k == "notes" and isinstance(v, list):
+            step[k] = [_note(str(n).strip(), who) for n in v if str(n).strip()]
+        else:
+            step[k] = v
 
 
 def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Result:
@@ -1503,21 +1649,41 @@ def _missing(doc: dict, given: str) -> Result:
     return Result(ok=False, human=why, data={"error": why, "id": given})
 
 
-def _no_step(doc: dict, given: str) -> Result:
+def _no_step(doc: dict, given: str, plan: Optional[dict] = None) -> Result:
     """No such step. The same shape as `_missing`, one id kind along.
 
-    Steps are numbered from one counter across the whole file, so "the highest is s-7" is a
-    true and useful thing to say from anywhere — and ids are never reused, so a step that is
-    not here has never been here.
+    Steps are numbered PER PLAN, so "the highest is step-7" is only true of somewhere: this
+    says which plan it looked in whenever it knows one — from a `p-16/step-3` qualifier, or
+    from the plan a caller was already working in, which is what `dep --after` hands it.
+    Ids are never reused within a plan, so a step that is not there has never been there.
+
+    The third miss is the one per-plan numbering introduces: a BARE id that more than one
+    plan holds. That is not "no such step" and is not refused as one — it names the
+    candidates and the qualified spelling, which is the whole recovery.
     """
     said = _flat(given)                 # see `_missing`: an id is never vetted text
-    if _num(_STEP_ID, given) is None:
-        why = f"'{said}' is not a step id — they look like s-1"
+    plan_id, sep, step_id = str(given or "").rpartition("/")
+    if sep:
+        plan = _find(doc, plan_id)
+        if plan is None:
+            why = _no_such(doc, plan_id)
+            return Result(ok=False, human=why, data={"error": why, "id": given})
+        said = _flat(step_id)
+    n = _num(_STEP_ID, step_id if sep else given)
+    if n is None:
+        why = f"'{said}' is not a step id — they look like step-1"
+    elif plan is None and len(_holders(doc, n)) > 1:
+        named = ", ".join(_flat(p.get("id")) for p in _holders(doc, n))
+        why = (f"step {said} is in {named} — step numbers start again in every plan, so "
+               f"name the plan: `{_flat(_holders(doc, n)[0].get('id'))}/{said}`")
     else:
-        high = _high(_STEP_ID, (s.get("id") for p in doc["plans"]
-                                for s in (p.get("steps") or ())))
-        why = (f"no step {said} — none has been made yet" if not high
-               else f"no step {said} — the highest is s-{high}")
+        where = f" in {_flat(plan.get('id'))}" if plan is not None else ""
+        high = _high(_STEP_ID, (st.get("id") for st in
+                                ((plan.get("steps") or ()) if plan is not None else
+                                 (s2 for p in doc["plans"] for s2 in (p.get("steps") or ())))))
+        why = (f"no step {said}{where} — none has been made yet" if not high
+               else f"no step {said}{where} — the highest there is step-{high}"
+               if plan is not None else f"no step {said} — the highest is step-{high}")
     return Result(ok=False, human=why, data={"error": why, "id": given})
 
 
@@ -1608,6 +1774,33 @@ def _escape(m: "re.Match") -> str:
 
 
 # -- the records ---------------------------------------------------------------
+
+
+def _mint_step(plan: dict) -> str:
+    """The next step id for ONE plan, from that plan's own counter. Never store-wide.
+
+    Two plans are independent, so their step numbers are too: every plan starts at
+    `step-1` and nothing another plan does moves it. The counter lives in the plan's own
+    file, which is what makes that true across the split store — there is no shared number
+    left for two worktrees to race for, and `add-step` and `name-step` need no lock at all
+    (see `_minting`).
+
+    FLOORED ON READ by the plan's own highest step id, exactly as `next_plan` is floored by
+    the ids on disk: a hand-deleted step, or a counter a hand-edit mangled, cannot make the
+    next mint hand out a number this plan has already written down. Ids are still never
+    reused within a plan, which is all `obliged_by`, `deps` and a changelog quoting one
+    ever needed.
+
+    Minted as `step-<n>`, which is what §3's markdown renders and what `_STEP_ID` reads
+    back. A plan made before this carries `s-<n>` ids and keeps them — nothing is
+    renumbered, because changelog entries quote ids as free text and rewriting history is
+    the one thing the guide forbids. Such a plan simply mints its next step one past its
+    own highest, in the new spelling; both spellings resolve.
+    """
+    n = max(_counter(plan.get("next_step")),
+            _high(_STEP_ID, (s.get("id") for s in plan.get("steps") or ())) + 1)
+    plan["next_step"] = n + 1
+    return f"step-{n}"
 
 
 def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
@@ -1813,7 +2006,7 @@ def _flatten(lib: dict, key: str, path: tuple = ()) -> list[str]:
     return out
 
 
-def _mint(doc: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
+def _mint(plan: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
     """The steps naming one definition puts in a plan: its expansion, then its obligations.
 
     Two walks. Composition expands first and may repeat a definition, because what a
@@ -1862,9 +2055,8 @@ def _mint(doc: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
 
     steps: list[dict] = []
     for k, by, _ in wanted:
-        steps.append(_step(f"s-{doc['next_step']}", None, key=k,
+        steps.append(_step(_mint_step(plan), None, key=k,
                            obliged_by=steps[by]["id"] if by is not None else None))
-        doc["next_step"] += 1
     # AND THE OBLIGING STEP COMES AFTER WHAT IT OBLIGED, as an edge rather than as an
     # order nobody wrote down. `merge` obliges the human-review list, and that list is
     # what a person reads just before the merge — so the review is the dep and the merge
@@ -1916,8 +2108,15 @@ def _resolve(step: dict, lib: dict) -> dict:
     # `name` is: it is part of what the library owns about a step, so an edit to the short
     # board label reaches every plan naming it. Null when the definition sets none, and the
     # board falls back to the name.
+    #
+    # `command` rides along for the same reason again, and for one more: the whole point of
+    # it is that the agent working the step does not go looking for it. A field that only
+    # showed up under `library <name>` would be a field you have to go and find, which is
+    # the cost it exists to remove. Null when the definition sets none — most steps have no
+    # single standard command, and an empty line under them would say there was one.
     return dict(step, name=str(spec.get("name") or "").strip() or key,
-                display=str(spec.get("display") or "").strip() or None)
+                display=str(spec.get("display") or "").strip() or None,
+                command=str(spec.get("command") or "").strip() or None)
 
 
 def _shown(plan: dict, lib: dict) -> dict:
@@ -2187,14 +2386,20 @@ MINT = ".mint.lock"
 def _minting(d: Path):
     """The one lock left: held while an id is allocated, and over nothing else.
 
-    Ids are minted from counters that belong to the whole store — `next_plan` and
-    `next_step` in `_meta.json`, floored on read by the highest id actually on disk — so
-    two `create`s that read at the same instant read the same number and mint it twice.
-    That is the one race per-file storage does not answer by itself, and it is not a race
-    that fails quietly: the twin lands and `_check` refuses one of the two files on the
-    next read, which costs a plan somebody just wrote. So it is prevented rather than
-    detected, and the four verbs that allocate — `create`, `add-step`, `name-step`,
-    `template use` — hold this across their read, their mint and their write.
+    A PLAN id is minted from a counter that belongs to the whole store — `next_plan` in
+    `_meta.json`, floored on read by the ids actually on disk — so two `create`s that read
+    at the same instant read the same number and mint it twice. That is the one race
+    per-file storage does not answer by itself, and it is not a race that fails quietly:
+    the twin lands and `_check` refuses one of the two files on the next read, which costs
+    a plan somebody just wrote. So it is prevented rather than detected, and the two verbs
+    that allocate a plan id — `create` and `template use` — hold this across their read,
+    their mint and their write.
+
+    A STEP id needs none of it. It is minted from the plan's own counter in the plan's own
+    file (`_mint_step`), so two agents minting steps in two plans never read one number,
+    and two minting in ONE plan are two writers on one plan — the case below, which the
+    design answers with a convention rather than a lock. `add-step` and `name-step` held
+    this lock only for the store-wide step counter and hold nothing now.
 
     Every other verb takes nothing. `tick`, `note`, `dep` and every read run concurrently
     with each other and with an editor, which is the concurrency the per-file split was
@@ -2378,11 +2583,14 @@ def _check_all(f: Path, plans: list) -> None:
 
     The single-file store cannot isolate anything: every plan in it shares one file, so a
     refusal is a refusal of all of them. What this does is run the same `_check` the split
-    store runs per file, and then the two questions no single plan can answer — a twin plan
-    id and a twin step id — over the lot.
+    store runs per file, and then the one question no single plan can answer — a twin plan
+    id — over the lot.
+
+    A twin STEP id is not that question any more. Step numbers are minted per plan, so two
+    plans in here both holding a `step-1` is the ordinary shape and not corruption; `_check`
+    refuses the twin that still matters, which is two steps of ONE plan sharing a number.
     """
     seen: set[int] = set()
-    steps_seen: set[int] = set()
     for plan in plans:
         if not isinstance(plan, dict):
             raise _refuse(f, f"holds a {type(plan).__name__} where a plan should be")
@@ -2391,15 +2599,6 @@ def _check_all(f: Path, plans: list) -> None:
         if n in seen:
             raise _refuse(f, f"holds two plans called p-{n}, and ids are never reused")
         seen.add(n)
-        for step in plan.get("steps") or ():
-            # Checked across the whole file, not per plan, because there is one step
-            # counter for the whole store — and because everything past PR1 addresses a
-            # step by its number alone. A twin `s-1` would take a tick meant for the other
-            # one and neither would say so.
-            m = _num(_STEP_ID, step.get("id"))
-            if m in steps_seen:
-                raise _refuse(f, f"holds two steps called s-{m}, and ids are never reused")
-            steps_seen.add(m)
 
 
 def _read_split(d: Path) -> tuple[dict, dict]:
@@ -2414,22 +2613,19 @@ def _read_split(d: Path) -> tuple[dict, dict]:
     Nothing here ever overwrites a file it could not read: a plan that did not load is not
     in `doc["plans"]`, so `_write` has nothing to write back over it, and `next_plan` still
     counts past it — its PLAN id is readable from the filename whether or not the contents
-    are. Its STEP ids are not: they are inside the file, so a broken plan stops reserving
-    them and only the sidecar's `next_step` keeps them from being minted again. That is a
-    real gap and it takes two hand-edit disasters at once — a corrupt `p-<n>.json` AND a
-    lost `_meta.json` — to reach, at which point a step id may be reused. Said here rather
-    than papered over, because nothing in the file can recover an id it cannot parse.
+    are. Its step ids need no such reserving: they are minted from a counter inside that
+    same file, so no other plan could hand them out however broken it is.
 
-    The two invariants that do not fit in one file are checked here rather than in
-    `_check`: a plan lives in the file its id names, and a step id is unique across the
-    whole store. The second is a UX contract — `tick s-7` names no plan — so it survives
-    the split by being checked over the assembled set, which is cheap over ten files.
+    The one invariant that does not fit in one file is checked here rather than in `_check`:
+    a plan lives in the file its id names. A step id unique across the STORE was checked
+    here too, once, and is gone with the store-wide counter — `tick step-3` names a plan
+    when one holds it and refuses naming the candidates when several do (`_locate`), which
+    is the UX contract that check was actually for.
     """
     meta = _meta(d)
     plans: list = []
     broken: list = []
     seen: dict[int, Path] = {}
-    steps_seen: dict[int, Path] = {}
     for f in _files(d):
         try:
             plan = _load(f)
@@ -2440,17 +2636,10 @@ def _read_split(d: Path) -> tuple[dict, dict]:
             if n in seen:
                 raise _refuse(f, f"holds p-{n}, which {seen[n].name} holds as well, and "
                                  f"ids are never reused")
-            mine = [_num(_STEP_ID, s.get("id")) for s in plan.get("steps") or ()]
-            twin = next((m for m in mine if m in steps_seen), None)
-            if twin is not None:
-                raise _refuse(f, f"holds an s-{twin} that {steps_seen[twin].name} holds as "
-                                 f"well, and ids are never reused")
         except ValueError as e:
             broken.append({"id": f"p-{_fnum(f)}", "file": str(f), "why": str(e)})
             continue
         seen[n] = f
-        for m in mine:
-            steps_seen[m] = f
         plans.append(plan)
     doc = {"format": FORMAT, "plans": plans, "broken": broken}
     doc["next_plan"] = max(_counter(meta.get("next_plan")),
@@ -3157,20 +3346,45 @@ def _find(doc: dict, given: str) -> Optional[dict]:
 
 
 def _locate(doc: dict, given: str) -> tuple[Optional[dict], Optional[dict]]:
-    """The step this id names, and the plan holding it. Searched across every plan.
+    """The step this id names, and the plan holding it. Two spellings, one function.
 
-    A step is addressed by its number ALONE, with no plan named beside it, which is what
-    makes `sb plugin plans tick s-7` something an agent can be told at spawn and type
-    without first looking anything up. `_read` has already refused a file where two steps
-    share a number, so the first match is the only match.
+    QUALIFIED — `p-16/step-3` — names the plan on the front of the step, separated by a
+    slash, and is the spelling that always works. It is the answer to step numbers no
+    longer being unique across the store: two plans on a worktree both have a `step-1` now,
+    and `p-16/step-1` says which.
+
+    BARE — `step-3`, `s-3`, `3` — resolves when exactly ONE plan holds that number, and
+    otherwise resolves to nothing so that `_no_step` can refuse naming the candidates. That
+    keeps the ergonomics globality was for (a worktree almost always holds one plan) without
+    keeping the constraint that made two plans share a counter.
+
+    Returns `(None, None)` for every miss, including an ambiguous bare id and a qualifier
+    naming no plan; every caller refuses through `_no_step`, which re-reads the id and says
+    which kind of miss it was.
     """
+    plan_id, sep, step_id = str(given or "").rpartition("/")
+    if sep:
+        plan = _find(doc, plan_id)
+        return (plan, _in_plan(plan, step_id)) if plan is not None else (None, None)
     n = _num(_STEP_ID, given)
-    if n:
-        for plan in doc["plans"]:
-            for step in plan.get("steps") or ():
-                if _num(_STEP_ID, step.get("id")) == n:
-                    return plan, step
-    return None, None
+    if not n:
+        return None, None
+    hits = [(p, st) for p in doc["plans"] for st in (p.get("steps") or ())
+            if _num(_STEP_ID, st.get("id")) == n]
+    return hits[0] if len(hits) == 1 else (None, None)
+
+
+def _in_plan(plan: Optional[dict], given: Any) -> Optional[dict]:
+    """One plan's step by number. The lookup every id comparison in this file is made of."""
+    n = _num(_STEP_ID, given)
+    return next((st for st in (plan or {}).get("steps") or ()
+                 if n and _num(_STEP_ID, st.get("id")) == n), None)
+
+
+def _holders(doc: dict, n: int) -> list[dict]:
+    """The plans holding a step with this number. What an ambiguous bare id refuses with."""
+    return [p for p in doc["plans"]
+            if any(_num(_STEP_ID, st.get("id")) == n for st in (p.get("steps") or ()))]
 
 
 def _num(pattern: re.Pattern, given: Any) -> Optional[int]:
@@ -3267,6 +3481,16 @@ def _full(p: dict) -> str:
     return "\n".join(lines)
 
 
+# Every key the template below draws BY NAME, which is the one thing it has to know to
+# draw the rest: what is left over is a field this file has never heard of, and the last
+# line of a step is where one goes. `owner_status`, `condition` and `command` are in here
+# for the same reason the stored fields are — they arrive on the rendered copy (`_viewed`,
+# `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
+_DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
+                    "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
+                    "checkpoints", "command"})
+
+
 def _step_lines(steps: list) -> list[str]:
     """One line per step, plus a line each for what hangs off it.
 
@@ -3277,7 +3501,10 @@ def _step_lines(steps: list) -> list[str]:
     """
     out = []
     for s in steps:
-        bits = [f"{_flat(s.get('id', '?')):<6}{_flat(s.get('progress', '?')):<10}"
+        # Nine, because an id is `step-<n>` now and `s-<n>` on a plan made before that:
+        # the column has to hold the longer spelling or the progress beside it runs into
+        # it, which is a rendering nobody can scan.
+        bits = [f"{_flat(s.get('id', '?')):<9}{_flat(s.get('progress', '?')):<10}"
                 f"{_flat(s.get('name') or '')}"]
         if s.get("display"):
             # The label the board draws for this step, beside the sentence it stands for —
@@ -3335,10 +3562,32 @@ def _step_lines(steps: list) -> list[str]:
             # too, one line per line, SPLIT FIRST so that no line of it can forge a step
             # row the way the whole thing could if it were pasted in unbroken.
             out.extend(f"    out   {line}" for line in _lines(s["output"]))
+        if s.get("command"):
+            # The command the definition carries, written out where the step is read. It is
+            # printed and never run: nothing in this plugin executes a step, and a plan that
+            # fired commands would be the evaluator this design does not have. The
+            # placeholders in it are the owner's to fill in.
+            out.append(f"    cmd   {_flat(s['command'])}")
         out.extend(f"    ref   {_flat(c.get('ref'))}" for c in (s.get("checkpoints") or ()))
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
                    f"{_when(n.get('at'))})"
                    for n in (s.get("notes") or ()))
+        # EVERYTHING ELSE THE STEP CARRIES, last, one line each. This template knows every
+        # field above by name, so before this a field nobody here had heard of rendered in
+        # `--json` and in `--markdown` and was silently invisible in the terminal — while
+        # the top of this file promised the opposite, that such a field is a feature and
+        # not corruption. It is the promise that was true; this is the renderer catching
+        # up, in the same falls-back-rather-than-fails spirit `_markdown` is walked for.
+        #
+        # Through `_flat` like every other value drawn here, key included, so an invented
+        # field is one line UNDER its step and can no more forge a row beside it than a
+        # gate or a name can. A non-scalar is left to `--json`: a list has no place under
+        # a step line, and this door exists to fall back rather than to raise on one.
+        # The key IS the label, padded to the width the labels above are drawn at and
+        # never narrower than the two spaces that separate it from its value: a field
+        # called `reviewed_by` would otherwise run straight into what it says.
+        out.extend(f"    {_flat(k) + '  ':<6}{_flat(v)}" for k, v in s.items()
+                   if k not in _DRAWN and _scalar(v) and _some(v))
     return out
 
 
@@ -3352,14 +3601,24 @@ def _step_lines(steps: list) -> list[str]:
 # supposed to be reporting. So this walks the record instead: a new field appears here on
 # its own, a removed one vanishes, and neither costs an edit to this function.
 #
-# What it does know about the schema is two things, and both fall back rather than fail:
-# the keys that might name the plan in its heading (`_HEADS`), and that a key called `at`
-# or ending `_at` holding an integer is a timestamp. Everything else is shape — scalar,
+# What it does know about the schema is three things, and every one falls back rather than
+# fails: the keys that might name the plan in its heading (`_HEADS`), the keys whose value
+# is prose to be dumped rather than flattened (`_BLOCK`), and that a key called `at` or
+# ending `_at` holding an integer is a timestamp. Everything else is shape — scalar,
 # list, dict — and the shape decides the rendering:
 #
 #   scalar fields          one `field | value` table under the heading
 #   list of flat dicts     a table, columns being the union of the keys actually used
 #   anything else          nested bullets, each item labelled by its first scalar field
+#
+# IDS ARE SPELT OUT HERE and nowhere else: a value that IS an id — `p-1`, `s-3` — renders
+# as `plan-1`, `step-3`. That is a rule about VALUES and not about the schema, which is why
+# it can live in a renderer that refuses to know one: it needs no list of which keys hold
+# ids, so a plan id, a step id, a `deps` entry, an `obliged_by` and whatever field a later
+# author puts an id in all come out readable without this function being told they exist.
+# Storage is untouched — `p-<n>` and `p-<n>.json` are what is written — and `_PLAN_ID` and
+# `_STEP_ID` read the long spelling back, so an id copied out of this rendering and typed
+# into a command resolves.
 #
 # ONE PLAN. It is handed the single resolved plan dict `show` already has and has no path
 # to the store, so there is nothing here that could widen into every plan in the repo.
@@ -3375,6 +3634,9 @@ _BLOCK = ("output",)                     # keys whose value is prose, dumped rat
 # table row, however it is spelled. It does not stop a `#` in the text becoming a heading
 # INSIDE its own quote, and that is accepted — this is the step's own text, deliberately
 # dumped, and it is visibly quoted while it does it.
+
+# The short spelling of an id, as a WHOLE value. See `_readable`.
+_LONG = re.compile(r"^(p|s)-(\d+)$", re.IGNORECASE)
 
 
 def _markdown(p: dict) -> str:
@@ -3458,7 +3720,19 @@ def _cell(key: str, v) -> str:
         return "yes" if v else "no"
     if isinstance(v, int) and (key == "at" or key.endswith("_at")):
         return _when(v)
-    return _flat(v).replace("|", "\\|")
+    return _readable(_flat(v)).replace("|", "\\|")
+
+
+def _readable(text: str) -> str:
+    """`p-1` → `plan-1`, `s-3` → `step-3`. A whole value or nothing.
+
+    Anchored, so it changes an id and never a sentence that contains one: a changelog detail
+    reading `3 steps (s-1, s-2, s-3)` is history quoted verbatim and is left exactly as its
+    author wrote it, which is the same rule the rest of this file follows about the record.
+    Applied after `_flat`, so nothing here can reintroduce a character `_flat` took out.
+    """
+    return _LONG.sub(lambda m: f"{'plan' if m.group(1).lower() == 'p' else 'step'}-"
+                               f"{m.group(2)}", text)
 
 
 def _table(items: list) -> list[str]:
@@ -3621,6 +3895,13 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     for ob in _obliges(lib, key):
         lines.append(f"    obliges     {_flat(ob)} — added with it, skippable with a reason, "
                      f"never omitted")
+    command = str(spec.get("command") or "").strip()
+    if full and command:
+        # Only with a name, beside the prose, because that is where a definition is READ in
+        # full — the listing is for choosing one and a command in it would be a wall of argv
+        # between two names. Where the command has to be to hand is on the step itself, and
+        # `_resolve` puts it there.
+        lines.append(f"    command     {_flat(command)}")
     if full:
         lines.extend(_about(spec))
     return "\n".join(lines)
