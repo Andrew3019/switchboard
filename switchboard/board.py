@@ -125,6 +125,10 @@ def _c(text: str, code: str) -> str:
 
 
 DIM, RED, YELLOW, GREEN, BLUE = "2", "31", "33", "32", "34"
+# The `oo` hint. Yellow like every other line on this board that is asking for a hand,
+# and bold because it is the one piece of chrome that appears and disappears — a human
+# who has not noticed it yet has to be able to.
+HINT = "1;33"
 
 
 # ---------------------------------------------------------------------------
@@ -1063,8 +1067,8 @@ def _stats_line(label: str, pieces: list[str], width: int) -> str:
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           here: Optional[str] = None, stats: Optional[dict] = None
-           ) -> list[tuple[str, Optional[object]]]:
+           here: Optional[str] = None, stats: Optional[dict] = None,
+           openable=None) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
     The agent a row belongs to is carried BY the row rather than recomputed from
@@ -1311,8 +1315,16 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     for line in below:
         emit(line)
 
-    while len(rows) < height - 2:
+    # The `oo` hint, above the footer and only when there is something to open — see
+    # `hint_lines`. It takes its lines out of the slack rather than off the tree, and
+    # goes when a pane is too short to spare them: the tree is what the board is for.
+    hint = hint_lines(here, openable)
+    if len(rows) + len(hint) > height - 2:
+        hint = []
+    while len(rows) < height - 2 - len(hint):
         emit("")
+    for line in hint:
+        emit(_c(line, HINT))
 
     hidden = len(agents) - (top + len(window)) if agents else 0
     tail = f"+{hidden} more below" if hidden > 0 else ("scroll ↑" if top else "")
@@ -1326,7 +1338,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # first, because it is the least useful thing on the line to somebody who already
     # knows. See `_frame`.
     from . import richboard
-    line = (_c("click a row to focus it · scroll to pan · oo opens files · a archived · q quits", DIM)
+    line = (_c("click a row to focus it · scroll to pan · a archived · q quits", DIM)
             + ("   " + msg if msg else ""))
     if not richboard.available():
         # AFTER the message, so it is this note that a narrow pane clips and never the
@@ -1837,19 +1849,14 @@ def open_report_files(name: Optional[str]) -> str:
     """
     if not name:
         return "press o on a highlighted agent"
-    detail = _inspect(name)
-    if detail is None:
+    where = locate(name)
+    if where is None:
         return f"{name}: could not read this agent"
-    cwd = detail.get("cwd")
+    cwd, transcript = where
     if not cwd:
         return f"{name}: no worktree to open"
-    # Absolute before anything is handed to the editor, for `report_files`' reason: an
-    # argument that starts with a dash is an option, not a path.
-    cwd = os.path.abspath(cwd)
 
-    transcript = detail.get("transcript")
-    files = report_files(last_assistant_texts(Path(transcript)) if transcript else [],
-                         cwd)
+    files = files_for(cwd, transcript)
     try:
         _editor(cwd)
         for f in files:
@@ -1869,6 +1876,133 @@ def open_report_files(name: Optional[str]) -> str:
     if not files:
         return f"{name}: no files found in recent messages"
     return f"→ {name}: opened {len(files)} file(s)"
+
+
+# How long a `locate` answer is trusted, and how often a highlighted agent with no
+# transcript yet is asked about again, in seconds. It bounds the ONLY subprocess on the
+# hint's path to one a minute for the one agent that is highlighted — a session id that
+# changed under a restore, or a transcript that did not exist when the board first
+# looked, is picked up within that and nothing is asked again in between.
+_REPORTS_RECHECK = 60.0
+
+
+def hint_lines(name: Optional[str], files) -> list[str]:
+    """The `oo` hint: two lines, or nothing at all. Both renderers draw these strings.
+
+    Shown ONLY when the highlighted agent has something to open, which is what makes it
+    a hint rather than chrome: a key that would do nothing is not advertised, and the
+    count is the thing worth knowing before pressing it.
+    """
+    if not name or not files:
+        return []
+    n = len(files)
+    return [f"{name} wrote {n} file{'' if n == 1 else 's'} you can open",
+            f"press oo for {'it' if n == 1 else 'them'} in {_EDITOR}"]
+
+
+class Reports:
+    """Whether the highlighted agent has anything for `oo` to open — asked every frame.
+
+    The hint only shows when there are files, so the drawing thread has to know the
+    answer on every frame, and the answer costs a fork plus a transcript read. This is
+    the whole of what makes that affordable:
+
+      * per frame, ONE `stat` of the transcript, and nothing else;
+      * the answer is cached against `(agent, transcript mtime)`, so while the highlight
+        sits on one agent and its transcript is not growing, every frame is that stat and
+        a dict lookup;
+      * the recompute, when the key does change, runs OFF THE DRAWING THREAD — the frame
+        that asked draws the previous answer and the new one lands a frame or two later;
+      * the `sb inspect` fork happens once per agent per `_REPORTS_RECHECK`, not once per
+        recompute: an agent writing its report changes the mtime every couple of seconds,
+        and re-forking on each of those is the freeze this design exists to avoid.
+
+    A transcript that grows is the point: the hint flips on by itself the moment the
+    agent names a file, without anything polling for it.
+    """
+
+    def __init__(self):
+        self._where: dict = {}        # agent -> (cwd, transcript, when it was located)
+        self._key = None              # (agent, mtime) the current answer belongs to
+        self._files: list[str] = []
+        self._at = 0.0                # when the last recompute finished
+        self._busy = False
+
+    def tick(self, name: Optional[str]) -> list[str]:
+        """The files `oo` would open for `name`. Never blocks, never raises."""
+        if not name:
+            return []
+        located = self._where.get(name)
+        transcript = located[1] if located else None
+        key = (name, _mtime(transcript) if transcript else None)
+        due = time.monotonic() - self._at >= _REPORTS_RECHECK
+        if not self._busy and (due or key != self._key):
+            self._busy = True
+            threading.Thread(target=self._recompute, args=(name,), daemon=True).start()
+        return self._files if self._key and self._key[0] == name else []
+
+    def _recompute(self, name: str) -> None:
+        try:
+            located = self._where.get(name)
+            # Re-`locate` only when there is nothing to stat or the answer is old
+            # enough to be worth doubting. This is the fork, and it is the whole reason
+            # for the cache.
+            if (located is None or not located[1]
+                    or time.monotonic() - located[2] >= _REPORTS_RECHECK):
+                found = locate(name)
+                located = (found[0], found[1], time.monotonic()) if found else None
+                if located:
+                    self._where[name] = located
+                else:
+                    self._where.pop(name, None)
+            cwd, transcript = (located[0], located[1]) if located else (None, None)
+            self._files = files_for(cwd, transcript)
+            self._key = (name, _mtime(transcript) if transcript else None)
+        except BaseException:                   # noqa: BLE001 — a hint may not be able
+            self._files, self._key = [], (name, None)   # to take the board with it
+        finally:
+            self._at = time.monotonic()
+            self._busy = False
+
+
+def _mtime(path: Optional[str]) -> Optional[float]:
+    """The one filesystem call the drawing thread makes per frame."""
+    if not path:
+        return None
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+def locate(name: str):
+    """An agent's worktree and transcript. -> (cwd, transcript or None), or None.
+
+    The one subprocess on this path, and the reason everything above caches it: the
+    board may not read the store (see `open_report_files`), so this is the only way to
+    turn a highlighted row into a directory, and it costs a fork.
+
+    `cwd` comes back ABSOLUTE, for `report_files`' reason: an editor argument that
+    starts with a dash is an option, not a path.
+    """
+    detail = _inspect(name)
+    if detail is None:
+        return None
+    cwd = detail.get("cwd")
+    return (os.path.abspath(cwd) if cwd else None), detail.get("transcript")
+
+
+def files_for(cwd: Optional[str], transcript: Optional[str]) -> list[str]:
+    """What a double-`o` would open. ONE definition, for the hint and the key alike.
+
+    The hint on screen promises exactly what the keypress does because both come
+    through here: two answers to "which files" would drift the first time either side
+    was tuned, and the hint would then be advertising files that do not open.
+    """
+    if not cwd:
+        return []
+    return report_files(last_assistant_texts(Path(transcript)) if transcript else [],
+                        cwd)
 
 
 def open_tick(name: Optional[str], note: list, running):
@@ -2049,7 +2183,7 @@ def _size() -> tuple[int, int]:
 
 def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
            show_archived: bool, here: Optional[str] = None,
-           stats: Optional[dict] = None
+           stats: Optional[dict] = None, openable=None
            ) -> list[tuple[str, Optional[object]]]:
     """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
 
@@ -2076,18 +2210,21 @@ def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
 
     rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
                             note_text=note_text, show_archived=show_archived, here=here,
-                            stats=stats)
+                            stats=stats, openable=openable)
     if rows is not None:
         return rows
     return layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, here=here, stats=stats)
+                  note_text=note_text, show_archived=show_archived, here=here,
+                  stats=stats, openable=openable)
 
 
 def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
-         here: Optional[str] = None, stats: Optional[dict] = None) -> list:
+         here: Optional[str] = None, stats: Optional[dict] = None,
+         openable=None) -> list:
     height, width = _size()
     rows = _frame(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, here=here, stats=stats)
+                  note_text=note_text, show_archived=show_archived, here=here,
+                  stats=stats, openable=openable)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -2199,6 +2336,9 @@ def main() -> int:
     # not at import, so the environment it reads is this process's own, and asked again per
     # frame because the answer is a NAME resolved against the rows being drawn.
     where = Locator()
+    # Whether the highlighted agent has anything for `oo` to open. Asked every frame and
+    # answered from cache — the fork and the transcript read are its own, off this thread.
+    reports = Reports()
     # The slot this board started in, so the first sweep is at the next boundary and never
     # at startup — see `sweep_tick`. `sweep_note` is the worker thread's one-slot mailbox.
     armed, sweep_note = sweep_mod.slot_of(time.time()), []
@@ -2209,8 +2349,9 @@ def main() -> int:
 
         snap, note_text, stats = refresh(sup)
         where.tick()
-        rows = draw(snap, top, msg, note_text, show_archived,
-                    where.name(snap.agents), stats)
+        here = where.name(snap.agents)
+        rows = draw(snap, top, msg, note_text, show_archived, here, stats,
+                    openable=reports.tick(here))
         last = time.time()
 
         while True:
@@ -2288,8 +2429,9 @@ def main() -> int:
                 # name of a row is done against the rows this frame actually has. So an
                 # agent that is restored, renamed away, or dropped from the snapshot stops
                 # or starts being highlighted on the next frame, with no subprocess in it.
-                rows = draw(snap, top, msg, note_text, show_archived,
-                            where.name(snap.agents), stats)
+                here = where.name(snap.agents)
+                rows = draw(snap, top, msg, note_text, show_archived, here, stats,
+                            openable=reports.tick(here))
                 dirty[0] = False
     except KeyboardInterrupt:
         pass

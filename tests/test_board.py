@@ -1892,6 +1892,128 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(board.drain("opening w1…", [], []), ("opening w1…", False))
 
 
+class HintTest(unittest.TestCase):
+    """The `oo` hint: two lines, yellow, and only when there is something to open."""
+
+    def rows(self, here, openable, renderer=board.layout, **kw):
+        got = renderer(snap(agent("w1"), agent("w2")), top=0, height=20, width=90,
+                       msg="", here=here, openable=openable, **kw)
+        return [text for text, _ in (got or [])]
+
+    def test_two_lines_naming_the_agent_and_the_count(self):
+        lines = board.hint_lines("w1", ["/a/x.md", "/a/y.md"])
+        self.assertEqual(lines, ["w1 wrote 2 files you can open",
+                                 f"press oo for them in {board._EDITOR}"])
+
+    def test_one_file_reads_as_one_file(self):
+        self.assertEqual(board.hint_lines("w1", ["/a/x.md"])[0],
+                         "w1 wrote 1 file you can open")
+
+    def test_nothing_to_open_and_nobody_highlighted_are_both_no_hint(self):
+        self.assertEqual(board.hint_lines("w1", []), [])
+        self.assertEqual(board.hint_lines(None, ["/a/x.md"]), [])
+
+    def test_the_plain_renderer_draws_it_in_yellow_and_keeps_its_height(self):
+        with_hint = self.rows("w1", ["/a/x.md", "/a/y.md"])
+        without = self.rows("w1", [])
+        self.assertEqual(len(with_hint), len(without))        # slack, not extra lines
+        hit = [line for line in with_hint if "wrote 2 files" in line]
+        self.assertEqual(len(hit), 1)
+        self.assertIn(board.HINT, hit[0])                     # yellow, and bold
+        self.assertTrue(any("press oo" in line for line in with_hint))
+        self.assertFalse(any("press oo" in line for line in without))
+
+    @unittest.skipUnless(HAVE_RICH, "rich is not installed")
+    def test_the_rich_renderer_draws_it_too_and_keeps_its_height(self):
+        with_hint = self.rows("w1", ["/a/x.md", "/a/y.md"], renderer=richboard.layout)
+        without = self.rows("w1", [], renderer=richboard.layout)
+        self.assertEqual(len(with_hint), len(without))
+        self.assertTrue(any("wrote 2 files" in line for line in with_hint))
+        self.assertTrue(any("press oo" in line for line in with_hint))
+        self.assertFalse(any("press oo" in line for line in without))
+
+    def test_a_pane_too_short_keeps_the_tree_and_drops_the_hint(self):
+        rows = board.layout(snap(*[agent(f"w{i}") for i in range(8)]), top=0, height=8,
+                            width=90, msg="", here="w1", openable=["/a/x.md"])
+        self.assertEqual(len(rows), 8)
+        self.assertFalse(any("press oo" in text for text, _ in rows))
+
+
+class ReportsCacheTest(unittest.TestCase):
+    """The hint is asked on every frame, so what it costs per frame is the design.
+
+    One `stat`, and nothing else, while the highlight sits on one agent whose transcript
+    is not growing. The `sb inspect` fork and the transcript read happen off the drawing
+    thread and only when the answer could have changed.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "x.md").write_text("x")
+        self.transcript = self.tmp / "t.jsonl"
+        self.transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "wrote `x.md`"}]}}) + "\n")
+        self.forks = []
+
+    def locate(self, name):
+        self.forks.append(name)
+        return str(self.tmp), str(self.transcript)
+
+    def settle(self, reports):
+        """Wait for the worker this frame started, the way the next frame would not."""
+        for _ in range(500):
+            if not reports._busy:
+                return
+            time.sleep(0.01)
+        self.fail("the recompute never finished")
+
+    def test_repeated_frames_with_a_stable_transcript_fork_once(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            reports.tick("w1")
+            self.settle(reports)
+            for _ in range(50):                    # fifty frames of the same board
+                files = reports.tick("w1")
+            self.settle(reports)
+        self.assertEqual([Path(f).name for f in files], ["x.md"])
+        self.assertEqual(self.forks, ["w1"])       # ONE subprocess, not fifty-one
+
+    def test_a_growing_transcript_recomputes_without_forking_again(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            reports.tick("w1")
+            self.settle(reports)
+            (self.tmp / "y.md").write_text("y")
+            with self.transcript.open("a") as fh:
+                fh.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"role": "assistant",
+                                "content": [{"type": "text",
+                                             "text": "and `y.md`"}]}}) + "\n")
+            os.utime(self.transcript, (0, time.time() + 5))     # the mtime moves
+            reports.tick("w1")
+            self.settle(reports)
+            files = reports.tick("w1")
+        self.assertEqual(sorted(Path(f).name for f in files), ["x.md", "y.md"])
+        self.assertEqual(self.forks, ["w1"])       # the transcript read is not a fork
+
+    def test_an_agent_that_cannot_be_located_is_no_hint_and_no_crash(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", lambda name: None):
+            reports.tick("w1")
+            self.settle(reports)
+            self.assertEqual(reports.tick("w1"), [])
+
+    def test_nobody_highlighted_asks_nothing_at_all(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            self.assertEqual(reports.tick(None), [])
+        self.assertEqual(self.forks, [])
+
+
 class DoublePressTest(unittest.TestCase):
     """`o` on its own does nothing, and the third press starts a new pair."""
 
