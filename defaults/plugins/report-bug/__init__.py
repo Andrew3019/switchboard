@@ -100,7 +100,7 @@ def register(reg):
         "show", show, audience="both", help="one report in full",
         args=[reg.arg("id", help="a report id, or enough of one to be unambiguous")])
     reg.command(
-        "drop", drop, audience="human", help="delete a report outright",
+        "drop", drop, audience="both", help="delete a report outright",
         args=[reg.arg("id", help="a report id")])
 
 
