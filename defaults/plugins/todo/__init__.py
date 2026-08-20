@@ -94,8 +94,13 @@ def register(reg):
         "done", done, audience="both", help="close a todo as finished",
         args=[reg.arg("id", help="a todo id, e.g. t-7"),
               reg.arg("--note", help="what happened")])
+    # Agents too. `drop` was the human's on the reasoning that *not going to happen* is a
+    # call about the work rather than about the row — but an agent that files a todo by
+    # mistake could then not withdraw it, and `done` would be a lie about what happened.
+    # Nothing is lost either way: this marks `state: "dropped"` and keeps the row, so the
+    # id still cites something and the changelog still says who closed it and why.
     reg.command(
-        "drop", drop, audience="human", help="close a todo as not-going-to-happen",
+        "drop", drop, audience="both", help="close a todo as not-going-to-happen",
         args=[reg.arg("id", help="a todo id, e.g. t-7"),
               reg.arg("--note", help="why")])
 

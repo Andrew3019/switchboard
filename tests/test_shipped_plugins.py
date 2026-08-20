@@ -265,13 +265,15 @@ class TodoTest(ShippedSandbox):
         self.assertEqual(r["state"], "dropped")
         self.assertEqual(self.data("plugin", "todo", "show", "t-1")["id"], "t-1")
 
-    def test_drop_is_for_the_human(self):
+    def test_an_agent_can_drop_its_own_mistake(self):
+        """An agent files most of these, so it withdraws its own. `done` would be a lie
+        about what happened, and there was no other way out of a todo filed by mistake."""
         self.as_agent("w1")
         self.ok("plugin", "todo", "add", "x")
-        code, _, err = self.sb("plugin", "todo", "drop", "t-1")
-        self.assertEqual(code, 1)
-        self.assertIn("for the human", err)
-        self.assertEqual(self.data("plugin", "todo", "show", "t-1")["state"], "open")
+        r = self.data("plugin", "todo", "drop", "t-1", "--note", "filed by mistake")
+        self.assertEqual(r["state"], "dropped")
+        self.assertEqual(self.data("plugin", "todo", "show", "t-1")["note"],
+                         "filed by mistake")
 
     # -- ids and refusals ------------------------------------------------
 
