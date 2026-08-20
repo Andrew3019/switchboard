@@ -1930,14 +1930,20 @@ def hint_lines(name: Optional[str], files, has_worktree: bool = False) -> list[s
     ONE block and never two, because the budget is two lines of slack (see `layout`)
     and a second gate would want a third: the files case carries `ww` on its second
     line rather than adding a line of its own.
+
+    `ww` goes FIRST on that shared line, which reads a little backwards and is about
+    clipping: a narrow pane cuts the line from the right (`_fit`), and with `oo` first
+    the cut lands mid-`ww` and leaves "· w" on screen — a key that is advertised and
+    does nothing. Losing the `oo` tail instead costs nothing, since the line above it
+    is already about the files.
     """
     if not name:
         return []
     if files:
         n = len(files)
         return [f"{name} wrote {n} file{'' if n == 1 else 's'} you can open",
-                f"press oo for {'it' if n == 1 else 'them'} in {_EDITOR}"
-                " · ww for the worktree"]
+                "press ww for the worktree · oo for "
+                f"{'it' if n == 1 else 'them'} in {_EDITOR}"]
     if has_worktree:
         return [f"press ww to open {name}'s worktree in {_EDITOR}"]
     return []

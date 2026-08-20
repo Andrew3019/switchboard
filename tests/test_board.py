@@ -2203,11 +2203,23 @@ class HintTest(unittest.TestCase):
         lines = board.hint_lines("w1", ["/a/x.md", "/a/y.md"], True)
         self.assertEqual(lines,
                          ["w1 wrote 2 files you can open",
-                          f"press oo for them in {board._EDITOR}"
-                          " · ww for the worktree"])
+                          "press ww for the worktree · oo for them in "
+                          + board._EDITOR])
         # Two lines and not three: the slack budget is two, and `ww` rides on the
         # second line rather than asking for one of its own.
         self.assertEqual(len(lines), 2)
+
+    def test_ww_comes_first_so_a_narrow_pane_never_clips_it_to_a_bare_w(self):
+        """A narrow pane cuts from the right. With `oo` first the cut landed inside
+        `ww` and left "· w" on screen — one key that does nothing, advertised."""
+        line = board.hint_lines("w1", ["/a/x.md", "/a/y.md"], True)[1]
+        self.assertLess(line.index("ww"), line.index("oo"))
+        # No cut of it ends in a lone `w` after a finished segment, which is the
+        # shape that reads as a key. (`press w`, the first half of the first word,
+        # is unavoidable in any wording that names `ww` at all, and it takes a pane
+        # about seven columns wide to see it.)
+        for cut in range(len(line) + 1):
+            self.assertFalse(line[:cut].endswith("· w"), line[:cut])
 
     def test_one_file_reads_as_one_file(self):
         self.assertEqual(board.hint_lines("w1", ["/a/x.md"], True)[0],
@@ -2231,8 +2243,9 @@ class HintTest(unittest.TestCase):
         hit = [line for line in with_hint if "wrote 2 files" in line]
         self.assertEqual(len(hit), 1)
         self.assertIn(board.HINT, hit[0])                     # yellow, and bold
-        self.assertTrue(any("press oo" in line for line in with_hint))
-        self.assertFalse(any("press oo" in line for line in without))
+        self.assertTrue(any("press ww for the worktree" in line
+                            for line in with_hint))
+        self.assertFalse(any("press ww" in line for line in without))
 
     @unittest.skipUnless(HAVE_RICH, "rich is not installed")
     def test_the_rich_renderer_draws_it_too_and_keeps_its_height(self):
@@ -2241,8 +2254,9 @@ class HintTest(unittest.TestCase):
         without = self.rows("w1", ([], False), renderer=richboard.layout)
         self.assertEqual(len(with_hint), len(without))
         self.assertTrue(any("wrote 2 files" in line for line in with_hint))
-        self.assertTrue(any("press oo" in line for line in with_hint))
-        self.assertFalse(any("press oo" in line for line in without))
+        self.assertTrue(any("press ww for the worktree" in line
+                            for line in with_hint))
+        self.assertFalse(any("press ww" in line for line in without))
 
     @unittest.skipUnless(HAVE_RICH, "rich is not installed")
     def test_the_rich_renderer_loses_no_agent_rows_to_the_hint(self):
@@ -2277,7 +2291,7 @@ class HintTest(unittest.TestCase):
                             width=90, msg="", here="w1",
                             openable=(["/a/x.md"], True))
         self.assertEqual(len(rows), 8)
-        self.assertFalse(any("press oo" in text for text, _ in rows))
+        self.assertFalse(any("press ww" in text for text, _ in rows))
 
 
 class ReportsCacheTest(unittest.TestCase):
