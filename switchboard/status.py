@@ -2102,6 +2102,89 @@ def display_rows(agents: list[AgentStatus], *, show_archived: bool = False
     return out
 
 
+def board_rows(agents: list[AgentStatus], *, show_archived: bool = False
+               ) -> list[AgentStatus]:
+    """The BOARD's rows: agents only, and never a `+ N archived` stand-in.
+
+    `sb status` collapses a finished subtree into one counted row (`display_rows`); the
+    board does not, and this is the whole difference between the two. A stand-in row is
+    something you cannot click, cannot focus and cannot act on — the board is a thing
+    Andrew steers the fleet from, so a row that is only a number is a row that costs a
+    line and answers nothing. The rows an agent no longer has are simply not drawn.
+
+    What `a` then shows is archived agents UNDER A LIVE ANCESTOR — a tree somebody is
+    still working in. An archived agent whose whole line of ancestors is archived too
+    belongs to a job that ended: the dispatcher that owned it is gone, nobody is going to
+    restore it from this screen, and it is never drawn whatever `a` says.
+
+    Two rules, and one invariant on top of them:
+
+    - A row that is NOT archived is never hidden, `a` or no `a`.
+    - An archived row with a live descendant is never hidden either, `a` or no `a`. It is
+      the only path to that descendant, and hiding it would orphan a drawn row.
+    - Beyond those, an archived row is drawn only when `show_archived` and some ancestor
+      of it is live.
+
+    The tree cannot come apart under this: if `x` is drawn for a live ancestor `P`, then
+    every node between `P` and `x` has `P` above it too and is drawn; if `x` is drawn for
+    a live descendant, its parent has that same descendant below it and is drawn.
+
+    Computed over the rows it is GIVEN — like `display_rows`, and for the same reason: a
+    filter (`--live`, `--mine`) has already had its say, and re-deriving the tree from the
+    store would judge these rows against one the caller is not looking at.
+    """
+    rows = list(agents)
+    if not rows:
+        return rows
+
+    names = {a.name for a in rows}
+    by_name = {a.name: a for a in rows}
+
+    def up(a: AgentStatus) -> Optional[AgentStatus]:
+        """The parent AMONG THESE ROWS, or None — a self-parent is a root, as in `_tree`."""
+        if a.parent in names and a.parent != a.name:
+            return by_name[a.parent]
+        return None
+
+    kids: dict[Optional[str], list[AgentStatus]] = {}
+    for a in rows:
+        parent = up(a)
+        kids.setdefault(parent.name if parent else None, []).append(a)
+
+    below: dict[str, bool] = {}
+    walking: set[str] = set()
+
+    def live_below(a: AgentStatus) -> bool:
+        if a.name in below:
+            return below[a.name]
+        if a.name in walking:
+            return False            # a cycle is broken, not followed (see `_tree`)
+        walking.add(a.name)
+        try:
+            out = any(not c.archived or live_below(c) for c in kids.get(a.name, ()))
+        finally:
+            walking.discard(a.name)
+        below[a.name] = out
+        return out
+
+    def live_above(a: AgentStatus) -> bool:
+        seen = {a.name}
+        cur = up(a)
+        while cur is not None and cur.name not in seen:
+            if not cur.archived:
+                return True
+            seen.add(cur.name)
+            cur = up(cur)
+        return False
+
+    def keep(a: AgentStatus) -> bool:
+        if not a.archived or live_below(a):
+            return True
+        return show_archived and live_above(a)
+
+    return [a for a in rows if keep(a)]
+
+
 def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
     """Compact enough to run reflexively; loud enough that drift cannot be missed.
 

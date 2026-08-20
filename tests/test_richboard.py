@@ -312,7 +312,7 @@ class GutterTest(unittest.TestCase):
         """The gutter character on each line, in order, or `None`."""
         out = []
         for text, owner in rows:
-            if owner is None or board._is_group(owner):
+            if owner is None:
                 continue
             # The LEFT of the line only. The panel's own border is a `│` in
             # column 0 and a tail can hold a `·` separator; the gutter is always
@@ -356,18 +356,17 @@ class GutterTest(unittest.TestCase):
         self.assertEqual(richboard.gutter_column(deeper)[2:],
                          [("╭", 2 * unit - 1), ("╰", 2 * unit - 1)])
 
-    def test_a_collapsed_archive_row_closes_the_workspace_it_belonged_to(self):
-        """A group whose last member has been archived still has a last member — the row
-        standing in for it. It carries the workspace it stands for, so it joins that run
-        and the bracket closes on it; a marker standing for SEVERAL workspaces belongs to
-        none of them and ends the run, exactly as every marker did before the field."""
+    def test_a_row_belonging_to_no_workspace_ends_the_run_it_follows(self):
+        """A run is read off the workspace field and nothing else. A row carrying None
+        belongs to no run, so the bracket closes on the row before it rather than
+        swallowing a row that says it sits somewhere else."""
         rows = [agent("top", workspace="top"),
                 agent("lead", depth=1, parent="top", workspace="w"),
                 agent("kid", depth=2, parent="lead", workspace="w"),
-                status.Collapsed(depth=2, count=2, workspace="w")]
-        self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 3)])
-        rows[-1] = status.Collapsed(depth=2, count=2, workspace=None)
+                agent("stray", depth=2, parent="lead", workspace=None)]
         self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 2)])
+        rows[-1] = agent("joined", depth=2, parent="lead", workspace="w")
+        self.assertEqual(richboard.group_runs(rows), [(0, 0), (1, 3)])
 
     def test_a_workspace_shared_at_depth_zero_is_marked_and_a_top_alone_is_not(self):
         """qa-2 found this on Andrew's own board: the mockup skipped every run whose
