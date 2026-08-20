@@ -281,7 +281,7 @@ class BrokerTest(unittest.TestCase):
         Effort rides along — the bug this replaces passed only the model id, so a tier's
         effort was silently dropped on every spawn.
         """
-        self.b.delegate("t", topic="t", role="researcher", me="orch")     # researcher = cheap
+        self.b.delegate("t", topic="t", role="researcher", me="orch")   # cheap
         self.assertEqual(self.h.started[0]["model_args"],
                          ["--model", "sonnet", "--effort", "medium"])
 
@@ -511,7 +511,8 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(store.get_agent(self.db, name)["session_id"], f"sess-{name}")
 
     def test_as_prompt_overrides_the_role_prompt(self):
-        self.b.delegate("t", topic="t", role="worker", as_prompt="You are a haiku critic.", me="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch",
+                        as_prompt="You are a haiku critic.")
         joined = " ".join(self.h.started[0]["prompts"])
         self.assertIn("haiku critic", joined)
 
@@ -3307,7 +3308,8 @@ class BrokerTest(unittest.TestCase):
         from switchboard.broker import PROTOCOL_LINE
         (self.repo / ".switchboard").mkdir(exist_ok=True)
         (self.repo / ".switchboard" / "protocol.md").write_text("# ours\n\nSAY LESS.\n")
-        Broker(self.db, self.h, repo=self.repo).delegate("t", topic="t", role="worker", me="orch")
+        Broker(self.db, self.h, repo=self.repo).delegate(
+            "t", topic="t", role="worker", me="orch")
         prompts = self.h.started[-1]["prompts"]
         self.assertIn("SAY LESS.", prompts)
         self.assertNotIn(PROTOCOL_LINE, prompts)
@@ -3326,7 +3328,8 @@ class BrokerTest(unittest.TestCase):
         d = self.repo / ".switchboard" / "roles"
         d.mkdir(parents=True, exist_ok=True)
         (d / "worker.md").write_text("+++\n+++\n\nMeasure twice.\n")
-        Broker(self.db, self.h, repo=self.repo).delegate("t", topic="t", role="worker", me="orch")
+        Broker(self.db, self.h, repo=self.repo).delegate(
+            "t", topic="t", role="worker", me="orch")
         self.assertIn("Measure twice.", self.h.started[-1]["prompts"])
 
     # -- worktree config links -------------------------------------------
@@ -3870,7 +3873,8 @@ class SbPinTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=space, check=True, capture_output=True)
         (space / "bin" / "sb").write_text("#!/bin/sh\n")
         (space / "bin" / "sb").chmod(0o755)
-        self.b.delegate("t", topic="t", role="worker", me=HUMAN, cwd=str(space), workspace="ws")
+        self.b.delegate("t", topic="t", role="worker", me=HUMAN,
+                        cwd=str(space), workspace="ws")
         _, text = self.h.pane_prompts[0]
         self.assertIn(shlex.quote(str(space / "bin")), text)
 
