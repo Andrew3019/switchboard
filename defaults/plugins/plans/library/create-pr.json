@@ -1,5 +1,8 @@
 {
   "name": "open the pull request and post the plan on it",
   "display": "open PR",
-  "about": "Push the branch and open the PR. Write the description first: what changed, why, and what has already been tested — it is the first thing every reader meets, and a PR without one costs each of them the same reconstruction. Then comment the plan onto it: `sb plugin plans show <plan> --markdown`, that ONE plan and never the store, posted as the markdown it gives you — no fenced block, no summarising, no reformatting. The whole record is the point: anyone reading the PR gets the state the lead has, rendered so they can actually read it. Nobody is asked whether to do any of this."
+  "obliges": [
+    "change-approval"
+  ],
+  "about": "Push the branch and open the PR. Write the description first: what changed, why, and what has already been tested — it is the first thing every reader meets, and a PR without one costs each of them the same reconstruction. Then comment the plan onto it: `sb plugin plans show <plan> --markdown`, that ONE plan and never the store, posted as the markdown it gives you — no fenced block, no summarising, no reformatting. The whole record is the point: anyone reading the PR gets the state the lead has, rendered so they can actually read it. Nobody is asked whether to do any of this. Obliges `change-approval`, which obliges `review`, so naming this step lands THREE steps in one act and two of them need re-deping by hand: change approval is an early ROOT of the plan and comes before the implementation, review comes after it, and this step waits on the review rather than on the approval it was minted against. The deps `name-step` writes are a starting shape; fix them in the file, which is where a plan is shaped anyway."
 }
