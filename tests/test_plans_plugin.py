@@ -2094,11 +2094,11 @@ class CompletenessTest(PlansSandbox):
         """
         self.ok(*_create("a job", "build it", "document it"))
         self.edit_step("s-2", deps=[])
-        self.assertIn("no dep: s-2", self.ok("plugin", "plans", "validate", "p-1"))
+        self.assertIn("no dep: step-2", self.ok("plugin", "plans", "validate", "p-1"))
 
         self.ok("plugin", "plans", "dep", "s-2", "--root", "--reason", "disjoint files")
-        self.assertTrue(self._step("s-2")["root"])
-        self.assertEqual(self._step("s-2")["deps"], [], "and no edge was invented")
+        self.assertTrue(self._step("step-2")["root"])
+        self.assertEqual(self._step("step-2")["deps"], [], "and no edge was invented")
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
         self.assertIn("parallel start", self.ok("plugin", "plans", "show", "p-1"),
                       "and `show` says which starts were authored as starts")
@@ -2111,8 +2111,8 @@ class CompletenessTest(PlansSandbox):
         self.ok(*_create("a job", "build it", "document it"))
         self.edit_step("s-2", deps=[])
         said = self.ok("plugin", "plans", "validate", "p-1")
-        self.assertIn("dep s-2 --after", said)
-        self.assertIn("dep s-2 --root", said)
+        self.assertIn("dep step-2 --after", said)
+        self.assertIn("dep step-2 --root", said)
 
     def test_an_edge_takes_the_root_mark_back_off(self):
         """A step that waits for something is not a start, so the two cannot both stand:
@@ -2121,8 +2121,8 @@ class CompletenessTest(PlansSandbox):
         self.edit_step("s-2", deps=[])
         self.ok("plugin", "plans", "dep", "s-2", "--root")
         self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
-        self.assertFalse(self._step("s-2")["root"])
-        self.assertEqual(self._step("s-2")["deps"], ["s-1"])
+        self.assertFalse(self._step("step-2")["root"])
+        self.assertEqual(self._step("step-2")["deps"], ["step-1"])
 
     def test_a_template_entry_joining_two_earlier_ones_records_both_edges(self):
         """A join is `"after": [1, 2]`, and both halves of it have to land.
