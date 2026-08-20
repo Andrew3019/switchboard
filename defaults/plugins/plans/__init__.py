@@ -29,7 +29,7 @@ The records
 
     step  {"id": "step-1", "name": "…", "display": null, "def": null, "obliged_by": null,
            "progress": "open", "why": null, "gate": null, "output": null, "owner": null,
-           "tries": 1, "notes": [], "deps": [], "checkpoints": []}
+           "tries": 1, "notes": [], "deps": [], "root": false, "checkpoints": []}
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
 writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here is an enum
@@ -170,7 +170,8 @@ the same "two views of one record" the board and `show` already are. Resolved ex
 `name` is — a named step's `display` lives in its definition and an edit reaches every plan
 naming it, an on-the-fly step's lives on the step.
 
-REQUIRED, on every step, and so is a `deps` on every step but the plan's first; a plan
+REQUIRED, on every step, and so is a `deps` on every step but the plan's first — or, where
+a start is deliberate, a `root: true` saying so; a plan
 carries a `display` of its own too, longer, since it owns the board's whole header line and
 is drawn there INSTEAD of the title. Required because optional is what was tried: not one
 plan in the live store ever set either field, so every step landed in column zero with no
@@ -560,6 +561,9 @@ def register(reg):
               reg.arg("--after", repeat=True,
                       help="a step in the same plan that it comes after; repeat for a "
                            "join"),
+              reg.arg("--root", flag=True,
+                      help="instead: this step deliberately comes after nothing — a "
+                           "parallel start, not a forgotten edge"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "migrate", migrate, audience="both",
@@ -665,8 +669,10 @@ EVERY STEP HAS A BOARD NAME AND A DEP
     - A DEP on every step but the first: `dep <step> --after <step>`, which is what the
       arrows are drawn from. `create --step … --step …` chains what you typed in the order
       you typed it, so reshape from there rather than starting from nothing. A plan that
-      genuinely has two starts will warn about its second one — leave it; nothing can tell
-      a deliberate second root from a forgotten edge.
+      genuinely has TWO STARTS says so — `dep <step> --root` — and then it is complete and
+      draws green like anything else. Say it rather than inventing an edge to clear the
+      warning: an order that never happened is a lie in the record, and the mark is what
+      tells a deliberate start from a forgotten edge.
 
   WHAT HAPPENS WHEN ONE IS MISSING, because it is not the same everywhere. `create`,
   `add-step`, `name-step` and `template use` REFUSE to make a step with no board name.
@@ -1165,10 +1171,20 @@ def dep(ctx, args) -> Result:
     `step-2`. A qualified `--after` naming a different plan still resolves, and is still
     refused one line below, because the refusal for a cross-plan edge is worth more than a
     "no such step" that would be a lie.
+
+    `--root` is the other thing a lead can say here, and it is the OPPOSITE of an edge: no
+    dep, deliberately, because this step starts on its own beside the plan's first. It
+    lives on this verb rather than a verb of its own because it answers the same question
+    an edge does — what does this step come after — with "nothing, and I mean it". Marking
+    it is what stops the completeness door reporting the step, so the only way to clear the
+    warning is no longer to invent an edge that misstates the order. The two are exclusive
+    by construction: `--after` on a marked root unmarks it, since a step that waits for
+    something is not a start any more.
     """
     after = [str(a).strip() for a in (args.after or ()) if str(a).strip()]
-    if not after:
-        return _needs("--after", "an edge says what a step comes after")
+    if not after and not getattr(args, "root", False):
+        return _needs("--after", "an edge says what a step comes after, or `--root` says "
+                                 "this step deliberately comes after nothing")
     bad = _cap(args.reason)
     if bad:
         return bad
@@ -1180,6 +1196,16 @@ def dep(ctx, args) -> Result:
     lib, bad = _lib([plan])             # before the write, so it cannot refuse after one
     if bad:
         return bad
+    if getattr(args, "root", False) and not after:
+        # Both directions of the same field, so the mark is undoable with the verb that
+        # made it rather than only by editing the file: `--root` says this start is meant,
+        # and any `--after` below takes it back off, because a step with an edge is not a
+        # start. Nothing else here writes it.
+        step["root"] = True
+        _log(plan, ctx.agent or "human", "dep", args.reason,
+             f"{step['id']} is a deliberate root")
+        _write(ctx.state_dir, doc, seal)
+        return _changed(plan, step, lib)
     added = []
     for given in after:
         other = _in_plan(plan, given) if "/" not in str(given) else None
@@ -1203,6 +1229,8 @@ def dep(ctx, args) -> Result:
         if not any(_num(_STEP_ID, d) == n for d in step.setdefault("deps", [])):
             step["deps"].append(other["id"])
             added.append(other["id"])
+    if step.get("deps"):
+        step["root"] = False
     who = ctx.agent or "human"
     _log(plan, who, "dep", args.reason,
          f"{step['id']} after {', '.join(added)}" if added
@@ -1813,11 +1841,20 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     carries its own. Explicit null, like `name`, so "this step has no shorter board label" is
     a thing the record says rather than a key it happens to lack — the board reads the field
     and falls back to the name when it is null.
+
+    `root` is the one field here that exists to say a step is NOT missing something. A step
+    with no `deps` past the plan's first start reads as a forgotten edge, and every one of
+    them was reported as such — including the deliberate ones, so a plan whose two starts
+    genuinely run side by side on disjoint work could only go green by inventing an edge
+    that lied about the order. `root: true` is the lead saying "this start is meant", and
+    it is a stored field rather than a guess because nothing about a bare `deps: []` can
+    tell the two apart. False by default and explicit, like every null above: a step that
+    is simply next in a chain says so.
     """
     return {"id": sid, "name": name, "display": display, "def": key,
             "obliged_by": obliged_by, "progress": OPEN, "why": None, "gate": None,
             "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
-            "checkpoints": []}
+            "root": False, "checkpoints": []}
 
 
 def _note(text: str, who: str) -> dict:
@@ -2141,16 +2178,29 @@ def _faults(plan: dict) -> tuple[bool, list[str], list[str]]:
     ONE ROOT IS FREE, and it is the first step that has no dep rather than the first step
     in the file. Those are usually the same step and sometimes are not: `name-step merge`
     lands the merge before the review it waits for, so the plan's only real start is second
-    in the list, and a positional rule reported the flagship path as defective. A plan with
-    two genuine starts still reports its second one, which is accepted rather than solved:
-    nothing can tell a deliberate second root from a missing edge, and the answer to a
-    warning about a root you meant is to leave it there.
+    in the list, and a positional rule reported the flagship path as defective.
+
+    A SECOND ROOT IS FREE TOO WHEN IT SAYS SO. `root: true` on the step is the lead saying
+    the start is deliberate, and a marked root is no more incomplete than the first one is
+    — a plan whose two starts genuinely run side by side is a shape this file draws, not a
+    defect it paints red. Unmarked is still reported, because that is the case nothing can
+    read: a bare `deps: []` is a forgotten edge and a parallel start in the same bytes, and
+    the marker is the only thing that separates them. So the warning now has an answer that
+    is not a false edge — the plan that was made red by two real starts used to be cleared
+    by writing an order that never happened, which is a lie in the record to satisfy a
+    rendering rule.
     """
     steps = plan.get("steps") or []
     nameless = [str(s.get("id") or "?") for s in steps
                 if not str(s.get("display") or "").strip()]
-    rootless = [str(s.get("id") or "?") for s in steps if not (s.get("deps") or [])][1:]
+    rootless = [str(s.get("id") or "?")
+                for s in _rootless(steps)[1:] if not s.get("root")]
     return (not str(plan.get("display") or "").strip()), nameless, rootless
+
+
+def _rootless(steps: list) -> list[dict]:
+    """The steps with no dep, in file order. The first of them is the plan's start."""
+    return [s for s in steps if not (s.get("deps") or [])]
 
 
 def _wrong(plan: dict) -> list[tuple[str, str]]:
@@ -2233,7 +2283,10 @@ def _defects(plan: dict) -> list[str]:
         out.append(f"    no dep: {', '.join(rootless)} — every step but the plan's first "
                    f"says what it comes after, or the board has no edge to draw and the "
                    f"plan renders as a loose stack. Fix: "
-                   f"`sb plugin plans dep {rootless[0]} --after <step>`.")
+                   f"`sb plugin plans dep {rootless[0]} --after <step>` — or, if this "
+                   f"start is deliberate and runs beside the plan's first, "
+                   f"`sb plugin plans dep {rootless[0]} --root`, which says so and is "
+                   f"complete. Never an edge you do not mean.")
     out.extend(f"    {sid}: {why}" for sid, why in wrong)
     return out
 
@@ -3483,6 +3536,11 @@ def _step_lines(steps: list) -> list[str]:
         if s.get("deps"):
             # Edges the lead interprets: what this one waits for, never a wait anything runs.
             bits.append(f"after {', '.join(_flat(d) for d in s['deps'])}")
+        elif s.get("root"):
+            # The one thing said about a step that has NO edge, and only where the record
+            # says the absence is meant: a reader counting starts should see which of them
+            # were authored as starts rather than diff the plan against a warning.
+            bits.append("parallel start")
         if _counter(s.get("tries")) > 1:
             bits.append(f"try {_flat(s['tries'])}")
         out.append("  ".join(bits))

@@ -1424,6 +1424,21 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn(" build", board._ANSI.sub("", chart), "the sound step is left alone")
         self.assertTrue(lines[0].startswith("\033[31m"), "and the header says so too")
 
+    def test_a_deliberate_second_root_is_drawn_like_any_other_step(self):
+        """The board is the whole reason the dep rule exists, so it is where the answer to
+        two real starts has to show: a start marked `root` is not a defect and is not
+        painted. Before this the only way off the red was an edge that misstated the order,
+        which put a lie in the record to satisfy a rendering rule."""
+        self.write(self.plan("p-1", "api", "shape", [
+            {"id": "s-1", "name": "build", "display": "build", "progress": "open"},
+            {"id": "s-2", "name": "document", "display": "docs", "progress": "open",
+             "root": True}],
+            display="shape the work"))
+        with self.hooks():
+            lines = board.section_extras([agent("lead")])[0][1]
+        self.assertNotIn("\033[31m", "".join(lines), "nothing is red")
+        self.assertIn("docs", board._ANSI.sub("", "".join(lines)))
+
     def test_a_hand_edit_that_broke_a_removed_verbs_rule_is_drawn_red_too(self):
         """The same door, widened. Five verbs went away in #4 and their refusals became
         warnings on the file, which only means anything if the board paints them: a gate on
@@ -1883,29 +1898,54 @@ class OpenReportFilesTest(unittest.TestCase):
         return {"cwd": str(self.tmp),
                 "transcript": str(transcript) if transcript else None}
 
+    def named(self):
+        """A transcript that NAMES a file, which is the only thing that opens one.
+
+        `notes.md` being on disk does nothing on its own: `report_files` opens what the
+        agent's prose put in backticks. Every editor-failure test below needs this, or
+        the empty-files guard answers first and the failure path is never reached.
+        """
+        self.transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text",
+                                     "text": "wrote `notes.md`"}]}}) + "\n")
+        return self.transcript
+
     def test_an_editor_that_is_there_and_cannot_be_run_does_not_raise(self):
         # A wrapper script nobody chmodded — the shape that would otherwise kill the
         # board on every restart until the setting is fixed.
         cmd = self.tmp / "cursor"
         cmd.write_text("#!/bin/sh\n")
         cmd.chmod(0o644)
-        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+        with mock.patch.object(board, "_inspect",
+                               lambda n: self.detail(self.named())), \
              mock.patch.object(board, "_EDITOR", str(cmd)):
             self.assertEqual(board.open_report_files("w1"),
                              f"w1: {cmd} is not executable")
 
     def test_an_editor_that_is_not_there_says_so(self):
-        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+        with mock.patch.object(board, "_inspect",
+                               lambda n: self.detail(self.named())), \
              mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
             self.assertEqual(board.open_report_files("w1"),
                              "w1: no-such-editor-xyz not on PATH")
 
     def test_a_transcript_record_whose_message_is_not_a_dict_does_not_raise(self):
         # Not a shape Claude Code writes; the file is not one switchboard writes either.
+        # The last record is a real one naming a real file, so the open gets PAST the
+        # empty-files guard and reaches the editor: without it this would be a test of
+        # the guard wearing the name of a test about malformed records.
         self.transcript.write_text(
             '{"type": "assistant", "message": "hello"}\n'
-            '{"type": "assistant", "message": [{"type": "text", "text": "hi"}]}\n')
-        self.assertEqual(board.last_assistant_texts(self.transcript), [])
+            '{"type": "assistant", "message": [{"type": "text", "text": "hi"}]}\n'
+            + json.dumps({"type": "assistant",
+                          "message": {"role": "assistant",
+                                      "content": [{"type": "text",
+                                                   "text": "wrote `notes.md`"}]}})
+            + "\n")
+        self.assertEqual(board.last_assistant_texts(self.transcript),
+                         ["wrote `notes.md`"])       # the two bad records gave nothing
         with mock.patch.object(board, "_inspect",
                                lambda n: self.detail(self.transcript)), \
              mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
@@ -1915,6 +1955,110 @@ class OpenReportFilesTest(unittest.TestCase):
     def test_no_highlighted_agent_is_a_line_not_an_open(self):
         self.assertEqual(board.open_report_files(None),
                          "press o on a highlighted agent")
+
+    def test_nothing_named_opens_nothing_and_the_editor_is_never_run(self):
+        """`cursor -r` with no paths is a VALID call that raises an empty window, so
+        the guard has to answer before the shell-out and not after it: an agent that
+        wrote nothing would otherwise pop the editor open to say so."""
+        editor = mock.Mock()
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_editor", editor):
+            self.assertEqual(board.open_report_files("w1"),
+                             "w1: no files found in recent messages")
+        editor.assert_not_called()
+
+    def test_every_file_goes_in_one_call_with_no_folder_and_no_g(self):
+        """One shell-out, all the files. The folder is `ww`'s job now — opening it here
+        left a subprocess in flight that the file calls were racing."""
+        (self.tmp / "other.md").write_text("x")
+        self.transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text",
+                                     "text": "wrote `notes.md` and `other.md`"}]}})
+            + "\n")
+        editor = mock.Mock()
+        with mock.patch.object(board, "_inspect",
+                               lambda n: self.detail(self.transcript)), \
+             mock.patch.object(board, "_editor", editor):
+            self.assertEqual(board.open_report_files("w1"), "→ w1: opened 2 file(s)")
+        self.assertEqual(editor.call_count, 1)
+        args = editor.call_args[0]
+        self.assertEqual(args[0], "-r")
+        self.assertNotIn("-g", args)
+        self.assertNotIn(str(self.tmp), args)          # no bare folder argument
+        self.assertEqual(sorted(Path(a).name for a in args[1:]),
+                         ["notes.md", "other.md"])
+
+
+class OpenWorktreeTest(unittest.TestCase):
+    """`ww`: the folder, and the window with a root in it. `open_report_files`' failure
+    paths for the same reason — this runs inside the event loop too."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def detail(self, cwd=True):
+        return {"cwd": str(self.tmp) if cwd else None, "transcript": None}
+
+    def test_the_folder_is_opened_with_no_reuse_flag(self):
+        """No `-r` on a folder: it would force the last active window to change what it
+        is showing, where the bare call skips a window already open on this folder."""
+        editor = mock.Mock()
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_editor", editor):
+            self.assertEqual(board.open_worktree("w1"), "→ w1: opened worktree")
+        editor.assert_called_once_with(str(self.tmp))
+
+    def test_no_highlighted_agent_is_a_line_not_an_open(self):
+        self.assertEqual(board.open_worktree(None), "press w on a highlighted agent")
+
+    def test_an_agent_with_no_worktree_says_so(self):
+        editor = mock.Mock()
+        with mock.patch.object(board, "_inspect", lambda n: self.detail(cwd=False)), \
+             mock.patch.object(board, "_editor", editor):
+            self.assertEqual(board.open_worktree("w1"), "w1: no worktree to open")
+        editor.assert_not_called()
+
+    def test_an_agent_that_cannot_be_read_says_so(self):
+        with mock.patch.object(board, "_inspect", lambda n: None):
+            self.assertEqual(board.open_worktree("w1"),
+                             "w1: could not read this agent")
+
+    def test_a_worktree_that_is_gone_is_ours_to_notice(self):
+        """`oo` gets this for free — no file under a deleted directory survives
+        `is_file()` — and this has no such filter, so it checks."""
+        gone = self.tmp / "gone"
+        editor = mock.Mock()
+        with mock.patch.object(board, "_inspect",
+                               lambda n: {"cwd": str(gone), "transcript": None}), \
+             mock.patch.object(board, "_editor", editor):
+            self.assertEqual(board.open_worktree("w1"),
+                             "w1: worktree no longer exists")
+        editor.assert_not_called()
+
+    def test_an_editor_that_is_not_there_says_so(self):
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
+            self.assertEqual(board.open_worktree("w1"),
+                             "w1: no-such-editor-xyz not on PATH")
+
+    def test_an_editor_that_is_there_and_cannot_be_run_does_not_raise(self):
+        cmd = self.tmp / "cursor"
+        cmd.write_text("#!/bin/sh\n")
+        cmd.chmod(0o644)
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", str(cmd)):
+            self.assertEqual(board.open_worktree("w1"),
+                             f"w1: {cmd} is not executable")
+
+    def test_an_editor_that_times_out_does_not_raise(self):
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_editor", mock.Mock(
+                 side_effect=subprocess.TimeoutExpired("cursor", 1))), \
+             mock.patch.object(board, "_EDITOR", "cursor"):
+            self.assertEqual(board.open_worktree("w1"), "w1: cursor timed out")
 
 
 class OpenTickTest(unittest.TestCase):
@@ -1982,6 +2126,53 @@ class BusyOpenNamesBothAgentsTest(unittest.TestCase):
         # And what arrives afterwards names A, so it cannot be read as B's result.
         self.assertEqual(note, ["→ A: opened"])
 
+    def test_the_other_key_is_refused_too_and_says_what_each_is_opening(self):
+        """`oo` and `ww` share one runner and one mailbox, so a `ww` while an `oo` is in
+        flight is dropped like a second `oo` would be. It names what each one opens:
+        with both on the same agent, "still opening A — A not started" says nothing."""
+        release = threading.Event()
+        note = []
+        def slow(name):
+            release.wait(5)
+            return f"→ {name}: opened"
+
+        with mock.patch.object(board, "open_report_files", slow):
+            run, first = board.open_tick("A", note, None, "oo")
+            still, second = board.open_tick("A", note, run, "ww")
+            self.assertEqual(first, "opening A…")
+            self.assertEqual(
+                second,
+                "still opening A's files — A's worktree not started, press ww again")
+            self.assertIs(still, run)
+            release.set()
+            run[0].join(5)
+        self.assertEqual(note, ["→ A: opened"])
+
+    def test_the_ww_key_runs_the_worktree_action_and_says_press_w(self):
+        note = []
+        with mock.patch.object(board, "open_worktree",
+                               lambda name: f"→ {name}: opened worktree"):
+            run, msg = board.open_tick("A", note, None, "ww")
+            self.assertEqual(msg, "opening A…")
+            run[0].join(5)
+        self.assertEqual(note, ["→ A: opened worktree"])
+        # And with nobody highlighted the line names the key that was pressed.
+        self.assertEqual(board.open_tick(None, note, None, "ww")[1],
+                         "press w on a highlighted agent")
+
+    def test_a_finished_open_does_not_block_the_other_key(self):
+        """One at a time is the rule, not one ever: `ww` after `oo` has finished runs."""
+        note = []
+        with mock.patch.object(board, "open_report_files", lambda name: "→ A: opened"), \
+             mock.patch.object(board, "open_worktree", lambda name: "→ A: worktree"):
+            run, _ = board.open_tick("A", note, None, "oo")
+            run[0].join(5)
+            run2, msg = board.open_tick("A", note, run, "ww")
+            self.assertEqual(msg, "opening A…")
+            self.assertIsNot(run2, run)
+            run2[0].join(5)
+        self.assertEqual(note, ["→ A: opened", "→ A: worktree"])
+
 
 class DrainTest(unittest.TestCase):
     """One status line, two worker mailboxes, and an order that keeps it honest."""
@@ -2002,46 +2193,85 @@ class DrainTest(unittest.TestCase):
     def test_nothing_waiting_leaves_the_line_and_the_frame_alone(self):
         self.assertEqual(board.drain("opening w1…", [], []), ("opening w1…", False))
 
+    def test_two_full_keypress_boxes_would_lose_one_answer(self):
+        """Which is why there is only ever ONE. `drain` pops every non-empty box and
+        keeps the last line — the others are not deferred, they are gone. `oo` and `ww`
+        share a mailbox for this reason, so this case is unreachable by construction;
+        pinned here so that stays a property of the code and not a coincidence."""
+        oo, ww = ["→ w1: opened 2 file(s)"], ["→ w1: opened worktree"]
+        msg, drained = board.drain("", ww, oo)
+        self.assertEqual(msg, "→ w1: opened 2 file(s)")
+        self.assertTrue(drained)
+        self.assertEqual(ww, [])                   # popped and thrown away, not kept
+
 
 class HintTest(unittest.TestCase):
-    """The `oo` hint: two lines, yellow, and only when there is something to open."""
+    """The `oo`/`ww` hint: two lines, one, or none — yellow, and only when a key would
+    do something. `openable` is `Reports.tick`'s (files, has_worktree) pair."""
 
     def rows(self, here, openable, renderer=board.layout, **kw):
         got = renderer(snap(agent("w1"), agent("w2")), top=0, height=20, width=90,
                        msg="", here=here, openable=openable, **kw)
         return [text for text, _ in (got or [])]
 
-    def test_two_lines_naming_the_agent_and_the_count(self):
-        lines = board.hint_lines("w1", ["/a/x.md", "/a/y.md"])
-        self.assertEqual(lines, ["w1 wrote 2 files you can open",
-                                 f"press oo for them in {board._EDITOR}"])
+    def test_two_lines_naming_the_agent_the_count_and_both_keys(self):
+        lines = board.hint_lines("w1", ["/a/x.md", "/a/y.md"], True)
+        self.assertEqual(lines,
+                         ["w1 wrote 2 files you can open",
+                          "press ww for the worktree · oo for them in "
+                          + board._EDITOR])
+        # Two lines and not three: the slack budget is two, and `ww` rides on the
+        # second line rather than asking for one of its own.
+        self.assertEqual(len(lines), 2)
+
+    def test_ww_comes_first_so_a_narrow_pane_never_clips_it_to_a_bare_w(self):
+        """A narrow pane cuts from the right. With `oo` first the cut landed inside
+        `ww` and left "· w" on screen — one key that does nothing, advertised."""
+        line = board.hint_lines("w1", ["/a/x.md", "/a/y.md"], True)[1]
+        self.assertLess(line.index("ww"), line.index("oo"))
+        # No cut of it ends in a lone `w` after a finished segment, which is the
+        # shape that reads as a key. (`press w`, the first half of the first word,
+        # is unavoidable in any wording that names `ww` at all, and it takes a pane
+        # about seven columns wide to see it.)
+        for cut in range(len(line) + 1):
+            self.assertFalse(line[:cut].endswith("· w"), line[:cut])
 
     def test_one_file_reads_as_one_file(self):
-        self.assertEqual(board.hint_lines("w1", ["/a/x.md"])[0],
+        self.assertEqual(board.hint_lines("w1", ["/a/x.md"], True)[0],
                          "w1 wrote 1 file you can open")
 
+    def test_a_worktree_and_nothing_written_yet_advertises_ww_alone(self):
+        """The new case: `oo` would do nothing here, so it is not offered — but `ww`
+        works for any agent that has a worktree at all, written to or not."""
+        self.assertEqual(board.hint_lines("w1", [], True),
+                         [f"press ww to open w1's worktree in {board._EDITOR}"])
+
     def test_nothing_to_open_and_nobody_highlighted_are_both_no_hint(self):
-        self.assertEqual(board.hint_lines("w1", []), [])
-        self.assertEqual(board.hint_lines(None, ["/a/x.md"]), [])
+        self.assertEqual(board.hint_lines("w1", [], False), [])
+        self.assertEqual(board.hint_lines("w1", []), [])   # worktree defaults to none
+        self.assertEqual(board.hint_lines(None, ["/a/x.md"], True), [])
 
     def test_the_plain_renderer_draws_it_in_yellow_and_keeps_its_height(self):
-        with_hint = self.rows("w1", ["/a/x.md", "/a/y.md"])
-        without = self.rows("w1", [])
+        with_hint = self.rows("w1", (["/a/x.md", "/a/y.md"], True))
+        without = self.rows("w1", ([], False))
         self.assertEqual(len(with_hint), len(without))        # slack, not extra lines
         hit = [line for line in with_hint if "wrote 2 files" in line]
         self.assertEqual(len(hit), 1)
         self.assertIn(board.HINT, hit[0])                     # yellow, and bold
-        self.assertTrue(any("press oo" in line for line in with_hint))
-        self.assertFalse(any("press oo" in line for line in without))
+        self.assertTrue(any("press ww for the worktree" in line
+                            for line in with_hint))
+        self.assertFalse(any("press ww" in line for line in without))
 
     @unittest.skipUnless(HAVE_RICH, "rich is not installed")
     def test_the_rich_renderer_draws_it_too_and_keeps_its_height(self):
-        with_hint = self.rows("w1", ["/a/x.md", "/a/y.md"], renderer=richboard.layout)
-        without = self.rows("w1", [], renderer=richboard.layout)
+        with_hint = self.rows("w1", (["/a/x.md", "/a/y.md"], True),
+                              renderer=richboard.layout)
+        without = self.rows("w1", ([], False), renderer=richboard.layout)
         self.assertEqual(len(with_hint), len(without))
         self.assertTrue(any("wrote 2 files" in line for line in with_hint))
-        self.assertTrue(any("press oo" in line for line in with_hint))
-        self.assertFalse(any("press oo" in line for line in without))
+        self.assertTrue(any("press ww for the worktree" in line
+                            for line in with_hint))
+        self.assertFalse(any("press ww" in line for line in without))
 
     @unittest.skipUnless(HAVE_RICH, "rich is not installed")
     def test_the_rich_renderer_loses_no_agent_rows_to_the_hint(self):
@@ -2053,13 +2283,30 @@ class HintTest(unittest.TestCase):
             rows = richboard.layout(snap(*agents), top=0, height=20, width=70, msg="",
                                     here="w0", openable=openable)
             return [t for t, _ in rows if "more below" in t]
-        self.assertEqual(tail(["/a/x.md", "/a/y.md"]), tail([]))
+        self.assertEqual(tail((["/a/x.md", "/a/y.md"], True)), tail(([], False)))
+        # And the one-line worktree hint, whose height is a different number again.
+        self.assertEqual(tail(([], True)), tail(([], False)))
+
+    def test_the_one_line_hint_is_drawn_by_both_renderers_and_costs_no_rows(self):
+        """The worktree-only case is a ONE-line hint where every other is two, and both
+        renderers size their slack off that length — so it needs its own pass through
+        each, or one of them silently promises something the other does not."""
+        for renderer in ([board.layout] +
+                         ([richboard.layout] if HAVE_RICH else [])):
+            with self.subTest(renderer=renderer.__module__):
+                one = self.rows("w1", ([], True), renderer=renderer)
+                without = self.rows("w1", ([], False), renderer=renderer)
+                self.assertEqual(len(one), len(without))
+                hit = [line for line in one if "press ww to open" in line]
+                self.assertEqual(len(hit), 1)
+                self.assertFalse(any("press ww" in line for line in without))
 
     def test_a_pane_too_short_keeps_the_tree_and_drops_the_hint(self):
         rows = board.layout(snap(*[agent(f"w{i}") for i in range(8)]), top=0, height=8,
-                            width=90, msg="", here="w1", openable=["/a/x.md"])
+                            width=90, msg="", here="w1",
+                            openable=(["/a/x.md"], True))
         self.assertEqual(len(rows), 8)
-        self.assertFalse(any("press oo" in text for text, _ in rows))
+        self.assertFalse(any("press ww" in text for text, _ in rows))
 
 
 class ReportsCacheTest(unittest.TestCase):
@@ -2099,7 +2346,7 @@ class ReportsCacheTest(unittest.TestCase):
             reports.tick("w1")
             self.settle(reports)
             for _ in range(50):                    # fifty frames of the same board
-                files = reports.tick("w1")
+                files, _ = reports.tick("w1")
             self.settle(reports)
         self.assertEqual([Path(f).name for f in files], ["x.md"])
         self.assertEqual(self.forks, ["w1"])       # ONE subprocess, not fifty-one
@@ -2119,7 +2366,7 @@ class ReportsCacheTest(unittest.TestCase):
             os.utime(self.transcript, (0, time.time() + 5))     # the mtime moves
             reports.tick("w1")
             self.settle(reports)
-            files = reports.tick("w1")
+            files, _ = reports.tick("w1")
         self.assertEqual(sorted(Path(f).name for f in files), ["x.md", "y.md"])
         self.assertEqual(self.forks, ["w1"])       # the transcript read is not a fork
 
@@ -2128,7 +2375,7 @@ class ReportsCacheTest(unittest.TestCase):
         with mock.patch.object(board, "locate", lambda name: None):
             reports.tick("w1")
             self.settle(reports)
-            self.assertEqual(reports.tick("w1"), [])
+            self.assertEqual(reports.tick("w1"), ([], False))
 
     def test_an_agent_with_no_transcript_is_not_relocated_every_frame(self):
         """The bound is on the AGE of the lookup, never on what it found.
@@ -2163,21 +2410,38 @@ class ReportsCacheTest(unittest.TestCase):
 
     def test_the_answer_is_published_as_one_tuple(self):
         """A frame may never read one agent's files under another agent's name — two
-        assignments with an `os.stat` between them is a wide enough window for it."""
+        assignments with an `os.stat` between them is a wide enough window for it.
+
+        `has_worktree` is in the SAME tuple for the same reason, rather than read off
+        `_where`: `_where` is written first, has no `name` guard, and has no entry at
+        all until the first recompute lands — so the worktree-only hint would be blank
+        for the first frames after every move of the highlight, and could pair one
+        agent's worktree flag with another's file count in between.
+        """
         reports = board.Reports()
         with mock.patch.object(board, "locate", self.locate):
             reports.tick("w1")
             self.settle(reports)
-            key, files = reports._answer
+            key, files, has_worktree = reports._answer
         self.assertEqual(key[0], "w1")
         self.assertEqual([Path(f).name for f in files], ["x.md"])
+        self.assertTrue(has_worktree)
         # The reader answers for the agent the tuple names and nobody else.
-        self.assertEqual(reports.tick("w2"), [])
+        self.assertEqual(reports.tick("w2"), ([], False))
+
+    def test_an_agent_with_a_worktree_and_nothing_written_still_says_so(self):
+        """The `ww`-only hint's whole input: no files, but a worktree to open."""
+        reports = board.Reports()
+        with mock.patch.object(board, "locate",
+                               lambda name: (str(self.tmp), None)):
+            reports.tick("w1")
+            self.settle(reports)
+            self.assertEqual(reports.tick("w1"), ([], True))
 
     def test_nobody_highlighted_asks_nothing_at_all(self):
         reports = board.Reports()
         with mock.patch.object(board, "locate", self.locate):
-            self.assertEqual(reports.tick(None), [])
+            self.assertEqual(reports.tick(None), ([], False))
         self.assertEqual(self.forks, [])
 
 
@@ -2198,6 +2462,37 @@ class DoublePressTest(unittest.TestCase):
     def test_two_presses_too_far_apart_do_not_fire(self):
         _, last = board.double_press(0.0, 1000.0)
         self.assertEqual(board.double_press(last, 1002.0), (False, 1002.0))
+
+
+class CrossKeyDoublePressTest(unittest.TestCase):
+    """`o` and `w` keep a float each, so neither can fire off the other's presses.
+
+    Only true at THIS level. Nothing tests `main()` itself, so that the two branches
+    are wired to the right floats and to the one shared mailbox is read, not proven.
+    """
+
+    def test_one_o_and_one_w_in_a_run_fire_nothing(self):
+        last_o, last_w = 0.0, 0.0
+        raw, now = "ow", 1000.0
+        fire_w, last_w = board.double_press_run(last_w, raw.count("w"), now)
+        fire_o, last_o = board.double_press_run(last_o, raw.count("o"), now)
+        self.assertFalse(fire_w)
+        self.assertFalse(fire_o)
+        # And the second half of each pair lands on its own key and nobody else's.
+        self.assertTrue(board.double_press_run(last_o, 1, now + 0.1)[0])
+        self.assertTrue(board.double_press_run(last_w, 1, now + 0.1)[0])
+
+    def test_a_run_of_wwoo_fires_both_and_neither_counts_the_others_presses(self):
+        raw, now = "wwoo", 1000.0
+        self.assertTrue(board.double_press_run(0.0, raw.count("w"), now)[0])
+        self.assertTrue(board.double_press_run(0.0, raw.count("o"), now)[0])
+
+    def test_owo_is_a_double_o_and_not_a_w_of_any_kind(self):
+        """Counting is per character and ignores interleaving, so a stray `o` in the
+        middle of a `ww` rhythm cannot become a cross-key press."""
+        raw, now = "owo", 1000.0
+        self.assertTrue(board.double_press_run(0.0, raw.count("o"), now)[0])
+        self.assertFalse(board.double_press_run(0.0, raw.count("w"), now)[0])
 
 
 class CoalescedPressTest(unittest.TestCase):
