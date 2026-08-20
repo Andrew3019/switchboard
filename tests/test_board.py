@@ -1932,6 +1932,18 @@ class HintTest(unittest.TestCase):
         self.assertTrue(any("press oo" in line for line in with_hint))
         self.assertFalse(any("press oo" in line for line in without))
 
+    @unittest.skipUnless(HAVE_RICH, "rich is not installed")
+    def test_the_rich_renderer_loses_no_agent_rows_to_the_hint(self):
+        """The hint comes out of the slack, not off the tree. It used to be sized
+        against the window, so turning it on pushed two agents under the fold — and
+        it turns on and off by itself as the highlighted agent writes."""
+        agents = [agent(f"w{i}") for i in range(12)]
+        def tail(openable):
+            rows = richboard.layout(snap(*agents), top=0, height=20, width=70, msg="",
+                                    here="w0", openable=openable)
+            return [t for t, _ in rows if "more below" in t]
+        self.assertEqual(tail(["/a/x.md", "/a/y.md"]), tail([]))
+
     def test_a_pane_too_short_keeps_the_tree_and_drops_the_hint(self):
         rows = board.layout(snap(*[agent(f"w{i}") for i in range(8)]), top=0, height=8,
                             width=90, msg="", here="w1", openable=["/a/x.md"])
@@ -2006,6 +2018,50 @@ class ReportsCacheTest(unittest.TestCase):
             reports.tick("w1")
             self.settle(reports)
             self.assertEqual(reports.tick("w1"), [])
+
+    def test_an_agent_with_no_transcript_is_not_relocated_every_frame(self):
+        """The bound is on the AGE of the lookup, never on what it found.
+
+        A highlight moving between tabs asks about a different agent each time it
+        lands, so an agent whose lookup returns no transcript — freshly spawned, or
+        one `sb inspect` cannot see — would otherwise fork on every flip.
+        """
+        def locate(name):
+            self.forks.append(name)
+            return (str(self.tmp), str(self.transcript) if name == "w1" else None)
+
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", locate):
+            for _ in range(10):                 # ten flips between the two
+                reports.tick("w1")
+                self.settle(reports)
+                reports.tick("w2")
+                self.settle(reports)
+        self.assertEqual(sorted(self.forks), ["w1", "w2"])
+
+    def test_an_agent_that_cannot_be_located_is_not_relocated_either(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate",
+                               lambda name: self.forks.append(name) or None):
+            for _ in range(10):
+                reports.tick("w1")
+                self.settle(reports)
+                reports.tick("w2")
+                self.settle(reports)
+        self.assertEqual(sorted(self.forks), ["w1", "w2"])
+
+    def test_the_answer_is_published_as_one_tuple(self):
+        """A frame may never read one agent's files under another agent's name — two
+        assignments with an `os.stat` between them is a wide enough window for it."""
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            reports.tick("w1")
+            self.settle(reports)
+            key, files = reports._answer
+        self.assertEqual(key[0], "w1")
+        self.assertEqual([Path(f).name for f in files], ["x.md"])
+        # The reader answers for the agent the tuple names and nobody else.
+        self.assertEqual(reports.tick("w2"), [])
 
     def test_nobody_highlighted_asks_nothing_at_all(self):
         reports = board.Reports()

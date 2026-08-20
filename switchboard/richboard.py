@@ -588,13 +588,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     bar = True                                   # is the AGENTS section header drawn?
     head_lines = 2 + len(stats_block)
     gap_min = 1 if needs else 0
-    room = (capacity - head_lines - 1 - len(needs) - gap_min - len(below)
-            - len(hint))                                          # head, footer
-    if room < 1 and hint:
-        # FIRST TO GIVE ITS LINES BACK, before even a plugin's section: it is the one
-        # piece of this board that is only telling the human about a key.
-        room += len(hint)
-        hint = []
+    # The hint is NOT charged here, deliberately: it is drawn out of whatever slack the
+    # frame has left, exactly as the plain renderer does it, and dropped below if there
+    # is none. Sizing the tree against it would cost two agent rows on any board that
+    # overflows — and cost them intermittently, since the hint comes and goes with what
+    # the highlighted agent has written. A line about a keystroke may not push agents
+    # under the fold.
+    room = capacity - head_lines - 1 - len(needs) - gap_min - len(below)   # head, footer
     if room < 1 and below:
         # FIRST TO GIVE ITS LINES BACK, before the numbers and long before the tree. A
         # plugin's section is the most decorative thing on this board and the only one a
@@ -616,10 +616,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # its bar last — a count with no names still says somebody is waiting.
         keep = max(1, len(needs) + room - 1)
         needs = needs[:keep]
-        room = capacity - head_lines - 1 - len(needs) - gap_min - len(hint)
+        room = capacity - head_lines - 1 - len(needs) - gap_min
         if room < 1:                                        # still none: the section goes
             needs, gap_min = [], 0
-            room = capacity - head_lines - 1 - len(hint)
+            room = capacity - head_lines - 1
 
     # WHICH ROWS ARE ON SCREEN, decided before the head is drawn because on the shortest
     # pane the head is what decides it. A section header over no agents at all is the one
@@ -733,8 +733,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # their own blank line above, so there is nothing to remember here about padding.
     for line in below:
         emit(line)
-    gap = max(gap_min, capacity - head_lines - drawn - len(below) - len(needs)
-              - len(hint) - 1)
+    # What is actually left once the tree has been drawn, and the hint is paid for out
+    # of it or not at all: it goes when taking its lines would eat the blank line NEEDS
+    # YOU is entitled to, or push the footer off the pane.
+    slack = capacity - head_lines - drawn - len(below) - len(needs) - 1
+    if hint and slack - len(hint) < gap_min:
+        hint = []
+    gap = max(gap_min, slack - len(hint))
     for _ in range(gap):
         emit(Text(""))
     for line in hint:

@@ -1913,18 +1913,26 @@ class Reports:
         a dict lookup;
       * the recompute, when the key does change, runs OFF THE DRAWING THREAD — the frame
         that asked draws the previous answer and the new one lands a frame or two later;
-      * the `sb inspect` fork happens once per agent per `_REPORTS_RECHECK`, not once per
-        recompute: an agent writing its report changes the mtime every couple of seconds,
-        and re-forking on each of those is the freeze this design exists to avoid.
+      * the `sb inspect` fork happens once per agent per `_REPORTS_RECHECK` — WHATEVER
+        that lookup found, including nothing at all. An agent writing its report moves
+        the mtime every couple of seconds, and a highlight moving between tabs asks about
+        a different agent every time it lands; neither may turn into a fork per frame, so
+        the age of the lookup is what decides, never what it happened to return.
 
     A transcript that grows is the point: the hint flips on by itself the moment the
     agent names a file, without anything polling for it.
     """
 
     def __init__(self):
-        self._where: dict = {}        # agent -> (cwd, transcript, when it was located)
-        self._key = None              # (agent, mtime) the current answer belongs to
-        self._files: list[str] = []
+        # agent -> (cwd, transcript, when it was looked up). A miss is REMEMBERED, with
+        # its timestamp, so an agent that has no worktree or no transcript yet is asked
+        # about on the same schedule as one that does rather than on every frame.
+        self._where: dict = {}
+        # ((agent, mtime), files) — published as ONE tuple, and read as one. Two
+        # assignments with an `os.stat` between them is long enough for a frame to read
+        # the new agent's files under the old agent's name, and the hint would then be
+        # showing A the number of files B wrote.
+        self._answer = None
         self._at = 0.0                # when the last recompute finished
         self._busy = False
 
@@ -1934,44 +1942,51 @@ class Reports:
             return []
         located = self._where.get(name)
         transcript = located[1] if located else None
-        key = (name, _mtime(transcript) if transcript else None)
+        key = (name, _mtime(transcript))
+        answer = self._answer
         due = time.monotonic() - self._at >= _REPORTS_RECHECK
-        if not self._busy and (due or key != self._key):
+        if not self._busy and (due or answer is None or key != answer[0]):
             self._busy = True
-            threading.Thread(target=self._recompute, args=(name,), daemon=True).start()
-        return self._files if self._key and self._key[0] == name else []
+            try:
+                threading.Thread(target=self._recompute, args=(name,),
+                                 daemon=True).start()
+            except RuntimeError:
+                # Thread exhaustion. The hint is the last thing on this board that may
+                # take the draw loop down, and a `_busy` left true would wedge it.
+                self._busy = False
+        return answer[1] if answer and answer[0][0] == name else []
 
     def _recompute(self, name: str) -> None:
         try:
             located = self._where.get(name)
-            # Re-`locate` only when there is nothing to stat or the answer is old
-            # enough to be worth doubting. This is the fork, and it is the whole reason
-            # for the cache.
-            if (located is None or not located[1]
-                    or time.monotonic() - located[2] >= _REPORTS_RECHECK):
-                found = locate(name)
-                located = (found[0], found[1], time.monotonic()) if found else None
-                if located:
-                    self._where[name] = located
-                else:
-                    self._where.pop(name, None)
-            cwd, transcript = (located[0], located[1]) if located else (None, None)
-            self._files = files_for(cwd, transcript)
-            self._key = (name, _mtime(transcript) if transcript else None)
+            # THE FORK, and the whole reason for the cache. Its age is the only thing
+            # that decides — a miss is cached exactly like a hit, or an agent with no
+            # transcript would re-fork every time the highlight came back to it.
+            if located is None or time.monotonic() - located[2] >= _REPORTS_RECHECK:
+                found = locate(name) or (None, None)
+                located = (found[0], found[1], time.monotonic())
+                self._where[name] = located
+            cwd, transcript = located[0], located[1]
+            files = files_for(cwd, transcript)
+            self._answer = ((name, _mtime(transcript)), files)
         except BaseException:                   # noqa: BLE001 — a hint may not be able
-            self._files, self._key = [], (name, None)   # to take the board with it
+            self._answer = ((name, None), [])   # to take the board with it
         finally:
             self._at = time.monotonic()
             self._busy = False
 
 
-def _mtime(path: Optional[str]) -> Optional[float]:
-    """The one filesystem call the drawing thread makes per frame."""
-    if not path:
+def _mtime(path) -> Optional[float]:
+    """The one filesystem call the drawing thread makes per frame.
+
+    Its argument came out of another process's JSON, so the type is not ours to assume:
+    a `TypeError` here would be a crash on the hot path, every frame.
+    """
+    if not path or not isinstance(path, str):
         return None
     try:
         return os.stat(path).st_mtime
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
