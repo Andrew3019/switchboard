@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -487,6 +488,48 @@ def prompt(dotted: str, repo: Optional[Path] = None, **fields: Any) -> str:
         return text.format(**fields) if fields else text
     except (KeyError, IndexError) as e:
         raise ConfigError(f"prompt '{dotted}' uses a placeholder nothing fills: {e}") from e
+
+
+# -- operator skills -----------------------------------------------------------
+
+
+@dataclass
+class OperatorSkill:
+    """One procedure a person can ask the dispatcher to run.
+
+    `command` is the verb a human is told to run, `description` is what it does. Both are
+    prose destined for a spawn prompt, so both are flattened by whoever renders them —
+    see `Broker._operator_menu`.
+    """
+    command: str
+    description: str
+
+
+def operator_skills(repo: Optional[Path] = None) -> list[OperatorSkill]:
+    """The operator procedures this repo offers, shipped joined with the repo's own.
+
+    An array of tables, so rule 3 applies: a repo adding one entry in
+    `<repo>/.switchboard/operator_skills.toml` keeps the shipped ones, and `["!reset"]`
+    first is how you say "exactly these, or none at all". Joining dedupes by whole-record
+    equality, so a same-command different-description entry is a SECOND row rather than an
+    override — rewording a shipped entry means resetting.
+
+    The list is what `spawn.operator_menu` is generated from, so that the dispatcher's menu
+    cannot go stale the way a hardcoded one would.
+    """
+    shipped = read_toml(defaults_dir() / "operator_skills.toml").get("skill") or []
+    p = path_for("operator_skills_file", repo)
+    mine = (read_toml(p).get("skill") or []) if p is not None else []
+    out = []
+    for entry in join(list(shipped), list(mine)):
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"operator_skills.toml: each entry must be a [[skill]] table, got {entry!r}")
+        try:
+            out.append(OperatorSkill(**entry))
+        except TypeError as e:
+            raise ConfigError(f"operator_skills.toml: bad [[skill]] entry {entry!r}: {e}") from e
+    return out
 
 
 # -- preset bindings -----------------------------------------------------------

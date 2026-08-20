@@ -38,6 +38,10 @@ protocol_file = "protocol.md"
 prompts_file  = "prompts.toml"
 settings_file = "settings.toml"
 
+# The operator procedures this repo offers — the dispatcher's menu, one `[[skill]]`
+# table per entry. Array-of-tables, so a repo's entries JOIN the shipped ones.
+operator_skills_file = "operator_skills.toml"
+
 # One directory and one file, each meaning two things during the transition — and needing
 # no disambiguation, because the two are told apart by SHAPE rather than by name:
 #

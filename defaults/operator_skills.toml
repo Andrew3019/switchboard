@@ -1,0 +1,17 @@
+# Operator skills: procedures a person can ask the dispatcher to run.
+#
+# Listed live in the dispatcher's spawn prompt (`spawn.operator_menu`, generated from this
+# file by `Broker._operator_menu`) so the menu cannot go stale the way hardcoded prose
+# would. A repo adds its own in `<repo>/.switchboard/operator_skills.toml`; arrays JOIN, so
+# the shipped entries survive — put `"!reset"` first to replace them instead.
+#
+# NOTE: joining dedupes by whole-record equality, so to REWORD a shipped entry a repo must
+# `"!reset"` — a same-command different-description row is a second row, not an override.
+#
+# `command` is the verb the dispatcher tells the human to run, written the way a person
+# would type it. Keep both fields short: they are joined into one line of every dispatcher's
+# system prompt.
+
+[[skill]]
+command = "sb presets sb-setup"
+description = "set up this repo's switchboard config (settings, plugin toggles, bespoke roles)"
