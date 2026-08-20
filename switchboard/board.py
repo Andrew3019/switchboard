@@ -1289,10 +1289,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     for line in below:
         emit(line)
 
-    # The `oo` hint, above the footer and only when there is something to open — see
-    # `hint_lines`. It takes its lines out of the slack rather than off the tree, and
+    # The `oo`/`ww` hint, above the footer and only when there is something to open —
+    # see `hint_lines`. It takes its lines out of the slack rather than off the tree, and
     # goes when a pane is too short to spare them: the tree is what the board is for.
-    hint = hint_lines(here, openable)
+    # `openable` is `Reports.tick`'s whole (files, has_worktree) pair — see `tick`.
+    hint = hint_lines(here, *(openable or ([], False)))
     if len(rows) + len(hint) > height - 2:
         hint = []
     while len(rows) < height - 2 - len(hint):
@@ -1796,12 +1797,27 @@ def double_press_run(last: float, presses: int, now: float,
 
 
 def open_report_files(name: Optional[str]) -> str:
-    """Double-`o`: the highlighted agent's worktree in the editor, and what it wrote.
+    """Double-`o`: what the highlighted agent wrote, in the editor. Files only.
 
-    Two shapes of call, and the order matters: the folder first, which focuses (or
-    creates) that worktree's window, then each file with `-r -g`, which lands it as a
-    tab in the window that is now the active one. Called again later for the same
-    worktree, the same window collects more tabs instead of a second window opening.
+    ONE shell-out, `cursor -r <every file at once>`, and no folder argument: `ww`
+    opens the worktree now, and this used to open it first — a second, still-in-flight
+    subprocess the file calls were racing. `-r` is not about recency, whatever the
+    one-line CLI doc says: it sets `forceReuseWindow`, which is what stops the user's
+    own `window.openFilesInNewWindow` setting overriding the editor's own choice of
+    window. That choice is CONTAINMENT — a window whose folder holds the file wins,
+    longest match first — so the files land in the worktree's own window whenever it
+    is open, and fall back to the last active one only when no window contains them.
+    With no editor window at all the fallback is a ROOTLESS window: the files as tabs
+    and no file tree. Pressing `ww` first is the fix for that, and it is a habit
+    rather than something this can do anything about.
+
+    No `-g`: it only switches path parsing into `path:line:col` mode, and `_LINE_SUFFIX`
+    already drops every candidate ending in a line number, so it was inert. `-g` would
+    be worth reconsidering only if `_PATHLIKE` were ever loosened to admit one.
+
+    Zero files is a NO-OP and returns before the editor is touched at all. `cursor -r`
+    with no paths is a valid call that raises an empty window, so an agent that wrote
+    nothing would pop the editor open to say "no files found" in the status bar.
 
     Where the worktree and the transcript come from is the one thing here that is not
     the obvious way round. Both live in the store, and this module may not read the
@@ -1831,10 +1847,12 @@ def open_report_files(name: Optional[str]) -> str:
         return f"{name}: no worktree to open"
 
     files = files_for(cwd, transcript)
+    # BEFORE the editor is touched: see the docstring — a pathless `cursor -r` raises a
+    # window rather than doing nothing, which is the opposite of what no files means.
+    if not files:
+        return f"{name}: no files found in recent messages"
     try:
-        _editor(cwd)
-        for f in files:
-            _editor("-r", "-g", f)
+        _editor("-r", *files)
     except FileNotFoundError:
         return f"{name}: {_EDITOR} not on PATH"
     except PermissionError:
@@ -1847,9 +1865,49 @@ def open_report_files(name: Optional[str]) -> str:
         # Everything else the exec can fail with — a fork that runs out of memory, a
         # bad interpreter line. A setting must not be able to end the board.
         return f"{name}: {_EDITOR} failed: {status_mod.clip(str(e), 40)}"
-    if not files:
-        return f"{name}: no files found in recent messages"
     return f"→ {name}: opened {len(files)} file(s)"
+
+
+def open_worktree(name: Optional[str]) -> str:
+    """Double-`w`: the highlighted agent's worktree folder in the editor.
+
+    `open_report_files`' other half, and the one that gives a window a ROOT. `cursor
+    <cwd>` and no `-r`: for a folder, `-r` would force whatever window was last active
+    to change what it is showing, where the bare call is the one that skips a window
+    already open on exactly that folder and focuses it instead. Two ways that skip
+    still misses, both accepted: a worktree that is one folder of a MULTI-ROOT window
+    (the skip wants a single-folder window), and a `cwd` reaching the same directory
+    through a symlink (the match is URI equality, not realpath). Both open a second
+    window on something already visible.
+
+    The directory is checked first because nothing else here would: `open_report_files`
+    gets a deleted worktree for free — no file under it survives `is_file()`, so it
+    says "no files found" — and this has no such filter.
+
+    Returns a line for the status bar and never raises, for `open_report_files`' reason:
+    a settings file must not be able to take the board down.
+    """
+    if not name:
+        return "press w on a highlighted agent"
+    where = locate(name)
+    if where is None:
+        return f"{name}: could not read this agent"
+    cwd, _ = where
+    if not cwd:
+        return f"{name}: no worktree to open"
+    if not os.path.isdir(cwd):
+        return f"{name}: worktree no longer exists"
+    try:
+        _editor(cwd)
+    except FileNotFoundError:
+        return f"{name}: {_EDITOR} not on PATH"
+    except PermissionError:
+        return f"{name}: {_EDITOR} is not executable"
+    except subprocess.TimeoutExpired:
+        return f"{name}: {_EDITOR} timed out"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"{name}: {_EDITOR} failed: {status_mod.clip(str(e), 40)}"
+    return f"→ {name}: opened worktree"
 
 
 # How long a `locate` answer is trusted, and how often a highlighted agent with no
@@ -1860,25 +1918,36 @@ def open_report_files(name: Optional[str]) -> str:
 _REPORTS_RECHECK = 60.0
 
 
-def hint_lines(name: Optional[str], files) -> list[str]:
-    """The `oo` hint: two lines, or nothing at all. Both renderers draw these strings.
+def hint_lines(name: Optional[str], files, has_worktree: bool = False) -> list[str]:
+    """The `oo`/`ww` hint: two lines, one, or nothing. Both renderers draw these strings.
 
     Shown ONLY when the highlighted agent has something to open, which is what makes it
     a hint rather than chrome: a key that would do nothing is not advertised, and the
-    count is the thing worth knowing before pressing it.
+    count is the thing worth knowing before pressing it. Files are what `oo` needs and
+    a worktree is what `ww` needs, so an agent with a worktree and nothing written yet
+    gets the one line that is true for it.
+
+    ONE block and never two, because the budget is two lines of slack (see `layout`)
+    and a second gate would want a third: the files case carries `ww` on its second
+    line rather than adding a line of its own.
     """
-    if not name or not files:
+    if not name:
         return []
-    n = len(files)
-    return [f"{name} wrote {n} file{'' if n == 1 else 's'} you can open",
-            f"press oo for {'it' if n == 1 else 'them'} in {_EDITOR}"]
+    if files:
+        n = len(files)
+        return [f"{name} wrote {n} file{'' if n == 1 else 's'} you can open",
+                f"press oo for {'it' if n == 1 else 'them'} in {_EDITOR}"
+                " · ww for the worktree"]
+    if has_worktree:
+        return [f"press ww to open {name}'s worktree in {_EDITOR}"]
+    return []
 
 
 class Reports:
-    """Whether the highlighted agent has anything for `oo` to open — asked every frame.
+    """Whether the highlighted agent has anything for `oo`/`ww` to open — every frame.
 
-    The hint only shows when there are files, so the drawing thread has to know the
-    answer on every frame, and the answer costs a fork plus a transcript read. This is
+    The hint only shows when there is something to open, so the drawing thread has to
+    know the answer every frame, and it costs a fork plus a transcript read. This is
     the whole of what makes that affordable:
 
       * per frame, ONE `stat` of the transcript, and nothing else;
@@ -1902,18 +1971,32 @@ class Reports:
         # its timestamp, so an agent that has no worktree or no transcript yet is asked
         # about on the same schedule as one that does rather than on every frame.
         self._where: dict = {}
-        # ((agent, mtime), files) — published as ONE tuple, and read as one. Two
-        # assignments with an `os.stat` between them is long enough for a frame to read
-        # the new agent's files under the old agent's name, and the hint would then be
-        # showing A the number of files B wrote.
+        # ((agent, mtime), files, has_worktree) — published as ONE tuple, and read as
+        # one. Two assignments with an `os.stat` between them is long enough for a frame
+        # to read the new agent's files under the old agent's name, and the hint would
+        # then be showing A the number of files B wrote.
+        #
+        # `has_worktree` rides INSIDE that tuple rather than being read off `_where`,
+        # which is where a drawing thread would naturally go looking for it. `_where` is
+        # written by `_recompute` before `_answer`, so a read of one beside the other
+        # crosses exactly the seam this tuple exists to close — and `_where` has no
+        # `name` guard and no entry at all until the first recompute lands, so the
+        # worktree-only hint, the one case with no files to fall back on, would be blank
+        # for the first frames after every move of the highlight.
         self._answer = None
         self._at = 0.0                # when the last recompute finished
         self._busy = False
 
-    def tick(self, name: Optional[str]) -> list[str]:
-        """The files `oo` would open for `name`. Never blocks, never raises."""
+    def tick(self, name: Optional[str]):
+        """What `oo`/`ww` would open for `name` — (files, has_worktree). Never blocks.
+
+        Returned as one pair, and threaded on as one `openable` value: a second
+        parameter beside it would have to be added to `draw`, `frame` and both
+        renderers' `layout`, and the cost of missing one of those is not a crash but
+        the two renderers quietly promising different hints.
+        """
         if not name:
-            return []
+            return [], False
         located = self._where.get(name)
         transcript = located[1] if located else None
         key = (name, _mtime(transcript))
@@ -1928,7 +2011,7 @@ class Reports:
                 # Thread exhaustion. The hint is the last thing on this board that may
                 # take the draw loop down, and a `_busy` left true would wedge it.
                 self._busy = False
-        return answer[1] if answer and answer[0][0] == name else []
+        return (answer[1], answer[2]) if answer and answer[0][0] == name else ([], False)
 
     def _recompute(self, name: str) -> None:
         try:
@@ -1942,9 +2025,9 @@ class Reports:
                 self._where[name] = located
             cwd, transcript = located[0], located[1]
             files = files_for(cwd, transcript)
-            self._answer = ((name, _mtime(transcript)), files)
-        except BaseException:                   # noqa: BLE001 — a hint may not be able
-            self._answer = ((name, None), [])   # to take the board with it
+            self._answer = ((name, _mtime(transcript)), files, bool(cwd))
+        except BaseException:                       # noqa: BLE001 — a hint may not be
+            self._answer = ((name, None), [], False)    # able to take the board with it
         finally:
             self._at = time.monotonic()
             self._busy = False
@@ -1994,32 +2077,57 @@ def files_for(cwd: Optional[str], transcript: Optional[str]) -> list[str]:
                         cwd)
 
 
-def open_tick(name: Optional[str], note: list, running):
+# The two editor actions, by the key pair that fires them: what runs, and what it
+# opens — the noun a refusal needs to tell one from the other.
+_ACTIONS = {"oo": ("files", lambda name: open_report_files(name)),
+            "ww": ("worktree", lambda name: open_worktree(name))}
+
+
+def open_tick(name: Optional[str], note: list, running, action: str = "oo"):
     """Start an open off the drawing thread. -> (what is running now, a line to show).
 
-    `running` is the `(thread, agent name)` this returned last, or None.
+    `running` is the `(thread, agent name, action)` this returned last, or None.
 
-    One at a time. Leaning on `o` re-fires once per read, and each fire is up to eight
-    subprocesses; without this the bursts would pile up behind each other and every one
-    of them would open the same tabs again.
+    ONE EDITOR ACTION AT A TIME, and `oo` and `ww` share the slot rather than having
+    one each. Leaning on `o` re-fires once per read; without this the bursts would pile
+    up behind each other and every one of them would open the same tabs again. Sharing
+    it with `ww` is what two independent mailboxes would have cost: `drain` pops EVERY
+    non-empty box and keeps the last line, which is sound only while exactly one
+    keypress answer can be waiting, and two boxes would silently destroy one of two
+    answers that landed in the same pass. Sharing also puts `oo` behind `ww` when both
+    are asked for at once — the ordering the files want, since a worktree window that
+    exists is the one containment sends them to.
+
+    What it does NOT fix: `cursor <cwd>` returns when the CLI hands off, not when the
+    window is up, so a cold-start `ww` followed straight away by `oo` can still have
+    the files arrive before there is a window to contain them. Press `ww`, wait for the
+    window, then `oo`.
 
     A refusal NAMES BOTH AGENTS, because the request is dropped rather than queued and
     the board must not imply otherwise: asking for B while A is still opening leaves A's
     line to arrive afterwards, and a bare "still opening…" followed by "→ A: opened 3
-    file(s)" reads, to somebody who just asked for B, like B.
+    file(s)" reads, to somebody who just asked for B, like B. When the two are different
+    actions it names what each one is opening as well, since "still opening A — A not
+    started" is otherwise a sentence about nothing.
     """
+    noun, _ = _ACTIONS[action]
     if not name:
-        return running, "press o on a highlighted agent"
+        return running, f"press {action[0]} on a highlighted agent"
     if running is not None and running[0].is_alive():
-        return running, f"still opening {running[1]} — {name} not started, press oo again"
-    t = threading.Thread(target=_open, args=(name, note), daemon=True)
+        if running[2] == action:
+            busy, asked = running[1], name
+        else:
+            busy = f"{running[1]}'s {_ACTIONS[running[2]][0]}"
+            asked = f"{name}'s {noun}"
+        return running, f"still opening {busy} — {asked} not started, press {action} again"
+    t = threading.Thread(target=_open, args=(name, note, action), daemon=True)
     try:
         t.start()
     except RuntimeError as e:
         # Thread exhaustion. Vanishingly rare and `sweep_tick` has the same exposure,
         # but this one is on a keypress, and a keypress may not end the board.
         return running, f"{name}: could not start: {status_mod.clip(str(e), 40)}"
-    return (t, name), f"opening {name}…"
+    return (t, name, action), f"opening {name}…"
 
 
 def drain(msg: str, *boxes: list):
@@ -2038,13 +2146,13 @@ def drain(msg: str, *boxes: list):
     return msg, drained
 
 
-def _open(name: Optional[str], note: list) -> None:
+def _open(name: Optional[str], note: list, action: str = "oo") -> None:
     """The open itself, off the drawing thread. Never raises into it."""
     try:
-        note.append(open_report_files(name))
+        note.append(_ACTIONS[action][1](name))
     except BaseException as e:                  # noqa: BLE001 — a dead thread that says
         note.append(f"{name}: open failed: {e}")        # nothing is the one outcome worth ruling
-                                                # out; `open_report_files` catches its own
+                                                # out; both actions catch their own
 
 
 # How far back a transcript is read. One JSONL record is one content block, not one
@@ -2313,13 +2421,16 @@ def main() -> int:
     # setting it starts from is for. `layout` clamps `top` every call, so the row
     # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
-    # When `o` was last pressed on its own, on the monotonic clock. One float is the
-    # whole double-press state: a single `o` is not a command, so nothing happens until
-    # a second one lands inside `DOUBLE_PRESS` — see `double_press_run`, which is where
-    # a pair arriving in ONE read is handled. `open_note` is that worker thread's
-    # one-slot mailbox, `sweep_note`'s shape and for its reason: the open shells out,
-    # and this pane may not be written to by anything but the frame loop.
-    last_o, open_note, opening = 0.0, [], None
+    # When `o` and `w` were last pressed on their own, on the monotonic clock. One float
+    # each is the whole double-press state: a single `o` is not a command, so nothing
+    # happens until a second one lands inside `DOUBLE_PRESS` — see `double_press_run`,
+    # which is where a pair arriving in ONE read is handled. The two floats are separate
+    # and the counting is per character, so `owo` is a double-`o` and not a cross-key
+    # anything. `open_note` is the worker thread's one-slot mailbox, `sweep_note`'s shape
+    # and for its reason: the open shells out, and this pane may not be written to by
+    # anything but the frame loop. ONE mailbox and one `opening` slot for both keys —
+    # see `open_tick` for why two would break `drain`.
+    last_o, last_w, open_note, opening = 0.0, 0.0, [], None
     show_archived = status_mod.SHOW_ARCHIVED
     # Which agent shares this pane's tab — the row this board highlights. Built here and
     # not at import, so the environment it reads is this process's own, and asked again per
@@ -2369,12 +2480,23 @@ def main() -> int:
                         if "a" in ev["raw"]:
                             show_archived = not show_archived
                             dirty[0] = True
+                        # `w` BEFORE `o`, and the order is load-bearing: one read can
+                        # carry `wwoo`, both branches fire in this same iteration, and
+                        # both write `msg` — so the branch that runs LAST owns the status
+                        # line. `oo`'s answer is the more informative of the two.
+                        if "w" in ev["raw"]:
+                            fire, last_w = double_press_run(
+                                last_w, ev["raw"].count("w"), time.monotonic())
+                            if fire:
+                                opening, msg = open_tick(
+                                    where.name(snap.agents), open_note, opening, "ww")
+                                dirty[0] = True
                         if "o" in ev["raw"]:
                             fire, last_o = double_press_run(
                                 last_o, ev["raw"].count("o"), time.monotonic())
                             if fire:
                                 opening, msg = open_tick(
-                                    where.name(snap.agents), open_note, opening)
+                                    where.name(snap.agents), open_note, opening, "oo")
                                 dirty[0] = True
                         continue
                     step = wheel(ev)

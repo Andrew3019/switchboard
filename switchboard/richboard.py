@@ -566,10 +566,11 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     wanted = needs_list(snap.agents)
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
-    # The `oo` hint — two lines and only when the highlighted agent has something to
-    # open. `board.hint_lines` writes them, so the two renderers cannot come to promise
-    # different things, exactly as `stats_rows` keeps their numbers the same.
-    hint = _hint_block(board.hint_lines(here, openable), inner)
+    # The `oo`/`ww` hint — two lines, one, or none, per what the highlighted agent has
+    # to open. `board.hint_lines` writes them, so the two renderers cannot come to
+    # promise different things, exactly as `stats_rows` keeps their numbers the same.
+    # `openable` is `board.Reports.tick`'s whole (files, has_worktree) pair.
+    hint = _hint_block(board.hint_lines(here, *(openable or ([], False))), inner)
 
     # The head is SIX lines: the board's own bar, the `STATS` bar, the two lines of fleet
     # numbers, the blank that separates them from what follows, and the section bar that
