@@ -80,6 +80,7 @@ Verify: `sb plugin plans create`, then `show`/`list` render it; changelog append
 ---
 - `register(reg)` declares `create`, `list`, `show`, `changelog` verbs.
 - State is one JSON file under `plugins.state_dir()`, tmp-write then `os.replace`.
+- Superseded: the store is one `p-<n>.json` per plan there, plus a `_meta.json`.
 ---
 - Plan id `p-<n>` and step id `s-<n>` are monotonic, never reused.
 - Superseded for steps: they number per plan from `step-1`, held in the plan's own file.
@@ -150,6 +151,7 @@ Verify: name a library step; copy a template; add a merge step and see merge-hum
 - Editing a library definition reaches every plan naming it, including live ones.
 - A variant is a new on-the-fly step, never a forked or edited link.
 - Library steps may compose into several steps, so long as nothing is circular.
+- Later: a definition may carry a `command`, resolved onto the step and never run.
 - What a plan holds is always flat; naming a composite expands it into flat steps.
 ---
 - A template is a preconfigured plan; using one copies it, and the copy is freely edited.

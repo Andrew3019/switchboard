@@ -38,8 +38,10 @@ says the agent is the interpreter and there is no schema to satisfy, so a step c
 field this file has never heard of is a feature and not corruption — `_step()` fills in the
 fields the design names and leaves everything else alone, and EVERY RENDERING SHOWS IT:
 `--json` and `--markdown` because neither knows a schema, and the terminal view because
-`_step_lines` draws what it has no name for on a line of its own under the step. A promise
-kept in two renderings out of three was one the third made a liar of.
+`_step_lines` draws what it has no name for on a line of its own under the step — a scalar
+one, that being what a line holds; a list or an object is left to `--json`, which is the
+shape that can carry one. A promise kept in two renderings out of three was one the third
+made a liar of.
 
 Moving a step
 -------------
@@ -190,7 +192,7 @@ flat. What a plan holds is always flat: no step contains another, because a step
 would be a plan by another name. Composition is the one edge in this file that is actually
 traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps` is not: a
 `dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
-hang. Expansion mints fresh ids from the same counter as everything else.
+hang. Expansion mints fresh ids from the plan's own counter, like every step in it.
 
 A definition may also OBLIGE another — `merge` obliges `merge-human-review` — and naming it
 adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
@@ -706,9 +708,14 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
     - NEVER drop or rewrite an entry that is already there, or a plan. Records are kept and
       never erased; cleanup means dropping out of the UI.
     - ADD A LIBRARY STEP with `name-step`, not by hand. It pulls in what the definition
-      composes and obliges; a `def` you typed yourself silently brings neither. A step
-      written by hand needs its own `display` and its own `deps` — a named one draws the
-      library definition's label and needs neither.
+      composes and obliges — and what those oblige in turn, so one name may land several
+      steps at once, and the deps it writes for them are a starting shape to fix in the
+      file. It also brings the definition's `command`, where it has one: the standard
+      shell command that step is run with, resolved onto the step every time it is drawn
+      so that it is under the step rather than somewhere its owner has to go and find. A
+      `def` you typed yourself silently brings none of it. A step written by hand needs
+      its own `display` and its own `deps` — a named one draws the library definition's
+      label and needs neither.
 
   WHICH FIELDS ARE YOURS TO WRITE. Everything a verb mints is in the file already; these
   are the ones that only ever arrive by editing it, and each says who writes it and when.
@@ -749,13 +756,23 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   every time the step is drawn.
 
   A FIELD THIS LIST HAS NEVER HEARD OF IS ALLOWED. There is no schema to satisfy: put what
-  the job needs on the step, and `show`, `--json` and the PR comment all print it.
+  the job needs on the step, and `show`, `--json` and the PR comment all print it — a
+  scalar gets its own line under the step in the terminal, and anything with a shape to it
+  is left to `--json`, which is the rendering that can carry one.
 
   Three verbs are worth typing rather than editing, being frequent and small — `tick
   <step>` when a step is done, `note <step> --text` for what happened, and `dep <step>
   --after <step>` for an edge, which refuses one pointing at a step that is not there.
   They write the changelog entry for you, which is most of what they buy. `sb plugin plans
   --help` lists the rest.
+
+  HOW A STEP IS ADDRESSED, since every one of those takes one. Each plan numbers its own
+  steps from `step-1`, so `step-3` on its own resolves while exactly one plan holds that
+  number — which is the usual case, a worktree holding one plan — and otherwise refuses,
+  naming the plans it could have meant. `p-16/step-3` names the plan on the front and
+  always works, and is what that refusal is asking you for. A plan made before per-plan
+  numbering keeps its `s-<n>` ids and nothing is renumbered; both spellings, and a bare
+  number, resolve.
 
   WHAT VALIDATE IS FOR. Nothing watches the file, so an edit is noticed when something
   next reads the store — the next command, or the board, which redraws every few seconds

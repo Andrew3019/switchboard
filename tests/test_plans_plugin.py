@@ -2913,6 +2913,13 @@ class GateTest(PlansSandbox):
                 "APPEND a changelog entry",
                 "NEVER drop or rewrite an entry",
                 "ADD A LIBRARY STEP with `name-step`, not by hand",
+                # And what naming one brings that typing a `def` does not: the chain of
+                # obligations, and the definition's ready-to-run command.
+                "It also brings the definition's `command`",
+                # How a step is addressed, now that step numbers are per plan and a bare
+                # one can be ambiguous. The qualified form is what a refusal asks for.
+                "HOW A STEP IS ADDRESSED",
+                "`p-16/step-3` names the plan on the front",
                 # Who writes what. Shape is the lead's; a tick is whoever did the step.
                 "The owner makes every edit to the SHAPE of the plan",
                 "TICKING IS NOT THAT",
