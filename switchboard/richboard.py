@@ -108,6 +108,9 @@ HEADER_STYLE = "bold white on blue"
 # reads as one of the family rather than as a new kind of line.
 SECTION_STYLE = "bold white on grey23"
 NEEDS_STYLE = "bold black on yellow"
+# The `oo` hint. Yellow for the same reason NEEDS YOU is, a line rather than a bar
+# because it is a smaller ask than somebody being stuck.
+HINT_STYLE = "bold yellow"
 BORDER_STYLE = "blue"
 GUTTER_STYLE = "bold cyan"
 DIM = "dim"
@@ -508,8 +511,8 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           here: Optional[str] = None, stats: Optional[dict] = None
-           ) -> Optional[list[tuple[str, Optional[object]]]]:
+           here: Optional[str] = None, stats: Optional[dict] = None,
+           openable=None) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
     Returns None when it cannot honour that contract: `rich` is absent, the pane is too
@@ -565,6 +568,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     wanted = needs_list(snap.agents)
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
+    # The `oo` hint — two lines and only when the highlighted agent has something to
+    # open. `board.hint_lines` writes them, so the two renderers cannot come to promise
+    # different things, exactly as `stats_rows` keeps their numbers the same.
+    hint = _hint_block(board.hint_lines(here, openable), inner)
 
     # The head is SIX lines: the board's own bar, the `STATS` bar, the two lines of fleet
     # numbers, the blank that separates them from what follows, and the section bar that
@@ -581,6 +588,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     bar = True                                   # is the AGENTS section header drawn?
     head_lines = 2 + len(stats_block)
     gap_min = 1 if needs else 0
+    # The hint is NOT charged here, deliberately: it is drawn out of whatever slack the
+    # frame has left, exactly as the plain renderer does it, and dropped below if there
+    # is none. Sizing the tree against it would cost two agent rows on any board that
+    # overflows — and cost them intermittently, since the hint comes and goes with what
+    # the highlighted agent has written. A line about a keystroke may not push agents
+    # under the fold.
     room = capacity - head_lines - 1 - len(needs) - gap_min - len(below)   # head, footer
     if room < 1 and below:
         # FIRST TO GIVE ITS LINES BACK, before the numbers and long before the tree. A
@@ -720,9 +733,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # their own blank line above, so there is nothing to remember here about padding.
     for line in below:
         emit(line)
-    gap = max(gap_min, capacity - head_lines - drawn - len(below) - len(needs) - 1)
+    # What is actually left once the tree has been drawn, and the hint is paid for out
+    # of it or not at all: it goes when taking its lines would eat the blank line NEEDS
+    # YOU is entitled to, or push the footer off the pane.
+    slack = capacity - head_lines - drawn - len(below) - len(needs) - 1
+    if hint and slack - len(hint) < gap_min:
+        hint = []
+    gap = max(gap_min, slack - len(hint))
     for _ in range(gap):
         emit(Text(""))
+    for line in hint:
+        emit(line)
     for line, owner in needs:
         emit(line, owner)
     emit(foot)
@@ -1059,6 +1080,17 @@ def _footer(inner: int, msg: str, note_text: str):
         foot.append(piece, style=DIM)
         used += gap + _vlen(piece)
     return foot
+
+
+def _hint_block(lines: list[str], inner: int) -> list:
+    """The `oo` hint as rich lines. Empty when there is nothing to open.
+
+    Yellow, like everything else on this board that is asking the human for something,
+    and owned by nobody: it names a key, not a row, so a click on it must miss.
+    """
+    from rich.text import Text
+    return [Text(_clip(line, inner), style=HINT_STYLE, no_wrap=True, overflow="crop")
+            for line in lines]
 
 
 def _bar(text: str, cols: int, style: str):

@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import tty
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1728,6 +1732,500 @@ class SeamPathsTest(unittest.TestCase):
         self.assertFalse(never.exists())
         # No repo, no path to name.
         self.assertIsNone(board._state_dir(tmp / "not-a-repo", "plans", "repo"))
+
+
+class ReportFilesTest(unittest.TestCase):
+    """What double-`o` opens, from prose that also cites code it merely read.
+
+    The strings below are real assistant text shapes taken off transcripts in this
+    repo — the "wrote it to X" one, which is the whole point of the feature, and the
+    "`board.py:1914-1929`" citation, which is what stops it being one regex. The
+    citation's file EXISTS here on purpose: an earlier version of this test only
+    passed because it did not, so it pinned the existence filter and not the rule it
+    was named for.
+    """
+
+    def setUp(self):
+        # Resolved, because /tmp is a symlink on macOS and `report_files` normalises
+        # the cwd it is handed.
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / ".switchboard" / "briefs" / "scout").mkdir(parents=True)
+        (self.tmp / ".switchboard" / "briefs" / "scout" / "findings.md").write_text("x")
+        (self.tmp / "notes").mkdir()
+        (self.tmp / "notes" / "x.md").write_text("x")
+        (self.tmp / "board.py").write_text("x")
+
+    def files(self, *texts, **kw):
+        return [str(Path(f).relative_to(self.tmp))
+                for f in board.report_files(texts, str(self.tmp), **kw)]
+
+    def test_a_written_file_is_opened(self):
+        self.assertEqual(
+            self.files("Task complete. I wrote full findings to "
+                       "`.switchboard/briefs/scout/findings.md`, then called `sb done`."),
+            [".switchboard/briefs/scout/findings.md"])
+
+    def test_a_line_range_rejects_a_citation_even_when_the_file_is_right_there(self):
+        self.assertEqual(
+            self.files("the board's left-click handler (`board.py:1914-1929`) does it"),
+            [])
+        # The same file, named without a line range, is indistinguishable from one it
+        # wrote — and is opened. The accepted residual, pinned so a change is deliberate.
+        self.assertEqual(self.files("see `board.py`"), ["board.py"])
+
+    def test_only_files_that_exist_under_the_agents_cwd_survive(self):
+        self.assertEqual(self.files("wrote `notes/x.md` and `notes/gone.md`"),
+                         ["notes/x.md"])
+
+    def test_absolute_and_tilde_paths_are_read_and_then_contained(self):
+        inside = self.tmp / "notes" / "x.md"
+        self.assertEqual(self.files(f"wrote `{inside}`"), ["notes/x.md"])
+        # Real, and nowhere near this agent's worktree: containment drops it.
+        self.assertEqual(board.report_files(["see `/etc/hosts` and `~/.zshrc`"],
+                                            str(self.tmp)), [])
+
+    def test_urls_unfenced_prose_and_repeats_are_not_paths(self):
+        self.assertEqual(self.files("see `http://example.com/a.md` and notes/x.md"), [])
+        self.assertEqual(self.files("`notes/x.md`", "again: `./notes/x.md`"),
+                         ["notes/x.md"])
+
+    def test_the_cap_keeps_the_newest_message_and_leaves_it_last(self):
+        for i in range(3):
+            (self.tmp / "notes" / f"f{i}.md").write_text("x")
+        # An earlier message naming enough files to fill the cap must not evict the
+        # report the final message names — that file is the whole point of the action,
+        # and it goes last so it is the tab the editor leaves in front.
+        self.assertEqual(
+            self.files("read `notes/f0.md` `notes/f1.md` `notes/f2.md`",
+                       "Done. Findings in `notes/x.md`.", limit=2),
+            ["notes/f0.md", "notes/x.md"])
+
+    def test_every_path_comes_back_absolute_even_from_a_relative_cwd(self):
+        """The one thing standing between a file named `-g.py` and `cursor -r -g -g.py`
+        is that what reaches the editor is absolute. Enforced here, not inherited from
+        the fact that the store happens to keep cwd absolute today."""
+        (self.tmp / "-g.py").write_text("x")
+        here = Path.cwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(self.tmp)
+        got = board.report_files(["see `./-g.py` and `notes/x.md`"], ".")
+        self.assertTrue(all(Path(f).is_absolute() for f in got), got)
+        self.assertEqual([Path(f).name for f in got], ["-g.py", "x.md"])
+
+    def test_a_cap_of_zero_opens_nothing(self):
+        self.assertEqual(self.files("`notes/x.md`", limit=0), [])
+
+
+class LastAssistantTextsTest(unittest.TestCase):
+    """Only what the agent SAID — the file-opener scans this, and tool arguments and
+    tool output are everything it read rather than everything it wrote."""
+
+    def entry(self, role, *parts):
+        return json.dumps({"type": role,
+                           "message": {"role": role, "content": list(parts)}})
+
+    def text(self, s):
+        return {"type": "text", "text": s}
+
+    def texts(self, *lines, n=3):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        p = tmp / "t.jsonl"
+        p.write_text("".join(l + "\n" for l in lines))
+        return board.last_assistant_texts(p, n)
+
+    def test_text_parts_only_newest_last(self):
+        got = self.texts(
+            self.entry("assistant", self.text("first")),
+            self.entry("assistant", {"type": "tool_use", "name": "Bash",
+                                     "input": {"command": "cat notes/x.md"}}),
+            self.entry("user", {"type": "tool_result", "content": "read notes/y.md"}),
+            self.entry("assistant", {"type": "thinking", "thinking": "hmm"}),
+            self.entry("assistant", self.text("second")),
+        )
+        self.assertEqual(got, ["first", "second"])
+
+    def test_stops_at_n_skips_meta_records_and_survives_a_torn_line(self):
+        got = self.texts(
+            '{"type": "last-prompt", "prompt": "x"}',
+            *[self.entry("assistant", self.text(f"m{i}")) for i in range(5)],
+            '{"type": "ai-tit',
+            n=2)
+        self.assertEqual(got, ["m3", "m4"])
+
+    def test_a_missing_transcript_is_not_an_error(self):
+        self.assertEqual(board.last_assistant_texts(Path("/nope/nothing.jsonl")), [])
+
+
+class OpenReportFilesTest(unittest.TestCase):
+    """The failure paths, which are the ones that matter: this runs inside the event
+    loop, and anything that escapes it takes the board down — permanently, if the cause
+    is a settings file, because the same key kills it again on the next start."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "notes.md").write_text("x")
+        self.transcript = self.tmp / "t.jsonl"
+
+    def detail(self, transcript=None):
+        return {"cwd": str(self.tmp),
+                "transcript": str(transcript) if transcript else None}
+
+    def test_an_editor_that_is_there_and_cannot_be_run_does_not_raise(self):
+        # A wrapper script nobody chmodded — the shape that would otherwise kill the
+        # board on every restart until the setting is fixed.
+        cmd = self.tmp / "cursor"
+        cmd.write_text("#!/bin/sh\n")
+        cmd.chmod(0o644)
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", str(cmd)):
+            self.assertEqual(board.open_report_files("w1"),
+                             f"w1: {cmd} is not executable")
+
+    def test_an_editor_that_is_not_there_says_so(self):
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
+            self.assertEqual(board.open_report_files("w1"),
+                             "w1: no-such-editor-xyz not on PATH")
+
+    def test_a_transcript_record_whose_message_is_not_a_dict_does_not_raise(self):
+        # Not a shape Claude Code writes; the file is not one switchboard writes either.
+        self.transcript.write_text(
+            '{"type": "assistant", "message": "hello"}\n'
+            '{"type": "assistant", "message": [{"type": "text", "text": "hi"}]}\n')
+        self.assertEqual(board.last_assistant_texts(self.transcript), [])
+        with mock.patch.object(board, "_inspect",
+                               lambda n: self.detail(self.transcript)), \
+             mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
+            self.assertEqual(board.open_report_files("w1"),
+                             "w1: no-such-editor-xyz not on PATH")
+
+    def test_no_highlighted_agent_is_a_line_not_an_open(self):
+        self.assertEqual(board.open_report_files(None),
+                         "press o on a highlighted agent")
+
+
+class OpenTickTest(unittest.TestCase):
+    """The open runs off the drawing thread, because a synchronous one could freeze the
+    board for the length of eight subprocess timeouts — and in raw mode ctrl-C is a byte
+    in a buffer, not a signal, so nothing the human types would end it."""
+
+    def test_the_keypress_returns_at_once_and_the_line_arrives_in_the_note(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow(name):
+            started.set()
+            release.wait(5)
+            return f"→ {name}: opened 1 file(s)"
+
+        note = []
+        with mock.patch.object(board, "open_report_files", slow):
+            run, msg = board.open_tick("w1", note, None)
+            self.assertEqual(msg, "opening w1…")
+            self.assertTrue(started.wait(5))
+            self.assertEqual(note, [])                 # still working
+            # A second double-press while the first is still going does not stack.
+            again, busy = board.open_tick("w1", note, run)
+            self.assertIs(again, run)
+            self.assertEqual(busy,
+                             "still opening w1 — w1 not started, press oo again")
+            release.set()
+            run[0].join(5)
+        self.assertEqual(note, ["→ w1: opened 1 file(s)"])
+
+    def test_a_thread_that_dies_still_says_something(self):
+        note = []
+        with mock.patch.object(board, "open_report_files",
+                               mock.Mock(side_effect=RuntimeError("boom"))):
+            run, _ = board.open_tick("w1", note, None)
+            run[0].join(5)
+        self.assertEqual(note, ["w1: open failed: boom"])
+
+    def test_no_highlighted_agent_starts_no_thread(self):
+        note = []
+        run, msg = board.open_tick(None, note, None)
+        self.assertIsNone(run)
+        self.assertEqual(msg, "press o on a highlighted agent")
+
+
+class BusyOpenNamesBothAgentsTest(unittest.TestCase):
+    """`oo` on A, then on B while A is still going. B is DROPPED, not queued — so the
+    line has to say so, or A's success line arriving a moment later reads as B's."""
+
+    def test_the_refusal_names_the_one_running_and_the_one_not_started(self):
+        release = threading.Event()
+        note = []
+        def slow(name):
+            release.wait(5)
+            return f"→ {name}: opened"
+
+        with mock.patch.object(board, "open_report_files", slow):
+            run, first = board.open_tick("A", note, None)
+            still, second = board.open_tick("B", note, run)
+            self.assertEqual(first, "opening A…")
+            self.assertEqual(second, "still opening A — B not started, press oo again")
+            self.assertIs(still, run)
+            release.set()
+            run[0].join(5)
+        # And what arrives afterwards names A, so it cannot be read as B's result.
+        self.assertEqual(note, ["→ A: opened"])
+
+
+class DrainTest(unittest.TestCase):
+    """One status line, two worker mailboxes, and an order that keeps it honest."""
+
+    def test_the_open_wins_a_pass_it_shares_with_the_sweep(self):
+        # A sweep line landing in the same pass must not swallow the answer to a key
+        # somebody just pressed.
+        msg, drained = board.drain("", ["sweep: nothing to do"], ["→ w1: opened 2"])
+        self.assertEqual(msg, "→ w1: opened 2")
+        self.assertTrue(drained)
+
+    def test_lines_come_out_oldest_first(self):
+        box = ["first", "second"]
+        msg, _ = board.drain("", box)
+        self.assertEqual(msg, "first")
+        self.assertEqual(box, ["second"])
+
+    def test_nothing_waiting_leaves_the_line_and_the_frame_alone(self):
+        self.assertEqual(board.drain("opening w1…", [], []), ("opening w1…", False))
+
+
+class HintTest(unittest.TestCase):
+    """The `oo` hint: two lines, yellow, and only when there is something to open."""
+
+    def rows(self, here, openable, renderer=board.layout, **kw):
+        got = renderer(snap(agent("w1"), agent("w2")), top=0, height=20, width=90,
+                       msg="", here=here, openable=openable, **kw)
+        return [text for text, _ in (got or [])]
+
+    def test_two_lines_naming_the_agent_and_the_count(self):
+        lines = board.hint_lines("w1", ["/a/x.md", "/a/y.md"])
+        self.assertEqual(lines, ["w1 wrote 2 files you can open",
+                                 f"press oo for them in {board._EDITOR}"])
+
+    def test_one_file_reads_as_one_file(self):
+        self.assertEqual(board.hint_lines("w1", ["/a/x.md"])[0],
+                         "w1 wrote 1 file you can open")
+
+    def test_nothing_to_open_and_nobody_highlighted_are_both_no_hint(self):
+        self.assertEqual(board.hint_lines("w1", []), [])
+        self.assertEqual(board.hint_lines(None, ["/a/x.md"]), [])
+
+    def test_the_plain_renderer_draws_it_in_yellow_and_keeps_its_height(self):
+        with_hint = self.rows("w1", ["/a/x.md", "/a/y.md"])
+        without = self.rows("w1", [])
+        self.assertEqual(len(with_hint), len(without))        # slack, not extra lines
+        hit = [line for line in with_hint if "wrote 2 files" in line]
+        self.assertEqual(len(hit), 1)
+        self.assertIn(board.HINT, hit[0])                     # yellow, and bold
+        self.assertTrue(any("press oo" in line for line in with_hint))
+        self.assertFalse(any("press oo" in line for line in without))
+
+    @unittest.skipUnless(HAVE_RICH, "rich is not installed")
+    def test_the_rich_renderer_draws_it_too_and_keeps_its_height(self):
+        with_hint = self.rows("w1", ["/a/x.md", "/a/y.md"], renderer=richboard.layout)
+        without = self.rows("w1", [], renderer=richboard.layout)
+        self.assertEqual(len(with_hint), len(without))
+        self.assertTrue(any("wrote 2 files" in line for line in with_hint))
+        self.assertTrue(any("press oo" in line for line in with_hint))
+        self.assertFalse(any("press oo" in line for line in without))
+
+    @unittest.skipUnless(HAVE_RICH, "rich is not installed")
+    def test_the_rich_renderer_loses_no_agent_rows_to_the_hint(self):
+        """The hint comes out of the slack, not off the tree. It used to be sized
+        against the window, so turning it on pushed two agents under the fold — and
+        it turns on and off by itself as the highlighted agent writes."""
+        agents = [agent(f"w{i}") for i in range(12)]
+        def tail(openable):
+            rows = richboard.layout(snap(*agents), top=0, height=20, width=70, msg="",
+                                    here="w0", openable=openable)
+            return [t for t, _ in rows if "more below" in t]
+        self.assertEqual(tail(["/a/x.md", "/a/y.md"]), tail([]))
+
+    def test_a_pane_too_short_keeps_the_tree_and_drops_the_hint(self):
+        rows = board.layout(snap(*[agent(f"w{i}") for i in range(8)]), top=0, height=8,
+                            width=90, msg="", here="w1", openable=["/a/x.md"])
+        self.assertEqual(len(rows), 8)
+        self.assertFalse(any("press oo" in text for text, _ in rows))
+
+
+class ReportsCacheTest(unittest.TestCase):
+    """The hint is asked on every frame, so what it costs per frame is the design.
+
+    One `stat`, and nothing else, while the highlight sits on one agent whose transcript
+    is not growing. The `sb inspect` fork and the transcript read happen off the drawing
+    thread and only when the answer could have changed.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "x.md").write_text("x")
+        self.transcript = self.tmp / "t.jsonl"
+        self.transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "wrote `x.md`"}]}}) + "\n")
+        self.forks = []
+
+    def locate(self, name):
+        self.forks.append(name)
+        return str(self.tmp), str(self.transcript)
+
+    def settle(self, reports):
+        """Wait for the worker this frame started, the way the next frame would not."""
+        for _ in range(500):
+            if not reports._busy:
+                return
+            time.sleep(0.01)
+        self.fail("the recompute never finished")
+
+    def test_repeated_frames_with_a_stable_transcript_fork_once(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            reports.tick("w1")
+            self.settle(reports)
+            for _ in range(50):                    # fifty frames of the same board
+                files = reports.tick("w1")
+            self.settle(reports)
+        self.assertEqual([Path(f).name for f in files], ["x.md"])
+        self.assertEqual(self.forks, ["w1"])       # ONE subprocess, not fifty-one
+
+    def test_a_growing_transcript_recomputes_without_forking_again(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            reports.tick("w1")
+            self.settle(reports)
+            (self.tmp / "y.md").write_text("y")
+            with self.transcript.open("a") as fh:
+                fh.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"role": "assistant",
+                                "content": [{"type": "text",
+                                             "text": "and `y.md`"}]}}) + "\n")
+            os.utime(self.transcript, (0, time.time() + 5))     # the mtime moves
+            reports.tick("w1")
+            self.settle(reports)
+            files = reports.tick("w1")
+        self.assertEqual(sorted(Path(f).name for f in files), ["x.md", "y.md"])
+        self.assertEqual(self.forks, ["w1"])       # the transcript read is not a fork
+
+    def test_an_agent_that_cannot_be_located_is_no_hint_and_no_crash(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", lambda name: None):
+            reports.tick("w1")
+            self.settle(reports)
+            self.assertEqual(reports.tick("w1"), [])
+
+    def test_an_agent_with_no_transcript_is_not_relocated_every_frame(self):
+        """The bound is on the AGE of the lookup, never on what it found.
+
+        A highlight moving between tabs asks about a different agent each time it
+        lands, so an agent whose lookup returns no transcript — freshly spawned, or
+        one `sb inspect` cannot see — would otherwise fork on every flip.
+        """
+        def locate(name):
+            self.forks.append(name)
+            return (str(self.tmp), str(self.transcript) if name == "w1" else None)
+
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", locate):
+            for _ in range(10):                 # ten flips between the two
+                reports.tick("w1")
+                self.settle(reports)
+                reports.tick("w2")
+                self.settle(reports)
+        self.assertEqual(sorted(self.forks), ["w1", "w2"])
+
+    def test_an_agent_that_cannot_be_located_is_not_relocated_either(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate",
+                               lambda name: self.forks.append(name) or None):
+            for _ in range(10):
+                reports.tick("w1")
+                self.settle(reports)
+                reports.tick("w2")
+                self.settle(reports)
+        self.assertEqual(sorted(self.forks), ["w1", "w2"])
+
+    def test_the_answer_is_published_as_one_tuple(self):
+        """A frame may never read one agent's files under another agent's name — two
+        assignments with an `os.stat` between them is a wide enough window for it."""
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            reports.tick("w1")
+            self.settle(reports)
+            key, files = reports._answer
+        self.assertEqual(key[0], "w1")
+        self.assertEqual([Path(f).name for f in files], ["x.md"])
+        # The reader answers for the agent the tuple names and nobody else.
+        self.assertEqual(reports.tick("w2"), [])
+
+    def test_nobody_highlighted_asks_nothing_at_all(self):
+        reports = board.Reports()
+        with mock.patch.object(board, "locate", self.locate):
+            self.assertEqual(reports.tick(None), [])
+        self.assertEqual(self.forks, [])
+
+
+class DoublePressTest(unittest.TestCase):
+    """`o` on its own does nothing, and the third press starts a new pair."""
+
+    def test_one_press_does_not_fire(self):
+        self.assertEqual(board.double_press(0.0, 1000.0), (False, 1000.0))
+
+    def test_two_presses_inside_the_window_fire_once(self):
+        fire, last = board.double_press(0.0, 1000.0)
+        self.assertFalse(fire)
+        fire, last = board.double_press(last, 1000.4)
+        self.assertTrue(fire)
+        # Reset-after-fire: a third press is the first half of the next double press.
+        self.assertEqual(board.double_press(last, 1000.5), (False, 1000.5))
+
+    def test_two_presses_too_far_apart_do_not_fire(self):
+        _, last = board.double_press(0.0, 1000.0)
+        self.assertEqual(board.double_press(last, 1002.0), (False, 1002.0))
+
+
+class CoalescedPressTest(unittest.TestCase):
+    """The pair that arrives in ONE terminal read — the case that used to never fire.
+
+    A read carries whatever bytes were waiting, so two quick presses reach the loop as
+    one event with `raw="oo"` whenever it was busy for a few tens of milliseconds, and
+    key auto-repeat is that always. Counting, not membership, is what makes it a pair.
+    """
+
+    def test_the_boards_own_parser_hands_back_one_event_for_two_presses(self):
+        events, rest = board.parse_sgr("oo")
+        self.assertEqual(rest, "")
+        self.assertEqual([e["raw"] for e in events], ["oo"])
+        self.assertEqual(board.double_press_run(0.0, events[0]["raw"].count("o"),
+                                                1000.0), (True, 0.0))
+
+    def test_a_raw_mode_pty_really_does_coalesce_them(self):
+        """Not a mock: the same pty, raw mode and blocking read the board uses."""
+        primary, secondary = pty.openpty()
+        self.addCleanup(os.close, primary)
+        self.addCleanup(os.close, secondary)
+        tty.setraw(secondary)
+        os.write(primary, b"o")
+        os.write(primary, b"o")
+        time.sleep(0.05)                       # the loop, busy on a refresh tick
+        raw = os.read(secondary, 1024).decode()
+        self.assertEqual(raw, "oo")            # one read, both presses
+        events, _ = board.parse_sgr(raw)
+        fire, _ = board.double_press_run(0.0, events[0]["raw"].count("o"), 1000.0)
+        self.assertTrue(fire)
+
+    def test_a_lone_press_in_its_own_event_still_does_not_fire(self):
+        self.assertEqual(board.double_press_run(0.0, 1, 1000.0), (False, 1000.0))
+
+    def test_a_longer_burst_fires_once_not_once_per_pair(self):
+        # Somebody leaning on the key wants the files open, not opened twice.
+        self.assertEqual(board.double_press_run(0.0, 5, 1000.0), (True, 1000.0))
 
 
 if __name__ == "__main__":

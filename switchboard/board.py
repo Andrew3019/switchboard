@@ -48,6 +48,7 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -56,6 +57,7 @@ import threading
 import time
 import tty
 import unicodedata
+from collections import deque
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -82,6 +84,7 @@ CHROME = config.setting("display.board_chrome")      # header, STATS, two stats 
                                                      # lines of this renderer that are
                                                      # not agent rows
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+_EDITOR = config.setting("editor.command")   # `[editor]`, and see `open_report_files`
 
 # How much of the width the board takes when it opens beside an agent — THE ONLY
 # board width there is. Every board pane is the same board showing the same fleet,
@@ -122,6 +125,10 @@ def _c(text: str, code: str) -> str:
 
 
 DIM, RED, YELLOW, GREEN, BLUE = "2", "31", "33", "32", "34"
+# The `oo` hint. Yellow like every other line on this board that is asking for a hand,
+# and bold because it is the one piece of chrome that appears and disappears — a human
+# who has not noticed it yet has to be able to.
+HINT = "1;33"
 
 
 # ---------------------------------------------------------------------------
@@ -1060,8 +1067,8 @@ def _stats_line(label: str, pieces: list[str], width: int) -> str:
 
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
-           here: Optional[str] = None, stats: Optional[dict] = None
-           ) -> list[tuple[str, Optional[object]]]:
+           here: Optional[str] = None, stats: Optional[dict] = None,
+           openable=None) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
     The agent a row belongs to is carried BY the row rather than recomputed from
@@ -1308,8 +1315,16 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     for line in below:
         emit(line)
 
-    while len(rows) < height - 2:
+    # The `oo` hint, above the footer and only when there is something to open — see
+    # `hint_lines`. It takes its lines out of the slack rather than off the tree, and
+    # goes when a pane is too short to spare them: the tree is what the board is for.
+    hint = hint_lines(here, openable)
+    if len(rows) + len(hint) > height - 2:
+        hint = []
+    while len(rows) < height - 2 - len(hint):
         emit("")
+    for line in hint:
+        emit(_c(line, HINT))
 
     hidden = len(agents) - (top + len(window)) if agents else 0
     tail = f"+{hidden} more below" if hidden > 0 else ("scroll ↑" if top else "")
@@ -1681,6 +1696,458 @@ def focus(name: str) -> str:
     return f"→ {name}"
 
 
+# What double-`o` opens, and how it decides. Prose fences a path in backticks nearly
+# every time it names one, so that is the first cut; the rest is there because prose
+# also CITES code it merely read — `board.py:1914-1929` is a citation, not a file to
+# open, and the line range is what says so. So a line range REJECTS a candidate; it
+# used to be stripped, which admitted the very thing it identified.
+_BACKTICKED = re.compile(r"`([^`]+)`")
+_LINE_SUFFIX = re.compile(r":\d[\d-]*$")
+# Relative, absolute or `~`-rooted, and it must end in a short extension. Where it
+# points is decided below, not here: an absolute path outside the agent's worktree is
+# admitted by this and dropped by the containment check.
+_PATHLIKE = re.compile(r"^(~/|/)?[\w.][\w./-]*\.[a-zA-Z0-9]{1,5}$")
+
+# Two or three messages can name a handful of paths each, and a dozen new tabs is not
+# "here is what it wrote", it is a mess to close.
+MAX_OPEN_FILES = 6
+
+# How long after an `o` a second one still counts as a double press, in seconds.
+DOUBLE_PRESS = 1.0
+
+
+def report_files(texts, cwd: str, *, limit: int = MAX_OPEN_FILES) -> list[str]:
+    """The files an agent's recent prose named, under its worktree. Oldest named last.
+
+    A heuristic, and two filters carry it: a line range means the agent was citing
+    code rather than naming its own output, and everything left has to be a real file
+    UNDER the agent's cwd. Shape alone would open half the words in a sentence; the
+    filesystem answers "is this a file" better than any regex can. What survives both
+    and still should not have is a file the agent read and named without a line range —
+    accepted, because nothing in the text distinguishes that from one it wrote.
+
+    Scanned NEWEST message first, so when there are more candidates than `limit` the
+    ones that survive are the most recently named — the final summary's report file,
+    not six files an earlier message happened to cite. The list is returned in reading
+    order, so the newest lands last and is the tab the editor leaves in front.
+
+    Containment is judged on the path as written, normalised, and NOT on
+    `Path.resolve()`: `.switchboard` in a worktree is a symlink into the main checkout,
+    and resolving would put the briefs this feature exists to open outside the cwd they
+    were named relative to. KNOWN AND ACCEPTED COST of that choice: a symlink inside the
+    worktree pointing out of it satisfies containment, so `evidence/id_rsa.pub` behind
+    `evidence -> ~/.ssh` would open. It escalates nothing — the agent that could plant
+    that symlink can already read the file — and the harm is a file being presented as
+    the agent's own output when it is not. Resolving would close it and would break the
+    ordinary case, so this is a limitation, not an oversight.
+
+    Every path returned is ABSOLUTE, and that is load-bearing rather than incidental: an
+    editor argument that came back relative could begin with a dash, and a file named
+    `-g.py` would then reach `cursor -r -g` as an option instead of a path.
+    """
+    if limit <= 0:
+        return []
+    # abspath, not normpath: a relative cwd would otherwise carry through to every path
+    # this returns. `cwd` is stored absolute by every writer today, so this enforces
+    # what is currently only inherited.
+    root = Path(os.path.abspath(cwd))
+    groups: list[list[str]] = []
+    seen: set[str] = set()
+    total = 0
+    for text in reversed(list(texts)):
+        group: list[str] = []
+        for span in _BACKTICKED.findall(text):
+            cand = span.strip()
+            if not cand or cand.startswith("http") or _LINE_SUFFIX.search(cand):
+                continue
+            if not _PATHLIKE.match(cand):
+                continue
+            try:
+                joined = Path(os.path.normpath(root / Path(cand).expanduser()))
+                if not joined.is_absolute() or not joined.is_relative_to(root):
+                    continue
+                if not joined.is_file():
+                    continue
+            except (OSError, ValueError):
+                continue
+            key = str(joined)
+            if key in seen:
+                continue
+            seen.add(key)
+            group.append(key)
+            total += 1
+            if total >= limit:
+                break
+        if group:
+            groups.append(group)
+        if total >= limit:
+            break
+    # A message at a time, so the cap is spent newest-first while each message keeps the
+    # order it named things in.
+    return [f for group in reversed(groups) for f in group]
+
+
+def double_press(last: float, now: float, window: float = DOUBLE_PRESS):
+    """-> (fire now?, the `last` to keep). A key that does nothing on its own.
+
+    Reset-after-fire, so a third press inside the window starts a new pair rather
+    than firing again off the second one. `now` is a MONOTONIC clock: on the wall
+    clock a backward step between two presses makes the gap negative, which reads as
+    "inside the window", and a single `o` would open the editor.
+    """
+    if now - last < window:
+        return True, 0.0
+    return False, now
+
+
+def double_press_run(last: float, presses: int, now: float,
+                     window: float = DOUBLE_PRESS):
+    """The same, for a RUN of presses that arrived together. -> (fire?, new `last`).
+
+    One terminal read can carry several keystrokes — `parse_sgr` hands the whole run
+    back as one event with `raw="oo"`, which is what two quick presses look like
+    whenever the loop was busy for a few tens of milliseconds (a refresh tick, or the
+    `sb inspect` this very action runs), and what key auto-repeat looks like always.
+    Membership (`"o" in raw`) counted that as ONE press, so the intended double press
+    was exactly the case that never fired.
+
+    Fires at most once per run: two pairs in one burst are a human leaning on the key,
+    not a request to open the same files twice.
+    """
+    fired = False
+    for _ in range(max(presses, 0)):
+        fire, last = double_press(last, now, window)
+        fired = fired or fire
+    return fired, last
+
+
+def open_report_files(name: Optional[str]) -> str:
+    """Double-`o`: the highlighted agent's worktree in the editor, and what it wrote.
+
+    Two shapes of call, and the order matters: the folder first, which focuses (or
+    creates) that worktree's window, then each file with `-r -g`, which lands it as a
+    tab in the window that is now the active one. Called again later for the same
+    worktree, the same window collects more tabs instead of a second window opening.
+
+    Where the worktree and the transcript come from is the one thing here that is not
+    the obvious way round. Both live in the store, and this module may not read the
+    store at ANY depth — a renderer that can reach `store.connect` can reach a schema
+    rebuild, which is why `tests/test_panel.py` bans the import outright rather than
+    trusting each edit to pick the read-only door. So the answer is asked of a separate
+    `sb inspect --json` process, exactly as a click already asks `herdr` to focus a
+    pane: out of process, on a keypress, never on the drawing path.
+
+    NOT ON THE DRAWING THREAD — `open_tick` runs this in one of its own, for
+    `Locator`'s reason and more of it. Eight subprocesses at ten seconds each is eighty
+    seconds a synchronous version could freeze the loop for, and a frozen board is worse
+    than it sounds: raw mode has cleared ISIG, so ctrl-C is a byte in a buffer and not a
+    signal, and nothing the human types would end it. Off the thread the loop keeps
+    drawing and the answer arrives in the status bar when it arrives.
+
+    Returns a line for the status bar and never raises: an exception here would take the
+    board down over a missing binary, which is a thing a settings file can cause.
+    """
+    if not name:
+        return "press o on a highlighted agent"
+    where = locate(name)
+    if where is None:
+        return f"{name}: could not read this agent"
+    cwd, transcript = where
+    if not cwd:
+        return f"{name}: no worktree to open"
+
+    files = files_for(cwd, transcript)
+    try:
+        _editor(cwd)
+        for f in files:
+            _editor("-r", "-g", f)
+    except FileNotFoundError:
+        return f"{name}: {_EDITOR} not on PATH"
+    except PermissionError:
+        # A command that is there and cannot be run: a wrapper script nobody chmodded,
+        # or `command` naming the .app bundle rather than the CLI inside it.
+        return f"{name}: {_EDITOR} is not executable"
+    except subprocess.TimeoutExpired:
+        return f"{name}: {_EDITOR} timed out"
+    except (OSError, subprocess.SubprocessError) as e:
+        # Everything else the exec can fail with — a fork that runs out of memory, a
+        # bad interpreter line. A setting must not be able to end the board.
+        return f"{name}: {_EDITOR} failed: {status_mod.clip(str(e), 40)}"
+    if not files:
+        return f"{name}: no files found in recent messages"
+    return f"→ {name}: opened {len(files)} file(s)"
+
+
+# How long a `locate` answer is trusted, and how often a highlighted agent with no
+# transcript yet is asked about again, in seconds. It bounds the ONLY subprocess on the
+# hint's path to one a minute for the one agent that is highlighted — a session id that
+# changed under a restore, or a transcript that did not exist when the board first
+# looked, is picked up within that and nothing is asked again in between.
+_REPORTS_RECHECK = 60.0
+
+
+def hint_lines(name: Optional[str], files) -> list[str]:
+    """The `oo` hint: two lines, or nothing at all. Both renderers draw these strings.
+
+    Shown ONLY when the highlighted agent has something to open, which is what makes it
+    a hint rather than chrome: a key that would do nothing is not advertised, and the
+    count is the thing worth knowing before pressing it.
+    """
+    if not name or not files:
+        return []
+    n = len(files)
+    return [f"{name} wrote {n} file{'' if n == 1 else 's'} you can open",
+            f"press oo for {'it' if n == 1 else 'them'} in {_EDITOR}"]
+
+
+class Reports:
+    """Whether the highlighted agent has anything for `oo` to open — asked every frame.
+
+    The hint only shows when there are files, so the drawing thread has to know the
+    answer on every frame, and the answer costs a fork plus a transcript read. This is
+    the whole of what makes that affordable:
+
+      * per frame, ONE `stat` of the transcript, and nothing else;
+      * the answer is cached against `(agent, transcript mtime)`, so while the highlight
+        sits on one agent and its transcript is not growing, every frame is that stat and
+        a dict lookup;
+      * the recompute, when the key does change, runs OFF THE DRAWING THREAD — the frame
+        that asked draws the previous answer and the new one lands a frame or two later;
+      * the `sb inspect` fork happens once per agent per `_REPORTS_RECHECK` — WHATEVER
+        that lookup found, including nothing at all. An agent writing its report moves
+        the mtime every couple of seconds, and a highlight moving between tabs asks about
+        a different agent every time it lands; neither may turn into a fork per frame, so
+        the age of the lookup is what decides, never what it happened to return.
+
+    A transcript that grows is the point: the hint flips on by itself the moment the
+    agent names a file, without anything polling for it.
+    """
+
+    def __init__(self):
+        # agent -> (cwd, transcript, when it was looked up). A miss is REMEMBERED, with
+        # its timestamp, so an agent that has no worktree or no transcript yet is asked
+        # about on the same schedule as one that does rather than on every frame.
+        self._where: dict = {}
+        # ((agent, mtime), files) — published as ONE tuple, and read as one. Two
+        # assignments with an `os.stat` between them is long enough for a frame to read
+        # the new agent's files under the old agent's name, and the hint would then be
+        # showing A the number of files B wrote.
+        self._answer = None
+        self._at = 0.0                # when the last recompute finished
+        self._busy = False
+
+    def tick(self, name: Optional[str]) -> list[str]:
+        """The files `oo` would open for `name`. Never blocks, never raises."""
+        if not name:
+            return []
+        located = self._where.get(name)
+        transcript = located[1] if located else None
+        key = (name, _mtime(transcript))
+        answer = self._answer
+        due = time.monotonic() - self._at >= _REPORTS_RECHECK
+        if not self._busy and (due or answer is None or key != answer[0]):
+            self._busy = True
+            try:
+                threading.Thread(target=self._recompute, args=(name,),
+                                 daemon=True).start()
+            except RuntimeError:
+                # Thread exhaustion. The hint is the last thing on this board that may
+                # take the draw loop down, and a `_busy` left true would wedge it.
+                self._busy = False
+        return answer[1] if answer and answer[0][0] == name else []
+
+    def _recompute(self, name: str) -> None:
+        try:
+            located = self._where.get(name)
+            # THE FORK, and the whole reason for the cache. Its age is the only thing
+            # that decides — a miss is cached exactly like a hit, or an agent with no
+            # transcript would re-fork every time the highlight came back to it.
+            if located is None or time.monotonic() - located[2] >= _REPORTS_RECHECK:
+                found = locate(name) or (None, None)
+                located = (found[0], found[1], time.monotonic())
+                self._where[name] = located
+            cwd, transcript = located[0], located[1]
+            files = files_for(cwd, transcript)
+            self._answer = ((name, _mtime(transcript)), files)
+        except BaseException:                   # noqa: BLE001 — a hint may not be able
+            self._answer = ((name, None), [])   # to take the board with it
+        finally:
+            self._at = time.monotonic()
+            self._busy = False
+
+
+def _mtime(path) -> Optional[float]:
+    """The one filesystem call the drawing thread makes per frame.
+
+    Its argument came out of another process's JSON, so the type is not ours to assume:
+    a `TypeError` here would be a crash on the hot path, every frame.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    try:
+        return os.stat(path).st_mtime
+    except (OSError, ValueError):
+        return None
+
+
+def locate(name: str):
+    """An agent's worktree and transcript. -> (cwd, transcript or None), or None.
+
+    The one subprocess on this path, and the reason everything above caches it: the
+    board may not read the store (see `open_report_files`), so this is the only way to
+    turn a highlighted row into a directory, and it costs a fork.
+
+    `cwd` comes back ABSOLUTE, for `report_files`' reason: an editor argument that
+    starts with a dash is an option, not a path.
+    """
+    detail = _inspect(name)
+    if detail is None:
+        return None
+    cwd = detail.get("cwd")
+    return (os.path.abspath(cwd) if cwd else None), detail.get("transcript")
+
+
+def files_for(cwd: Optional[str], transcript: Optional[str]) -> list[str]:
+    """What a double-`o` would open. ONE definition, for the hint and the key alike.
+
+    The hint on screen promises exactly what the keypress does because both come
+    through here: two answers to "which files" would drift the first time either side
+    was tuned, and the hint would then be advertising files that do not open.
+    """
+    if not cwd:
+        return []
+    return report_files(last_assistant_texts(Path(transcript)) if transcript else [],
+                        cwd)
+
+
+def open_tick(name: Optional[str], note: list, running):
+    """Start an open off the drawing thread. -> (what is running now, a line to show).
+
+    `running` is the `(thread, agent name)` this returned last, or None.
+
+    One at a time. Leaning on `o` re-fires once per read, and each fire is up to eight
+    subprocesses; without this the bursts would pile up behind each other and every one
+    of them would open the same tabs again.
+
+    A refusal NAMES BOTH AGENTS, because the request is dropped rather than queued and
+    the board must not imply otherwise: asking for B while A is still opening leaves A's
+    line to arrive afterwards, and a bare "still opening…" followed by "→ A: opened 3
+    file(s)" reads, to somebody who just asked for B, like B.
+    """
+    if not name:
+        return running, "press o on a highlighted agent"
+    if running is not None and running[0].is_alive():
+        return running, f"still opening {running[1]} — {name} not started, press oo again"
+    t = threading.Thread(target=_open, args=(name, note), daemon=True)
+    try:
+        t.start()
+    except RuntimeError as e:
+        # Thread exhaustion. Vanishingly rare and `sweep_tick` has the same exposure,
+        # but this one is on a keypress, and a keypress may not end the board.
+        return running, f"{name}: could not start: {status_mod.clip(str(e), 40)}"
+    return (t, name), f"opening {name}…"
+
+
+def drain(msg: str, *boxes: list):
+    """Take one line from each worker mailbox. -> (the line to show, anything taken?).
+
+    Oldest first within a box, so two lines that arrived together are shown in the order
+    they happened; and LAST BOX WINS across boxes, which is why the caller passes the
+    open's mailbox last — a sweep landing in the same pass must not swallow the answer to
+    a key somebody just pressed.
+    """
+    drained = False
+    for box in boxes:
+        if box:
+            msg = box.pop(0)
+            drained = True
+    return msg, drained
+
+
+def _open(name: Optional[str], note: list) -> None:
+    """The open itself, off the drawing thread. Never raises into it."""
+    try:
+        note.append(open_report_files(name))
+    except BaseException as e:                  # noqa: BLE001 — a dead thread that says
+        note.append(f"{name}: open failed: {e}")        # nothing is the one outcome worth ruling
+                                                # out; `open_report_files` catches its own
+
+
+# How far back a transcript is read. One JSONL record is one content block, not one
+# turn, so the last few things an agent SAID can sit a long run of tool calls back.
+_TRANSCRIPT_TAIL = 400
+
+
+def last_assistant_texts(path: Path, n: int = 3) -> list[str]:
+    """The agent's last `n` assistant TEXT blocks, oldest first.
+
+    `output.read_transcript` renders the same file and is deliberately not used: it
+    flattens tool calls and their results in too, so a caller scanning it for paths
+    would be scanning everything the agent READ as well as what it said — and it lives
+    in a module that imports the store, which this one may not (see `open_report_files`).
+    Only the `text` parts, which is the prose a human would have seen on screen.
+    """
+    try:
+        with path.open(errors="replace") as fh:
+            tail = deque(fh, maxlen=_TRANSCRIPT_TAIL)
+    except OSError:
+        return []
+    out: list[str] = []
+    for line in reversed(tail):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue          # a torn last line on a live session, not a failure
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue          # user turns, and the meta records with no role at all
+        message = rec.get("message")
+        # isinstance, like every other field here: this file is not one switchboard
+        # writes, and a `message` that is a string raises where `.get` is assumed.
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        texts = [part["text"] for part in content
+                 if isinstance(part, dict) and part.get("type") == "text"
+                 and isinstance(part.get("text"), str) and part["text"].strip()]
+        if not texts:
+            continue          # a thinking-only or tool_use-only record
+        out.append("\n".join(texts))
+        if len(out) >= n:
+            break
+    return list(reversed(out))
+
+
+def _inspect(name: str) -> Optional[dict]:
+    """One agent's row, as JSON, from a separate process. None if anything went wrong.
+
+    THIS build's `sb` and not whatever is on PATH, for `collector.doorbell_sb`'s reason
+    — that symlink points at the main checkout, so a board running a branch would ask a
+    different build. Its three lines are copied rather than imported: `collector` reaches
+    the store, and a renderer may not name a module that does.
+    """
+    own = Path(__file__).resolve().parent.parent / "bin" / "sb"
+    sb = str(own) if os.access(own, os.X_OK) else shutil.which("sb")
+    if not sb:
+        return None
+    try:
+        p = subprocess.run([sb, "inspect", name, "--json", "-n", "1", "--events", "1"],
+                           capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        d = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _editor(*args: str) -> None:
+    subprocess.run([_EDITOR, *args], capture_output=True, text=True,
+                   timeout=_SUBPROCESS_TIMEOUT)
+
+
 def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:
     """Split `pane_id` and run the board in the new pane. -> new pane id, or None.
 
@@ -1731,7 +2198,7 @@ def _size() -> tuple[int, int]:
 
 def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
            show_archived: bool, here: Optional[str] = None,
-           stats: Optional[dict] = None
+           stats: Optional[dict] = None, openable=None
            ) -> list[tuple[str, Optional[object]]]:
     """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
 
@@ -1758,18 +2225,21 @@ def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
 
     rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
                             note_text=note_text, show_archived=show_archived, here=here,
-                            stats=stats)
+                            stats=stats, openable=openable)
     if rows is not None:
         return rows
     return layout(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, here=here, stats=stats)
+                  note_text=note_text, show_archived=show_archived, here=here,
+                  stats=stats, openable=openable)
 
 
 def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
-         here: Optional[str] = None, stats: Optional[dict] = None) -> list:
+         here: Optional[str] = None, stats: Optional[dict] = None,
+         openable=None) -> list:
     height, width = _size()
     rows = _frame(snap, top=top, height=height, width=width, msg=msg,
-                  note_text=note_text, show_archived=show_archived, here=here, stats=stats)
+                  note_text=note_text, show_archived=show_archived, here=here,
+                  stats=stats, openable=openable)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -1869,11 +2339,21 @@ def main() -> int:
     # setting it starts from is for. `layout` clamps `top` every call, so the row
     # count changing under the toggle needs nothing here.
     top, msg, buf = 0, "", ""
+    # When `o` was last pressed on its own, on the monotonic clock. One float is the
+    # whole double-press state: a single `o` is not a command, so nothing happens until
+    # a second one lands inside `DOUBLE_PRESS` — see `double_press_run`, which is where
+    # a pair arriving in ONE read is handled. `open_note` is that worker thread's
+    # one-slot mailbox, `sweep_note`'s shape and for its reason: the open shells out,
+    # and this pane may not be written to by anything but the frame loop.
+    last_o, open_note, opening = 0.0, [], None
     show_archived = status_mod.SHOW_ARCHIVED
     # Which agent shares this pane's tab — the row this board highlights. Built here and
     # not at import, so the environment it reads is this process's own, and asked again per
     # frame because the answer is a NAME resolved against the rows being drawn.
     where = Locator()
+    # Whether the highlighted agent has anything for `oo` to open. Asked every frame and
+    # answered from cache — the fork and the transcript read are its own, off this thread.
+    reports = Reports()
     # The slot this board started in, so the first sweep is at the next boundary and never
     # at startup — see `sweep_tick`. `sweep_note` is the worker thread's one-slot mailbox.
     armed, sweep_note = sweep_mod.slot_of(time.time()), []
@@ -1884,11 +2364,21 @@ def main() -> int:
 
         snap, note_text, stats = refresh(sup)
         where.tick()
-        rows = draw(snap, top, msg, note_text, show_archived,
-                    where.name(snap.agents), stats)
+        here = where.name(snap.agents)
+        rows = draw(snap, top, msg, note_text, show_archived, here, stats,
+                    openable=reports.tick(here))
         last = time.time()
 
         while True:
+            # Both worker mailboxes, drained BEFORE this pass reads the keyboard and in
+            # this order, which is what keeps the status line honest. Oldest first, so
+            # two lines that arrived together are shown in the order they happened. The
+            # open drains last of the two, so a sweep landing in the same pass cannot
+            # swallow the answer to a key somebody just pressed. And both drain ahead of
+            # the keypress handler, so a result that arrived since the last pass cannot
+            # overwrite the "opening…" that this pass is about to set.
+            msg, drained = drain(msg, sweep_note, open_note)
+            dirty[0] = dirty[0] or drained
             r, _, _ = select.select([fd], [], [], 0.25)
             if r:
                 data = os.read(fd, 1024)
@@ -1905,6 +2395,13 @@ def main() -> int:
                         if "a" in ev["raw"]:
                             show_archived = not show_archived
                             dirty[0] = True
+                        if "o" in ev["raw"]:
+                            fire, last_o = double_press_run(
+                                last_o, ev["raw"].count("o"), time.monotonic())
+                            if fire:
+                                opening, msg = open_tick(
+                                    where.name(snap.agents), open_note, opening)
+                                dirty[0] = True
                         continue
                     step = wheel(ev)
                     if step:
@@ -1941,17 +2438,15 @@ def main() -> int:
                 # declined by the throttle is work for nothing. `Locator` holds the real
                 # cadence; this just gives it chances to fire.
                 where.tick()
-            if sweep_note:
-                msg = sweep_note.pop()
-                dirty[0] = True
             if dirty[0]:
                 # Asked HERE, on the frame being drawn, rather than when the pane list came
                 # back: the cached answer is a set of pane IDS, and turning those into the
                 # name of a row is done against the rows this frame actually has. So an
                 # agent that is restored, renamed away, or dropped from the snapshot stops
                 # or starts being highlighted on the next frame, with no subprocess in it.
-                rows = draw(snap, top, msg, note_text, show_archived,
-                            where.name(snap.agents), stats)
+                here = where.name(snap.agents)
+                rows = draw(snap, top, msg, note_text, show_archived, here, stats,
+                            openable=reports.tick(here))
                 dirty[0] = False
     except KeyboardInterrupt:
         pass
