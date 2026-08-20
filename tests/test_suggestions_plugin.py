@@ -10,14 +10,14 @@ What is left is what this plugin decided for itself:
 1. The bar is enforced, and the refusal names the flag that is missing. This is the whole
    design: a suggestion that does not clear it is refused, never filed with empty fields.
 2. All three answers reach the file. A bar nothing records is not a bar.
-3. `drop` is the human's. An agent that can bin a suggestion can undo the only record that
-   the friction was ever paid for.
+3. `drop` is open to both. Dropping does lose the only record that the friction was ever
+   paid for; agents are trusted with that, so they can bin the stale ones they filed.
 
 Unproven, and not provable here: that agents file good suggestions, and that anybody reads
 them.
 
 Run through `cli.main` like the other shipped-plugin tests, so the parser sb builds from
-the declaration and the audience refusal are part of what is being tested.
+the declaration and the audience gate are part of what is being tested.
 """
 
 from __future__ import annotations
@@ -70,17 +70,16 @@ class SuggestionsTest(ShippedSandbox):
             self.assertIn(heading, text)
             self.assertIn(answer, text)
 
-    def test_drop_is_for_the_human(self):
+    def test_an_agent_can_drop(self):
+        """Half of the decision: the agent that filed it can bin it."""
         self.as_agent("w1")
         r = self.data("plugin", "suggestions", "file", "sb inspect is unreliable", *FLAGS)
-        code, _, err = self.sb("plugin", "suggestions", "drop", r["id"])
-        self.assertEqual(code, 1)
-        self.assertIn("for the human", err)
-        self.assertEqual(len(list(self._dir().glob("*.md"))), 1)
+        self.ok("plugin", "suggestions", "drop", r["id"])
+        self.assertEqual(list(self._dir().glob("*.md")), [])
 
 
 class SuggestionsHumanDropTest(ShippedSandbox):
-    """The other half of the same decision: a human at a terminal can delete."""
+    """The other half: a human at a terminal deletes the same way."""
 
     def test_a_human_can_drop(self):
         d = self.user_state / "plugins" / "suggestions"

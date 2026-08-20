@@ -135,10 +135,11 @@ def register(reg):
     reg.command(
         "show", show, audience="both", help="one suggestion in full",
         args=[reg.arg("id", help="a suggestion id, or enough of one to be unambiguous")])
-    # Human only. An agent that can bin its own or another agent's suggestion can quietly
-    # undo the only record that the friction was ever paid for.
+    # Agents too. Dropping loses the only record that the friction was ever paid for, and
+    # that risk is accepted: agents are trusted to bin what is stale or duplicated rather
+    # than to bury inconvenient reports.
     reg.command(
-        "drop", drop, audience="human", help="delete a suggestion outright",
+        "drop", drop, audience="both", help="delete a suggestion outright",
         args=[reg.arg("id", help="a suggestion id")])
 
 
