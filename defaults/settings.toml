@@ -584,9 +584,15 @@ needs_settle = 30.0
 # does not read this.
 board_chrome = 8
 
-# Draw every archived agent instead of collapsing whole archived subtrees into one
-# `+ N archived` row. An agent is archived when herdr no longer has its pane and it is
-# past the spawn grace — see `status.AgentStatus.archived`.
+# Draw the archived agents too, instead of only what is still running. An agent is
+# archived when herdr no longer has its pane and it is past the spawn grace — see
+# `status.AgentStatus.archived`.
+#
+# The two readouts spend it differently, because they are read differently. `sb status`
+# collapses whole archived subtrees into one `+ N archived` row; the BOARD draws no such
+# row at all and simply leaves them out, and on it this setting means "also draw the
+# archived rows of a tree somebody is still working in" — a subtree with no live agent
+# above it anywhere is never drawn there whatever this says (`status.board_rows`).
 #
 # False, because the alternative is what the board did before: on the store this was
 # written against, 59 of 68 rows were agents whose pane had closed, and every session
@@ -594,7 +600,7 @@ board_chrome = 8
 # pane's width, so this is the difference between a panel and a wall of dead names.
 #
 # Nothing is lost by it. The header still counts every agent, and DRIFT, NEEDS YOU and
-# UNDELIVERED still name each one — collapse shortens the tree, never the readout, and
+# UNDELIVERED still name each one — this shortens the tree, never the readout, and
 # `sb status --json` is not affected at all. Per invocation: `sb status --archived`, or
 # `a` in the board.
 show_archived = false

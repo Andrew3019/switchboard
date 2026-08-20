@@ -599,8 +599,8 @@ def _starts_group(rows, i: int) -> bool:
     Never above the very first row — a screen that opens with a blank line has
     separated the tree from the header, which needs no separating.
 
-    Reads `.depth`, which a `Collapsed` carries as well as an agent, so a
-    collapsed group of first-level children is spaced off like the live ones.
+    Reads `.depth`: every row here is an agent, and the board draws no
+    stand-in rows at all (`status.board_rows`).
     """
     return i > 0 and rows[i].depth <= 1
 
@@ -619,17 +619,6 @@ _BREAK = ""
 # have to agree, or the gutter lands outside the indentation it is drawn into) so the two
 # renderers cannot come to indent by different amounts.
 INDENT = "    "
-
-
-def _is_group(row) -> bool:
-    """Is this display row a collapsed group rather than an agent?
-
-    One predicate, used by everything that reads a row, so there is exactly one
-    place that knows how the two are told apart. Everything downstream of
-    `layout` receives whatever the row carries, and reading `.name` off a group
-    is the failure `layout`'s closing comment is about.
-    """
-    return isinstance(row, status_mod.Collapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -1083,8 +1072,8 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     anywhere else: no caller counts lines, and nothing computes which agent sits
     on screen row N.
 
-    Every line is drawn by `emit`, which takes the owner alongside the text. A
-    collapsed group carries itself; a group break carries `None`, which is what
+    Every line is drawn by `emit`, which takes the owner alongside the text. An
+    agent row carries its agent; a group break carries `None`, which is what
     makes clicking it do nothing rather than focusing whatever is nearby.
 
     `here` — the agent sharing this board's own tab, from `Locator` — is ACCEPTED
@@ -1106,10 +1095,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     difference of fact rather than of appearance. `None` and `{}` are ordinary:
     the section draws its labels and says the numbers are not measured.
 
-    `top` is the scroll offset in DISPLAY rows, not in agents. Those stopped
-    being the same thing when collapse landed: `display_rows` replaces whole
-    archived subtrees with one `Collapsed`, so a window taken over `snap.agents`
-    would scroll past rows that are not drawn and the `+N more below` count would
+    `top` is the scroll offset in DISPLAY rows, not in agents. Those are not the
+    same thing: `board_rows` drops finished subtrees and the breaks between groups
+    are lines belonging to nobody, so a window taken over `snap.agents` would
+    scroll past rows that are not drawn and the `+N more below` count would
     contradict the screen. Everything here — the slice, the clamp, the tail —
     counts what is actually on screen.
 
@@ -1133,7 +1122,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
     if show_archived is None:                       # `display.show_archived`, via status,
         show_archived = status_mod.SHOW_ARCHIVED    # so both readouts share one default
-    agents = status_mod.display_rows(snap.agents, show_archived=show_archived)
+    agents = status_mod.board_rows(snap.agents, show_archived=show_archived)
     # The top section is FOUR lines — its own label, two lines of numbers, and the blank
     # that holds it off `AGENTS` — and `display.board_chrome` counts them, so nothing
     # below has to learn about it. The one exception is a pane too short to hold the
@@ -1220,8 +1209,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         # board cannot hold every count, and what it drops is the tail of a list that is
         # already ordered by how much it matters — so the totals go before the trouble
         # does, and the headline never does. `sb status` and a wider board still show
-        # them all, and the archived total is on the screen anyway, in the tree's own
-        # `+N archived` footer.
+        # them all.
         if cols + 3 + _visible_len(b) > width:
             break
         head += _c(" · " + b, DIM)
@@ -1251,36 +1239,22 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         why = note_text or "nothing running — sb start"
         emit(_c(f"  ({why})", DIM))
     else:
-        # Defaults, not `max(seq)`: a window can be nothing but collapsed rows —
-        # which is the ORDINARY end-of-session state, every agent finished and
-        # its pane closed — and there is then no agent to measure a name or a
-        # state against. Empty-sequence `max` raises, and a panel that raises at
-        # the end of every session is worse than one with a narrow column.
-        # Columns, not characters, in both column widths and in every pad and clip
-        # below — see `_visible_len`.
+        # Defaults, not `max(seq)`: a window can hold no agent row at all — a
+        # plugin's block hanging under a group whose rows are all above the window
+        # is one — and there is then no name or state to measure. Empty-sequence
+        # `max` raises, and a panel that raises is worse than one with a narrow
+        # column. Columns, not characters, in both column widths and in every pad
+        # and clip below — see `_visible_len`.
         w_name = max([0] + [_visible_len((INDENT * a.depth) + a.name)
-                            for a, _, _ in window if not _is_group(a)])
+                            for a, _, _ in window])
         # `display_state`, not the store's raw word: `working` drawn next to this row's
         # own `STALLED — idle …` note is the row contradicting itself, and the one thing
         # a glanceable view must never do. See `AgentStatus.display_state`.
         w_state = max([0] + [_visible_len(a.display_state)
-                             for a, _, _ in window if not _is_group(a)])
+                             for a, _, _ in window])
         for a, brk, block in window:
             if brk:
                 emit(_BREAK)                # owned by nobody: a click here is a miss
-            if _is_group(a):
-                # No glyph, no state, no note. It is not an agent and must not
-                # read as one — `agent_at` hands this very object to the click
-                # handler, which has to be able to tell them apart.
-                #
-                # `INDENT`, the same rung every row above it uses: this row is the
-                # footer of a block of siblings and has to start where their names
-                # do. `sb status` draws the same tree two spaces at a time and
-                # passes its own rung, which is why the unit is an argument.
-                emit(_c("   " + status_mod.collapsed_label(a, INDENT), DIM), a)
-                for extra in block:
-                    emit(_c(_block_line(extra), DIM))
-                continue
             g = glyph(a)
             label = (INDENT * a.depth) + a.name
             # ONE LINE, and everything on it. Identity, state and age take fixed columns;
@@ -1373,10 +1347,10 @@ def _max_top(costs: list[int], capacity: int) -> int:
 def agent_at(rows, row: int):
     """Screen row (1-based) -> whatever is drawn there, or None.
 
-    May be a `Collapsed` as well as an agent, so every caller has to ask before
-    it reads a `.name` — see `_is_group`. Not filtered to agents here on
-    purpose: a click on a collapsed row is a real thing the human did, and the
-    handler that decides what it means should be the one that sees it.
+    An agent, or None for chrome — a header line, a break between groups, a
+    plugin's block. Every row that carries an owner carries an agent, because the
+    board draws no stand-in rows (`status.board_rows`), so the caller reads a
+    `.name` off whatever comes back that is not None.
     """
     i = row - 1
     if i < 0 or i >= len(rows):
@@ -2410,19 +2384,15 @@ def main() -> int:
                         continue
                     if is_left_click(ev):
                         a = agent_at(rows, ev["row"])
-                        if _is_group(a):
-                            # Focusing "the archived ones" is not a thing herdr can
-                            # do, and reading `.name` here is the misclick this
-                            # branch exists to prevent. Say what would work.
-                            msg = "press a to show archived"
-                        else:
-                            # A click still focuses, and now that is ALL it does: the row
-                            # background stopped meaning "the one you just touched" and
-                            # started meaning "the one beside you", and one board cannot
-                            # have two meanings for one mark. What a click did that was
-                            # worth keeping — jumping to the pane — is here, and what it
-                            # said on screen is said by the status line.
-                            msg = focus(a.name) if a else ""
+                        # A click still focuses, and now that is ALL it does: the row
+                        # background stopped meaning "the one you just touched" and
+                        # started meaning "the one beside you", and one board cannot
+                        # have two meanings for one mark. What a click did that was
+                        # worth keeping — jumping to the pane — is here, and what it
+                        # said on screen is said by the status line. Every row that
+                        # carries an owner is an agent now (`status.board_rows`), so
+                        # there is nothing else a click can land on but chrome.
+                        msg = focus(a.name) if a else ""
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:

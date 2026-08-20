@@ -1908,6 +1908,52 @@ class CollapseTest(unittest.TestCase):
         self.assertEqual(len(status.display_rows(agents)), 11)
 
 
+class BoardRowsTest(unittest.TestCase):
+    """The BOARD's rule, which is not `sb status`'s: agents only, and never a stand-in.
+
+    Pure, like `display_rows`: the rows it is given, and neither store nor herdr.
+    """
+
+    def rows(self, agents, **kw):
+        got = status.board_rows(agents, **kw)
+        self.assertTrue(all(isinstance(r, status.AgentStatus) for r in got))
+        return [r.name for r in got]
+
+    def test_a_finished_subtree_is_dropped_with_nothing_standing_in_for_it(self):
+        """Where `sb status` draws `+ 2 archived`, the board draws nothing at all."""
+        agents = [_mk("main"),
+                  _mk("lead", parent="main", depth=1, archived=True),
+                  _mk("w1", parent="lead", depth=2, archived=True)]
+        self.assertEqual(self.rows(agents), ["main"])
+        self.assertEqual(self.rows(agents, show_archived=True), ["main", "lead", "w1"])
+
+    def test_archived_with_no_live_ancestor_is_never_drawn_even_under_a(self):
+        """The dispatcher that owned this tree is gone, so `a` is not about it. The live
+        tree beside it shows its archived rows, which is what `a` is for."""
+        agents = [_mk("main"),
+                  _mk("kid", parent="main", depth=1, archived=True),
+                  _mk("old", archived=True),
+                  _mk("older", parent="old", depth=1, archived=True)]
+        self.assertEqual(self.rows(agents, show_archived=True), ["main", "kid"])
+        self.assertEqual(self.rows(agents), ["main"])
+
+    def test_an_archived_row_with_a_live_descendant_is_always_kept(self):
+        """Both directions of the invariant: no live row is ever hidden, and no row a
+        live row hangs off is either — with `a` on or off, the tree stays connected."""
+        agents = [_mk("old", archived=True),
+                  _mk("lead", parent="old", depth=1, archived=True),
+                  _mk("live", parent="lead", depth=2)]
+        self.assertEqual(self.rows(agents), ["old", "lead", "live"])
+        self.assertEqual(self.rows(agents, show_archived=True), ["old", "lead", "live"])
+
+    def test_a_cycle_is_broken_rather_than_followed(self):
+        """Two archived rows that parent each other are their own ancestors and nobody
+        else's — no live ancestor, no live descendant, and no hang either."""
+        agents = [_mk("a", parent="b", archived=True), _mk("b", parent="a", archived=True)]
+        self.assertEqual(self.rows(agents), [])
+        self.assertEqual(self.rows(agents, show_archived=True), [])
+
+
 class NeedsSettleTest(unittest.TestCase):
     """The NEEDS YOU debounce: `stamp_needs_for` times a summons, `settled` gates it.
 

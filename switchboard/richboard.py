@@ -27,8 +27,8 @@ Four things the mockup did not have to do, and this does:
   would have been. A corner means "this is where the group ends"; the absence of one at
   the edge of the screen means "it carries on past here", which is the truth.
 - **Owners.** Every line records who it belongs to, including the NEEDS YOU rows (which
-  focus the agent they name), the collapsed-archive rows (which carry their `Collapsed`,
-  as before) and the padding (nobody).
+  focus the agent they name) and the padding (nobody). Every owner is an agent: the board
+  draws no stand-in row for what is archived (`status.board_rows`).
 - **The no-wrap invariant.** See `_lines`.
 
 This file must not import `store` — see `board.py`'s module note and
@@ -437,11 +437,8 @@ def group_runs(rows: list[Any]) -> list[tuple[int, int]]:
     child whose `workspace` is its parent's, unlike every one of its siblings. Depth
     cannot tell that row from the ones around it; the workspace value can.
 
-    A collapsed-archive marker is read the same way, off the same field. It carries the
-    workspace of the agents it stands for when they shared one (`status.Collapsed`), and
-    None when they did not — so a group whose last member has been archived keeps its
-    closing corner, and a marker standing for several workspaces still belongs to none of
-    them and ends the run it follows, which is what it did before it had the field.
+    A row with no workspace at all belongs to no run and ends the one it follows, which
+    is the honest reading: nothing says it sits with the rows above it.
     """
     runs: list[list[int]] = []
     current: Optional[str] = None
@@ -545,7 +542,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
 
     if show_archived is None:
         show_archived = status_mod.SHOW_ARCHIVED
-    rows = status_mod.display_rows(snap.agents, show_archived=show_archived)
+    rows = status_mod.board_rows(snap.agents, show_archived=show_archived)
 
     inner = width - 4                            # 2 columns of border, 2 of padding
     capacity = height - 2                        # 2 lines of border
@@ -563,8 +560,9 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         content.append((line, owner))
 
     # --- NEEDS YOU and the footer, sized before the body gets what is left ---
-    # Read from `snap.agents` and not from `rows`: a blocked agent inside a collapsed
-    # archive is still a person's problem, and the collapse must not be able to bury it.
+    # Read from `snap.agents` and not from `rows`: a blocked agent whose row the board
+    # does not draw — archived under an archived ancestor — is still a person's problem,
+    # and the tree's rule about what is worth a row must not be able to bury it.
     wanted = needs_list(snap.agents)
     needs = _needs_block(wanted, inner)
     foot = _footer(inner, msg, note_text)
@@ -691,10 +689,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             drawn += 1
         w_name, w_state, show_age, left = _row_budget(rows[first:last], inner)
         for i in range(first, last):
-            # A collapsed row is never lit: it is not an agent, `here` is a name, and a
-            # workspace's archived tail is not a pane anybody is sitting in.
-            on = (here is not None and not board._is_group(rows[i])
-                  and rows[i].name == here)
+            on = here is not None and rows[i].name == here
             emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on),
                  rows[i])
             drawn += 1
@@ -811,7 +806,7 @@ def _row_budget(window: list[Any], inner: int) -> tuple[int, int, bool, int]:
     The gutter is NOT in here. Its rule is drawn inside the indentation the name column
     already carries, so the budget is the same with it or without it.
     """
-    live = [a for a in window if not board._is_group(a)]
+    live = list(window)
     reserve = max([0] + [_vlen(f[-1]) for f in (tail_forms(a) for a in live) if f])
     reserve += 2 if reserve else 0               # the two spaces before it
     w_state = max([0] + [_vlen(a.display_state) for a in live])
@@ -835,9 +830,8 @@ def _gutter(line, label: str, mark: Optional[tuple[str, int]], indent_cols: int,
     `off` is always inside this row's indentation, so the character it replaces is a space
     and the name column stays exactly where it was.
 
-    ONE FUNCTION FOR BOTH KINDS OF ROW, and that is the point rather than tidiness: an
-    agent row and the collapsed row that closes its workspace have to put the mark in the
-    same screen column, or the bracket closes on nothing. Bounded by the INDENT and not by
+    Every row of a run has to put the mark in the same screen column, or the bracket
+    closes on nothing. Bounded by the INDENT and not by
     the label, so a mark that somehow came out too far right is dropped rather than drawn
     over a letter of the name.
     """
@@ -879,25 +873,6 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
 
     line = Text(no_wrap=True, overflow="crop")
 
-    if board._is_group(row):
-        # No glyph, no state, no tail. It is not an agent and must not read as one:
-        # `board.agent_at` hands this very object to the click handler, which has to be
-        # able to tell the two apart.
-        #
-        # Two things it DOES share with an agent row, because it stands among agent rows:
-        # it indents by `board.INDENT` to the depth of the rows it replaced, so it lines
-        # up with the siblings it is the footer of; and it carries the workspace mark,
-        # because it is the last row of that workspace's run and the bracket has to close
-        # on something. `_clip` is given the WORDS only — it flattens runs of whitespace,
-        # and an indent handed to it arrives with the indent gone.
-        indent = board.INDENT * row.depth
-        head = " " if mark is None or mark[1] >= 0 else mark[0]
-        line.append(head, style="" if head == " " else GUTTER_STYLE)
-        line.append("  ")                        # where an agent row draws its glyph
-        text = _clip(status_mod.collapsed_text(row), max(1, inner - 3 - _vlen(indent)))
-        _gutter(line, indent + text, mark, _vlen(indent), DIM)
-        return line
-
     # A gone agent is one whose pane herdr no longer has. It is the row a future "clear
     # them all" key would sweep, so it is drawn to be picked out without reading: red the
     # whole way across, the name struck through. The strike is decoration on top of the
@@ -915,8 +890,7 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         line.append(" ")
     line.append(g, style=GLYPH_STYLE.get(g, ""))
     line.append(" ")
-    # The workspace mark, drawn INTO the indent rather than in front of it — see `_gutter`,
-    # which the collapsed row above goes through as well.
+    # The workspace mark, drawn INTO the indent rather than in front of it — see `_gutter`.
     _gutter(line, label, mark, _vlen(indent), name_style)
     line.append("  ")
     if doomed:

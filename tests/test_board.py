@@ -438,8 +438,8 @@ class LayoutTest(unittest.TestCase):
                             top=0, height=board.CHROME + 4, width=40, msg="")
         for text, _ in rows:
             self.assertLessEqual(board._visible_len(text), 40)
-        row = next(i + 1 for i, (_, a) in enumerate(rows) if a is not None
-                   and not board._is_group(a) and a.name == "below")
+        row = next(i + 1 for i, (_, a) in enumerate(rows)
+                   if a is not None and a.name == "below")
         self.assertEqual(board.agent_at(rows, row).name, "below")
 
     def test_an_emoji_sequence_is_one_glyph_two_columns_wide(self):
@@ -696,13 +696,17 @@ class RefreshTest(unittest.TestCase):
                                           note_text=note_text)), 12)
 
 
-class CollapseLayoutTest(unittest.TestCase):
-    """Collapse in the panel — and the mapping it could break.
+class ArchivedLayoutTest(unittest.TestCase):
+    """What the board draws of what is finished — and the mapping it could break.
 
-    `layout` used to window `snap.agents` directly and `agent_at` used to be able to
-    assume every carried object was an agent. Neither is true once a display row can
-    stand for a whole subtree, and both failures are of the silent kind this file exists
-    for: a click that focuses somebody, just not the row under the cursor.
+    The board draws NO stand-in row for archived work: `+ N archived` was a line you
+    could not click, could not focus and could not act on, and this is the human's
+    steering view. So a finished subtree is simply not drawn, and `a` widens that to the
+    archived rows of a tree somebody is still working in (`status.board_rows`).
+
+    `layout` windows the DRAWN rows and never `snap.agents`, which is the mapping half of
+    this: a click that focuses somebody, just not the row under the cursor, is the silent
+    failure this file exists for.
     """
 
     def drawn(self, rows):
@@ -716,68 +720,81 @@ class CollapseLayoutTest(unittest.TestCase):
         asserting over the whole screen would pass no matter what was drawn."""
         return "\n".join(t for t, a in rows if a is not None)
 
-    def test_an_archived_subtree_is_one_row_and_its_agents_are_not_drawn(self):
+    def test_an_archived_subtree_is_not_drawn_and_leaves_no_row_behind(self):
+        """The `+ N archived` row is gone, not moved: no count, no footer, nothing to
+        click. Three agents on the snapshot, one row on the screen."""
         rows = board.layout(snap(agent("main"),
                                  agent("lead", depth=1, parent="main", archived=True),
                                  agent("w1", depth=2, parent="lead", archived=True)),
                             top=0, height=12, width=100, msg="")
-        self.assertEqual([getattr(a, "name", "GROUP") for a in self.drawn(rows)],
-                         ["main", "GROUP"])
-        self.assertIn("+ 2 archived", self.text(rows))
+        self.assertEqual([a.name for a in self.drawn(rows)], ["main"])
+        self.assertNotIn("archived", self.body(rows))
 
-    def test_a_click_on_a_collapsed_row_never_resolves_to_an_agent(self):
-        """The misclick this whole file is about. `agent_at` hands back whatever the row
-        carries, so a collapsed row that read as an agent would focus one — and which one
-        depends on nothing the human can see."""
+    def test_every_row_the_board_carries_is_an_agent(self):
+        """`agent_at` hands the click handler whatever the row carries. With the stand-in
+        row gone that is an agent every time, and the handler reads `.name` off it."""
         rows = board.layout(snap(agent("main"),
+                                 agent("live", depth=1, parent="main"),
                                  agent("a", depth=1, parent="main", archived=True),
                                  agent("b", depth=1, parent="main", archived=True)),
                             top=0, height=12, width=100, msg="")
-        at = [(i + 1, a) for i, (_, a) in enumerate(rows) if a is not None]
-        groups = [(r, a) for r, a in at if board._is_group(a)]
-        self.assertEqual(len(groups), 1)
-        row, got = groups[0]
-        self.assertIs(board.agent_at(rows, row), got)
-        self.assertIsInstance(got, status.Collapsed)
-        self.assertFalse(hasattr(got, "name"))
-
-    def test_a_live_agent_is_still_clickable_next_to_a_collapsed_group(self):
-        rows = board.layout(snap(agent("main"),
-                                 agent("live", depth=1, parent="main"),
-                                 agent("dead", depth=1, parent="main", archived=True)),
-                            top=0, height=12, width=100, msg="")
-        named = [(i + 1, a.name) for i, (_, a) in enumerate(rows)
-                 if a is not None and not board._is_group(a)]
+        named = [(i + 1, a.name) for i, (_, a) in enumerate(rows) if a is not None]
+        self.assertEqual([n for _, n in named], ["main", "live"])
         for row, name in named:
             self.assertEqual(board.agent_at(rows, row).name, name)
 
+    def test_an_archived_agent_with_a_live_child_is_still_drawn(self):
+        """The one archived row the board cannot drop: it is the only path to a row that
+        IS drawn, and hiding it would leave the child hanging off nothing."""
+        rows = board.layout(snap(agent("main", archived=True),
+                                 agent("kid", depth=1, parent="main")),
+                            top=0, height=12, width=100, msg="")
+        self.assertEqual([a.name for a in self.drawn(rows)], ["main", "kid"])
+
+    def test_a_shows_the_archived_under_a_live_ancestor(self):
+        s = snap(agent("main"), agent("gone", depth=1, parent="main", archived=True))
+        rows = board.layout(s, top=0, height=12, width=100, msg="", show_archived=True)
+        self.assertEqual([a.name for a in self.drawn(rows)], ["main", "gone"])
+        self.assertNotIn("archived", self.body(rows))
+
+    def test_a_never_shows_a_tree_whose_own_dispatcher_is_gone(self):
+        """`a` is "show me what finished in a job that is still running", not "show me
+        every agent that ever existed". A subtree with no live agent above it anywhere
+        belongs to a job that ended — nobody is going to restore it from this screen."""
+        s = snap(agent("main"),
+                 agent("kid", depth=1, parent="main", archived=True),
+                 agent("old", archived=True),
+                 agent("older", depth=1, parent="old", archived=True))
+        rows = board.layout(s, top=0, height=12, width=100, msg="", show_archived=True)
+        self.assertEqual([a.name for a in self.drawn(rows)], ["main", "kid"])
+
     def test_scrolling_is_an_offset_into_drawn_rows_not_into_agents(self):
         """`top` indexed `snap.agents` before, and the clamp was `len(agents) - capacity`.
-        With 30 of 34 agents collapsed away there are 5 rows on screen, so a `top` of 4
-        is already past the end — but in agent-space it clamps to 31 and the window fills
-        with archived rows that collapse says must not be drawn at all.
+        With 30 of 34 agents not drawn there are 4 rows on screen, so a `top` of 4 is
+        already past the end — but in agent-space it clamps to 31 and the window fills
+        with archived rows that must not be drawn at all.
         """
         agents = [agent("main")]
         agents += [agent(f"live{i}", depth=1, parent="main") for i in range(3)]
         agents += [agent("dead", depth=1, parent="main", archived=True)]
         agents += [agent(f"d{i}", depth=2, parent="dead", archived=True) for i in range(29)]
-        height = board.CHROME + 6                       # capacity 3 rows, 5 to show
+        height = board.CHROME + 6                       # capacity 3 rows, 4 to show
 
         rows = board.layout(snap(*agents), top=0, height=height, width=100, msg="")
-        self.assertEqual([getattr(a, "name", "GROUP") for a in self.drawn(rows)],
+        self.assertEqual([a.name for a in self.drawn(rows)],
                          ["main", "live0", "live1"])
         rows = board.layout(snap(*agents), top=9999, height=height, width=100, msg="")
-        self.assertEqual([getattr(a, "name", "GROUP") for a in self.drawn(rows)],
-                         ["live1", "live2", "GROUP"])
-        # Nothing hidden by collapse can be reached by scrolling to it.
+        self.assertEqual([a.name for a in self.drawn(rows)],
+                         ["live0", "live1", "live2"])
+        # Nothing dropped can be reached by scrolling to it.
         for top in range(0, 40):
             got = self.drawn(board.layout(snap(*agents), top=top, height=height,
                                           width=100, msg=""))
-            self.assertFalse([a for a in got if not board._is_group(a) and a.archived])
+            self.assertFalse([a for a in got if a.archived])
 
     def test_the_more_below_count_counts_rows_on_screen_not_agents(self):
         """A footer that contradicts the screen is worse than no footer: the human
-        scrolls looking for thirty rows that were never going to be drawn."""
+        scrolls looking for forty rows that were never going to be drawn."""
         agents = [agent(f"live{i}") for i in range(6)]
         agents += [agent("dead", archived=True)]
         agents += [agent(f"d{i}", depth=1, parent="dead", archived=True) for i in range(40)]
@@ -785,31 +802,25 @@ class CollapseLayoutTest(unittest.TestCase):
         height = board.CHROME + 6
         rows = board.layout(snap(*agents), top=0, height=height, width=100, msg="")
         self.assertEqual(len(self.drawn(rows)), 3)
-        self.assertIn("+4 more below", self.text(rows))      # 7 drawn rows, 3 shown
+        self.assertIn("+3 more below", self.text(rows))      # 6 drawn rows, 3 shown
 
     def test_a_fleet_that_has_entirely_finished_still_draws(self):
-        """Every root archived, so the window is one collapsed row and there is no agent
-        left to size a column against. This is the ORDINARY end-of-session state, and
-        `max()` over an empty sequence raises."""
+        """Every root archived, so the tree is EMPTY — the ordinary end-of-session state,
+        and the one a `max()` over an empty sequence used to raise on."""
         rows = board.layout(snap(agent("a", archived=True), agent("b", archived=True)),
                             top=0, height=12, width=100, msg="")
-        self.assertIn("+ 2 archived", self.text(rows))
+        self.assertNotIn("archived", self.body(rows))
+        self.assertIn("nothing running", self.text(rows))
         self.assertEqual(len(rows), 12)
 
-    def test_show_archived_draws_every_agent_again(self):
-        s = snap(agent("main"), agent("gone", depth=1, parent="main", archived=True))
-        rows = board.layout(s, top=0, height=12, width=100, msg="", show_archived=True)
-        self.assertEqual([a.name for a in self.drawn(rows)], ["main", "gone"])
-        self.assertNotIn("archived", self.body(rows))
-
-    def test_a_herdr_outage_draws_the_whole_fleet_rather_than_one_row(self):
+    def test_a_herdr_outage_draws_the_whole_fleet_rather_than_nothing(self):
         """`alive is None`, so nothing is archived however old the rows are. A panel that
-        collapsed the fleet on a subprocess hiccup would be worse than no panel."""
+        emptied the fleet on a subprocess hiccup would be worse than no panel."""
         unknown = [agent(f"a{i}", alive=None, herdr_state=None) for i in range(4)]
         for a in unknown:
             a.age = int(status.SPAWN_GRACE) + 1
         # Four rows and the three group breaks between them, off the chrome: the question
-        # here is what `display_rows` keeps, so the pane is sized not to be the answer.
+        # here is what `board_rows` keeps, so the pane is sized not to be the answer.
         rows = board.layout(snap(*unknown), top=0, height=board.CHROME + 7, width=100,
                             msg="")
         self.assertEqual([a.name for a in self.drawn(rows)], ["a0", "a1", "a2", "a3"])
@@ -821,20 +832,19 @@ class CollapseLayoutTest(unittest.TestCase):
         would be a setting that only half the product obeyed."""
         s = snap(agent("main"), agent("gone", depth=1, parent="main", archived=True))
         rows = board.layout(s, top=0, height=12, width=100, msg="")
-        self.assertEqual([getattr(a, "name", "GROUP") for a in self.drawn(rows)],
-                         ["main", "GROUP"])
+        self.assertEqual([a.name for a in self.drawn(rows)], ["main"])
         with mock.patch.object(status, "SHOW_ARCHIVED", True):
             rows = board.layout(s, top=0, height=12, width=100, msg="")
             self.assertEqual([a.name for a in self.drawn(rows)], ["main", "gone"])
 
-    def test_the_header_still_counts_every_agent_a_collapse_hid(self):
-        """Collapse shortens the tree, not the readout. Three agents, two rows — so a
-        header that had quietly started counting rows would read "2 agents" here."""
+    def test_the_header_still_counts_every_agent_the_tree_dropped(self):
+        """Dropping rows shortens the tree, not the readout. Three agents, one row — so a
+        header that had quietly started counting rows would read "1 agents" here."""
         s = snap(agent("main"),
                  agent("d1", depth=1, parent="main", archived=True),
                  agent("d2", depth=1, parent="main", archived=True))
         rows = board.layout(s, top=0, height=12, width=200, msg="")
-        self.assertEqual(len(self.drawn(rows)), 2)
+        self.assertEqual(len(self.drawn(rows)), 1)
         self.assertIn("3 agents", rows[0][0])
         self.assertIn(status.summary_line(s), board._ANSI.sub('', rows[0][0]))
 
