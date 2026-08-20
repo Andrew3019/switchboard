@@ -1673,6 +1673,62 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("not in the step library", json.loads(out)["data"]["error"])
 
 
+    # -- a definition's command ------------------------------------------------
+
+    def test_a_definitions_command_reaches_the_step_that_names_it(self):
+        """The command is resolved onto the step the way the name and the display are —
+        rendered under it, never copied into the record. What it buys is that the agent
+        working the step reads the command where the step is; a field that only appeared
+        under `library <name>` would be a field somebody has to go and find, which is the
+        cost it exists to remove."""
+        self.define("post", name="post the plan on the pull request", display="post",
+                    command='gh pr comment <PR> --body "$(sb plugin plans show <PLAN>)"')
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "post", "--reason", "post it")
+
+        self.assertNotIn("command", self.steps()[0])     # nothing copied into the record
+        self.assertNotIn("gh pr comment", self._raw())
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn('cmd   gh pr comment <PR> --body "$(sb plugin plans show <PLAN>)"',
+                      shown)
+        # And an edit to the definition reaches the plan already running, like the name.
+        self.define("post", name="post the plan on the pull request", display="post",
+                    command="gh pr comment <PR> --body-file <FILE>")
+        self.assertIn("cmd   gh pr comment <PR> --body-file <FILE>",
+                      self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_definition_with_no_command_renders_no_command_line(self):
+        """Most steps have no one standard command, and an empty `cmd` line under them
+        would say there was one. Null rather than blank, so a step that carries a command
+        is legible as the exception it is."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.ok("plugin", "plans", "name-step", "p-1", "merge-human-review",
+                "--reason", "a human checks it")
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("list what only a human can check", shown)
+        self.assertNotIn("cmd", shown)
+
+    def test_the_two_shipped_pr_steps_carry_the_command_that_posts_the_plan(self):
+        """The pair the field was added for: `create-pr` posts the plan as a comment and
+        `merge` rewrites THAT comment rather than adding a second one, and both commands
+        are on the steps with obvious placeholders. Pinned because the two are a pair — a
+        `merge` that lost `--edit-last` would post a second rendering of the same plan and
+        leave whoever reads the PR working out which one is current."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn('cmd   gh pr comment <PR> --body '
+                      '"$(sb plugin plans show <PLAN> --markdown)"', shown)
+        self.assertIn('cmd   gh pr comment <PR> --edit-last --body '
+                      '"$(sb plugin plans show <PLAN> --markdown)"', shown)
+        # And the library prints it under the definition read in full, beside the prose.
+        self.assertIn("command     gh pr comment <PR> --edit-last",
+                      self.ok("plugin", "plans", "library", "merge"))
+
+
 class CompletenessTest(PlansSandbox):
     """A display name and a dep on every step, and the three doors that keep them there.
 

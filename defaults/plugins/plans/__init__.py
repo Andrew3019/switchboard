@@ -174,6 +174,14 @@ length cap and no per-cell clip any more — the cap is what cut the informative
 the enforcement is three doors rather than one: the shape verbs refuse, every other write
 warns and still writes, and `show`, `list` and the board draw the defect. See `_faults`.
 
+A definition may also carry a `command`: the one standard shell command that step is run
+with, `<PR>`- and `<PLAN>`-style placeholders and all, resolved onto a named step exactly as
+`name` and `display` are. It is DATA and nothing here runs it — the agent owning the step is
+what runs a command, because a plugin that fired them would be the evaluator this design does
+not have. It exists so that the command is under the step when the step is read rather than
+somewhere the owner has to go and look for it, which is the whole saving; most definitions
+have no single standard command and carry none.
+
 A definition may COMPOSE — `{"steps": ["a", "b"]}` — and naming it puts a and b in the plan,
 flat. What a plan holds is always flat: no step contains another, because a step that did
 would be a plan by another name. Composition is the one edge in this file that is actually
@@ -1879,8 +1887,15 @@ def _resolve(step: dict, lib: dict) -> dict:
     # `name` is: it is part of what the library owns about a step, so an edit to the short
     # board label reaches every plan naming it. Null when the definition sets none, and the
     # board falls back to the name.
+    #
+    # `command` rides along for the same reason again, and for one more: the whole point of
+    # it is that the agent working the step does not go looking for it. A field that only
+    # showed up under `library <name>` would be a field you have to go and find, which is
+    # the cost it exists to remove. Null when the definition sets none — most steps have no
+    # single standard command, and an empty line under them would say there was one.
     return dict(step, name=str(spec.get("name") or "").strip() or key,
-                display=str(spec.get("display") or "").strip() or None)
+                display=str(spec.get("display") or "").strip() or None,
+                command=str(spec.get("command") or "").strip() or None)
 
 
 def _shown(plan: dict, lib: dict) -> dict:
@@ -3277,6 +3292,12 @@ def _step_lines(steps: list) -> list[str]:
             # too, one line per line, SPLIT FIRST so that no line of it can forge a step
             # row the way the whole thing could if it were pasted in unbroken.
             out.extend(f"    out   {line}" for line in _lines(s["output"]))
+        if s.get("command"):
+            # The command the definition carries, written out where the step is read. It is
+            # printed and never run: nothing in this plugin executes a step, and a plan that
+            # fired commands would be the evaluator this design does not have. The
+            # placeholders in it are the owner's to fill in.
+            out.append(f"    cmd   {_flat(s['command'])}")
         out.extend(f"    ref   {_flat(c.get('ref'))}" for c in (s.get("checkpoints") or ()))
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
                    f"{_when(n.get('at'))})"
@@ -3563,6 +3584,13 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
     for ob in _obliges(lib, key):
         lines.append(f"    obliges     {_flat(ob)} — added with it, skippable with a reason, "
                      f"never omitted")
+    command = str(spec.get("command") or "").strip()
+    if full and command:
+        # Only with a name, beside the prose, because that is where a definition is READ in
+        # full — the listing is for choosing one and a command in it would be a wall of argv
+        # between two names. Where the command has to be to hand is on the step itself, and
+        # `_resolve` puts it there.
+        lines.append(f"    command     {_flat(command)}")
     if full:
         lines.extend(_about(spec))
     return "\n".join(lines)
