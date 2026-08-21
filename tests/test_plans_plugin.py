@@ -3289,6 +3289,34 @@ class MarkdownTest(PlansSandbox):
         self.assertEqual(self.data("plugin", "plans", "show", "p-2", "--markdown"),
                          self.data("plugin", "plans", "show", "p-2"))
 
+    def test_the_anchor_stays_out_of_the_comment_a_human_reads(self):
+        """The one field resolved onto the view for the CODE and for no reader.
+
+        `show --markdown` is what `create-pr` posts onto the pull request, so a step's
+        resolved `name`, `display` and `command` belong in it — they are what whoever turns
+        up reads. `anchor` is not: it is how this file decided where to put the step, weeks
+        earlier, and `anchor: pr` under a step means nothing to that reader. Dropped from
+        the copy that is dumped rather than skipped by the renderer, because a renderer
+        that knew one field name would be the template this one exists not to be.
+
+        `--json` still carries it, and that half is the point of the split: the machine
+        reader is who the field is for.
+        """
+        self.ok(*_create("ship it", "write it"))
+        self.ok("plugin", "plans", "name-step", "p-1", "create-pr")
+        md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
+        self.assertIn("open PR", md, "the resolved text a reader needs is still there")
+        self.assertNotIn("anchor", md)
+        self.assertNotIn("anchor", self.ok("plugin", "plans", "show", "step-2", "--markdown"))
+
+        shown = self.data("plugin", "plans", "show", "p-1")
+        by_def = {s.get("def"): s for s in shown["steps"]}
+        self.assertEqual(by_def["create-pr"]["anchor"], "pr", "`--json` carries it")
+        self.assertNotIn("anchor", by_def[None],
+                         "a step of its own words is not resolved at all")
+        # And the stored step holds no such field: the definition owns it, like the name.
+        self.assertNotIn("anchor", self._doc()["plans"][0]["steps"][1])
+
     def test_a_field_nobody_wrote_this_renderer_for_still_renders(self):
         """Schema drift, forwards: a plan carrying fields this code has never heard of —
         a scalar, a list of records, a nested map — renders them rather than dropping them

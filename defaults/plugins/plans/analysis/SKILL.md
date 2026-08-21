@@ -18,8 +18,8 @@ ids the claim rests on. Somebody else decides, and the catalogue is edited in an
 person.
 
 Concretely, for the whole of this pass: no `sb plugin plans` verb but `list`, `show`,
-`changelog`, `library`, `template list` and `validate`. No `tick`, `note`, `add-step`,
-`name-step`, `dep`, `create` or `template use` — not even on a plan you own, not even to
+`changelog`, `library`, `template list` and `validate`. No `tick`, `skip`, `note`,
+`name-step`, `create` or `template use` — not even on a plan you own, not even to
 "record that the analysis ran". No editing a plan file either, which is how most of a plan
 is written now. No `Write`, no `Edit`, no `git commit`.
 
@@ -61,6 +61,16 @@ seriously rather than arguing it up.
 - *Rework as added step* — an `add-step` entry. The plan's shape changed mid-job. Something
   was missing from the plan, and if the same thing keeps being added, it is missing from the
   catalogue or from the template. That is a new step or a template change.
+
+  READ THIS SIGNAL AS HISTORICAL. `add-step` was a verb and is not one any more: a step
+  invented mid-job is written into the plan file by hand now, and a hand-edit stamps no
+  changelog entry — the guide says so in as many words. So an `add-step` entry means a plan
+  made before the verb was dropped, and NO `add-step` ENTRY MEANS NOTHING AT ALL about a
+  plan made since. A count of them is a floor and never a measure, the absence of them is
+  not evidence that a plan kept its shape, and a pass that reported "no rework" on that
+  basis would be reporting on the record rather than on the job. Say which you are looking
+  at. Finding a signal that survives the shape change is a real question and is not this
+  pass's to answer on the fly — raise it in the output, as below.
 
 Both live in the changelog and the report reads them from there, from the action, not from
 guessing at the step. If an entry has no reason on it, you cannot tell a step added for
@@ -106,7 +116,9 @@ have one is the failure mode this whole pass is exposed to.
 If the analysis wants something the record does not have, say so in the output. Do **not**
 add a field: the plan schema belongs to the verbs that write it, and a pass that grew the
 record would be editing it. Known ones the report will raise on its own: plans with no notes
-at all, rework and add-step entries with no reason, and try counts with no verb behind them.
+at all, rework and add-step entries with no reason, try counts with no verb behind them, and
+plans whose shape changed with nothing in the changelog to say so — which, since `add-step`
+stopped being a verb, is every plan whose steps were added by hand.
 
 Two more that the report cannot raise, because they are about the shape of the record rather
 than about one job:

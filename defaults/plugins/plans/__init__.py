@@ -788,8 +788,9 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   THE FILE ITSELF IS THE SHAPE TO WRITE AGAINST, and it is the only shape. `sb plugin
   plans show <plan> --json` is a VIEW of that plan and not a copy of it: the library is
   resolved into it, so what it prints for a `def` step — its `name`, its `display`, its
-  `command` — is not what the step holds and must never be written back into the file. A
-  `def` step's own record keeps those null on purpose, which is what makes the link live.
+  `command` and its `anchor` — is not what the step holds and must never be written back
+  into the file. A `def` step's own record does not carry any of the four, which is what
+  makes the link live: the definition owns them and an edit to it reaches every plan.
   Two rules:
 
     - NEVER drop or rewrite a changelog entry that is already there, or a plan. Records
@@ -1119,7 +1120,10 @@ def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:
     shown = _resolve(step, lib)
     data = dict(shown, plan=plan["id"], about=_instructions(step, lib))
     if markdown:
-        return Result(human=_markdown(data), data=data)
+        # The machinery out of the copy that is dumped and not out of `data`, exactly as
+        # `_plan_result` does it — see `_MACHINERY`.
+        return Result(human=_markdown({k: v for k, v in data.items()
+                                       if k not in _MACHINERY}), data=data)
     lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines([shown]))
     lines.extend(f"  {ln}" for ln in _how(step, lib))
@@ -1803,7 +1807,7 @@ def _no_step(doc: dict, given: str, plan: Optional[dict] = None) -> Result:
 
     Steps are numbered PER PLAN, so "the highest is step-7" is only true of somewhere: this
     says which plan it looked in whenever it knows one — from a `p-16/step-3` qualifier, or
-    from the plan a caller was already working in, which is what `dep --after` hands it.
+    from the plan a caller was already working in, which is what a qualified id hands it.
     Ids are never reused within a plan, so a step that is not there has never been there.
 
     The third miss is the one per-plan numbering introduces: a BARE id that more than one
@@ -2426,9 +2430,10 @@ def _resolve(step: dict, lib: dict) -> dict:
     # `anchor` rides along too, and it is the one of these NOT put there to be read by a
     # person: `_wrong` has to know where a step runs to tell an obligation that was left out
     # of the order from one the anchors deliberately ordered the other way, and it is handed
-    # a resolved plan and never the catalogue. It is in `_DRAWN`, so no rendering prints it
-    # under the step — where a definition runs is read off `library <name>`, which says it
-    # in words — but `--json` carries it, like everything else on the view.
+    # a resolved plan and never the catalogue. Neither rendering a person reads prints it —
+    # see `_MACHINERY`, which is where the two different ways that is arranged are — while
+    # `--json` carries it, like everything else on the view. Where a definition runs is read
+    # off `library <name>`, which says it in a word rather than in a field.
     return dict(step, name=str(spec.get("name") or "").strip() or key,
                 display=str(spec.get("display") or "").strip() or None,
                 anchor=str(spec.get("anchor") or "").strip() or None,
@@ -2703,7 +2708,7 @@ def _plan_result(shown: dict, markdown: bool = False,
     if path:
         doc = dict(doc, file=path)
     if markdown:
-        return Result(human=_markdown(doc), data=doc)
+        return Result(human=_markdown(_dumped(doc)), data=doc)
     human = _full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
     if path:
         human += f"\n\nthe plan is {path} — edit it there, then `sb plugin plans validate`"
@@ -3873,7 +3878,7 @@ def _full(p: dict) -> str:
 # `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
 _DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
                     "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
-                    "checkpoints", "command", "anchor"})
+                    "checkpoints", "command", "root", "anchor"})
 
 
 def _step_lines(steps: list) -> list[str]:
@@ -3974,6 +3979,35 @@ def _step_lines(steps: list) -> list[str]:
         out.extend(f"    {_flat(k) + '  ':<6}{_flat(v)}" for k, v in s.items()
                    if k not in _DRAWN and _scalar(v) and _some(v))
     return out
+
+
+# Resolved onto the view for the code to read and for NO RENDERING TO PRINT. `anchor` is
+# the only one: a step's name, display and command are resolved for a reader, and this is
+# resolved for `_wrong`, which has to know where a step runs to tell an obligation left out
+# of the order from one the anchors ordered the other way, and which is handed a resolved
+# plan and never the catalogue.
+#
+# Kept out of both renderings by two different means, because they are two different
+# mechanisms. The terminal draws only what it does not already know how to draw, so this
+# joins `_DRAWN`. The markdown is WALKED and knows no field names at all — which is the
+# whole point of it — so nothing in that renderer could be taught to skip a key without
+# taking that property away; what happens instead is that the field is dropped from the
+# copy being dumped (`_dumped`), one call above it. `--json` carries it either way, since
+# that rendering is the record and a machine reader is who this field is for.
+_MACHINERY = frozenset({"anchor"})
+
+
+def _dumped(shown: dict) -> dict:
+    """A resolved plan with the machinery taken back out, for the rendering a HUMAN reads.
+
+    `show --markdown` is what `create-pr` posts onto the pull request, so what is in it is
+    what whoever turns up reads. `anchor: pr` under a step means nothing to that reader and
+    is not a fact about the job — it is how this file decided where to put the step, which
+    it did weeks earlier. Dropped from the copy rather than skipped by the renderer: see
+    `_MACHINERY`. A copy, so `data` is untouched and `--json` still means what it meant.
+    """
+    return dict(shown, steps=[{k: v for k, v in s.items() if k not in _MACHINERY}
+                              for s in (shown.get("steps") or ())])
 
 
 # -- the plan as markdown ------------------------------------------------------
