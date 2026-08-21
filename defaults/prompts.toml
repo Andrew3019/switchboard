@@ -49,6 +49,21 @@ identity = "You are agent '{name}', role '{role}'. You report to '{parent}': the
 #   {roles} the role names this repo has, comma-separated
 roles = "The roles that exist are: {roles}. That is the list `--role` takes; a name that is not on it still works and inherits the default role."
 
+# Operator procedures this repo offers, told ONLY to the dispatcher (the `MAIN` role) and
+# only when the registry is non-empty — a repo that `"!reset"`s it to nothing gets no
+# fragment, the same way `spawn.workspace` is simply absent for an agent with no workspace.
+#
+# Generated live from `defaults/operator_skills.toml` (`config.operator_skills`), never
+# hardcoded — same property `{roles}` is paid for above: a repo that adds an entry gets it
+# here with nothing edited.
+#
+# Stated as a FACT, not as an instruction to speak. A dispatcher started WITH a real task
+# must not be derailed into reciting a menu, and an instruction here would also argue with
+# `spawn.start_task`'s "Await my instructions." The last sentence names the one moment the
+# menu is worth raising, and leaves every other moment alone.
+#   {menu} the registry as one flat "; "-separated line, `command — description`
+operator_menu = "This repo offers these operator procedures a person can ask you to run: {menu}. Offer them when someone is standing by without a task."
+
 # Added only when the agent is being placed in a named workspace.
 #
 # The last sentence came from the deleted `own-files` preset, which every agent used to pay

@@ -654,6 +654,23 @@ class Broker:
         """
         return config.prompt(key, repo=self.repo, **fields)
 
+    def _operator_menu(self) -> tuple[list[config.OperatorSkill], str]:
+        """The operator-skill registry, and it rendered as one flat line for the prompt.
+
+        Every field goes through `config.flatten` on the way in. `config.prompt` flattens
+        the TEMPLATE and then interpolates, so a multi-line `description` would arrive
+        unflattened in the finished fragment — and `Herdr.start_agent` refuses a prompt
+        containing a newline, which would turn a wrapped line in someone's
+        `operator_skills.toml` into a dead `sb start` for every dispatcher.
+
+        Returns the list too, so the caller can suppress the fragment entirely when a repo
+        has reset the registry to nothing.
+        """
+        skills = config.operator_skills(self.repo)
+        menu = "; ".join(f"{config.flatten(s.command)} — {config.flatten(s.description)}"
+                         for s in skills)
+        return skills, menu
+
     def _first_task(self, key: str, task: Optional[str]) -> tuple[str, bool]:
         """What a new agent is told to do, and whether that is anything at all.
 
@@ -3641,6 +3658,15 @@ class Broker:
         ]
         if ws:
             prompts.append(self._say("spawn.workspace", workspace=ws, path=where))
+        # Only the dispatcher, and only if there is anything to offer. Gated on the module
+        # constant `MAIN` rather than on `config.setting("vocabulary.main_role", repo=...)`:
+        # `_top` spawns with `role=MAIN`, read with no repo, so reading the repo's value
+        # here would let a repo that renames the role silently lose the menu. One reader,
+        # one answer.
+        if role == MAIN:
+            skills, menu = self._operator_menu()
+            if skills:
+                prompts.append(self._say("spawn.operator_menu", menu=menu))
         if as_prompt:
             prompts.append(as_prompt)
         elif r.prompt:

@@ -538,6 +538,58 @@ class BrokerTest(unittest.TestCase):
         self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertIn("archaeologist", " ".join(self.h.started[0]["prompts"]))
 
+    # -- the operator menu: the dispatcher's, and nobody else's ------------
+
+    def _started_prompts(self) -> str:
+        return " ".join(self.h.started[-1]["prompts"])
+
+    def _start_top(self) -> str:
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        return self.b.start()
+
+    def test_the_dispatcher_is_told_what_operator_procedures_this_repo_offers(self):
+        """The menu exists so a person standing in front of a waiting dispatcher can be
+        told what it can run, without the list being written into anyone's prose."""
+        self._start_top()
+        self.assertIn("sb presets sb-setup", self._started_prompts())
+
+    def test_a_worker_is_not_told_any_of_it(self):
+        """Gated on the role, not merely on the registry being non-empty: the menu is one
+        line of every spawn prompt, and only the dispatcher is ever asked to run one."""
+        self.b.delegate("t", topic="t", role="worker", me="orch")
+        self.assertNotIn("sb presets sb-setup", self._started_prompts())
+
+    def test_a_repo_that_resets_the_registry_to_nothing_gets_no_fragment_at_all(self):
+        """Empty means absent, the way `spawn.workspace` is absent for an agent with no
+        workspace — not a dispatcher told it offers "these procedures: "."""
+        d = self.repo / ".switchboard"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "operator_skills.toml").write_text('skill = ["!reset"]\n')
+        self._start_top()
+        joined = self._started_prompts()
+        self.assertNotIn("sb presets sb-setup", joined)
+        self.assertNotIn("operator procedures", joined)
+
+    def test_a_wrapped_description_does_not_kill_every_dispatcher_spawn(self):
+        """`config.prompt` flattens the TEMPLATE and interpolates after, so a description
+        that wraps in someone's `operator_skills.toml` would reach `Herdr.start_agent`
+        with a newline still in it — and that is refused, turning a cosmetic line break
+        into a dead `sb start` for every dispatcher. Each field is flattened on the way in.
+        """
+        d = self.repo / ".switchboard"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "operator_skills.toml").write_text(
+            'skill = ["!reset", {command = "sb presets deploy", '
+            'description = """ship it\nwhen the tests are green"""}]\n')
+        self._start_top()
+        prompts = self.h.started[-1]["prompts"]
+        for p in prompts:                      # the rule Herdr.start_agent enforces
+            self.assertNotIn("\n", p)
+        joined = " ".join(prompts)
+        self.assertIn("ship it", joined)
+        self.assertIn("when the tests are green", joined)
+
     # -- the spawn race: a claim is not a dead agent -----------------------
 
     def _collect_during_spawn(self):
