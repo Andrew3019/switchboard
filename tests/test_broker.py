@@ -557,7 +557,7 @@ class BrokerTest(unittest.TestCase):
     def test_a_worker_is_not_told_any_of_it(self):
         """Gated on the role, not merely on the registry being non-empty: the menu is one
         line of every spawn prompt, and only the dispatcher is ever asked to run one."""
-        self.b.delegate("t", role="worker", me="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertNotIn("sb presets sb-setup", self._started_prompts())
 
     def test_a_repo_that_resets_the_registry_to_nothing_gets_no_fragment_at_all(self):
