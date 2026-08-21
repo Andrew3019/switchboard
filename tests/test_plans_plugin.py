@@ -1131,6 +1131,23 @@ class StepsTest(PlansSandbox):
         self.assertIn("--why is required", json.loads(out)["data"]["error"])
         self.assertEqual(self.step("s-2")["progress"], "open")   # and nothing moved
 
+    def test_a_skip_releases_what_waited_on_it_exactly_as_a_tick_does(self):
+        """The two words are the same fact to whatever came next: the step is not going to
+        be worked again, so what waited on it is waiting no longer.
+
+        A skip that printed nothing would leave its successor unclaimed — the agent that
+        skipped a step would be the one agent never handed the next one, which is the whole
+        of what `_next` is for. Asserted through the release rather than through the flag,
+        so the claim survives the plumbing being rewritten.
+        """
+        self.plan("write it", "review it")
+        said = self.ok("plugin", "plans", "skip", "s-1", "--why", "the change is a typo")
+        self.assertIn("next — this move unblocked:", said)
+        self.assertIn("review it", said.split("unblocked:")[1])
+        released = json.loads(self.ok("plugin", "plans", "skip", "s-1",
+                                      "--why", "the change is a typo", "--json"))
+        self.assertEqual([s["id"] for s in released["data"]["next"]], ["step-2"])
+
     def test_an_edge_is_a_field_and_show_renders_what_the_file_says(self):
         """Fan-out and join, stored as data. Nothing traverses these, waits on them or
         orders anything by them — a join waits because the lead does not start it. So the
@@ -2134,6 +2151,127 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("no step definition 'nonesuch'", json.loads(out)["data"]["error"])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
 
+    def test_create_lib_sorts_its_flags_so_the_order_they_are_typed_decides_nothing(self):
+        """The claim `--lib` makes, and the one thing in this file that makes it true.
+
+        `_place` looks BACKWARDS: a step is placed against the plan as it stands, so a
+        merge minted before the PR exists waits on whatever the plan ended with then and is
+        never re-deped. `create --lib` answers that by sorting what it was given by anchor
+        before minting any of it — which is exactly why the same flags in either order have
+        to produce the same graph, and why `name-step`, which takes one name, cannot.
+
+        Named in the REVERSE of the order they run, because that is the case the sort
+        exists for: forwards, the anchors alone would get there.
+        """
+        back = self.data("plugin", "plans", "create", "B", "--display", "B",
+                         "--step", "impl = build it", "--lib", "merge", "--lib", "create-pr")
+        by_def = {s["def"]: s for s in back["steps"] if s.get("def")}
+        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]],
+                         "the human review waits on the PR, whichever flag came first")
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertNotIn("incomplete", back)
+
+        # And the same flags the other way round are the same plan, edge for edge.
+        fwd = self.data("plugin", "plans", "create", "F", "--display", "F",
+                        "--step", "impl = build it", "--lib", "create-pr", "--lib", "merge")
+        shape = lambda p: [(s.get("def") or s["name"], s["deps"], s["root"])
+                           for s in p["steps"]]
+        self.assertEqual(shape(fwd), shape(back))
+
+    def test_an_anchor_the_spine_does_not_have_is_refused_by_name(self):
+        """A closed vocabulary, unlike `progress` and `gate`, and this is what that costs.
+
+        The whole meaning of an anchor is its position in the order, so a word that is not
+        in it has no position and there is nothing honest to do with one but refuse: a typo
+        placed somewhere plausible-looking is the failure this file cannot have, since where
+        a step runs is the thing anchors were added to get right. Refused when a definition
+        carrying it is REACHED, like every other bad definition, so one typo takes down the
+        commands that touch it and not every plan in the repo.
+        """
+        self.define("groundwork", name="do the groundwork", anchor="prr")
+        self.ok(*_create("a job", "write it"))
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "groundwork", "--json")
+        self.assertEqual(code, 1)
+        why = json.loads(out)["data"]["error"]
+        self.assertIn("not where anything runs", why)
+        self.assertIn("design, build, review, pr, pre-merge, merge", why)
+        self.assertEqual(len(self._doc()["plans"][0]["steps"]), 1, "and nothing was written")
+
+        # A definition nothing reaches is not a definition anything refuses over.
+        self.ok("plugin", "plans", "name-step", "p-1", "review")
+
+    def test_placement_never_writes_a_marked_root_and_a_dep_onto_one_step(self):
+        """The two say opposite things, and `_wrong` reports the pair on a hand-edit — so
+        the generator writing one itself would be this file failing its own door.
+
+        Reachable where an obliging step and the step it obliges share a band: both are
+        placed with nothing lower than them, so both are marked starts, and then the
+        obligation is put back as an edge onto the one that obliged. The mark comes off
+        with the write, exactly as the removed `dep` verb took it off.
+        """
+        self.define("audit", name="audit the change", anchor="review", obliges=["sign-off"])
+        self.define("sign-off", name="sign the audit off", anchor="review")
+        made = self.data("plugin", "plans", "create", "A", "--display", "A", "--lib", "audit")
+        by_def = {s["def"]: s for s in made["steps"]}
+
+        self.assertEqual(by_def["audit"]["deps"], [by_def["sign-off"]["id"]],
+                         "the obligation is an edge, since the anchors drew none")
+        self.assertFalse(by_def["audit"]["root"], "and the start mark came off with it")
+        self.assertTrue(by_def["sign-off"]["root"], "which is now the plan's real start")
+        self.assertNotIn("incomplete", made, f"no door fires on what it made: {made}")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_create_lib_refuses_before_it_writes_anything(self):
+        """The guards on the new flag, which are the ones `name-step` already had.
+
+        Both are refusals rather than exceptions and both happen BEFORE the plan is made:
+        a `create` that wrote a plan and then failed would leave the agent retrying and the
+        store holding two. A definition with no board label cannot be named at all — the
+        label lives in the definition and there is no argument here that could supply one —
+        and a catalogue file that will not parse is the catalogue's answer, said so a
+        machine reader hears it rather than raised as a traceback.
+        """
+        self.define("groundwork", name="do the groundwork", display=None)
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--display", "d",
+                               "--lib", "groundwork", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("library/groundwork.json", json.loads(out)["data"]["error"])
+        self.assertEqual(self._doc()["plans"], [], "and no plan was made")
+
+        (self.catalogue("library") / "broken.json").write_text("{nope")
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--display", "d",
+                               "--lib", "review", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("not readable JSON", json.loads(out)["data"]["error"])
+        self.assertEqual(self._doc()["plans"], [])
+        (self.catalogue("library") / "broken.json").unlink()
+
+        # And a definition that PARSES and is still unusable — the expansion is where that
+        # is met, inside the mint, under the lock, with the plan half built. It comes back
+        # as a refusal like the two above and not as a raised exception, because a `create`
+        # that failed after writing would leave the agent retrying and the store with two.
+        self.define("groundwork", name="do the groundwork", anchor="prr")
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--display", "d",
+                               "--lib", "groundwork", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("not where anything runs", json.loads(out)["data"]["error"])
+        self.assertEqual(self._doc()["plans"], [])
+
+    def test_an_unanchored_lib_step_hangs_off_what_the_plan_ends_with(self):
+        """`create --lib` places what it mints against the freetext steps typed beside it,
+        which is what makes one command a whole plan rather than a plan and a loose step.
+
+        Said with an UNANCHORED definition on purpose: an anchored one would be placed by
+        its band whatever it was handed, so this is the case that proves the plan's own tail
+        is what a `--lib` step is minted against."""
+        self.define("scan", name="scan the code", display="scan")
+        made = self.data("plugin", "plans", "create", "S", "--display", "S",
+                         "--step", "one = do the first", "--step", "two = do the second",
+                         "--lib", "scan")
+        by_def = {s.get("def"): s for s in made["steps"]}
+        self.assertEqual(by_def["scan"]["deps"], ["step-2"], "the tail, not the whole plan")
+        self.assertNotIn("incomplete", made)
+
     def test_a_tick_prints_the_instructions_for_what_it_unblocked(self):
         """The moment a step is picked up is the moment its `about` is worth printing, and
         it was the moment nothing marked. `_resolve` merges a definition's name, display
@@ -2147,7 +2285,8 @@ class CatalogueTest(PlansSandbox):
         said = " ".join(self.ok("plugin", "plans", "tick", "s-1").split())
 
         self.assertEqual([s["def"] for s in out["data"]["next"]], ["review"])
-        self.assertIn("Put the result in this step's `output`", out["data"]["next"][0]["about"])
+        self.assertIn("read the approved text out of that step's `output`",
+                      out["data"]["next"][0]["about"])
         self.assertIn("next — this move unblocked:", said)
         self.assertIn("The review you would run anyway", said)
 

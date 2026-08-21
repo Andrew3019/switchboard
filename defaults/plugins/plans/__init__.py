@@ -2269,11 +2269,20 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     the approval stays a marked early root, and "no PR without an approved contract" is in
     the graph again rather than in a field nothing reads.
 
-    Two guards on that, both load-bearing. It is skipped where the obliged step ALREADY
-    REACHES its obliger through the deps — `implement the thing` obliging `review` puts the
-    review downstream, and a back-edge there is the round-one cycle rebuilt. And it writes
-    only onto steps THIS COMMAND MINTED, never onto a step already in the plan, which is
-    the same line every other write here keeps.
+    Two guards on that. It writes only onto steps THIS COMMAND MINTED, never onto a step
+    already in the plan, which is the same line every other write here keeps. And it is
+    skipped where the obliged step ALREADY REACHES its obliger through the deps, since a
+    back-edge there is the round-one cycle rebuilt.
+
+    THAT SECOND GUARD IS A BACKSTOP AND NOT A LIVE CHECK, said here because a reader
+    otherwise cannot tell which it is and a test cannot reach it. `_owed` already requires
+    the obliger to rank at or above the obliged; every dep this function writes for an
+    anchored step points at a STRICTLY LOWER band, an unanchored one points only at steps
+    that were in the plan before this command, and nothing already in the plan can point at
+    something this command just minted — so anything reachable from the obliged step ranks
+    below it, and its obliger, ranking at or above it, is not among them. It stays because
+    the reasoning is about `_owed`'s rule rather than about this line, and a later change to
+    that rule should meet a guard rather than a cycle.
     """
     at = {st["id"]: st for st in steps}
     for st in steps:
