@@ -265,11 +265,11 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="lead", role="lead", workspace="api",
                            branch="api", cwd=str(self.repo))
         with mock.patch.dict(os.environ, {"HERDR_WORKSPACE_ID": "w1"}, clear=False):
-            self.b.delegate("t", role="worker", me="lead")
+            self.b.delegate("t", topic="t", role="worker", me="lead")
         self.assertEqual(self.h.tabs[-1], "w1")
 
     def test_delegate_records_parent_and_pokes_with_the_task(self):
-        name = self.b.delegate("compute 2+2", role="worker", me="orch")
+        name = self.b.delegate("compute 2+2", topic="t", role="worker", me="orch")
         a = store.get_agent(self.db, name)
         self.assertEqual(a["parent"], "orch")
         self.assertEqual(a["session_id"], f"sess-{name}")
@@ -281,19 +281,19 @@ class BrokerTest(unittest.TestCase):
         Effort rides along — the bug this replaces passed only the model id, so a tier's
         effort was silently dropped on every spawn.
         """
-        self.b.delegate("t", role="researcher", me="orch")     # researcher = cheap
+        self.b.delegate("t", topic="t", role="researcher", me="orch")   # cheap
         self.assertEqual(self.h.started[0]["model_args"],
                          ["--model", "sonnet", "--effort", "medium"])
 
     def test_an_explicit_model_is_a_tier_name_too(self):
         """`--model strong` must be resolved, not handed to the CLI as a model id."""
-        self.b.delegate("t", role="worker", model="strong", me="orch")
+        self.b.delegate("t", topic="t", role="worker", model="strong", me="orch")
         self.assertEqual(self.h.started[0]["model_args"],
                          ["--model", "opus", "--effort", "high"])
 
     def test_unknown_role_still_works(self):
         """Vocabulary is data — an undefined role inherits defaults, it does not error."""
-        name = self.b.delegate("t", role="wizard", me="orch")
+        name = self.b.delegate("t", topic="t", role="wizard", me="orch")
         self.assertEqual(store.get_agent(self.db, name)["role"], "wizard")
 
     # -- a spawn is not a success until the task is in ----------------------
@@ -432,7 +432,7 @@ class BrokerTest(unittest.TestCase):
         checkout — the transcript bucket is keyed by cwd, so a proof pointed anywhere
         else would answer for some other agent, or for nobody.
         """
-        name = self.b.delegate("do the thing", role="worker", me="orch")
+        name = self.b.delegate("do the thing", topic="t", role="worker", me="orch")
         who, proof = self.h.proofs[-1]
         self.assertEqual(who, name)
         self.assertIsNotNone(proof)
@@ -477,7 +477,7 @@ class BrokerTest(unittest.TestCase):
         home = Path(self.tmp.name) / "home-capture"
         self._transcript(home, str(self.repo), "sess-from-transcript", "do the thing")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            name = self.b.delegate("do the thing", role="worker", me="orch")
+            name = self.b.delegate("do the thing", topic="t", role="worker", me="orch")
         # Nothing here ran `sb` as the child: the id came from its transcript.
         self.assertEqual(store.get_agent(self.db, name)["session_id"],
                          "sess-from-transcript")
@@ -494,8 +494,8 @@ class BrokerTest(unittest.TestCase):
         self._transcript(home, str(self.repo), "sess-first", "review the design")
         self._transcript(home, str(self.repo), "sess-second", "rewrite the parser")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            one = self.b.delegate("review the design", role="worker", me="orch")
-            two = self.b.delegate("rewrite the parser", role="worker", me="orch")
+            one = self.b.delegate("review the design", topic="t", role="worker", me="orch")
+            two = self.b.delegate("rewrite the parser", topic="t", role="worker", me="orch")
         self.assertEqual(store.get_agent(self.db, one)["session_id"], "sess-first")
         self.assertEqual(store.get_agent(self.db, two)["session_id"], "sess-second")
 
@@ -507,11 +507,12 @@ class BrokerTest(unittest.TestCase):
                            workspace="ws", branch="ws")
         self._transcript(home, str(self.repo), "sess-from-transcript", "do the thing")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            name = self.b.delegate("do the thing", role="worker", me="orch")
+            name = self.b.delegate("do the thing", topic="t", role="worker", me="orch")
         self.assertEqual(store.get_agent(self.db, name)["session_id"], f"sess-{name}")
 
     def test_as_prompt_overrides_the_role_prompt(self):
-        self.b.delegate("t", role="worker", as_prompt="You are a haiku critic.", me="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch",
+                        as_prompt="You are a haiku critic.")
         joined = " ".join(self.h.started[0]["prompts"])
         self.assertIn("haiku critic", joined)
 
@@ -520,7 +521,7 @@ class BrokerTest(unittest.TestCase):
     def test_every_spawn_is_told_what_roles_exist(self):
         """DESIGN-TRUTH: "The role list is lightly audited and fine as it is" — knowing
         there are roles, and which."""
-        self.b.delegate("t", role="worker", me="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
         for role in ("dispatcher", "lead", "worker", "qa", "researcher", "reviewer"):
             with self.subTest(role=role):
@@ -534,8 +535,60 @@ class BrokerTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "archaeologist.md").write_text("You dig.\n")
         self.restart_sb()                     # roles are read once, at Broker construction
-        self.b.delegate("t", role="worker", me="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertIn("archaeologist", " ".join(self.h.started[0]["prompts"]))
+
+    # -- the operator menu: the dispatcher's, and nobody else's ------------
+
+    def _started_prompts(self) -> str:
+        return " ".join(self.h.started[-1]["prompts"])
+
+    def _start_top(self) -> str:
+        self.h.focus = lambda n: None
+        self.h.list_agents = lambda: []
+        return self.b.start()
+
+    def test_the_dispatcher_is_told_what_operator_procedures_this_repo_offers(self):
+        """The menu exists so a person standing in front of a waiting dispatcher can be
+        told what it can run, without the list being written into anyone's prose."""
+        self._start_top()
+        self.assertIn("sb presets sb-setup", self._started_prompts())
+
+    def test_a_worker_is_not_told_any_of_it(self):
+        """Gated on the role, not merely on the registry being non-empty: the menu is one
+        line of every spawn prompt, and only the dispatcher is ever asked to run one."""
+        self.b.delegate("t", topic="t", role="worker", me="orch")
+        self.assertNotIn("sb presets sb-setup", self._started_prompts())
+
+    def test_a_repo_that_resets_the_registry_to_nothing_gets_no_fragment_at_all(self):
+        """Empty means absent, the way `spawn.workspace` is absent for an agent with no
+        workspace — not a dispatcher told it offers "these procedures: "."""
+        d = self.repo / ".switchboard"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "operator_skills.toml").write_text('skill = ["!reset"]\n')
+        self._start_top()
+        joined = self._started_prompts()
+        self.assertNotIn("sb presets sb-setup", joined)
+        self.assertNotIn("operator procedures", joined)
+
+    def test_a_wrapped_description_does_not_kill_every_dispatcher_spawn(self):
+        """`config.prompt` flattens the TEMPLATE and interpolates after, so a description
+        that wraps in someone's `operator_skills.toml` would reach `Herdr.start_agent`
+        with a newline still in it — and that is refused, turning a cosmetic line break
+        into a dead `sb start` for every dispatcher. Each field is flattened on the way in.
+        """
+        d = self.repo / ".switchboard"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "operator_skills.toml").write_text(
+            'skill = ["!reset", {command = "sb presets deploy", '
+            'description = """ship it\nwhen the tests are green"""}]\n')
+        self._start_top()
+        prompts = self.h.started[-1]["prompts"]
+        for p in prompts:                      # the rule Herdr.start_agent enforces
+            self.assertNotIn("\n", p)
+        joined = " ".join(prompts)
+        self.assertIn("ship it", joined)
+        self.assertIn("when the tests are green", joined)
 
     # -- the spawn race: a claim is not a dead agent -----------------------
 
@@ -559,7 +612,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_a_claim_survives_a_status_collect_mid_spawn(self):
         self._collect_during_spawn()
-        name = self.b.delegate("t", role="worker", me="orch")
+        name = self.b.delegate("t", topic="t", role="worker", me="orch")
         a = store.get_agent(self.db, name)
         self.assertEqual(a["state"], "working")
         self.assertIsNone(a["ended_at"])
@@ -572,7 +625,7 @@ class BrokerTest(unittest.TestCase):
         write `state` or `ended_at` and so the false `failed` used to stick forever."""
         self._collect_during_spawn()
         with mock.patch.object(status, "SPAWN_GRACE", 0):
-            name = self.b.delegate("t", role="worker", me="orch")
+            name = self.b.delegate("t", topic="t", role="worker", me="orch")
         a = store.get_agent(self.db, name)
         self.assertEqual(a["state"], "working")
         self.assertIsNone(a["ended_at"])
@@ -2593,7 +2646,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_nothing_spawned_now_is_ever_written_kept(self):
         """The write path is what went, not the column."""
-        name = self.b.delegate("t", role="lead", me="orch")
+        name = self.b.delegate("t", topic="t", role="lead", me="orch")
         self.assertEqual(store.get_agent(self.db, name)["cleanup"], "close")
 
     def test_cleanup_prints_the_refusals_it_collected(self):
@@ -2898,7 +2951,7 @@ class BrokerTest(unittest.TestCase):
     def test_restore_comes_back_on_the_tier_it_was_spawned_with(self):
         """Restore brings back the SAME agent, not a fresh one of its role. `--model`
         pinned the tier for the first life only until the row started recording it."""
-        name = self.b.delegate("t", role="researcher", model="strong", me="orch")
+        name = self.b.delegate("t", topic="t", role="researcher", model="strong", me="orch")
         store.set_state(self.db, name, "done")
         self.h.started.clear()
         self.b.restore(name)
@@ -3280,7 +3333,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_every_agent_gets_the_protocol_at_spawn(self):
         from switchboard.broker import PROTOCOL_LINE
-        self.b.delegate("t", role="worker", me="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertIn(PROTOCOL_LINE, self.h.started[0]["prompts"])
 
     def test_protocol_is_single_line(self):
@@ -3295,7 +3348,7 @@ class BrokerTest(unittest.TestCase):
         """Generated at every spawn, so there is no copy to fall out of date."""
         from switchboard import broker as bmod
         with mock.patch.object(bmod, "PROTOCOL_LINE", "NEW PROTOCOL v2"):
-            self.b.delegate("t", role="worker", me="orch")
+            self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertIn("NEW PROTOCOL v2", self.h.started[-1]["prompts"])
 
     def test_a_repo_can_replace_the_protocol_and_it_reaches_the_spawn(self):
@@ -3307,7 +3360,8 @@ class BrokerTest(unittest.TestCase):
         from switchboard.broker import PROTOCOL_LINE
         (self.repo / ".switchboard").mkdir(exist_ok=True)
         (self.repo / ".switchboard" / "protocol.md").write_text("# ours\n\nSAY LESS.\n")
-        Broker(self.db, self.h, repo=self.repo).delegate("t", role="worker", me="orch")
+        Broker(self.db, self.h, repo=self.repo).delegate(
+            "t", topic="t", role="worker", me="orch")
         prompts = self.h.started[-1]["prompts"]
         self.assertIn("SAY LESS.", prompts)
         self.assertNotIn(PROTOCOL_LINE, prompts)
@@ -3326,7 +3380,8 @@ class BrokerTest(unittest.TestCase):
         d = self.repo / ".switchboard" / "roles"
         d.mkdir(parents=True, exist_ok=True)
         (d / "worker.md").write_text("+++\n+++\n\nMeasure twice.\n")
-        Broker(self.db, self.h, repo=self.repo).delegate("t", role="worker", me="orch")
+        Broker(self.db, self.h, repo=self.repo).delegate(
+            "t", topic="t", role="worker", me="orch")
         self.assertIn("Measure twice.", self.h.started[-1]["prompts"])
 
     # -- worktree config links -------------------------------------------
@@ -3545,7 +3600,7 @@ class WorkspacePlacementTest(unittest.TestCase):
             else:
                 os.environ.pop("HERDR_WORKSPACE_ID", None)
             kw.setdefault("role", "worker")
-            name = self.b.delegate("t", me="parent", **kw)
+            name = self.b.delegate("t", topic="t", me="parent", **kw)
         return self.h.tabs[-1], name
 
     # -- the order -------------------------------------------------------
@@ -3607,7 +3662,7 @@ class WorkspacePlacementTest(unittest.TestCase):
         self._parent(workspace_id="wA")
         _, child = self._spawn(role="lead")
         self.derived.clear()
-        self.b.delegate("t", role="worker", me=child)
+        self.b.delegate("t", topic="t", role="worker", me=child)
         self.assertEqual(self.h.tabs[-1], "wA")
         self.assertEqual(self.derived, [])
 
@@ -3779,7 +3834,7 @@ class SbPinTest(unittest.TestCase):
         # The board pane is opened with the same `pane run` the pin uses, and it opens
         # for every spawn now, so this class reads the FIRST of those calls — the pin,
         # which happens before the agent is started at all.
-        return self.b.delegate("t", role="worker", me=HUMAN, cwd=str(self.repo),
+        return self.b.delegate("t", topic="t", role="worker", me=HUMAN, cwd=str(self.repo),
                                workspace="ws", **kw)
 
     # -- the pin ---------------------------------------------------------
@@ -3870,7 +3925,8 @@ class SbPinTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=space, check=True, capture_output=True)
         (space / "bin" / "sb").write_text("#!/bin/sh\n")
         (space / "bin" / "sb").chmod(0o755)
-        self.b.delegate("t", role="worker", me=HUMAN, cwd=str(space), workspace="ws")
+        self.b.delegate("t", topic="t", role="worker", me=HUMAN,
+                        cwd=str(space), workspace="ws")
         _, text = self.h.pane_prompts[0]
         self.assertIn(shlex.quote(str(space / "bin")), text)
 
@@ -3939,7 +3995,7 @@ class ForkBaseTest(unittest.TestCase):
         """Delegate as a parent with no worktree — the one case that forks."""
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            name = self.b.delegate("t", role="worker", me="orch")
+            name = self.b.delegate("t", topic="t", role="worker", me="orch")
         return name, err.getvalue()
 
     def test_a_child_forks_from_the_branch_its_parent_is_working_on(self):

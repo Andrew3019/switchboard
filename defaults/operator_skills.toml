@@ -1,0 +1,24 @@
+# Operator skills: procedures a person can ask the dispatcher to run.
+#
+# Listed live in the dispatcher's spawn prompt (`spawn.operator_menu`, generated from this
+# file by `Broker._operator_menu`) so the menu cannot go stale the way hardcoded prose
+# would. A repo adds its own in `<repo>/.switchboard/operator_skills.toml` using the same
+# `[[skill]]` blocks as below; arrays JOIN, so the shipped entries survive.
+#
+# To REPLACE the shipped entries instead of adding to them, a repo puts `"!reset"` first —
+# but `"!reset"` is a string in the `skill` array, and TOML forbids a `[[skill]]` block once
+# `skill` has been assigned as an array. So a resetting repo writes the WHOLE list inline:
+#     skill = ["!reset", {command = "...", description = "..."}]
+# (not `[[skill]]` blocks). Adding-without-reset uses the plain `[[skill]]` form below.
+#
+# NOTE: joining dedupes by whole-record equality, so to REWORD a shipped entry a repo must
+# `"!reset"` (inline, as above) — a same-command different-description row is a second row,
+# not an override.
+#
+# `command` is the verb the dispatcher tells the human to run, written the way a person
+# would type it. Keep both fields short: they are joined into one line of every dispatcher's
+# system prompt.
+
+[[skill]]
+command = "sb presets sb-setup"
+description = "set up this repo's switchboard config (settings, plugin toggles, bespoke roles)"

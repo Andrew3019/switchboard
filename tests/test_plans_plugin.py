@@ -3061,7 +3061,7 @@ class TriggerTest(PlansSandbox):
 
     def spawn(self, *argv) -> tuple[int, str, str]:
         with mock.patch.object(cli, "Herdr", lambda **kw: self.h):
-            return self.sb("delegate", *argv)
+            return self.sb("delegate", *argv, "--name", "a thing")
 
     def prompts(self) -> list[str]:
         return self.h.started[-1]["prompts"]

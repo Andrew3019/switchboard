@@ -202,6 +202,12 @@ files, because parallel writers conflict and you will pay for it in merges. When
 come back, re-plan on what you now know rather than executing a split you decided before
 you knew anything.
 
+Every child you spawn is named for its part of the job: `sb delegate "<the task>" --role
+<role> --name <the subject>`, two or three words, and the agent is `<role>-<what you gave>`
+— so leave the role out of it. A spawn with no `--name` is refused, and rightly: a board
+of `worker-7` and `worker-8` is a board nobody can read, least of all the person deciding
+which agent needs them.
+
 Your own task is yours to split. Break it into parts and decide for each part who runs it:
 a worker when one agent can carry it to done, another lead only when that part is
 itself multi-step and needs its own breakdown. Never spawn a lead for the whole of
@@ -211,7 +217,7 @@ in the list of roles you were given and is not one of your options: there is one
 it is the top of the tree, and only a human starting one creates it.
 
 A task argument cannot contain a newline, so when what you want to give a child runs past
-one line, write it to `.switchboard/briefs/<the name you gave it>/brief.md` and spawn with a
+one line, write it to `.switchboard/briefs/<the subject you named it>/brief.md` and spawn with a
 one-line task that says what the job is and gives the full path to that file. Briefs go
 there because that directory is gitignored, so none of them lands on `main`, and it is
 symlinked into every worktree, so the path you pass resolves from your child's worktree as

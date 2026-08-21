@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import store, validate  # noqa: E402
-from switchboard.cli import _derived_name, _validate, build_parser  # noqa: E402
+from switchboard.cli import _validate, build_parser  # noqa: E402
 
 
 def parse(argv):
@@ -171,8 +171,14 @@ class CliBoundaryTest(unittest.TestCase):
     def test_delegate_rejects_a_multi_line_task(self):
         self.bad(["delegate", "step one\nstep two"])
 
-    def test_delegate_rejects_an_illegal_explicit_name(self):
-        self.bad(["delegate", "do it", "--name", "QA Bot"])
+    def test_delegate_takes_a_topic_in_prose_and_refuses_only_a_multi_line_one(self):
+        """`--name` is the SUBJECT, not the name — `Broker._compose_name` puts the role in
+        front of it and slugs the pair, so spaces and capitals are its job and not this
+        boundary's. What is still refused here is what herdr refuses in any argument."""
+        args = parse(["delegate", "do it", "--name", "  QA Bot  "])
+        _validate(args)
+        self.assertEqual(args.name, "QA Bot")
+        self.bad(["delegate", "do it", "--name", "two\nlines"])
 
     def test_delegate_rejects_a_multi_line_ad_hoc_role_prompt(self):
         self.bad(["delegate", "do it", "--as", "you are\na reviewer"])
@@ -263,35 +269,6 @@ class CliBoundaryTest(unittest.TestCase):
         for argv in (["status"], ["inbox"], ["doctor"], ["init"], ["presets"],
                      ["cleanup"], ["start"]):
             _validate(parse(argv))           # must not raise
-
-
-class DerivedNameTest(unittest.TestCase):
-    """The other half of the agent-name problem: names nobody typed."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.db = store.connect(path=Path(self.tmp.name) / "state.db")
-
-    def tearDown(self):
-        self.db.close()
-        self.tmp.cleanup()
-
-    def test_a_legal_role_is_left_to_the_broker(self):
-        self.assertIsNone(_derived_name(self.db, "worker"))
-
-    def test_an_illegal_role_gets_a_legal_derived_name(self):
-        got = _derived_name(self.db, "QA Bot")
-        self.assertEqual(got, "qa-bot-1")
-        self.assertEqual(validate.agent_name(got), got)
-
-    def test_it_picks_the_first_free_number_like_the_broker_does(self):
-        store.create_agent(self.db, name="qa-bot-1", role="QA Bot")
-        self.assertEqual(_derived_name(self.db, "QA Bot"), "qa-bot-2")
-
-    def test_an_over_long_role_cannot_overflow_the_name(self):
-        got = _derived_name(self.db, "R" * 40)
-        self.assertLessEqual(len(got), validate.MAX_AGENT_NAME)
-        self.assertEqual(validate.agent_name(got), got)
 
 
 if __name__ == "__main__":

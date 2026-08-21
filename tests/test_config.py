@@ -317,6 +317,40 @@ class SettingsLayeringTest(_Layered):
         self.assertIn("display.show_archived", str(e.exception))
         self.assertIn("true or false", str(e.exception))
 
+class OperatorSkillLayeringTest(_Layered):
+    """The dispatcher's menu is data, and a repo may add to it or replace it outright."""
+
+    def test_the_shipped_registry_is_what_a_repo_with_no_file_gets(self):
+        skills = config.operator_skills(self.repo)
+        shipped = config.read_toml(SHIPPED / "operator_skills.toml")["skill"]
+        self.assertEqual([(s.command, s.description) for s in skills],
+                         [(s["command"], s["description"]) for s in shipped])
+
+    def test_a_repo_entry_joins_the_shipped_ones_rather_than_replacing_them(self):
+        """Rule 3, and the reason the registry is an array of tables: a repo that adds its
+        own procedure must not silently lose `sb presets sb-setup`."""
+        self.write("operator_skills.toml",
+                   '[[skill]]\ncommand = "sb presets deploy"\ndescription = "ship it"\n')
+        skills = config.operator_skills(self.repo)
+        commands = [s.command for s in skills]
+        self.assertIn("sb presets sb-setup", commands)      # shipped survived
+        self.assertEqual(commands[-1], "sb presets deploy")  # repo's is joined on the end
+
+    def test_a_repo_can_reset_the_registry_to_exactly_its_own(self):
+        """The only way to REWORD a shipped entry, since joining dedupes by whole record.
+
+        Written as inline tables rather than `[[skill]]`, because TOML refuses to append a
+        table to an array that was already given a value — `skill = ["!reset"]` followed by
+        `[[skill]]` is a parse error, so a resetting repo has no other spelling available.
+        """
+        self.write("operator_skills.toml",
+                   'skill = ["!reset", '
+                   '{command = "sb presets sb-setup", description = "set this repo up"}]\n')
+        skills = config.operator_skills(self.repo)
+        self.assertEqual([(s.command, s.description) for s in skills],
+                         [("sb presets sb-setup", "set this repo up")])
+
+
 class ProtocolLayeringTest(_Layered):
     def test_a_repo_replaces_the_protocol_wholesale(self):
         """The one file that does NOT join: a protocol assembled from two halves is a
