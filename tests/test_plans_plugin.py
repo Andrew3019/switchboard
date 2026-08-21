@@ -1948,8 +1948,11 @@ class CatalogueTest(PlansSandbox):
         self.assertTrue(by_def["change-approval"]["root"])
         # The review comes after the WORK, not after the approval that obliged it.
         self.assertEqual(by_def["review"]["deps"], ["step-2"])
-        # And the PR waits on the review.
-        self.assertEqual(by_def["create-pr"]["deps"], [by_def["review"]["id"]])
+        # And the PR waits on the review AND on the approval — the second of those is the
+        # obligation, put back as an edge because the anchor drew none. See
+        # `test_the_pr_waits_on_the_approval_it_obliged`.
+        self.assertEqual(by_def["create-pr"]["deps"],
+                         [by_def["review"]["id"], by_def["change-approval"]["id"]])
         self.assertNotIn("incomplete", added, f"and nothing is left to fix: {added}")
 
         # The merge and its human review land on the end of that chain, in that order.
@@ -2030,10 +2033,75 @@ class CatalogueTest(PlansSandbox):
         # The review waits on the implementation's SINK and not on both of its steps,
         # which is what drawing the entry's edges in the same round buys.
         self.assertEqual([at[d]["display"] for d in by_def["review"]["deps"]], ["tests"])
-        self.assertEqual(by_def["create-pr"]["deps"], [by_def["review"]["id"]])
+        self.assertEqual(by_def["create-pr"]["deps"],
+                         [by_def["review"]["id"], by_def["change-approval"]["id"]])
         self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]])
         self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
         self.assertNotIn("incomplete", made, f"and nothing is left to fix: {made}")
+
+    def test_the_pr_waits_on_the_approval_it_obliged(self):
+        """The guardrail the spec told this rework not to loosen: no PR without an approved
+        change contract behind it. It was loosened, and this is the test that would have
+        caught it.
+
+        The anchor puts the approval at the very start, where nothing lower exists for it
+        to come after — and a first draft left it there as a marked root that NO STEP IN THE
+        PLAN LISTED. `obliged_by` is a label; only an edge is a wait. So the whole flagship
+        plan could be ticked to merged past an approval nobody had done, with `validate`
+        silent, and the tick chain never handed anybody the two-section contract that step
+        is the whole reason for. The obligation goes back as an edge on the obliging step
+        wherever the anchor left none.
+        """
+        made = self.data("plugin", "plans", "create", "flagship", "--display", "flag",
+                         "--step", "impl = build it", "--lib", "create-pr", "--lib", "merge")
+        by_def = {s["def"]: s for s in made["steps"] if s.get("def")}
+        approval = by_def["change-approval"]["id"]
+        self.assertIn(approval, by_def["create-pr"]["deps"], "no PR without the approval")
+        self.assertEqual(by_def["change-approval"]["deps"], [], "and it is still the start")
+        self.assertTrue(by_def["change-approval"]["root"])
+        self.assertNotIn("incomplete", made)
+
+        # And the tick chain does not hand over the PR while the approval is open, which is
+        # how an agent following `next — this move unblocked` walked past it.
+        self.ok("plugin", "plans", "tick", "step-1")
+        released = json.loads(self.ok("plugin", "plans", "tick",
+                                      by_def["review"]["id"], "--json"))
+        self.assertEqual(released["data"].get("next", []), [],
+                         "the review alone does not release the PR")
+        after = json.loads(self.ok("plugin", "plans", "tick", approval, "--json"))
+        self.assertEqual([s["def"] for s in after["data"]["next"]], ["create-pr"])
+
+    def test_an_obligation_left_out_of_the_order_is_reported(self):
+        """The door behind the edge, so that a future anchor cannot lose one in silence.
+
+        An obliged step is added so it CANNOT be omitted, and one that nothing waits on and
+        that comes after nothing is omitted in every way that counts — the plan reads as
+        finished with it still open. Reported, never refused, like everything else in that
+        door: the file is meant to be edited.
+
+        The condition is the generator's own, from the other side, which is what keeps it
+        from firing on the shapes the generator makes. An obliged step whose obliger runs
+        EARLIER — `change-approval` obliges `review`, four bands ahead of it — is not
+        reported, because an edge there would say the approval waits on the review, which
+        is the inversion the anchor exists to remove.
+        """
+        self.data("plugin", "plans", "create", "D", "--display", "D",
+                  "--step", "impl = build it", "--lib", "create-pr")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+        # The PR stops waiting on the approval, which is the exact shape the bug produced.
+        steps = {s["def"]: s["id"] for s in self.steps() if s.get("def")}
+        self.edit_step(steps["create-pr"], deps=[steps["review"]])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("left out of the order", said)
+        self.assertIn(steps["change-approval"], said)
+
+        # A skip with its reason is the sanctioned way past an obligation, so a skipped one
+        # is not reported — it was dealt with rather than forgotten.
+        self.ok("plugin", "plans", "skip", steps["change-approval"],
+                "--why", "a one-line typo fix")
+        self.assertNotIn("left out of the order",
+                         self.ok("plugin", "plans", "validate", "p-1"))
 
     def test_create_lib_lands_a_resolved_library_step_in_the_one_call(self):
         """The whole plan in one command, which is the difference between `create` and

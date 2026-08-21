@@ -2253,6 +2253,23 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     it. `create --lib` sorts what it was given by anchor and is order-insensitive for that
     reason; `name-step` names one definition and cannot. Name them in the order they run,
     or make the plan in one `create`, and reshape in the file where you did neither.
+
+    AND THEN THE OBLIGATION IS PUT BACK AS AN EDGE WHERE THE ANCHOR LEFT NONE, which is the
+    half a first draft of this got wrong badly enough to lose a guardrail. `create-pr`
+    obliges `change-approval`: the anchor correctly puts the approval at the very start,
+    where nothing lower exists for it to come after — and it then sat there as a root that
+    NO STEP IN THE PLAN LISTED, so the whole plan could be ticked to merged past an approval
+    nobody had done, with `validate` silent. `obliged_by` is a label; only an edge is a
+    wait. So after placement, an obliged step that nothing waits on gets its id appended to
+    the deps of the step that obliged it — the PR waits on the approval AND on the review,
+    the approval stays a marked early root, and "no PR without an approved contract" is in
+    the graph again rather than in a field nothing reads.
+
+    Two guards on that, both load-bearing. It is skipped where the obliged step ALREADY
+    REACHES its obliger through the deps — `implement the thing` obliging `review` puts the
+    review downstream, and a back-edge there is the round-one cycle rebuilt. And it writes
+    only onto steps THIS COMMAND MINTED, never onto a step already in the plan, which is
+    the same line every other write here keeps.
     """
     at = {st["id"]: st for st in steps}
     for st in steps:
@@ -2282,6 +2299,60 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
         waited = {_num(_STEP_ID, d) for x in pool for d in (x.get("deps") or ())}
         st["deps"] = [x["id"] for x in band
                       if _num(_STEP_ID, x["id"]) not in waited] or [band[-1]["id"]]
+
+    waited = {_num(_STEP_ID, d) for x in pool for d in (x.get("deps") or ())}
+    for st in steps:
+        by = at.get(str(st.get("obliged_by") or ""))
+        n = _num(_STEP_ID, st["id"])
+        if by is None or not _owed(st, by, lib) or n in waited or _reaches(pool, st, by):
+            continue
+        by["deps"].append(st["id"])
+        # The mark and an edge cannot both stand, which is the rule `_wrong` reports on a
+        # hand-edit: a step that waits for something is not a start. Only reachable where
+        # the two share a band, since a step with something lower than it in the plan was
+        # never marked — but the write is what has to be consistent, not the argument.
+        by["root"] = False
+        waited.add(n)
+
+
+def _owed(step: dict, by: dict, lib: dict) -> bool:
+    """Should the step that obliged this one WAIT for it? The anchors decide, or nothing.
+
+    `create-pr` obliges `change-approval` and runs three bands later, so the PR waits on
+    the approval and that edge is the guardrail. `change-approval` obliges `review` and
+    runs FOUR BANDS EARLIER, and the same edge there would say the approval waits on the
+    review — the inversion anchors exist to remove, rebuilt by the mechanism that restores
+    them. So the edge is owed only where the obliging step runs at or after the step it
+    obliged; where it runs before, the obligation is satisfied by both steps being in the
+    plan and the order is the anchor's to state.
+
+    Equal ranks are owed, which covers every unanchored pair — two definitions with no
+    anchor between them are exactly the case this file had before anchors, where the
+    obliging step waited on what it obliged and nothing else said when either ran.
+    """
+    return _ranked(by, lib) >= _ranked(step, lib)
+
+
+def _reaches(steps: list, frm: dict, to: dict) -> bool:
+    """Does `frm` come after `to`, at any distance? The deps, walked once.
+
+    The one place in this file that TRAVERSES a dep, and it is a question about a shape
+    rather than a schedule: nothing here waits, and this is asked only to keep `_place`
+    from drawing a back-edge over an order that already exists. Seen-set guarded, because
+    a cycle in `deps` is a lead's mistake to read and must never be a hang here.
+    """
+    at = {_num(_STEP_ID, s.get("id")): s for s in steps}
+    want, seen = _num(_STEP_ID, to.get("id")), set()
+    queue = [_num(_STEP_ID, frm.get("id"))]
+    while queue:
+        n = queue.pop()
+        if n == want:
+            return True
+        if n in seen or n not in at:
+            continue
+        seen.add(n)
+        queue.extend(_num(_STEP_ID, d) for d in (at[n].get("deps") or ()))
+    return False
 
 
 def _anchor(lib: dict, key: str) -> int:
@@ -2351,8 +2422,16 @@ def _resolve(step: dict, lib: dict) -> dict:
     # showed up under `library <name>` would be a field you have to go and find, which is
     # the cost it exists to remove. Null when the definition sets none — most steps have no
     # single standard command, and an empty line under them would say there was one.
+    #
+    # `anchor` rides along too, and it is the one of these NOT put there to be read by a
+    # person: `_wrong` has to know where a step runs to tell an obligation that was left out
+    # of the order from one the anchors deliberately ordered the other way, and it is handed
+    # a resolved plan and never the catalogue. It is in `_DRAWN`, so no rendering prints it
+    # under the step — where a definition runs is read off `library <name>`, which says it
+    # in words — but `--json` carries it, like everything else on the view.
     return dict(step, name=str(spec.get("name") or "").strip() or key,
                 display=str(spec.get("display") or "").strip() or None,
+                anchor=str(spec.get("anchor") or "").strip() or None,
                 command=str(spec.get("command") or "").strip() or None)
 
 
@@ -2435,6 +2514,18 @@ def _faults(plan: dict) -> tuple[bool, list[str], list[str]]:
     return (not str(plan.get("display") or "").strip()), nameless, rootless
 
 
+def _shown_rank(step: dict) -> int:
+    """Where a RESOLVED step runs, read off the view rather than out of the catalogue.
+
+    `_ranked` is the same question asked of a stored step and a library, and is what
+    `_place` uses while it is minting. This one is for the doors, which are handed a
+    resolved plan (`_shown`) and never a catalogue — see `_resolve`, which merges the
+    anchor onto the view for exactly this. A step with none ranks as the work, as always.
+    """
+    word = str(step.get("anchor") or "").strip()
+    return _ANCHORS.index(word) if word in _ANCHORS else _UNANCHORED
+
+
 def _rootless(steps: list) -> list[dict]:
     """The steps with no dep, in file order. The first of them is the plan's start."""
     return [s for s in steps if not (s.get("deps") or [])]
@@ -2453,14 +2544,34 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
     removing the rule — so they live HERE now, in the warn door, and reach a hand-edit as
     well as a command, which the verbs never did.
 
+    AN OBLIGATION WITH NO ORDER TO IT is the one rule here that no verb ever kept, and it
+    is here because the anchor made it possible to lose one. An obliged step is added so
+    that it CANNOT be omitted; a step sitting in the plan with no path to or from the step
+    that obliged it is omitted in every way that matters. That is exactly the shape a first
+    draft of `_place` produced for `change-approval`, and it is what a future anchor added
+    to the catalogue could produce again.
+
+    The condition is `_place`'s own, from the other side: nothing waits on the step, AND it
+    does not come after the step that obliged it. Either one is enough to keep it in the
+    job — something waiting on it means the plan cannot finish without it, and being
+    downstream of its obliger means a tick releases it — and it is the plan with NEITHER
+    that reads as finished with the obligation still open. Waited-on is the test rather
+    than reaching the obliger in either direction, because a step and its obliger are often
+    siblings under a third: the review and the change approval both hang under the PR that
+    obliged one of them, with no path between the two. A done or skipped one is not
+    reported, because a skip with its reason is the sanctioned way past an obligation.
+
     A WARNING AND NOT A REFUSAL, deliberately, for the same reason nothing else in this
     door refuses: the plan file is meant to be edited, and a file that bricks the board
     because one step's gate reads wrong is a file nobody dares open. Each one is
     `(step id, what is wrong)`, so the board can paint the step and `_defects` can name it.
     """
     out: list[tuple[str, str]] = []
-    here = {_num(_STEP_ID, s.get("id")) for s in plan.get("steps") or []}
-    for step in plan.get("steps") or []:
+    here_steps = plan.get("steps") or []
+    here = {_num(_STEP_ID, s.get("id")) for s in here_steps}
+    at = {_num(_STEP_ID, s.get("id")): s for s in here_steps}
+    waited = {_num(_STEP_ID, d) for s in here_steps for d in (s.get("deps") or ())}
+    for step in here_steps:
         sid = str(step.get("id") or "?")
         # THE EDGE THAT NAMES NOTHING, which was `dep`'s one refusal and is now the file's.
         # An edge whose target is not in this plan renders as a wait nobody is ever
@@ -2480,6 +2591,16 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
                                  f"this plan — an edge to nothing draws as a wait that "
                                  f"never ends. Edges join steps of ONE plan, and nothing "
                                  f"here reads across plans."))
+        by = at.get(_num(_STEP_ID, step.get("obliged_by")))
+        if (by is not None and str(step.get("progress") or "") not in (DONE, SKIPPED)
+                and _shown_rank(by) >= _shown_rank(step)
+                and _num(_STEP_ID, step.get("id")) not in waited
+                and not _reaches(here_steps, step, by)):
+            out.append((sid, f"obliged by {_flat(str(step.get('obliged_by')))} and left out "
+                             f"of the order — nothing in this plan waits on it and it comes "
+                             f"after nothing that does, so the plan reads as finished with "
+                             f"it still open. An obliged step is added so it cannot be "
+                             f"omitted: put it in the chain, or skip it with the reason."))
         if step.get("root") and (step.get("deps") or []):
             # The two say opposite things about the same step, and the mark is the half a
             # reader trusts: `root: true` is somebody saying this start is deliberate, so a
@@ -3752,7 +3873,7 @@ def _full(p: dict) -> str:
 # `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
 _DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
                     "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
-                    "checkpoints", "command"})
+                    "checkpoints", "command", "anchor"})
 
 
 def _step_lines(steps: list) -> list[str]:
