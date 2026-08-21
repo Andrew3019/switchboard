@@ -68,6 +68,15 @@ about one key deletes bindings nobody mentioned. Read the current file, merge yo
 change into what is there, write it back. If it does not exist yet, creating it with only
 your change is correct — that is a merge with an empty file.
 
+There is one exception to "creating it fresh is fine", and it is the `todo` binding below.
+Plugin bindings (`all` / `[roles]`) once lived in `.switchboard/plugins.toml`; they now live
+in `.switchboard/presets.toml`, and switchboard reads only ONE of the two — the moment
+`presets.toml` exists, `plugins.toml`'s `all`/`[roles]` are never consulted again. So if
+`.switchboard/plugins.toml` still holds `all` or `[roles]` bindings and `presets.toml` does
+not exist yet, do NOT create `presets.toml` with only your one line: MOVE those existing
+bindings into it in the same write, or the repo silently loses them. This bites exactly the
+first-time-setup repo this walkthrough is for.
+
 ## First, read the current state
 
 Before offering anything, read all of these. Any of them may be absent; absent means
