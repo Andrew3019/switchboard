@@ -554,6 +554,16 @@ class BrokerTest(unittest.TestCase):
         self._start_top()
         self.assertIn("sb presets sb-setup", self._started_prompts())
 
+    def test_the_menu_is_ordered_into_the_dispatchers_first_message(self):
+        """The list existing in the prompt is not the requirement: dispatchers read the
+        older factual phrasing and sat on the menu forever. It has to be an order about
+        the FIRST message, and one that does not demand the list again after that."""
+        self._start_top()
+        joined = self._started_prompts()
+        self.assertIn("FIRST message", joined)
+        self.assertIn("MUST", joined)
+        self.assertIn("do not repeat it", joined)
+
     def test_a_worker_is_not_told_any_of_it(self):
         """Gated on the role, not merely on the registry being non-empty: the menu is one
         line of every spawn prompt, and only the dispatcher is ever asked to run one."""

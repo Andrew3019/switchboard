@@ -57,12 +57,13 @@ roles = "The roles that exist are: {roles}. That is the list `--role` takes; a n
 # hardcoded — same property `{roles}` is paid for above: a repo that adds an entry gets it
 # here with nothing edited.
 #
-# Stated as a FACT, not as an instruction to speak. A dispatcher started WITH a real task
-# must not be derailed into reciting a menu, and an instruction here would also argue with
-# `spawn.start_task`'s "Await my instructions." The last sentence names the one moment the
-# menu is worth raising, and leaves every other moment alone.
+# An INSTRUCTION to speak, and the only one in this file that fires unprompted: the menu
+# is worthless if the person in front of the dispatcher never learns it exists, and the
+# older factual phrasing left dispatchers free to sit on it forever — which they did. So
+# the first message is mandatory and the rest are not: once the human has seen the list,
+# repeating it is noise, and the fragment says so without forbidding it outright.
 #   {menu} the registry as one flat "; "-separated line, `command — description`
-operator_menu = "This repo offers these operator procedures a person can ask you to run: {menu}. Offer them when someone is standing by without a task."
+operator_menu = "This repo offers these operator procedures a person can ask you to run: {menu}. Your very FIRST message to the human MUST present that list, verbatim, whatever else you have to say. Afterwards do not repeat it unless someone asks, though you may."
 
 # Added only when the agent is being placed in a named workspace.
 #
