@@ -485,6 +485,14 @@ LIBRARY, TEMPLATES = "library", "templates"
 # than it in the plan is a deliberate root and says so — which is exactly what a change
 # approval is, whatever order it was added in.
 #
+# AN ANCHOR LOOKS BACKWARDS AND NEVER FORWARDS. A step is placed against the plan as it
+# stands and nothing already in the plan is re-deped, because a command changes the steps it
+# names and rewriting a lead's edges behind its back is a worse fault than the one being
+# fixed. `create --lib` sorts what it was given, so one call is order-insensitive; steps
+# named one at a time in the reverse of the order they run land in the order they were
+# named. Said in `guide` and in `_place`, because it is the one thing about this field an
+# agent can get wrong without being told.
+#
 # A CLOSED VOCABULARY, unlike `progress` and `gate`, and for the reason those are open: the
 # whole meaning of an anchor is its position in this order, so a word not in it has no
 # position and there is nothing honest to do with it but refuse. A definition with no anchor
@@ -691,6 +699,13 @@ WHAT TO BUILD IT FROM
   That is a whole shipping plan, and it lands with its edges right. The `--step`s chain in
   the order you typed them. A `--lib` step lands where its definition says it RUNS rather
   than where you typed it, so the order of those flags decides nothing.
+
+  IN ONE `create` IF YOU CAN, because that is the call that sorts them. A step added later
+  — `name-step`, or written into the file — is placed against the plan AS IT THEN STANDS,
+  and nothing already in the plan is ever re-deped: `name-step merge` before `name-step
+  create-pr` leaves the merge waiting on the implementation, because that is what the plan
+  ended with when it was named. Name them in the order they run, or fix the edge in the
+  file afterwards, which is one field.
 
   NAME THE OUTERMOST STEP AND WHAT IT OBLIGES ARRIVES WITH IT — the two flags above land
   seven steps, because `create-pr` obliges the change approval, which obliges the review,
@@ -1484,12 +1499,23 @@ def template(ctx, args) -> Result:
                 "created_by": who, "created_at": int(time.time())}
         doc["next_plan"] += 1
         try:
-            landed = [_from_template(plan, lib, e) for e in (spec.get("steps") or ())]
-            _chain(spec.get("steps") or (), landed)
+            # ONE ENTRY AT A TIME, EACH LANDING BEFORE THE NEXT IS EXPANDED, because an
+            # anchor is read against the plan as it stands (`_place`) and a copy built with
+            # every entry expanded against an empty plan gave every anchored step nothing to
+            # be placed against: a template naming `create-pr` after its implementation
+            # entries put the change approval AFTER the implementation, which is the one
+            # defect anchors exist to remove, and marked it a root that `_chain` then wrote
+            # an edge onto. The entries' own order is still `_chain`'s to draw; what this
+            # buys is that an entry sees the entries before it.
+            entries = list(spec.get("steps") or ())
+            landed: list[list[dict]] = []
+            for n, e in enumerate(entries):
+                made = _from_template(plan, lib, e)
+                plan["steps"].extend(made)
+                landed.append(made)
+                _chain_entry(entries, landed, n)
         except _BadDef as e:
             return e.refusal()
-        for made in landed:
-            plan["steps"].extend(made)
 
         detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
         if how == UNAVAILABLE:
@@ -1537,16 +1563,35 @@ def _chain(entries: Any, landed: list[list[dict]]) -> None:
     a short hand-written list and its entries have no ids to name each other by. Out of
     range or pointing forwards is refused, because an edge to nothing renders as an order
     that silently is not there.
+
+    A MARKED ROOT IS NOT ONE OF AN ENTRY'S ROOTS. A step placed by its anchor with nothing
+    lower than it in the plan says so with `root: true` — a change approval runs before the
+    work whatever entry brought it — and an entry's `after` written onto that step would
+    both contradict the mark and re-create the order the anchor exists to fix. It is a
+    start, so nothing is written onto it; the entry's other rootless steps take the edge.
+
+    ONE ENTRY AT A TIME (`_chain_entry`), because `template` lands each entry before the
+    next is expanded so that an anchor has the entries before it to be placed against. An
+    entry's edges have to be drawn in that same round: a `review` expanded while the entry
+    before it still had no edges saw two implementation steps that both looked like sinks
+    and waited on both. `after` only ever points backwards, so an entry can always be
+    chained the moment it lands.
     """
-    for n, entry in enumerate(entries):
-        after = (entry or {}).get("after") if isinstance(entry, dict) else None
-        if not after:
-            continue
+    for n in range(len(list(entries))):
+        _chain_entry(entries, landed, n)
+
+
+def _chain_entry(entries: Any, landed: list[list[dict]], n: int) -> None:
+    """One entry's `after`, drawn as soon as that entry has landed. See `_chain`."""
+    entries = list(entries)
+    entry = entries[n]
+    after = (entry or {}).get("after") if isinstance(entry, dict) else None
+    if after:
         # The roots are read ONCE, before any of this entry's edges are added. Asking
         # "which steps have no deps yet" inside the loop made the second `after` a no-op —
         # the first edge filled the field the second was testing — so a join written as
         # `"after": [1, 2]` silently recorded one of its two edges.
-        roots = [st for st in landed[n] if not st["deps"]]
+        roots = [st for st in landed[n] if not st["deps"] and not st.get("root")]
         for given in after:
             try:
                 j = int(given)
@@ -2185,16 +2230,34 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     genuinely has no fixed place in a job — most of them, in a catalogue that grows — is not
     made to invent one.
 
-    THE OBLIGATION EDGE IS ONLY DRAWN WHERE AN ANCHOR IS NOT DRAWING IT, which is the bug
-    this function was written for. Where both ends are anchored the anchors say the order
-    and the obligation says only that the step exists; where either end is not, the edge is
-    what it always was. `merge` obliging its human review comes out the same either way,
-    which is the check that this is a fix and not a rewrite.
+    THE OBLIGATION EDGE IS DRAWN ONLY FOR AN OBLIGED STEP THAT SAYS NOTHING ABOUT WHEN IT
+    RUNS, which is the bug this function was written for. An anchored obliged step is
+    placed by its anchor and the obligation then says only that the step exists; an
+    unanchored one has nothing else to go on, so the edge is what it always was and the
+    obliging step waits on it. `merge` obliging its human review comes out the same under
+    either rule, which is the check that this is a fix and not a rewrite.
+
+    The rule is about the OBLIGED end and not about both ends, and that is load-bearing: an
+    unanchored step obliging an anchored one — `implement the thing` obliging `review`, the
+    exact mixed library this function promises still works — drew the edge under a
+    both-ends rule, and then placed the anchored step after the very step now waiting on it.
+    Two steps, each waiting for the other, in a graph nothing traverses and nothing checks
+    for cycles. The obliged end alone decides, so that can no longer be built.
+
+    LOOKING BACKWARDS IS ALL AN ANCHOR DOES. A step is placed against the plan AS IT STANDS
+    and nothing already in the plan is ever re-placed: this file's rule is that a command
+    changes the steps it names, and silently rewriting deps a lead shaped by hand would be
+    a worse bug than the one being fixed. So naming steps in separate calls, out of the
+    order they run — `name-step merge` and then `name-step create-pr` — leaves the merge
+    waiting on what the plan ended with at the time and not on the PR that arrived after
+    it. `create --lib` sorts what it was given by anchor and is order-insensitive for that
+    reason; `name-step` names one definition and cannot. Name them in the order they run,
+    or make the plan in one `create`, and reshape in the file where you did neither.
     """
     at = {st["id"]: st for st in steps}
     for st in steps:
         by = st.get("obliged_by")
-        if by in at and not (_anchored(st, lib) and _anchored(at[by], lib)):
+        if by in at and not _anchored(st, lib):
             at[by]["deps"].append(st["id"])
 
     pool = list(plan.get("steps") or [])
@@ -2213,9 +2276,12 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
             continue
         top = max(_ranked(x, lib) for x in lower)
         band = [x for x in lower if _ranked(x, lib) == top]
-        waited = {str(d) for x in pool for d in (x.get("deps") or ())}
-        st["deps"] = [x["id"] for x in band if str(x["id"]) not in waited] or \
-                     [band[-1]["id"]]
+        # BY NUMBER, like every other id comparison in this file: a hand-written `deps: [1]`
+        # is the edge it names, so the step it names is not reported as a loose end and
+        # picked up as a second dep the plan already has transitively.
+        waited = {_num(_STEP_ID, d) for x in pool for d in (x.get("deps") or ())}
+        st["deps"] = [x["id"] for x in band
+                      if _num(_STEP_ID, x["id"]) not in waited] or [band[-1]["id"]]
 
 
 def _anchor(lib: dict, key: str) -> int:
@@ -2414,6 +2480,15 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
                                  f"this plan — an edge to nothing draws as a wait that "
                                  f"never ends. Edges join steps of ONE plan, and nothing "
                                  f"here reads across plans."))
+        if step.get("root") and (step.get("deps") or []):
+            # The two say opposite things about the same step, and the mark is the half a
+            # reader trusts: `root: true` is somebody saying this start is deliberate, so a
+            # step carrying one AND an edge reads as a start on the board and as a wait in
+            # the file. The verb that wrote an edge used to clear the mark; this is that
+            # rule where the edge is now written, which is by hand.
+            out.append((sid, "marked a deliberate root and given a dep — a step that waits "
+                             "for something is not a start. Drop the `root` or drop the "
+                             "`deps`, whichever one is not true."))
         if str(step.get("gate") or "").strip() and str(step.get("progress") or "") == DONE:
             out.append((sid, "a gate on a step that is already done — a gate is reached "
                              "before the work it guards, so a plan does not get to mark "

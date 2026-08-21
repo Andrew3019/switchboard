@@ -1973,6 +1973,68 @@ class CatalogueTest(PlansSandbox):
         self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
         self.assertNotIn("incomplete", added)
 
+    def test_an_unanchored_step_obliging_an_anchored_one_is_not_a_deadlock(self):
+        """The mixed library the anchor rule promises still works, and the cycle it made.
+
+        The obligation edge was drawn whenever EITHER end was unanchored, so an unanchored
+        step obliging an anchored one got the edge — and then the anchored step was placed
+        after the very step now waiting on it. Two steps each waiting for the other, in a
+        graph nothing traverses and nothing checks for cycles: `validate` said no defects
+        and both steps were blocked for ever. The OBLIGED end alone decides now.
+        """
+        self.define("impl-thing", name="implement the thing", display="implement",
+                    obliges=["review"])
+        self.data("plugin", "plans", "create", "Q", "--display", "Q", "--lib", "impl-thing")
+        by_def = {s["def"]: s for s in self.data("plugin", "plans", "show", "p-1")["steps"]}
+        self.assertEqual(by_def["impl-thing"]["deps"], [], "and not an edge onto the review")
+        self.assertEqual(by_def["review"]["deps"], [by_def["impl-thing"]["id"]])
+
+        # The other direction is untouched: an anchored step obliging an unanchored one
+        # keeps the edge it always had, since the obliged end says nothing about when it
+        # runs and the obligation is the only order there is.
+        self.define("merge", name="merge the pull request", display="merge PR",
+                    anchor="merge", obliges=["hand-check"])
+        self.define("hand-check", name="what only a human can check", display="by hand")
+        self.data(*_create("a job", "write it"))
+        added = self.data("plugin", "plans", "name-step", "p-2", "merge")
+        by_def = {s["def"]: s for s in added["steps"]}
+        self.assertEqual(by_def["merge"]["deps"], [by_def["hand-check"]["id"]])
+        self.assertEqual(by_def["hand-check"]["deps"], ["step-1"])
+
+    def test_a_template_places_each_entry_against_the_ones_before_it(self):
+        """A template got none of the anchor fix while every entry was expanded before any
+        of them landed: `_place` saw an empty plan every time, so an anchored step found
+        nothing to be placed against, was marked a deliberate root, and then had the
+        entry's own `after` edge written onto it — a step claiming to be a start and
+        carrying a wait, with the change approval back after the implementation, which is
+        the precise defect anchors exist to remove.
+
+        Each entry lands before the next is expanded now, and its `after` is drawn in the
+        same round — an entry expanded while the one before it still had no edges saw two
+        implementation steps that both looked like sinks and waited on both.
+        """
+        d = self.catalogue("templates")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "ship.json").write_text(json.dumps(
+            {"title": "ship it", "display": "ship it", "steps": [
+                {"name": "implement it", "display": "implement"},
+                {"name": "test it", "display": "tests", "after": [1]},
+                {"def": "create-pr", "after": [2]},
+                {"def": "merge", "after": [3]}]}))
+        made = self.data("plugin", "plans", "template", "use", "ship")
+        at = {s["id"]: s for s in made["steps"]}
+        by_def = {s["def"]: s for s in made["steps"] if s.get("def")}
+
+        self.assertEqual(by_def["change-approval"]["deps"], [], "before the work, still")
+        self.assertTrue(by_def["change-approval"]["root"])
+        # The review waits on the implementation's SINK and not on both of its steps,
+        # which is what drawing the entry's edges in the same round buys.
+        self.assertEqual([at[d]["display"] for d in by_def["review"]["deps"]], ["tests"])
+        self.assertEqual(by_def["create-pr"]["deps"], [by_def["review"]["id"]])
+        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]])
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertNotIn("incomplete", made, f"and nothing is left to fix: {made}")
+
     def test_create_lib_lands_a_resolved_library_step_in_the_one_call(self):
         """The whole plan in one command, which is the difference between `create` and
         `create` plus an unbounded number of follow-ups.
@@ -2226,6 +2288,15 @@ class CompletenessTest(PlansSandbox):
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
         self.assertIn("parallel start", self.ok("plugin", "plans", "show", "p-1"),
                       "and `show` says which starts were authored as starts")
+
+        # AND THE MARK AND AN EDGE CANNOT BOTH STAND, which is what the verb that wrote an
+        # edge used to enforce by clearing the mark. The rule outlives the verb: a step
+        # claiming to be a start and carrying a wait draws as a start on the board and as a
+        # wait in the file, and only one of those can be true.
+        self.edit_step("s-2", deps=["step-1"])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("marked a deliberate root and given a dep", said)
+        self.assertIn("step-2", said)
 
     def test_an_unmarked_second_root_is_still_reported_and_the_fix_names_both_ways(self):
         """The marker is the whole of what separates the two cases, so the unmarked one is
