@@ -3559,7 +3559,8 @@ class Broker:
         *,
         role: str = DEFAULT_ROLE,
         as_prompt: Optional[str] = None,
-        name: Optional[str] = None,
+        name: Optional[str] = None,      # the FINAL name, verbatim — internal callers only
+        topic: Optional[str] = None,     # what this agent is FOR; composed into the name
         model: Optional[str] = None,
         with_: Sequence[str] = (),      # NAMES to bind (or literal lines) — see below
         me: Optional[str] = None,
@@ -3581,7 +3582,7 @@ class Broker:
         # got — an agent told it is an `orchestrator`, given a lead's prompt and filed as
         # neither is three answers to one question.
         role = r.name
-        name = name or self._unique_name(role)
+        name = name or self._compose_name(role, topic)
         self.delivery_note = None       # this spawn's caveat, not the last one's
 
         # A child inherits its parent's workspace unless told otherwise, so a whole
@@ -3925,11 +3926,45 @@ class Broker:
         return (a is not None and a["state"] == GONE_STATE
                 and not a["pane_id"] and not a["session_id"])
 
-    def _unique_name(self, role: str) -> str:
-        n = 1
-        while store.get_agent(self.db, f"{role}-{n}"):
+    def _compose_name(self, role: str, topic: Optional[str]) -> str:
+        """`<role>-<topic>`: what it is, and what it is for, in the one string.
+
+        THE NAME IS THE WHOLE OF AN AGENT'S IDENTITY ON THE BOARD — it is also its
+        workspace and its git branch (`_fork_for`) — so it carries both halves or a person
+        reading the board has to go and ask. The role half is on every agent, including one
+        whose parent named it well: a board of `sb-setup-skill` and `triage-bugs` says what
+        the jobs are and never says which of them may spawn, which model tier it costs, or
+        what to expect of its report.
+
+        A TOPICLESS SPAWN IS REFUSED rather than numbered. `<role>-<n>` used to be the
+        fallback and it is what this change exists to end: `worker-69` is a row nobody can
+        read, and 247 of the store's first 717 agents were named that way. Auto-slugging
+        the task text was the alternative and it is worse than it looks — the first three
+        words of a task are `read-only-deep`, which is a name that has stopped being a
+        number without starting to mean anything. So the parent is asked, once, and the
+        prompts are written so it rarely gets that far (`defaults/protocol.md`).
+
+        Truncation cuts the TOPIC and never the prefix: `slug_name` truncates the tail, and
+        the two halves are slugged together so the 32 characters herdr allows are spent on
+        one name rather than budgeted twice.
+        """
+        if not (topic and topic.strip()):
+            raise ValueError(
+                "every agent is named for what it is FOR: pass `--name <two or three "
+                "words for the subject>`, and it becomes `" + role + "-<that>`. "
+                "The name is also the workspace and the branch, so it is what everyone "
+                "reads this job by — name the subject, not the approach."
+            )
+        stem = validate.slug_name(f"{role}-{topic}", reserve=len("-99"))
+        if not store.get_agent(self.db, stem):
+            return stem
+        # A collision is a second job on the same subject, so the number counts THOSE and
+        # starts at 2 — it reads as "the second triage", where the old global counter read
+        # as nothing at all.
+        n = 2
+        while store.get_agent(self.db, f"{stem}-{n}"):
             n += 1
-        return f"{role}-{n}"
+        return f"{stem}-{n}"
 
     # -- messaging -------------------------------------------------------
 

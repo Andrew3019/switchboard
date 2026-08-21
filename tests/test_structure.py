@@ -78,7 +78,7 @@ class TopStampTest(Fixture, unittest.TestCase):
     def test_a_delegated_agent_is_never_stamped(self):
         """The stamp has exactly one writer. A second would be a second definition of what
         a top is, and the two would drift."""
-        kid = self.b.delegate("t", role="worker", me=self._top())
+        kid = self.b.delegate("t", topic="t", role="worker", me=self._top())
         self.assertFalse(store.get_agent(self.db, kid)["is_top"])
         self.assertFalse(self.b.is_top(kid))
 
@@ -200,7 +200,7 @@ class TopStampMigrationTest(unittest.TestCase):
         self.addCleanup(db.close)
         h = FakeHerdr(self.path.parent / "worktrees")
         b = Broker(db, h, repo=self.path.parent)
-        kid = b.delegate("t", role="worker", me="main")
+        kid = b.delegate("t", topic="t", role="worker", me="main")
         self.assertEqual(store.get_agent(db, kid)["branch"], kid)      # forked, not tabbed
 
 
@@ -231,22 +231,22 @@ class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
     def test_a_bare_non_top_tabs_rather_than_forking(self):
         scout = self._bare_non_top()
         self.assertFalse(self.b.has_worktree(scout))     # the fact the old rule read
-        kid = self.b.delegate("t", role="worker", me=scout)
+        kid = self.b.delegate("t", topic="t", role="worker", me=scout)
         self.assertEqual(self.h.calls_of("create_worktree"), [])
         self.assertEqual(store.get_agent(self.db, kid)["workspace"], "api")
 
     def test_a_top_with_the_same_shape_still_forks(self):
         """The control. Same `branch IS NULL`, opposite answer — which is only possible
         because the rule reads the stamp and not the branch."""
-        kid = self.b.delegate("t", role="worker", me=self._top())
+        kid = self.b.delegate("t", topic="t", role="worker", me=self._top())
         self.assertEqual(self.h.calls_of("create_worktree"), [kid])
 
     def test_a_sub_orchestrators_whole_subtree_stays_in_one_space(self):
         """Three deep. DESIGN-TRUTH: "a sub-lead a lead spawns is a tab in the lead's
         space, and its whole subtree stays in that one space"."""
-        lead = self.b.delegate("t", role="lead", me=self._top())
-        sub = self.b.delegate("t", role="lead", me=lead)
-        kid = self.b.delegate("t", role="worker", me=sub)
+        lead = self.b.delegate("t", topic="t", role="lead", me=self._top())
+        sub = self.b.delegate("t", topic="t", role="lead", me=lead)
+        kid = self.b.delegate("t", topic="t", role="worker", me=sub)
         spaces = [store.get_agent(self.db, n)["workspace"] for n in (lead, sub, kid)]
         self.assertEqual(spaces, [lead, lead, lead])
         self.assertEqual(self.h.calls_of("create_worktree"), [lead])   # exactly one fork
@@ -274,7 +274,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="w", role="worker", parent=self._top(),
                            workspace="api", branch="api")
         with self.assertRaises(ValueError) as cm:
-            self.b.delegate("t", role="worker", me="w")
+            self.b.delegate("t", topic="t", role="worker", me="w")
         self.assertIn("does not spawn", str(cm.exception))
         self.assertIn("lead", str(cm.exception))          # and what CAN, by name
 
@@ -286,7 +286,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         self.assertEqual(self.h.started, [])
 
     def test_a_lead_is_not_refused(self):
-        self.assertTrue(self.b.delegate("t", role="worker", me=self._top()))
+        self.assertTrue(self.b.delegate("t", topic="t", role="worker", me=self._top()))
 
     def test_bareness_is_a_field_on_the_role_not_the_role_s_name(self):
         """Vocabulary is data — a repo that names its leaf role something else, or its
@@ -300,9 +300,9 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
                            workspace="api", branch="api", cwd=str(self.repo))
         store.create_agent(self.db, name="d", role="dogsbody", parent="f",
                            workspace="api", branch="api", cwd=str(self.repo))
-        self.assertTrue(b.delegate("t", role="dogsbody", me="f"))
+        self.assertTrue(b.delegate("t", topic="t", role="dogsbody", me="f"))
         with self.assertRaises(ValueError):
-            b.delegate("t", role="dogsbody", me="d")
+            b.delegate("t", topic="t", role="dogsbody", me="d")
 
     def test_an_undefined_role_cannot_delegate(self):
         """A role nobody thought about is a leaf. Being wrong that way costs a refusal a
@@ -310,7 +310,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="x", role="invented-yesterday",
                            parent=self._top())
         with self.assertRaises(ValueError):
-            self.b.delegate("t", role="worker", me="x")
+            self.b.delegate("t", topic="t", role="worker", me="x")
 
     def test_a_row_that_still_says_orchestrator_may_still_delegate(self):
         """The rename reaches the role table, never the rows already written. Every agent
@@ -321,13 +321,13 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="old", role="orchestrator",
                            parent=self._top(), workspace="api", branch="api",
                            cwd=str(self.repo))
-        self.assertTrue(self.b.delegate("t", role="worker", me="old"))
+        self.assertTrue(self.b.delegate("t", topic="t", role="worker", me="old"))
 
     def test_delegating_with_the_retired_name_files_the_child_as_a_lead(self):
         """The alias resolves all the way, so the row says what the agent actually is: it
         is holding the lead prompt, and a row saying `orchestrator` would be a third answer
         to a question that already has two."""
-        kid = self.b.delegate("t", role="orchestrator", me=self._top())
+        kid = self.b.delegate("t", topic="t", role="orchestrator", me=self._top())
         self.assertEqual(store.get_agent(self.db, kid)["role"], "lead")
 
 

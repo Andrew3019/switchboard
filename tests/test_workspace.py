@@ -356,14 +356,14 @@ class WorkspaceTest(Fixture, unittest.TestCase):
 
     def test_children_inherit_the_workspace_without_being_told(self):
         lead = self._open("api")
-        kid = self.b.delegate("do a thing", role="worker", me=lead["agent"])
+        kid = self.b.delegate("do a thing", topic="t", role="worker", me=lead["agent"])
         row = store.get_agent(self.db, kid)
         self.assertEqual(row["workspace"], "api")
         self.assertEqual(row["cwd"], lead["path"])
 
     def test_a_childs_tab_is_placed_in_its_parents_workspace(self):
         r = self._open("api")
-        self.b.delegate("t", role="worker", me="api")
+        self.b.delegate("t", topic="t", role="worker", me="api")
         self.assertEqual(self.h.tabs[-1][0], r["workspace_id"])
 
     def test_the_lead_is_told_it_is_sharing(self):
@@ -525,7 +525,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         main = self._git_repo()
         b = Broker(self.db, self.h, repo=main)
         b.start()
-        kid = b.delegate("do a thing", role="worker", me="main")
+        kid = b.delegate("do a thing", topic="t", role="worker", me="main")
         row = store.get_agent(self.db, kid)
         self.assertEqual(row["workspace"], kid)              # a tree of its own
         self.assertEqual(row["branch"], kid)
@@ -546,14 +546,22 @@ class WorkspaceTest(Fixture, unittest.TestCase):
 
     # -- failure modes ----------------------------------------------------
 
-    def test_a_bad_name_is_refused_before_anything_is_created(self):
-        """The name is the agent's AND the branch's, so a bad one is refused at the CLI
-        (`validate.agent_name`) before the broker is reached at all."""
-        from switchboard.cli import _validate, build_parser
-        from switchboard.validate import Invalid
-        for bad in ("", "has space", "-api", "/api", "a..b"):
-            with self.subTest(bad=bad), self.assertRaises((Invalid, SystemExit)):
-                _validate(build_parser().parse_args(["delegate", "t", "--name", bad]))
+    def test_a_hostile_topic_still_composes_a_name_git_and_herdr_accept(self):
+        """The name is the agent's AND the branch's, and since `<role>-<topic>` naming the
+        half a caller supplies is prose. So the guarantee moved rather than went: `--name`
+        is no longer checked as a name (it is not one), and `Broker._compose_name` slugs
+        whatever arrives into something both herdr and git take.
+
+        An EMPTY topic is the one that is still refused, and by the broker: a spawn with
+        nothing to be named for is the case the composition exists to end."""
+        from switchboard import validate
+        for hostile in ("has space", "-api", "/api", "a..b", "API/../etc", "ünïcode"):
+            with self.subTest(hostile=hostile):
+                got = self.b._compose_name("worker", hostile)
+                self.assertEqual(validate.agent_name(got), got)
+                self.assertEqual(validate.ref_name(got), got)      # it is also the branch
+        with self.assertRaises(ValueError):
+            self.b._compose_name("worker", "   ")
         self.assertEqual(self.h.checkouts, {})
 
     def test_a_workspace_that_can_neither_be_opened_nor_created_says_so(self):
@@ -580,7 +588,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         r = self._open("api")
         plain = lambda *, cwd=None, focus=False: "w9:p9"      # noqa: E731
         self.h.create_tab = plain
-        kid = self.b.delegate("t", role="worker", me="api")
+        kid = self.b.delegate("t", topic="t", role="worker", me="api")
         self.assertEqual(store.get_agent(self.db, kid)["workspace"], "api")
         self.assertEqual(store.get_agent(self.db, kid)["pane_id"], "w9:p9")
         self.assertTrue(r["workspace_id"])
@@ -599,7 +607,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="lead", role="lead", workspace="api",
                            branch="api", cwd=str(self.repo))      # no workspace_id
         with mock.patch.dict(os.environ, {"HERDR_WORKSPACE_ID": "w1"}, clear=False):
-            kid = self.b.delegate("t", role="worker", me="lead")
+            kid = self.b.delegate("t", topic="t", role="worker", me="lead")
         row = store.get_agent(self.db, kid)
         self.assertEqual(row["workspace"], "api")            # inherited, not forked
         self.assertEqual(row["cwd"], str(self.repo))
@@ -623,7 +631,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         before = {a["name"] for a in store.live_agents(self.db)}
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ForkFailed) as cm:
-                self.b.delegate("t", role="worker", me=HUMAN)
+                self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         self.assertIn("worktree of its own", str(cm.exception))
         self.assertIn(str(self.repo), str(cm.exception))      # the checkout it refused
         self.assertEqual({a["name"] for a in store.live_agents(self.db)}, before)
@@ -655,7 +663,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
     def test_a_delegated_child_opens_a_board_beside_itself(self):
         """`sb delegate` used to hand out a bare tab. Every spawn goes through
         `delegate`, so this is where the board is opened for all of them."""
-        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        kid = self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         pane = store.get_agent(self.db, kid)["pane_id"]
         self.assertIn((pane, "right"), [(p, d) for p, d, _r in self.h.splits])
         self.assertTrue(any("switchboard.board" in t for _p, t in self.h.pane_prompts))
@@ -663,7 +671,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
     def test_the_board_is_the_small_pane(self):
         """herdr's ratio is the share kept by the pane being SPLIT, so the agent's own
         session keeps the majority and the board gets what is left."""
-        self.b.delegate("t", role="worker", me=HUMAN)
+        self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         _pane, _dir, ratio = self.h.splits[0]
         self.assertGreater(ratio, 0.5, "the agent's session must be the larger pane")
         self.assertLess(ratio, 0.8)                         # and the board still readable
@@ -673,7 +681,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         def boom(*a, **kw):
             raise HerdrError("split_failed", "no panes left")
         self.h.split_pane = boom
-        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        kid = self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         self.assertIn(kid, self.h.live)
         self.assertTrue(any(e["kind"] == "board_open_failed"
                             for e in store.recent_events(self.db)))
@@ -750,7 +758,7 @@ class StartWorkspaceTest(Fixture, unittest.TestCase):
         from switchboard import board as board_mod
         self.b.start()
         _pane, _dir, top_ratio = self.h.splits[0]
-        self.b.delegate("t", role="worker", me=HUMAN)
+        self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         _pane, _dir, kid_ratio = self.h.splits[1]
         # herdr's ratio is what the SPLIT pane keeps, so a wider board is a smaller one.
         self.assertAlmostEqual(top_ratio, 1 - board_mod.BOARD_SHARE)
@@ -778,7 +786,7 @@ class ClosingTakesTheBoardWithItTest(Fixture, unittest.TestCase):
     def _finished_kid(self) -> tuple[str, str, str]:
         """A closable child. -> (name, its board's pane, its own pane)"""
         self._open("api")
-        kid = self.b.delegate("t", role="worker", me="api")
+        kid = self.b.delegate("t", topic="t", role="worker", me="api")
         store.set_state(self.db, kid, "done")
         agent_pane = store.get_agent(self.db, kid)["pane_id"]
         return kid, self._board_pane(kid), agent_pane
@@ -960,7 +968,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
         with mock.patch.dict(os.environ, {}, clear=True):
-            kid = self.b.delegate("t", role="worker", me="root")
+            kid = self.b.delegate("t", topic="t", role="worker", me="root")
         # The child forks — its parent is a top — but it forks its OWN name. What must
         # never happen is a checkout appearing under the parent's bare label.
         self.assertEqual(self.h.calls_of("create_worktree"), [kid])
@@ -980,7 +988,7 @@ class WorktreeIsAFactTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="root", role="lead", workspace="api",
                            cwd=str(self.repo), is_top=True)  # a bare row, same name
         self.assertIsNone(store.get_agent(self.db, "root")["branch"])
-        kid = self.b.delegate("t", role="worker", me="root")
+        kid = self.b.delegate("t", topic="t", role="worker", me="root")
         # Its parent is a top, so it forks — and what it must not do is pick up the 'api'
         # worktree that merely shares its parent's label.
         self.assertNotEqual(store.get_agent(self.db, kid)["branch"], "api")
@@ -1013,7 +1021,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         return name
 
     def test_a_child_of_a_top_is_forked_its_own_worktree(self):
-        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        kid = self.b.delegate("t", topic="t", role="worker", me=self._bare_root())
         row = store.get_agent(self.db, kid)
         self.assertEqual(row["branch"], kid)                 # the branch IS the name
         self.assertEqual(row["workspace"], kid)
@@ -1022,8 +1030,8 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         self.assertTrue(self.b.has_worktree(kid))
 
     def test_a_grandchild_inherits_its_parents_worktree_rather_than_forking(self):
-        kid = self.b.delegate("t", role="lead", me=self._bare_root())
-        grandkid = self.b.delegate("t", role="worker", me=kid)
+        kid = self.b.delegate("t", topic="t", role="lead", me=self._bare_root())
+        grandkid = self.b.delegate("t", topic="t", role="worker", me=kid)
         rows = [store.get_agent(self.db, n) for n in (kid, grandkid)]
         self.assertEqual(rows[1]["branch"], rows[0]["branch"])
         self.assertEqual(rows[1]["workspace"], rows[0]["workspace"])
@@ -1031,7 +1039,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         self.assertEqual(self.h.calls_of("create_worktree"), [kid])   # exactly one fork
 
     def test_the_human_has_no_worktree_to_lend_so_their_child_forks(self):
-        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        kid = self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
 
     def test_the_question_is_asked_of_the_store_not_of_the_name(self):
@@ -1041,7 +1049,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="root", role="lead", workspace="api",
                            cwd=str(self.repo), pane_id="w1:p1",   # a BARE space, same name
                            is_top=True)
-        kid = self.b.delegate("t", role="worker", me="root")
+        kid = self.b.delegate("t", topic="t", role="worker", me="root")
         self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
         self.assertNotEqual(store.get_agent(self.db, kid)["cwd"], r["path"])
 
@@ -1049,7 +1057,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
         """`sb start` and a workspace lead both place a child explicitly. A fork on top of
         that would ignore the instruction."""
         r = self._open("api", me=self._root("other-top"))
-        kid = self.b.delegate("t", role="worker", me=self._bare_root(),
+        kid = self.b.delegate("t", topic="t", role="worker", me=self._bare_root(),
                               workspace="api", branch="api", cwd=r["path"])
         self.assertEqual(store.get_agent(self.db, kid)["workspace"], "api")
         self.assertEqual(self.h.calls_of("create_worktree"), ["api"])
@@ -1057,7 +1065,7 @@ class ForkRuleTest(Fixture, unittest.TestCase):
     def test_the_child_takes_the_forked_workspaces_root_pane(self):
         """A fresh workspace already has an idle shell; a tab on top of it is a pane
         nobody ever closes."""
-        kid = self.b.delegate("t", role="worker", me=self._bare_root())
+        kid = self.b.delegate("t", topic="t", role="worker", me=self._bare_root())
         self.assertEqual(self.h.tabs, [])
         self.assertEqual(store.get_agent(self.db, kid)["pane_id"],
                          self.h.checkouts[store.get_agent(self.db, kid)["cwd"]]["root_pane"])
@@ -1202,7 +1210,7 @@ class ForkBaseTest(Fixture, unittest.TestCase):
         b = Broker(self.db, self.h, repo=main)
         store.create_agent(self.db, name="root", role="lead", cwd=str(main),
                            pane_id="w1:p1", is_top=True)
-        b.delegate("t", role="worker", me="root")
+        b.delegate("t", topic="t", role="worker", me="root")
         self.assertEqual(self.bases, ["origin/main"])
         self.assertTrue(self._tracking(main))
 
@@ -1225,7 +1233,7 @@ class JoinWorkspaceTest(Fixture, unittest.TestCase):
     """
 
     def _join(self, name: str, *, me: str = "root") -> str:
-        return self.b.delegate("t", role="worker", me=me,
+        return self.b.delegate("t", topic="t", role="worker", me=me,
                                **self.b.join_workspace(name))
 
     def setUp(self):
@@ -1390,12 +1398,12 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         return started["prompts"]
 
     def test_delegate_resolves_the_repos_bindings(self):
-        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        kid = self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         self.assertIn("keep it short", " ".join(self._prompts_for(kid)))
 
     def test_every_spawn_path_resolves_the_same_bindings(self):
         """The property the fix is really about: one resolution point, not three."""
-        kid = self.b.delegate("t", role="lead", me=HUMAN)
+        kid = self.b.delegate("t", topic="t", role="lead", me=HUMAN)
         store.create_agent(self.db, name="root", role="lead", workspace="scratch",
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
         lead = self.b.delegate("t", role="lead", name="api", me="root")
@@ -1408,13 +1416,13 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
 
     def test_a_per_role_binding_still_layers_on_top(self):
         """`all` then the role's own — the layering survives the move."""
-        kid = self.b.delegate("t", role="worker", me=HUMAN)
+        kid = self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         text = " ".join(self._prompts_for(kid))
         self.assertIn("keep it short", text)
         self.assertIn("be exact", text)
 
     def test_a_callers_own_with_is_appended_last(self):
-        kid = self.b.delegate("t", role="worker", with_=["house-style", "and terse"],
+        kid = self.b.delegate("t", topic="t", role="worker", with_=["house-style", "and terse"],
                               me=HUMAN)
         prompts = self._prompts_for(kid)
         self.assertIn("and terse", prompts)
@@ -1427,7 +1435,7 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         over = config.setting("limits.prompt") + 1
         (self.repo / ".switchboard" / "plugins" / "house-style.md").write_text("x" * over)
         with self.assertRaises(ValueError) as cm:
-            self.b.delegate("t", role="worker", me=HUMAN)
+            self.b.delegate("t", topic="t", role="worker", me=HUMAN)
         self.assertIn("preset text", str(cm.exception))
 
 
@@ -1442,7 +1450,7 @@ class RestoreOpensTheBoardTest(Fixture, unittest.TestCase):
     def _closed_kid(self) -> str:
         """A child that has been closed: row and session kept, panes gone."""
         self._open("api")
-        kid = self.b.delegate("t", role="worker", me="api")
+        kid = self.b.delegate("t", topic="t", role="worker", me="api")
         store.set_state(self.db, kid, "done")
         self.assertEqual(self.b.cleanup([kid], me="api"), [kid])
         # The fake keeps a closed agent in `live`; real herdr drops it with its pane,

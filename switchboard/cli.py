@@ -136,7 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"preset from {_preset_dir_help()}, or @<plugin> for that plugin's "
                         f"fragment (repeatable); an unknown BARE value is used as a literal "
                         f"instruction, but @ is reserved and an unknown @name is an error")
-    d.add_argument("--name")
+    d.add_argument("--name", metavar="TOPIC",
+                   help="two or three words for the subject — the agent is named "
+                        "<role>-<topic>, and that is also its workspace and its branch. "
+                        "Required: a spawn with nothing to be named for is refused")
     d.add_argument("--workspace", metavar="NAME",
                    help="join this EXISTING workspace instead of working where you are "
                         "(a workspace is opened by a dispatcher delegating: the "
@@ -386,11 +389,16 @@ def _validate(args) -> None:
     elif cmd == "delegate":
         args.task = validate.line(args.task, "task")
         # Not slugified here: the role is also a lookup key into roles.toml, and a role
-        # nobody defined is legal (roles.get falls back to worker). Only the agent NAME
-        # derived from it has to satisfy herdr — see _derived_name.
+        # nobody defined is legal (roles.get falls back to worker). Only the composed agent
+        # name has to satisfy herdr, and `Broker._compose_name` slugs it there.
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
+        # NOT `agent_name`: `--name` is no longer the name. It is the topic half, and the
+        # broker composes `<role>-<topic>` from it (`Broker._compose_name`), so a topic
+        # checked against herdr's 32 characters here would pass and then compose into
+        # something too long. Checked as a LINE, and slugged by the broker with the role in
+        # front so the truncation falls on the topic rather than on the prefix.
         if args.name is not None:
-            args.name = validate.agent_name(args.name, "--name")
+            args.name = validate.line(args.name, "--name", max_len=validate.MAX_TOKEN)
         # A workspace name IS a branch name, so it is checked as one — the same rule
         # `sb workspace close` is held to, since both name the same place.
         if args.workspace is not None:
@@ -529,24 +537,6 @@ def _validate_plugin(args) -> None:
     args.command = p.commands[ns._command]
     args.pargs = ns
     args.json = getattr(ns, "json", False) or args.json
-
-
-def _derived_name(db, role: str) -> Optional[str]:
-    """The agent name the broker would derive from this role, made legal — or None.
-
-    The broker names an unnamed child `<role>-<n>`, so `--role "QA Bot"` would ask herdr
-    for the agent `QA Bot-1` and be refused. Slugifying the role itself is not an option
-    (it is also the roles.toml lookup key), so the name is derived here instead, from the
-    slug, picking the first free number exactly as the broker does. When the role is
-    already a legal stem this returns None and the broker's own derivation stands.
-    """
-    stem = validate.slug_name(role, reserve=len("-99"))
-    if stem == role:
-        return None
-    n = 1
-    while store.get_agent(db, f"{stem}-{n}"):
-        n += 1
-    return f"{stem}-{n}"
 
 
 # The only verbs refused while the store is degraded — see `store.schema_deficit`. All
@@ -896,7 +886,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # caller's workspace or forks, as it always has.
         join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
-                          name=args.name or _derived_name(db, args.role),
+                          topic=args.name,
                           model=args.model, with_=args.with_, me=me, **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
