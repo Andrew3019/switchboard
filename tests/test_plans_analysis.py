@@ -299,6 +299,32 @@ class GapTest(unittest.TestCase):
         self.assertIn("add-step entr", gaps)
         self.assertIn("no notes at all", gaps)
 
+    def test_no_add_step_entries_is_reported_as_a_blind_spot_not_as_a_finding(self):
+        """The one gap raised on an ABSENCE, because the absence is what would otherwise
+        read as a finding.
+
+        `add-step` was a verb and is not one any more: a step invented mid-job is written
+        into the plan file by hand, and a hand-edit stamps no changelog entry. So no plan
+        made since carries one, and a report that stayed quiet would hand over "no plan
+        changed shape" when what it has is "no record of any". The try-count kind of rework
+        is unaffected — that one still comes through a verb.
+        """
+        quiet = _plan("p-9", "shapely", "finished",
+                      [_step("s-90", "implement it", tries=2)],
+                      [_entry("create", "1 step (s-90)", "shaping"),
+                       _entry("rework", "s-90 done → open, try 2", "the review found a bug")])
+        gaps = " ".join(ev.survey([quiet])["gaps"])
+        self.assertIn("no add-step entries in this set", gaps)
+        self.assertIn("hand-edit writes no changelog entry", gaps)
+
+        # And it is NOT raised where the set does hold one, since there is a count to read.
+        loud = _plan("p-10", "reshaped", "finished",
+                     [_step("s-100", "implement it")],
+                     [_entry("create", "1 step (s-100)", "shaping"),
+                      _entry("add-step", "s-101 backfill the fixtures", "fixtures stale")])
+        self.assertNotIn("no add-step entries in this set",
+                         " ".join(ev.survey([loud])["gaps"]))
+
 
 if __name__ == "__main__":
     unittest.main()

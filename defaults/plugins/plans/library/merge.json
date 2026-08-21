@@ -1,6 +1,7 @@
 {
   "name": "merge the pull request",
   "display": "merge PR",
+  "anchor": "merge",
   "command": "gh pr comment <PR> --edit-last --body \"$(sb plugin plans show <PLAN> --markdown)\"",
   "obliges": [
     "merge-human-review"

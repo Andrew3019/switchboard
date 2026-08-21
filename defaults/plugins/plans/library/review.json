@@ -1,5 +1,6 @@
 {
   "name": "review the implementation",
   "display": "review",
+  "anchor": "review",
   "about": "The review you would run anyway, and then two more checks — never fewer. Run your own review first and in full: correctness, the tests, what the diff does that nobody asked for. Nothing here narrows it. THEN look at the plan. If it carries a `change-approval` step, read the approved text out of that step's `output` and add two checks: are the OBJECTIVES met, one by one, as he stated them; and does what was built match the CHANGE CONTRACT he approved. If there is no change-approval step in the plan, those two are skipped and that is not a defect — this is a plain review and nothing is missing. Put the result in this step's `output`, written as markdown-ready nesting, and keep it COMPACT: `Objectives met` with a tick or the ones that are not, `Change contract aligned` with a tick or `partial` plus a line or two on the small implementation changes. Not the contract again — that is dumped in full by the step above and twice is once too many. Runs after the implementation and before the PR is opened."
 }

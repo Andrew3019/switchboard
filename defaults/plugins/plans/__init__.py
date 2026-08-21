@@ -1,9 +1,9 @@
 """Plans and steps — the live state of one job, held where a lead can show it.
 
 The design is `design/PLANS-AND-STEPS.md`; this is the state model, the verbs that make a
-plan (`create`, `template use`, `name-step`, `add-step`), the verbs that read one (`list`,
-`show`, `changelog`, `library`, `validate`), the three small ones worth typing while a job
-runs (`tick`, `note`, `dep`), the two things that are READ every time a plan is displayed
+plan (`create`, `template use`, `name-step`), the verbs that read one (`list`, `show`,
+`changelog`, `library`, `validate`), the three small ones worth typing while a job runs
+(`tick`, `skip`, `note`), the two things that are READ every time a plan is displayed
 and written down nowhere — a step owner's status, and the plan's own condition — and the
 instruction that says when to make a plan at all (`guide`). What is still not here is
 anything that decides for itself: nothing in this file blocks, merges, tears down or
@@ -135,13 +135,13 @@ is the same rule from the other side: it is exactly how a lead replacing a dead 
 a gate the previous plan cleared.
 
 `deps` are what a step comes after: data the lead reads, and this file's only interest in
-them is that they are storable and renderable. `dep` keeps its verb where the other small
-ones lost theirs, because an edge is the one field whose value is another record's id —
-the typo it catches is one an editor cannot see and the board would draw as a wait nobody
-is ever released from. Nothing traverses them, waits on them,
-orders anything by them or refuses a cycle in them — a join waits because the lead does not
-start it. What IS checked is that an edge names a step that exists, in the same plan, and
-not itself, since an edge to nothing is a typo rather than a shape.
+them is that they are storable and renderable. Written into the file like every other field
+a lead shapes a plan with — the verb that wrote one is gone, because it set one field and
+what it bought over an edit was the changelog entry nothing asks for any more. Nothing
+traverses them, waits on them, orders anything by them or refuses a cycle in them — a join
+waits because the lead does not start it. An edge naming a step that is not there is a typo
+the file cannot catch at the door any more; what catches it is `validate` and the board,
+which draw the plan the edge actually describes.
 
 Reassigning tells nobody. `owner` is a name written onto a step and nothing more: the plan
 never pushes to a running agent, and the old owner learns it lost the step from its parent
@@ -150,7 +150,8 @@ or not at all. Two agents believing they own one step is the collision the desig
 The catalogue
 -------------
 
-A step is either invented on the fly — `add-step`, `create --step`, a name and nothing else
+A step is either invented on the fly — `create --step`, a hand-written step, a name and
+nothing else
 — or NAMED from the library, which is `library/*.json` shipped beside this file. Both are
 first class, and the difference is one field: a named step stores `def` and leaves `name`
 null, and the text is resolved out of the library every time the plan is rendered.
@@ -220,6 +221,15 @@ mechanism exists to prevent. Refused at expansion rather than at the load, so th
 malformed definition takes down only the commands that actually reach it: a catalogue is
 edited by hand, and a typo in it must not be able to make every plan in the repo unreadable.
 
+AN OBLIGATION IS NOT AN ORDER, and a definition says where it runs in a field of its own:
+`anchor`, one word on the fixed spine every landing change has (`_ANCHORS`). `create-pr`
+obliges `change-approval` — no PR without an approved contract — and an approval runs at the
+very start, so reading the order off the obligation put it in the one place it cannot be.
+The anchor is what `_place` reads to write a new step's deps, so a change approval named
+into a plan of work lands as an early root and a review lands after the work, whatever order
+they were named in. A definition with no anchor keeps the placement this file always gave
+one: after whatever the plan currently ends with.
+
 Templates are `templates/*.json`: preconfigured plans, COPIED on use and never linked back.
 `template list` browses them, because nobody knows at the start of a job that a template
 exists for it — the lead looks once the work is shaped. A copy holds no reference to what it
@@ -228,8 +238,8 @@ the links: a named step inside a template stays a name, so it is still resolved 
 and links are the two halves of this design and they point opposite ways on purpose.
 
 Templates hold no `deps`. A template entry may expand into several steps, so an edge written
-against an entry would have nothing single to attach to; edges are added with `dep` once the
-copy exists. Every OTHER key on an entry is a field on the step it mints, copied onto it
+against an entry would have nothing single to attach to; edges are written into the copy's
+own file once it exists. Every OTHER key on an entry is a field on the step it mints, copied onto it
 blind (`_written`) — a gate, an owner, a checkpoint, a skip and its reason have no verb,
 so a template that could carry only a name could not show what a step really looks like.
 
@@ -337,15 +347,20 @@ will break a line on — which is C0 and the C1 range, and also U+2028 and U+202
 The changelog
 -------------
 
-Append-only, written by the command, carrying the reason the agent supplied. That is the
-whole record of how a job actually ran: a plan gets reshaped as it goes, and without this
-the file keeps only the final shape. `_write` refuses a document whose changelog is shorter
-than the one that was read, or whose existing entries have changed — so a bug in a future
-verb that rewrites a plan wholesale fails loudly here instead of quietly losing the story.
-It cannot police a raw editor write of a plan file; nothing can. The answer is not that
-every mutation goes through a command — the guide sanctions hand-editing — but that the one
-writer editing by hand appends the entry itself, the way a command would, and every command's
-own write is held to the check above.
+Written by the command, carrying the reason the agent supplied. That is the record of how a
+job actually ran where a command ran it: a plan gets reshaped as it goes, and without this
+the file keeps only the final shape.
+
+NOTHING VALIDATES IT AND NOTHING REFUSES ON IT, which is a decision and not a gap. `_write`
+used to reject a document whose changelog had shrunk or whose entries had moved, and the
+guide used to require a hand-edit to append its own entry in the shape of the ones already
+there. Both were built for a plan a human maintained in an editor. What a plan is edited by
+now is an agent with ordinary file tools, and rewriting the file whole is the normal way to
+change one — so the check stood in the way of the interface it was meant to protect, and
+the requirement made every edit pay for a record nothing surfaced. The verbs still stamp
+their own entries (`_log`), so the story a command can tell is still told; what is gone is
+an obligation on the hand that edits the file. What `_write` still refuses is a write that
+drops a PLAN, which is the loss that cannot be reconstructed from anything.
 
 Storage is one file per plan, each rewritten whole via tmp + `os.replace`, and NO coarse
 lock — see `LOCK` above and `_minting`. `os.replace` is atomic within a directory, so a
@@ -449,6 +464,45 @@ CLOSED = ("done", "failed")
 # verb to implement it.
 LIBRARY, TEMPLATES = "library", "templates"
 
+# WHERE A NAMED STEP RUNS, as a point on the one spine every landing change has. A
+# definition's `anchor` is one of these words and nothing else, and the order of this tuple
+# IS the order of the work: design before build, build before review, review before the PR,
+# the PR before the human's pass, and the merge last.
+#
+# It exists because ORDER AND OBLIGATION ARE DIFFERENT FACTS and this file used to derive
+# the first from the second. `create-pr` obliges `change-approval` — no PR without an
+# approved contract behind it — and the obligation edge put the approval immediately before
+# the PR, which is the one place in a job it must never be: an approval is the gate before
+# any code, so it landed mid-chain and the lead re-deped it to the front of the plan every
+# single time. The obligation was right and the edge was wrong, because "you may not do X
+# without Y" says nothing whatever about when Y runs.
+#
+# So obligation keeps its own job — materialising the step, never optional, never deduped —
+# and the anchor says where each of them goes. `_place` is what reads it: a step lands after
+# the sinks of the NEAREST LOWER BAND that is actually in the plan, so a review named into a
+# plan of implementation steps waits on the implementation, and one named into a plan that
+# has none waits on whatever is earlier than it that IS there. A step with nothing earlier
+# than it in the plan is a deliberate root and says so — which is exactly what a change
+# approval is, whatever order it was added in.
+#
+# AN ANCHOR LOOKS BACKWARDS AND NEVER FORWARDS. A step is placed against the plan as it
+# stands and nothing already in the plan is re-deped, because a command changes the steps it
+# names and rewriting a lead's edges behind its back is a worse fault than the one being
+# fixed. `create --lib` sorts what it was given, so one call is order-insensitive; steps
+# named one at a time in the reverse of the order they run land in the order they were
+# named. Said in `guide` and in `_place`, because it is the one thing about this field an
+# agent can get wrong without being told.
+#
+# A CLOSED VOCABULARY, unlike `progress` and `gate`, and for the reason those are open: the
+# whole meaning of an anchor is its position in this order, so a word not in it has no
+# position and there is nothing honest to do with it but refuse. A definition with no anchor
+# at all is a different thing and is fine — it is an ordinary piece of the work, ranked with
+# `build`, and it keeps the placement it had before anchors existed (after whatever the plan
+# currently ends with). That is what makes a repo's own library, written against the older
+# shape, go on working unchanged.
+_ANCHORS = ("design", "build", "review", "pr", "pre-merge", "merge")
+_UNANCHORED = _ANCHORS.index("build")
+
 # `p-1`, `P-1`, `plan-1` and a bare `1` all name the same plan; likewise `s-1`, `step-1` and
 # `1` for a step. An id is read out of a board or a spawn prompt and retyped, and being
 # strict buys nothing. The long forms are what the markdown dump renders (see `_markdown`),
@@ -493,14 +547,20 @@ def register(reg):
               reg.arg("--step", repeat=True,
                       help="a step, as `<board name> = <what it is>`; repeat for more, "
                            "and they are chained in the order given"),
+              reg.arg("--lib", repeat=True,
+                      help="a library step by name, e.g. review; repeat for more, and "
+                           "each lands where its definition says it runs"),
               reg.arg("--note", repeat=True, help="a note on the plan; repeat for more"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "list", ls, audience="both", help="the plans on this worktree",
         args=[reg.arg("--all", flag=True, help="every plan, on every workspace")])
     reg.command(
-        "show", show, audience="both", help="one plan in full — steps, deps, changelog",
-        args=[reg.arg("id", help="a plan id, e.g. p-1"),
+        "show", show, audience="both",
+        help="one plan in full — steps, deps, changelog; or one STEP in full, with the "
+             "instructions for doing it",
+        args=[reg.arg("id", help="a plan id (p-1), or a step id (step-2, p-1/step-2) for "
+                                 "that one step and how it is done"),
               reg.arg("--markdown", flag=True,
                       help="render that one plan as markdown, for posting where a human "
                            "reads it — a PR comment. Walked, not templated: it survives "
@@ -527,12 +587,15 @@ def register(reg):
               reg.arg("--text", help="the note"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
-        "add-step", add_step, audience="both",
-        help="invent a step on the fly, in a plan that is already running",
-        args=[reg.arg("plan", help="a plan id, e.g. p-1"),
-              reg.arg("name", repeat=True, help="what the step is"),
-              reg.arg("--display", help="its board name — short, required"),
-              reg.arg("--reason", help="why, for the changelog")])
+        "skip", skip, audience="both",
+        help="mark a step skipped, with the reason — a skip is a state with a sentence "
+             "beside it, never an absence",
+        args=[reg.arg("step", help="a step id, e.g. step-1, or p-2/step-1 to say "
+                                   "which plan"),
+              reg.arg("--why", help="the reason, which renders beside the state and is "
+                                    "required"),
+              reg.arg("--reason", help="why, for the changelog; the skip's own reason is "
+                                       "`--why` and is what shows on the step")])
     reg.command(
         "library", library, audience="both",
         help="browse the step definitions a plan can name, or read one in full",
@@ -552,18 +615,6 @@ def register(reg):
               reg.arg("--title", help="a title for the copy; the template's is the default"),
               reg.arg("--display", help="the copy's board name; the template's is the "
                                         "default"),
-              reg.arg("--reason", help="why, for the changelog")])
-    reg.command(
-        "dep", dep, audience="both",
-        help="record that a step comes after others — data the lead reads, not control flow",
-        args=[reg.arg("step", help="a step id, e.g. step-2, or p-2/step-2 to say "
-                                   "which plan"),
-              reg.arg("--after", repeat=True,
-                      help="a step in the same plan that it comes after; repeat for a "
-                           "join"),
-              reg.arg("--root", flag=True,
-                      help="instead: this step deliberately comes after nothing — a "
-                           "parallel start, not a forgotten edge"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "migrate", migrate, audience="both",
@@ -638,6 +689,30 @@ WHAT TO BUILD IT FROM
       sb plugin plans template use <name>    start from one
       sb plugin plans create "<what for>" --display "<board name>" --step "<short> = <what it is>"
 
+  ONE COMMAND MAKES THE WHOLE PLAN. `--step` invents a step and `--lib <name>` names one
+  out of the library, in the same `create`; repeat either as often as you like:
+
+      sb plugin plans create "make X work" --display "make X work end to end" \\
+          --step "impl = write it" --step "tests = pin it" \\
+          --lib create-pr --lib merge
+
+  That is a whole shipping plan, and it lands with its edges right. The `--step`s chain in
+  the order you typed them. A `--lib` step lands where its definition says it RUNS rather
+  than where you typed it, so the order of those flags decides nothing.
+
+  IN ONE `create` IF YOU CAN, because that is the call that sorts them. A step added later
+  — `name-step`, or written into the file — is placed against the plan AS IT THEN STANDS,
+  and nothing already in the plan is ever re-deped: `name-step merge` before `name-step
+  create-pr` leaves the merge waiting on the implementation, because that is what the plan
+  ended with when it was named. Name them in the order they run, or fix the edge in the
+  file afterwards, which is one field.
+
+  NAME THE OUTERMOST STEP AND WHAT IT OBLIGES ARRIVES WITH IT — the two flags above land
+  seven steps, because `create-pr` obliges the change approval, which obliges the review,
+  and `merge` obliges the human-review list. Naming those as well gets you a SECOND copy of
+  each: nothing is ever deduplicated, since two merges are two diffs and therefore two
+  reviews. Read `library` first and name the ones nothing else brings.
+
   A definition carries its own account of how that step is run — what it obliges, what it
   gates, what finishing it means. Read it there. Nothing about any particular step is
   repeated here, so that nothing here can be out of date about one.
@@ -653,9 +728,9 @@ EVERY STEP HAS A BOARD NAME AND A DEP
   what every plan looked like before this was required.
 
     - A BOARD NAME on every step, written with the name in one flag so the two cannot come
-      apart: `--step "list claims = list every claim the document makes"`, and `add-step
-      <plan> "<what it is>" --display "<short>"` afterwards. Make it as short as it can be
-      and still READ as words — abbreviate, and cut what the plan's own title already
+      apart: `--step "list claims = list every claim the document makes"`. A step added to
+      a running plan is written into the file with a `display` of its own, the same way.
+      Make it as short as it can be and still READ as words — abbreviate, and cut what the plan's own title already
       says, which is on the line above it. `list every claim the document makes` is `list
       claims`; `human review` is `review`. No length cap and nothing clips it, and no
       vowel-stripping either: a label nobody can pronounce is not a label.
@@ -666,16 +741,17 @@ EVERY STEP HAS A BOARD NAME AND A DEP
       --display "fix red CI: rich assertions on main"`. The board draws this INSTEAD of
       the title, and `show` is where the title is read.
 
-    - A DEP on every step but the first: `dep <step> --after <step>`, which is what the
-      arrows are drawn from. `create --step … --step …` chains what you typed in the order
-      you typed it, so reshape from there rather than starting from nothing. A plan that
-      genuinely has TWO STARTS says so — `dep <step> --root` — and then it is complete and
-      draws green like anything else. Say it rather than inventing an edge to clear the
-      warning: an order that never happened is a lie in the record, and the mark is what
-      tells a deliberate start from a forgotten edge.
+    - A DEP on every step but the first: `"deps": ["step-1"]` on the step, which is what
+      the arrows are drawn from. `create --step … --step …` chains what you typed in the
+      order you typed it and `--lib` places its steps for you, so reshape from there
+      rather than starting from nothing. A plan that genuinely has TWO STARTS says so —
+      `"root": true` on the step — and then it is complete and draws green like anything
+      else. Say it rather than inventing an edge to clear the warning: an order that never
+      happened is a lie in the record, and the mark is what tells a deliberate start from
+      a forgotten edge.
 
   WHAT HAPPENS WHEN ONE IS MISSING, because it is not the same everywhere. `create`,
-  `add-step`, `name-step` and `template use` REFUSE to make a step with no board name.
+  `name-step` and `template use` REFUSE to make a step with no board name.
   Every other verb — `tick` included — writes what you asked and then says what is
   incomplete underneath: a tick that would not land because of a rendering rule is worse
   than the rendering. `show` and `list` say the same thing, and the board draws the plan
@@ -685,14 +761,19 @@ EVERY STEP HAS A BOARD NAME AND A DEP
 EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
 
   The plan is a JSON file and editing it IS the interface. There is no verb for most of
-  what a lead does to a plan — an owner, a gate, a skip and its reason, a checkpoint, a
+  what a lead does to a plan — an owner, a gate, a checkpoint, a new step, an edge, a
   reworked step — because each of them was one field, and a verb per field is a surface
-  nobody can hold in their head to do something an editor does better. The shape of the
+  nobody can hold in their head to do something a file edit does better. The shape of the
   job is:
 
       sb plugin plans create … / template use …    makes it, and prints the file
-      $EDITOR <that file>                          shape it: steps, owners, gates, deps
+      read that file, then edit or write it        shape it: steps, owners, gates, deps
       sb plugin plans validate <plan>              ask what you broke
+
+  READ IT AND EDIT IT WITH YOUR NORMAL FILE TOOLS. It is a JSON file on this disk like any
+  other file you work on: read it, then edit or rewrite it. There is no editor to open and
+  nothing to script — a read-modify-write through a one-liner shell interpreter is the
+  slow way round something that is already a file.
 
   `create` and `template use` print the path of the file they just wrote, so there is
   nothing to derive. If you have lost it, the plans live here:
@@ -704,24 +785,24 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   directory and you can see which you have. (`sb plugin plans migrate` moves a repo to one
   file per plan, once, and its own output says what that costs.)
 
-  The file itself is the shape to write against. `sb plugin plans show <plan> --json` is
-  the same plan with the library resolved in, so what it prints for a `def` step is not
-  what that step holds and never goes back into the file. Three rules:
+  THE FILE ITSELF IS THE SHAPE TO WRITE AGAINST, and it is the only shape. `sb plugin
+  plans show <plan> --json` is a VIEW of that plan and not a copy of it: the library is
+  resolved into it, so what it prints for a `def` step — its `name`, its `display`, its
+  `command` and its `anchor` — is not what the step holds and must never be written back
+  into the file. A `def` step's own record does not carry any of the four, which is what
+  makes the link live: the definition owns them and an edit to it reaches every plan.
+  Two rules:
 
-    - APPEND a changelog entry for what you changed, in the shape the ones already there
-      have. Nothing infers it, and the record is read later to decide what the catalogue
-      should hold — an edit with no entry behind it counts as nothing.
-    - NEVER drop or rewrite an entry that is already there, or a plan. Records are kept and
-      never erased; cleanup means dropping out of the UI.
-    - ADD A LIBRARY STEP with `name-step`, not by hand. It pulls in what the definition
-      composes and obliges — and what those oblige in turn, so one name may land several
-      steps at once, and the deps it writes for them are a starting shape to fix in the
-      file. It also brings the definition's `command`, where it has one: the standard
-      shell command that step is run with, resolved onto the step every time it is drawn
-      so that it is under the step rather than somewhere its owner has to go and find. A
-      `def` you typed yourself silently brings none of it. A step written by hand needs
-      its own `display` and its own `deps` — a named one draws the library definition's
-      label and needs neither.
+    - NEVER drop or rewrite a changelog entry that is already there, or a plan. Records
+      are kept and never erased; cleanup means dropping out of the UI. You do not have to
+      ADD an entry for a hand-edit — the verbs stamp their own and nothing here validates
+      or refuses on the strength of that record.
+    - ADD A LIBRARY STEP with `create --lib` or `name-step`, not by hand. It pulls in what
+      the definition composes and obliges — and what those oblige in turn, so one name may
+      land several steps at once, placed where each of them runs. A `def` you type by hand
+      resolves its label, its name and its `command` like any other named step, and it is
+      a perfectly good thing to write; what it does NOT do is materialise the steps its
+      definition obliges, which is the whole reason the obligation is not a memory.
 
   WHICH FIELDS ARE YOURS TO WRITE. Everything a verb mints is in the file already; these
   are the ones that only ever arrive by editing it, and each says who writes it and when.
@@ -733,12 +814,13 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
                  answer before this step is finished — a FIELD on the step whose exit
                  condition it is, never a step of its own. No verb clears it: the owning
                  agent blocks, and the human answering that agent clears both.
-    progress     `open` at mint and `tick` writes `done`. `skipped` you write by hand,
-                 with the reason, and an open vocabulary means `waiting on Andrew` is a
-                 progress too if that is what is true.
-    why          the reason for whatever `progress` currently says, written by the same
-                 hand in the same edit — a skip with no reason is drawn red. Overwritten
-                 by whatever moves the step next, so it is never a history.
+    progress     `open` at mint, `tick` writes `done` and `skip` writes `skipped`. An open
+                 vocabulary, so `waiting on Andrew` is a progress too if that is what is
+                 true — write that one by hand, with its reason in `why`.
+    why          the reason for whatever `progress` currently says — `skip --why` writes
+                 it, and a hand-written progress needs it written in the same edit. A skip
+                 with no reason is drawn red. Overwritten by whatever moves the step next,
+                 so it is never a history.
     tries        bumped by whoever re-enters the step, with `progress` put back to `open`.
                  Leave a `note` saying what the second run was for; a count that went up
                  with nothing behind it is a record nobody can account for.
@@ -766,11 +848,14 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   scalar gets its own line under the step in the terminal, and anything with a shape to it
   is left to `--json`, which is the rendering that can carry one.
 
-  Three verbs are worth typing rather than editing, being frequent and small — `tick
-  <step>` when a step is done, `note <step> --text` for what happened, and `dep <step>
-  --after <step>` for an edge, which refuses one pointing at a step that is not there.
-  They write the changelog entry for you, which is most of what they buy. `sb plugin plans
-  --help` lists the rest.
+  Three verbs are worth typing rather than editing, being frequent, small and usable by
+  the agent that did the work rather than only by the plan's owner — `tick <step>` when a
+  step is done, `skip <step> --why "<reason>"` when it is not going to be, and `note
+  <step> --text` for what happened. A `tick` or a `skip` also prints what it just
+  unblocked, in full, so the next step's own instructions arrive as you reach it. `sb
+  plugin plans show <step>` is that same view of one step asked for on purpose — the step,
+  its command, and how its definition says it is done. `sb plugin plans --help` lists the
+  rest.
 
   HOW A STEP IS ADDRESSED, since every one of those takes one. Each plan numbers its own
   steps from `step-1`, so `step-3` on its own resolves while exactly one plan holds that
@@ -783,7 +868,7 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   WHAT VALIDATE IS FOR. Nothing watches the file, so an edit is noticed when something
   next reads the store — the next command, or the board, which redraws every few seconds
   and paints a plan and the steps at fault in red. `validate` is that same check asked for
-  on purpose, at the moment you close the editor: it names what will not load and what is
+  on purpose, at the moment you finish an edit: it names what will not load and what is
   incomplete, on one plan or on all of them, and it refuses nothing whatever it finds.
 
   TICK A STEP BEFORE ITS TEARDOWN RUNS, never after. A step that closes the last agent or
@@ -817,14 +902,28 @@ def create(ctx, args) -> Result:
     because `--step` repeats: a parallel `--display` list pairs by position, so a list one
     short pairs every step after the gap with the wrong label, silently, in a field nobody
     re-reads. The steps are then chained in the order they were given (see below).
+
+    `--lib` NAMES A LIBRARY STEP IN THE SAME CALL, which is the difference between a plan
+    landing in one command and landing in one plus an unbounded number of follow-ups. It
+    is the same expansion `name-step` does — what the definition composes, what those
+    oblige — and the steps it lands are placed by their ANCHOR (`_anchor`), so where a
+    `--lib` sits among the flags does not decide where it sits in the plan. That is the
+    one thing about this flag not to mistake for an omission: `--step` order IS an order
+    and is chained, and a library step's order is a property of the definition instead.
+
+    What `--lib` deliberately cannot seed is an owner, a gate or a non-linear dep, all of
+    which name ids that do not exist until this command has minted them. Those stay
+    edits to the file, which is now the cheap half of making a plan rather than the
+    expensive one.
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
     display = str(args.display or "").strip()
     given = [str(s).strip() for s in (args.step or ()) if str(s).strip()]
+    named = [str(s).strip() for s in (getattr(args, "lib", None) or ()) if str(s).strip()]
     notes = [str(n).strip() for n in (args.note or ()) if str(n).strip()]
     # The reason is in here with the rest: it is the field every later verb carries into
     # the changelog, and the cap is about a record staying readable when it is shown.
-    bad = _cap(title, display, *given, *notes, args.reason)
+    bad = _cap(title, display, *given, *named, *notes, args.reason)
     if bad:
         return bad
     if not display:
@@ -842,6 +941,23 @@ def create(ctx, args) -> Result:
                 "document makes\"`.")
         steps.append((short, name))
 
+    # The catalogue BEFORE the lock and before the write, for `_lib`'s reason: a verb that
+    # wrote and then met a broken definition would report a failure over a plan that had
+    # already landed. Read only when a `--lib` was actually asked for, so a typo in a
+    # shipped JSON file cannot stop a plan being made that never names one.
+    lib: dict = {}
+    if named:
+        lib, bad = _lib()
+        if bad:
+            return bad
+        for want in named:
+            if want not in lib:
+                return _no_def(lib, want)
+            if not str((lib.get(want) or {}).get("display") or "").strip():
+                return _no_display(f"the '{_flat(want)}' definition",
+                                   f"A named step draws its definition's label, so add a "
+                                   f"`display` to `library/{_flat(want)}.json`.")
+
     # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
     # `_minting` for why the other verbs need none and what is left unguarded.
     with _minting(ctx.state_dir):
@@ -858,12 +974,24 @@ def create(ctx, args) -> Result:
         # lead writing `--step a --step b --step c` has just said what comes after what,
         # and the alternative — every step a root, every plan warning about itself the
         # moment it is made — makes the one-shot `create` unusable to be pedantic about
-        # intent nobody doubts. A plan that is not a chain is reshaped with `dep`.
+        # intent nobody doubts. A plan that is not a chain is reshaped in the file.
         for short, name in steps:
             step = _step(_mint_step(plan), name, display=short)
             if plan["steps"]:
                 step["deps"] = [plan["steps"][-1]["id"]]
             plan["steps"].append(step)
+
+        # THE LIBRARY STEPS LAST, and in ANCHOR ORDER rather than in the order the flags
+        # were typed. The freetext chain above is the work itself, which is what a library
+        # step is anchored against — a change approval before it, a review after it — so
+        # placing these against a plan that already holds the chain is what makes one
+        # `create` land the whole shape with its deps right. Each is minted separately,
+        # against the plan as it now stands, exactly as a `name-step` would be.
+        try:
+            for want in sorted(named, key=lambda k: _anchor(lib, k)):
+                plan["steps"].extend(_mint(plan, lib, want, after=tuple(_sinks(plan))))
+        except _BadDef as e:
+            return e.refusal()
 
         made = ", ".join(s["id"] for s in plan["steps"])
         detail = f"{_count(plan['steps'])} ({made})" if made else "empty"
@@ -878,9 +1006,10 @@ def create(ctx, args) -> Result:
         _reserve(ctx.state_dir, doc, plan)
         doc["plans"].append(plan)
         _write(ctx.state_dir, doc, seal)
-    # `{}` and not the library: every step `create` makes owns its own words, so there is
-    # no link to resolve and no reason to open a file that could refuse after this write.
-    return _plan_result(_shown(plan, {}), path=_path(ctx, plan))
+    # `lib` is `{}` unless a `--lib` was given, and it was read on the way in either way:
+    # a freetext plan holds no link to resolve, and a plan that does holds one whose
+    # catalogue has already been opened, so nothing past the write can fail.
+    return _plan_result(_shown(plan, lib), path=_path(ctx, plan))
 
 
 def ls(ctx, args) -> Result:
@@ -940,7 +1069,22 @@ def show(ctx, args) -> Result:
     in the library, which is why an edit to a definition reaches a plan made last week; and
     every owner's status and the plan's own condition are read off sb at this instant,
     which is why a dead owner is on the line the moment a lead looks at it.
+
+    A STEP ID SHOWS THAT ONE STEP, with the instructions for doing it under it. Same verb
+    because it is the same question asked at a different scale — what is this — and because
+    an agent that has been handed `step-4` should not have to learn a second command name to
+    read it. `tick` and `skip` print this view unasked for what they release (`_next`); this
+    is the way to ask for it, for a step nothing has just unblocked — the plan's own first
+    step, or one being picked up again after a break.
+
+    A SLASH SETTLES IT BEFORE THE PREFIX IS READ, exactly as `note`'s target does: `p-16/
+    step-3` starts with a `p` and is a step, because the qualifier names the plan the step
+    is in. A bare number is a PLAN here and not a step, which is the one place in this file
+    that reads one that way and is the older meaning `show 1` has always had.
     """
+    given = str(args.id or "").strip()
+    if "/" in given or (given[:1].lower() == "s" and _num(_STEP_ID, given) is not None):
+        return _one_step(ctx, given, markdown=bool(getattr(args, "markdown", False)))
     doc, _ = _read(ctx.state_dir)
     plan = _find(doc, args.id)
     if plan is None:
@@ -952,6 +1096,38 @@ def show(ctx, args) -> Result:
         return bad
     return _plan_result(_viewed(_shown(plan, lib), _Live(ctx)),
                         markdown=bool(getattr(args, "markdown", False)))
+
+
+def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:
+    """One step, drawn as `show` draws a plan's rows — plus how it is done.
+
+    The `about` is the whole reason this exists, and it is why the same text is NOT on
+    every row of `show <plan>`: a definition's prose is a page, and a page under each of
+    six steps is a plan nobody can see. Asked for one step at a time it is exactly the
+    right length, because one step at a time is how it is worked.
+
+    Read-only and resolved, like every other read here: the name, the label, the command
+    and the instructions all come out of the library at this instant, and none of them is
+    written back into the file.
+    """
+    doc, _ = _read(ctx.state_dir)
+    plan, step = _locate(doc, given)
+    if step is None:
+        return _no_step(doc, given)
+    lib, bad = _lib([plan])
+    if bad:
+        return bad
+    shown = _resolve(step, lib)
+    data = dict(shown, plan=plan["id"], about=_instructions(step, lib))
+    if markdown:
+        # The machinery out of the copy that is dumped and not out of `data`, exactly as
+        # `_plan_result` does it — see `_MACHINERY`.
+        return Result(human=_markdown({k: v for k, v in data.items()
+                                       if k not in _MACHINERY}), data=data)
+    lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
+    lines.extend(f"  {ln}" for ln in _step_lines([shown]))
+    lines.extend(f"  {ln}" for ln in _how(step, lib))
+    return Result(human="\n".join(lines), data=data)
 
 
 def changelog(ctx, args) -> Result:
@@ -1044,7 +1220,7 @@ def _path(ctx, plan: dict) -> Optional[str]:
 
 # -- the step lifecycle --------------------------------------------------------
 #
-# Four verbs left, and every one of them is `_on_step` (or, where it addresses a plan, the
+# Three verbs left, and every one of them is `_on_step` (or, where it addresses a plan, the
 # same three moves written out): read, change the ONE step named, log, write. Nothing here
 # rewrites a plan wholesale — a re-plan and a tick can land in either order and the loser
 # is still in the file — and the single `_log` call per verb is why the changelog is the
@@ -1064,7 +1240,37 @@ def tick(ctx, args) -> Result:
     if bad:
         return bad
     return _on_step(ctx, args.step, "tick", args.reason,
-                    lambda step, who: _progress(step, DONE, args.reason))
+                    lambda step, who: _progress(step, DONE, args.reason), unblocked=True)
+
+
+def skip(ctx, args) -> Result:
+    """Skipped, with the reason, in one call. `tick`'s sibling and the other way past.
+
+    A verb rather than a field edit for the two reasons `tick` is one: it is frequent, and
+    it is the agent that did — or did not do — the work that types it, where reshaping the
+    plan is the owner's. A child that has just found a step unnecessary can say so without
+    editing a file it is not allowed to edit.
+
+    THE REASON IS REQUIRED, which is the one refusal here and the only thing this verb has
+    that a hand-edit does not. A skip is a state with a sentence beside it and never an
+    absence: without `why` the step draws red (`_wrong`), so a verb that let one through
+    would be a verb whose whole output is a warning. Refused at the door instead, where the
+    error message can say what to write.
+
+    `--why` goes on the STEP, where it renders beside the state; `--reason` is the audit
+    line every mutating verb carries into the changelog. They are usually the same sentence
+    and are still two fields: one is what the step says now, the other is what happened.
+    """
+    why = str(getattr(args, "why", None) or "").strip()
+    if not why:
+        return _needs("--why", "a skip is a state with a sentence beside it, never an "
+                               "absence — say what made this step unnecessary and it "
+                               "renders next to the state")
+    bad = _cap(why, args.reason)
+    if bad:
+        return bad
+    return _on_step(ctx, args.step, "skip", args.reason,
+                    lambda step, who: _progress(step, SKIPPED, why), unblocked=True)
 
 
 def note(ctx, args) -> Result:
@@ -1111,132 +1317,6 @@ def note(ctx, args) -> Result:
     _log(plan, who, "note", args.reason, f"on {plan['id']}: {_clip(text)}")
     _write(ctx.state_dir, doc, seal)
     return _plan_result(_shown(plan, lib))
-
-
-def add_step(ctx, args) -> Result:
-    """A step invented while the job runs, in a plan that already exists.
-
-    Its id comes from the same counter every other step comes from, so it is unique across
-    the file and a spawn prompt citing it stays true. The reason matters more here than
-    anywhere else: the design points out that rework leaves either a try count or a new
-    step that looks like a recurring pattern, and the analysis pass can only tell those
-    apart if the lead that added the step said which it was doing.
-    """
-    name = " ".join(str(w) for w in (args.name or ())).strip()
-    if not name:
-        return _needs("name", "a step is named so somebody can be told to do it")
-    display = str(args.display or "").strip()
-    bad = _cap(name, display, args.reason)
-    if bad:
-        return bad
-    if not display:
-        return _no_display("a step", "Give it with the name: "
-                                     "`--display \"list claims\"`.")
-
-    # NO LOCK. The step id comes from this plan's own counter in this plan's own file, so
-    # the only race left is two writers on one plan — which the design answers with one
-    # writer per plan rather than with a lock. See `_minting`.
-    doc, seal = _read(ctx.state_dir)
-    plan = _find(doc, args.plan)
-    if plan is None:
-        return _missing(doc, args.plan)
-    lib, bad = _lib([plan])             # before the write, so it cannot refuse after one
-    if bad:
-        return bad
-    step = _step(_mint_step(plan), name, display=display)
-    plan.setdefault("steps", []).append(step)
-    who = ctx.agent or "human"
-    _log(plan, who, "add-step", args.reason, f"{step['id']} {display} = {name}")
-    _write(ctx.state_dir, doc, seal)
-    return _changed(plan, step, lib)
-
-
-def dep(ctx, args) -> Result:
-    """Record that a step comes after others. Fan-out and join, stored as data.
-
-    Nothing here executes, evaluates, orders or waits on an edge. A join waits because the
-    lead does not start it, which is what "interpreted rather than executed" means, and
-    there is no scheduler in this file to disappoint. Cycles are not refused either: the
-    design says the graph stays acyclic, and it stays that way because rework is a counter
-    rather than a back-edge — nothing traverses these, so a cycle is a lead's mistake to
-    read, not a hang.
-
-    What is refused is an edge that names nothing: a step that does not exist, a step in
-    another plan, or the step itself. Those are typos, and an edge pointing at nothing
-    renders as a dependency the lead will wait for forever.
-
-    `--after` IS PLAN-LOCAL, and that is what per-plan step numbers buy here: once the step
-    argument has said which plan this is about — `dep p-16/step-3 --after step-2` — a bare
-    `--after` is read inside that plan and cannot be ambiguous however many plans hold a
-    `step-2`. A qualified `--after` naming a different plan still resolves, and is still
-    refused one line below, because the refusal for a cross-plan edge is worth more than a
-    "no such step" that would be a lie.
-
-    `--root` is the other thing a lead can say here, and it is the OPPOSITE of an edge: no
-    dep, deliberately, because this step starts on its own beside the plan's first. It
-    lives on this verb rather than a verb of its own because it answers the same question
-    an edge does — what does this step come after — with "nothing, and I mean it". Marking
-    it is what stops the completeness door reporting the step, so the only way to clear the
-    warning is no longer to invent an edge that misstates the order. The two are exclusive
-    by construction: `--after` on a marked root unmarks it, since a step that waits for
-    something is not a start any more.
-    """
-    after = [str(a).strip() for a in (args.after or ()) if str(a).strip()]
-    if not after and not getattr(args, "root", False):
-        return _needs("--after", "an edge says what a step comes after, or `--root` says "
-                                 "this step deliberately comes after nothing")
-    bad = _cap(args.reason)
-    if bad:
-        return bad
-
-    doc, seal = _read(ctx.state_dir)
-    plan, step = _locate(doc, args.step)
-    if step is None:
-        return _no_step(doc, args.step)
-    lib, bad = _lib([plan])             # before the write, so it cannot refuse after one
-    if bad:
-        return bad
-    if getattr(args, "root", False) and not after:
-        # Both directions of the same field, so the mark is undoable with the verb that
-        # made it rather than only by editing the file: `--root` says this start is meant,
-        # and any `--after` below takes it back off, because a step with an edge is not a
-        # start. Nothing else here writes it.
-        step["root"] = True
-        _log(plan, ctx.agent or "human", "dep", args.reason,
-             f"{step['id']} is a deliberate root")
-        _write(ctx.state_dir, doc, seal)
-        return _changed(plan, step, lib)
-    added = []
-    for given in after:
-        other = _in_plan(plan, given) if "/" not in str(given) else None
-        if other is None:
-            _, other = _locate(doc, given)
-        if other is None:
-            return _no_step(doc, given, plan)
-        if other is step:
-            why = f"{step['id']} cannot come after itself"
-            return Result(ok=False, human=why, data={"error": why, "id": given})
-        if other not in (plan.get("steps") or ()):
-            why = (f"{other['id']} is not in {plan['id']} — an edge joins steps of one "
-                   f"plan, and nothing reads across plans")
-            return Result(ok=False, human=why, data={"error": why, "id": given})
-        # Compared as numbers, like every other id comparison in this file: `s-1` and a
-        # bare `1` are one edge, and no comparison here can be a substring test — `in` on a
-        # list of ids would already be right, but `in` on the string a hand-edit left there
-        # would quietly report `s-1` as present in `s-10`. `_check` refuses that file, and
-        # this is the second lock on the same door.
-        n = _num(_STEP_ID, other["id"])
-        if not any(_num(_STEP_ID, d) == n for d in step.setdefault("deps", [])):
-            step["deps"].append(other["id"])
-            added.append(other["id"])
-    if step.get("deps"):
-        step["root"] = False
-    who = ctx.agent or "human"
-    _log(plan, who, "dep", args.reason,
-         f"{step['id']} after {', '.join(added)}" if added
-         else f"{step['id']} already came after {', '.join(after)}")
-    _write(ctx.state_dir, doc, seal)
-    return _changed(plan, step, lib)
 
 
 # -- the catalogue -------------------------------------------------------------
@@ -1342,7 +1422,9 @@ def name_step(ctx, args) -> Result:
                            f"A named step draws its definition's label, so add a "
                            f"`display` to `library/{_flat(wanted)}.json`.")
 
-    # NO LOCK, for the reason `add-step` gives: a per-plan counter in a per-plan file.
+    # NO LOCK: the step id comes from this plan's own counter in this plan's own file, so
+    # the only race left is two writers on one plan — which the design answers with one
+    # writer per plan rather than with a lock. See `_minting`.
     doc, seal = _read(ctx.state_dir)
     plan = _find(doc, args.plan)
     if plan is None:
@@ -1421,12 +1503,23 @@ def template(ctx, args) -> Result:
                 "created_by": who, "created_at": int(time.time())}
         doc["next_plan"] += 1
         try:
-            landed = [_from_template(plan, lib, e) for e in (spec.get("steps") or ())]
-            _chain(spec.get("steps") or (), landed)
+            # ONE ENTRY AT A TIME, EACH LANDING BEFORE THE NEXT IS EXPANDED, because an
+            # anchor is read against the plan as it stands (`_place`) and a copy built with
+            # every entry expanded against an empty plan gave every anchored step nothing to
+            # be placed against: a template naming `create-pr` after its implementation
+            # entries put the change approval AFTER the implementation, which is the one
+            # defect anchors exist to remove, and marked it a root that `_chain` then wrote
+            # an edge onto. The entries' own order is still `_chain`'s to draw; what this
+            # buys is that an entry sees the entries before it.
+            entries = list(spec.get("steps") or ())
+            landed: list[list[dict]] = []
+            for n, e in enumerate(entries):
+                made = _from_template(plan, lib, e)
+                plan["steps"].extend(made)
+                landed.append(made)
+                _chain_entry(entries, landed, n)
         except _BadDef as e:
             return e.refusal()
-        for made in landed:
-            plan["steps"].extend(made)
 
         detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
         if how == UNAVAILABLE:
@@ -1447,7 +1540,7 @@ def _sinks(plan: dict) -> list[str]:
 
     Several, in a plan that forked and never joined, and the answer is then all of them: a
     step added to a plan with two open ends waits for both, which is the join a lead would
-    have written and is reshaped with `dep` where it is not what they meant.
+    have written and is reshaped in the file where it is not what they meant.
     """
     steps = plan.get("steps") or []
     waited: set[int] = set()
@@ -1474,16 +1567,35 @@ def _chain(entries: Any, landed: list[list[dict]]) -> None:
     a short hand-written list and its entries have no ids to name each other by. Out of
     range or pointing forwards is refused, because an edge to nothing renders as an order
     that silently is not there.
+
+    A MARKED ROOT IS NOT ONE OF AN ENTRY'S ROOTS. A step placed by its anchor with nothing
+    lower than it in the plan says so with `root: true` — a change approval runs before the
+    work whatever entry brought it — and an entry's `after` written onto that step would
+    both contradict the mark and re-create the order the anchor exists to fix. It is a
+    start, so nothing is written onto it; the entry's other rootless steps take the edge.
+
+    ONE ENTRY AT A TIME (`_chain_entry`), because `template` lands each entry before the
+    next is expanded so that an anchor has the entries before it to be placed against. An
+    entry's edges have to be drawn in that same round: a `review` expanded while the entry
+    before it still had no edges saw two implementation steps that both looked like sinks
+    and waited on both. `after` only ever points backwards, so an entry can always be
+    chained the moment it lands.
     """
-    for n, entry in enumerate(entries):
-        after = (entry or {}).get("after") if isinstance(entry, dict) else None
-        if not after:
-            continue
+    for n in range(len(list(entries))):
+        _chain_entry(entries, landed, n)
+
+
+def _chain_entry(entries: Any, landed: list[list[dict]], n: int) -> None:
+    """One entry's `after`, drawn as soon as that entry has landed. See `_chain`."""
+    entries = list(entries)
+    entry = entries[n]
+    after = (entry or {}).get("after") if isinstance(entry, dict) else None
+    if after:
         # The roots are read ONCE, before any of this entry's edges are added. Asking
         # "which steps have no deps yet" inside the loop made the second `after` a no-op —
         # the first edge filled the field the second was testing — so a join written as
         # `"after": [1, 2]` silently recorded one of its two edges.
-        roots = [st for st in landed[n] if not st["deps"]]
+        roots = [st for st in landed[n] if not st["deps"] and not st.get("root")]
         for given in after:
             try:
                 j = int(given)
@@ -1583,7 +1695,8 @@ def _written(plan: dict, entry: dict, step: dict) -> None:
             step[k] = v
 
 
-def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Result:
+def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
+             *, unblocked: bool = False) -> Result:
     """Read, change the one step named, log, write. Every step verb is this.
 
     `change` mutates the step and returns the changelog detail — or a `Result`, for the
@@ -1591,6 +1704,9 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Res
     what makes "every mutating verb appends a changelog entry" a property of the file
     rather than a thing nine verbs each remember: a verb that skipped `_log` would have to
     not be written this way at all.
+
+    `unblocked` is what the two verbs that MOVE a step past ask for: what this move just
+    released, printed under the result with its instructions in full. See `_next`.
     """
     doc, seal = _read(ctx.state_dir)
     plan, step = _locate(doc, given)
@@ -1605,7 +1721,7 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change) -> Res
         return detail                   # refused, and nothing has been written
     _log(plan, who, action, reason, detail)
     _write(ctx.state_dir, doc, seal)
-    return _changed(plan, step, lib)
+    return _changed(plan, step, lib, _next(plan, step) if unblocked else [])
 
 
 def _progress(step: dict, to: str, why: Optional[str]) -> str:
@@ -1625,6 +1741,43 @@ def _progress(step: dict, to: str, why: Optional[str]) -> str:
 def _add_note(step: dict, text: str, who: str) -> str:
     step.setdefault("notes", []).append(_note(text, who))
     return f"{step['id']}: {_clip(text)}"
+
+
+def _next(plan: dict, moved: dict) -> list[dict]:
+    """What moving this step past just released: the steps that can now be started.
+
+    THE MOMENT A STEP IS PICKED UP is the only moment its instructions are worth printing,
+    and it is the moment nothing used to mark. A definition's `about` — the two-section
+    contract a change approval is written in, what a human-review list may and may not
+    hold — is the whole of how that step is done right, and `_resolve` never carried it
+    onto the step, so an agent met the step and not the instruction unless it already knew
+    to go and read the definition. Which is a thing you only know to do once you have got
+    it wrong. So it arrives here instead, unasked, at the tick or the skip that hands the
+    next step to somebody.
+
+    RELEASED BY THIS MOVE and not merely open: a step is listed if it names the step that
+    just moved among its deps AND every one of its deps is now done or skipped. Every open
+    step whose deps happen to be clear would print the plan's whole loose parallel work at
+    every tick, which buries the one thing this is for. A step nothing waits on releases
+    nothing, and that is a plan whose edges are missing rather than a plan with no next
+    step — `_defects` is the door that says so.
+
+    A SKIP RELEASES exactly as a tick does, and both words are the same fact here: the
+    step is not going to be worked again, so whatever waited on it is waiting no longer.
+    A plan that skipped a step and printed nothing would leave its successor unclaimed.
+    """
+    steps = plan.get("steps") or []
+    at = {_num(_STEP_ID, s.get("id")): s for s in steps}
+    n = _num(_STEP_ID, moved.get("id"))
+    done = {DONE, SKIPPED}
+    out = []
+    for st in steps:
+        deps = [_num(_STEP_ID, d) for d in (st.get("deps") or ())]
+        if n not in deps or str(st.get("progress") or "") in done:
+            continue
+        if all(str((at.get(d) or {}).get("progress") or "") in done for d in deps):
+            out.append(st)
+    return out
 
 
 # -- refusals ------------------------------------------------------------------
@@ -1654,7 +1807,7 @@ def _no_step(doc: dict, given: str, plan: Optional[dict] = None) -> Result:
 
     Steps are numbered PER PLAN, so "the highest is step-7" is only true of somewhere: this
     says which plan it looked in whenever it knows one — from a `p-16/step-3` qualifier, or
-    from the plan a caller was already working in, which is what `dep --after` hands it.
+    from the plan a caller was already working in, which is what a qualified id hands it.
     Ids are never reused within a plan, so a step that is not there has never been there.
 
     The third miss is the one per-plan numbering introduces: a BARE id that more than one
@@ -1782,7 +1935,7 @@ def _mint_step(plan: dict) -> str:
     Two plans are independent, so their step numbers are too: every plan starts at
     `step-1` and nothing another plan does moves it. The counter lives in the plan's own
     file, which is what makes that true across the split store — there is no shared number
-    left for two worktrees to race for, and `add-step` and `name-step` need no lock at all
+    left for two worktrees to race for, and `name-step` needs no lock at all
     (see `_minting`).
 
     FLOORED ON READ by the plan's own highest step id, exactly as `next_plan` is floored by
@@ -2057,23 +2210,191 @@ def _mint(plan: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
     for k, by, _ in wanted:
         steps.append(_step(_mint_step(plan), None, key=k,
                            obliged_by=steps[by]["id"] if by is not None else None))
-    # AND THE OBLIGING STEP COMES AFTER WHAT IT OBLIGED, as an edge rather than as an
-    # order nobody wrote down. `merge` obliges the human-review list, and that list is
-    # what a person reads just before the merge — so the review is the dep and the merge
-    # is what waits. Without this every obliged step lands as a second root of the plan,
-    # which is exactly the loose stack deps became required to stop.
+    _place(plan, lib, steps, after)
+    return steps
+
+
+def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
+    """The deps of a freshly minted expansion: where each of its steps RUNS.
+
+    Two rules, and which one applies is decided per step by whether its definition carries
+    an anchor (`_ANCHORS`, where the reasoning is).
+
+    ANCHORED, and it lands after the sinks of the nearest lower band present in the plan.
+    "Nearest" is the whole of it: a review named into a plan of implementation steps waits
+    on the implementation and not also on the change approval two bands below it, which
+    would draw a fan-in nobody wrote. A step with nothing lower than it anywhere in the
+    plan is a start, and is MARKED one — a change approval added to a plan that already has
+    work in it comes after nothing on purpose, and `root: true` is the difference between
+    saying so and looking like a forgotten edge.
+
+    UNANCHORED, and it keeps exactly the placement this file had before anchors: hung off
+    `after`, the ids the plan currently ends with, with the obliging step waiting on what it
+    obliged. A repo whose own library predates this goes on working, and a definition that
+    genuinely has no fixed place in a job — most of them, in a catalogue that grows — is not
+    made to invent one.
+
+    THE OBLIGATION EDGE IS DRAWN ONLY FOR AN OBLIGED STEP THAT SAYS NOTHING ABOUT WHEN IT
+    RUNS, which is the bug this function was written for. An anchored obliged step is
+    placed by its anchor and the obligation then says only that the step exists; an
+    unanchored one has nothing else to go on, so the edge is what it always was and the
+    obliging step waits on it. `merge` obliging its human review comes out the same under
+    either rule, which is the check that this is a fix and not a rewrite.
+
+    The rule is about the OBLIGED end and not about both ends, and that is load-bearing: an
+    unanchored step obliging an anchored one — `implement the thing` obliging `review`, the
+    exact mixed library this function promises still works — drew the edge under a
+    both-ends rule, and then placed the anchored step after the very step now waiting on it.
+    Two steps, each waiting for the other, in a graph nothing traverses and nothing checks
+    for cycles. The obliged end alone decides, so that can no longer be built.
+
+    LOOKING BACKWARDS IS ALL AN ANCHOR DOES. A step is placed against the plan AS IT STANDS
+    and nothing already in the plan is ever re-placed: this file's rule is that a command
+    changes the steps it names, and silently rewriting deps a lead shaped by hand would be
+    a worse bug than the one being fixed. So naming steps in separate calls, out of the
+    order they run — `name-step merge` and then `name-step create-pr` — leaves the merge
+    waiting on what the plan ended with at the time and not on the PR that arrived after
+    it. `create --lib` sorts what it was given by anchor and is order-insensitive for that
+    reason; `name-step` names one definition and cannot. Name them in the order they run,
+    or make the plan in one `create`, and reshape in the file where you did neither.
+
+    AND THEN THE OBLIGATION IS PUT BACK AS AN EDGE WHERE THE ANCHOR LEFT NONE, which is the
+    half a first draft of this got wrong badly enough to lose a guardrail. `create-pr`
+    obliges `change-approval`: the anchor correctly puts the approval at the very start,
+    where nothing lower exists for it to come after — and it then sat there as a root that
+    NO STEP IN THE PLAN LISTED, so the whole plan could be ticked to merged past an approval
+    nobody had done, with `validate` silent. `obliged_by` is a label; only an edge is a
+    wait. So after placement, an obliged step that nothing waits on gets its id appended to
+    the deps of the step that obliged it — the PR waits on the approval AND on the review,
+    the approval stays a marked early root, and "no PR without an approved contract" is in
+    the graph again rather than in a field nothing reads.
+
+    Two guards on that. It writes only onto steps THIS COMMAND MINTED, never onto a step
+    already in the plan, which is the same line every other write here keeps. And it is
+    skipped where the obliged step ALREADY REACHES its obliger through the deps, since a
+    back-edge there is the round-one cycle rebuilt.
+
+    THAT SECOND GUARD IS A BACKSTOP AND NOT A LIVE CHECK, said here because a reader
+    otherwise cannot tell which it is and a test cannot reach it. `_owed` already requires
+    the obliger to rank at or above the obliged; every dep this function writes for an
+    anchored step points at a STRICTLY LOWER band, an unanchored one points only at steps
+    that were in the plan before this command, and nothing already in the plan can point at
+    something this command just minted — so anything reachable from the obliged step ranks
+    below it, and its obliger, ranking at or above it, is not among them. It stays because
+    the reasoning is about `_owed`'s rule rather than about this line, and a later change to
+    that rule should meet a guard rather than a cycle.
+    """
     at = {st["id"]: st for st in steps}
     for st in steps:
         by = st.get("obliged_by")
-        if by in at:
+        if by in at and not _anchored(st, lib):
             at[by]["deps"].append(st["id"])
-    # Then the whole expansion hangs off what the plan already ends with. Its roots and not
-    # every step of it: the review is the root here, because the merge waits on the review,
-    # so the chain that lands is `…work → review → merge` and not a fan-in on both.
-    for st in steps:
-        if not st["deps"]:
+
+    pool = list(plan.get("steps") or [])
+    for i in sorted(range(len(steps)), key=lambda j: (_ranked(steps[j], lib), j)):
+        st = steps[i]
+        pool.append(st)
+        if st["deps"]:
+            continue                     # placed by the obligation edge above
+        if not _anchored(st, lib):
             st["deps"] = list(after)
-    return steps
+            continue
+        rank = _ranked(st, lib)
+        lower = [x for x in pool if x is not st and _ranked(x, lib) < rank]
+        if not lower:
+            st["root"] = True
+            continue
+        top = max(_ranked(x, lib) for x in lower)
+        band = [x for x in lower if _ranked(x, lib) == top]
+        # BY NUMBER, like every other id comparison in this file: a hand-written `deps: [1]`
+        # is the edge it names, so the step it names is not reported as a loose end and
+        # picked up as a second dep the plan already has transitively.
+        waited = {_num(_STEP_ID, d) for x in pool for d in (x.get("deps") or ())}
+        st["deps"] = [x["id"] for x in band
+                      if _num(_STEP_ID, x["id"]) not in waited] or [band[-1]["id"]]
+
+    waited = {_num(_STEP_ID, d) for x in pool for d in (x.get("deps") or ())}
+    for st in steps:
+        by = at.get(str(st.get("obliged_by") or ""))
+        n = _num(_STEP_ID, st["id"])
+        if by is None or not _owed(st, by, lib) or n in waited or _reaches(pool, st, by):
+            continue
+        by["deps"].append(st["id"])
+        # The mark and an edge cannot both stand, which is the rule `_wrong` reports on a
+        # hand-edit: a step that waits for something is not a start. Only reachable where
+        # the two share a band, since a step with something lower than it in the plan was
+        # never marked — but the write is what has to be consistent, not the argument.
+        by["root"] = False
+        waited.add(n)
+
+
+def _owed(step: dict, by: dict, lib: dict) -> bool:
+    """Should the step that obliged this one WAIT for it? The anchors decide, or nothing.
+
+    `create-pr` obliges `change-approval` and runs three bands later, so the PR waits on
+    the approval and that edge is the guardrail. `change-approval` obliges `review` and
+    runs FOUR BANDS EARLIER, and the same edge there would say the approval waits on the
+    review — the inversion anchors exist to remove, rebuilt by the mechanism that restores
+    them. So the edge is owed only where the obliging step runs at or after the step it
+    obliged; where it runs before, the obligation is satisfied by both steps being in the
+    plan and the order is the anchor's to state.
+
+    Equal ranks are owed, which covers every unanchored pair — two definitions with no
+    anchor between them are exactly the case this file had before anchors, where the
+    obliging step waited on what it obliged and nothing else said when either ran.
+    """
+    return _ranked(by, lib) >= _ranked(step, lib)
+
+
+def _reaches(steps: list, frm: dict, to: dict) -> bool:
+    """Does `frm` come after `to`, at any distance? The deps, walked once.
+
+    The one place in this file that TRAVERSES a dep, and it is a question about a shape
+    rather than a schedule: nothing here waits, and this is asked only to keep `_place`
+    from drawing a back-edge over an order that already exists. Seen-set guarded, because
+    a cycle in `deps` is a lead's mistake to read and must never be a hang here.
+    """
+    at = {_num(_STEP_ID, s.get("id")): s for s in steps}
+    want, seen = _num(_STEP_ID, to.get("id")), set()
+    queue = [_num(_STEP_ID, frm.get("id"))]
+    while queue:
+        n = queue.pop()
+        if n == want:
+            return True
+        if n in seen or n not in at:
+            continue
+        seen.add(n)
+        queue.extend(_num(_STEP_ID, d) for d in (at[n].get("deps") or ()))
+    return False
+
+
+def _anchor(lib: dict, key: str) -> int:
+    """A definition's anchor as its position in `_ANCHORS`. Unanchored ranks with `build`.
+
+    Refused rather than guessed at when it is a word the spine does not have: an anchor
+    means its position and nothing else, so there is no position to fall back to and a
+    typo would silently place the step somewhere plausible-looking instead.
+    """
+    given = (lib.get(key) or {}).get("anchor")
+    if given is None or not str(given).strip():
+        return _UNANCHORED
+    word = str(given).strip()
+    if word not in _ANCHORS:
+        raise _BadDef(f"'{key}' has an anchor of '{_flat(word)}', which is not where "
+                      f"anything runs — it is one of {', '.join(_ANCHORS)}")
+    return _ANCHORS.index(word)
+
+
+def _anchored(step: dict, lib: dict) -> bool:
+    """Does this step's definition say where it runs? A step of its own words never does."""
+    key = _defkey(step)
+    return bool(key and str((lib.get(key) or {}).get("anchor") or "").strip())
+
+
+def _ranked(step: dict, lib: dict) -> int:
+    """Where a step in a plan sits on the spine. A step that owns its words is the work."""
+    key = _defkey(step)
+    return _anchor(lib, key) if key else _UNANCHORED
 
 
 def _obliges(lib: dict, key: str) -> list[str]:
@@ -2114,8 +2435,17 @@ def _resolve(step: dict, lib: dict) -> dict:
     # showed up under `library <name>` would be a field you have to go and find, which is
     # the cost it exists to remove. Null when the definition sets none — most steps have no
     # single standard command, and an empty line under them would say there was one.
+    #
+    # `anchor` rides along too, and it is the one of these NOT put there to be read by a
+    # person: `_wrong` has to know where a step runs to tell an obligation that was left out
+    # of the order from one the anchors deliberately ordered the other way, and it is handed
+    # a resolved plan and never the catalogue. Neither rendering a person reads prints it —
+    # see `_MACHINERY`, which is where the two different ways that is arranged are — while
+    # `--json` carries it, like everything else on the view. Where a definition runs is read
+    # off `library <name>`, which says it in a word rather than in a field.
     return dict(step, name=str(spec.get("name") or "").strip() or key,
                 display=str(spec.get("display") or "").strip() or None,
+                anchor=str(spec.get("anchor") or "").strip() or None,
                 command=str(spec.get("command") or "").strip() or None)
 
 
@@ -2147,7 +2477,7 @@ def _minted(steps: list, lib: dict) -> str:
 # two ways a plan renders as a column of half-sentences with no edges — which is what the
 # board looked like before this, because nothing ever required either field.
 #
-# The first door is a refusal, and it is not here: `create`, `add-step`, `name-step` and
+# The first door is a refusal, and it is not here: `create`, `name-step` and
 # `template use` will not MINT a step with no display name, and they say what a good one
 # looks like when they refuse (`_no_display`). That door catches authoring.
 #
@@ -2198,20 +2528,52 @@ def _faults(plan: dict) -> tuple[bool, list[str], list[str]]:
     return (not str(plan.get("display") or "").strip()), nameless, rootless
 
 
+def _shown_rank(step: dict) -> int:
+    """Where a RESOLVED step runs, read off the view rather than out of the catalogue.
+
+    `_ranked` is the same question asked of a stored step and a library, and is what
+    `_place` uses while it is minting. This one is for the doors, which are handed a
+    resolved plan (`_shown`) and never a catalogue — see `_resolve`, which merges the
+    anchor onto the view for exactly this. A step with none ranks as the work, as always.
+    """
+    word = str(step.get("anchor") or "").strip()
+    return _ANCHORS.index(word) if word in _ANCHORS else _UNANCHORED
+
+
 def _rootless(steps: list) -> list[dict]:
     """The steps with no dep, in file order. The first of them is the plan's start."""
     return [s for s in steps if not (s.get("deps") or [])]
 
 
 def _wrong(plan: dict) -> list[tuple[str, str]]:
-    """The three rules the removed verbs used to keep, checked against the file instead.
+    """The rules the removed verbs used to keep, checked against the file instead.
 
-    `gate`, `skip` and `checkpoint` each refused one thing before they were verbs nobody
-    should have to type: a gate on a step already done, a skip with no reason, a checkpoint
-    ref carrying a line break. Those refusals were the whole of what those verbs bought
+    `gate`, `checkpoint` and `dep` each refused one thing before they were verbs nobody
+    should have to type: a gate on a step already done, a checkpoint ref carrying a line
+    break, an edge naming a step that is not there. A skip with no reason is the same rule
+    from a verb that stayed, where it is a refusal at the door and this is what catches
+    the same mistake written into the file. Those refusals were the whole of what those
+    verbs bought
     over editing the field, and the rule has to outlive the verb or removing it would be
     removing the rule — so they live HERE now, in the warn door, and reach a hand-edit as
     well as a command, which the verbs never did.
+
+    AN OBLIGATION WITH NO ORDER TO IT is the one rule here that no verb ever kept, and it
+    is here because the anchor made it possible to lose one. An obliged step is added so
+    that it CANNOT be omitted; a step sitting in the plan with no path to or from the step
+    that obliged it is omitted in every way that matters. That is exactly the shape a first
+    draft of `_place` produced for `change-approval`, and it is what a future anchor added
+    to the catalogue could produce again.
+
+    The condition is `_place`'s own, from the other side: nothing waits on the step, AND it
+    does not come after the step that obliged it. Either one is enough to keep it in the
+    job — something waiting on it means the plan cannot finish without it, and being
+    downstream of its obliger means a tick releases it — and it is the plan with NEITHER
+    that reads as finished with the obligation still open. Waited-on is the test rather
+    than reaching the obliger in either direction, because a step and its obliger are often
+    siblings under a third: the review and the change approval both hang under the PR that
+    obliged one of them, with no path between the two. A done or skipped one is not
+    reported, because a skip with its reason is the sanctioned way past an obligation.
 
     A WARNING AND NOT A REFUSAL, deliberately, for the same reason nothing else in this
     door refuses: the plan file is meant to be edited, and a file that bricks the board
@@ -2219,8 +2581,49 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
     `(step id, what is wrong)`, so the board can paint the step and `_defects` can name it.
     """
     out: list[tuple[str, str]] = []
-    for step in plan.get("steps") or []:
+    here_steps = plan.get("steps") or []
+    here = {_num(_STEP_ID, s.get("id")) for s in here_steps}
+    at = {_num(_STEP_ID, s.get("id")): s for s in here_steps}
+    waited = {_num(_STEP_ID, d) for s in here_steps for d in (s.get("deps") or ())}
+    for step in here_steps:
         sid = str(step.get("id") or "?")
+        # THE EDGE THAT NAMES NOTHING, which was `dep`'s one refusal and is now the file's.
+        # An edge whose target is not in this plan renders as a wait nobody is ever
+        # released from, and a self-edge as a step waiting for itself; neither is a shape,
+        # both are typos, and a typo in an id is exactly what an editor cannot see. Read
+        # by NUMBER like every other id comparison here, so a hand-written `1` is the edge
+        # it names rather than a fourth thing to warn about.
+        mine = _num(_STEP_ID, step.get("id"))
+        for d in step.get("deps") or ():
+            n = _num(_STEP_ID, d)
+            if n is not None and n == mine:
+                out.append((sid, f"comes after itself ({_flat(str(d))}) — a step waiting "
+                                 f"for its own completion is an edge nothing releases. "
+                                 f"Point it at the step it really follows, or drop it."))
+            elif n is None or n not in here:
+                out.append((sid, f"comes after {_flat(str(d))}, which is not a step in "
+                                 f"this plan — an edge to nothing draws as a wait that "
+                                 f"never ends. Edges join steps of ONE plan, and nothing "
+                                 f"here reads across plans."))
+        by = at.get(_num(_STEP_ID, step.get("obliged_by")))
+        if (by is not None and str(step.get("progress") or "") not in (DONE, SKIPPED)
+                and _shown_rank(by) >= _shown_rank(step)
+                and _num(_STEP_ID, step.get("id")) not in waited
+                and not _reaches(here_steps, step, by)):
+            out.append((sid, f"obliged by {_flat(str(step.get('obliged_by')))} and left out "
+                             f"of the order — nothing in this plan waits on it and it comes "
+                             f"after nothing that does, so the plan reads as finished with "
+                             f"it still open. An obliged step is added so it cannot be "
+                             f"omitted: put it in the chain, or skip it with the reason."))
+        if step.get("root") and (step.get("deps") or []):
+            # The two say opposite things about the same step, and the mark is the half a
+            # reader trusts: `root: true` is somebody saying this start is deliberate, so a
+            # step carrying one AND an edge reads as a start on the board and as a wait in
+            # the file. The verb that wrote an edge used to clear the mark; this is that
+            # rule where the edge is now written, which is by hand.
+            out.append((sid, "marked a deliberate root and given a dep — a step that waits "
+                             "for something is not a start. Drop the `root` or drop the "
+                             "`deps`, whichever one is not true."))
         if str(step.get("gate") or "").strip() and str(step.get("progress") or "") == DONE:
             out.append((sid, "a gate on a step that is already done — a gate is reached "
                              "before the work it guards, so a plan does not get to mark "
@@ -2282,10 +2685,9 @@ def _defects(plan: dict) -> list[str]:
     if rootless:
         out.append(f"    no dep: {', '.join(rootless)} — every step but the plan's first "
                    f"says what it comes after, or the board has no edge to draw and the "
-                   f"plan renders as a loose stack. Fix: "
-                   f"`sb plugin plans dep {rootless[0]} --after <step>` — or, if this "
-                   f"start is deliberate and runs beside the plan's first, "
-                   f"`sb plugin plans dep {rootless[0]} --root`, which says so and is "
+                   f"plan renders as a loose stack. Fix: write `\"deps\": [\"<step>\"]` on "
+                   f"{rootless[0]} in the plan file — or, if this start is deliberate and "
+                   f"runs beside the plan's first, `\"root\": true`, which says so and is "
                    f"complete. Never an edge you do not mean.")
     out.extend(f"    {sid}: {why}" for sid, why in wrong)
     return out
@@ -2315,7 +2717,7 @@ def _plan_result(shown: dict, markdown: bool = False,
     if path:
         doc = dict(doc, file=path)
     if markdown:
-        return Result(human=_markdown(doc), data=doc)
+        return Result(human=_markdown(_dumped(doc)), data=doc)
     human = _full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
     if path:
         human += f"\n\nthe plan is {path} — edit it there, then `sb plugin plans validate`"
@@ -2398,10 +2800,10 @@ def _minting(d: Path):
     A STEP id needs none of it. It is minted from the plan's own counter in the plan's own
     file (`_mint_step`), so two agents minting steps in two plans never read one number,
     and two minting in ONE plan are two writers on one plan — the case below, which the
-    design answers with a convention rather than a lock. `add-step` and `name-step` held
-    this lock only for the store-wide step counter and hold nothing now.
+    design answers with a convention rather than a lock. `name-step` held this lock only
+    for the store-wide step counter and holds nothing now.
 
-    Every other verb takes nothing. `tick`, `note`, `dep` and every read run concurrently
+    Every other verb takes nothing. `tick`, `skip`, `note` and every read run concurrently
     with each other and with an editor, which is the concurrency the per-file split was
     for.
 
@@ -2541,7 +2943,7 @@ def _read_one(d: Path) -> tuple[dict, dict]:
     Unreadable is checked all the way down, not just at the top level, and the reason is
     the seal rather than tidiness: it is keyed on the plan id, so two plans sharing an id —
     or two with no id at all — collapse into one entry and `_write`'s drop check passes
-    over the plan whose changelog is no longer in it.
+    over the plan that is no longer in it.
 
     `broken` comes back empty and not absent, so that nothing downstream has to know which
     shape it was handed: in this one, a plan that did not load means none of them did.
@@ -2862,17 +3264,17 @@ def _text(obj: Any) -> str:
 def _seal(doc: dict) -> dict:
     """Every loaded plan as it stands, keyed by plan NUMBER. Compared on the way out.
 
-    Two things per plan, for two different jobs: the changelog, which `_write` refuses to
-    let shrink, and the whole plan as text, which `_write` compares to decide whether this
-    file needs writing at all. A plan nobody touched is a file nobody rewrites.
+    The plan as TEXT, which `_write` compares to decide whether this file needs writing at
+    all: a plan nobody touched is a file nobody rewrites. It sealed the changelog beside it
+    once, for an append-only check `_write` no longer makes — see there for why that rule
+    went — and what remains is which plans were loaded, which is what stops one being
+    dropped.
 
     The number rather than the string, so that `p-1` and a bare `1` cannot seal one plan
     and be looked up as another. `_read` has already dropped a file where two plans share
     one, which is what makes a dict safe to key on it at all.
     """
-    return {_num(_PLAN_ID, p.get("id")):
-            {"log": json.dumps(p.get("changelog") or [], sort_keys=True), "raw": _text(p)}
-            for p in doc["plans"]}
+    return {_num(_PLAN_ID, p.get("id")): {"raw": _text(p)} for p in doc["plans"]}
 
 
 def _atomic(d: Path, name: str, text: str) -> None:
@@ -2917,15 +3319,21 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
     worktree still on the old plugin down as a side effect of a tick. `migrate` is the only
     thing that changes the shape, and somebody types it.
 
-    The append-only check is here, at the single write, rather than trusted to each verb,
-    and it is the same check in both shapes. A command changes the steps it names; if one
-    ever rewrites a plan wholesale it will take the changelog with it, and that failure is
-    silent everywhere except here.
+    THE PLAN IS WHAT IS PROTECTED HERE, and only the plan: a plan that was read and is not
+    being written back has lost everything it held, and the design says records are kept
+    and never erased — cleanup means dropping out of the UI. Two ids for one plan is the
+    same loss wearing a different shape and is refused beside it.
 
-    Both halves of "append-only" are checked, because dropping the plan is the easier way
-    to lose a changelog than editing one: a plan that was read and is not being written
-    back has lost every entry it had, and the design says records are kept and never
-    erased — cleanup means dropping out of the UI.
+    The CHANGELOG is no longer part of that check, and it was until the writing of a plan
+    stopped being something an agent did by hand. The rule was that a write whose changelog
+    was shorter than the one that was read, or whose existing entries had moved, was a bug
+    in a verb — true, and it was also a tax on the thing this plugin now asks for. A plan
+    is edited with the tools that edit files: rewriting the file whole is the ORDINARY way
+    to change one, no hand-edit is asked to append an entry any more, and a check that
+    refused those writes would refuse the interface. The verbs still stamp their own entry
+    each time (`_log`), so the record of how a job ran is still made by the things that
+    move a plan; what is gone is a rule that could only ever have caught a verb, at the
+    cost of standing between an agent and the file.
 
     What `os.replace` buys is readers, not crashes: a power loss between the rename and
     the blocks reaching disk can still cost the last write, and there is no `fsync` here.
@@ -2947,15 +3355,6 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
         raise ValueError(f"this write would have dropped "
                          f"{', '.join(f'p-{n}' for n in sorted(gone))} and its changelog; "
                          f"plans are kept, never erased")
-    for n, plan in sorted(here.items()):
-        was = seal.get(n)
-        if was is None:
-            continue                    # a plan created by this command; nothing to keep
-        old = json.loads(was["log"])
-        now = plan.get("changelog") or []
-        if not isinstance(now, list) or now[:len(old)] != old:
-            raise ValueError(f"p-{n}'s changelog is append-only, and this write would "
-                             f"have dropped or rewritten {len(old)} entries")
     (_write_split if _split(d) else _write_one)(d, doc, seal, here)
 
 
@@ -3488,7 +3887,7 @@ def _full(p: dict) -> str:
 # `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
 _DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
                     "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
-                    "checkpoints", "command"})
+                    "checkpoints", "command", "root", "anchor"})
 
 
 def _step_lines(steps: list) -> list[str]:
@@ -3589,6 +3988,35 @@ def _step_lines(steps: list) -> list[str]:
         out.extend(f"    {_flat(k) + '  ':<6}{_flat(v)}" for k, v in s.items()
                    if k not in _DRAWN and _scalar(v) and _some(v))
     return out
+
+
+# Resolved onto the view for the code to read and for NO RENDERING TO PRINT. `anchor` is
+# the only one: a step's name, display and command are resolved for a reader, and this is
+# resolved for `_wrong`, which has to know where a step runs to tell an obligation left out
+# of the order from one the anchors ordered the other way, and which is handed a resolved
+# plan and never the catalogue.
+#
+# Kept out of both renderings by two different means, because they are two different
+# mechanisms. The terminal draws only what it does not already know how to draw, so this
+# joins `_DRAWN`. The markdown is WALKED and knows no field names at all — which is the
+# whole point of it — so nothing in that renderer could be taught to skip a key without
+# taking that property away; what happens instead is that the field is dropped from the
+# copy being dumped (`_dumped`), one call above it. `--json` carries it either way, since
+# that rendering is the record and a machine reader is who this field is for.
+_MACHINERY = frozenset({"anchor"})
+
+
+def _dumped(shown: dict) -> dict:
+    """A resolved plan with the machinery taken back out, for the rendering a HUMAN reads.
+
+    `show --markdown` is what `create-pr` posts onto the pull request, so what is in it is
+    what whoever turns up reads. `anchor: pr` under a step means nothing to that reader and
+    is not a fact about the job — it is how this file decided where to put the step, which
+    it did weeks earlier. Dropped from the copy rather than skipped by the renderer: see
+    `_MACHINERY`. A copy, so `data` is untouched and `--json` still means what it meant.
+    """
+    return dict(shown, steps=[{k: v for k, v in s.items() if k not in _MACHINERY}
+                              for s in (shown.get("steps") or ())])
 
 
 # -- the plan as markdown ------------------------------------------------------
@@ -3823,7 +4251,7 @@ def _condition(p: dict) -> str:
     return f"{word} — {say}" if say else word
 
 
-def _changed(plan: dict, step: dict, lib: dict) -> Result:
+def _changed(plan: dict, step: dict, lib: dict, nxt: list = ()) -> Result:
     """What a step verb hands back: the plan it was in, and the step as it now stands.
 
     The step alone, not the whole plan — a tick that printed the entire plan back would
@@ -3831,19 +4259,56 @@ def _changed(plan: dict, step: dict, lib: dict) -> Result:
     anyway, because a machine reader given only a step has lost which plan it belongs to
     and there is no verb that maps one back to the other. Resolved, like every other read:
     a tick on a named step should say what it ticked and not print a null.
+
+    `nxt` is what this move released (`_next`), printed with its instructions IN FULL —
+    the one place a definition's `about` reaches the agent that is about to need it. Long,
+    and deliberately: it is a page an agent reads once at the moment it starts a step, not
+    a field on a listing, which is exactly why `show` does not carry it for every step.
     """
     shown = _resolve(step, lib)
     lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines([shown]))
+    ready = [_resolve(s, lib) for s in nxt]
+    if ready:
+        lines.extend(["", "next — this move unblocked:"])
+        for s, raw in zip(ready, nxt):
+            lines.extend(f"  {ln}" for ln in _step_lines([s]))
+            lines.extend(f"  {ln}" for ln in _how(raw, lib))
     # THE SECOND DOOR: recomputed over the whole plan after the write, appended, and never
     # a refusal. A step verb that refused a plan for a rendering rule would be a `tick`
     # that does not land, which is worse than the rendering it was protecting.
     defects = _defects(_shown(plan, lib))
     data: dict = {"plan": plan["id"], "step": shown}
+    if ready:
+        data["next"] = [dict(s, about=_instructions(r, lib)) for s, r in zip(ready, nxt)]
     if defects:
         lines.extend(["", *defects])
         data["incomplete"] = defects
     return Result(human="\n".join(lines), data=data)
+
+
+def _instructions(step: dict, lib: dict) -> Optional[str]:
+    """HOW this step is done, in the words of whoever wrote it down. Never a copy.
+
+    A named step's is its definition's `about`, resolved live out of the library exactly as
+    its name and its command are — the library owns how a named step is done, and a copy of
+    it on the step would be the link quietly turned into a snapshot. This is the field
+    `_resolve` deliberately does NOT merge onto a step: it is a page long, `show` draws a
+    plan as lines, and a page under every step would bury the plan it belongs to.
+
+    A step that owns its words may carry an `about` of its own, written into the file like
+    every other field this plugin has never heard of. A lead that writes the how-to for a
+    one-off step gets it surfaced by the same door the library steps use.
+    """
+    key = _defkey(step)
+    spec = (lib.get(key) or {}) if key else step
+    return " ".join(str(spec.get("about") or "").split()) or None
+
+
+def _how(step: dict, lib: dict) -> list[str]:
+    """`_instructions` as indented, wrapped lines under the step it belongs to."""
+    text = _instructions(step, lib)
+    return [f"  {ln}" for ln in textwrap.wrap(_flat(text), 84)] if text else []
 
 
 def _added(plan: dict, steps: list, lib: dict) -> Result:
@@ -3889,6 +4354,11 @@ def _def_lines(key: str, spec: dict, lib: dict, *, full: bool) -> str:
         # What the board draws for this step, shown so an author can see the short label the
         # long name above collapses to rather than having to open a board to find out.
         lines.append(f"    board       {_flat(display)}")
+    anchor = str(spec.get("anchor") or "").strip()
+    if anchor:
+        # WHERE it runs, beside what it is, because that is the half of a definition a
+        # lead used to have to work out by reading the prose and then fix by hand.
+        lines.append(f"    runs        {_flat(anchor)}")
     parts = _names(key, spec, "steps")
     if parts:
         lines.append(f"    composes    {', '.join(_flat(x) for x in parts)}")

@@ -350,9 +350,16 @@ class PlansTest(PlansSandbox):
         self.assertEqual(made["id"], "p-3")
         self.assertEqual([s["id"] for s in made["steps"]], ["step-1"])
 
-    def test_the_changelog_is_append_only_and_carries_the_reason(self):
+    def test_the_changelog_carries_the_reason_and_the_plan_cannot_be_dropped(self):
         """Written by the command, with the reason the agent supplied. A plan is reshaped
-        as the job runs, and without this the file keeps only the final shape."""
+        as the job runs, and without this the file keeps only the final shape.
+
+        WHAT IS PROTECTED IS THE PLAN AND NOT THE CHANGELOG, which is the half that
+        changed when hand-editing became the way a plan is shaped. A write whose changelog
+        had shrunk used to be refused; rewriting a plan file whole is now the ordinary way
+        to change one, so that check stood in front of the interface it was protecting. A
+        write that drops the plan is still refused — that loss cannot be reconstructed.
+        """
         self.as_agent("w1")
         made = self.data("plugin", "plans", "create", "a job", "--display", "board: a job",
                          "--step", 'a = a', "--reason", "investigation landed")
@@ -362,19 +369,21 @@ class PlansTest(PlansSandbox):
         self.assertEqual(entry["reason"], "investigation landed")
         self.assertIn("step-1", entry["detail"])
 
-        # The single write is where append-only is enforced, so that a future verb that
-        # rewrites a plan wholesale fails loudly instead of quietly losing the story. Both
-        # halves: an edited changelog, and the easier loss — the whole plan not written back.
+        # The single write is where the plan is protected: a document that has lost one is
+        # refused there rather than quietly written back one plan short.
         mod = _plans()
-        for wreck, expected in ((lambda d: d["plans"][0].update(changelog=[]), "append-only"),
-                                (lambda d: d.update(plans=[]), "never erased")):
-            with self.subTest(expected=expected):
-                doc, seal = mod._read(self._dir())
-                wreck(doc)
-                with self.assertRaises(ValueError) as caught:
-                    mod._write(self._dir(), doc, seal)
-                self.assertIn(expected, str(caught.exception))
-        self.assertEqual(len(self._doc()["plans"][0]["changelog"]), 1)
+        doc, seal = mod._read(self._dir())
+        doc.update(plans=[])
+        with self.assertRaises(ValueError) as caught:
+            mod._write(self._dir(), doc, seal)
+        self.assertIn("never erased", str(caught.exception))
+
+        # And a rewritten changelog is NOT refused, because rewriting the file is how a
+        # plan is edited now. Nothing validates the record and nothing refuses on it.
+        doc, seal = mod._read(self._dir())
+        doc["plans"][0]["changelog"] = []
+        mod._write(self._dir(), doc, seal)
+        self.assertEqual(self._doc()["plans"][0]["changelog"], [])
 
     def test_an_unreadable_plan_costs_that_plan_and_nothing_else(self):
         """One plan is one file, and that is what a corrupt one costs: the plan in it.
@@ -542,7 +551,7 @@ class PlansTest(PlansSandbox):
 
         What survives is the one race per-file storage does not answer — two commands
         reading the same store-wide counter and minting the same PLAN id — so the two verbs
-        that allocate one hold a lock across their mint and nothing else does. `add-step`
+        that allocate one hold a lock across their mint and nothing else does. `name-step`
         held it too while step ids came from a store-wide counter; they come from the
         plan's own file now, so it takes nothing. Asserted as a pair at the same instant,
         because "no lock at all" and "the wrong lock" are different bugs."""
@@ -555,8 +564,8 @@ class PlansTest(PlansSandbox):
                          [(False, False)])
         self.assertEqual(self._at_write("plugin", "plans", "note", "s-1", "--text", "x"),
                          [(False, False)])
-        self.assertEqual(self._at_write("plugin", "plans", "add-step", "p-1", "and more",
-                                        "--display", "more"),
+        self.assertEqual(self._at_write("plugin", "plans", "skip", "s-1",
+                                        "--why", "not needed"),
                          [(False, False)])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
 
@@ -802,12 +811,13 @@ class MigrationTest(PlansSandbox):
         meta = json.loads((self._dir() / "_meta.json").read_text())
         self.assertEqual(meta["format"], 2)
         self.assertEqual(meta["next_step"], 61)
-        made = self.data("plugin", "plans", "add-step", "p-12", "next", "--display", "next",
+        self.define("scan", name="scan the code", display="scan")
+        made = self.data("plugin", "plans", "name-step", "p-12", "scan",
                          "--reason", "because")
-        self.assertEqual(made["step"]["id"], "step-1")
-        old = self.data("plugin", "plans", "add-step", "p-2", "one more", "--display",
-                        "more", "--reason", "because")
-        self.assertEqual(old["step"]["id"], "step-4")
+        self.assertEqual(made["steps"][0]["id"], "step-1")
+        old = self.data("plugin", "plans", "name-step", "p-2", "scan",
+                        "--reason", "because")
+        self.assertEqual(old["steps"][0]["id"], "step-4")
 
     def test_an_old_file_restored_beside_a_moved_store_is_left_alone(self):
         """Somebody restores a `plans.json` from a backup next to a store that has already
@@ -1068,107 +1078,136 @@ class StepsTest(PlansSandbox):
         self.assertEqual(self.step("s-2")["progress"], "open")
         self.assertEqual(self.actions(), ["create", "tick"])
 
-    def test_add_step_mints_a_fresh_id_from_the_one_counter(self):
-        """A step invented while the job runs is numbered from the same counter as every
-        other step in the file, so "your step is s-3" names one thing across two plans. The
-        reason matters more here than anywhere: rework leaves either a try count or an
-        added step, and only the changelog can tell the analysis pass which happened."""
+    def test_a_step_added_by_hand_is_numbered_from_the_plans_own_counter(self):
+        """A step invented while the job runs is written into the file, and the plan's own
+        counter is what numbers it — `next_step`, floored on read by the highest id really
+        present, so a hand-written step and a minted one can never collide.
+
+        The verb that used to do this is gone: it set two fields on a new object, which is
+        what writing the object does. What it bought over the edit was the changelog entry
+        nothing asks for any more."""
         self.plan("write it")
-        self.ok("plugin", "plans", "create", "another job",
-                "--display", "board: another job", "--step", 'elsewhere = elsewhere')
-        made = self.data("plugin", "plans", "add-step", "p-1", "fix", "what", "review",
-                         "found",
-                             "--display", "fix", "--reason", "rework, as an added step")
+        doc = self._doc()
+        plan = doc["plans"][0]
+        plan["steps"].append({"id": f"step-{plan['next_step']}", "name": "fix what review "
+                              "found", "display": "fix", "progress": "open",
+                              "deps": ["step-1"]})
+        plan["next_step"] += 1
+        self._save(doc)
 
-        self.assertEqual(made["step"]["id"], "step-2")
-        self.assertEqual(made["step"]["name"], "fix what review found")
-        self.assertEqual(made["plan"], "p-1")
-        self.assertEqual([s["id"] for s in self._doc()["plans"][0]["steps"]],
-                         ["step-1", "step-2"])
-        self.assertEqual(self.data("plugin", "plans", "changelog", "p-1")[1]["reason"],
-                         "rework, as an added step")
+        self.assertEqual([s["id"] for s in self.steps()], ["step-1", "step-2"])
+        self.assertEqual(self.steps()[1]["name"], "fix what review found")
+        # And the next MINT does not hand out a number the hand-edit already used.
+        self.define("scan", name="scan the code", display="scan")
+        made = self.data("plugin", "plans", "name-step", "p-1", "scan")
+        self.assertEqual(made["steps"][0]["id"], "step-3")
 
-        code, out, _ = self.sb("plugin", "plans", "add-step", "p-9", "nowhere",
-                               "--display", "nowhere", "--json")
+    def test_skip_writes_the_state_and_the_reason_and_refuses_without_one(self):
+        """`tick`'s sibling, and the second of the two verbs that move a step past.
+
+        A skip is a STATE WITH A SENTENCE BESIDE IT and never an absence, which is why the
+        reason is not optional: a skipped step with an empty `why` draws red, so a verb
+        that let one through would be a verb whose whole output is a warning. Refused at
+        the door instead, where the message can say what to write.
+
+        Child-usable like `tick`, and for the same reason: the agent that found the step
+        unnecessary is the one that knows why, and it may not edit the plan's shape.
+        """
+        self.plan("write it", "review it")
+        made = self.data("plugin", "plans", "skip", "s-1",
+                         "--why", "the change is a typo", "--reason", "too small to gate")
+        self.assertEqual(made["step"]["progress"], "skipped")
+        self.assertEqual(self.step("s-1")["progress"], "skipped")
+        self.assertEqual(self.step("s-1")["why"], "the change is a typo")
+        # The step says the state and the reason together, which is the whole point of
+        # `why` living on the step rather than in the changelog.
+        self.assertIn("the change is a typo", self.ok("plugin", "plans", "show", "p-1"))
+        entry = self.data("plugin", "plans", "changelog", "p-1")[-1]
+        self.assertEqual(entry["action"], "skip")
+        self.assertEqual(entry["reason"], "too small to gate")
+
+        code, out, _ = self.sb("plugin", "plans", "skip", "s-2", "--json")
         self.assertEqual(code, 1)
-        self.assertIn("the highest is p-2", json.loads(out)["data"]["error"])
+        self.assertIn("--why is required", json.loads(out)["data"]["error"])
+        self.assertEqual(self.step("s-2")["progress"], "open")   # and nothing moved
 
-    def test_dep_records_an_edge_that_show_renders(self):
+    def test_a_skip_releases_what_waited_on_it_exactly_as_a_tick_does(self):
+        """The two words are the same fact to whatever came next: the step is not going to
+        be worked again, so what waited on it is waiting no longer.
+
+        A skip that printed nothing would leave its successor unclaimed — the agent that
+        skipped a step would be the one agent never handed the next one, which is the whole
+        of what `_next` is for. Asserted through the release rather than through the flag,
+        so the claim survives the plumbing being rewritten.
+        """
+        self.plan("write it", "review it")
+        said = self.ok("plugin", "plans", "skip", "s-1", "--why", "the change is a typo")
+        self.assertIn("next — this move unblocked:", said)
+        self.assertIn("review it", said.split("unblocked:")[1])
+        released = json.loads(self.ok("plugin", "plans", "skip", "s-1",
+                                      "--why", "the change is a typo", "--json"))
+        self.assertEqual([s["id"] for s in released["data"]["next"]], ["step-2"])
+
+    def test_an_edge_is_a_field_and_show_renders_what_the_file_says(self):
         """Fan-out and join, stored as data. Nothing traverses these, waits on them or
         orders anything by them — a join waits because the lead does not start it. So the
-        whole of this verb is that the edge is stored, rendered, and points at a step that
-        is really there."""
-        self.plan("design", "build", "review", "merge")
-        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
-        self.ok("plugin", "plans", "dep", "s-4", "--after", "s-2", "--after", "3",
-                "--reason", "the join")
+        whole of an edge is that it is stored, rendered, and points at a step that is
+        really there.
 
-        self.assertEqual(self.step("s-2")["deps"], ["step-1"])
-        # `step-3` first because `create` chained it there when the plan was made, then the
-        # two this verb added — an edge is appended, and the record keeps the order.
-        self.assertEqual(self.step("s-4")["deps"], ["step-3", "step-2"])
+        Written into the file now. The verb that wrote one set a list, and its refusal —
+        an edge naming nothing — outlived it in `_wrong`, which reaches a hand-edit where
+        the verb never could."""
+        self.plan("design", "build", "review", "merge")
+        self.edit_step("s-4", deps=["step-3", "step-2"])
+        self.assertEqual(self.step("s-2")["deps"], ["step-1"])   # what `create` chained
         self.assertIn("after step-3, step-2", self.ok("plugin", "plans", "show", "p-1"))
 
-        # Repeating an edge is not an error and does not double it; the plan is the same shape.
-        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
-        self.assertEqual(self.step("s-2")["deps"], ["step-1"])
+        # An id is read by NUMBER everywhere here, so a bare `1` written by hand is the
+        # edge it names rather than an edge to nothing.
+        self.edit_step("s-3", deps=["1"])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertNotIn("not a step in this plan", said)
 
-        # And "already there" is decided on the NUMBER, like every other id comparison
-        # here, so a bare `1` written by hand is the edge it names rather than a new one.
-        doc = self._doc()
-        doc["plans"][0]["steps"][2]["deps"] = ["1"]
-        self._save(doc)
-        self.ok("plugin", "plans", "dep", "s-3", "--after", "s-1")
-        self.assertEqual(self.step("s-3")["deps"], ["1"])
+    def test_an_edge_that_names_nothing_is_reported_rather_than_refused(self):
+        """A cycle is not reported — nothing traverses an edge, so a cycle is a lead's
+        mistake to read rather than a hang. An edge pointing at a step that does not
+        exist, or at the step itself, is a typo, and it renders as a wait that never ends.
 
-    def test_an_edge_that_names_nothing_is_refused(self):
-        """A cycle is not refused — nothing traverses an edge, so a cycle is a lead's
-        mistake to read rather than a hang. An edge pointing at a step that does not exist,
-        or lives in another plan, is a typo, and it renders as a wait that never ends."""
+        A WARNING AND NOT A REFUSAL, like everything else in that door: the file is meant
+        to be edited, and a plan that would not load because one edge reads wrong is a file
+        nobody dares open. What the removed verb refused, the file now says out loud."""
         self.plan("design", "build")
-        self.ok("plugin", "plans", "create", "another job",
-                "--display", "board: another job", "--step", 'elsewhere = elsewhere')
-        # `--after` is read inside the plan the step argument names, so the cross-plan
-        # edge is written the only way it can be said now — qualified — and is still
-        # refused. A bare `--after 1` would be p-1's own step-1 and a perfectly good edge.
-        for argv, expected in ((("dep", "s-2", "--after", "s-9"), "no step s-9"),
-                               (("dep", "s-2", "--after", "s-2"), "cannot come after itself"),
-                               (("dep", "s-2", "--after", "p-2/step-1"), "is not in p-1"),
-                               (("dep", "s-2",), "--after is required")):
-            with self.subTest(expected=expected):
-                code, out, _ = self.sb("plugin", "plans", *argv, "--json")
-                self.assertEqual(code, 1)
-                self.assertIn(expected, json.loads(out)["data"]["error"])
-                # What `create` chained, and nothing more: a refused edge writes nothing.
-                self.assertEqual(self.step("s-2")["deps"], ["step-1"])
+        self.edit_step("s-2", deps=["step-9"])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("step-9, which is not a step in this plan", said)
 
-        # And a cycle, which is allowed, stays readable rather than hanging anything.
-        # Qualified, because the second plan this test made holds a `step-1` of its own and
-        # a bare one would be refused as ambiguous — which is the other half of the same
-        # decision and is pinned in `test_a_bare_step_id_two_plans_hold_is_refused_by_name`.
-        self.ok("plugin", "plans", "dep", "p-1/step-2", "--after", "step-1")
-        self.ok("plugin", "plans", "dep", "p-1/step-1", "--after", "step-2")
+        self.edit_step("s-2", deps=["step-2"])
+        self.assertIn("comes after itself", self.ok("plugin", "plans", "validate", "p-1"))
+
+        # And a cycle, which is allowed, stays readable and is not reported.
+        self.edit_step("s-1", deps=["step-2"])
+        self.edit_step("s-2", deps=["step-1"])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertNotIn("not a step in this plan", said)
         self.assertIn("after step-2", self.ok("plugin", "plans", "show", "p-1"))
 
     # -- what every one of them owes -------------------------------------------
 
     def test_every_step_verb_logs_and_none_rewrites_the_plan(self):
         """The cross-cutting rule, checked once over every mutating verb rather than once
-        each. `_write` refuses a document whose changelog is shorter than the one that was
-        read, so a verb that rewrote a plan wholesale would fail here rather than quietly
-        lose the story — running the whole set in sequence is what proves none of them does.
+        each. Every one of them appends its own entry and none of them rewrites a plan
+        wholesale — running the whole set in sequence is what proves it, since a verb that
+        rewrote the plan would take the entries before it with it.
         """
         self.plan("write it", "review it")
         for argv in (("tick", "s-1"),
                      ("note", "s-1", "--text", "a note"), ("note", "p-1", "--text", "and one"),
-                     ("add-step", "p-1", "a third", "--display", "third"),
-                     ("dep", "s-3", "--after", "s-1"),
+                     ("skip", "s-2", "--why", "covered by the first"),
                      ("name-step", "p-1", "merge")):
             with self.subTest(verb=argv[0]):
                 self.ok("plugin", "plans", *argv)
         self.assertEqual(self.actions(),
-                         ["create", "tick", "note", "note", "add-step", "dep",
-                          "name-step"])
+                         ["create", "tick", "note", "note", "skip", "name-step"])
         self.assertTrue(all(e["at"] for e in self.data("plugin", "plans", "changelog", "p-1")))
 
     # -- per-plan numbering, and the addressing that pays for it ---------------
@@ -1183,8 +1222,8 @@ class StepsTest(PlansSandbox):
         self.assertEqual([s["id"] for s in self.steps()], ["step-1", "step-2"])
         self.assertEqual([s["id"] for s in self.steps("p-2")], ["step-1"])
 
-        self.ok("plugin", "plans", "add-step", "p-2", "and more", "--display", "more",
-                "--reason", "the job grew")
+        self.define("scan", name="scan the code", display="scan")
+        self.ok("plugin", "plans", "name-step", "p-2", "scan", "--reason", "the job grew")
         self.assertEqual([s["id"] for s in self.steps("p-2")], ["step-1", "step-2"])
         self.assertEqual([s["id"] for s in self.steps()], ["step-1", "step-2"])
         self.migrate()
@@ -1196,9 +1235,9 @@ class StepsTest(PlansSandbox):
                "steps": [{"id": "s-84", "name": "done long ago", "progress": "open"}],
                "changelog": [], "notes": []}
         self._file("p-9").write_text(json.dumps(old))
-        made = self.data("plugin", "plans", "add-step", "p-9", "one more",
-                         "--display", "more", "--reason", "still running")
-        self.assertEqual(made["step"]["id"], "step-85")
+        made = self.data("plugin", "plans", "name-step", "p-9", "scan",
+                         "--reason", "still running")
+        self.assertEqual(made["steps"][0]["id"], "step-85")
         self.assertEqual([s["id"] for s in self.steps("p-9")], ["s-84", "step-85"])
 
     def test_a_bare_step_id_two_plans_hold_is_refused_by_name(self):
@@ -1223,9 +1262,8 @@ class StepsTest(PlansSandbox):
 
     def test_a_qualified_id_names_the_plan_and_every_step_verb_takes_one(self):
         """`p-2/step-1` is the spelling that always works, and it is one argument rather
-        than a flag — `tick`, `note` and `dep` all take a step where they always did. Once
-        the step argument has named a plan, `--after` is read inside THAT plan, so a bare
-        `--after` is unambiguous however many plans hold the number."""
+        than a flag, on every verb that takes a step. The qualifier names the plan for
+        one of them — `tick`, `skip` and `note` all take a step where they always did."""
         self.plan("write it")
         self.ok(*_create("another job", "design", "build"))
 
@@ -1236,15 +1274,12 @@ class StepsTest(PlansSandbox):
         self.ok("plugin", "plans", "note", "p-2/step-2", "--text", "picked up")
         self.assertEqual(self.steps("p-2")[1]["notes"][0]["text"], "picked up")
 
-        self.ok("plugin", "plans", "dep", "p-2/step-2", "--after", "step-1")
-        self.assertEqual(self.steps("p-2")[1]["deps"], ["step-1"])
+        self.ok("plugin", "plans", "skip", "p-2/step-2", "--why", "already covered")
+        self.assertEqual(self.steps("p-2")[1]["progress"], "skipped")
+        self.assertEqual(self.steps()[0]["progress"], "open")   # p-1's step-1, still not
 
-        # And an edge into another plan stays refused, which is the one thing a qualified
-        # `--after` can say that a bare one cannot.
-        code, out, _ = self.sb("plugin", "plans", "dep", "p-2/step-2",
-                               "--after", "p-1/step-1", "--json")
-        self.assertEqual(code, 1)
-        self.assertIn("is not in p-2", json.loads(out)["data"]["error"])
+        # And `show` takes one too, which is how a step's own instructions are asked for.
+        self.assertIn("build", self.ok("plugin", "plans", "show", "p-2/step-2"))
 
     def test_a_step_verb_on_a_step_that_is_not_there_is_refused_by_name(self):
         """Ids are never reused within a plan, so "there is no step-9 yet" and "step-9 was
@@ -1386,14 +1421,19 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("no such definition", self.ok("plugin", "plans", "show", "p-1"))
 
     def test_a_variant_is_an_on_the_fly_step_and_not_an_edited_link(self):
-        """There is no verb that forks a definition for one job, and this is what stands in
-        for one: `add-step`. The two live side by side in one plan — one owning its words,
-        one owning a link — which is what "both are first class" means."""
+        """There is no verb that forks a definition for one job, and this is what stands
+        in for one: a step of your own words, written into the file. The two live side by
+        side in one plan — one owning its words, one owning a link — which is what "both
+        are first class" means."""
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.ok("plugin", "plans", "name-step", "p-1", "merge-human-review")
-        self.ok("plugin", "plans", "add-step", "p-1", "review it twice, it is a migration",
-                "--display", "review",
-                "--reason", "a variant, not a forked link")
+        doc = self._doc()
+        plan = doc["plans"][0]
+        plan["steps"].append({"id": "step-2", "name": "review it twice, it is a migration",
+                              "display": "review", "progress": "open", "def": None,
+                              "deps": ["step-1"]})
+        plan["next_step"] = 3
+        self._save(doc)
 
         stored = self.steps()
         self.assertEqual([s["def"] for s in stored], ["merge-human-review", None])
@@ -1761,7 +1801,7 @@ class CatalogueTest(PlansSandbox):
 
         # p-1 names a definition, so every verb that would render it has to resolve one.
         for argv in (("tick", "s-1"), ("tick", "s-2"),
-                     ("add-step", "p-1", "and one more", "--display", "one more"),
+                     ("skip", "s-1", "--why", "not needed"),
                      ("note", "p-1", "--text", "a note"),
                      ("name-step", "p-1", "merge"), ("template", "use", "docs"),
                      ("show", "p-1"), ("list",), ("library",)):
@@ -1795,7 +1835,7 @@ class CatalogueTest(PlansSandbox):
         (self.catalogue("library") / "broken.json").write_text("{nope")
 
         for argv in (("show", "p-1"), ("list",), ("changelog", "p-1"),
-                     ("tick", "s-1"), ("add-step", "p-1", "another", "--display", "anthr"),
+                     ("tick", "s-1"),
                      ("create", "a second job", "--display", "board: a second job"),
                      ("template", "list")):
             with self.subTest(verb=argv[0]):
@@ -1832,7 +1872,6 @@ class CatalogueTest(PlansSandbox):
         shutil.rmtree(self.catalogue("library"))
         self.ok("plugin", "plans", "create", "a job",
                 "--display", "board: a job", "--step", 'write = write it')
-        self.ok("plugin", "plans", "add-step", "p-1", "and review it", "--display", "and")
         self.ok("plugin", "plans", "tick", "s-1")
         self.assertIn("empty", self.ok("plugin", "plans", "library"))
         self.assertIn("write it", self.ok("plugin", "plans", "show", "p-1"))
@@ -1903,6 +1942,358 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("command     gh pr comment <PR> --edit-last",
                       self.ok("plugin", "plans", "library", "merge"))
 
+    # -- where a named step runs, which is not what it obliges ------------------
+
+    def test_an_anchor_puts_a_step_where_it_runs_and_not_where_it_was_named(self):
+        """The bug this field was added for, on the shipped catalogue.
+
+        `create-pr` obliges `change-approval`, which obliges `review` — so naming the PR
+        step lands three, and reading the ORDER off the obligation put the approval
+        immediately before the PR. An approval is the gate before any code: it landed
+        mid-chain and the lead re-deped it to the front of every plan it was ever named
+        into. The obligation was right and the edge was wrong, and the anchor is the fact
+        the edge was standing in for.
+        """
+        self.data(*_create("a job", "write it", "test it"))
+        added = self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        by_def = {s["def"]: s for s in added["steps"]}
+
+        # The approval comes before the implementation, so there is nothing in the plan
+        # for it to come after — a deliberate root, marked as one rather than left looking
+        # like a forgotten edge.
+        self.assertEqual(by_def["change-approval"]["deps"], [])
+        self.assertTrue(by_def["change-approval"]["root"])
+        # The review comes after the WORK, not after the approval that obliged it.
+        self.assertEqual(by_def["review"]["deps"], ["step-2"])
+        # And the PR waits on the review AND on the approval — the second of those is the
+        # obligation, put back as an edge because the anchor drew none. See
+        # `test_the_pr_waits_on_the_approval_it_obliged`.
+        self.assertEqual(by_def["create-pr"]["deps"],
+                         [by_def["review"]["id"], by_def["change-approval"]["id"]])
+        self.assertNotIn("incomplete", added, f"and nothing is left to fix: {added}")
+
+        # The merge and its human review land on the end of that chain, in that order.
+        more = self.data("plugin", "plans", "name-step", "p-1", "merge")
+        by_def = {s["def"]: s for s in more["steps"]}
+        pr = next(s["id"] for s in added["steps"] if s["def"] == "create-pr")
+        self.assertEqual(by_def["merge-human-review"]["deps"], [pr])
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+
+    def test_an_unanchored_definition_keeps_the_placement_it_always_had(self):
+        """A repo's own library predates this field, and a catalogue that grows will hold
+        definitions with no fixed place in a job. Both go on hanging off whatever the plan
+        currently ends with, with the obliging step waiting on what it obliged — which is
+        what makes the anchor a fix rather than a rewrite."""
+        self.define("merge", name="merge the pull request", obliges=["merge-human-review"])
+        self.define("merge-human-review", name="list what only a human can check")
+        self.data(*_create("a job", "write it", "review it"))
+        added = self.data("plugin", "plans", "name-step", "p-1", "merge")
+        by_def = {s["def"]: s for s in added["steps"]}
+        self.assertEqual(by_def["merge-human-review"]["deps"], ["step-2"])
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertNotIn("incomplete", added)
+
+    def test_an_unanchored_step_obliging_an_anchored_one_is_not_a_deadlock(self):
+        """The mixed library the anchor rule promises still works, and the cycle it made.
+
+        The obligation edge was drawn whenever EITHER end was unanchored, so an unanchored
+        step obliging an anchored one got the edge — and then the anchored step was placed
+        after the very step now waiting on it. Two steps each waiting for the other, in a
+        graph nothing traverses and nothing checks for cycles: `validate` said no defects
+        and both steps were blocked for ever. The OBLIGED end alone decides now.
+        """
+        self.define("impl-thing", name="implement the thing", display="implement",
+                    obliges=["review"])
+        self.data("plugin", "plans", "create", "Q", "--display", "Q", "--lib", "impl-thing")
+        by_def = {s["def"]: s for s in self.data("plugin", "plans", "show", "p-1")["steps"]}
+        self.assertEqual(by_def["impl-thing"]["deps"], [], "and not an edge onto the review")
+        self.assertEqual(by_def["review"]["deps"], [by_def["impl-thing"]["id"]])
+
+        # The other direction is untouched: an anchored step obliging an unanchored one
+        # keeps the edge it always had, since the obliged end says nothing about when it
+        # runs and the obligation is the only order there is.
+        self.define("merge", name="merge the pull request", display="merge PR",
+                    anchor="merge", obliges=["hand-check"])
+        self.define("hand-check", name="what only a human can check", display="by hand")
+        self.data(*_create("a job", "write it"))
+        added = self.data("plugin", "plans", "name-step", "p-2", "merge")
+        by_def = {s["def"]: s for s in added["steps"]}
+        self.assertEqual(by_def["merge"]["deps"], [by_def["hand-check"]["id"]])
+        self.assertEqual(by_def["hand-check"]["deps"], ["step-1"])
+
+    def test_a_template_places_each_entry_against_the_ones_before_it(self):
+        """A template got none of the anchor fix while every entry was expanded before any
+        of them landed: `_place` saw an empty plan every time, so an anchored step found
+        nothing to be placed against, was marked a deliberate root, and then had the
+        entry's own `after` edge written onto it — a step claiming to be a start and
+        carrying a wait, with the change approval back after the implementation, which is
+        the precise defect anchors exist to remove.
+
+        Each entry lands before the next is expanded now, and its `after` is drawn in the
+        same round — an entry expanded while the one before it still had no edges saw two
+        implementation steps that both looked like sinks and waited on both.
+        """
+        d = self.catalogue("templates")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "ship.json").write_text(json.dumps(
+            {"title": "ship it", "display": "ship it", "steps": [
+                {"name": "implement it", "display": "implement"},
+                {"name": "test it", "display": "tests", "after": [1]},
+                {"def": "create-pr", "after": [2]},
+                {"def": "merge", "after": [3]}]}))
+        made = self.data("plugin", "plans", "template", "use", "ship")
+        at = {s["id"]: s for s in made["steps"]}
+        by_def = {s["def"]: s for s in made["steps"] if s.get("def")}
+
+        self.assertEqual(by_def["change-approval"]["deps"], [], "before the work, still")
+        self.assertTrue(by_def["change-approval"]["root"])
+        # The review waits on the implementation's SINK and not on both of its steps,
+        # which is what drawing the entry's edges in the same round buys.
+        self.assertEqual([at[d]["display"] for d in by_def["review"]["deps"]], ["tests"])
+        self.assertEqual(by_def["create-pr"]["deps"],
+                         [by_def["review"]["id"], by_def["change-approval"]["id"]])
+        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]])
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertNotIn("incomplete", made, f"and nothing is left to fix: {made}")
+
+    def test_the_pr_waits_on_the_approval_it_obliged(self):
+        """The guardrail the spec told this rework not to loosen: no PR without an approved
+        change contract behind it. It was loosened, and this is the test that would have
+        caught it.
+
+        The anchor puts the approval at the very start, where nothing lower exists for it
+        to come after — and a first draft left it there as a marked root that NO STEP IN THE
+        PLAN LISTED. `obliged_by` is a label; only an edge is a wait. So the whole flagship
+        plan could be ticked to merged past an approval nobody had done, with `validate`
+        silent, and the tick chain never handed anybody the two-section contract that step
+        is the whole reason for. The obligation goes back as an edge on the obliging step
+        wherever the anchor left none.
+        """
+        made = self.data("plugin", "plans", "create", "flagship", "--display", "flag",
+                         "--step", "impl = build it", "--lib", "create-pr", "--lib", "merge")
+        by_def = {s["def"]: s for s in made["steps"] if s.get("def")}
+        approval = by_def["change-approval"]["id"]
+        self.assertIn(approval, by_def["create-pr"]["deps"], "no PR without the approval")
+        self.assertEqual(by_def["change-approval"]["deps"], [], "and it is still the start")
+        self.assertTrue(by_def["change-approval"]["root"])
+        self.assertNotIn("incomplete", made)
+
+        # And the tick chain does not hand over the PR while the approval is open, which is
+        # how an agent following `next — this move unblocked` walked past it.
+        self.ok("plugin", "plans", "tick", "step-1")
+        released = json.loads(self.ok("plugin", "plans", "tick",
+                                      by_def["review"]["id"], "--json"))
+        self.assertEqual(released["data"].get("next", []), [],
+                         "the review alone does not release the PR")
+        after = json.loads(self.ok("plugin", "plans", "tick", approval, "--json"))
+        self.assertEqual([s["def"] for s in after["data"]["next"]], ["create-pr"])
+
+    def test_an_obligation_left_out_of_the_order_is_reported(self):
+        """The door behind the edge, so that a future anchor cannot lose one in silence.
+
+        An obliged step is added so it CANNOT be omitted, and one that nothing waits on and
+        that comes after nothing is omitted in every way that counts — the plan reads as
+        finished with it still open. Reported, never refused, like everything else in that
+        door: the file is meant to be edited.
+
+        The condition is the generator's own, from the other side, which is what keeps it
+        from firing on the shapes the generator makes. An obliged step whose obliger runs
+        EARLIER — `change-approval` obliges `review`, four bands ahead of it — is not
+        reported, because an edge there would say the approval waits on the review, which
+        is the inversion the anchor exists to remove.
+        """
+        self.data("plugin", "plans", "create", "D", "--display", "D",
+                  "--step", "impl = build it", "--lib", "create-pr")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+        # The PR stops waiting on the approval, which is the exact shape the bug produced.
+        steps = {s["def"]: s["id"] for s in self.steps() if s.get("def")}
+        self.edit_step(steps["create-pr"], deps=[steps["review"]])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("left out of the order", said)
+        self.assertIn(steps["change-approval"], said)
+
+        # A skip with its reason is the sanctioned way past an obligation, so a skipped one
+        # is not reported — it was dealt with rather than forgotten.
+        self.ok("plugin", "plans", "skip", steps["change-approval"],
+                "--why", "a one-line typo fix")
+        self.assertNotIn("left out of the order",
+                         self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_create_lib_lands_a_resolved_library_step_in_the_one_call(self):
+        """The whole plan in one command, which is the difference between `create` and
+        `create` plus an unbounded number of follow-ups.
+
+        A `--lib` step is a LINK like any other named step — `def` stored, `name` null,
+        the text resolved out of the library at render — and it is placed by its anchor,
+        so where the flag sat among the others decides nothing.
+        """
+        made = self.data("plugin", "plans", "create", "make X work",
+                         "--display", "make X work end to end",
+                         "--lib", "review", "--step", "impl = write it",
+                         "--lib", "change-approval")
+        by_def = {s.get("def"): s for s in made["steps"]}
+        self.assertEqual(by_def["review"]["name"], "review the implementation")
+        self.assertEqual(by_def["review"]["display"], "review")
+        stored = {s["id"]: s for s in self._doc()["plans"][0]["steps"]}
+        self.assertEqual(stored[by_def["review"]["id"]]["name"], None,
+                         "stored as a link, not a copy")
+        # Named last, and it still runs first; the review still comes after the work.
+        self.assertTrue(by_def["change-approval"]["root"])
+        self.assertEqual(by_def["review"]["deps"],
+                         [by_def[None]["id"]])
+        self.assertNotIn("incomplete", made, f"and it needs no fixing up: {made}")
+
+        # A name the library does not have is refused, and nothing is written.
+        code, out, _ = self.sb("plugin", "plans", "create", "another", "--display", "b",
+                               "--lib", "nonesuch", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("no step definition 'nonesuch'", json.loads(out)["data"]["error"])
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
+
+    def test_create_lib_sorts_its_flags_so_the_order_they_are_typed_decides_nothing(self):
+        """The claim `--lib` makes, and the one thing in this file that makes it true.
+
+        `_place` looks BACKWARDS: a step is placed against the plan as it stands, so a
+        merge minted before the PR exists waits on whatever the plan ended with then and is
+        never re-deped. `create --lib` answers that by sorting what it was given by anchor
+        before minting any of it — which is exactly why the same flags in either order have
+        to produce the same graph, and why `name-step`, which takes one name, cannot.
+
+        Named in the REVERSE of the order they run, because that is the case the sort
+        exists for: forwards, the anchors alone would get there.
+        """
+        back = self.data("plugin", "plans", "create", "B", "--display", "B",
+                         "--step", "impl = build it", "--lib", "merge", "--lib", "create-pr")
+        by_def = {s["def"]: s for s in back["steps"] if s.get("def")}
+        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]],
+                         "the human review waits on the PR, whichever flag came first")
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertNotIn("incomplete", back)
+
+        # And the same flags the other way round are the same plan, edge for edge.
+        fwd = self.data("plugin", "plans", "create", "F", "--display", "F",
+                        "--step", "impl = build it", "--lib", "create-pr", "--lib", "merge")
+        shape = lambda p: [(s.get("def") or s["name"], s["deps"], s["root"])
+                           for s in p["steps"]]
+        self.assertEqual(shape(fwd), shape(back))
+
+    def test_an_anchor_the_spine_does_not_have_is_refused_by_name(self):
+        """A closed vocabulary, unlike `progress` and `gate`, and this is what that costs.
+
+        The whole meaning of an anchor is its position in the order, so a word that is not
+        in it has no position and there is nothing honest to do with one but refuse: a typo
+        placed somewhere plausible-looking is the failure this file cannot have, since where
+        a step runs is the thing anchors were added to get right. Refused when a definition
+        carrying it is REACHED, like every other bad definition, so one typo takes down the
+        commands that touch it and not every plan in the repo.
+        """
+        self.define("groundwork", name="do the groundwork", anchor="prr")
+        self.ok(*_create("a job", "write it"))
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "groundwork", "--json")
+        self.assertEqual(code, 1)
+        why = json.loads(out)["data"]["error"]
+        self.assertIn("not where anything runs", why)
+        self.assertIn("design, build, review, pr, pre-merge, merge", why)
+        self.assertEqual(len(self._doc()["plans"][0]["steps"]), 1, "and nothing was written")
+
+        # A definition nothing reaches is not a definition anything refuses over.
+        self.ok("plugin", "plans", "name-step", "p-1", "review")
+
+    def test_placement_never_writes_a_marked_root_and_a_dep_onto_one_step(self):
+        """The two say opposite things, and `_wrong` reports the pair on a hand-edit — so
+        the generator writing one itself would be this file failing its own door.
+
+        Reachable where an obliging step and the step it obliges share a band: both are
+        placed with nothing lower than them, so both are marked starts, and then the
+        obligation is put back as an edge onto the one that obliged. The mark comes off
+        with the write, exactly as the removed `dep` verb took it off.
+        """
+        self.define("audit", name="audit the change", anchor="review", obliges=["sign-off"])
+        self.define("sign-off", name="sign the audit off", anchor="review")
+        made = self.data("plugin", "plans", "create", "A", "--display", "A", "--lib", "audit")
+        by_def = {s["def"]: s for s in made["steps"]}
+
+        self.assertEqual(by_def["audit"]["deps"], [by_def["sign-off"]["id"]],
+                         "the obligation is an edge, since the anchors drew none")
+        self.assertFalse(by_def["audit"]["root"], "and the start mark came off with it")
+        self.assertTrue(by_def["sign-off"]["root"], "which is now the plan's real start")
+        self.assertNotIn("incomplete", made, f"no door fires on what it made: {made}")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_create_lib_refuses_before_it_writes_anything(self):
+        """The guards on the new flag, which are the ones `name-step` already had.
+
+        Both are refusals rather than exceptions and both happen BEFORE the plan is made:
+        a `create` that wrote a plan and then failed would leave the agent retrying and the
+        store holding two. A definition with no board label cannot be named at all — the
+        label lives in the definition and there is no argument here that could supply one —
+        and a catalogue file that will not parse is the catalogue's answer, said so a
+        machine reader hears it rather than raised as a traceback.
+        """
+        self.define("groundwork", name="do the groundwork", display=None)
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--display", "d",
+                               "--lib", "groundwork", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("library/groundwork.json", json.loads(out)["data"]["error"])
+        self.assertEqual(self._doc()["plans"], [], "and no plan was made")
+
+        (self.catalogue("library") / "broken.json").write_text("{nope")
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--display", "d",
+                               "--lib", "review", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("not readable JSON", json.loads(out)["data"]["error"])
+        self.assertEqual(self._doc()["plans"], [])
+        (self.catalogue("library") / "broken.json").unlink()
+
+        # And a definition that PARSES and is still unusable — the expansion is where that
+        # is met, inside the mint, under the lock, with the plan half built. It comes back
+        # as a refusal like the two above and not as a raised exception, because a `create`
+        # that failed after writing would leave the agent retrying and the store with two.
+        self.define("groundwork", name="do the groundwork", anchor="prr")
+        code, out, _ = self.sb("plugin", "plans", "create", "a job", "--display", "d",
+                               "--lib", "groundwork", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("not where anything runs", json.loads(out)["data"]["error"])
+        self.assertEqual(self._doc()["plans"], [])
+
+    def test_an_unanchored_lib_step_hangs_off_what_the_plan_ends_with(self):
+        """`create --lib` places what it mints against the freetext steps typed beside it,
+        which is what makes one command a whole plan rather than a plan and a loose step.
+
+        Said with an UNANCHORED definition on purpose: an anchored one would be placed by
+        its band whatever it was handed, so this is the case that proves the plan's own tail
+        is what a `--lib` step is minted against."""
+        self.define("scan", name="scan the code", display="scan")
+        made = self.data("plugin", "plans", "create", "S", "--display", "S",
+                         "--step", "one = do the first", "--step", "two = do the second",
+                         "--lib", "scan")
+        by_def = {s.get("def"): s for s in made["steps"]}
+        self.assertEqual(by_def["scan"]["deps"], ["step-2"], "the tail, not the whole plan")
+        self.assertNotIn("incomplete", made)
+
+    def test_a_tick_prints_the_instructions_for_what_it_unblocked(self):
+        """The moment a step is picked up is the moment its `about` is worth printing, and
+        it was the moment nothing marked. `_resolve` merges a definition's name, display
+        and command onto a step and deliberately not its prose — a page under every row
+        would bury the plan — so an agent met the step and never the instruction unless it
+        already knew to go and read the definition, which is a thing you learn by having
+        got it wrong."""
+        self.data(*_create("a job", "write it"))
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+        out = json.loads(self.ok("plugin", "plans", "tick", "s-1", "--json"))
+        said = " ".join(self.ok("plugin", "plans", "tick", "s-1").split())
+
+        self.assertEqual([s["def"] for s in out["data"]["next"]], ["review"])
+        self.assertIn("read the approved text out of that step's `output`",
+                      out["data"]["next"][0]["about"])
+        self.assertIn("next — this move unblocked:", said)
+        self.assertIn("The review you would run anyway", said)
+
+        # And the same view asked for on purpose, for a step nothing has just released.
+        one = self.ok("plugin", "plans", "show", "step-2")
+        self.assertIn("The review you would run anyway", " ".join(one.split()))
+
 
 class CompletenessTest(PlansSandbox):
     """A display name and a dep on every step, and the three doors that keep them there.
@@ -1963,10 +2354,11 @@ class CompletenessTest(PlansSandbox):
         self.assertEqual(self._doc()["plans"], [], "and nothing was written")
 
         self.ok(*_create("a job", "write it"))
-        code, out, _ = self.sb("plugin", "plans", "add-step", "p-1", "review it", "--json")
+        code, out, _ = self.sb("plugin", "plans", "create", "another", "--display", "b",
+                               "--step", "review it", "--json")
         self.assertEqual(code, 1)
         self.assertIn("list claims", json.loads(out)["data"]["error"])
-        self.assertEqual(len(self._doc()["plans"][0]["steps"]), 1)
+        self.assertEqual(len(self._doc()["plans"]), 1, "and nothing was written")
 
     def test_a_definition_with_no_display_name_is_refused_at_name_step(self):
         """A named step draws its DEFINITION's label, so the refusal is about the file.
@@ -1987,7 +2379,7 @@ class CompletenessTest(PlansSandbox):
 
         The alternative — every step a root — makes the one-shot `create` warn about itself
         the moment it is used, to be pedantic about an intent nobody doubts. A plan that is
-        not a chain is reshaped with `dep`, which is the verb for it.
+        not a chain is reshaped in the file, which is where a plan is shaped.
         """
         made = self.data(*_create("a job", "write it", "review it", "merge it"))
         self.assertEqual([s["deps"] for s in made["steps"]], [[], ["step-1"], ["step-2"]])
@@ -2010,7 +2402,7 @@ class CompletenessTest(PlansSandbox):
         self.assertIn("no display name", said)
         self.assertIn("no dep", said)
         self.assertIn("the plan has no display name", said)
-        self.assertIn("dep s-2 --after", said, "and it says the command that fixes it")
+        self.assertIn('"deps": ["<step>"]', said, "and it says the edit that fixes it")
         stored = self._doc()["plans"][0]["steps"][1]
         self.assertEqual(stored["progress"], "done", "and it is in the file, not only said")
 
@@ -2034,7 +2426,8 @@ class CompletenessTest(PlansSandbox):
         """
         self.hand_edit()
         for argv in (("show", "p-1"), ("list",), ("changelog", "p-1"), ("tick", "s-2"),
-                     ("note", "s-2", "--text", "a note"), ("dep", "s-2", "--after", "s-1")):
+                     ("note", "s-2", "--text", "a note"),
+                     ("skip", "s-2", "--why", "not needed")):
             with self.subTest(verb=argv[0]):
                 self.ok("plugin", "plans", *argv)
 
@@ -2089,19 +2482,28 @@ class CompletenessTest(PlansSandbox):
 
         Two steps on disjoint work, starting side by side, could only clear the warning by
         recording an order that never happened — a lie in the record to satisfy a rendering
-        rule. `--root` says the start is meant, and a start that says so is no more
+        rule. `root: true` says the start is meant, and a start that says so is no more
         incomplete than the plan's first one is.
         """
         self.ok(*_create("a job", "build it", "document it"))
         self.edit_step("s-2", deps=[])
         self.assertIn("no dep: step-2", self.ok("plugin", "plans", "validate", "p-1"))
 
-        self.ok("plugin", "plans", "dep", "s-2", "--root", "--reason", "disjoint files")
+        self.edit_step("s-2", root=True)
         self.assertTrue(self._step("step-2")["root"])
         self.assertEqual(self._step("step-2")["deps"], [], "and no edge was invented")
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
         self.assertIn("parallel start", self.ok("plugin", "plans", "show", "p-1"),
                       "and `show` says which starts were authored as starts")
+
+        # AND THE MARK AND AN EDGE CANNOT BOTH STAND, which is what the verb that wrote an
+        # edge used to enforce by clearing the mark. The rule outlives the verb: a step
+        # claiming to be a start and carrying a wait draws as a start on the board and as a
+        # wait in the file, and only one of those can be true.
+        self.edit_step("s-2", deps=["step-1"])
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("marked a deliberate root and given a dep", said)
+        self.assertIn("step-2", said)
 
     def test_an_unmarked_second_root_is_still_reported_and_the_fix_names_both_ways(self):
         """The marker is the whole of what separates the two cases, so the unmarked one is
@@ -2111,18 +2513,8 @@ class CompletenessTest(PlansSandbox):
         self.ok(*_create("a job", "build it", "document it"))
         self.edit_step("s-2", deps=[])
         said = self.ok("plugin", "plans", "validate", "p-1")
-        self.assertIn("dep step-2 --after", said)
-        self.assertIn("dep step-2 --root", said)
-
-    def test_an_edge_takes_the_root_mark_back_off(self):
-        """A step that waits for something is not a start, so the two cannot both stand:
-        the mark is undone by the verb that made it rather than only by editing the file."""
-        self.ok(*_create("a job", "build it", "document it"))
-        self.edit_step("s-2", deps=[])
-        self.ok("plugin", "plans", "dep", "s-2", "--root")
-        self.ok("plugin", "plans", "dep", "s-2", "--after", "s-1")
-        self.assertFalse(self._step("step-2")["root"])
-        self.assertEqual(self._step("step-2")["deps"], ["step-1"])
+        self.assertIn('"deps": ["<step>"]', said)
+        self.assertIn('"root": true', said)
 
     def test_a_template_entry_joining_two_earlier_ones_records_both_edges(self):
         """A join is `"after": [1, 2]`, and both halves of it have to land.
@@ -2838,9 +3230,13 @@ class GateTest(PlansSandbox):
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
 
         # Read off the registry rather than off this file's memory of it: a verb that wrote
-        # or cleared a gate would have to break this test to arrive.
+        # or cleared a gate would have to break this test to arrive. `skip` IS a verb — it
+        # moves progress, which is the thing a gate does not — and it leaves the gate where
+        # it is, so a skipped gate is still on the board with its reason beside it.
         self.assertNotIn("gate", _plans_commands())
-        self.assertNotIn("skip", _plans_commands())
+        self.ok("plugin", "plans", "tick", "s-1")
+        self.ok("plugin", "plans", "skip", "s-1", "--why", "a one-line typo fix")
+        self.assertEqual(self.step("s-1")["gate"], "he confirms the contract")
 
     def test_a_gate_cannot_forge_a_row(self):
         """A gate is text that renders on a plan, so it goes through the door every field
@@ -2953,13 +3349,20 @@ class GateTest(PlansSandbox):
                 "agentflow/plugins/plans/",
                 "One plan is one `p-<id>.json`",
                 "sb plugin plans migrate",
-                # The three things hand-editing can silently lose.
-                "APPEND a changelog entry",
-                "NEVER drop or rewrite an entry",
-                "ADD A LIBRARY STEP with `name-step`, not by hand",
+                # What hand-editing can silently lose — and what it is NOT asked to do,
+                # which is maintain the changelog: nothing validates or refuses on it.
+                "NEVER drop or rewrite a changelog entry",
+                "You do not have to ADD an entry for a hand-edit",
+                "ADD A LIBRARY STEP with `create --lib` or `name-step`, not by hand",
                 # And what naming one brings that typing a `def` does not: the chain of
-                # obligations, and the definition's ready-to-run command.
-                "It also brings the definition's `command`",
+                # obligations. A `def` written by hand resolves everything else itself.
+                "what it does NOT do is materialise the steps its definition obliges",
+                # The agent's real tools, named, where `$EDITOR` used to be — the line
+                # that sent agents round the houses through a shell one-liner.
+                "READ IT AND EDIT IT WITH YOUR NORMAL FILE TOOLS",
+                "There is no editor to open and nothing to script",
+                # `show --json` is a VIEW, and what it resolves must not go back in.
+                "must never be written back into the file",
                 # How a step is addressed, now that step numbers are per plan and a bare
                 # one can be ambiguous. The qualified form is what a refusal asks for.
                 "HOW A STEP IS ADDRESSED",
@@ -3024,6 +3427,34 @@ class MarkdownTest(PlansSandbox):
                          self.data("plugin", "plans", "show", "p-2")["id"])
         self.assertEqual(self.data("plugin", "plans", "show", "p-2", "--markdown"),
                          self.data("plugin", "plans", "show", "p-2"))
+
+    def test_the_anchor_stays_out_of_the_comment_a_human_reads(self):
+        """The one field resolved onto the view for the CODE and for no reader.
+
+        `show --markdown` is what `create-pr` posts onto the pull request, so a step's
+        resolved `name`, `display` and `command` belong in it — they are what whoever turns
+        up reads. `anchor` is not: it is how this file decided where to put the step, weeks
+        earlier, and `anchor: pr` under a step means nothing to that reader. Dropped from
+        the copy that is dumped rather than skipped by the renderer, because a renderer
+        that knew one field name would be the template this one exists not to be.
+
+        `--json` still carries it, and that half is the point of the split: the machine
+        reader is who the field is for.
+        """
+        self.ok(*_create("ship it", "write it"))
+        self.ok("plugin", "plans", "name-step", "p-1", "create-pr")
+        md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
+        self.assertIn("open PR", md, "the resolved text a reader needs is still there")
+        self.assertNotIn("anchor", md)
+        self.assertNotIn("anchor", self.ok("plugin", "plans", "show", "step-2", "--markdown"))
+
+        shown = self.data("plugin", "plans", "show", "p-1")
+        by_def = {s.get("def"): s for s in shown["steps"]}
+        self.assertEqual(by_def["create-pr"]["anchor"], "pr", "`--json` carries it")
+        self.assertNotIn("anchor", by_def[None],
+                         "a step of its own words is not resolved at all")
+        # And the stored step holds no such field: the definition owns it, like the name.
+        self.assertNotIn("anchor", self._doc()["plans"][0]["steps"][1])
 
     def test_a_field_nobody_wrote_this_renderer_for_still_renders(self):
         """Schema drift, forwards: a plan carrying fields this code has never heard of —

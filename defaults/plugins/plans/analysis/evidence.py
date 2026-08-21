@@ -196,6 +196,16 @@ def _rework(plans: list[dict]) -> dict:
     is above 1 with no `rework` entry behind it did not get there through a verb, so it is
     reported as a record that was edited by hand rather than counted as rework that
     happened.
+
+    `by_added_step` IS A HISTORICAL COUNT and has to be read as one. `add-step` was a verb
+    and is not one any more — a step invented mid-job is written into the plan file by
+    hand, and a hand-edit stamps no changelog entry — so these entries come from plans made
+    before that changed and none will ever be added. The count is a floor and never a
+    measure, and an empty one says nothing whatever about whether a plan kept its shape.
+    Nothing here can fix that: the record does not hold what is no longer written into it,
+    and inventing a substitute signal out of the shape of the steps would be this pass
+    deciding what happened. What it does instead is SAY SO, in `gaps` below, on every
+    report that has plans with no such entries in them.
     """
     tries: list[dict] = []
     added: list[dict] = []
@@ -297,6 +307,17 @@ def _gaps(plans: list[dict], rework: dict) -> list[str]:
         out.append(f"{len(mute)} add-step entr(ies) carry no reason ({_ids(mute)}) — "
                    f"a step added for rework and a step that was simply missed look "
                    f"identical without one.")
+    if not rework["by_added_step"]:
+        # Raised on the ABSENCE, which is the opposite of every other line here, because
+        # the absence is exactly what would otherwise be read as a finding. `add-step` was
+        # a verb and is not one any more; a step invented mid-job is a hand-edit and a
+        # hand-edit stamps nothing. A report that stayed quiet here would be handing over
+        # "no shape changes" when what it has is "no record of any".
+        out.append("no add-step entries in this set, and that is not evidence that no "
+                   "plan changed shape — `add-step` is no longer a verb, a step invented "
+                   "mid-job is a hand-edit, and a hand-edit writes no changelog entry. "
+                   "Rework as an added step is unreadable from the record for any plan "
+                   "made since; only the try-count kind above is still counted.")
     if rework["unexplained_tries"]:
         out.append(f"{len(rework['unexplained_tries'])} step(s) have a try count above 1 "
                    f"with no rework entry behind it — the record was edited outside the "
