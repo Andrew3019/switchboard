@@ -1,5 +1,6 @@
 {
   "name": "list what only a human can check",
   "display": "human review",
+  "anchor": "pre-merge",
   "about": "The checks a person has to do by hand, listed for them just before the merge gate, in the bullet format `sb presets design-gate` prints — that preset is the FORMAT, and the sections it names in its own example belong to the step that named it, not to this one. Head yours for what it is. Include only what no agent could verify — end-to-end flows needing a real device or session, and UI that is new or visibly changed. Name the route and what should be seen there: which screens to open, which controls to exercise. Exclude everything already covered, always: logic under test, queries an agent ran itself, untouched UI. Repeating a check that passed is asking a person to redo an agent's work. No filler, no restating the diff. If nothing genuinely needs a human, say so and skip with that reason. This list exists to shorten review-to-ship, and every line that does not need a person lengthens it. Obliged by `merge`: it appears with every merge step named from the library, and it may be skipped with a reason — a one-line docs change needs no manual pass — but never left out."
 }
