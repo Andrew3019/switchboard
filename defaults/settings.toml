@@ -135,6 +135,7 @@ default_tier    = "default"
 # not the local branch: a local `main` is however stale the last `git pull` left it, and a
 # fork from it starts life behind. It is fetched on the spot before every fork, and falls
 # back to the local branch when there is no remote to fetch from (see `Broker._fork_base`).
+# setup: { type = "string", hint = "this repo's default branch as a remote ref, e.g. \"origin/master\"", when = "only ask if the repo's actual default branch isn't main — check it, don't assume" }
 base_branch = "origin/main"
 
 # How `sb done "<summary>"` reaches the parent's mailbox. Readers strip it, so the prefix
@@ -208,6 +209,7 @@ min_age = 86400.0
 
 # A stranded commit is docs-only if every file it touches is a `.md` or lives under one of
 # these. Path-based, deliberately: see `sweep.docs_only`.
+# setup: { type = "list", hint = "directory names (repo-root-relative) this repo's docs/notes live under, IN ADDITION to the shipped ones" }
 docs_dirs = ["notes", "design", "learnings", "research"]
 
 # ...except these, which are never docs however they are spelled. DESIGN-TRUTH.md is the
@@ -215,6 +217,7 @@ docs_dirs = ["notes", "design", "learnings", "research"]
 # is not a note somebody can regenerate.
 # (single-quoted, which in TOML is a literal string: a double-quoted one next to that name
 # reads as an unterminated citation to `tests/test_design_truth_refs.py`.)
+# setup: { type = "list", hint = "any file that's never docs however it's spelled, e.g. this repo's one trusted doc" }
 docs_never = ['DESIGN-TRUTH.md']
 
 # Shortest commit subject the squash-merge check will match on (`sweep.stranded`, rule 3).
@@ -668,4 +671,5 @@ permission_mode = "auto"
 # window, and `-r -g <file>` to add a file to the most-recently-active window as a tab
 # rather than opening a window of its own. `cursor` and `code` both do; something else
 # may not. See `board.open_report_files`.
+# setup: { type = "string", hint = "the CLI your editor uses to open a folder and add a file as a tab (e.g. \"code\") — only if it isn't cursor" }
 command = "cursor"
