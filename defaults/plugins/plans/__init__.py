@@ -431,6 +431,12 @@ LEGACY_FORMAT = 1
 # which is why nothing below compares against this list to decide whether a move is allowed.
 OPEN, DONE, SKIPPED = "open", "done", "skipped"
 
+# The two changelog ACTIONS that close a step, and so the only two that stamp when one was
+# finished. A separate list from the three words above on purpose: those are what a step
+# SAYS and are an open vocabulary a hand-edit may add to, these are what this plugin's own
+# verbs WROTE, which is a closed list and is the only thing a timestamp can be trusted from.
+CLOSING = ("tick", "skip")
+
 # How a plan's workspace was decided, stored as `workspace_from`. Four values and no more,
 # because this one IS a closed vocabulary: it describes what this code did, not what a job
 # is like, and the PR that derives records has to be able to switch on it. The two that
@@ -1101,8 +1107,8 @@ def show(ctx, args) -> Result:
     lib, bad = _lib([plan])
     if bad:
         return bad
-    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx)),
-                        markdown=bool(getattr(args, "markdown", False)))
+    md = bool(getattr(args, "markdown", False))
+    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md)
 
 
 def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:
@@ -3613,6 +3619,59 @@ class _Live:
                             if isinstance(rows, list) else None)
         return self._agents
 
+    def roles(self, names) -> dict:
+        """The role of each agent named, off the snapshot already in hand — `{name: role}`.
+
+        Free, and that is the whole argument for the column it fills: `role` is a field on
+        the row `sb status` already returned for `owner`, so a per-step "what KIND of agent
+        closed this" costs no second question and no second subprocess.
+
+        A name sb does not mention is simply absent, exactly as `owner` refuses to read that
+        scoping as a death: the snapshot is the caller's own tree, an agent closed weeks ago
+        or spawned in another tree is not in it, and the renderer falls back to the agent's
+        own name rather than to a blank (`_did`).
+        """
+        rows = self.agents() or {}
+        got = {n: str((rows.get(n) or {}).get("role") or "") for n in names}
+        return {n: r for n, r in got.items() if r}
+
+    def tokens(self, names) -> Optional[dict]:
+        """What these agents burned, summed off their own transcripts. None if none read.
+
+        NOT A FIGURE SWITCHBOARD KEEPS. Nothing in the store or in herdr counts tokens; the
+        only place the number exists is each agent's own Claude Code transcript, which sb
+        already locates per agent (`sb inspect` -> `transcript`). So this is a read of
+        somebody else's log format, and everything about it is arranged around that being
+        allowed to fail: an agent out of the caller's tree is refused, an agent that never
+        got a session id has no transcript, and a format that drifts parses to nothing.
+        Every one of those is a smaller `seen` and never an exception.
+
+        ITS OWN BUDGET, and it is paid only for `--markdown`. One `inspect` per agent is a
+        fork each where the rest of this class asks one question for the whole render, so
+        the caller only asks for this on the rendering that goes on a pull request — and it
+        is bounded separately so that a slow `sb status` cannot silently spend the clock
+        this needs, nor this the clock that reading owners needs.
+
+        `seen` beside `total` is what stops a partial answer passing for a whole one: three
+        agents read out of five is a real number about three agents, and the line that draws
+        it says so.
+        """
+        names = [n for n in dict.fromkeys(str(x) for x in names) if n]
+        if not names:
+            return None
+        clock, total, seen = _Budget(), 0, 0
+        for name in names:
+            # The smallest `inspect` sb will answer: both counts have a floor of one, and
+            # this wants neither the terminal nor the events — only the transcript PATH.
+            detail = _ask(self.ctx, "inspect", name, "-n", "1", "--events", "1",
+                          clock=clock)
+            path = (detail or {}).get("transcript")
+            got = _burned(path) if isinstance(path, str) and path else None
+            if got is not None:
+                total += got
+                seen += 1
+        return {"total": total, "agents": len(names), "seen": seen} if seen else None
+
     def owner(self, name: Any) -> Optional[str]:
         """A step's owner as the agent itself reads, right now. None when there is no owner.
 
@@ -3758,7 +3817,52 @@ class _Live:
         return DORMANT, where
 
 
-def _viewed(shown: dict, live: _Live) -> dict:
+# The four keys a Claude Code turn reports its usage under. Named rather than summed over
+# whatever `usage` holds, because it holds more than tokens — `iterations`, `speed` and a
+# `service_tier` sit in the same dict, and a reader that added up every integer in it would
+# report a token count with a stopwatch reading folded into it.
+_USAGE = ("input_tokens", "output_tokens",
+          "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _burned(path: str) -> Optional[int]:
+    """Every token in one Claude Code transcript. None when there was nothing to read.
+
+    ONCE PER MESSAGE, and this is the whole subtlety of the file. A transcript is one JSONL
+    record per CONTENT BLOCK and not per turn, and every block of one assistant message
+    carries that message's whole `usage` dict — so summing the records doubles a real
+    session's total, and by a factor that moves with how many tool calls a turn made. The
+    usage is therefore banked against the message id and counted once.
+
+    Read line by line and never loaded whole: these files run to tens of megabytes, and this
+    is on the path of a command a human is waiting on. A line that does not parse is skipped
+    rather than fatal — a transcript being written into as this reads has a torn last line,
+    which is ordinary and is not a reason to report no tokens at all.
+
+    None and not zero for a file that could not be opened, which is the distinction the line
+    that draws this is built on: an unreadable transcript is an agent not counted, where a
+    zero would be an agent that spent nothing.
+    """
+    seen: dict = {}
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    message = (json.loads(line) or {}).get("message") or {}
+                except (ValueError, AttributeError):
+                    continue
+                usage = message.get("usage") if isinstance(message, dict) else None
+                if isinstance(usage, dict):
+                    seen[str(message.get("id"))] = usage
+    except OSError:
+        return None
+    return sum(v for u in seen.values() for k, v in u.items()
+               if k in _USAGE and isinstance(v, int) and not isinstance(v, bool))
+
+
+def _viewed(shown: dict, live: _Live, *, tokens: bool = False) -> dict:
     """A resolved plan with what was read live added to the COPY, and only to the copy.
 
     This is where "never stored" is actually kept, so it is worth being explicit about the
@@ -3766,11 +3870,30 @@ def _viewed(shown: dict, live: _Live) -> dict:
     words, so annotating a step in place would write an owner's status into the plan's file on
     the next command that happens to write. Every step is copied again here, and there is
     no path from anything below to `_write` at all.
+
+    THE OTHER HALF OF THE PULL REQUEST COMMENT is added here too, and it is here rather than
+    in the renderer for one reason: `_markdown` is a pure function of the plan dict and has
+    no store, no sb and no filesystem, which is what lets every rendering test hand it a
+    literal. So the two stats that need the world — each closing agent's ROLE, and what the
+    plan burned in TOKENS — are read at this instant and put on the copy as fields, and the
+    renderer just draws two more fields. `owner_status` was already exactly this.
+
+    `tokens` is off by default and asked for only by `show --markdown`, because it is the
+    one thing here that costs a subprocess per agent (see `_Live.tokens`). `list` renders a
+    board and must not pay it; a terminal `show` has nowhere to draw it either.
     """
     steps = [dict(s, owner_status=live.owner(s.get("owner")))
              for s in (shown.get("steps") or ())]
     condition, where = live.condition(shown)
-    return dict(shown, steps=steps, condition=condition, worktree=where)
+    out = dict(shown, steps=steps, condition=condition, worktree=where)
+    # The agents that actually MOVED this plan — the `by` of every tick and skip — which is
+    # the same join both stats want and is read once for the two of them.
+    who = [c["by"] for c in _closings(out).values() if c.get("by")]
+    if (found := live.roles(who)):
+        out["roles"] = found
+    if tokens and (spent := live.tokens(who)):
+        out["tokens"] = spent
+    return out
 
 
 # -- rendering and lookup ------------------------------------------------------
@@ -4194,7 +4317,12 @@ def _walked(p: dict, skip: set, level: int = 2) -> list[str]:
 # or a table of its own inside its own section, and that is what it is for; what it cannot
 # do is forge a row of the plan's own table, because it is not in that table at all.
 
-_SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete"})
+_SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete",
+                         # Put on the copy by `_viewed` and drawn by name above: the token
+                         # total on its own line, and `roles` inside the steps table. Named
+                         # here so neither also lands in the metadata block below the fold —
+                         # `roles` especially, which is a lookup table and not a reading.
+                         "tokens", "roles"})
 _SHOWN_STEP = frozenset({"id", "name", "display", "progress", "why", "gate", "output",
                          "owner", "deps", "obliged_by", "root"})
 
@@ -4213,10 +4341,12 @@ def _comment(p: dict, steps: list) -> str:
     lines += ["", _status(steps)]
     if (span := _elapsed(p)):
         lines += ["", span]
+    if (spend := _tokens(p)):
+        lines += ["", spend]
     lines += _defect_lines(p) + _gates(steps)
     lines += ["", "## how it runs", ""] + _graph(steps)
     lines += _outputs(steps)
-    lines += ["", "## steps", ""] + _rows(steps)
+    lines += ["", "## steps", ""] + _rows(p, steps)
     lines += _metadata(p, steps)
     return "\n".join(lines)
 
@@ -4288,6 +4418,167 @@ def _span(secs: int) -> str:
     if secs < 172800:
         return f"{secs // 3600}h {(secs % 3600) // 60}m"
     return f"{secs // 86400}d {(secs % 86400) // 3600}h"
+
+
+def _closings(p: dict) -> dict:
+    """Every step's LAST closing changelog entry, keyed by step id — `{at, by}`.
+
+    The changelog is the only place a step's timing exists. Nothing stamps a step when it
+    is picked up; `tick` and `skip` are the two verbs that stamp one when it is let go
+    (`_on_step`, `CLOSING`). So "when was this finished" and "who finished it" are read off
+    the entry that finished it and off nothing else, which is why the two stats below need
+    no new field, no migration and no store.
+
+    THE LAST entry and not the first: a re-entered step is ticked, reopened by hand and
+    ticked again, and what a reader wants is when it was actually finished. The changelog
+    is append-only, so later in the list is later in time.
+
+    A step is named by the FIRST WORD of the entry's detail, which is how every verb here
+    writes one (`_progress` returns `s-2 open -> done`). Matched against the ids actually in
+    the plan rather than parsed as an id: `step-1` and `step-10` both start with `step-1`,
+    and a prefix test would credit one step's tick to another, silently.
+    """
+    ids = {str(s.get("id")) for s in (p.get("steps") or ()) if _some(s.get("id"))}
+    out: dict = {}
+    for e in (p.get("changelog") or ()):
+        if not isinstance(e, dict) or str(e.get("action") or "") not in CLOSING:
+            continue
+        at = e.get("at")
+        if not (isinstance(at, int) and not isinstance(at, bool) and at):
+            continue
+        head = str(e.get("detail") or "").split(" ", 1)[0]
+        if head in ids:
+            out[head] = {"at": at, "by": str(e.get("by") or "")}
+    return out
+
+
+def _timings(p: dict, steps: list) -> dict:
+    """How long each step took, keyed by step id: `(seconds, still running)`.
+
+    `elapsed = done_at - unblocked_at`, where `unblocked_at` is the moment the step COULD
+    have been started: the last of its deps to close, or the plan's own `created_at` for a
+    root. Measuring from there is what takes dependency-blocked time back out — a step that
+    sat behind two others for a day and then took ten minutes reads as ten minutes, which
+    is the figure somebody looking for where a plan went is after.
+
+    WHAT IS STILL IN IT, deliberately: gate-wait and pickup-idle. A step ready at midnight
+    and picked up at nine reads as nine hours. Telling those apart needs a stamp at pickup,
+    which is a schema change and a different job; the alternative here was no per-step
+    figure at all, and end-to-end is the honest one of the two available.
+
+    A dep that is not a step of this plan is IGNORED, which is the same answer `_graph`
+    gives it: the record's defect is reported in words by `incomplete`, and refusing to time
+    a step because of somebody's typo would hide a good figure behind a bad edge. A dep that
+    IS here and has not closed means the step was never unblocked — there is nothing to
+    measure from, so nothing is claimed.
+
+    A still-open step gets a RUNNING figure, flagged so its cell can say so. A negative one
+    — a hand-edited timestamp, a clock that went backwards — is dropped rather than drawn:
+    a step that took minus two hours is not a fact about the job.
+    """
+    closed = _closings(p)
+    here = {str(s.get("id")) for s in steps if _some(s.get("id"))}
+    made = p.get("created_at")
+    made = made if isinstance(made, int) and not isinstance(made, bool) and made else None
+    now = int(time.time())
+    out: dict = {}
+    for s in steps:
+        sid = str(s.get("id"))
+        deps = [str(d) for d in (s.get("deps") or ()) if str(d) in here]
+        if deps:
+            if any(d not in closed for d in deps):
+                continue                  # never unblocked: nothing to measure from
+            start = max(closed[d]["at"] for d in deps)
+        else:
+            start = made
+        if start is None:
+            continue
+        end = closed.get(sid, {}).get("at")
+        if end is None:
+            # SETTLED WITH NO STAMP: a step ticked or skipped by a hand-edit, which writes
+            # no changelog entry at all. It is finished, so a running figure would be a lie
+            # about a step nobody is working on — and there is no end to measure to, so
+            # there is no figure. A step still OPEN is the other case and is genuinely
+            # running, however long it has been.
+            if str(s.get("progress") or "") in (DONE, SKIPPED):
+                continue
+        secs = (end if end is not None else now) - start
+        if secs >= 0:
+            out[sid] = (secs, end is None)
+    return out
+
+
+def _took(timings: dict, sid) -> str:
+    """One step's elapsed, as the words that go in its cell.
+
+    `_span` and not a second duration format: the plan-total line above the table already
+    speaks in it, and two spellings of "an hour and four minutes" in one comment is exactly
+    the kind of thing a reader stops to reconcile.
+    """
+    got = timings.get(str(sid))
+    if not got:
+        return ""
+    secs, running = got
+    return f"{_span(secs)} so far" if running else _span(secs)
+
+
+def _did(closings: dict, roles: Any, sid) -> str:
+    """Who moved this step past, as the ROLE where sb would say and the name where it would not.
+
+    The role is the useful half — `worker`, `reviewer`, `qa` says what KIND of pass a step
+    got, where an agent name is a topic somebody picked at spawn time. But sb only names the
+    agents in the caller's own tree, and an agent closed weeks ago may be in neither, so the
+    name is kept as the fallback: `by lead-pr-comment-stats` is worth strictly more than a
+    blank cell, and it is a fact off the record rather than a guess off the store.
+    """
+    who = (closings.get(str(sid)) or {}).get("by") or ""
+    if not who:
+        return ""
+    role = (roles or {}).get(who)
+    return _flat(role) if role else _flat(who)
+
+
+def _mag(n: int) -> str:
+    """A count as a magnitude read at a glance: `900`, `12k`, `0.1m`, `1.2b`.
+
+    The unit steps so the mantissa stays roughly in [0.1, 100), which is Andrew's spec and
+    is the rule that keeps the figure the same WIDTH whatever the scale: a hundred thousand
+    is `0.1m` rather than `100k`, and a plan that burned two billion tokens is still four
+    characters. One decimal only below ten, because `12.3k` is precision nobody asked a
+    summary line for.
+    """
+    if n < 1000:
+        return str(n)
+    for size, suffix in ((1_000_000_000, "b"), (1_000_000, "m"), (1000, "k")):
+        if n / size >= 0.1:
+            mant = n / size
+            return ((f"{mant:.1f}".rstrip("0").rstrip(".") if mant < 10
+                     else str(round(mant))) + suffix)
+    return str(n)
+
+
+def _tokens(p: dict) -> str:
+    """The plan's total token spend, if it was readable — the line under the elapsed one.
+
+    `tokens` is put on the COPY by `_viewed`, which is the one place the store and the
+    transcripts can be reached; this reads a field and nothing else, so the renderer stays a
+    pure function of the record it was handed and the tests can hand it one.
+
+    NEVER A GUESS. The field is `{total, agents, seen}` when something was read and is
+    absent when nothing was, so a plan whose transcripts could not be found gets no line
+    rather than a zero — a zero reads as "this plan cost nothing", which is the one wrong
+    answer available here. When only some of the agents answered, how many is said out
+    loud: a partial total that looked complete would be worse than no total at all.
+    """
+    got = p.get("tokens")
+    if not isinstance(got, dict) or not isinstance(got.get("total"), int):
+        return ""
+    seen, agents = got.get("seen"), got.get("agents")
+    line = f"**Tokens:** {_mag(got['total'])}"
+    if isinstance(seen, int) and isinstance(agents, int) and agents:
+        line += (f" · across {agents} agents" if seen == agents else
+                 f" · {seen} of {agents} agents read — the rest had no transcript to read")
+    return line
 
 
 def _node(sid) -> str:
@@ -4396,13 +4687,20 @@ def _defect_lines(p: dict) -> list[str]:
     return ["", "## incomplete", ""] + [f"- {_flat(x)}" for x in p["incomplete"]]
 
 
-def _rows(steps: list) -> list[str]:
+def _rows(p: dict, steps: list) -> list[str]:
     """The steps as a real table — the flat columns only, and always a table.
 
     `obliges` is `obliged_by` read the other way round: the record says which step obliged
     this one, and what somebody reading a plan wants beside a step is what it drags in
     after it. Computed here rather than stored, because it is the same edge.
+
+    `took` and `by` are the same kind of thing one level up: both are read off the plan's
+    changelog against the plan's dep graph (`_timings`, `_closings`), and neither is a field
+    on a step. They take the whole plan as an argument for that reason — a row cannot be
+    drawn from its own dict alone once a column's value depends on when its DEPS closed.
     """
+    timings, roles = _timings(p, steps), p.get("roles")
+    closings = _closings(p)
     obliges: dict = {}
     for s in steps:
         if _some(s.get("obliged_by")):
@@ -4410,8 +4708,8 @@ def _rows(steps: list) -> list[str]:
     here = {s.get("id") for s in steps}
     blocks = {s.get("id") for s in steps
               if isinstance(s.get("output"), str) and _some(s["output"])}
-    out = ["| id | step | status | owner | after | obliges |",
-           "| --- | --- | --- | --- | --- | --- |"]
+    out = ["| id | step | status | took | by | owner | after | obliges |",
+           "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for s in steps:
         sid, name = s.get("id"), _cell("id", s.get("id"))
         cell = f'<a id="{_tag(sid)}"></a>' + (
@@ -4420,6 +4718,8 @@ def _rows(steps: list) -> list[str]:
             cell,
             _named(s),
             _state(s),
+            _took(timings, sid),
+            _did(closings, roles, sid),
             _cell("owner", s.get("owner")) if _some(s.get("owner")) else "",
             _refs(s.get("deps"), here),
             _refs(obliges.get(sid), here))) + " |")
