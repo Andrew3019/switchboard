@@ -14,14 +14,22 @@ that merely USE switchboard — sb installs nothing into a repo, and `.claude/` 
 gitignored. A shipped preset is nameable in every repo with zero install, which is the
 whole point of a setup procedure: it has to exist before the repo has been set up.
 
-WHY THE KEY LIST IS SHORT AND MUST STAY SHORT. `defaults/settings.toml` is ~670 lines and
+THIS FILE NAMES NO KEYS, AND MUST NOT START — except as an illustration of layering
+semantics, where naming one is unavoidable. The offer-set is DISCOVERED at run time from
+`# setup:` tags in switchboard's own shipped `defaults/*.toml`, and the plugin toggles are computed live as
+available-minus-enabled. That is deliberate: a key's prompt text lives once, in the tag
+next to the value it describes, instead of twice — here and there — drifting apart. If you
+find yourself adding a row naming a specific key, you are re-introducing the hardcoded
+table this rewrite deleted; add a `# setup:` tag at the key instead.
+
+WHY THE TAGGED SET IS SMALL AND MUST STAY SMALL. `defaults/settings.toml` is ~670 lines and
 almost all of it is measurement-backed tuning with a paragraph justifying each number, or
 `[herdr]`, whose own comment says these are facts about the binary rather than preferences.
-Exactly three rows below are real per-repo human choices. Every key added here is a key a
-setup walkthrough invites a stranger to change on a guess, so the bar for a fourth row is
-"a person could know the right answer without measuring anything".
+A tag invites a stranger to change that key on a guess, so the bar for tagging one is "a
+person could know the right answer without measuring anything". Absence of a tag is the
+safe default and there is no anti-tag; the tag IS the allowlist.
 
-WHY TIER 2 STOPS AT PRESETS AND ROLES. Both are discovered by filesystem glob with no
+WHY TIER 3 STOPS AT PRESETS AND ROLES. Both are discovered by filesystem glob with no
 registration step, so generating one is a file write and nothing else. A plugin is Python
 that ships and runs on other people's machines — that is a change that lands, with a plan
 and a PR, and not something a walkthrough authors on the spot.
@@ -68,86 +76,151 @@ about one key deletes bindings nobody mentioned. Read the current file, merge yo
 change into what is there, write it back. If it does not exist yet, creating it with only
 your change is correct — that is a merge with an empty file.
 
-There is one exception to "creating it fresh is fine", and it is the `todo` binding below.
-Plugin bindings (`all` / `[roles]`) once lived in `.switchboard/plugins.toml`; they now live
-in `.switchboard/presets.toml`, and switchboard reads only ONE of the two — the moment
+There is one exception to "creating it fresh is fine", and it is a plugin binding. Plugin
+bindings (`all` / `[roles]`) once lived in `.switchboard/plugins.toml`; they now live in
+`.switchboard/presets.toml`, and switchboard reads only ONE of the two — the moment
 `presets.toml` exists, `plugins.toml`'s `all`/`[roles]` are never consulted again. So if
 `.switchboard/plugins.toml` still holds `all` or `[roles]` bindings and `presets.toml` does
 not exist yet, do NOT create `presets.toml` with only your one line: MOVE those existing
 bindings into it in the same write, or the repo silently loses them. This bites exactly the
 first-time-setup repo this walkthrough is for.
 
-## First, read the current state
+## Tier 1 — discover what this repo can be asked about
 
-Before offering anything, read all of these. Any of them may be absent; absent means
-"shipped defaults apply", not an error.
+Nothing here is a fixed list. The set of questions is computed, every run, from two
+sources: `# setup:` tags in switchboard's own shipped config, and the plugins this repo can
+see but has not turned on. Do the discovery first, in full, before you say a word to the
+person — the whole point is one batched offer at the end rather than a drip of questions.
 
-- `.switchboard/settings.toml` — which of the Tier 1 keys are already set.
-- `.switchboard/plugins.toml` — is `"todo"` already in `enabled`?
-- `.switchboard/presets.toml` — is `"@todo"` already in `all` or under `[roles]`?
-- `.switchboard/roles/*.md` and `.switchboard/presets/*.md` — what has already been
-  generated here.
+**Find the tags.** The tags live in switchboard's OWN installed defaults directory —
+wherever `sb` itself is installed — not in the repo you are setting up. `sb setup` runs in
+any repo that merely USES switchboard, and such a repo has no `defaults/` of its own, so
+resolve the directory first rather than assuming the current working directory:
 
-Then offer the person only the deltas. A key already set is not a question; skipping it
-silently is right, and re-asking it is the thing that makes a second run feel broken.
-`sb plugin list` renders the current enabled-and-bound state if you want to show it rather
-than describe it.
+    DEFAULTS="${SWITCHBOARD_DEFAULTS:-$(dirname "$(dirname "$(readlink -f "$(command -v sb)")")")/defaults}"
+    grep -n '^[[:space:]]*#[[:space:]]*setup:' "$DEFAULTS"/*.toml
 
-## Tier 1 — the config values worth asking about
+That is the shipped layer only. The target repo's own `.switchboard/*.toml` is this
+walkthrough's OUTPUT — you read it separately, as the override layer, to see which keys are
+already answered — and it is never a source of tags.
 
-Three rows, and only three. Everything else in `settings.toml` is tuning with measurements
-behind it; do not offer it, and do not volunteer it if asked to "go through the settings".
+**Confirm you actually found them, and fail loudly if not.** Before you go any further,
+check that the resolved `$DEFAULTS` directory exists and contains `settings.toml` — or
+equivalently that the grep matched at least the shipped tags. If it did not, switchboard's
+defaults could not be located: STOP and say so plainly to the person, naming the path you
+tried. Do NOT conclude there is nothing to offer, and do NOT fall through to Tier 3.
+"Discovery found nothing open" is a valid state ONLY after the defaults were successfully
+located and every tagged key turned out to be already answered.
 
-| key | shipped default | ask only when | what you write |
-|---|---|---|---|
-| `editor.command` | `"cursor"` | their editor is not Cursor | `[editor]` / `command = "code"` |
-| `vocabulary.base_branch` | `"origin/main"` | the repo's default branch is not `main` | `[vocabulary]` / `base_branch = "origin/master"` |
-| `sweep.docs_dirs`, `sweep.docs_never` | `["notes", "design", "learnings", "research"]`, `['DESIGN-TRUTH.md']` | this repo's docs live under other directory names | `[sweep]` / `docs_dirs = ["docs"]` |
+Each hit is one askable key. Read the file around it, don't just take the line.
 
-`editor.command` is a CLI that must accept a folder and VS Code-style `-r -g <file>` flags;
-it is what the board's `oo` action shells out to. `vocabulary.base_branch` is what a new
-worktree forks from when `--base` is not given — check what the repo's default branch
-actually is rather than asking the person to remember. `docs_dirs` decides which stranded
-commits the sweep treats as docs-only and may therefore clean up, so a repo whose notes
-live in `docs/` and is not told so has its notes counted as real work; `docs_never` is the
-list of files that are never docs however they are spelled, and a repo with its own
-single trusted document should say so there.
+**Parse each tag.** A tag is one comment line whose payload is a TOML inline table:
 
-These arrays JOIN across layers rather than replacing, so name only what you are ADDING —
-`docs_dirs = ["docs"]` gives this repo all five directories, not one. `"!reset"` as the
-first element replaces the shipped list instead, and is what you write when the shipped
-names are actively wrong here rather than merely incomplete.
+    # setup: { type = "string", hint = "...", when = "..." }
 
-TOML tables merge key by key, so writing just these keys leaves the rest of
-`[editor]`/`[vocabulary]`/`[sweep]` alone. Show the person the exact lines, get a yes, then
-read-modify-write `.switchboard/settings.toml`.
+The fields:
 
-## Tier 1, continued — the `todo` plugin
+| field | required | meaning |
+|---|---|---|
+| `type` | yes | `"string"`, `"list"`, `"bool"` or `"enum"` — the shape of the answer |
+| `hint` | yes | the plain-language prompt you put to the human, written at the key |
+| `choices` | only when `type = "enum"` | the allowed values, as an array |
+| `when` | no | a prose condition for WHETHER to ask — a fact about the repo for you to check |
+| `key` | no | an explicit dotted target, overriding the positional rule below |
 
-`todo` ships, is not enabled, and is the only shipped plugin in that state. Offer it, and
-say what it costs: every enabled plugin's bound fragment is carried by every spawn it is
-bound to, forever. If they say yes, it is TWO decisions and two files, and doing only the
-first is the common mistake — enabled means the human can run `sb plugin todo`; bound means
-agents are told it exists.
+**Resolve each tag's target.** The tag sits immediately above the key it describes, and is
+the last line of any prose comment block above that key. So the target is the next
+non-comment, non-blank line: `<current [section]>.<key>`. An explicit `key` field overrides
+that. A tag whose target you cannot resolve is a bug in the shipped file — report it, do
+not guess.
+
+The `key = value` line under the tag is also the shipped default, so that one read gives
+you both the question and the current answer-if-nobody-says-otherwise. Nothing else to look
+up.
+
+**Then read what this repo has already answered.** For each tagged key, read the repo's
+matching `.switchboard/<same file name>` — `.switchboard/settings.toml` for a tag found in
+`defaults/settings.toml`, and so on. Absent means "shipped defaults apply", not an error.
+If the dotted key appears there, it is already answered: skip it silently. Re-asking an
+answered key is the thing that makes a second run feel broken.
+
+**Compare deltas the way sb merges layers, not by string equality.** The repo's file is an
+override layer, not a replacement, and three rules decide what "already answered" means:
+
+- **Tables merge key by key.** A repo that sets one key under `[sweep]` has not touched the
+  rest of `[sweep]`. Writing your one key back leaves its neighbours alone.
+- **Arrays JOIN across layers.** A repo whose `docs_dirs` reads `["docs"]` has all of the
+  shipped names PLUS `docs`; it has not dropped them. That it does not re-list the shipped
+  names is not a reason to re-offer the key — it is what a correctly-answered list key
+  looks like.
+- **`"!reset"` as the first element replaces instead of joining.** A repo that means the
+  shipped list is actively wrong here, rather than merely incomplete, says so that way.
+  That is still an answer, so still a skip.
+
+**A `when` is yours to check, not to assume.** It names a fact about the repo — the actual
+default branch, what the editor is — and expects you to go and look. If the fact says don't
+ask, don't ask, and say nothing about it. If it says ask, remember what you found: the
+person sees it as your reason for raising the question at all.
+
+## Tier 2 — plugins this repo could turn on
+
+Toggles carry no tag; they are computed live, so a plugin that ships off tomorrow shows up
+here with no edit to this file. The set to offer is *available minus enabled*:
+
+    sb plugin list --json
+
+Every entry with `"enabled": false` is a candidate, and its `"help"` is the plugin's own
+one-line description — use that when you explain it, rather than anything you remember
+about a particular plugin. Offer each one and say what it costs: every enabled plugin's
+bound fragment is carried by every spawn it is bound to, forever.
+
+If they say yes, it is TWO decisions and two files, and doing only the first is the common
+mistake — enabled means the human can run `sb plugin <name>`; bound means agents are told
+it exists.
 
 `.switchboard/plugins.toml` — enable it:
 
-    enabled = ["todo"]
+    enabled = ["<name>"]
 
 `.switchboard/presets.toml` — bind it, either to everyone:
 
-    all = ["@todo"]
+    all = ["@<name>"]
 
 or to one role, which is the cheaper answer when only some agents need it:
 
     [roles]
-    worker = ["@todo"]
+    worker = ["@<name>"]
 
 Both join onto the shipped lists, so again: name only the new thing. **The `@` sigil is
-required.** A bare `"todo"` in `presets.toml` names a preset FILE, not a plugin fragment;
+required.** A bare `"<name>"` in `presets.toml` names a preset FILE, not a plugin fragment;
 it is an error, not a silent no-op, and it is the single most likely typo in this step.
 
-## Tier 2 — generate a role and preset for what this repo actually is
+A plugin already enabled AND already bound is one line of "already done", not two offers.
+Enabled but not bound is a real open item: offer the binding alone.
+
+## Ask only the deltas
+
+One presentation, everything still open in it — tagged keys and plugin toggles together.
+They are the same kind of thing now: something a person could answer, that this repo has
+not answered. Do not split them into rounds, and do not ask anything the discovery above
+resolved.
+
+For each item show:
+
+- **the `hint`**, as the question — it is written for the human, so use its words;
+- **the shipped default**, so they can see that saying nothing is already a choice;
+- **the fact you checked**, whenever the tag carried a `when` — what you looked at and what
+  you found, so the reason this one is even being asked is visible;
+- **the exact lines you would write, and to which file**, before any file changes.
+
+Then get a yes, and read-modify-write. For a list key, write only what is being ADDED — the
+join does the rest, and `"!reset"` first is how they say the shipped list is wrong rather
+than incomplete. `sb plugin list` renders the current enabled-and-bound state if you want
+to show it rather than describe it.
+
+If discovery found nothing open, say exactly that and go on to Tier 3.
+
+## Tier 3 — generate a role and preset for what this repo actually is
 
 Sniff the repo type by file existence, most specific first. Stop at the first match: a
 React Native repo also has a `package.json`, and an iOS repo checked after "plain Node"
@@ -210,15 +283,18 @@ of the person before any file exists. You are guessing at their conventions and 
 not — the draft is what makes that guess correctable, and a written file is a thing they
 have to review rather than a thing they chose.
 
-Do not author a plugin. Tier 2 is presets and roles: files that are read. A plugin is
+Do not author a plugin. Tier 3 is presets and roles: files that are read. A plugin is
 Python that runs, and that goes through a plan and a PR like any other code.
 
 ## Re-runs: offer deltas, diff rather than clobber
 
-The reads at the top are what make a second run cheap. Carry them through to the end:
+Discovery is what makes a second run cheap: the offer-set is recomputed from the files
+every time and nothing is remembered between runs. Carry that through to the end:
 
-- A settings key already present is skipped, not re-asked.
-- `todo` already enabled and already bound is one line of "already done", not two offers.
+- **An already-answered key is skipped, not re-asked** — including a list key whose repo
+  value names only its additions.
+- **A plugin already enabled and already bound is one line of "already done"**, not two
+  offers.
 - **A generated file that already exists is never overwritten.** Someone has probably
   hand-edited it since — that was the point of generating it. Show the difference between
   what exists and what you would generate, and let the person choose: keep, replace, or
