@@ -42,6 +42,8 @@ line a repo would write to adopt it.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -99,13 +101,83 @@ class PlansSandbox(ShippedSandbox):
     `_sb()` — a plugin shipped inside a checkout asks that checkout's build — and pointing
     it at this repo's real `bin/sb` is what makes the shell-out run the code under test
     against the sandbox's own store rather than whatever is installed on the machine.
+
+    That shell-out is also what this file used to spend most of its time on: the resolver
+    asks up to two questions per `create` and every liveness read asks another, and each
+    one was a fresh Python interpreter importing `switchboard.cli` from scratch — ~2-3s a
+    test, ~40% of the whole suite. So `setUp` short-circuits the *process boundary* and
+    nothing else (`_short_circuit_own_sb`): the same argv reaches the same `cli.main`
+    against the same sandbox store, in this interpreter. It is not a fake sb — there is
+    still no fake sb anywhere in here — and every subprocess to any OTHER program, the
+    wedged stub `LivenessTest` writes included, is really spawned.
     """
+
+    #: The build `_sb()` resolves to from inside the sandbox, through the `bin` symlink
+    #: below. Only a call to exactly this is answered in-process.
+    REAL_SB = (Path(__file__).resolve().parent.parent / "bin" / "sb").resolve()
 
     def setUp(self) -> None:
         super().setUp()
         (self.sw / "plugins.toml").write_text('enabled = ["plans"]\n')
         root = Path(self.tmp.name)
         (root / "bin").symlink_to(Path(__file__).resolve().parent.parent / "bin")
+        self._short_circuit_own_sb()
+
+    def _short_circuit_own_sb(self) -> None:
+        """`subprocess.run([<this repo's sb>, ...])` answered by `cli.main` in this process.
+
+        Patched at `subprocess.run` rather than at the plugin's `_ask`, because sb imports
+        a plugin afresh for every command (`plugins._import`), so there is no module object
+        that lives long enough to patch in `setUp`. `subprocess` is shared by every
+        importer of it, and the discriminator is the resolved path of argv[0] — so the
+        plugin still calls `_sb()`, still gets None when there is no build, still spends
+        its `_Budget`, and a test that puts a DIFFERENT `sb` on that path gets a real fork.
+        """
+        real_run = subprocess.run
+
+        def run(argv, *a, **kwargs):
+            if self._sb_is_ours(argv):
+                return self._sb_in_process(list(argv)[1:], kwargs.get("cwd"))
+            return real_run(argv, *a, **kwargs)
+
+        patch = mock.patch("subprocess.run", run)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self._in_process_sb = True
+
+    def real_sb_subprocess(self) -> None:
+        """Spawn the real `sb` for the rest of this test, the way every test used to.
+
+        For the tests whose subject IS the process boundary: what the shell-out costs, and
+        that the argv this plugin builds really is answered by a real `sb` on a real store.
+        """
+        self._in_process_sb = False
+
+    def _sb_is_ours(self, argv) -> bool:
+        if not self._in_process_sb or isinstance(argv, (str, bytes)) or not argv:
+            return False
+        try:
+            return Path(argv[0]).resolve() == self.REAL_SB
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _sb_in_process(self, argv, cwd) -> subprocess.CompletedProcess:
+        """One `sb <argv>` through `cli.main`, wearing the `CompletedProcess` the caller
+        expects. Every failure is a non-zero exit and never an exception, because that is
+        what the caller would have seen from a real fork of a build that crashed."""
+        out, err, here = io.StringIO(), io.StringIO(), Path.cwd()
+        if cwd:
+            os.chdir(cwd)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main([str(a) for a in argv])
+        except SystemExit as e:                 # `sys.exit()` is an exit code out here
+            code = int(e.code or 0)
+        except Exception as e:                  # noqa: BLE001 — so is a traceback
+            code, _ = 1, err.write(f"{type(e).__name__}: {e}\n")
+        finally:
+            os.chdir(here)
+        return subprocess.CompletedProcess(argv, code, out.getvalue(), err.getvalue())
 
     def workspace(self, name: str, checkout: Path, *, agent: str = "") -> None:
         """A workspace row, the way `sb` writes one, so the resolver has a real answer.
@@ -273,7 +345,12 @@ class PlansTest(PlansSandbox):
         that has not. Filed once at `create`, and neither recomputed nor re-attached: a
         `git checkout -b` in the same directory used to make `list` go blind to the plan
         that was made there, with nothing recording that it had.
+
+        KEPT ON A REAL FORK. The rest of this file short-circuits the process boundary for
+        speed (`PlansSandbox`), which proves the resolver's logic but not that the argv it
+        builds is answered by a real `sb` on a real store. This one test pays for that.
         """
+        self.real_sb_subprocess()
         self.workspace("ws-1", self.repo, agent="lead-1")
         self.as_agent("lead-1")         # the normal path: a lead makes the plan
         made = self.data("plugin", "plans", "create", "a job",
@@ -3009,7 +3086,14 @@ class LivenessTest(PlansSandbox):
     def test_a_read_is_bounded_when_sb_hangs(self):
         """`show` runs with the plans lock held, so an sb that has wedged must cost seconds
         and a page of honest unknowns — never a hung `show`, and never every other plans
-        command in the repo queued behind it."""
+        command in the repo queued behind it.
+
+        A REAL FORK of a real wedged program, which is the only way this can be true: the
+        thing under test is the timeout on the subprocess, so there is nothing here to
+        stand in for it. The stub in `PlansSandbox` leaves it alone of its own accord —
+        the wedged `sb` is not this repo's build — and this says so out loud.
+        """
+        self.real_sb_subprocess()
         self.ok("plugin", "plans", "create", "a job",
                 "--display", "board: a job", "--step", 'write = write it')
         wedged = Path(self.tmp.name) / "bin"
