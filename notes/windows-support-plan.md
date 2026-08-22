@@ -86,15 +86,22 @@ The only argument for changing it was Windows-convention/tooling recognition; An
 explicitly waved that off ("forget the backup and cleanup tools"). So **no code change at all** —
 the same literal path on all three OSes. Zero work, zero regression.
 
-### D4. Symlink fallback for `.switchboard`/`CLAUDE.md` — **RECOMMEND junction+copy, flag the spirit-regression**
+### D4. Symlink strategy on Windows — **DECIDED (Andrew, 2026-08-22): Option A — Developer Mode + real symlinks, keep fallback in code**
 `broker.py:1116` `dst.symlink_to(src)` needs Developer Mode/admin on Windows and, even when
 privileged, creates the wrong link *type* for the `.switchboard` directory. On failure it
 silently logs `link_failed` and every worktree loses `.switchboard` (briefs, notes, roles,
-presets, models — all invisible) and `CLAUDE.md` (no repo context). Recommend: pass
-`target_is_directory=src.is_dir()`; on Windows fall back to a **directory junction**
-(`_winapi.CreateJunction`, no privilege needed) for `.switchboard` and a **copy** for `CLAUDE.md`
-(junctions can't target files). Note: the copy loses the "exactly one true file" design
-(`broker.py:69`) — a real regression *in spirit*, worth naming.
+presets, models — all invisible) and `CLAUDE.md` (no repo context).
+- **Andrew's machine (primary target):** enable **Developer Mode** (a one-time Windows Settings
+  toggle) so real symlinks work exactly as on macOS — one true shared copy, no drift. Code fix:
+  pass `target_is_directory=src.is_dir()` (free/correct on POSIX where it's ignored, correct on
+  Windows for a directory target).
+- **Robustness fallback (still built, for machines without Developer Mode):** on symlink failure,
+  use a **directory junction** (`_winapi.CreateJunction`, no privilege) for `.switchboard` and a
+  **copy** for `CLAUDE.md` (junctions can't target files). The copy path loses the "exactly one
+  true file" design (`broker.py:69`) — a real regression *in spirit*, but it only applies on a
+  machine that can't enable Developer Mode, not Andrew's.
+- Either way, update the two `is_symlink()` detection sites (`broker.py:1113`, `:1856`, M5) in
+  lockstep so a junction/copy isn't misread as "not ours."
 
 ---
 
@@ -133,7 +140,7 @@ Severity: **BLOCKER** = nothing works (import/spawn fails); **BREAK** = runs but
 
 | # | file:line | What | Fix |
 |---|---|---|---|
-| M1 | `defaults/settings.toml:66` (`plugins.py:608`) | `~/.local/state/switchboard` wrong convention | D3 |
+| M1 | `defaults/settings.toml:66` (`plugins.py:608`) | `~/.local/state/switchboard` wrong convention | **none** — D3 decided: keep same path on all OSes |
 | M2 | `board.py:1684` `_PATHLIKE` | regex rejects drive-letter/backslash paths ⇒ click-through feature silently no-ops | widen regex / `PureWindowsPath(...).as_posix()` on nt |
 | M3 | `herdr.py:239`, `store.py:962` | `~/.local/bin/herdr` fallback (after `shutil.which`) | platform-conditional fallback dir; low priority, `which` almost always wins |
 | M4 | `richboard.py:1105` | `legacy_windows=False` forced | likely inert (renders to a `capture()` string buffer) — verify, don't assume |
