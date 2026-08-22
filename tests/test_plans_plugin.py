@@ -2158,7 +2158,8 @@ class CatalogueTest(PlansSandbox):
         merge minted before the PR exists waits on whatever the plan ended with then and is
         never re-deped. `create --lib` answers that by sorting what it was given by anchor
         before minting any of it — which is exactly why the same flags in either order have
-        to produce the same graph, and why `name-step`, which takes one name, cannot.
+        to produce the same graph. `name-step` takes several names and sorts them the same
+        way, and the test below is the same claim made about that verb.
 
         Named in the REVERSE of the order they run, because that is the case the sort
         exists for: forwards, the anchors alone would get there.
@@ -2177,6 +2178,72 @@ class CatalogueTest(PlansSandbox):
         shape = lambda p: [(s.get("def") or s["name"], s["deps"], s["root"])
                            for s in p["steps"]]
         self.assertEqual(shape(fwd), shape(back))
+
+    def test_name_step_sorts_its_names_so_the_order_they_are_typed_decides_nothing(self):
+        """The same claim `create --lib` makes, made about the verb that adds to a plan
+        that already exists — and the fix for the ordering this file used to concede.
+
+        `name-step` took ONE name, so `name-step p-1 merge` and then
+        `name-step p-1 create-pr` left the merge waiting on the implementation: `_place`
+        looks backwards, and when the merge was minted the PR did not exist. Taking
+        several names and sorting them by anchor before minting any of them is what makes
+        one call order-insensitive, so the merge waits on the PR whichever way round the
+        names are typed.
+
+        Named in the REVERSE of the order they run, because that is the case the sort
+        exists for: forwards, the anchors alone would get there.
+        """
+        self.ok(*_create("a job", "build it"))
+        back = self.data("plugin", "plans", "name-step", "p-1", "merge", "create-pr")
+        by_def = {s["def"]: s for s in back["steps"] if s.get("def")}
+        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]],
+                         "the human review waits on the PR, whichever name came first")
+        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertNotIn("incomplete", back)
+
+        # And the same names the other way round are the same shape, edge for edge — read
+        # off the whole plan, since the freetext step is what the PR is placed against.
+        self.ok(*_create("a job", "build it"))
+        self.data("plugin", "plans", "name-step", "p-2", "create-pr", "merge")
+        shape = lambda pl: [(s.get("def") or s["name"], s["deps"], s.get("root"))
+                            for s in self.steps(pl)]
+        self.assertEqual(shape("p-2"), shape("p-1"))
+
+    def test_name_step_still_places_each_call_against_the_plan_of_that_moment(self):
+        """What sorting several names does NOT do: re-place what is already in the plan.
+
+        One call sorts; two calls are two acts, and the second is placed against the plan
+        as the first left it. That is `_place`'s rule and not a leftover — a lead who
+        shaped an edge by hand would otherwise find it silently rewritten by a later
+        `name-step`. So the answer to ordering is naming them together, and this pins that
+        the answer stops there.
+        """
+        self.ok(*_create("a job", "build it"))
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        impl = self.steps()[0]["id"]
+        first = {s.get("def"): s for s in self.steps()}
+        self.assertEqual(first["merge-human-review"]["deps"], [impl],
+                         "the human review waits on the impl, which is all there was")
+
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        by_def = {s.get("def"): s for s in self.steps()}
+        self.assertEqual(by_def["merge-human-review"]["deps"], [impl],
+                         "and is not re-deped onto the PR that arrived after it")
+        self.assertNotIn(by_def["create-pr"]["id"], by_def["merge"]["deps"])
+
+    def test_name_step_refuses_the_whole_call_before_it_writes_any_of_it(self):
+        """A verb that writes once refuses once. A bad second name has to take the first
+        one down with it: landing half of what was asked for and reporting a failure is
+        the state nobody can read, since the plan then holds a step the caller was told
+        about only as an error.
+        """
+        self.ok(*_create("a job", "build it"))
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1",
+                               "create-pr", "nonesuch", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("no step definition 'nonesuch'", json.loads(out)["data"]["error"])
+        self.assertEqual([s.get("def") for s in self.steps()], [None],
+                         "and the good name landed nothing")
 
     def test_an_anchor_the_spine_does_not_have_is_refused_by_name(self):
         """A closed vocabulary, unlike `progress` and `gate`, and this is what that costs.
