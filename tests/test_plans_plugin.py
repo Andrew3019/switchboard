@@ -3662,7 +3662,8 @@ class MarkdownTest(PlansSandbox):
         table = md.split("## steps", 1)[1].split("<details>", 1)[0]
         rows = [ln for ln in table.splitlines()
                 if ln.startswith("|") and not ln.startswith("| ---")]
-        self.assertEqual(rows[0], "| id | step | status | owner | after | obliges |")
+        self.assertEqual(
+            rows[0], "| id | step | status | took | by | owner | after | obliges |")
         for row in rows[1:]:
             self.assertTrue(row.startswith('| <a id="step-'), row)
         # And the forged rows are up in the dump's own collapsible, above that table.
@@ -3683,7 +3684,7 @@ class MarkdownTest(PlansSandbox):
                           {"id": "s-2", "name": "write it"}]}
         md = _plans()._markdown(flat)
 
-        self.assertIn("| id | step | status | owner | after | obliges |", md)
+        self.assertIn("| id | step | status | took | by | owner | after | obliges |", md)
         self.assertIn("get it approved", md)
         self.assertIn("[step-1](#step-1-output)", md)
         self.assertIn("## step-1 output", md)
@@ -3798,6 +3799,138 @@ class MarkdownTest(PlansSandbox):
         for command in _plans_commands():
             if command != "show":
                 self.assertNotIn("--markdown", _plans_args(command))
+
+
+class TelemetryTest(PlansSandbox):
+    """The three stats the pull-request comment grew: per-step elapsed, who closed a step,
+    and what the plan burned.
+
+    All three are arranged around the same rule — NEVER A GUESS. A step nothing can be
+    measured for gets a blank cell, a plan whose transcripts could not be read gets no token
+    line, and neither draws a zero. A zero is the one wrong answer available here: it reads
+    as a real measurement of nothing.
+    """
+
+    def test_per_step_elapsed_is_measured_from_when_the_step_was_unblocked(self):
+        """The figure and the two cases that decide whether it means anything.
+
+        A ROOT is measured from the plan's `created_at`, because that is the first moment
+        anybody could have started it. A step with deps is measured from the LAST of them to
+        close — which is what takes dependency-blocked time back out, and is the whole
+        reason the number is worth drawing: a step that waited a day behind two others and
+        then took ten minutes has to read as ten minutes.
+
+        A RE-ENTERED step uses the latest tick. It is ticked, reopened by hand and ticked
+        again, and the reading somebody wants is when it was actually finished, not when it
+        was first thought to be.
+        """
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        hour = 3600
+        plan = {"id": "p-1", "title": "t", "created_at": 1000, "steps": [
+            {"id": "s-1", "name": "write it", "progress": "done"},
+            {"id": "s-2", "name": "review it", "progress": "done", "deps": ["s-1"]},
+            {"id": "s-3", "name": "merge it", "progress": "done", "deps": ["s-2"]}],
+            "changelog": [
+                {"at": 1000 + hour, "by": "w", "action": "tick", "detail": "s-1 open → done"},
+                # s-2 closes two hours after s-1 did, and the day s-3 then sat waiting for a
+                # human is NOT s-2's time: s-2 is 2h and s-3 is what came after it.
+                {"at": 1000 + 3 * hour, "by": "w", "action": "tick",
+                 "detail": "s-2 open → done"},
+                # s-1 re-entered and ticked again, LATER — but that must not move s-2's
+                # start, which is s-1's last close, so s-2 is re-measured from it.
+                {"at": 1000 + 4 * hour, "by": "w", "action": "tick",
+                 "detail": "s-3 open → done"}]}
+
+        took = _plans()._timings(plan, plan["steps"])
+        self.assertEqual(took["s-1"], (hour, False))        # root: from created_at
+        self.assertEqual(took["s-2"], (2 * hour, False))    # from s-1's close, not creation
+        self.assertEqual(took["s-3"], (hour, False))
+        self.assertIn("1h 0m", _plans()._markdown(plan))
+
+        # Re-entered: the LATEST tick is the one that counts, for the step itself and for
+        # everything measuring from it.
+        plan["changelog"].append(
+            {"at": 1000 + 5 * hour, "by": "w", "action": "tick", "detail": "s-1 open → done"})
+        again = _plans()._timings(plan, plan["steps"])
+        self.assertEqual(again["s-1"], (5 * hour, False))
+        # s-2 closed BEFORE s-1's second tick, so it is now negative and is dropped rather
+        # than drawn: a step that took minus two hours is not a fact about the job.
+        self.assertNotIn("s-2", again)
+
+    def test_a_step_that_was_never_unblocked_is_left_blank_and_an_open_one_runs(self):
+        """The two absences, and why one of them is not zero.
+
+        A step whose deps have not closed was never unblocked — there is no moment to
+        measure from, so nothing is claimed. A step that IS unblocked and still open has a
+        real start and no end, so it gets a running figure marked as running; a bare number
+        there would read as finished.
+        """
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        plan = {"id": "p-1", "title": "t", "created_at": int(time.time()) - 7200, "steps": [
+            {"id": "s-1", "name": "write it"},
+            {"id": "s-2", "name": "review it", "deps": ["s-1"]}]}
+        took = _plans()._timings(plan, plan["steps"])
+        self.assertNotIn("s-2", took)               # never unblocked: no figure at all
+        self.assertTrue(took["s-1"][1], took)       # unblocked at creation, still running
+        self.assertIn("so far", _plans()._markdown(plan))
+
+        # And the third case, which is the one a real plan hits: a step SETTLED by a hand
+        # edit, which writes no changelog entry. It is finished, so it must not read as
+        # running — and there is no stamp to measure to, so it gets no figure at all.
+        plan["steps"][0]["progress"] = "skipped"
+        self.assertEqual(_plans()._timings(plan, plan["steps"]), {})
+        self.assertNotIn("so far", _plans()._markdown(plan))
+
+    def test_a_token_total_is_compact_at_every_magnitude(self):
+        """Andrew's format: the unit steps so the mantissa stays roughly in [0.1, 100), so
+        the figure is the same WIDTH whether a plan burned twelve thousand tokens or two
+        billion. The boundaries are the whole of it — 100k is `0.1m` and not `100k`."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        for count, expected in ((0, "0"), (900, "900"), (999, "999"), (1000, "1k"),
+                                (12_000, "12k"), (99_000, "99k"), (100_000, "0.1m"),
+                                (1_000_000, "1m"), (1_500_000, "1.5m"), (12_000_000, "12m"),
+                                (100_000_000, "0.1b"), (1_000_000_000, "1b"),
+                                (2_400_000_000, "2.4b")):
+            self.assertEqual(_plans()._mag(count), expected, count)
+
+    def test_tokens_that_could_not_be_read_are_absent_and_never_a_zero(self):
+        """The degradation, which is most of what this stat is. Nothing in switchboard
+        counts tokens — the number is read out of somebody else's log format, per agent,
+        through a subprocess that is refused across a tree boundary. So every way of failing
+        has to end in the line simply not being there, because a `**Tokens:** 0` on a pull
+        request is a claim that the job was free."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        plan = {"id": "p-1", "title": "t", "steps": [{"id": "s-1", "name": "write it"}]}
+        self.assertNotIn("**Tokens:**", _plans()._markdown(plan))
+        # Every shape a broken read could put there, and none of them draws a line.
+        for broken in (None, {}, {"total": None}, {"total": "lots"}, "unavailable"):
+            self.assertEqual(_plans()._tokens(dict(plan, tokens=broken)), "", broken)
+        # A transcript that is not there is None — an agent NOT COUNTED — and not a zero,
+        # which is the distinction the "3 of 5 agents read" half of the line rests on.
+        self.assertIsNone(_plans()._burned(str(Path(self.tmp.name) / "nope.jsonl")))
+
+    def test_a_transcript_is_counted_once_per_message_and_not_once_per_block(self):
+        """The one subtlety of the file being read: a Claude Code transcript is one JSONL
+        record per CONTENT BLOCK, and every block of an assistant message repeats that whole
+        message's `usage`. Summing the records doubles a real session's total, by a factor
+        that moves with how many tool calls each turn made — so usage is banked against the
+        message id and counted once. The non-token integers sitting in the same dict
+        (`iterations`, and whatever is added to it next) are left out for the same reason:
+        the figure has to be tokens and nothing else."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        turn = {"id": "msg_1", "usage": {"input_tokens": 10, "output_tokens": 5,
+                                         "cache_creation_input_tokens": 100,
+                                         "cache_read_input_tokens": 1000,
+                                         "iterations": 7, "service_tier": "standard"}}
+        path = Path(self.tmp.name) / "t.jsonl"
+        path.write_text("\n".join([
+            json.dumps({"type": "assistant", "message": turn}),   # same message, two blocks
+            json.dumps({"type": "assistant", "message": turn}),
+            "{ this line is torn and is skipped rather than fatal",
+            json.dumps({"type": "user", "message": {"role": "user"}}),
+            json.dumps({"type": "assistant", "message": dict(turn, id="msg_2")}),
+        ]) + "\n")
+        self.assertEqual(_plans()._burned(str(path)), 2 * 1115)
 
 
 def _plans_commands() -> list[str]:
