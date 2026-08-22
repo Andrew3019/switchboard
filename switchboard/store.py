@@ -257,6 +257,24 @@ CREATE TABLE agents (
                                       -- only thing they share. NULL means "no doubt as far
                                       -- as anyone has looked", which is what rows predating
                                       -- the column read as too.
+    seed_capabilities TEXT,           -- the capability set this agent was SEEDED with at
+                                      -- spawn, as a space-separated sorted list. Written
+                                      -- once, by `seed_capabilities`, and never mutated
+                                      -- afterwards: it is the record of what the role
+                                      -- said on the day this agent was made, which is a
+                                      -- different fact from what the agent holds NOW
+                                      -- (that is the `capabilities` table, which grants
+                                      -- will add to later). NULL means the row predates
+                                      -- the substrate — either an older store or a row
+                                      -- written straight to the table by something that
+                                      -- does not know about roles — and readers fall back
+                                      -- to deriving the set from `role` and `is_top`
+                                      -- exactly as the two hardcoded gates did before
+                                      -- this column existed. That fallback is what makes
+                                      -- adding the substrate a no-op for every row that
+                                      -- already exists, so it is load-bearing and not
+                                      -- tidiness. "" is NOT NULL: it is an agent seeded
+                                      -- with nothing, which is what a worker gets.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );
@@ -336,6 +354,32 @@ CREATE TABLE workspaces (
                                       -- how long a crashed one has been sitting there.
     created_at    INTEGER
 );
+
+CREATE TABLE capabilities (
+    agent         TEXT,               -- the agent that holds it. Not a foreign key: the
+                                      -- rest of this schema does not use them either, and
+                                      -- a capability row outliving its agent costs a row,
+                                      -- not a wrong answer (every read is by agent name).
+    cap           TEXT,               -- the capability STRING — `spawn`, `fork`. A new
+                                      -- gated action is a new string here, never a new
+                                      -- refusal function: that is the whole point of the
+                                      -- table. There is deliberately no `start` string
+                                      -- and there never will be — `sb start` is a
+                                      -- hardcoded, fail-closed, human-only gate in the
+                                      -- CLI, and making it grantable is how a top would
+                                      -- come to mint another top.
+    delegable     INTEGER NOT NULL DEFAULT 0,
+                                      -- may the holder pass this capability DOWN to an
+                                      -- agent it spawns? Present from the start and
+                                      -- unused until grants ship: the column belongs to
+                                      -- the row's shape, and adding it later would mean
+                                      -- an ALTER against a table full of live grants.
+    granted_at    INTEGER              -- epoch the row was written. Seeded rows carry the
+                                      -- spawn time; the column exists so a later grant is
+                                      -- distinguishable from the seed by more than
+                                      -- inference.
+);
+CREATE UNIQUE INDEX idx_caps_agent_cap ON capabilities(agent, cap);
 """
 
 # A cache key, NOT a version. It covers the SCHEMA string verbatim, so editing a comment
@@ -797,8 +841,13 @@ def _table_ddl(table: str) -> list[str]:
     m = re.search(rf"CREATE TABLE {table} \(.*?\n\);", SCHEMA, re.S)
     if m:
         out.append(m.group(0).replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
-    for i in re.finditer(rf"CREATE INDEX \w+\s+ON {table}\(.*?\);", SCHEMA):
-        out.append(i.group(0).replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+    # `UNIQUE` is optional in the pattern and not in the output: an index declared UNIQUE
+    # is created UNIQUE on a store that predates it too, or the constraint the writing code
+    # relies on would exist only in stores built from scratch.
+    for i in re.finditer(rf"CREATE (?:UNIQUE )?INDEX \w+\s+ON {table}\(.*?\);", SCHEMA):
+        out.append(re.sub(r"^CREATE (UNIQUE )?INDEX ",
+                          lambda m: f"CREATE {m.group(1) or ''}INDEX IF NOT EXISTS ",
+                          i.group(0), count=1))
     return out
 
 
@@ -1075,10 +1124,52 @@ def claim_agent(
     return cur.rowcount == 1
 
 
+def seed_capabilities(db: sqlite3.Connection, name: str, caps) -> None:
+    """Record the capability set an agent was spawned with. Once, and never again.
+
+    Two writes, and they say different things. The `capabilities` rows are what the agent
+    HOLDS — a set that grants may add to later. `agents.seed_capabilities` is what the role
+    said on the day it was made, which is the fact `restore` needs when it rebuilds a row
+    and the fact nothing may edit; the `WHERE seed_capabilities IS NULL` is what makes
+    "written once" a property of the store rather than a promise about callers.
+
+    Called after the name is claimed, not inside the claim: the claim is the arbiter two
+    concurrent spawners share and it stays one statement. A spawn that dies in between
+    leaves a row with a NULL seed, which every reader already handles — it is the same
+    shape as a row from before this column existed, and it derives the same set.
+    """
+    caps = sorted(set(caps))
+    ts = now()
+    db.execute("UPDATE agents SET seed_capabilities=? "
+               "WHERE name=? AND seed_capabilities IS NULL", (" ".join(caps), name))
+    for cap in caps:
+        db.execute("INSERT OR IGNORE INTO capabilities(agent, cap, delegable, granted_at) "
+                   "VALUES (?,?,0,?)", (name, cap, ts))
+    db.commit()
+
+
+def capabilities_of(db: sqlite3.Connection, name: str) -> set:
+    """The capabilities this agent holds NOW, read from the table.
+
+    Only meaningful for a row that has been seeded — a NULL `seed_capabilities` means
+    nobody has written these rows, and an empty set read here would be the substrate
+    inventing a refusal for a row that predates it. The caller checks that first
+    (`Broker._capabilities_of`); this function just answers what the table says.
+    """
+    return {r["cap"] for r in
+            db.execute("SELECT cap FROM capabilities WHERE agent=?", (name,))}
+
+
 def drop_agent(db: sqlite3.Connection, name: str) -> None:
     """Remove a row. Only ever used to undo a claim whose spawn then failed — otherwise
-    an agent that never started would hold its name against every later attempt."""
+    an agent that never started would hold its name against every later attempt.
+
+    The capability rows go with it. They are keyed on the NAME, and the name is about to be
+    handed to a different agent — leaving them would let the next holder of it inherit a
+    set nobody seeded for it, which is the one way a dropped row can still decide something.
+    """
     db.execute("DELETE FROM agents WHERE name=?", (name,))
+    db.execute("DELETE FROM capabilities WHERE agent=?", (name,))
     db.commit()
 
 
