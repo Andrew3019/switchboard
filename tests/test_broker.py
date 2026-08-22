@@ -550,9 +550,27 @@ class BrokerTest(unittest.TestCase):
 
     def test_the_dispatcher_is_told_what_operator_procedures_this_repo_offers(self):
         """The menu exists so a person standing in front of a waiting dispatcher can be
-        told what it can run, without the list being written into anyone's prose."""
+        told what it can run, without the list being written into anyone's prose. The
+        readable name leads and the command follows: the human picks by meaning, so what
+        they can be shown has to be the plain words, not `sb presets sb-setup`."""
         self._start_top()
-        self.assertIn("sb presets sb-setup", self._started_prompts())
+        joined = self._started_prompts()
+        self.assertIn("sb presets sb-setup", joined)
+        self.assertLess(joined.index("set up this repo's switchboard config"),
+                        joined.index("sb presets sb-setup"))
+
+    def test_the_menu_is_ordered_into_the_dispatchers_first_message(self):
+        """The list existing in the prompt is not the requirement: dispatchers read the
+        older factual phrasing and sat on the menu forever. It has to be an order about
+        the very first message, an invitation the person can answer, and one that does
+        not demand the list again after that."""
+        self._start_top()
+        joined = self._started_prompts()
+        self.assertIn("very first message", joined)
+        self.assertIn("Would you like to run any of these?", joined)
+        self.assertIn("bulleted line", joined)
+        self.assertIn("only if someone asks", joined)
+        self.assertIn("repeating it unprompted is noise", joined)
 
     def test_a_worker_is_not_told_any_of_it(self):
         """Gated on the role, not merely on the registry being non-empty: the menu is one
@@ -569,7 +587,7 @@ class BrokerTest(unittest.TestCase):
         self._start_top()
         joined = self._started_prompts()
         self.assertNotIn("sb presets sb-setup", joined)
-        self.assertNotIn("operator procedures", joined)
+        self.assertNotIn("Would you like to run any of these?", joined)
 
     def test_a_wrapped_description_does_not_kill_every_dispatcher_spawn(self):
         """`config.prompt` flattens the TEMPLATE and interpolates after, so a description

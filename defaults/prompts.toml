@@ -57,12 +57,23 @@ roles = "The roles that exist are: {roles}. That is the list `--role` takes; a n
 # hardcoded — same property `{roles}` is paid for above: a repo that adds an entry gets it
 # here with nothing edited.
 #
-# Stated as a FACT, not as an instruction to speak. A dispatcher started WITH a real task
-# must not be derailed into reciting a menu, and an instruction here would also argue with
-# `spawn.start_task`'s "Await my instructions." The last sentence names the one moment the
-# menu is worth raising, and leaves every other moment alone.
-#   {menu} the registry as one flat "; "-separated line, `command — description`
-operator_menu = "This repo offers these operator procedures a person can ask you to run: {menu}. Offer them when someone is standing by without a task."
+# An INSTRUCTION to speak, and the only one in this file that fires unprompted: the menu
+# is worthless if the person in front of the dispatcher never learns it exists, and the
+# older factual phrasing left dispatchers free to sit on it forever — which they did. So
+# the first message is mandatory and the rest are not: once the human has seen the list,
+# repeating it is noise, and the fragment says so without forbidding it outright.
+#
+# It fires even when `sb start` came with a task, and the earlier objection — that a
+# task-bearing dispatcher must not be derailed into reciting a menu — is overruled: the
+# offer is one cheap line and the human still gets their task answered immediately after
+# it, which is what dispatchers were seen to do live.
+#
+# It is an INVITATION, not a recital. The person picks by meaning, so what they read is the
+# plain-words name on its own bulleted line — `sb presets sb-setup` is the internal verb,
+# unreadable as a choice. The command still travels in `{menu}` (name then command) because
+# the dispatcher is the one who has to run it once they have chosen.
+#   {menu} the registry as one flat "; "-separated line, `description — command`
+operator_menu = "Open your very first message to the human with this offer, whatever else you say. Ask, in these words — Would you like to run any of these? — then list each procedure on its own bulleted line, named by what it does in plain words rather than its raw command, so the person can choose one by meaning; when they choose, run it for them. The procedures, given as name then command: {menu}. Afterwards, raise it again only if someone asks — repeating it unprompted is noise."
 
 # Added only when the agent is being placed in a named workspace.
 #

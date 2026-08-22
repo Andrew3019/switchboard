@@ -15,9 +15,11 @@
 # `"!reset"` (inline, as above) — a same-command different-description row is a second row,
 # not an override.
 #
-# `command` is the verb the dispatcher tells the human to run, written the way a person
-# would type it. Keep both fields short: they are joined into one line of every dispatcher's
-# system prompt.
+# `command` is the verb the dispatcher runs once the human has chosen the procedure, still
+# written the way a person would type it. Keep both fields short: they are joined into one
+# line of every dispatcher's system prompt. A `description` must be a single plain phrase —
+# no bullets, headings or newlines — because it becomes one bulleted item of the menu, and
+# `config.flatten` turns any of those into the "; " that separates one entry from the next.
 
 [[skill]]
 command = "sb presets sb-setup"
