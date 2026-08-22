@@ -1,6 +1,7 @@
 # Adversarial review — lens: the zero-regression-to-macOS/Linux claim (D1 psutil priority)
 
-Artifact: `notes/windows-support-plan.md` @ `d2c4807`, branch `lead-windows-support-plan`.
+Artifact: `notes/windows-support/native-port-plan.md` @ `d2c4807`, branch `lead-windows-support-plan`.
+*(Path corrected 2026-08-22: this reviewed the **native-port** plan, which then lived at `notes/windows-support-plan.md` and is now `notes/windows-support/native-port-plan.md`. The file at `notes/windows-support-plan.md` today is the WSL2 plan, which this did NOT review.)*
 Reviewer: `reviewer-zero-regression`. Date 2026-08-22.
 
 **Verdict: the zero-regression claim does NOT hold as written.** §5 says "The POSIX side of every

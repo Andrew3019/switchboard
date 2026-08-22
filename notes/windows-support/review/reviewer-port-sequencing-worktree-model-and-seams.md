@@ -1,6 +1,7 @@
 # Adversarial review — port sequencing under switchboard's own multi-agent model + the four new seams
 
-Reviewer: `reviewer-port-sequencing`. Artifact: `notes/windows-support-plan.md` @ `75e0a24`.
+Reviewer: `reviewer-port-sequencing`. Artifact: `notes/windows-support/native-port-plan.md` @ `75e0a24`.
+*(Path corrected 2026-08-22: this reviewed the **native-port** plan, which then lived at `notes/windows-support-plan.md` and is now `notes/windows-support/native-port-plan.md`. The file at `notes/windows-support-plan.md` today is the WSL2 plan, which this did NOT review.)*
 Lens: (A) can this be BUILT by several agents in one shared worktree? (B) do the four new
 shared seams hold together as designs?
 

@@ -1,4 +1,6 @@
-# Adversarial review — §2 inventory completeness — `notes/windows-support-plan.md`
+# Adversarial review — §2 inventory completeness — `notes/windows-support/native-port-plan.md`
+
+*(Path corrected 2026-08-22: this reviewed the **native-port** plan, which then lived at `notes/windows-support-plan.md` and is now `notes/windows-support/native-port-plan.md`. The file at `notes/windows-support-plan.md` today is the WSL2 plan, which this did NOT review.)*
 
 Reviewer: `reviewer-inventory-completene`. Lens: **is the §2 inventory of platform-specific
 code paths complete?** Nothing else was reviewed and nothing was changed.

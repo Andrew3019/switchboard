@@ -1,3 +1,17 @@
+> **⚠️ CORRECTION (2026-08-22, adversarial review rounds 1–2) — three claims in the WSL2 row below
+> are withdrawn.**
+> - *"switchboard needs zero Windows-specific code"* — **false.** One required fix: `live.py`'s
+>   `lsof` invocation is blind on Ubuntu 24.04 (`../windows-support-plan.md` §2.1).
+> - *"Microsoft has driven this to near one-command"* — **withdrawn** for a non-developer. The real
+>   setup is ~17 steps, several failing silently (§2.4, §3).
+> - *"Only WSL-specific note in herdr's docs is a cosmetic cursor-drawing default … not a
+>   functional gap"* — **false.** herdr carries three runtime WSL divergences (§1), and there is a
+>   real functional gap: on a stock WSL2 distro switchboard's blocked-agent → human notification is
+>   silent and switchboard cannot tell (§2.3).
+>
+> **The ranking itself stands** — WSL2 is still rank 1, and no round of review attacked that.
+> The corrected reasoning is in [`../windows-support-plan.md`](../windows-support-plan.md).
+
 # Every way to run switchboard on a Windows PC — ranked comparison
 
 Scope: breadth survey per brief (`.switchboard/briefs/researcher-windows-options/brief.md`).

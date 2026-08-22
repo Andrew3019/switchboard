@@ -1,3 +1,15 @@
+> **⚠️ CORRECTION (2026-08-22, adversarial review round 1) — the F1 `lsof` row below is WRONG.**
+> This document's F1 row says "Dissolves — High", and §1a says the Linux lsof parse bug was
+> "re-confirmed" not to exist. **It does exist.** lsof **4.95.0** — shipped by **Ubuntu 24.04, the
+> distro `wsl --install` installs by default** — emits **3-line** `-F pcn` groups, so
+> `live._parse` rejects the whole scan and `sb cleanup` / `sb workspace close` refuse permanently.
+> Measured across five images in [`lsof-linux-measurement.md`](lsof-linux-measurement.md); the
+> earlier check tested only lsof 4.93.2 (Ubuntu 22.04 / Debian 11, both superseded). The fix is
+> `-F pcnf`. Consequently line 212's *"the same GNU lsof build is what WSL2 distros ship"* is also
+> wrong — the build is the variable. **Every other row in this document stands and was re-verified
+> in review.** The corrected story is in [`../windows-support-plan.md`](../windows-support-plan.md)
+> §2.1.
+
 # WSL2 viability for switchboard "Windows support" — verification findings
 
 Scope: verify whether running switchboard (and herdr) as **Linux inside WSL2** dissolves the

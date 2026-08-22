@@ -1,6 +1,7 @@
 # Adversarial review of the Windows-support plan — final report
 
-**Artifact:** `notes/windows-support-plan.md` (branch `lead-windows-support-plan`).
+**Artifact:** `notes/windows-support/native-port-plan.md` (branch `lead-windows-support-plan`).
+*(Path corrected 2026-08-22: this reviewed the **native-port** plan, which then lived at `notes/windows-support-plan.md` and is now `notes/windows-support/native-port-plan.md`. The file at `notes/windows-support-plan.md` today is the WSL2 plan, which this did NOT review.)*
 **Procedure:** the `adversarial` preset — one standing proposer, a fresh single-lens reviewer each
 round, run sequentially. **Round count: hit the 4-round cap.**
 

@@ -1,6 +1,7 @@
 # Adversarial review — phase ordering / dependency correctness (§3) + testability honesty (§4)
 
-Artifact: `notes/windows-support-plan.md` @ `lead-windows-support-plan`.
+Artifact: `notes/windows-support/native-port-plan.md` @ `lead-windows-support-plan`.
+*(Path corrected 2026-08-22: this reviewed the **native-port** plan, which then lived at `notes/windows-support-plan.md` and is now `notes/windows-support/native-port-plan.md`. The file at `notes/windows-support-plan.md` today is the WSL2 plan, which this did NOT review.)*
 Lens only. Everything below verified against real files in this worktree; commands shown.
 
 **Verdict: the phase *ordering* is sound; the *exit criteria* and the CI/testability claims are

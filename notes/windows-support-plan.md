@@ -7,15 +7,25 @@ scope error (see the note below).
 ## TL;DR
 
 **Recommendation: run switchboard inside WSL2** (Windows Subsystem for Linux 2 — a real Linux
-kernel Microsoft ships built into Windows). WSL2 *is* Linux, so every one of the ~30
-*Windows-gated* blockers the native port would have to fix simply never executes, and it rides
-herdr's **stable** Linux support instead of herdr's experimental-beta *native*-Windows support.
+kernel Microsoft ships built into Windows). WSL2 *is* Linux, so the **Windows-gated** blockers
+the native port would have to fix — most of the ~30 the native plan found — simply never execute,
+and it rides herdr's **stable** Linux support instead of herdr's experimental-beta
+*native*-Windows support. **Two of those ~30 classes are not Windows-gated and do not dissolve**
+(§1): the `lsof` scan, and the encoding sites.
 
-The code cost is **one required fix, not zero** — `live.py`'s `lsof` invocation is measurably
-blind on Ubuntu 24.04, the distro `wsl --install` gives you, which makes `sb cleanup` and
-`sb workspace close` refuse permanently. It is a one-character fix (§2.1) and it is the only thing
-standing between "runs on WSL2" and "works on WSL2". Beyond that the cost is setup friction and
-one placement rule (keep the repo on the Linux side, not `/mnt/c`).
+Three costs, not one:
+
+1. **One required code fix.** `live.py`'s `lsof` invocation is measurably blind on Ubuntu 24.04,
+   the distro `wsl --install` gives you, which makes `sb cleanup` and `sb workspace close` refuse
+   permanently. One character (§2.1).
+2. **One required configuration step.** On a stock WSL2 distro switchboard's only blocked-agent →
+   human path is **silent, and switchboard cannot tell** (§2.3). The doorbell has to be switched on
+   deliberately; nothing surfaces it if you don't.
+3. **One placement rule.** Keep the repo on the Linux side, not `/mnt/c` — a *correctness* rule,
+   not a speed one (§2.2).
+
+Beyond those three it is setup friction — but a lot of it: §3 is 17 steps and several of them fail
+silently rather than with an error (§2.4).
 
 Two honesty notes up front: switchboard's Linux CI runs the unit suite with **no herdr and no
 tmux**, so the pane/agent/fleet surface is unproven on Linux (`tests.yml:17-21`) — "CI-tested on
@@ -42,9 +52,10 @@ filed as a switchboard bug.)
 
 ## 1. Why WSL2 works — every *Windows-gated* blocker dissolves
 
-The native-port plan found ~30 platform-specific blockers. **Every blocker that is gated on a
-Windows-specific code path** — Python `sys.platform == "win32"` / `os.name == "nt"`, or herdr's
-Rust `cfg(windows)` compile-time target. A process inside WSL2 runs on a **real Linux kernel**;
+The native-port plan found ~30 platform-specific blockers. **Every blocker gated on a
+Windows-specific code path dissolves** — that is, anything behind Python
+`sys.platform == "win32"` / `os.name == "nt"`, or herdr's Rust `cfg(windows)` compile-time target.
+A process inside WSL2 runs on a **real Linux kernel**;
 the Python interpreter reports `linux` and the herdr binary is a genuine
 `x86_64-unknown-linux-gnu` build. So none of those Windows branches ever execute — this is not
 emulation or a shim, these specific lines of code simply do not run. (Full verification, blocker
@@ -55,7 +66,8 @@ both rather than omitting them:
 
 - **F1, the `lsof` scan** — gated on the *lsof revision the distro ships*. Measured broken on the
   default WSL2 distro. This is a required code fix; see §2.1.
-- **The ~52 encoding sites (F7b/F9/F10/F11/F12)** — gated on the *runtime locale*. Nothing about
+- **The encoding sites — 26 (F9) + 26 (F12), plus F7b and the stdio pair F10/F11** — gated on the
+  *runtime locale*. Nothing about
   them is a Windows branch; they are a latent POSIX bug today. WSL2 does not fix them, it merely
   defaults to UTF-8 so they do not bite. See §2.5.
 
@@ -114,7 +126,7 @@ under WSL2 (but **not** native Windows) — another point in WSL2's favor.
 
 ---
 
-## 2. The real costs — one code fix, one correctness rule, and setup friction
+## 2. The real costs — a code fix, a config step, a correctness rule, setup, and hygiene
 
 WSL2 is near-zero *code* work. It is not zero code work, and it is not zero friction.
 
@@ -138,7 +150,7 @@ included — so it is not a Linux special-case, it is the invocation being expli
 was relying on lsof to volunteer.
 
 This also settles a tracked contradiction: `tests/test_live.py:70`'s darwin-only skip and the CI
-comment at `tests.yml:17-21` are **correct**, and `audits/researcher-process-liveness-findings.md`'s
+comment at `tests.yml:17-21` are **correct**, and `windows-support/audits/researcher-process-liveness-findings.md`'s
 headline claim that the Linux parse bug "does not reproduce" is **wrong** — it tested only lsof
 4.93.2. Its recommendation to un-skip that test would have turned a real gap into a red build.
 
@@ -226,13 +238,15 @@ Earlier drafts called this "~one-command install". That phrase is withdrawn. Cou
 non-developer has to do **all** of the following, in order, with no step optional:
 
 one Administrator PowerShell command + a reboot → possibly a BIOS virtualization toggle → a distro
-first-run (Linux username/password) → `apt update` **then** `apt install` → a piped-curl herdr
+first-run (Linux username/password) → `apt update` **then** `apt install` → a **Python version
+check that can disqualify the distro entirely** (3.11 floor; Ubuntu 22.04 fails it) → a piped-curl herdr
 install with a `PATH` caveat that reads as "it didn't work" → a Claude Code install → a
 **browser-based login with no browser** (WSL2 has no `xdg-open` handler by default, so it is a
 copy-the-URL-into-Windows step) → `git clone` → a **hand-made symlink**, because switchboard has no
-install procedure at all (§3.7) → two `git config --global` lines, or every agent's first `sb done`
+install procedure at all (§3.10) → two `git config --global` lines, or every agent's first `sb done`
 fails to commit → a settings change in a TUI (§2.3) → and knowing that `sb start` runs in *their
-own project repo*, not in the switchboard checkout they just cloned.
+own project repo*, not in the switchboard checkout they just cloned → `sb doctor` to confirm any
+of it worked.
 
 None of it is hard for a developer. All of it is new for someone who isn't, and several steps fail
 **silently or misleadingly** rather than with an error — which is what makes this a real cost and
@@ -298,7 +312,7 @@ hand-patch a source file, and an earlier draft of this section did exactly that.
    sudo apt install -y git curl lsof bubblewrap libnotify-bin pulseaudio-utils
    ```
    `curl` is needed by herdr's installer; `bubblewrap` by Claude Code's WSL2 sandbox
-   (`researcher-wsl2-viability-findings.md` §2); `lsof` by §2.1; the last two by §2.3.
+   (`windows-support/researcher-wsl2-viability-findings.md` §2); `lsof` by §2.1; the last two by §2.3.
 5. **[L] Check the Python floor — it is hard, not a preference:**
    ```
    python3 -V
@@ -324,7 +338,7 @@ hand-patch a source file, and an earlier draft of this section did exactly that.
    reads like a failed install and isn't. **Close the terminal and open a new one**, then
    `command -v herdr`. Both `linux/x86_64` and `linux/aarch64` are supported
    (`install.sh:24-28`), so ARM Windows laptops are covered.
-8. **[L] Install Claude Code** (its Linux/WSL2 install). **[W-ish] The login is browser-based and
+8. **[L] Install Claude Code** (its Linux/WSL2 install). **[W] The login is browser-based and
    WSL2 has no default browser handler** — expect to copy the URL out of the terminal and paste it
    into a Windows browser. This is the step non-developers stall on.
 
@@ -384,18 +398,27 @@ hand-patch a source file, and an earlier draft of this section did exactly that.
     (`defaults/settings.toml:139`, `broker.py:1815-1817`) — a project on `master` with no remote
     fails at the first delegate.
 
+    **`sb init` is optional here, not a missing step** — checked, because the guide's shape invites
+    the question. `store.main_checkout()` falls back to inferring the checkout from `.git`'s common
+    dir when nothing is pinned (`store.py:122-132`), and `_refuse_outside_main_checkout` explicitly
+    *skips* rather than guesses when it cannot establish one (`broker.py:1203-1221`). So `sb start`
+    works on an ordinary clone without it. Running `sb init` once in the project is still worth it:
+    it pins `main_checkout` rather than leaving it inferred (which is wrong under
+    `--separate-git-dir` or a relocated `.git`) and keeps switchboard's local config out of
+    `git status`.
+
 ### Part 5 — day 2
 
-14. **Getting back in tomorrow:** run `herdr` to reattach; `ctrl+b q` detaches without killing
+14. **[L] Getting back in tomorrow:** run `herdr` to reattach; `ctrl+b q` detaches without killing
     anything. The herdr server outlives your terminal (real POSIX `setsid`).
-15. **Sleep, and `wsl --shutdown`:** `wsl --shutdown` stops the whole Linux VM and everything in
+15. **[W] Sleep, and `wsl --shutdown`:** `wsl --shutdown` stops the whole Linux VM and everything in
     it. Whether a running fleet survives Windows sleep/hibernate, WSL's idle timeout, or the clock
     jump on resume is **the biggest open question in this plan** — see §6. Until someone tests it,
     assume an overnight fleet may not be there in the morning.
-16. **Where your state lives:** SQLite under the project repo's shared `.git`, so every worktree
+16. **[L] Where your state lives:** SQLite under the project repo's shared `.git`, so every worktree
     finds the same one (`README.md:115-118`). It is operational state and disposable by
     construction — losing it does not lose your code, which is in git.
-17. **Updating:** `herdr update` for herdr; `git pull` in `~/switchboard` for switchboard (the
+17. **[L] Updating:** `herdr update` for herdr; `git pull` in `~/switchboard` for switchboard (the
     symlink keeps working); Claude Code's own updater. After a herdr update, re-run `sb doctor` —
     switchboard pins a *minimum* herdr version, and newer-than-tested is not the same as verified
     (`herdr.py:9` notes the protocol pin).
@@ -406,7 +429,7 @@ Full ranked table + citations in `windows-support/researcher-windows-options-fin
 
 | Rank | Option | Verdict |
 |---|---|---|
-| **1** | **WSL2** | Recommended. Rides herdr's stable Linux binary, one-character switchboard fix (§2.1) and nothing else required, runs locally (no cloud bill, no second machine, works offline). **Not** a one-command install for a non-developer — see §2.4. |
+| **1** | **WSL2** | Recommended. Rides herdr's stable Linux binary. **Code cost:** one character (§2.1). Also needs the §2.3 doorbell switched on and the §2.2 placement rule — neither is code. Runs locally (no cloud bill, no second machine, works offline). **Not** a one-command install for a non-developer — see §2.4. |
 | 2 | **Remote into a Linux host, attach from Windows** | herdr's *documented intended* Windows story (Windows = client, Linux = host; Windows-as-host is unsupported). Wins over WSL2 **only if** the user already wants a persistent Linux box that outlives the laptop (home server; agents running overnight). Otherwise it's more operational burden (uptime/cost/SSH) for the same result. |
 | 3 | Cloud dev box (Codespaces / cloud VM) | Same mechanism as #2, no box to maintain, but a recurring bill and always-online. Only if zero local footprint is wanted. |
 | 4 | Full Linux VM (Hyper-V/VirtualBox) | Strictly heavier than WSL2 for the identical result. Essentially never wins here. |
@@ -428,6 +451,18 @@ or misleadingly (§2.4), and it is the **largest** piece of work here — larger
 things must happen before anyone is handed it: the §2.1 fix lands in the repo, and **the guide is
 walked end-to-end on a real Windows machine** (§6). Handing this document to a non-developer today
 would not work; it is the specification for a guide, now written as one, not a validated one.
+
+**One support-matrix decision this plan makes, stated here rather than buried in a setup step:
+the supported target is Ubuntu 24.04 plus the §2.1 fix.** The two candidate distros each fail one
+requirement, in opposite directions:
+
+| Distro | Python | lsof | Verdict |
+|---|---|---|---|
+| Ubuntu 22.04 | **3.10 — switchboard will not import** (`config.py:41` needs `tomllib`, 3.11+) | 4.93.2, no §2.1 bug | **Disqualified** |
+| Ubuntu 24.04 | 3.12 — fine | **4.95.0 — the §2.1 breakage** | **Supported, with the fix** |
+
+There is no combination that needs neither. This is why §2.1 is *required* rather than *optional*,
+and it is a decision to ratify, not a detail.
 
 Offer **remote-into-Linux** as the alternative for the specific user who wants a persistent Linux
 box independent of the laptop. Keep the **native-Windows** plan parked as the "if herdr's Windows
@@ -468,8 +503,18 @@ a live WSL2 run. High-confidence because the platform gating is mechanical (`cfg
   `HERDR_PROCESS_DETECTION=child-groups` fallback if not. Low risk; switchboard mostly drives
   agent state explicitly.
 - Claude Code's current-version WSL2 sandbox/hooks/git specifics (documented, not re-tested).
+- **That `wsl --install` gives you Ubuntu 24.04.** Asserted as flat fact in the TL;DR, §1's table,
+  §2.1 and §3 — and it is *load-bearing*: it is the whole reason §2.1 is required rather than
+  optional (22.04's lsof 4.93.2 has no bug) and the reason the Python 3.11 floor is satisfiable at
+  all. It is documented Microsoft behaviour that **has changed before** and is Windows-version
+  dependent. Nobody here has watched `wsl --install` pick a distro.
+- **That Ubuntu 22.04 ships Python 3.10 and 24.04 ships 3.12.** Documented distro facts, not
+  measured here, and the §5 support matrix rests entirely on them.
 - The default WSL2 distro's locale (`UTF-8`) and default shell (`bash`) in practice (standard for
   Ubuntu, assumed not measured).
+- **That a fresh herdr install has no `claude` integration.** `herdr.check()`'s refusal is verified
+  (`herdr.py:320-335`) and I found no auto-install in herdr's source, but the *default absence* is
+  an assumption about herdr's installer. It is what makes §3 step 12 a check rather than a fix.
 - Real DrvFs behaviour for switchboard's specific I/O if a user wrongly puts the repo on
   `/mnt/c/…`: the symlink-privilege failure (§2.2), the case-folding comparison, `flock` over
   DrvFs, and the slowdown numbers. All four are reasoned from documented WSL behaviour, not run.
@@ -494,16 +539,26 @@ a live WSL2 run. High-confidence because the platform gating is mechanical (`cfg
 - `windows-support/native-port-plan.md` — the full native-Windows port plan (the parked fallback),
   and under `windows-support/audits/` the six concern-scoped native audits + the herdr-on-Windows
   gate finding it was built from.
-- `windows-support/review/` — the adversarial review of the (native) plan; a fresh review of THIS
-  WSL2-first plan is run before the PR is finalized.
+- `windows-support/review/` — **two reviews, mixed together.** The four-round adversarial review
+  of *this* WSL2 plan is in `proposer-response-round1..4.md` (blocker dissolution, herdr-under-WSL2,
+  the setup guide, and coherence). Everything else in that directory reviewed the **native** plan.
+  **Trap to know about:** several native-review files carry a header reading
+  *"Artifact: `notes/windows-support-plan.md`"* — written when that filename held the native plan.
+  They reviewed `windows-support/native-port-plan.md`, not this document; their headers have been
+  corrected, but treat any un-corrected reference the same way.
 
-Status (2026-08-22): scope corrected to WSL2-first; supporting research verified; **adversarial
-review rounds 1-3 folded in**. Round 1: F1 demoted to *measured broken* with a one-character fix;
-§1 reframed to Windows-gated only; §2.2 rewritten as a correctness rule; §2.5's "zero-risk"
-retracted. Round 2: "herdr under WSL2 is clean" replaced with herdr's three real runtime WSL
-divergences; new §2.3 for the silent `sb block` doorbell; VM lifecycle added to §6. Round 3: §3
-rewritten from an outline into an actual 17-step guide with literal commands, [W]/[L] validation
-markers and a day-2 section; the `[toast]` config section corrected to **`[ui.toast]`** in §2.3
-(the wrong one is silently ignored — the plan had reintroduced the very failure §2.3 prevents);
-"~one-command install" withdrawn from §2.4 and §4. Further rounds pending before PR #171 is
-updated.
+Status (2026-08-22): scope corrected to WSL2-first; **four-round adversarial review complete**
+(closed at the round cap). Round 1: F1 demoted to *measured broken* with a one-character fix; §1
+reframed to Windows-gated only; §2.2 rewritten as a correctness rule; §2.5's "zero-risk" retracted.
+Round 2: "herdr under WSL2 is clean" replaced with herdr's three real runtime WSL divergences; new
+§2.3 for the silent `sb block` doorbell; VM lifecycle added to §6. Round 3: §3 rewritten from an
+outline into a 17-step guide with [W]/[L] validation markers and a day-2 section; the `[toast]`
+config section corrected to **`[ui.toast]`**; "~one-command install" withdrawn. Round 4 (seams):
+TL;DR rebuilt around three costs rather than one; §5 now carries the **Ubuntu 24.04 + the fix**
+support-matrix decision; dead cross-refs and paths fixed; and the three cited evidence docs
+(`researcher-wsl2-viability-findings.md`, `researcher-windows-options-findings.md`,
+`native-port-plan.md`) carry dated correction banners so following the plan's own pointers no
+longer hands the reader a retracted claim.
+
+**Ready for PR #171 to be updated.** The recommendation was never attacked in any round; what
+changed was the honesty of its reasons and the completeness of §3.

@@ -6,6 +6,13 @@
 > only be revisited if herdr's Windows support graduates to stable AND a native-only experience
 > is specifically wanted. It was written before the scope was corrected from "native Windows"
 > (an assumption never in the user's ask) to "Windows support" (which WSL2 satisfies today).
+>
+> **⚠️ AND §0 point 1 below is RETRACTED (2026-08-22).** It says the Linux `lsof` 3-line-group bug
+> does not exist and that `tests/test_live.py:70-72`'s `skipUnless(darwin)` and the CI comment
+> "should be removed". **Do not act on that.** The bug is real on current distros and the skip is
+> correct — measured in [`lsof-linux-measurement.md`](lsof-linux-measurement.md). Acting on the
+> original prescription would turn a documented gap into a red build. Points 2 and 3 are unaffected,
+> as is the rest of this plan.
 
 # Windows support for switchboard — comprehensive NATIVE-PORT plan (fallback)
 
@@ -23,12 +30,15 @@ Built from six independent concern-scoped audits (full detail, every `file:line`
 The prior migration note (`notes/pc-migration-findings.md`, branch `worker-pc-migration-check`)
 was a good starting map but got three things wrong, verified here:
 
-1. **The "Linux `lsof` gives 3-line groups" bug does NOT exist.** Tested directly against real
-   GNU `lsof` (Docker: Ubuntu 22.04 + Debian 11, the `lsof-org` fork every current distro
-   ships): `lsof -a -d cwd -F pcn` emits the same 4-line `p`/`c`/`fcwd`/`n` groups as BSD/macOS.
-   `live._parse` already works on Linux. **The `skipUnless(darwin)` at `tests/test_live.py:70-72`
-   and the CI comment are based on an unverified assumption and should be removed** (replace with
-   a static-fixture test). Consequence: `sb workspace close` on WSL is *not* broken as claimed.
+1. ~~**The "Linux `lsof` gives 3-line groups" bug does NOT exist.**~~ **RETRACTED 2026-08-22 —
+   the bug is real.** The original text tested only lsof **4.93.2** (Ubuntu 22.04 + Debian 11, both
+   superseded). At lsof **4.94+** the `f` field is emitted only when `-F` asks for it, so on
+   **Ubuntu 24.04** and Debian 12 (lsof 4.95.0) `lsof -a -d cwd -F pcn` returns **3-line** groups,
+   `live._parse` rejects the entire scan, and `sb cleanup` / `sb workspace close` refuse
+   permanently. **`tests/test_live.py:70-72`'s `skipUnless(darwin)` and the CI comment are CORRECT
+   and must NOT be removed.** The fix is one character — `-F pcnf` — verified on macOS and on all
+   four Linux images. Measured in [`lsof-linux-measurement.md`](lsof-linux-measurement.md); see
+   [`../windows-support-plan.md`](../windows-support-plan.md) §2.1.
 2. **`os.environ['HOME']` is never used.** Grepped the whole package — every home lookup goes
    through `Path.home()`/`.expanduser()`, already Windows-correct. The prior note described a
    generic risk, not a real citation.
@@ -689,7 +699,7 @@ are largely CI-verifiable" was too broad.
     CI, and listed in §5 as unproven.
   - `_entry_point()` returns a `.cmd` path under monkeypatched `os.name == "nt"`.
   - `link_config` falls back to copy when `os.symlink` raises `OSError(1314)` (D4).
-  - `live._parse` accepts the captured GNU-lsof 4-line fixture (kills the bogus skip).
+  - `live._parse` accepts the captured GNU-lsof 4-line fixture (pins the parser shape *(the original wording, "kills the bogus skip", is RETRACTED — see §0 point 1)*).
   - Encoding: transcript read + glyph write round-trip under a forced non-UTF-8 locale (F9/F10) —
     reproducible on any OS. Extend it to the **spawn-prompt path** (`config.read_text` →
     `defaults/protocol.md`), which is the site where the corruption actually costs something.
