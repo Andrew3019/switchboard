@@ -4799,7 +4799,10 @@ def _fold_body(s: dict, closings: dict, roles: Any, obliges: dict,
             ("obliges", _refs(obliges.get(sid), here)),
             ("owner", _cell("owner", s.get("owner")) if _some(s.get("owner")) else ""),
             ("by", _did(closings, roles, sid)),
-            ("root", _cell("root", s.get("root")) if _some(s.get("root")) else ""),
+            # Only when it is TRUE. `root` is a claim that a step is a deliberate second
+            # start, and the plans that carry it at all carry `false` on every other step —
+            # a `root | no` row under all of them is a column of nothing, said out loud.
+            ("root", _cell("root", True) if s.get("root") else ""),
             ("gate", _cell("gate", s["gate"]) if _some(s.get("gate")) else ""),
             ("output", f"[{_head_of(s)}](#{_fragment(_head_of(s))})"
                        if isinstance(s.get("output"), str) and _some(s["output"]) else "")]

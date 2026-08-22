@@ -3909,6 +3909,14 @@ class LayoutTest(PlansSandbox):
         # And the contract is a LINK from its step, not a second copy of the prose.
         self.assertIn("[step-2 output](#step-2-output)", folds[2])
         self.assertNotIn("Change Contract", md.split("## steps", 1)[1])
+        # `root: false` is the default said out loud and draws nothing — a plan that marks
+        # a second start marks every OTHER step false, and a `root | no` under all of them
+        # is a column of nothing. A true one is a claim and draws.
+        for s in plan["steps"]:
+            s["root"] = False
+        self.assertNotIn("| root |", _plans()._markdown(plan))
+        plan["steps"][0]["root"] = True
+        self.assertEqual(_plans()._markdown(plan).count("| root |"), 1)
 
     def test_the_blank_lines_a_collapsible_needs_are_there_on_every_fold(self):
         """The gotcha the whole layout rests on: without a blank line after `</summary>`
