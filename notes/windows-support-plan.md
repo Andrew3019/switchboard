@@ -38,7 +38,7 @@ the docstring, not the code.
 These change macOS/Linux behaviour or reverse a documented decision. Each needs an explicit
 sign-off before implementation — they are the real "design questions" in this port.
 
-### D1. Process scanning: adopt `psutil`, or hand-roll per-OS? — **RECOMMEND psutil, needs sign-off**
+### D1. Process scanning: adopt `psutil`, or hand-roll per-OS? — **DECIDED (Andrew, 2026-08-22): adopt psutil**
 `live.py` (`lsof`), `stats.py` (`ps`/`vm_stat`), and `broker._parents` (`ps`) are three
 hand-parsed POSIX subprocesses. Windows has no `lsof` equivalent for "which process has this
 cwd". `psutil` (BSD-3, prebuilt cp311/cp312 wheels for win/mac/linux, no compiler) replaces all
@@ -60,7 +60,7 @@ three with one tested library and gives Windows a real per-process cwd via the P
   ctypes-Win32 for Windows only, keeping the POSIX subprocesses untouched (larger Windows-only
   maintenance surface, no macOS/Linux behaviour change).
 
-### D2. Packaging: `pyproject.toml` console-scripts vs committed per-checkout `.cmd` shims — **RECOMMEND both**
+### D2. Packaging: `pyproject.toml` console-scripts vs committed per-checkout `.cmd` shims — **DECIDED (Andrew, 2026-08-22): do both**
 `bin/sb`, `bin/sb-stop-hook`, `bin/sb-activity-hook` are extensionless `#!/usr/bin/env python3`
 scripts. Windows cannot launch them (no shebang, no `PATHEXT` match) — `sb` won't run and hooks
 never fire.
@@ -79,12 +79,12 @@ never fire.
   install path. Also fold the two duplicated hook scripts into one `switchboard/hooks_entry.py`
   (`--stop`/`--activity`), a net simplification independent of Windows.
 
-### D3. State directory convention — **RECOMMEND nt-only branch, keep POSIX literal**
-`~/.local/state/switchboard` (`defaults/settings.toml:66`) works syntactically on Windows but is
-the wrong convention (should be `%LOCALAPPDATA%\switchboard`). A full `platformdirs` switch would
-*also* move macOS from `~/.local/state` to `~/Library/Application Support` — a silent regression
-that orphans existing state, violating the hard constraint. **Recommend:** special-case
-`os.name == "nt"` → `%LOCALAPPDATA%`, leave POSIX byte-for-byte as today. Zero-risk diff.
+### D3. State directory convention — **DECIDED (Andrew, 2026-08-22): use the SAME path everywhere, no change**
+`~/.local/state/switchboard` (`defaults/settings.toml:66`) *works functionally* on Windows —
+`~` resolves to the user profile, so files land under `C:\Users\<name>\.local\state\switchboard`.
+The only argument for changing it was Windows-convention/tooling recognition; Andrew has
+explicitly waved that off ("forget the backup and cleanup tools"). So **no code change at all** —
+the same literal path on all three OSes. Zero work, zero regression.
 
 ### D4. Symlink fallback for `.switchboard`/`CLAUDE.md` — **RECOMMEND junction+copy, flag the spirit-regression**
 `broker.py:1116` `dst.symlink_to(src)` needs Developer Mode/admin on Windows and, even when
