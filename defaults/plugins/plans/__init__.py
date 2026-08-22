@@ -603,9 +603,12 @@ def register(reg):
                       help="a definition to read; omit for all of them")])
     reg.command(
         "name-step", name_step, audience="both",
-        help="add a step from the library — a link to its definition, never a copy",
+        help="add steps from the library — links to their definitions, never copies",
         args=[reg.arg("plan", help="a plan id, e.g. p-1"),
-              reg.arg("name", help="a library definition, e.g. merge"),
+              reg.arg("name", repeat=True,
+                      help="one or more library definitions, e.g. create-pr merge; they "
+                           "land where each RUNS, so the order you type them decides "
+                           "nothing"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "template", template, audience="both",
@@ -700,12 +703,14 @@ WHAT TO BUILD IT FROM
   the order you typed them. A `--lib` step lands where its definition says it RUNS rather
   than where you typed it, so the order of those flags decides nothing.
 
-  IN ONE `create` IF YOU CAN, because that is the call that sorts them. A step added later
-  — `name-step`, or written into the file — is placed against the plan AS IT THEN STANDS,
-  and nothing already in the plan is ever re-deped: `name-step merge` before `name-step
+  IN ONE CALL IF YOU CAN, because a call is what sorts. `create --lib` and `name-step`
+  both take several names and place them where each RUNS; a step added by a LATER call —
+  or written into the file — is placed against the plan AS IT THEN STANDS, and nothing
+  already in the plan is ever re-deped. So `name-step p-1 merge create-pr` is right
+  whichever way round you type it, while `name-step p-1 merge` and then `name-step p-1
   create-pr` leaves the merge waiting on the implementation, because that is what the plan
-  ended with when it was named. Name them in the order they run, or fix the edge in the
-  file afterwards, which is one field.
+  ended with when it was named. Name them together, or fix the edge in the file
+  afterwards, which is one field.
 
   NAME THE OUTERMOST STEP AND WHAT IT OBLIGES ARRIVES WITH IT — the two flags above land
   seven steps, because `create-pr` obliges the change approval, which obliges the review,
@@ -1390,37 +1395,57 @@ def library(ctx, args) -> Result:
 
 
 def name_step(ctx, args) -> Result:
-    """Name a library step into a plan: a link to its definition, and its own run object.
+    """Name library steps into a plan: links to their definitions, and their run objects.
 
     The plan stores `def` and leaves `name` null, so the text comes out of the library
     every time the plan is rendered and an edit to a definition reaches this plan even
     while it is running. Copying the name in here would be the same code with the design's
     central claim quietly deleted from it.
 
-    What lands may be more than one step. A composite expands flat, and whatever the
-    resulting steps oblige is added beside them — which is the whole of "obliged, not
+    What lands may be more than one step per name. A composite expands flat, and whatever
+    the resulting steps oblige is added beside them — which is the whole of "obliged, not
     optional": there is no argument to this verb that turns it off, and the merge step and
     its review are added by the same act.
+
+    SEVERAL NAMES IN ONE CALL, SORTED BY ANCHOR, exactly as `create --lib` sorts what it
+    was given. That is what makes this verb order-insensitive rather than a trap: an
+    anchor looks BACKWARDS at the plan as it stands and nothing already in the plan is
+    ever re-placed (`_place`), so `name-step p-1 merge` followed by
+    `name-step p-1 create-pr` leaves the merge waiting on the implementation and not on
+    the PR that arrived after it. Naming both in ONE call sorts them first, so the PR is
+    minted before the merge and the merge lands after it — the order they run, whichever
+    order they were typed. Separate calls still mean separate acts and still place each
+    against the plan of that moment: this verb can now be order-insensitive, and cannot
+    make two commands into one.
+
+    Each name is minted separately and against the plan AS IT NOW STANDS, so a later name
+    sees what an earlier one landed — the same one-at-a-time rule `template` keeps for
+    its entries and for the same reason.
     """
-    wanted = str(args.name or "").strip()
+    wanted = [str(n).strip() for n in (args.name or ()) if str(n).strip()]
     if not wanted:
         return _needs("name", "a named step is named after a definition in the library")
-    bad = _cap(wanted, args.reason)
+    bad = _cap(*wanted, args.reason)
     if bad:
         return bad
     lib, bad = _lib()
     if bad:
         return bad
-    if wanted not in lib:
-        return _no_def(lib, wanted)
-    # The DEFINITION's display, since that is where a named step's board label lives and
-    # where an edit to it has to reach every plan naming it. So this refusal is about the
-    # catalogue rather than about the command: there is no argument here that could supply
-    # one, and a copy of the label on the step would be the link quietly turned into a copy.
-    if not str((lib.get(wanted) or {}).get("display") or "").strip():
-        return _no_display(f"the '{_flat(wanted)}' definition",
-                           f"A named step draws its definition's label, so add a "
-                           f"`display` to `library/{_flat(wanted)}.json`.")
+    # EVERY NAME CHECKED BEFORE ANY OF THEM LANDS, because this verb writes once: a second
+    # name that turns out to be a typo would otherwise report a refusal over a first name
+    # already in the plan, and the plan would hold half of what was asked for.
+    for want in wanted:
+        if want not in lib:
+            return _no_def(lib, want)
+        # The DEFINITION's display, since that is where a named step's board label lives
+        # and where an edit to it has to reach every plan naming it. So this refusal is
+        # about the catalogue rather than about the command: there is no argument here
+        # that could supply one, and a copy of the label on the step would be the link
+        # quietly turned into a copy.
+        if not str((lib.get(want) or {}).get("display") or "").strip():
+            return _no_display(f"the '{_flat(want)}' definition",
+                               f"A named step draws its definition's label, so add a "
+                               f"`display` to `library/{_flat(want)}.json`.")
 
     # NO LOCK: the step id comes from this plan's own counter in this plan's own file, so
     # the only race left is two writers on one plan — which the design answers with one
@@ -1429,11 +1454,18 @@ def name_step(ctx, args) -> Result:
     plan = _find(doc, args.plan)
     if plan is None:
         return _missing(doc, args.plan)
+    added: list[dict] = []
     try:
-        added = _mint(plan, lib, wanted, after=tuple(_sinks(plan)))
+        # STABLE, so names sharing a band keep the order they were typed — the only order
+        # information there is about two steps the spine cannot separate.
+        for want in sorted(wanted, key=lambda k: _anchor(lib, k)):
+            made = _mint(plan, lib, want, after=tuple(_sinks(plan)))
+            plan.setdefault("steps", []).extend(made)
+            added.extend(made)
     except _BadDef as e:
+        # Nothing was written: the refusal comes back before `_write`, and `doc` is this
+        # process's own copy of the store.
         return e.refusal()
-    plan.setdefault("steps", []).extend(added)
     who = ctx.agent or "human"
     _log(plan, who, "name-step", args.reason, _minted(added, lib))
     _write(ctx.state_dir, doc, seal)
@@ -2252,11 +2284,12 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     and nothing already in the plan is ever re-placed: this file's rule is that a command
     changes the steps it names, and silently rewriting deps a lead shaped by hand would be
     a worse bug than the one being fixed. So naming steps in separate calls, out of the
-    order they run — `name-step merge` and then `name-step create-pr` — leaves the merge
-    waiting on what the plan ended with at the time and not on the PR that arrived after
-    it. `create --lib` sorts what it was given by anchor and is order-insensitive for that
-    reason; `name-step` names one definition and cannot. Name them in the order they run,
-    or make the plan in one `create`, and reshape in the file where you did neither.
+    order they run — `name-step p-1 merge` and then `name-step p-1 create-pr` — leaves the
+    merge waiting on what the plan ended with at the time and not on the PR that arrived
+    after it. What answers that is ONE CALL: `create --lib` and `name-step` both sort the
+    names they were given by anchor before minting any of them, so either verb is
+    order-insensitive within a call and neither can be across two. Name them together, and
+    reshape in the file where a later act genuinely has to go somewhere else.
 
     AND THEN THE OBLIGATION IS PUT BACK AS AN EDGE WHERE THE ANCHOR LEFT NONE, which is the
     half a first draft of this got wrong badly enough to lose a guardrail. `create-pr`
