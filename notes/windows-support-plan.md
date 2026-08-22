@@ -57,7 +57,7 @@ both rather than omitting them:
   default WSL2 distro. This is a required code fix; see §2.1.
 - **The ~52 encoding sites (F7b/F9/F10/F11/F12)** — gated on the *runtime locale*. Nothing about
   them is a Windows branch; they are a latent POSIX bug today. WSL2 does not fix them, it merely
-  defaults to UTF-8 so they do not bite. See §2.4.
+  defaults to UTF-8 so they do not bite. See §2.5.
 
 A third caveat sits under the whole table: **WSL2 moves the user from macOS to Linux, not to "the
 tested platform."** `.github/workflows/tests.yml:17-21` states that the Linux CI leg has no herdr
@@ -73,18 +73,41 @@ Linux leg has been exercised in anger.
 | `signal.SIGHUP` / `SIGWINCH` — B3/B4 | Both defined on Linux; WSL2 pty delivers `SIGWINCH` on resize | High |
 | **`lsof` — F1** | **Does NOT dissolve.** lsof 4.95.0 (Ubuntu 24.04, Debian 12) emits **3-line** `-F pcn` groups; `live._parse` rejects the whole scan, `scan()` returns `None`, and `broker.py:2299-2311` refuses every `sb cleanup`/`workspace close` **permanently**. Measured, unprivileged, in Docker — `windows-support/lsof-linux-measurement.md`. One-character fix in §2.1 | **Measured broken** |
 | `ps -Ao` / `vm_stat` — F2 | `stats.py:501` dispatches darwin→`_available_darwin()`, else `_available_linux()` reading real `/proc/meminfo`; `_PS` uses portable `-o` forms | High |
-| encoding class — F7b/F9/F10/F11/F12 (~52 sites) | **Not Windows-gated — locale-gated.** Does not dissolve; WSL2's UTF-8 default means it does not bite. Latent POSIX bug regardless (§2.4) | Medium (rests on the distro locale, not on code paths) |
+| encoding class — F7b/F9/F10/F11/F12 (~52 sites) | **Not Windows-gated — locale-gated.** Does not dissolve; WSL2's UTF-8 default means it does not bite. Latent POSIX bug regardless (§2.5) | Medium (rests on the distro locale, not on code paths) |
 | symlinks needing Developer Mode — F5 | Native POSIX symlinks; no "Developer Mode" concept on the Linux side | High |
 | `.cmd`/shebang/`os.access(X_OK)`, `shlex.quote`, bash-only `_ready_pane`, `exec` — B5/B6/F6/F7/F8 | Panes are POSIX shells running shebang scripts with real exec bits | High |
 | ConPTY / `msvcrt` / `start_new_session` discarded — F13 | N/A — these are *native-Windows* API problems; WSL2 uses real POSIX `setsid`/pty | High |
 | `psutil` adoption (native fix D1) | Not needed — the existing Linux `ps`/`/proc` paths run | High |
 
-**herdr under WSL2 is clean** (verified from source at `/Users/andrew/Code/herdr`): its pty is the
-`portable-pty` crate's real Unix `openpty` behind a compile-time `cfg(unix)` gate; its IPC socket
-lives under `~/.config/herdr` with **no systemd / `XDG_RUNTIME_DIR` dependency** (important —
-WSL2 doesn't run systemd by default); it does **no** inotify file-watching. herdr's Windows *beta*
-status is about its native-Windows (ConPTY/PowerShell) code path — running herdr as a Linux binary
-under WSL2 never touches it.
+**herdr's server layer under WSL2 is genuinely Linux** — the layer switchboard drives (verified
+from source at `/Users/andrew/Code/herdr`, HEAD `69a07fd`): the pty is the `portable-pty` crate's
+real Unix `openpty` behind a compile-time `cfg(unix)` gate (`src/pty/backend.rs:1-5`,
+`backend/unix.rs:12-24`); the IPC socket lives under `~/.config/herdr` with **no systemd /
+`XDG_RUNTIME_DIR` dependency** — herdr *pins* this with a test
+(`src/api/server.rs:929`, `socket_path_defaults_to_config_dir_even_when_xdg_runtime_dir_is_set`),
+which matters because WSL2 doesn't run systemd by default; the server daemonises with real POSIX
+`setsid` (`src/platform/mod.rs:73-85`); and there is **no** inotify file-watching. herdr's Windows
+*beta* status is about its native-Windows (ConPTY/PowerShell) code path, which a Linux binary
+cannot execute.
+
+**But "WSL2 is just Linux" is not true of herdr as a whole, and the plan should not say it is.**
+herdr detects WSL **at runtime, from a Linux binary**, and diverges in three places — all in the
+interactive client, none in the pty/server/IPC layer switchboard uses:
+
+- **Drawn cursor.** `src/platform/linux.rs:38-50` — `should_draw_host_cursor_by_default()` returns
+  `running_inside_wsl()`, so herdr draws its own cursor rather than the terminal's, the same
+  workaround it applies to native Windows. **Consequence for the human at the keyboard:** a drawn
+  cursor is not the anchor Windows uses for CJK IME composition, so IME candidate UI can land in
+  the wrong place. Fix: `[ui] host_cursor = "native"`. herdr's own docs put this caveat on the
+  *Windows beta* page and say "native Windows **and WSL**".
+- **Clipboard route.** `src/selection.rs:277-320` — `is_wsl()` forces clipboard writes down OSC 52
+  rather than native clipboard tools. Deliberate, and it is what populates Windows Terminal's
+  clipboard history.
+- **Graphics cell size.** Under WSL the pty's `TIOCGWINSZ` pixel fields come back zero, so herdr
+  queries the host for cell size instead of guessing 8x16 — a measured WSL-specific ioctl gap.
+
+These are evidence WSL is a *cared-for, exercised* herdr target, not an untested one. But cared-for
+is not identical, and one WSL2-specific degradation **does** reach switchboard — see §2.3.
 
 **Claude Code under WSL2** is a documented/supported way to run on Windows, and its sandbox works
 under WSL2 (but **not** native Windows) — another point in WSL2's favor.
@@ -146,14 +169,43 @@ operation and is 10–100× slower, and switchboard is stat-heavy. So the failur
 and easy to miss. This must be a loud, explicit setup instruction. *(DrvFs symlink privilege and
 case-insensitivity are documented WSL behaviour; not re-measured here — no WSL2 box. See §6.)*
 
-### 2.3 Setup is a bigger ask for a non-technical user than "download an app"
+### 2.3 The `sb block` doorbell is silent on a stock WSL2 distro
+
+switchboard's only path from a blocked agent to the human is `broker.py:6489-6493` `_surface()` →
+`herdr.notify()` → `herdr notification show`. herdr routes that on `toast.delivery`
+(`src/app/api.rs:1192-1236`), and two of the three routes have no working backend on a stock WSL2
+Ubuntu:
+
+| Route | On WSL2 | On macOS |
+|---|---|---|
+| `herdr` (in-app toast) | **Works** | Works |
+| `terminal` | **Nothing shown.** `src/terminal_notify.rs:11-31` recognises only Ghostty, iTerm2, Kitty, WezTerm. **Windows Terminal is not in that list** — and it is the terminal `wsl --install` hands the user | Works (iTerm2/Ghostty/Kitty/WezTerm) |
+| `system` | **Nothing shown** unless `notify-send` (`libnotify-bin`) is installed *and* a notification daemon is on the session bus; `platform/linux.rs:534-556` also returns early with no `DISPLAY`/`WAYLAND_DISPLAY` | Unconditional — `platform/macos.rs:583-597` falls back to `osascript`, always present |
+
+**And switchboard cannot tell.** `_surface` catches only `HerdrError`, while herdr encodes
+`{"shown": false, "reason": "no_foreground_client"}` as a **successful** response
+(`api.rs` → `encode_success`) and `herdr.notify()` discards the body entirely
+(`herdr.py:1131-1134`). No `notify_failed` event, no log line. The doorbell rings into nothing and
+the store records that it rang. The audible cue has the same shape: `src/sound.rs:299-323` tries
+`paplay`/`pw-play`/`ffplay`/`mpg123`/`mpv`, none in a stock WSL2 image, against macOS's
+always-present `afplay`.
+
+**Mitigation, and it belongs in the setup guide (§3):** set `[toast] delivery = "herdr"`, or
+`apt install libnotify-bin` (plus a daemon) for the `system` route, and `apt install
+pulseaudio-utils` for sound.
+
+*Honest scoping:* herdr's default `delivery` is `Off` (`src/config/model.rs:59-65`), so this is a
+regression relative to a user who has **configured** notifications — which on macOS is the working
+setup today, and is the setup the blocking protocol assumes. Not re-tested live; no WSL2 box.
+
+### 2.4 Setup is a bigger ask for a non-technical user than "download an app"
 
 Enable WSL2 (`wsl --install`, one reboot, occasionally a BIOS virtualization toggle), install a
 distro (Ubuntu), understand that files now live in two places, install Claude Code + switchboard
 *inside* the Linux environment, and open a WSL/Ubuntu terminal (or VS Code Remote-WSL) rather than
 PowerShell. None of this is hard for a developer; all of it is new for someone who isn't.
 
-### 2.4 Encoding hygiene — worth doing anyway, and **not** zero-risk
+### 2.5 Encoding hygiene — worth doing anyway, and **not** zero-risk
 
 The native audit enumerated, by AST pass, **26 `open()`/`read_text()` sites with no
 `encoding="utf-8"` (F9)** and **26 `subprocess(..., text=True)` sites with no `encoding=` (F12)**,
@@ -175,7 +227,7 @@ reintroducing on POSIX the exact failure F11 exists to fix, and (b) raises `Attr
 `errors=sys.stdin.errors` **and** be `getattr`-guarded. See the native plan's F10/F11 hazard note.
 
 **These, plus §2.1, are the only switchboard code changes this plan recommends.** §2.1 is required
-to run usefully under WSL2; §2.4 is not, and should land regardless of Windows.
+to run usefully under WSL2; §2.5 is not, and should land regardless of Windows.
 
 ## 3. Setup guide (WSL2, for a non-technical user)
 
@@ -195,7 +247,11 @@ A step-by-step to hand the user. (Commands to be validated on a real Windows box
 5. **Clone + install switchboard inside Ubuntu**, exactly as on macOS/Linux today.
 6. **Land the §2.1 `lsof` fix** (`-F pcnf`) before relying on `sb cleanup` / `sb workspace close`.
    Without it they refuse on Ubuntu 24.04, permanently and by design.
-7. **Run it from the Ubuntu terminal.** herdr, panes, hooks, the board — all the normal Linux paths.
+7. **Turn the doorbell on (§2.3), or `sb block` is silent.** Set `[toast] delivery = "herdr"` in
+   herdr's config — the one route with a working backend out of the box. If you want desktop
+   toasts or sound instead: `sudo apt install libnotify-bin pulseaudio-utils` (and note the
+   `terminal` route will not work at all under Windows Terminal).
+8. **Run it from the Ubuntu terminal.** herdr, panes, hooks, the board — all the normal Linux paths.
    Expect the pane/agent/fleet surface to be exercised on Linux for the first time here (§1) — the
    Linux CI leg has never run it.
 
@@ -222,7 +278,7 @@ Full ranked table + citations in `windows-support/researcher-windows-options-fin
 **Run switchboard in WSL2.** It is the cheapest correct answer to "gain Windows support," it's the
 lowest-risk (stable herdr, no unbuilt port), and it runs entirely on the user's own machine. The
 deliverable is therefore a **setup guide** (§3) plus **one required code fix** (§2.1, one
-character) and a few **optional code-hygiene fixes** (§2.4), not an engineering port.
+character) and a few **optional code-hygiene fixes** (§2.5), not an engineering port.
 
 Offer **remote-into-Linux** as the alternative for the specific user who wants a persistent Linux
 box independent of the laptop. Keep the **native-Windows** plan parked as the "if herdr's Windows
@@ -236,9 +292,24 @@ All findings are from source (switchboard + herdr) and documented WSL2/Claude Co
 a live WSL2 run. High-confidence because the platform gating is mechanical (`cfg(windows)` /
 `sys.platform`), but not empirically closed. Specifically still needs a real WSL2 box to confirm:
 
+- **Does the long-lived herdr server survive WSL2's VM lifecycle?** The biggest WSL2-vs-Linux
+  unknown, and the one this plan can least afford. On bare-metal Linux `setsid`
+  (`herdr/src/platform/mod.rs:73-85`) settles it. Under WSL2 the *distro VM* lifecycle is Windows'
+  — `vmIdleTimeout`, `wsl --shutdown`, host sleep/hibernate suspending the VM, and the wall-clock
+  jump on resume that switchboard's own deadlines sit on (`herdr.py:1096-1112` uses `time.time()`).
+  switchboard's model is agents running overnight and blocked agents waiting hours for a human, so
+  this is directly load-bearing. Not a source question — it needs a real box.
 - The exact `wsl --install` → herdr → Claude Code → switchboard end-to-end on a real machine.
-- herdr's clipboard/OSC escape actually reaching the Windows clipboard through a given WSL2
-  terminal.
+- The §2.3 doorbell mitigation actually alerting a human under Windows Terminal + WSL2.
+- **Clipboard *reads*** through a WSL2 terminal. (Narrowed: clipboard *writes* are settled by
+  source — herdr deliberately prefers OSC 52 under WSL specifically so Windows Terminal's clipboard
+  history is populated. Reads offer only `wl-paste`/`xclip`/`xsel` gated on
+  `WAYLAND_DISPLAY`/`DISPLAY`, with no OSC 52 fallback. Neither direction is a switchboard
+  dependency — switchboard sends text server-side via `agent prompt`.)
+- herdr's foreground-process agent detection (`herdr/src/platform/linux.rs:287+`) under WSL2.
+  Expected to work — WSL2 is a real kernel with a real `/proc` — and herdr ships an opt-in
+  `HERDR_PROCESS_DETECTION=child-groups` fallback if not. Low risk; switchboard mostly drives
+  agent state explicitly.
 - Claude Code's current-version WSL2 sandbox/hooks/git specifics (documented, not re-tested).
 - The default WSL2 distro's locale (`UTF-8`) and default shell (`bash`) in practice (standard for
   Ubuntu, assumed not measured).
@@ -270,6 +341,9 @@ a live WSL2 run. High-confidence because the platform gating is mechanical (`cfg
   WSL2-first plan is run before the PR is finalized.
 
 Status (2026-08-22): scope corrected to WSL2-first; supporting research verified; **adversarial
-review round 1 folded in** — §1 reframed to Windows-gated only, F1 demoted to *measured broken*
-with a fix, §2.2 rewritten as a correctness rule, §2.4's "zero-risk" retracted with counts
-corrected to 26+26. Further review rounds pending before PR #171 is updated.
+review rounds 1-2 folded in**. Round 1: §1 reframed to Windows-gated only, F1 demoted to *measured
+broken* with a one-character fix, §2.2 rewritten as a correctness rule, §2.5's "zero-risk"
+retracted with counts corrected to 26+26. Round 2: "herdr under WSL2 is clean" replaced with the
+three runtime WSL divergences herdr actually carries, new §2.3 for the silent `sb block` doorbell,
+VM lifecycle added to §6, clipboard narrowed to reads. Further rounds pending before PR #171 is
+updated.
