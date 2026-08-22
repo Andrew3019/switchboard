@@ -38,17 +38,40 @@ the docstring, not the code.
 These change macOS/Linux behaviour or reverse a documented decision. Each needs an explicit
 sign-off before implementation — they are the real "design questions" in this port.
 
-**Still open after four review rounds — the whole list, all of it Phase 0, none of it coding work:**
+**H1 and H2 — the two gating questions — are now RESOLVED from herdr's own source**
+(clone at `/Users/andrew/Code/herdr`; full citations in
+`.switchboard/notes/researcher-herdr-on-windows-findings.md`):
 
-| | question | gates | why it is not an implementer's call |
+- **H1 — RESOLVED: qualified YES.** herdr genuinely spawns ConPTY panes on Windows and its CI
+  smoke-tests actual pane creation on `windows-latest` (`.github/workflows/ci.yml:117-124`;
+  real `CreatePseudoConsole` at `vendor/portable-pty/src/win/psuedocon.rs:306`). **Caveat:** it
+  is explicitly **"experimental beta"** — NOT in the stable release pipeline (`release.yml`
+  builds only Linux/macOS; Windows binaries come only from manual/preview builds), and herdr's
+  own docs say the beta "is not a commitment that every Linux/macOS feature will become fully
+  supported" (`windows-beta.mdx`). Windows is supported only as a **local client**, not as a
+  remote host. So the foundation exists and is tested, but sits on a beta the herdr authors
+  could reduce. **This is a project-level risk to accept, not a code blocker** → surfaced to
+  Andrew.
+- **H2 — RESOLVED: NO, herdr does not report per-pane shell family, and cannot force one per
+  call.** No shell field in `PaneInfo`/`PaneProcessInfo`; no shell param in `TabCreateParams`
+  etc. **The default Windows pane shell is `powershell.exe`** (`src/pane.rs:1318-1320`) — NOT
+  `cmd.exe` as the prior note and B5's draft assumed. So B5's fix becomes concrete: **target
+  PowerShell** (herdr's Windows default), inferring shell from (the OS switchboard already
+  knows) + herdr's config `default_shell`; for certainty, switchboard can **pin
+  `default_shell` in herdr's `config.toml` before spawning** rather than detect per-pane. This
+  removes the "dispatch lands wrong ⇒ `SbUnpinned`" risk B5 worried about.
+
+**Still open — 3 internal technical decisions, resolved DURING implementation (not Andrew's):**
+
+| | question | gates | why it is not an implementer's call *to guess* |
 |---|---|---|---|
-| **H1** | Does herdr run natively on Windows and make a Windows pane? | Phases 3, 3b, 6, 7 | herdr is an external pinned binary and the only thing that makes a pane. If no, Phases 1/2/4/5 all pass their gates and switchboard still spawns nothing. Nothing in this plan or the six audits establishes it. |
-| **H2** | Does herdr's API report a pane's shell family? | Phase 3 (B5) | If no, B5's whole design changes; a dispatch landing anywhere but POSIX is `SbUnpinned` on every macOS spawn. |
-| **D5** | How does a plugin reach `lockfile`? | B7, in Phase 1 | Today's contract is one module wide. Re-export vs widen. |
-| **D6** | What does `blocking=True` mean on Windows? | `lockfile.py`, the first thing Phase 1 builds | `msvcrt` has no unbounded wait, so two sites need a timeout and a **per-site expiry behaviour**. "Proceed anyway" is right for a fork lock and may be wrong for `_minting`, where it means two agents minting the same plan id. |
-| **D4a** | On D4's fallback branch: does it append to `linked`, and how is a copied `CLAUDE.md` classified? | Phase 5 | The second half is a **data-loss** decision — `mine` deletes a possibly-genuine file without it appearing in the "what you're about to lose" inventory. Does not touch D4's primary path. |
+| **D5** | How does a plugin reach `lockfile`? | B7, in Phase 1 | Today's contract is one module wide. Re-export vs widen. Decided with analysis, not guessed. |
+| **D6** | What does `blocking=True` mean on Windows? | `lockfile.py`, the first thing Phase 1 builds | `msvcrt` has no unbounded wait, so two sites need a timeout and a **per-site expiry behaviour**. "Proceed anyway" is right for a fork lock and may be wrong for `_minting`, where it means two agents minting the same plan id. **Dangerous if guessed → explicit decision + test.** |
+| **D4a** | On D4's fallback branch: does it append to `linked`, and how is a copied `CLAUDE.md` classified? | Phase 5 | The second half is a **data-loss** decision — `mine` deletes a possibly-genuine file. **Dangerous if guessed → explicit decision + test.** Only applies on a machine without Developer Mode (not Andrew's, per D4). |
 
-D1–D4 are settled and none of the four rounds found any of them unsafe.
+D1–D4 are settled and none of the four rounds found any of them unsafe. D5/D6/D4a are internal
+seam decisions for the implementation lead to make with verification — flagged here so they are
+*decided*, never guessed.
 
 ### D1. Process scanning: adopt `psutil`, or hand-roll per-OS? — **DECIDED (Andrew, 2026-08-22): adopt psutil**
 `live.py` (`lsof`), `stats.py` (`ps`/`vm_stat`), and `broker._parents` (`ps`) are three
