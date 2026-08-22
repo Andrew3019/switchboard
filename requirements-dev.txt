@@ -1,0 +1,10 @@
+# What running the TEST SUITE needs, on top of `requirements.txt`. Same install rule:
+# into the same interpreter `bin/sb` resolves to.
+#
+#     python3 -m pip install -r requirements-dev.txt
+#
+# pytest-xdist is what makes `python -m pytest tests` finish in a minute rather than ten;
+# `pytest.ini` turns it on by default with `-n auto`. Without it installed pytest fails at
+# startup on the unknown `-n` flag, so it is required rather than optional.
+pytest>=7.0
+pytest-xdist>=3.0

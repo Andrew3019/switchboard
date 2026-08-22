@@ -12,6 +12,9 @@
 # not into whichever one happens to be handy — a board opened by `sb start` runs under
 # `sys.executable` of the process that spawned it.
 #
+# Running the test suite needs pytest and pytest-xdist as well; those are in
+# `requirements-dev.txt`, kept separate because nothing switchboard ships imports them.
+#
 # rich draws `sb board`'s panelled view (switchboard/richboard.py). Without it the board
 # falls back to the plain ANSI renderer in switchboard/board.py and loses nothing but
 # polish: same rows, same clicks, same scrolling, same words. Nothing else in switchboard

@@ -1565,6 +1565,22 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn("the good one", " ".join(sections[0][1]))
 
 
+# The seam sweeps below used to run every height in `range(6, 30)`, which cost 33s of
+# pure CPU for 384 renders per test and dominated the suite. The class of bug they exist
+# to catch is an off-by-one in window arithmetic, and an off-by-one shows at a boundary:
+# the smallest pane a board will draw, the first heights either side of the point where
+# the tree stops fitting in it, and a pane far larger than its content. Everything between
+# those is the same arithmetic with different numbers. Checked rather than assumed: three
+# hand-planted off-by-ones (`_window`'s `avail`, its `room - 1`, `_max_top`'s `capacity`)
+# were each run against both the boundary set and the full range, and the two sets agreed
+# every time on which ones fail. Widen `HEIGHTS` back out if you are changing `_window`,
+# `_max_top`, or how a block is charged into `costs` — the full range is the right thing to
+# run once by hand when that arithmetic moves.
+HEIGHTS = (6, 7, 9, 12, 29)     # min pane, min+1, either side of the fit boundary, max
+BLOCKS = (0, 1, 5, 40)          # no block, one line, a few, taller than any pane here
+TOPS = (0, 1, 7)                # unscrolled, first scroll, past the end (clamps)
+
+
 class SeamWindowTest(unittest.TestCase):
     """Variable-height blocks and the window arithmetic, which is where this could hurt.
 
@@ -1594,9 +1610,9 @@ class SeamWindowTest(unittest.TestCase):
         s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None,
                          workspace=["api", "web", "db"][i % 3])
                    for i in range(6)])
-        for height in range(6, 30):
-            for n in (0, 1, 5, 40):
-                for top in (0, 1, 3, 7):
+        for height in HEIGHTS:
+            for n in BLOCKS:
+                for top in TOPS:
                     with self.subTest(height=height, block=n, top=top), self.tall(n):
                         plain = board.layout(s, top=top, height=height, width=100, msg="")
                         self.assertEqual(len(plain), height)
@@ -1625,8 +1641,8 @@ class SeamWindowTest(unittest.TestCase):
         """
         s = snap(*[agent(f"a{i}", depth=i % 2, parent="a0" if i % 2 else None,
                          workspace=["api", "web"][i % 2]) for i in range(4)])
-        for height in range(6, 30):
-            for n in (0, 1, 5, 40):
+        for height in HEIGHTS:
+            for n in BLOCKS:
                 for top in (0, 3):
                     with self.subTest(height=height, section=n, top=top), self.deep(n):
                         plain = board.layout(s, top=top, height=height, width=100, msg="")

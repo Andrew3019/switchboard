@@ -156,9 +156,11 @@ says which:
   No model name appears anywhere in the code; a role is a markdown file; adding a
   behaviour means adding a file and registering it nowhere.
 
-There is a pytest suite in `tests/` — around 1,200 tests, no network and no herdr
+There is a pytest suite in `tests/` — around 1,700 tests, no network and no herdr
 required — covering the store's migration paths, the herdr adapter against a fake runner
 whose cases were each verified against the live binary, and the structural rules above.
+`python -m pytest tests` runs it, in parallel across every core (`pytest.ini` sets
+`-n auto`; `-n0` for one process). It needs `requirements-dev.txt` installed.
 
 ## Design truth
 
