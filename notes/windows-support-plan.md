@@ -5,7 +5,7 @@ all of switchboard (`sb`/broker/plugins/panel/sweep/board/hooks/worktrees) with 
 regression** to macOS/Linux — both keep working correctly, Windows is gained on top.
 
 Built from six independent concern-scoped audits (full detail, every `file:line`, in
-`.switchboard/notes/researcher-*-findings.md`). This document is the synthesis and the plan.
+`notes/windows-support/audits/`). This document is the synthesis and the plan.
 
 ---
 
@@ -40,7 +40,7 @@ sign-off before implementation — they are the real "design questions" in this 
 
 **H1 and H2 — the two gating questions — are now RESOLVED from herdr's own source**
 (clone at `/Users/andrew/Code/herdr`; full citations in
-`.switchboard/notes/researcher-herdr-on-windows-findings.md`):
+`notes/windows-support/audits/researcher-herdr-on-windows-findings.md`):
 
 - **H1 — RESOLVED: qualified YES.** herdr genuinely spawns ConPTY panes on Windows and its CI
   smoke-tests actual pane creation on `windows-latest` (`.github/workflows/ci.yml:117-124`;
@@ -785,7 +785,7 @@ side still needs a real box or a `windows-latest` CI leg to move from "documente
 
 ## Appendix — review history
 
-- **Round 1, inventory-completeness lens** (`.switchboard/notes/reviewer-inventory-completene-inventory-gaps.md`):
+- **Round 1, inventory-completeness lens** (`notes/windows-support/review/reviewer-inventory-completene-inventory-gaps.md`):
   9 findings, all accepted. The systemic one: `defaults/` had never been swept by any of the six
   source audits. Also confirmed *held* under attack: `status.py` and `models.py` are clean; no
   `os.fork`/`setsid`/`killpg`/`resource`/`AF_UNIX`/`mkfifo`/`shell=True`/`PurePosixPath` anywhere;
@@ -794,7 +794,7 @@ side still needs a real box or a `windows-latest` CI leg to move from "documente
   (`stats.py:501`) and zero `os.name` in the whole package.
 
 - **Round 2, zero-regression / psutil-blast-radius lens**
-  (`.switchboard/notes/reviewer-zero-regression-psutil-blast-radius.md`): 8 findings, all
+  (`notes/windows-support/review/reviewer-zero-regression-psutil-blast-radius.md`): 8 findings, all
   accepted, all re-verified here by running them. It broke the plan's blanket no-regression
   sentence (now the table in §5) and found five proposed changes that regress macOS. Also
   confirmed *held*: `broker._parents`, the psutil cwd set, RSS and `available` are all
@@ -802,7 +802,7 @@ side still needs a real box or a `windows-latest` CI leg to move from "documente
   forks; the `lockfile(fd)` signature respects `panel.acquire`'s "the fd IS the lock" contract.
 
 - **Round 3, phase-ordering / testability lens**
-  (`.switchboard/notes/reviewer-phasing-testability-phase-ordering.md`): 13 findings, all accepted.
+  (`notes/windows-support/review/reviewer-phasing-testability-phase-ordering.md`): 13 findings, all accepted.
   §3 was rewritten around them. The attack did **not** land on the ordering — the code-dependency
   graph held, as did D5's placement and the completeness of the B1–B4 import-blocker set. It landed
   on the exit criteria (five were unsatisfiable or green over the failure they exist to catch), on
@@ -811,7 +811,7 @@ side still needs a real box or a `windows-latest` CI leg to move from "documente
   assumption four phases rested on and the plan never named.
 
 - **Round 4, multi-agent build model / seam coherence lens**
-  (`.switchboard/notes/reviewer-port-sequencing-worktree-model-and-seams.md`): 10 findings, all
+  (`notes/windows-support/review/reviewer-port-sequencing-worktree-model-and-seams.md`): 10 findings, all
   accepted (one with its prescription corrected — see `procscan` rule 5). Produced **D6** and
   **D4a**, the `rawinput` seam redraw, the by-file Phase 1 decomposition, and the enumerated F9/F12
   appendix. Two of the four new seams held as designed (`hooks_entry`, and `procscan` as a
@@ -872,7 +872,14 @@ criterion. And `plans/__init__.py:3350`, named as a site in earlier drafts, **al
 
 ---
 
-## Appendix — source audits
-`.switchboard/notes/researcher-{process-liveness,locking-terminal,hooks-entrypoints,
-worktree-filesyste,tui-rendering,herdr-integration}-findings.md` (gitignored; every `file:line`,
-confidence level, and test note lives there).
+## Appendix — supporting docs (all in this PR)
+- **`notes/windows-support/audits/`** — the six concern-scoped source audits (process-liveness,
+  locking-terminal, hooks-entrypoints, worktree-filesyste, tui-rendering, herdr-integration) plus
+  `researcher-herdr-on-windows-findings.md` (the H1/H2 gate resolution). Every `file:line`,
+  confidence level, and test note lives here.
+- **`notes/windows-support/review/`** — the adversarial review: `00-review-report.md` (the
+  synthesis), the four single-lens reviewer notes, and the four proposer round-replies.
+
+Status (2026-08-22): investigated, reviewed to the 4-round cap, gate-cleared (herdr-on-Windows
+confirmed but in experimental beta). **Andrew chose to HOLD** — this PR parks the complete plan
+for a later implementation phase; it is intentionally not merged.
