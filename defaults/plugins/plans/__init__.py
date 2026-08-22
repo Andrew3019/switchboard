@@ -1945,8 +1945,8 @@ def _lines(text: Any) -> list[str]:
     Splits on the newline and then escapes each line, so the newline is the only control
     character spared and it is spared as a SEPARATOR rather than as content. Every renderer
     that uses this puts each line somewhere a forged row cannot reach — indented under a
-    label in the terminal, quoted in the markdown walk, and lifted clean out of the steps
-    table into a section of its own in the pull request comment — so the property `_flat`
+    label in the terminal, quoted in the markdown walk, and lifted clean out of every step's
+    own fold into a contract section of its own in the pull request comment — so `_flat`'s
     holds everywhere else in this file is held here by where the lines go instead of by
     escaping them. Anything that is not a string is one line, which is the fallback: this
     is asked of a hand-edited field and must not raise on a list somebody put there.
@@ -4226,9 +4226,9 @@ _BLOCK = ("output",)                     # keys whose value is prose, dumped rat
 # In the WALK, every line of a dump is BLOCKQUOTED, which is what keeps the forged-row
 # property the rest of this file holds by escaping: no line inside a quote can start a step
 # row or a markdown table row, however it is spelled. In the pull request COMMENT the same
-# property is kept a different way — the block is lifted out of the steps table into a
-# section of its own and rendered as the markdown it was written as, so it can draw a
-# heading or a table inside its own section and cannot forge a row of the plan's. See
+# property is kept a different way — the block is lifted out of the step's own fold into a
+# contract section of its own and rendered as the markdown it was written as, so it can draw
+# a heading or a table inside its own section and cannot forge a row of any step's. See
 # `_outputs`.
 
 # The short spelling of an id, as a WHOLE value. See `_readable`.
@@ -4300,26 +4300,33 @@ def _walked(p: dict, skip: set, level: int = 2) -> list[str]:
 # degraded the steps from a table into bullets with a wall of blockquoted contract under
 # them, exactly when a plan had the most to say.
 #
+# WHAT IS OPEN AND WHAT IS FOLDED is the layout's whole argument, and it is stated in full
+# on `_comment`. Four things open at the top — the status and totals, the graph, the
+# contract, the gates — and then one collapsed `<details>` per step. Nothing here is a
+# table of steps any more: the fields that would have been its columns are the collapsed
+# title (`_fold_title`) and the first rows of the body (`_fold_body`).
+#
 # WHAT THE WALK BOUGHT IS KEPT ANYWAY, and it is worth saying how, because "bespoke" would
 # otherwise mean "a field added next month is invisible in front of somebody's merge". The
 # template names the fields it draws (`_SHOWN_PLAN`, `_SHOWN_STEP`) and hands EVERYTHING
-# ELSE — plan keys and step keys alike, known or not — to the same walk, inside a collapsed
-# metadata block. So a field this file has never heard of still arrives on the PR on its
-# own, a field that goes away vanishes, and neither costs an edit here. What changed is
-# where such a field lands: below the fold rather than beside the work.
+# ELSE — plan keys and step keys alike, known or not — to the same walk. A plan's undrawn
+# fields go to the collapsed metadata block at the bottom; a STEP's go inside that step's
+# own fold, under the step they are about. So a field this file has never heard of still
+# arrives on the PR on its own, a field that goes away vanishes, and neither costs an edit
+# here. What changed is where such a field lands: below a fold rather than beside the work.
 #
 # THE FORGED ROW, which every renderer in this file is arranged against. Each SCALAR still
 # goes through `_cell` and so through `_flat`, so a newline stored in a name or an owner is
 # the `\n` it is and starts no row. The one exception is deliberate and is the whole point
 # of the field: a step's `output` is a human-authored markdown block — an approved change
-# contract, a review — and it renders as the markdown it was written as, inside its own
-# `<details>` section and OUT of the steps table entirely. It can therefore draw a heading
-# or a table of its own inside its own section, and that is what it is for; what it cannot
-# do is forge a row of the plan's own table, because it is not in that table at all.
+# contract, a review — and it renders as the markdown it was written as, in the contract
+# section at the top and OUT of every step's fold entirely. It can therefore draw a heading
+# or a table of its own inside that section, and that is what it is for; what it cannot do
+# is forge a row of a step's own table, because it is in no such table at all.
 
 _SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete",
                          # Put on the copy by `_viewed` and drawn by name above: the token
-                         # total on its own line, and `roles` inside the steps table. Named
+                         # total on its own line, and `roles` inside each step's fold. Named
                          # here so neither also lands in the metadata block below the fold —
                          # `roles` especially, which is a lookup table and not a reading.
                          "tokens", "roles"})
@@ -4331,7 +4338,23 @@ _UNSAFE = re.compile(r"[^0-9A-Za-z]+")
 
 
 def _comment(p: dict, steps: list) -> str:
-    """A whole plan as the comment that goes on the pull request, top to bottom."""
+    """A whole plan as the comment that goes on the pull request, top to bottom.
+
+    FOUR THINGS OPEN AND EVERY STEP FOLDED, in that order, and the order is the argument.
+    What a human at a pull request needs without clicking is: where the job is (the status
+    line and the totals), what shape it is (the graph), what was agreed (the contract), and
+    what is being asked of THEM (the gates). None of those is about a particular step, and
+    all four together are shorter than one step's detail — so they are the whole of what is
+    open, and the per-step detail is behind a fold each.
+
+    THE STEPS WERE A TABLE AND ARE NOT ANY MORE. A table put every step's every column in
+    front of a reader who wanted one step's detail, and the columns still could not hold
+    what a step actually carries — its notes, its checkpoints, whatever field a later author
+    put on it — so those went to a metadata block at the bottom, away from the step they
+    belong to. One `<details>` per step is the trade taken instead: the collapsed title
+    carries what a scan needs (which step, what state, how long) and the body carries
+    everything else about that step, including the fields this file has never heard of.
+    """
     used = next((k for k in _HEADS if _some(p.get(k))), None)
     lines = ["# " + _heading(p, used)]
     # The title under the heading when the display took the heading: they are two
@@ -4343,11 +4366,12 @@ def _comment(p: dict, steps: list) -> str:
         lines += ["", span]
     if (spend := _tokens(p)):
         lines += ["", spend]
-    lines += _defect_lines(p) + _gates(steps)
+    lines += _defect_lines(p)
     lines += ["", "## how it runs", ""] + _graph(steps)
     lines += _outputs(steps)
-    lines += ["", "## steps", ""] + _rows(p, steps)
-    lines += _metadata(p, steps)
+    lines += _gates(steps)
+    lines += ["", "## steps"] + _folds(p, steps)
+    lines += _metadata(p)
     return "\n".join(lines)
 
 
@@ -4634,24 +4658,30 @@ def _label(s: dict) -> str:
 
 
 def _outputs(steps: list) -> list[str]:
-    """Each step's finished `output` as its own headed, collapsible section.
+    """Every step's finished `output`, as the contract section — OPEN, near the top.
 
     RENDERED AS THE MARKDOWN IT IS — a change contract and a review are written as prose
     with nesting, and the walk's blockquote turned every one of them into a wall of quoted
-    text. Lifted out of the steps table so a block never has to fit in a cell, which is
-    what used to cost the whole plan its table.
+    text. Kept out of the per-step folds so a block never has to fit inside one, and so the
+    thing that was actually agreed is readable without opening anything.
 
-    The blank line after `</summary>` and before `</details>` is load-bearing: without it
-    GitHub renders the contents as literal text rather than as markdown.
+    OPEN AND NOT FOLDED, which is the Phase-3 change to it. When a plan has a contract at
+    all it is the single most-read thing on the comment — somebody arriving at the pull
+    request is there to check the diff against it — and a fold is a click between them and
+    the text. Most plans have no contract and get no section, so the cost of leaving it open
+    is paid only by the plans where it is the point.
+
+    Each block keeps its own `## <id> output` heading, which is the anchor the step's own
+    fold links back to (`_head_of`, `_fragment`): the fold says a contract exists and where
+    it is, and the text lives once, up here, rather than twice.
     """
-    out: list[str] = []
-    for s in steps:
-        if not (isinstance(s.get("output"), str) and _some(s["output"])):
-            continue
-        out += ["", f"## {_head_of(s)}", "", "<details>",
-                f"<summary>{_summary(s)}</summary>", ""]
-        out += _lines(s["output"])
-        out += ["", "</details>"]
+    have = [s for s in steps
+            if isinstance(s.get("output"), str) and _some(s["output"])]
+    if not have:
+        return []
+    out: list[str] = ["", "## contract"]
+    for s in have:
+        out += ["", f"### {_head_of(s)}", ""] + _lines(s["output"])
     return out
 
 
@@ -4660,17 +4690,16 @@ def _head_of(s: dict) -> str:
     return f"{_cell('id', s.get('id')) or 'step'} output"
 
 
-def _summary(s: dict) -> str:
-    """The line that stays visible when the block is collapsed."""
-    bits = [_flat(s.get("display") or s.get("name") or ""), _flat(s.get("progress") or "")]
-    return " · ".join(x for x in bits if x) or "output"
-
-
 def _gates(steps: list) -> list[str]:
     """The human gates still ahead, in the words whoever wrote them wrote.
 
-    Up top rather than in a cell: a gate is a QUESTION for the person reading the pull
-    request, and it is the one field on a plan addressed to them directly.
+    Up top and OPEN rather than inside the gated step's own fold: a gate is a QUESTION for
+    the person reading the pull request, and it is the one field on a plan addressed to them
+    directly. A question behind a fold is a question that does not get answered.
+
+    Last of the four open sections, because the three above it — where the job is, what
+    shape it is, what was agreed — are what somebody needs to have read before the question
+    means anything.
     """
     ahead = [s for s in steps
              if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
@@ -4687,17 +4716,23 @@ def _defect_lines(p: dict) -> list[str]:
     return ["", "## incomplete", ""] + [f"- {_flat(x)}" for x in p["incomplete"]]
 
 
-def _rows(p: dict, steps: list) -> list[str]:
-    """The steps as a real table — the flat columns only, and always a table.
+def _folds(p: dict, steps: list) -> list[str]:
+    """Every step as its own collapsed `<details>` — the title scans, the body explains.
 
-    `obliges` is `obliged_by` read the other way round: the record says which step obliged
-    this one, and what somebody reading a plan wants beside a step is what it drags in
-    after it. Computed here rather than stored, because it is the same edge.
+    ONE FOLD PER STEP AND NO TABLE. See `_comment` for why the table went; what matters
+    here is that a step's whole detail is now in one place, the place a reader opened
+    because they wanted that step.
 
-    `took` and `by` are the same kind of thing one level up: both are read off the plan's
-    changelog against the plan's dep graph (`_timings`, `_closings`), and neither is a field
-    on a step. They take the whole plan as an argument for that reason — a row cannot be
-    drawn from its own dict alone once a column's value depends on when its DEPS closed.
+    `took` and `by` are read off the plan's changelog against the plan's dep graph
+    (`_timings`, `_closings`) and neither is a field on a step, which is why this takes the
+    whole plan: a step cannot be drawn from its own dict alone once a value depends on when
+    its DEPS closed. `obliges` is the same edge as `obliged_by` read the other way round —
+    the record says which step obliged this one, and what somebody reading a plan wants
+    beside a step is what it drags in after it.
+
+    THE BLANK LINES ARE LOAD-BEARING. One after `</summary>` and one before `</details>`,
+    or GitHub renders the body as literal text rather than as the markdown it is — which is
+    the same failure the contract section was written against, by another route.
     """
     timings, roles = _timings(p, steps), p.get("roles")
     closings = _closings(p)
@@ -4706,39 +4741,100 @@ def _rows(p: dict, steps: list) -> list[str]:
         if _some(s.get("obliged_by")):
             obliges.setdefault(s["obliged_by"], []).append(s.get("id"))
     here = {s.get("id") for s in steps}
-    blocks = {s.get("id") for s in steps
-              if isinstance(s.get("output"), str) and _some(s["output"])}
-    out = ["| id | step | status | took | by | owner | after | obliges |",
-           "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    out: list[str] = []
     for s in steps:
-        sid, name = s.get("id"), _cell("id", s.get("id"))
-        cell = f'<a id="{_tag(sid)}"></a>' + (
-            f"[{name}](#{_fragment(_head_of(s))})" if sid in blocks else name)
-        out.append("| " + " | ".join((
-            cell,
-            _named(s),
-            _state(s),
-            _took(timings, sid),
-            _did(closings, roles, sid),
-            _cell("owner", s.get("owner")) if _some(s.get("owner")) else "",
-            _refs(s.get("deps"), here),
-            _refs(obliges.get(sid), here))) + " |")
+        out += ["", "<details>", f"<summary>{_fold_title(s, timings)}</summary>", ""]
+        out += _fold_body(s, closings, roles, obliges, here)
+        out += ["", "</details>"]
     return out
 
 
+def _fold_title(s: dict, timings: dict) -> str:
+    """What stays visible when a step is folded: which step, what state, how long.
+
+    `{id} · {display} — {name} | {state} | {elapsed}`, and the elapsed half is dropped
+    WITH its separator when there is nothing to measure — a dangling `| ` at the end of
+    every title on a plan that has not run yet is noise pretending to be a column. Cost
+    would sit after it on the same rule and is deferred, so nothing renders it today.
+
+    THE ID IS ON THE FRONT because everything else in the comment refers to a step by it:
+    the graph's nodes, the gate list, the `after` and `obliges` cells inside another step's
+    fold. A title without it would leave a reader who followed one of those links with no
+    way of telling they had landed in the right place.
+
+    PLAIN TEXT AND NO EMPHASIS. This is the content of an HTML `<summary>` element, and
+    markdown inside one is at GitHub's discretion in a way markdown in a body is not; a
+    title that rendered its own `**` is worse than a title with no bold in it. Every value
+    still goes through `_cell`, so a newline stored in a name is the `\n` it is.
+    """
+    named = " · ".join(x for x in (_cell("id", s.get("id")) if _some(s.get("id")) else "",
+                                   _named(s)) if x)
+    bits = [named or "step", _state(s)]
+    if (took := _took(timings, s.get("id"))):
+        bits.append(took)
+    return f'<a id="{_tag(s.get("id"))}"></a>' + " | ".join(bits)
+
+
+def _fold_body(s: dict, closings: dict, roles: Any, obliges: dict,
+               here: set) -> list[str]:
+    """One step's whole detail: the fields drawn by name, then everything else, walked.
+
+    THE WALK IS WHY THIS IS NOT JUST A TABLE. The fields below are named because a reader
+    wants them in a fixed order; every OTHER field on the step — its notes, its checkpoints,
+    its `tries`, and whatever a later author puts there — is handed to the same walk the
+    rest of this file uses, right here under the step it belongs to. That is where they
+    moved FROM the comment-wide metadata block: a note about step 3 was being filed at the
+    bottom of the page next to the workspace path, which is filing rather than rendering.
+
+    A scalar the walk turned up joins the same `field | value` table rather than starting a
+    second one underneath it, because two tables in a row is a rendering artefact and not a
+    distinction anybody reading it can act on.
+
+    The contract is a LINK and not a copy: it is rendered once, open, at the top of the
+    comment, and duplicating it inside the fold would put the same prose on the page twice
+    and leave two things to keep in step.
+    """
+    sid = s.get("id")
+    rows = [("after", _refs(s.get("deps"), here)),
+            ("obliges", _refs(obliges.get(sid), here)),
+            ("owner", _cell("owner", s.get("owner")) if _some(s.get("owner")) else ""),
+            ("by", _did(closings, roles, sid)),
+            # Only when it is TRUE. `root` is a claim that a step is a deliberate second
+            # start, and the plans that carry it at all carry `false` on every other step —
+            # a `root | no` row under all of them is a column of nothing, said out loud.
+            ("root", _cell("root", True) if s.get("root") else ""),
+            ("gate", _cell("gate", s["gate"]) if _some(s.get("gate")) else ""),
+            ("output", f"[{_head_of(s)}](#{_fragment(_head_of(s))})"
+                       if isinstance(s.get("output"), str) and _some(s["output"]) else "")]
+    rest = {k: v for k, v in s.items() if _leftover(k, v)}
+    got = [(k, v) for k, v in rows if v]
+    got += [(_title(k), _cell(k, v)) for k, v in rest.items() if _scalar(v)]
+    lines: list[str] = []
+    if got:
+        lines += ["| field | value |", "| --- | --- |"]
+        lines += [f"| {k} | {v} |" for k, v in got]
+    nested = {k: v for k, v in rest.items() if not _scalar(v)}
+    if nested:
+        lines += _walked(nested, set(), level=4)
+    return lines
+
+
 def _named(s: dict) -> str:
-    """The step cell: the short name in bold, and the whole sentence after it.
+    """A step named for its fold title: the short name, and the whole sentence after it.
 
     BOTH, where they differ. `display` is what the board draws in a cell and is a display
     version of the sentence rather than an abbreviation of it — so the sentence is the part
     that actually says what the job is, and a comment that showed only the short one would
     leave whoever turns up at the pull request reading two words per step.
+
+    No emphasis on either half: this goes inside a `<summary>`, where the `**` would be at
+    risk of arriving as two asterisks. See `_fold_title`.
     """
     short = _cell("display", s.get("display")) if _some(s.get("display")) else ""
     full = _cell("name", s.get("name")) if _some(s.get("name")) else ""
     if short and full and short != full:
-        return f"**{short}** — {full}"
-    return f"**{short}**" if short else full
+        return f"{short} — {full}"
+    return short or full
 
 
 def _fragment(heading: str) -> str:
@@ -4782,20 +4878,21 @@ def _leftover(k: str, v) -> bool:
     return k not in _SHOWN_STEP or (k in _BLOCK and not isinstance(v, str))
 
 
-def _metadata(p: dict, steps: list) -> list[str]:
-    """Everything the template did not draw, walked, below the fold.
+def _metadata(p: dict) -> list[str]:
+    """Everything about the PLAN that the template did not draw, walked, below the fold.
 
-    This is where the walk's property is kept: a plan field and a step field this file has
-    never heard of both land here on their own, without this function being told they
-    exist, and the day one of them turns out to matter to a human it is promoted into the
-    template above by name. Plumbing — the workspace, the checkout, the changelog — stays
-    here for good, which is the other half of what the block is for.
+    This is half of where the walk's property is kept: a plan field this file has never
+    heard of lands here on its own, without this function being told it exists, and the day
+    one of them turns out to matter to a human it is promoted into the template above by
+    name. Plumbing — the workspace, the checkout, the changelog — stays here for good, which
+    is the other half of what the block is for.
+
+    A STEP's undrawn fields are the other half and are no longer here: they render inside
+    that step's own fold (`_fold_body`). Filing a note about step 3 at the bottom of the
+    page beside the checkout path kept it visible and made it unfindable, and one fold per
+    step is somewhere better to put it that did not exist before Phase 3.
     """
     rest = {k: v for k, v in p.items() if k not in _SHOWN_PLAN and _some(v)}
-    left = [dict({"id": s.get("id")}, **extra) for s in steps
-            if (extra := {k: v for k, v in s.items() if _leftover(k, v)})]
-    if left:
-        rest["steps"] = left
     if not rest:
         return []
     return (["", "<details>", "<summary>metadata</summary>"]
