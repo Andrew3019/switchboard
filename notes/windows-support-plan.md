@@ -38,6 +38,18 @@ the docstring, not the code.
 These change macOS/Linux behaviour or reverse a documented decision. Each needs an explicit
 sign-off before implementation — they are the real "design questions" in this port.
 
+**Still open after four review rounds — the whole list, all of it Phase 0, none of it coding work:**
+
+| | question | gates | why it is not an implementer's call |
+|---|---|---|---|
+| **H1** | Does herdr run natively on Windows and make a Windows pane? | Phases 3, 3b, 6, 7 | herdr is an external pinned binary and the only thing that makes a pane. If no, Phases 1/2/4/5 all pass their gates and switchboard still spawns nothing. Nothing in this plan or the six audits establishes it. |
+| **H2** | Does herdr's API report a pane's shell family? | Phase 3 (B5) | If no, B5's whole design changes; a dispatch landing anywhere but POSIX is `SbUnpinned` on every macOS spawn. |
+| **D5** | How does a plugin reach `lockfile`? | B7, in Phase 1 | Today's contract is one module wide. Re-export vs widen. |
+| **D6** | What does `blocking=True` mean on Windows? | `lockfile.py`, the first thing Phase 1 builds | `msvcrt` has no unbounded wait, so two sites need a timeout and a **per-site expiry behaviour**. "Proceed anyway" is right for a fork lock and may be wrong for `_minting`, where it means two agents minting the same plan id. |
+| **D4a** | On D4's fallback branch: does it append to `linked`, and how is a copied `CLAUDE.md` classified? | Phase 5 | The second half is a **data-loss** decision — `mine` deletes a possibly-genuine file without it appearing in the "what you're about to lose" inventory. Does not touch D4's primary path. |
+
+D1–D4 are settled and none of the four rounds found any of them unsafe.
+
 ### D1. Process scanning: adopt `psutil`, or hand-roll per-OS? — **DECIDED (Andrew, 2026-08-22): adopt psutil**
 `live.py` (`lsof`), `stats.py` (`ps`/`vm_stat`), and `broker._parents` (`ps`) are three
 hand-parsed POSIX subprocesses. Windows has no `lsof` equivalent for "which process has this
@@ -146,6 +158,24 @@ presets, models — all invisible) and `CLAUDE.md` (no repo context).
   machine that can't enable Developer Mode, not Andrew's.
 - Either way, update the two `is_symlink()` detection sites (`broker.py:1113`, `:1856`, M5) in
   lockstep so a junction/copy isn't misread as "not ours."
+- **D4a — OPEN sub-decision on the fallback branch only (round 4). Does not touch D4's primary
+  path.** Two things the fallback has to answer that "update the `is_symlink` sites" does not:
+  1. **Does the fallback append to `linked`?** `link_config` (`broker.py:1108-1121`) calls
+     `self._exclude(main, LINKED_CONFIG)` **only if `linked` is non-empty** (`:1119`). Today's
+     failure path just logs `link_failed`. If the junction/copy path does the same, the names
+     never reach `.git/info/exclude`, git reports the copied `CLAUDE.md` as untracked, `_weigh`
+     counts it in `dirty` (`broker.py:1851-1855`, the `code != "!!"` branch), and
+     `broker.py:2381-2383` — `if weight["dirty"]:` — **refuses the close outright, not as a
+     prompt**. Every Windows worktree in the fallback branch becomes uncloseable. Phase 5's two
+     exit criteria are both green over this. It must append.
+  2. **How is a *copied* `CLAUDE.md` classified at `broker.py:1856`?** A copy is byte-
+     indistinguishable from a file the user wrote. `mine` ⇒ it is deleted **without appearing in
+     the "what you're about to lose" inventory** that `_weigh`'s docstring (`broker.py:1834-1838`)
+     says the whole mechanism exists for — a genuine data-loss path. `unknown` ⇒ every Windows
+     close prompts. D4's "so a junction/copy isn't misread as 'not ours'" silently picks the
+     first. **This is a data-loss decision and it is D4's, not an implementer's.** (A junction is
+     fine either way — it is structurally distinguishable. Only the `CLAUDE.md` copy has this
+     problem, which is another argument for Developer Mode being the primary path.)
 
 ### D5. How does a *plugin* get the lock primitive? — **OPEN (new, raised by adversarial review round 1)**
 `defaults/plugins/plans/__init__.py:379` imports `fcntl` at module scope and flocks the plan-id
@@ -156,12 +186,42 @@ not: every shipped plugin imports exactly `switchboard.plugins` and nothing else
 - **Re-export `lock`/`unlock` through `switchboard.plugins`** — the contract stays one module wide,
   plugins get the primitive, one implementation. *Recommended.*
 - **Widen the contract** to allow `switchboard.lockfile` — more honest as a layering statement,
-  but it makes "what a plugin may import" a list rather than a single name, and `sb doctor` and
-  the prose at `report-bug:284-287` both have to move with it.
+  but it makes "what a plugin may import" a list rather than a single name.
+  **Correction (round 4): this costs less than the first draft said.** `sb doctor` does *not*
+  police plugin imports — `_doctor_plugins` (`cli.py:1428-1464`) reports `status in ("broken",
+  "incompatible")`, orphaned state dirs, repo-sourced plugins and deprecations, and never inspects
+  what a plugin imports. The one-module contract exists **only** as prose in one plugin's
+  docstring (`report-bug/__init__.py:286-288`, which is itself the plan's source for the claim and
+  is wrong about doctor). So widening costs a docstring edit, not a doctor change. Option 1 is
+  still the smaller change, but the comparison was being made against a check that does not exist.
 - (Rejected third option: let each plugin platform-branch its own locking inline. Duplicates the
   msvcrt/fcntl branch per plugin — the exact thing `lockfile.py` exists to prevent.)
 
 ---
+
+### D6. What does `blocking=True` mean on Windows? — **OPEN (new, raised by adversarial review round 4)**
+`lockfile.lock(fd, *, blocking)` was costed as "~40 lines, POSIX extracted verbatim". That is true
+for six of the eight call sites and false for two, because **`msvcrt` has no unbounded wait**:
+`msvcrt.locking(fd, LK_LOCK, n)` retries once a second, ten times, then raises `OSError`. The two
+blocking sites are:
+- `plugins.py:687` — `plugins.locked`, documented at `:672-676` as *the* answer to "what happens
+  when two agents write at once", and held for the length of an arbitrary handler call.
+- `defaults/plugins/plans/__init__.py:2869` — `_minting`, held across a `yield`.
+
+So on Windows a second agent contending for more than ~10s gets an exception where POSIX waits.
+That is a policy question, not a shim detail, and **the repo already has an opinion 200 lines
+away**: `broker._fork_lock` (`broker.py:2856-2876`) polls `LOCK_NB` against `FORK_LOCK_WAIT`, logs
+`fork_lock_timeout`, and **proceeds anyway**, with a docstring (`broker.py:2843-2847`) arguing that
+an unbounded wait is the worse failure. Options:
+- **Adopt the `_fork_lock` shape for the Windows `blocking=True` branch** — a named timeout, and a
+  stated expiry behaviour *per site* (proceed? raise? log?). Consistent with the one place in the
+  repo that already decided this. *Recommended, but the per-site expiry behaviour is the part
+  Andrew has to set: "proceed anyway" is right for a fork lock and may be wrong for `_minting`,
+  where proceeding means two agents minting the same plan id.*
+- **Let `plugins.locked` raise on Windows and not on POSIX** — cheapest, and an explicit,
+  documented platform difference rather than a silent one. Weakens the no-regression symmetry.
+Either way it must be written down: this is the first place the port cannot be "add a Windows
+branch that behaves as POSIX does", because the primitive underneath does not exist.
 
 ## 2. Complete inventory of platform-specific code paths
 
@@ -201,10 +261,10 @@ the earlier F9 and V2 read as exhaustive site lists and were not.
 | F7 | `hooks.py:113/126/143`, `broker.py:3343` | `shlex.quote` — POSIX quoting; breaks on Windows paths with spaces | branch on `os.name`; use `subprocess.list2cmdline`/`"..."` for Windows, keep `shlex.quote` for POSIX |
 | F7b | `hooks.py:157` (`p.read_text()`), `:160` (`tmp.write_text(body)`) | the **same two lines** write Claude Code's `settings.json` with no `encoding=`. Claude Code reads that file as UTF-8; this writes it in the ANSI code page. A checkout path with any non-ASCII character produces a settings file Claude Code mis-parses or reads a wrong path out of — and hooks never fire, silently | `encoding="utf-8"` on both. Part of the F9 class, called out separately because the consequence is "hooks are dead", not "text looks wrong" |
 | F8 | `board.py:2269` | `prompt_pane(…, "exec {python} -m switchboard.board")` — `exec` is a POSIX builtin | drop `exec` on Windows panes (not load-bearing) |
-| F9 | **A package-wide class, not two lines.** No text read in this codebase passes `encoding=`. On Windows `Path.read_text()`/`open()` fall back to `locale.getpreferredencoding(False)` — the ANSI code page, cp1252 on a default install, not UTF-8 (3.11/3.12; UTF-8 mode is only the default from 3.15). The grep is `grep -rn -e 'read_text(' -e '.open(' -e 'write_text(' switchboard/ defaults/`, minus the lines that already pass `encoding=`. Sites: `board.py:2179`, `output.py:337`, `defaults/plugins/plans/__init__.py:3848` (the three `errors="replace"` opens); `config.py:163` (`read_toml`), `:191` (`read_text`), `:425`, `:453`; `models.py:213`; `presets.py:167`, `:220`; `plugins.py:336`; `store.py:108`/`:118`; `sweep.py:313`/`:319`; `panel.py:136`/`:145`; `broker.py:1134`, `:4090`; `collector.py:568`; `defaults/plugins/plans/__init__.py:3350`; and F7b | **Silent corruption of the artefact switchboard exists to produce.** Measured, not assumed: `defaults/protocol.md` (192 non-ASCII bytes) and `defaults/settings.toml` (293) both decode *successfully* as cp1252 into mojibake (`'sessions â€” in this repo'`). `config.py:191` is what reads `protocol.md`, every role `.md` and `agent.md` — i.e. **every agent's spawn prompt is mojibake on a default Windows install**. `read_toml` corrupts any setting *value* containing `—`/`’`. Contrast `herdr.write_prompt_file` (`herdr.py:145,147`), which already passes `encoding="utf-8"` — which is why this is a gap and not the whole codebase | add `encoding="utf-8"` at every site. Zero-risk on POSIX (it is what a UTF-8 locale already does) and it fixes the same **latent POSIX bug** under `LC_ALL=C` / minimal containers |
+| F9 | **A package-wide class, not two lines — and now enumerated, not grep-defined.** No text read in this codebase passes `encoding=`. On Windows `Path.read_text()`/`open()` fall back to `locale.getpreferredencoding(False)` — the ANSI code page, cp1252 on a default install, not UTF-8 (3.11/3.12; UTF-8 mode is only the default from 3.15). **The 26 sites are listed in the appendix**, produced by an AST pass, not a grep — round 4 showed a grep is wrong in both directions here: it misses bare `open(...)` while matching `os.open(...)` (an fd, no encoding), and it reported `plans/__init__.py:3350` as a site when that call already passes `encoding=` on its continuation line. Earlier drafts of this row had both errors. | **Silent corruption of the artefact switchboard exists to produce.** Measured, not assumed: `defaults/protocol.md` (192 non-ASCII bytes) and `defaults/settings.toml` (293) both decode *successfully* as cp1252 into mojibake (`'sessions â€” in this repo'`). `config.py:191` is what reads `protocol.md`, every role `.md` and `agent.md` — i.e. **every agent's spawn prompt is mojibake on a default Windows install**. `read_toml` corrupts any setting *value* containing `—`/`’`. Contrast `herdr.write_prompt_file` (`herdr.py:145,147`), which already passes `encoding="utf-8"` — which is why this is a gap and not the whole codebase | add `encoding="utf-8"` at every enumerated site. Zero-risk on POSIX (it is what a UTF-8 locale already does) and it fixes the same **latent POSIX bug** under `LC_ALL=C` / minimal containers |
 | F10 | `board.py:2333` write path | no `sys.stdout.reconfigure(encoding="utf-8")` ⇒ glyphs (`✗◐◌○●`) raise `UnicodeEncodeError`/mojibake on a non-UTF-8 codepage | **`sys.stdout.reconfigure(encoding="utf-8", errors=sys.stdout.errors)`, guarded** — see the F10/F11 hazard note below. A bare `reconfigure(encoding=…)` is **not** zero-risk on POSIX and **is not** what the rest of the F9 class is |
 | F11 | `bin/sb-stop-hook:28`, `bin/sb-activity-hook:27` — `hooks.run(sys.stdin.read())` | the **read** side of F10. `sys.stdin` decodes a pipe with the ANSI code page and `errors='strict'`. `0x81 0x8D 0x8F 0x90 0x9D` are undefined in cp1252, so a payload containing e.g. `●` (UTF-8 `E2 97 8F`) raises `UnicodeDecodeError` before `json.loads` runs. Both scripts catch it and return 0 — hooks fail open by design (B6) — so the Stop gate silently never fires for that turn and nothing is logged | `sys.stdin.reconfigure(encoding="utf-8", errors=sys.stdin.errors)`, guarded. **Phase 1 patches the two `bin/` scripts directly** — `hooks_entry.py` is a Phase 2 artifact and this fix must not wait for it; Phase 2 carries it across when it folds the two scripts. Same hazard note |
-| F12 | 26 `subprocess.run(..., text=True)` sites across `switchboard/` and `defaults/` (e.g. `defaults/plugins/report-bug/__init__.py:269`, `plans/__init__.py:3556`, `plans/analysis/evidence.py:110`) | `text=True` with no `encoding=` decodes the child's stdout with the ANSI code page too. Reading `sb … --json` output containing an em-dash gives mojibake through `json.loads`, or a `UnicodeDecodeError` on the undefined cp1252 bytes | pass `encoding="utf-8"` alongside `text=True`. Same class as F9, same zero-risk POSIX fix. *(Found while verifying F9; not in the round-1 findings.)* |
+| F12 | 26 `subprocess.run(..., text=True)` sites, **enumerated in the appendix**, across `switchboard/` and `defaults/` (e.g. `defaults/plugins/report-bug/__init__.py:269`, `plans/__init__.py:3556`, `plans/analysis/evidence.py:110`) | `text=True` with no `encoding=` decodes the child's stdout with the ANSI code page too. Reading `sb … --json` output containing an em-dash gives mojibake through `json.loads`, or a `UnicodeDecodeError` on the undefined cp1252 bytes | pass `encoding="utf-8"` alongside `text=True`. Same class as F9, same zero-risk POSIX fix. *(Found while verifying F9; not in the round-1 findings.)* |
 | F13 | `panel.py:583` `start_new_session=True` (the collector spawn, `panel.py:576-586`) | **was V6, and V6's verdict was wrong.** V6 said CPython maps this to `CREATE_NEW_PROCESS_GROUP` on Windows. It does not: CPython 3.11.5's Windows `_execute_child` takes it as `unused_start_new_session` (`subprocess.py:1445`) and never reads it; the docstring at `:785` says "POSIX only". It is **silently discarded** — no `creationflags` are set. This is the repo's single elected collector, and `start_new_session` is what detaches it from whichever renderer won the election. On Windows it stays in that renderer's console and process group: a Ctrl-C in that pane, or closing that console window, takes the fleet's collector down and every panel goes stale | Windows branch adding `creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP`; keep `start_new_session=True` unchanged on POSIX |
 
 **The F10/F11 hazard — two ways a bare `reconfigure(encoding=…)` regresses macOS/Linux.**
@@ -281,16 +341,45 @@ are different and must not inherit F9's "zero-risk on POSIX" line.
   says how, see B7). Do not convert "all but one": one survivor keeps `import fcntl` at module
   scope and B1 is not done. Windows branch = `msvcrt.locking` at offset 0 after `os.lseek(0)` (must lock
   the *same* byte range at all sites to contend). ~40 lines; recommended over a `portalocker`
-  dep. All 8 lock calls are whole-file, advisory, exclusive, cross-process, on a *separate* 0-byte
-  `.lock` file (never the data file) — so Windows *mandatory* byte-range locking never collides
-  with the separate `tmp + os.replace` data rewrite. Checked in the API's favour (round 2): `lock(fd, *, blocking)` / `unlock(fd)` keeps the fd with
+  dep. All 8 lock calls are whole-file, advisory, exclusive, cross-process, on a *separate*
+  `.lock` file (never the data file). **Correction (round 4): that file is not 0-byte** —
+  `panel.acquire` (`panel.py:437-441`) `ftruncate`s `collector.lock` and writes its own pid into it
+  *while holding the lock*. The `os.lseek(0)`-before-lock rule already handles the file-pointer
+  drift that write causes, so this is a wrong statement in the plan rather than a break — but
+  `ftruncate` + write under a byte-range lock at offset 0 is an untested Windows interaction and is
+  now in §5 — so Windows *mandatory* byte-range locking never collides
+  with the separate `tmp + os.replace` data rewrite. **Release-by-close is load-bearing and unverified on Windows.** Four sites release by closing
+  the fd with a comment saying so (`plugins.py:689`, `sweep.py:323`, `broker.py:2880`,
+  `plans:2872`), and `panel.py:426-430` rests the entire collector election on the kernel dropping
+  the lock at process exit, "`kill -9` and a herdr restart included". Windows does release
+  byte-range locks on handle close and on termination, but MSDN documents that timing as
+  resource-dependent and recommends explicit unlock. The single-collector invariant depends on it;
+  it is in §5. Checked in the API's favour (round 2): `lock(fd, *, blocking)` / `unlock(fd)` keeps the fd with
   the caller, which is what `panel.acquire`'s "the fd IS the lock" contract (`panel.py:426-430`)
   requires — a path-taking API would have been a real POSIX regression. One rule to preserve: never read a `.lock`
   file's contents from a second process without holding the lock (works by accident on POSIX,
   `PermissionError` on Windows).
 - **`switchboard/rawinput.py`** — the raw-mode keypress seam. POSIX = `termios`/`tty`/`select`
   unchanged. Windows = `ENABLE_VIRTUAL_TERMINAL_INPUT` + `msvcrt.kbhit()` polling. **Keep
-  `parse_sgr` (`board.py:139`) as the single shared parser** — only the byte *source* forks.
+  `parse_sgr` (`board.py:139`) as the single shared parser** — verified round 4 as pure string
+  work over a regex with a `leftover` carry (`board.py:139-167`), genuinely platform-neutral.
+  **But the seam is one layer too low as first drawn.** "Only the byte source forks" is wrong:
+  three things sit between the source and `parse_sgr`, all POSIX-shaped, and all readable in
+  today's source:
+  1. **EOF.** `board.py:2474` `if not data: break` is the loop's only exit on closed stdin.
+     `msvcrt.kbhit()` has no EOF to report, so the seam needs an explicit "source exhausted"
+     signal or the board never exits that way on Windows.
+  2. **Decode.** `board.py:2477` does `data.decode("utf-8", "replace")`. `msvcrt.getch()` returns
+     bytes in the *console input codepage* and `getwch()` returns `str` — neither is UTF-8 bytes,
+     so the decode forks with the source.
+  3. **Which handle, and raw-mode save/restore.** `board.py:2394` `fd = sys.stdin.fileno()` feeds
+     `tcgetattr`, `setraw` and `select`. Windows console mode is set on
+     `GetStdHandle(STD_INPUT_HANDLE)`, which is not that fd under redirection — and `restore()`
+     (`board.py:2398-2406`) runs from the SIGINT/SIGTERM/SIGHUP handler, so the save/restore pair
+     has to live inside `rawinput` too.
+  So the API is **`open_raw() -> context manager`** (owning save/restore) **+
+  `poll(timeout) -> Optional[str]`** (decoded text, `None` on timeout, a distinct EOF signal), not
+  "give me bytes". `parse_sgr` stays above it, unchanged.
 - **`switchboard/procscan.py`** (D1 = psutil) — one *module* serving `live.scan`, `stats`
   memory/process sampling, and `broker._parents`. **Not one enumeration** — round 2 showed that
   phrasing was itself the bug. Four rules it must hold, each from a measured macOS behaviour
@@ -302,6 +391,34 @@ are different and must not inherit F9's "zero-risk on POSIX" line.
   3. Any cwd that is **not absolute** is rejected, reproducing the `n/` guard at `live.py:107`.
      An empty cwd resolves to the broker's own and refuses the gate forever.
   4. CPU% needs **per-pid `Process` objects retained across samples**, or it reads `0.0` forever.
+  5. **A cwd the scan cannot read is never silently skipped.** This is the only rule here whose
+     absence fails toward *deletion* rather than refusal, so it is the one that matters most.
+     `Process.cwd()` raises `AccessDenied` for processes the caller cannot open. The obvious
+     implementation — skip the pid — makes `live.processes_in` under-report, which feeds
+     `broker._live_under` (`broker.py:2443`) and the close gate, and under-reporting there means
+     `sb workspace close` **deletes a checkout somebody is standing in**. Today's lsof path
+     cannot have this bug: `live._parse` gets an absolute name or the process is simply absent for
+     a reason lsof already decided.
+
+     **But the rule has to be scoped, or it breaks macOS immediately.** Measured here: 195 of 490
+     processes raise `AccessDenied` on `cwd()` on this Mac. Those are foreign-user processes, and
+     round 2 measured that psutil's refusals *reproduce* unprivileged lsof's own-user-only scope
+     (`live.py:25-37`) exactly — 0 cwd strings differed, 0 pids psutil had that lsof did not. So
+     "fail the scan to `None`" or "count the pid as present" applied unconditionally would make
+     `scan()` return `None` or refuse on **every** call on macOS, permanently breaking
+     `sb workspace close`. The rule is therefore:
+     - **A refusal on a process the caller does not own is out of scope** — that is today's
+       behaviour, measured, and stays.
+     - **A refusal on a process the caller *does* own, or one whose ownership cannot be
+       determined, fails the whole scan to `None`** — the existing fail-safe channel
+       (`broker.py:2305` refuses). This is the Windows case that does not exist on POSIX: there a
+       process the caller cannot open may still be their own agent (different integrity level,
+       elevated, different session).
+     - Ownership itself must be read without a privileged attribute (rule 2's hazard), and if it
+       cannot be read at all, take the conservative branch.
+
+     *The finding is round 4's; the scoping is mine — the reviewer's prescription as written
+     ("fail to `None` or count as present") would have been a macOS regression.*
 - **`switchboard/hooks_entry.py`** — one module replacing the two duplicated hook scripts.
 
 ---
@@ -315,9 +432,19 @@ phase's *code* needs a later phase's code. What round 3 broke was the exit crite
 were unsatisfiable, or green over the exact failure the phase exists to prevent. They are rewritten
 below, and every phase now states what it changes in `.github/workflows/tests.yml`.
 
-**Phase 0 — settle what gates code.** Three questions, none of them coding work:
+**All parallelism in this port is *within* a phase.** `broker.py` is edited in Phases 1, 2, 3, 4
+and 5; `board.py` in 1, 2, 3, 6 and 7; `panel.py` in 1 and 3b. That is a consequence of the
+dependency graph, not a defect in it — but it means a lead cannot get overlap by running phases
+concurrently, and the only place to get it is the by-file split inside Phase 1 below.
+
+**Phase 0 — settle what gates code.** Now **five** questions, none of them coding work:
 
 - **D5 (how a plugin reaches `lockfile`)** — open, gates B7, which is in Phase 1.
+- **D6 (what `blocking=True` means on Windows)** — open, gates `lockfile.py`, which is the first
+  thing Phase 1 builds. `msvcrt` has no unbounded wait, so the two blocking sites need a stated
+  timeout and a per-site expiry behaviour. See §1.
+- **D4a (the fallback branch's `linked`/`_exclude` and copy-classification)** — open, gates
+  Phase 5. The second half is a data-loss decision. Does not touch D4's primary path. See §1.
 - **H1 — does herdr run natively on Windows, and does it make a Windows pane?** `herdr.py:1-11`:
   herdr is an external binary pinned to **0.8.0 / protocol 19**, and it is the only thing that
   makes a pane. Phases 3, 3b, 6 and V3/V5 all presuppose a native Windows herdr. **Nothing in this
@@ -334,6 +461,23 @@ below, and every phase now states what it changes in `.github/workflows/tests.ym
   H1 and answered in the same conversation; it is a decision, not a Phase 3 bullet.
 
 **Phase 1 — make it import on Windows (unblocks all testing).**
+
+*How to decompose it, because this is the one phase big enough to fan out and the way it is
+written invites the wrong split.* Phase 1 bundles five independent fix-classes, and splitting **by
+fix-class** — which is how §2 presents them — puts multiple concurrent writers in six core files:
+`board.py` gets three or four (rawinput, signals, encoding, stdio), and `broker.py`, `panel.py`,
+`plugins.py`, `sweep.py`, `collector.py` and `plans/__init__.py` get two each. Nothing forces that
+— the fixes are independent *within* a file. So:
+
+1. **One prior commit lands `lockfile.py` and `rawinput.py`** as new files, with no call sites
+   converted. Everything else edits against them.
+2. **Then decompose by FILE, not by fix-class** — one worker owns a file set and applies *every*
+   Phase-1 fix in it.
+3. **The F9/F12 site lists must be committed and enumerated before that fan-out** (see the
+   appendix). A work item whose scope is a grep has no boundary: two workers running it at
+   different points get different overlapping sets and neither can tell whose line is whose — and
+   Phase 1's exit criterion (2) is itself a grep, so a partial pass reads green.
+
 - `lockfile.py` shim. **The counts, from `grep`, because an earlier draft of this plan got them
   wrong twice:** `switchboard/` has **4** `import fcntl` and **7** `flock` calls; `defaults/` adds
   **1** and **1**. Convert all **8** call sites — `plugins.py:687`, `sweep.py:308`,
@@ -341,6 +485,19 @@ below, and every phase now states what it changes in `.github/workflows/tests.ym
   D5 decides). Do not convert "all but one": one survivor keeps `import fcntl` at module scope and
   the first exit criterion still fails. Pure extraction on POSIX.
 - `rawinput.py` seam so `board.py`/`richboard.py` import without `termios`/`tty` (B2).
+  **This is Phase 6's structural half and the phase's real risk — say so rather than discovering
+  it.** `import termios` cannot leave `board.py` without every call site leaving with it, and
+  there are exactly four, all inside `board.main()`: `:2395` `tcgetattr`, `:2406` `tcsetattr`
+  (inside `restore()`, which is also the SIGINT/SIGTERM/SIGHUP teardown at `:2410-2414`), `:2452`
+  `tty.setraw`, `:2473` `select.select`. So Phases 1 and 6 cannot be fully separated: Phase 1 moves
+  the structure, Phase 6 wires the Windows source into it.
+  **And this is the one Phase-1 edit that is not "pure extraction verified by tests."**
+  `tests/test_board.py` is 2537 lines and never drives `main()` — its own comment at `:2470` says
+  so ("Nothing tests `main()` itself"). All three Phase-1 exit criteria are green over a board
+  whose raw-mode setup or signal-path restore was broken during the extraction. Either add a
+  POSIX-runnable pty test that drives `main()` for one frame **before** touching it, or accept
+  that this edit is hands-on-verified only — and either way it belongs to one worker, with the
+  `board.py` file set, not split across the rawinput and signals fix-classes.
 - Guard `SIGHUP` (B3) and `SIGWINCH` (B4) with `hasattr`/platform filters in `collector.py` and
   `board.py`.
 - Add the whole F9 encoding class now, plus F7b, F12, and F10/F11 **with their `errors=` +
@@ -518,6 +675,15 @@ are largely CI-verifiable" was too broad.
       (D1 cost 6).
     - fleet CPU% is non-zero across two consecutive collector samples (D1 cost 3 — the stateless
       shape reads `0.0` forever and no existing test would notice).
+    - **`procscan` fails the whole scan to `None` when a process the caller owns refuses its cwd,
+      and still omits foreign-user refusals** (rule 5). Both halves matter: the first is the
+      unsafe-direction gap; the second is what keeps macOS working, where 195 of 490 processes
+      refuse `cwd()` today. Fake a `procscan` whose refusals carry ownership either way.
+    - `link_config`'s junction/copy fallback **appends to `linked`** so `_exclude` runs (D4a) —
+      assert against `.git/info/exclude`, not against `is_symlink`, because the failure is an
+      uncloseable worktree via `_weigh`'s `dirty` count.
+    - The Windows `blocking=True` branch honours whatever D6 decides — a named timeout and the
+      stated per-site expiry behaviour, asserted with a mocked lock primitive.
   - `python bin/sb plugin list` reports **no shipped plugin as `broken`** — a regression test for
     B7's failure mode, where a plugin import error is swallowed into a health line nobody reads.
     Runs on every OS. Must grep the output: `cli.py:1411` returns `0` unconditionally. Not "every
@@ -561,7 +727,16 @@ POSIX default, not this); and whether D2's `@py -3` shim resolves through the Wi
 rather than the interpreter `actions/setup-python` chose — if it does, anything exercised *through*
 the shim on `windows-latest` is not testing the matrix's 3.11/3.12 axis. The reviewer who raised
 that had no Windows box and did not verify it; a shim spelled `python "%~dp0sb"` instead of
-`py -3` would sidestep it without reopening D2. Two Windows claims here **are** verified, by running them on this Mac rather than
+`py -3` would sidestep it without reopening D2.
+
+From review round 4, three Windows lock behaviours the single-collector invariant rests on:
+`msvcrt` byte-range lock on a **non-empty** file (`collector.lock` holds a pid — the earlier "0-byte
+lock file" statement was wrong); `ftruncate` + write under a byte-range lock held at offset 0
+(`panel.py:437-441`); and **release-on-close / release-on-termination timing**, which
+`panel.py:426-430` depends on for `kill -9` and herdr restarts and which MSDN documents as
+resource-dependent while recommending explicit unlock. Also unproven: that `msvcrt`'s
+`LK_LOCK` retry-10×-then-raise is acceptable at the two blocking sites — that is D6, and it is a
+decision before it is a test. Two Windows claims here **are** verified, by running them on this Mac rather than
 asserting them: the cp1252 decode of the repo's own text files (F9), and CPython 3.11.5's Windows
 `_execute_child` discarding `start_new_session` (`subprocess.py:1445`, F13). **The zero-regression claim is per-item, not blanket.** An earlier draft said "the POSIX side of
 every proposed change is a verbatim extraction of current code" — round 2 showed that is false for
@@ -611,6 +786,66 @@ side still needs a real box or a `windows-latest` CI leg to move from "documente
   the CI story (three `tests.yml` edits across three phases, none previously owned; the "additive,
   no risk" line only ever covered the matrix change), and on **H1/H2** — a herdr-on-Windows
   assumption four phases rested on and the plan never named.
+
+- **Round 4, multi-agent build model / seam coherence lens**
+  (`.switchboard/notes/reviewer-port-sequencing-worktree-model-and-seams.md`): 10 findings, all
+  accepted (one with its prescription corrected — see `procscan` rule 5). Produced **D6** and
+  **D4a**, the `rawinput` seam redraw, the by-file Phase 1 decomposition, and the enumerated F9/F12
+  appendix. Two of the four new seams held as designed (`hooks_entry`, and `procscan` as a
+  *module*); `lockfile` and `rawinput` did not. Also confirmed *held*: `procscan`'s three callers
+  do not conflict (the retained-`Process` CPU% state lives only in the long-lived collector,
+  `stats.py:166`, which calls neither of the others); `parse_sgr` is genuinely platform-neutral;
+  the `lock(fd)`/`unlock(fd)` signature is right for all three `panel` callers; `broker`'s fork
+  lock is already a poll loop and converts to `blocking=False` cleanly; no call site reads a
+  `.lock` file's body; and no lock is held across a spawn in a way that matters.
+
+---
+
+## Appendix — enumerated F9 / F12 sites
+
+Produced by an AST pass over `switchboard/` and `defaults/` (calls with no `encoding=` keyword;
+binary-mode and `os.open` excluded), **not** a grep — see the F9 row for why that distinction cost
+two earlier drafts. Commit this list before Phase 1 fans out; it is the work-item boundary.
+
+**F9 — text I/O with no `encoding=` (26 sites).**
+
+| file | lines |
+|---|---|
+| `switchboard/board.py` | 2179 (`open`) |
+| `switchboard/broker.py` | 1134, 4090 (`read_text`); 1137 (`open`) |
+| `switchboard/collector.py` | 568 |
+| `switchboard/config.py` | 163, 191, 425, 453, 462 |
+| `switchboard/hooks.py` | 157 (`read_text`), 160 (`write_text`) — F7b |
+| `switchboard/models.py` | 213 |
+| `switchboard/output.py` | 337 (`open`) |
+| `switchboard/panel.py` | 136, 145 (`read_text`); 493 (`open`) |
+| `switchboard/plugins.py` | 336 |
+| `switchboard/presets.py` | 167, 220 |
+| `switchboard/stats.py` | 543 |
+| `switchboard/store.py` | 108 (`read_text`), 118 (`write_text`) |
+| `switchboard/sweep.py` | 313 (`read_text`), 319 (`write_text`) |
+| `defaults/plugins/plans/__init__.py` | 3848 (`open`) |
+
+Two notes an implementer needs: `panel.py:493` is `open(paths.demand, "a")` used purely as a touch
+— nothing is read or written, so it is a no-op fix, listed for completeness of the grep-clean
+criterion. And `plans/__init__.py:3350`, named as a site in earlier drafts, **already passes
+`encoding="utf-8"`** on its continuation line; it is not a site.
+
+**F12 — `subprocess` with `text=True` and no `encoding=` (26 sites).**
+
+| file | lines |
+|---|---|
+| `switchboard/board.py` | 1420, 1662, 2221, 2235, 2372 |
+| `switchboard/broker.py` | 1357, 1840, 2464, 2743, 2945, 3142 |
+| `switchboard/collector.py` | 588 |
+| `switchboard/herdr.py` | 214 |
+| `switchboard/live.py` | 90 |
+| `switchboard/stats.py` | 374, 515, 564 |
+| `switchboard/store.py` | 48, 71, 964, 1446 |
+| `switchboard/sweep.py` | 93 |
+| `defaults/plugins/plans/__init__.py` | 3556 |
+| `defaults/plugins/plans/analysis/evidence.py` | 110 |
+| `defaults/plugins/report-bug/__init__.py` | 269 (also F6b), 311 |
 
 ---
 
