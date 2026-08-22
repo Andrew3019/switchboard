@@ -657,6 +657,10 @@ class Broker:
     def _operator_menu(self) -> tuple[list[config.OperatorSkill], str]:
         """The operator-skill registry, and it rendered as one flat line for the prompt.
 
+        Rendered `description — command`, readable name first: the human picks a
+        procedure by what it does, and the dispatcher needs the plain words before the
+        verb it will type.
+
         Every field goes through `config.flatten` on the way in. `config.prompt` flattens
         the TEMPLATE and then interpolates, so a multi-line `description` would arrive
         unflattened in the finished fragment — and `Herdr.start_agent` refuses a prompt
@@ -667,7 +671,7 @@ class Broker:
         has reset the registry to nothing.
         """
         skills = config.operator_skills(self.repo)
-        menu = "; ".join(f"{config.flatten(s.command)} — {config.flatten(s.description)}"
+        menu = "; ".join(f"{config.flatten(s.description)} — {config.flatten(s.command)}"
                          for s in skills)
         return skills, menu
 
