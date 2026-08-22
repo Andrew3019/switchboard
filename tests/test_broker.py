@@ -569,7 +569,8 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("very first message", joined)
         self.assertIn("Would you like to run any of these?", joined)
         self.assertIn("bulleted line", joined)
-        self.assertIn("Don't repeat the offer", joined)
+        self.assertIn("only if someone asks", joined)
+        self.assertIn("repeating it unprompted is noise", joined)
 
     def test_a_worker_is_not_told_any_of_it(self):
         """Gated on the role, not merely on the registry being non-empty: the menu is one

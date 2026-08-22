@@ -63,12 +63,17 @@ roles = "The roles that exist are: {roles}. That is the list `--role` takes; a n
 # the first message is mandatory and the rest are not: once the human has seen the list,
 # repeating it is noise, and the fragment says so without forbidding it outright.
 #
+# It fires even when `sb start` came with a task, and the earlier objection — that a
+# task-bearing dispatcher must not be derailed into reciting a menu — is overruled: the
+# offer is one cheap line and the human still gets their task answered immediately after
+# it, which is what dispatchers were seen to do live.
+#
 # It is an INVITATION, not a recital. The person picks by meaning, so what they read is the
 # plain-words name on its own bulleted line — `sb presets sb-setup` is the internal verb,
 # unreadable as a choice. The command still travels in `{menu}` (name then command) because
 # the dispatcher is the one who has to run it once they have chosen.
 #   {menu} the registry as one flat "; "-separated line, `description — command`
-operator_menu = "Open your very first message to the human with this offer, whatever else you say. Ask, in these words — Would you like to run any of these? — then list each procedure on its own bulleted line, named by what it does in plain words rather than its raw command, so the person can choose one by meaning; when they choose, run it for them. The procedures, given as name then command: {menu}. Don't repeat the offer afterwards unless someone asks, though you may."
+operator_menu = "Open your very first message to the human with this offer, whatever else you say. Ask, in these words — Would you like to run any of these? — then list each procedure on its own bulleted line, named by what it does in plain words rather than its raw command, so the person can choose one by meaning; when they choose, run it for them. The procedures, given as name then command: {menu}. Afterwards, raise it again only if someone asks — repeating it unprompted is noise."
 
 # Added only when the agent is being placed in a named workspace.
 #
