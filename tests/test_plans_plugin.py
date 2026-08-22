@@ -3592,11 +3592,13 @@ class MarkdownTest(PlansSandbox):
         for escaped in ("a\\nb", "c\\|d", "e\\n\\| x \\| y \\|", "f\\ng", "h\\|i", "j\\nk"):
             self.assertIn(escaped, md)
         self.assertNotIn("\n| x | y |", md)
-        # The header and one row per step, and not a line more: nothing above forged one.
-        table = md.split("## steps", 1)[1].split("<details>", 1)[0]
-        rows = [ln for ln in table.splitlines()
-                if ln.startswith("|") and not ln.startswith("| ---")]
-        self.assertEqual(len(rows), 3, rows)
+        # One fold per step and not a line more: every table row below `## steps` is a
+        # `field | value` row of a step's own body, and nothing above forged one.
+        below = md.split("## steps", 1)[1]
+        self.assertEqual(below.count("<summary>"), 2, below)
+        for row in below.splitlines():
+            if row.startswith("|") and not row.startswith("| --- "):
+                self.assertEqual(row.count(" | "), 1, row)
 
     _DUMP = ("Scope & Objectives\n"
              "\n"
@@ -3623,8 +3625,12 @@ class MarkdownTest(PlansSandbox):
         blockquote. A change approval is approved as markdown prose and has to arrive on
         the pull request as that prose — headed, nested, readable — rather than as one
         escaped line (the first failure) or as a wall of somebody else's quoted text (the
-        second). So the block is lifted out of the steps table into a section of its own
-        and rendered line for line, inside a `<details>` so the comment stays short."""
+        second). So the block is lifted out of the step's own fold into a contract section
+        of its own and rendered line for line.
+
+        OPEN and not collapsed, which is the Phase-3 half: when a plan has a contract it is
+        the most-read thing on the comment, and a fold is a click between the reader and the
+        text they came to check the diff against."""
         self._approved()
         md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
 
@@ -3636,20 +3642,21 @@ class MarkdownTest(PlansSandbox):
         self.assertIn("\nChange Contract", md)
         self.assertNotIn("> Change Contract", md)
         self.assertIn("  - Nothing else in the plugin moves.", md)
-        # Collapsed, and with the blank lines GitHub requires: without the one after
-        # `</summary>` and the one before `</details>` the whole block renders as literal
-        # text, which is the same failure as the blockquote by another route.
-        body = md.split("<details>", 1)[1]
-        self.assertTrue(body.split("\n", 1)[1].startswith("<summary>"), body[:80])
-        rest = body.split("</summary>", 1)[1]
-        self.assertTrue(rest.startswith("\n\n"), rest[:40])
-        self.assertIn("\n\n</details>", rest)
+        # In the contract section, and that section is above the folds and outside every
+        # one of them: nothing between the heading and the text is a `<details>`.
+        self.assertIn("\n## contract\n", md)
+        contract = md.split("## contract", 1)[1].split("## steps", 1)[0]
+        self.assertIn("### step-1 output", contract)
+        self.assertIn("Change Contract", contract)
+        self.assertNotIn("<details>", contract)
+        # And the step it belongs to points at it rather than carrying a second copy.
+        self.assertIn("[step-1 output](#step-1-output)", md)
 
-    def test_a_dumped_output_cannot_forge_a_row_of_the_plan_s_own_table(self):
+    def test_a_dumped_output_cannot_forge_a_row_of_a_step_s_own_table(self):
         """The anti-forgery property, kept by WHERE the block goes rather than by quoting
-        it. The dump is lifted out of the steps table entirely, into a section of its own,
+        it. The dump is lifted out of every step's fold entirely, into the contract section,
         so a line spelled like a markdown table row draws a row of the DUMP and never a row
-        of the plan. That is what the blockquote used to buy, at the cost of the field's
+        of a step. That is what the blockquote used to buy, at the cost of the field's
         whole reason to exist; the property every stored SCALAR still holds by escaping is
         pinned next door in `test_a_forged_row_cannot_forge_one_here_either`."""
         self._approved()
@@ -3657,24 +3664,20 @@ class MarkdownTest(PlansSandbox):
         md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
 
         self.assertIn("| a | b |", md)
-        # The plan's own table is the block under `## steps`, and every row of it opens
-        # with its own id cell — there is no row in it the dump wrote.
-        table = md.split("## steps", 1)[1].split("<details>", 1)[0]
-        rows = [ln for ln in table.splitlines()
-                if ln.startswith("|") and not ln.startswith("| ---")]
-        self.assertEqual(
-            rows[0], "| id | step | status | took | by | owner | after | obliges |")
-        for row in rows[1:]:
-            self.assertTrue(row.startswith('| <a id="step-'), row)
-        # And the forged rows are up in the dump's own collapsible, above that table.
+        # Not one line of the dump is below `## steps`, which is where every step's own
+        # table lives: the dump is in a section the folds do not contain.
+        below = md.split("## steps", 1)[1]
+        for row in ("| a | b |", "| c | d |"):
+            self.assertNotIn(row, below)
+        # And the forged rows are up in the contract section, above the folds.
         self.assertLess(md.index("| a | b |"), md.index("## steps"))
 
-    def test_a_step_carrying_a_dump_still_renders_as_a_table(self):
+    def test_a_step_carrying_a_dump_still_renders_beside_the_rest(self):
         """The decision the block rule used to force the other way round. A table cell is
         one line, so the walker degraded a whole plan into bullets the moment one step
         carried a dump — which is exactly when the plan had the most to say. The comment
-        lifts the block OUT of the row instead: the steps are a table always, and the row
-        links to the block's own section.
+        lifts the block OUT of the step instead: every step gets the same fold whether or
+        not it carries one, and the one that does links to the contract section.
 
         The walker still has the old rule and still needs it — `show <step> --markdown` is
         walked, and a block in a cell there would be the same wall of text."""
@@ -3684,10 +3687,10 @@ class MarkdownTest(PlansSandbox):
                           {"id": "s-2", "name": "write it"}]}
         md = _plans()._markdown(flat)
 
-        self.assertIn("| id | step | status | took | by | owner | after | obliges |", md)
+        self.assertEqual(md.count("<summary>"), 2, "one fold per step, dump or no dump")
         self.assertIn("get it approved", md)
-        self.assertIn("[step-1](#step-1-output)", md)
-        self.assertIn("## step-1 output", md)
+        self.assertIn("[step-1 output](#step-1-output)", md)
+        self.assertIn("### step-1 output", md)
         self.assertIn("\na\nb\n", md)
         self.assertFalse(_plans()._tabular(flat["steps"]))
 
@@ -3799,6 +3802,130 @@ class MarkdownTest(PlansSandbox):
         for command in _plans_commands():
             if command != "show":
                 self.assertNotIn("--markdown", _plans_args(command))
+
+
+class LayoutTest(PlansSandbox):
+    """Phase 3: what is OPEN on the pull request and what is behind a fold.
+
+    The one part of this rendering whose layout IS pinned, and deliberately — the rest of
+    the comment is tested for what it says rather than for how it is arranged, because a
+    test that pinned the arrangement would be the per-field template the renderer exists not
+    to be. The arrangement here is not incidental: it is the whole change. Four things a
+    reader needs without clicking, in the order they need them, and then one collapsed
+    `<details>` per step so a plan with twenty steps is still a page somebody can scan.
+    """
+
+    def _plan(self) -> dict:
+        """A plan with one of everything the layout has to place."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        hour = 3600
+        return {"id": "p-1", "display": "board: ship it", "title": "ship the thing",
+                "created_at": 1000, "steps": [
+                    {"id": "s-1", "display": "impl", "name": "write it",
+                     "progress": "done"},
+                    {"id": "s-2", "display": "approve", "name": "get it approved",
+                     "progress": "done", "deps": ["s-1"],
+                     "output": "Change Contract\n\n- it folds\n"},
+                    {"id": "s-3", "display": "merge", "name": "merge it", "deps": ["s-2"],
+                     "gate": "Andrew: merge it?"}],
+                "changelog": [
+                    {"at": 1000 + hour, "by": "w", "action": "tick",
+                     "detail": "s-1 open → done"},
+                    {"at": 1000 + 2 * hour, "by": "w", "action": "tick",
+                     "detail": "s-2 open → done"}]}
+
+    def test_the_open_sections_come_in_the_order_a_reader_needs_them(self):
+        """Where the job is, what shape it is, what was agreed, what is being asked of you
+        — and only then the steps. The order is the argument: the gate at the bottom of the
+        open part is a question, and the three sections above it are what has to have been
+        read before it means anything.
+
+        All four are OUTSIDE every fold. A `<details>` opening before `## steps` would mean
+        one of them had been put behind a click, which is the failure this pins.
+        """
+        plan = self._plan()
+        md = _plans()._markdown(plan)
+        top = md.split("## steps", 1)[0]
+
+        self.assertLess(top.index("**Status:**"), top.index("**Elapsed:**"))
+        order = [top.index(x) for x in
+                 ("**Status:**", "## how it runs", "## contract", "## waiting on a human")]
+        self.assertEqual(order, sorted(order), top)
+        self.assertNotIn("<details>", top, "nothing above the steps is behind a click")
+        self.assertIn("```mermaid", top)
+        self.assertIn("Change Contract", top)
+        self.assertIn("Andrew: merge it?", top)
+
+    def test_every_step_is_a_fold_titled_with_its_name_state_and_elapsed(self):
+        """`{id} · {display} — {name} | {state} | {elapsed}`, one per step, no exceptions —
+        a step with a contract and a step with nothing on it get the same fold, so a reader
+        scanning the titles is reading one shape rather than three.
+
+        The elapsed half goes WITH its separator when there is nothing to measure. A plan
+        that has not run yet would otherwise carry a dangling `| ` on every title, which is
+        a column pretending to have a value.
+        """
+        plan = self._plan()
+        md = _plans()._markdown(plan)
+        titles = [ln.split("</a>", 1)[1].removesuffix("</summary>")
+                  for ln in md.splitlines() if ln.startswith("<summary><a id=")]
+
+        self.assertEqual(titles[:2], [
+            "step-1 · impl — write it | done | 1h 0m",
+            "step-2 · approve — get it approved | done | 1h 0m"])
+        # An open step that IS unblocked reads as running rather than as finished.
+        self.assertTrue(titles[2].startswith("step-3 · merge — merge it | open · gate | "),
+                        titles[2])
+        self.assertTrue(titles[2].endswith(" so far"), titles[2])
+        # And when there is nothing to measure at all, the elapsed goes WITH its separator.
+        bare = _plans()._markdown({"id": "p-1", "title": "t", "steps": [
+            {"id": "s-1", "display": "impl", "name": "write it"}]})
+        self.assertIn('<summary><a id="step-1"></a>step-1 · impl — write it | open</summary>',
+                      bare)
+        # One fold per step and nothing else folded up there: the metadata block at the
+        # bottom is the only other `<details>` in the comment.
+        self.assertEqual(md.count("<details>"), len(plan["steps"]) + 1)
+        # The title is the anchor everything else in the comment links a step by.
+        self.assertIn('<summary><a id="step-1"></a>step-1 ·', md)
+        self.assertIn("[step-1](#step-1)", md)
+
+    def test_a_fold_carries_the_whole_step_including_a_field_nobody_wrote_this_for(self):
+        """The safety net, moved rather than dropped. A step's undrawn fields used to be
+        filed in the comment-wide metadata block at the bottom, next to the checkout path;
+        they now render inside that step's own fold. A note about step 3 belongs under step
+        3 — and a field this file has never heard of still has to land somewhere, which is
+        the property the walk was there for in the first place.
+        """
+        plan = self._plan()
+        plan["steps"][2]["owner"] = "lead-x"
+        plan["steps"][0]["mood"] = "cheerful"
+        plan["steps"][0]["notes"] = [{"text": "reworked after review", "by": "w"}]
+        md = _plans()._markdown(plan)
+        folds = md.split("## steps", 1)[1].split("<details>")
+
+        self.assertIn("| mood | cheerful |", folds[1])
+        self.assertIn("reworked after review", folds[1])
+        self.assertIn("| owner | lead-x |", folds[3])
+        # And the contract is a LINK from its step, not a second copy of the prose.
+        self.assertIn("[step-2 output](#step-2-output)", folds[2])
+        self.assertNotIn("Change Contract", md.split("## steps", 1)[1])
+
+    def test_the_blank_lines_a_collapsible_needs_are_there_on_every_fold(self):
+        """The gotcha the whole layout rests on: without a blank line after `</summary>`
+        and another before `</details>`, GitHub renders the body as literal text — so a
+        plan would arrive on a pull request as a wall of pipe characters and raw HTML.
+
+        Checked on EVERY fold rather than on the first, because the failure is per-block:
+        one step whose body starts hard against its summary is one step nobody can read.
+        """
+        plan = self._plan()
+        md = _plans()._markdown(plan)
+
+        for fold in md.split("<details>")[1:]:
+            body = fold.split("</summary>", 1)
+            self.assertTrue(body[0].lstrip().startswith("<summary>"), fold[:80])
+            self.assertTrue(body[1].startswith("\n\n"), body[1][:40])
+            self.assertIn("\n\n</details>", body[1])
 
 
 class TelemetryTest(PlansSandbox):
