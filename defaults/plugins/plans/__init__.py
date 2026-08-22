@@ -4054,13 +4054,18 @@ def _dumped(shown: dict) -> dict:
 
 # -- the plan as markdown ------------------------------------------------------
 #
-# WALKED, NOT TEMPLATED. `_full` above is the terminal rendering and knows every field by
-# name. This one deliberately does not, because of where it goes: a pull request comment,
-# posted by one step definition and rewritten by another, read by whoever turns up. A
-# rendering with the schema written into it stops being true the week a field is added and
-# raises the week one is dropped — in front of somebody's merge, from a step that is only
-# supposed to be reporting. So this walks the record instead: a new field appears here on
-# its own, a removed one vanishes, and neither costs an edit to this function.
+# WALKED, THEN TEMPLATED ON TOP. What is below is a walk: `_full` above is the terminal
+# rendering and knows every field by name, and this deliberately does not — a rendering
+# with the schema written into it stops being true the week a field is added and raises the
+# week one is dropped, in front of somebody's merge, from a step that is only supposed to
+# be reporting. So it walks the record: a new field appears on its own, a removed one
+# vanishes, and neither costs an edit here.
+#
+# The WHOLE-PLAN markdown — the pull request comment — is a template over that walk, and
+# lives further down under `_comment`. It draws the fields a human reads by name and hands
+# every other field, known or not, back to this walk inside a collapsed metadata block, so
+# the property above is kept and the comment is still something somebody can take in at a
+# glance. `show <step> --markdown` is the walk alone. See `_markdown`.
 #
 # What it does know about the schema is three things, and every one falls back rather than
 # fails: the keys that might name the plan in its heading (`_HEADS`), the keys whose value
@@ -4090,23 +4095,60 @@ _BLOCK = ("output",)                     # keys whose value is prose, dumped rat
 #                                          back like the other two: a `_BLOCK` key holding
 #                                          anything but a string takes the ordinary path.
 #
-# Every line of a dump is BLOCKQUOTED, which is what keeps the forged-row property the rest
-# of this file holds by escaping: no line inside a quote can start a step row or a markdown
-# table row, however it is spelled. It does not stop a `#` in the text becoming a heading
-# INSIDE its own quote, and that is accepted — this is the step's own text, deliberately
-# dumped, and it is visibly quoted while it does it.
+# In the WALK, every line of a dump is BLOCKQUOTED, which is what keeps the forged-row
+# property the rest of this file holds by escaping: no line inside a quote can start a step
+# row or a markdown table row, however it is spelled. In the pull request COMMENT the same
+# property is kept a different way — the block is lifted out of the steps table into a
+# section of its own and rendered as the markdown it was written as, so it can draw a
+# heading or a table inside its own section and cannot forge a row of the plan's. See
+# `_outputs`.
 
 # The short spelling of an id, as a WHOLE value. See `_readable`.
 _LONG = re.compile(r"^(p|s)-(\d+)$", re.IGNORECASE)
 
 
 def _markdown(p: dict) -> str:
-    """One plan as markdown: a heading, its scalar fields, then a section per collection."""
+    """One plan as markdown — or, for a single step, the walk that was here before it.
+
+    TWO CALLERS AND TWO RENDERINGS, and the branch is the shape of what it was handed.
+    `_plan_result` passes a whole plan and that is the pull-request comment: a bespoke
+    template (`_comment`), because that comment is close to the whole of what a human ever
+    sees of a plan and the walk below made a wall of quoted text out of it. `_one_step`
+    passes ONE step, which has no `steps` list, and that keeps the walk — it is read in a
+    terminal by whoever is working the step, it has no graph to draw and no rows to line
+    up, and the walk is what stops a new field going missing there.
+
+    A plan whose `steps` is empty, absent, or holding something that is not a dict takes
+    the walk too. Falls back rather than fails, like the three schema facts below it.
+    """
+    steps = p.get("steps")
+    if isinstance(steps, list) and steps and all(isinstance(s, dict) for s in steps):
+        return _comment(p, steps)
+    return _markdown_walk(p)
+
+
+def _markdown_walk(p: dict) -> str:
+    """The generic walk: a heading, its scalar fields, then a section per collection."""
     used = next((k for k in _HEADS if _some(p.get(k))), None)
+    return "\n".join(["# " + _heading(p, used)]
+                     + _walked(p, {"id"} | ({used} if used else set())))
+
+
+def _heading(p: dict, used: Optional[str]) -> str:
+    """What names the plan on its first line: the id, then whichever of `_HEADS` is there."""
     head = " — ".join(x for x in (_cell("id", p.get("id")) if _some(p.get("id")) else "",
                                   _cell(used, p[used]) if used else "") if x)
-    lines = ["# " + (head or "plan")]
-    skip = {"id"} | ({used} if used else set())
+    return head or "plan"
+
+
+def _walked(p: dict, skip: set, level: int = 2) -> list[str]:
+    """Everything under a heading, walked. Empty in, empty out — nothing is drawn blank.
+
+    `level` is how deep the section headings sit, because this is used twice now: at the
+    top of the walk, where a section is a `##`, and inside the comment's collapsed
+    metadata, where the same sections hang under a block that is already a section itself.
+    """
+    lines: list[str] = []
     rows = {k: v for k, v in p.items() if k not in skip and _scalar(v) and _some(v)}
     if rows:
         lines += ["", "| field | value |", "| --- | --- |"]
@@ -4114,9 +4156,336 @@ def _markdown(p: dict) -> str:
     for k, v in p.items():
         if k in skip or _scalar(v) or not _some(v):
             continue
-        lines += ["", f"## {_title(k)}", ""]
+        lines += ["", "#" * level + f" {_title(k)}", ""]
         lines += _table(v) if _tabular(v) else _bullets(v)
+    return lines
+
+
+# -- the pull request comment --------------------------------------------------
+#
+# TEMPLATED, AND THE ONLY THING HERE THAT IS. Everything above walks; this reads the
+# schema by name — the one place in this file where that is the right trade, because of
+# who reads it. `create-pr` posts this onto the pull request and `merge` rewrites it, so
+# for most plans it is ALL a human ever sees of the plan, and a rendering that is merely
+# correct about a schema is not the same as one somebody can take in at a glance. The walk
+# put internal plumbing in the same table as the work, and — because `output` is a block —
+# degraded the steps from a table into bullets with a wall of blockquoted contract under
+# them, exactly when a plan had the most to say.
+#
+# WHAT THE WALK BOUGHT IS KEPT ANYWAY, and it is worth saying how, because "bespoke" would
+# otherwise mean "a field added next month is invisible in front of somebody's merge". The
+# template names the fields it draws (`_SHOWN_PLAN`, `_SHOWN_STEP`) and hands EVERYTHING
+# ELSE — plan keys and step keys alike, known or not — to the same walk, inside a collapsed
+# metadata block. So a field this file has never heard of still arrives on the PR on its
+# own, a field that goes away vanishes, and neither costs an edit here. What changed is
+# where such a field lands: below the fold rather than beside the work.
+#
+# THE FORGED ROW, which every renderer in this file is arranged against. Each SCALAR still
+# goes through `_cell` and so through `_flat`, so a newline stored in a name or an owner is
+# the `\n` it is and starts no row. The one exception is deliberate and is the whole point
+# of the field: a step's `output` is a human-authored markdown block — an approved change
+# contract, a review — and it renders as the markdown it was written as, inside its own
+# `<details>` section and OUT of the steps table entirely. It can therefore draw a heading
+# or a table of its own inside its own section, and that is what it is for; what it cannot
+# do is forge a row of the plan's own table, because it is not in that table at all.
+
+_SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete"})
+_SHOWN_STEP = frozenset({"id", "name", "display", "progress", "why", "gate", "output",
+                         "owner", "deps", "obliged_by", "root"})
+
+# A value as something a mermaid node id or a markdown anchor can be spelled with.
+_UNSAFE = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _comment(p: dict, steps: list) -> str:
+    """A whole plan as the comment that goes on the pull request, top to bottom."""
+    used = next((k for k in _HEADS if _some(p.get(k))), None)
+    lines = ["# " + _heading(p, used)]
+    # The title under the heading when the display took the heading: they are two
+    # different sentences on purpose, and the long one is the one that says what the job is.
+    if used == "display" and _some(p.get("title")):
+        lines += ["", f"_{_cell('title', p['title'])}_"]
+    lines += ["", _status(steps)]
+    if (span := _elapsed(p)):
+        lines += ["", span]
+    lines += _defect_lines(p) + _gates(steps)
+    lines += ["", "## how it runs", ""] + _graph(steps)
+    lines += _outputs(steps)
+    lines += ["", "## steps", ""] + _rows(steps)
+    lines += _metadata(p, steps)
     return "\n".join(lines)
+
+
+def _status(steps: list) -> str:
+    """The one line at the top, read off the steps and nothing else.
+
+    `progress` is an OPEN vocabulary — `done` and `skipped` are what the verbs write and a
+    hand-edited plan may say anything — so the three are counted by name and whatever else
+    is there is NAMED rather than folded into "open". A status line that swallowed a
+    `waiting on Andrew` into a count would be hiding the one word somebody wrote by hand.
+    """
+    done = [s for s in steps if s.get("progress") == DONE]
+    skipped = [s for s in steps if s.get("progress") == SKIPPED]
+    rest = [s for s in steps if s.get("progress") not in (DONE, SKIPPED)]
+    word = "finished" if not rest else ("not started" if not (done or skipped)
+                                        else "in progress")
+    bits = [word, f"{len(done)}/{len(steps)} done"]
+    if skipped:
+        bits.append(f"{len(skipped)} skipped")
+    odd = sorted({_flat(s["progress"]) for s in rest
+                  if _some(s.get("progress")) and s.get("progress") != OPEN})
+    bits += odd
+    if (gate := _at_gate(steps, rest)):
+        bits.append(gate)
+    return "**Status:** " + " · ".join(bits)
+
+
+def _at_gate(steps: list, rest: list) -> str:
+    """Which human gate the plan is sitting at, if it is sitting at one.
+
+    "Blocked at" only when everything the gated step waits for is settled — a gate five
+    steps out is something to know about and is not what is holding the plan up, and a
+    status line that called both the same would cry wolf on every plan that has a merge.
+    """
+    settled = {s.get("id") for s in steps if s.get("progress") in (DONE, SKIPPED)}
+    gated = [s for s in rest if _some(s.get("gate"))]
+    if not gated:
+        return ""
+    ready = [s for s in gated if all(d in settled for d in (s.get("deps") or ()))]
+    at = (ready or gated)[0]
+    name = _flat(at.get("display") or at.get("name") or at.get("id") or "a step")
+    return f"blocked at the {name} gate" if ready else f"{name} gate ahead"
+
+
+def _elapsed(p: dict) -> str:
+    """How long the job has been running, off `created_at` and the changelog's last entry.
+
+    Both are on the record `show` already has, so this needs no store and no new field.
+    Nothing is claimed when there is nothing to read it off: a hand-written plan with no
+    timestamps gets no line rather than a zero.
+    """
+    marks = [t for t in [p.get("created_at")]
+             + [e.get("at") for e in (p.get("changelog") or ()) if isinstance(e, dict)]
+             if isinstance(t, int) and not isinstance(t, bool) and t]
+    if not marks:
+        return ""
+    first, last = min(marks), max(marks)
+    return (f"**Elapsed:** {_span(last - first)} · started {_when(first)} · "
+            f"last change {_when(last)}")
+
+
+def _span(secs: int) -> str:
+    """A duration a human reads, at one unit of precision below the one that dominates."""
+    if secs < 60:
+        return "under a minute"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 172800:
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+    return f"{secs // 86400}d {(secs % 86400) // 3600}h"
+
+
+def _node(sid) -> str:
+    """A step id as a mermaid node id: prefixed, so it never opens with a digit."""
+    return "n_" + _UNSAFE.sub("_", _flat(sid)).strip("_")
+
+
+def _tag(sid) -> str:
+    """A step id as the anchor its row carries and everything referring to it links to."""
+    return _UNSAFE.sub("-", _cell("id", sid)).strip("-").lower()
+
+
+def _graph(steps: list) -> list[str]:
+    """The dependency graph as a mermaid `flowchart LR`, which GitHub draws natively.
+
+    An edge is drawn only between two steps that are both HERE. A dep naming a step that
+    is not in the plan is a defect the three doors report in words; a renderer that
+    invented a node for it would draw a graph the plan does not have.
+    """
+    ids = {s.get("id") for s in steps}
+    out = ["```mermaid", "flowchart LR"]
+    out += [f'    {_node(s.get("id"))}["{_label(s)}"]' for s in steps]
+    out += [f'    {_node(d)} --> {_node(s.get("id"))}'
+            for s in steps for d in (s.get("deps") or ()) if d in ids]
+    styled: dict = {"done": [], "skipped": [], "gate": []}
+    for s in steps:
+        which = (DONE if s.get("progress") == DONE else
+                 SKIPPED if s.get("progress") == SKIPPED else
+                 "gate" if _some(s.get("gate")) else None)
+        if which:
+            styled[which].append(_node(s.get("id")))
+    out += ["    classDef done fill:#dafbe1,stroke:#2da44e,color:#0a3622",
+            "    classDef skipped fill:#eaeef2,stroke:#8c959f,color:#57606a",
+            "    classDef gate fill:#fff8c5,stroke:#bf8700,color:#4d2d00"]
+    out += [f"    class {','.join(nodes)} {name}"
+            for name, nodes in styled.items() if nodes]
+    return out + ["```", "",
+                  "_green = done · grey = skipped · amber = waits on a human · "
+                  "an arrow points from a step to what runs after it._"]
+
+
+def _label(s: dict) -> str:
+    """A node's text: the id and the short name, through `_flat` like every other value.
+
+    The double quote is the one character a quoted mermaid label cannot hold, and it is
+    spelled as the entity mermaid reads rather than dropped — a display name with a quoted
+    phrase in it is ordinary, and a graph that failed to draw because of one would take the
+    whole comment's diagram with it.
+    """
+    both = " · ".join(x for x in (_cell("id", s.get("id")) if _some(s.get("id")) else "",
+                                  _flat(s.get("display") or s.get("name") or "")) if x)
+    return (both or "step").replace('"', "#quot;")
+
+
+def _outputs(steps: list) -> list[str]:
+    """Each step's finished `output` as its own headed, collapsible section.
+
+    RENDERED AS THE MARKDOWN IT IS — a change contract and a review are written as prose
+    with nesting, and the walk's blockquote turned every one of them into a wall of quoted
+    text. Lifted out of the steps table so a block never has to fit in a cell, which is
+    what used to cost the whole plan its table.
+
+    The blank line after `</summary>` and before `</details>` is load-bearing: without it
+    GitHub renders the contents as literal text rather than as markdown.
+    """
+    out: list[str] = []
+    for s in steps:
+        if not (isinstance(s.get("output"), str) and _some(s["output"])):
+            continue
+        out += ["", f"## {_head_of(s)}", "", "<details>",
+                f"<summary>{_summary(s)}</summary>", ""]
+        out += _lines(s["output"])
+        out += ["", "</details>"]
+    return out
+
+
+def _head_of(s: dict) -> str:
+    """The heading over a step's output, which is also what its row links to."""
+    return f"{_cell('id', s.get('id')) or 'step'} output"
+
+
+def _summary(s: dict) -> str:
+    """The line that stays visible when the block is collapsed."""
+    bits = [_flat(s.get("display") or s.get("name") or ""), _flat(s.get("progress") or "")]
+    return " · ".join(x for x in bits if x) or "output"
+
+
+def _gates(steps: list) -> list[str]:
+    """The human gates still ahead, in the words whoever wrote them wrote.
+
+    Up top rather than in a cell: a gate is a QUESTION for the person reading the pull
+    request, and it is the one field on a plan addressed to them directly.
+    """
+    ahead = [s for s in steps
+             if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
+    if not ahead:
+        return []
+    return ["", "## waiting on a human", ""] + [
+        f"- **{_cell('id', s.get('id'))}** — {_cell('gate', s['gate'])}" for s in ahead]
+
+
+def _defect_lines(p: dict) -> list[str]:
+    """What `_plan_result` found incomplete, kept where somebody at a merge will see it."""
+    if not _some(p.get("incomplete")):
+        return []
+    return ["", "## incomplete", ""] + [f"- {_flat(x)}" for x in p["incomplete"]]
+
+
+def _rows(steps: list) -> list[str]:
+    """The steps as a real table — the flat columns only, and always a table.
+
+    `obliges` is `obliged_by` read the other way round: the record says which step obliged
+    this one, and what somebody reading a plan wants beside a step is what it drags in
+    after it. Computed here rather than stored, because it is the same edge.
+    """
+    obliges: dict = {}
+    for s in steps:
+        if _some(s.get("obliged_by")):
+            obliges.setdefault(s["obliged_by"], []).append(s.get("id"))
+    blocks = {s.get("id") for s in steps
+              if isinstance(s.get("output"), str) and _some(s["output"])}
+    out = ["| id | step | status | owner | after | obliges |",
+           "| --- | --- | --- | --- | --- | --- |"]
+    for s in steps:
+        sid, name = s.get("id"), _cell("id", s.get("id"))
+        cell = f'<a id="{_tag(sid)}"></a>' + (
+            f"[{name}](#{_fragment(_head_of(s))})" if sid in blocks else name)
+        out.append("| " + " | ".join((
+            cell,
+            _named(s),
+            _state(s),
+            _cell("owner", s.get("owner")) if _some(s.get("owner")) else "",
+            _refs(s.get("deps")),
+            _refs(obliges.get(sid)))) + " |")
+    return out
+
+
+def _named(s: dict) -> str:
+    """The step cell: the short name in bold, and the whole sentence after it.
+
+    BOTH, where they differ. `display` is what the board draws in a cell and is a display
+    version of the sentence rather than an abbreviation of it — so the sentence is the part
+    that actually says what the job is, and a comment that showed only the short one would
+    leave whoever turns up at the pull request reading two words per step.
+    """
+    short = _cell("display", s.get("display")) if _some(s.get("display")) else ""
+    full = _cell("name", s.get("name")) if _some(s.get("name")) else ""
+    if short and full and short != full:
+        return f"**{short}** — {full}"
+    return f"**{short}**" if short else full
+
+
+def _fragment(heading: str) -> str:
+    """A heading as the fragment GitHub gives it: lowercased, spaces for hyphens."""
+    return _UNSAFE.sub("-", heading).strip("-").lower()
+
+
+def _refs(ids) -> str:
+    """A cell of step ids, each linking to that step's own row."""
+    return ", ".join(f"[{_cell('id', i)}](#{_tag(i)})" for i in (ids or ()))
+
+
+def _state(s: dict) -> str:
+    """The status cell: the progress word, whether the exit is a gate, and any reason."""
+    bits = [_cell("progress", s.get("progress")) if _some(s.get("progress")) else OPEN]
+    if _some(s.get("gate")):
+        bits.append("gate")
+    if _some(s.get("why")):
+        bits.append(_cell("why", s["why"]))
+    return " · ".join(bits)
+
+
+def _leftover(k: str, v) -> bool:
+    """Is this step field one the template did not draw, and so the walk's to draw?
+
+    `output` is the one key that is sometimes both: the block section above renders it when
+    it is a STRING, which is what it is whenever anything wrote it, and a hand-edited plan
+    with a list or a number under that key falls back here rather than vanishing — the same
+    fallback `_BLOCK` has had all along, kept on the other side of the split.
+    """
+    if not _some(v):
+        return False
+    return k not in _SHOWN_STEP or (k in _BLOCK and not isinstance(v, str))
+
+
+def _metadata(p: dict, steps: list) -> list[str]:
+    """Everything the template did not draw, walked, below the fold.
+
+    This is where the walk's property is kept: a plan field and a step field this file has
+    never heard of both land here on their own, without this function being told they
+    exist, and the day one of them turns out to matter to a human it is promoted into the
+    template above by name. Plumbing — the workspace, the checkout, the changelog — stays
+    here for good, which is the other half of what the block is for.
+    """
+    rest = {k: v for k, v in p.items() if k not in _SHOWN_PLAN and _some(v)}
+    left = [dict({"id": s.get("id")}, **extra) for s in steps
+            if (extra := {k: v for k, v in s.items() if _leftover(k, v)})]
+    if left:
+        rest["steps"] = left
+    if not rest:
+        return []
+    return (["", "<details>", "<summary>metadata</summary>"]
+            + _walked(rest, set(), level=4) + ["", "</details>"])
 
 
 def _scalar(v) -> bool:
