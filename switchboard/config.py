@@ -400,8 +400,29 @@ def roles(repo: Optional[Path] = None) -> dict[str, dict]:
         if not isinstance(cfg, dict):
             raise ConfigError(
                 f"{d / s['roles_file']}: role '{name}' must be a table, e.g. [{name}]")
-        out[name] = merge(out.get(name, {}), cfg)
+        out[name] = merge(out.get(name, {}), _bundled(cfg))
     return merge(out, _roles_from_dir(d / s["roles_dir"]))
+
+
+def _bundled(cfg: dict) -> dict:
+    """A role's fields with the retired `delegate` bool rewritten as the bundle it meant.
+
+    PER LAYER, before merging, and that is the whole point of doing it here rather than
+    once at the end: a repo that writes `[qa] delegate = true` over a shipped role whose
+    file names `capabilities` is layering two spellings of ONE field, and only the layer
+    boundary knows which came later. Translated at the end instead, the shipped list would
+    win and the repo's line would be read as nothing at all.
+
+    The translation emits `["!reset", ...]` because arrays JOIN (rule 3). A bundle that
+    unioned with the shipped one would make `delegate = false` widen a role rather than
+    narrow it — the bool's answer replaced, it never added to, whatever was underneath.
+    """
+    if "delegate" not in cfg:
+        return cfg
+    from . import roles      # local: `roles` imports this module at import time
+    out = {k: v for k, v in cfg.items() if k != "delegate"}
+    out["capabilities"] = [RESET, *sorted(roles.bundle_for_delegate(cfg["delegate"]))]
+    return out
 
 
 _roles_cache: dict[tuple, dict] = {}
@@ -425,7 +446,7 @@ def _roles_from_dir(d: Path) -> dict[str, dict]:
             fields, body = front_matter(f.read_text())
         except ConfigError as e:
             raise ConfigError(f"{f}: {e}") from e
-        cfg = dict(fields)
+        cfg = _bundled(fields)
         prompt = flatten(body)
         # Only when there is one: an override file that is front matter alone adjusts the
         # fields and leaves the shipped prompt in place, rather than blanking it.

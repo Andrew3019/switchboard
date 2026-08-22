@@ -65,15 +65,15 @@ MAIN = config.setting("vocabulary.main_role")
 # what the top IS, and the top-level agent still wants an obvious name.
 MAIN_NAME = config.setting("vocabulary.main_name")
 
-# THE CAPABILITY STRINGS. A gated action is one of these, checked through
-# `Broker.require_capability`; adding a rule means adding a string here, not another
-# refusal function beside the gate.
-#
-# There is deliberately no `start`. `sb start` is a hardcoded, fail-closed, human-only gate
-# in the CLI (`cli.py`, the `start` branch) and it stays there: a grantable version of it is
-# how a top would come to mint another top, so the string does not exist to be granted.
-CAP_SPAWN = "spawn"     # may this caller spawn an agent at all? (was the role `delegate` bool)
-CAP_FORK = "fork"       # does this caller's spawn mint a space of its own? (was `is_top`)
+# THE CAPABILITY STRINGS, defined in `roles.py` and imported here so the gate and the role
+# bundles that seed it cannot drift into two vocabularies. Read the block there for what
+# the set is and why `start` is not in it — a gated action is one of these, checked through
+# `Broker.require_capability`, and adding a rule means adding a string, not another refusal
+# function beside the gate.
+CAP_SPAWN = roles_mod.CAP_SPAWN
+CAP_FORK = roles_mod.CAP_FORK
+CAP_DISPATCH = roles_mod.CAP_DISPATCH
+CAP_WRITE_TRACKED = roles_mod.CAP_WRITE_TRACKED
 
 # Config that must follow work into a worktree. Deliberately NOT committed: it is local
 # setup, not source. Worktrees get symlinks to the main checkout's copies, so there is
@@ -1074,10 +1074,10 @@ class Broker:
         A NULL `seed_capabilities` is a row written before the substrate existed — an older
         store, or a row inserted straight into `agents` by something that never read a role
         — and it has no capability rows for the same reason. Reading the empty table for it
-        would refuse an agent that has always been allowed, so it falls back to the two
-        facts the hardcoded gates read: the role's `delegate` field and the `is_top` stamp.
-        That fallback is what makes adding the substrate a no-op for every row that already
-        exists.
+        would refuse an agent that has always been allowed, so it falls back to deriving
+        the set the same way a spawn would today — the role's default bundle and the
+        `is_top` stamp (`seed_for`). That fallback is what makes adding the substrate a
+        no-op for every row that already exists.
         """
         # NOT `_column`: that collapses NULL to "", and "" is a row seeded with NOTHING —
         # a worker — while NULL is a row nobody seeded. Those are the two sides of this
@@ -1091,24 +1091,34 @@ class Broker:
         return store.capabilities_of(self.db, row["name"])
 
     def seed_for(self, role: str, is_top: bool) -> list:
-        """The set an agent of this role gets at spawn. The BACK-COMPAT READ.
+        """The set an agent of this role gets at spawn: its role's DEFAULT BUNDLE.
 
-        `spawn` comes from the role's `delegate` field (`roles.Role`), never from the
-        role's NAME, so a repo's own orchestrating role is seeded correctly and an
-        unedited `roles.toml` still loads. `fork` comes from the `is_top` stamp, which
-        stays exactly where it is — a raw, unresolved identity fact written by `sb start`
-        and read here, not a capability that could be granted to anything else.
+        Read off the role (`roles.Role.capabilities`), never off the role's NAME, so a
+        repo's own orchestrating role is seeded correctly and a `roles.toml` that still
+        says `delegate = true` loads onto the bundle it always meant (`roles._bundle`).
+
+        Two things the bundle does not decide, both `is_top`'s:
+
+        A STAMPED TOP takes the fixed set and nothing else (§2.0, `roles.TOP_CAPABILITIES`)
+        — no `write-tracked`, whatever its role template says. That is the top's whole
+        invariant, and it is not a template because a template has no vocabulary for the
+        stamp or for the placement `sb start` gives it.
+
+        `fork` IS WITHHELD FROM EVERY OTHER ROW, even a role whose template names it. The
+        fork decision still reads the caller's stamp and only the stamp (`mints_space`), so
+        seeding a nested lead with `fork` would silently turn every one of its spawns into
+        a new workspace. A template naming `fork` is a CEILING — "may be granted isolation"
+        — and the request site that spends it does not exist yet; it arrives with the
+        isolation work, and this line is what it changes.
 
         There is no `start` in this function and there is none anywhere: `sb start` is a
         hardcoded human-only gate in the CLI, and a grantable version of it is how a top
         would come to mint another top.
         """
-        caps = []
-        if roles_mod.get(self.roles, role, self.repo).delegate:
-            caps.append(CAP_SPAWN)
         if is_top:
-            caps.append(CAP_FORK)
-        return sorted(caps)
+            return sorted(roles_mod.TOP_CAPABILITIES)
+        bundle = roles_mod.get(self.roles, role, self.repo).capabilities
+        return sorted(bundle - {CAP_FORK})
 
     def _capability_refusal(self, role: str, cap: str) -> str:
         """What a refused caller is told. Word for word what the spawn gate said before
@@ -1117,7 +1127,7 @@ class Broker:
         """
         if cap == CAP_SPAWN:
             return (
-                f"a {role} does not spawn agents — only a role with delegate rights does "
+                f"a {role} does not spawn agents — only a role that holds `spawn` does "
                 f"(today: {', '.join(self._delegating_roles()) or 'none'}). If this task is "
                 f"bigger than one agent, or needs a decision you were not given, say so to "
                 f"your parent with `sb done` rather than growing a tree under yourself."
@@ -1130,8 +1140,12 @@ class Broker:
         Named in the refusal so it says what to do instead of only what went wrong, and
         read from the definitions so a repo that adds its own orchestrating role is
         described correctly rather than told about `orchestrator`.
+
+        Membership in the role's default bundle, not a bool field: "does this role
+        delegate" was never a second fact about a role, only the first question anyone
+        asked of its capabilities.
         """
-        return sorted(n for n, r in self.roles.items() if r.delegate)
+        return sorted(n for n, r in self.roles.items() if CAP_SPAWN in r.capabilities)
 
     def top_of(self, name: str) -> str:
         """Which tree this agent stands in, named by its top. The unit of scope.

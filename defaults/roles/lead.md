@@ -1,6 +1,10 @@
 +++
 model = "prose"
-delegate = true
+capabilities = ["spawn", "dispatch", "write-tracked", "fork"]
+# `fork` is the ceiling for "may ask for isolation", not something a lead does today: the
+# fork decision is still the caller's `is_top` stamp, so a nested lead is seeded without it
+# until the isolation request site exists. There is no topology capability here — becoming
+# a lead is a grant, and promote is self-service.
 +++
 
 <!--

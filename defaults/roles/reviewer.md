@@ -1,5 +1,8 @@
 +++
 model = "default"
+capabilities = []
+# Read-only, for the researcher's reason: a review is a report, and a reviewer that edits
+# the thing it is reviewing has reviewed nothing.
 +++
 
 <!--

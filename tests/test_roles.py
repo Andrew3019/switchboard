@@ -373,18 +373,21 @@ class RolesTest(unittest.TestCase):
 
     def test_both_halves_of_the_split_ship_and_may_delegate(self):
         """One role became two: `dispatcher` at the top, `lead` everywhere nested. Both
-        spawn agents, which is the field that matters — a half of the split that cannot
-        delegate is a half that cannot do its job."""
+        spawn agents, which is what matters — a half of the split that cannot delegate is a
+        half that cannot do its job.
+
+        Asked of the capability bundle since C1 retired `delegate: bool`. Same question,
+        same answer: "may this role spawn" is `spawn` in its default set."""
         r = roles.load(self.repo)
         for name in ("dispatcher", "lead"):
             with self.subTest(role=name):
                 self.assertIn(name, r)
-                self.assertTrue(r[name].delegate)
+                self.assertIn(roles.CAP_SPAWN, r[name].capabilities)
                 self.assertTrue(r[name].prompt)
 
     def test_the_retired_name_resolves_to_the_lead_and_not_to_the_fallback(self):
         """`--role orchestrator` gets typed out of muscle memory long after the rename.
-        Unaliased it would inherit `fallback_role` (`worker`), whose `delegate` is False —
+        Unaliased it would inherit `fallback_role` (`worker`), which holds no `spawn` —
         so the one name that used to mean "an agent that splits work" would silently spawn
         an agent that cannot spawn anything. The alias resolves it all the way: the Role
         that comes back IS the lead, name included, so the board, the prompt and the
@@ -392,7 +395,7 @@ class RolesTest(unittest.TestCase):
         r = roles.load(self.repo)
         got = roles.get(r, "orchestrator")
         self.assertEqual(got.name, "lead")
-        self.assertTrue(got.delegate)
+        self.assertIn(roles.CAP_SPAWN, got.capabilities)
         self.assertEqual(got.prompt, r["lead"].prompt)
 
     def test_a_repo_can_write_an_alias_of_its_own(self):
