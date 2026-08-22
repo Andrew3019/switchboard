@@ -203,7 +203,7 @@ the earlier F9 and V2 read as exhaustive site lists and were not.
 | F8 | `board.py:2269` | `prompt_pane(…, "exec {python} -m switchboard.board")` — `exec` is a POSIX builtin | drop `exec` on Windows panes (not load-bearing) |
 | F9 | **A package-wide class, not two lines.** No text read in this codebase passes `encoding=`. On Windows `Path.read_text()`/`open()` fall back to `locale.getpreferredencoding(False)` — the ANSI code page, cp1252 on a default install, not UTF-8 (3.11/3.12; UTF-8 mode is only the default from 3.15). The grep is `grep -rn -e 'read_text(' -e '.open(' -e 'write_text(' switchboard/ defaults/`, minus the lines that already pass `encoding=`. Sites: `board.py:2179`, `output.py:337`, `defaults/plugins/plans/__init__.py:3848` (the three `errors="replace"` opens); `config.py:163` (`read_toml`), `:191` (`read_text`), `:425`, `:453`; `models.py:213`; `presets.py:167`, `:220`; `plugins.py:336`; `store.py:108`/`:118`; `sweep.py:313`/`:319`; `panel.py:136`/`:145`; `broker.py:1134`, `:4090`; `collector.py:568`; `defaults/plugins/plans/__init__.py:3350`; and F7b | **Silent corruption of the artefact switchboard exists to produce.** Measured, not assumed: `defaults/protocol.md` (192 non-ASCII bytes) and `defaults/settings.toml` (293) both decode *successfully* as cp1252 into mojibake (`'sessions â€” in this repo'`). `config.py:191` is what reads `protocol.md`, every role `.md` and `agent.md` — i.e. **every agent's spawn prompt is mojibake on a default Windows install**. `read_toml` corrupts any setting *value* containing `—`/`’`. Contrast `herdr.write_prompt_file` (`herdr.py:145,147`), which already passes `encoding="utf-8"` — which is why this is a gap and not the whole codebase | add `encoding="utf-8"` at every site. Zero-risk on POSIX (it is what a UTF-8 locale already does) and it fixes the same **latent POSIX bug** under `LC_ALL=C` / minimal containers |
 | F10 | `board.py:2333` write path | no `sys.stdout.reconfigure(encoding="utf-8")` ⇒ glyphs (`✗◐◌○●`) raise `UnicodeEncodeError`/mojibake on a non-UTF-8 codepage | **`sys.stdout.reconfigure(encoding="utf-8", errors=sys.stdout.errors)`, guarded** — see the F10/F11 hazard note below. A bare `reconfigure(encoding=…)` is **not** zero-risk on POSIX and **is not** what the rest of the F9 class is |
-| F11 | `bin/sb-stop-hook:28`, `bin/sb-activity-hook:27` — `hooks.run(sys.stdin.read())` | the **read** side of F10. `sys.stdin` decodes a pipe with the ANSI code page and `errors='strict'`. `0x81 0x8D 0x8F 0x90 0x9D` are undefined in cp1252, so a payload containing e.g. `●` (UTF-8 `E2 97 8F`) raises `UnicodeDecodeError` before `json.loads` runs. Both scripts catch it and return 0 — hooks fail open by design (B6) — so the Stop gate silently never fires for that turn and nothing is logged | `sys.stdin.reconfigure(encoding="utf-8", errors=sys.stdin.errors)`, guarded, in D2's `hooks_entry.py`. Same hazard note |
+| F11 | `bin/sb-stop-hook:28`, `bin/sb-activity-hook:27` — `hooks.run(sys.stdin.read())` | the **read** side of F10. `sys.stdin` decodes a pipe with the ANSI code page and `errors='strict'`. `0x81 0x8D 0x8F 0x90 0x9D` are undefined in cp1252, so a payload containing e.g. `●` (UTF-8 `E2 97 8F`) raises `UnicodeDecodeError` before `json.loads` runs. Both scripts catch it and return 0 — hooks fail open by design (B6) — so the Stop gate silently never fires for that turn and nothing is logged | `sys.stdin.reconfigure(encoding="utf-8", errors=sys.stdin.errors)`, guarded. **Phase 1 patches the two `bin/` scripts directly** — `hooks_entry.py` is a Phase 2 artifact and this fix must not wait for it; Phase 2 carries it across when it folds the two scripts. Same hazard note |
 | F12 | 26 `subprocess.run(..., text=True)` sites across `switchboard/` and `defaults/` (e.g. `defaults/plugins/report-bug/__init__.py:269`, `plans/__init__.py:3556`, `plans/analysis/evidence.py:110`) | `text=True` with no `encoding=` decodes the child's stdout with the ANSI code page too. Reading `sb … --json` output containing an em-dash gives mojibake through `json.loads`, or a `UnicodeDecodeError` on the undefined cp1252 bytes | pass `encoding="utf-8"` alongside `text=True`. Same class as F9, same zero-risk POSIX fix. *(Found while verifying F9; not in the round-1 findings.)* |
 | F13 | `panel.py:583` `start_new_session=True` (the collector spawn, `panel.py:576-586`) | **was V6, and V6's verdict was wrong.** V6 said CPython maps this to `CREATE_NEW_PROCESS_GROUP` on Windows. It does not: CPython 3.11.5's Windows `_execute_child` takes it as `unused_start_new_session` (`subprocess.py:1445`) and never reads it; the docstring at `:785` says "POSIX only". It is **silently discarded** — no `creationflags` are set. This is the repo's single elected collector, and `start_new_session` is what detaches it from whichever renderer won the election. On Windows it stays in that renderer's console and process group: a Ctrl-C in that pane, or closing that console window, takes the fleet's collector down and every panel goes stale | Windows branch adding `creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP`; keep `start_new_session=True` unchanged on POSIX |
 
@@ -310,83 +310,194 @@ are different and must not inherit F9's "zero-risk on POSIX" line.
 
 Every phase is written as "add a Windows branch," never "rewrite the POSIX one." Ordering is by
 dependency: nothing downstream can be tested on Windows until the import-time blockers clear.
+**The code-dependency graph 0→1→2→3→3b→4→5→6→7 was attacked in review round 3 and held** — no
+phase's *code* needs a later phase's code. What round 3 broke was the exit criteria: five of them
+were unsatisfiable, or green over the exact failure the phase exists to prevent. They are rewritten
+below, and every phase now states what it changes in `.github/workflows/tests.yml`.
 
-**Phase 0 — decisions.** D1–D4 are settled (§1). **D5 (how a plugin reaches `lockfile`) is open and
-gates B7** — settle it before Phase 1 touches the lock sites, because it decides whether `lockfile`
-is re-exported through `switchboard.plugins` or the plugin import contract widens.
+**Phase 0 — settle what gates code.** Three questions, none of them coding work:
+
+- **D5 (how a plugin reaches `lockfile`)** — open, gates B7, which is in Phase 1.
+- **H1 — does herdr run natively on Windows, and does it make a Windows pane?** `herdr.py:1-11`:
+  herdr is an external binary pinned to **0.8.0 / protocol 19**, and it is the only thing that
+  makes a pane. Phases 3, 3b, 6 and V3/V5 all presuppose a native Windows herdr. **Nothing in this
+  plan or in the six audits establishes that.** The herdr-integration audit asserts it in a
+  parenthesis — "herdr itself is not being changed (already Windows-native)" — with no evidence,
+  and the same audit later says the Windows install location is unknown ("once the actual Windows
+  install location is confirmed from herdr's own installer docs"). If the answer is no, Phases 1,
+  2, 4 and 5 all land and pass their gates and switchboard still spawns nothing on Windows — this
+  plan's signature failure mode, a green check over a dead subsystem, at plan scale. **Andrew is
+  the one who can answer this.** Also settle the install-dir fallback it decides (M3).
+- **H2 — does herdr's API report what shell a pane runs?** B5's dispatch needs it (Phase 3). If
+  herdr cannot say, B5's whole design changes, and §2's B5 row has the blast radius: a dispatch
+  landing anywhere but POSIX is `SbUnpinned` on **every macOS spawn**. Same kind of question as
+  H1 and answered in the same conversation; it is a decision, not a Phase 3 bullet.
 
 **Phase 1 — make it import on Windows (unblocks all testing).**
-- `lockfile.py` shim; convert the 6 fcntl sites — 5 in `switchboard/` (B1) and the plans plugin's
-  (B7), the latter via whatever D5 decides. Pure extraction on POSIX.
+- `lockfile.py` shim. **The counts, from `grep`, because an earlier draft of this plan got them
+  wrong twice:** `switchboard/` has **4** `import fcntl` and **7** `flock` calls; `defaults/` adds
+  **1** and **1**. Convert all **8** call sites — `plugins.py:687`, `sweep.py:308`,
+  `panel.py:435/453/474/478`, `broker.py:2863` (B1), and `plans/__init__.py:2869` (B7, via whatever
+  D5 decides). Do not convert "all but one": one survivor keeps `import fcntl` at module scope and
+  the first exit criterion still fails. Pure extraction on POSIX.
 - `rawinput.py` seam so `board.py`/`richboard.py` import without `termios`/`tty` (B2).
 - Guard `SIGHUP` (B3) and `SIGWINCH` (B4) with `hasattr`/platform filters in `collector.py` and
   `board.py`.
-- Add the whole F9 encoding class now, plus F7b, F10, F11, F12 (cheap, mechanical, and each also
-  fixes a latent POSIX bug under a non-UTF-8 locale).
-- Exit criteria: `import switchboard.*` succeeds on `windows-latest`; pytest *collects*; **and
-  `sb plugin list` reports every shipped plugin `ok`.** That third criterion is not decoration:
-  plugins load by path through `spec_from_file_location`, not as `switchboard.*`, and
-  `plugins.load` swallows the failure into `status="broken"` — so the first two criteria pass
-  with the plans plugin (and the merge gate) silently dead. That is exactly how B7 was missed.
+- Add the whole F9 encoding class now, plus F7b, F12, and F10/F11 **with their `errors=` +
+  `getattr` guards** (cheap, mechanical, and each also fixes a latent POSIX bug under a
+  non-UTF-8 locale). **F11 patches `bin/sb-stop-hook:28` and `bin/sb-activity-hook:27` directly
+  here** — `hooks_entry.py` does not exist until Phase 2, and Phase 2 carries the fix across when
+  it folds the two scripts. Saying so because §2's F11 row points at the Phase 2 artifact.
+- CI: add `windows-latest` to the matrix **with `continue-on-error: true`**, and register the
+  `windows`/`posix` pytest markers. Both were previously scheduled into Phase 2's `pyproject.toml`,
+  which is too late — Phase 1 is the phase that first needs Windows skips, and without
+  `continue-on-error` the new leg is red on every unrelated PR in the repo from Phase 1 to Phase 7.
+  Markers can live in `pytest.ini`/`setup.cfg` now and move into `pyproject.toml` at Phase 2.
+- Exit criteria:
+  1. `import switchboard.*` succeeds on `windows-latest`; pytest *collects*.
+  2. `grep -rn "import fcntl\|import termios\|import tty" switchboard/ defaults/` returns nothing
+     outside the new seams — the mechanical check that (1) is not passing by accident.
+  3. **`python bin/sb plugin list` reports no shipped plugin as `broken`.** Three corrections to
+     the earlier wording, all measured: it is **`python bin/sb`**, because `bin/sb` is unlaunchable
+     on Windows until Phase 2 and there is no `switchboard/__main__.py`; it is **"none broken"**,
+     not "every plugin `ok`", because `defaults/plugins.toml:61` ships `todo` **off** and
+     `plugins.py:425-426` gives a disabled plugin `status="not enabled"` — the old criterion was
+     unsatisfiable on a healthy Mac today, and an unsatisfiable gate gets loosened ad hoc, which is
+     where B7 gets lost again; and the check must **grep the output**, because `cli.py:1411`
+     returns `0` unconditionally. This still catches B7: `plugins.py:429`'s `broken()` overwrites
+     `"not enabled"`, and `load_all` (`plugins.py:488-492`) imports every available plugin
+     regardless of enablement. Without this criterion, (1) and (2) pass with the plans plugin —
+     and the merge gate — silently dead, which is exactly how B7 was missed.
 
 **Phase 2 — make `sb` runnable and hooks fire (B6, D2).**
-- `pyproject.toml` console-scripts + `hooks_entry.py` + committed `.cmd` shims.
-- Fix `hooks.py` quoting (F7) and `_entry_point` to return the `.cmd`/entry path on nt.
-- Replace the 4 `os.access(X_OK)` checks (F6) with shim-existence checks, and resolve
-  `report-bug`'s bare `"sb"` literal (F6b).
-- Exit criteria: `sb --help` runs on Windows; a registered Stop hook actually fires (V4).
+- `pyproject.toml` console-scripts + `hooks_entry.py` (carrying Phase 1's F11 fix) + committed
+  `.cmd` shims. Move the pytest markers here.
+- Fix `hooks.py` quoting (F7's `hooks.py` half) and `_entry_point` to return the `.cmd`/entry path
+  on nt. **F7's `broker.py:3343` half belongs to Phase 3**, absorbed by B5's `_ready_pane` rewrite —
+  F7 is not done at the end of this phase.
+- Replace the 4 `os.access(X_OK)` checks (F6) with shim-existence checks **behind an
+  `os.name == "nt"` gate**, keeping `os.access` verbatim on POSIX; resolve `report-bug`'s bare
+  `"sb"` literal (F6b).
+- CI: add an install step. `tests.yml` today runs `pip install --upgrade pip pytest` and no
+  `pip install -e .`, and its header comment asserts there is nothing to install. `sb.exe` does
+  not exist without one.
+- Exit criteria — **split, because these are not one phase's worth of provability**:
+  1. *CI, this phase:* `python bin/sb --help` runs on `windows-latest` through the committed
+     `.cmd` shim (needs no install), and `pip install -e .` produces an `sb` entry point on all
+     three OSes.
+  2. *Deferred to Phase 7, and say so:* "a registered Stop hook actually fires" needs a real
+     Claude Code install on native Windows. §4's own "cannot be pinned in CI" list already
+     contains Claude Code's hook runner (V4). Phase 2 cannot gate on it; pretending otherwise is
+     the "Phases 1–5 are CI-verifiable" claim overreaching.
 
-**Phase 3 — make agent spawn work (B5, F8).**
-- Branch `_ready_pane` (B5) and `board.open_beside` (F8) by pane shell family. Needs a
-  herdr-reported "what shell does this pane run" fact — confirm herdr's API exposes it; do not
-  infer from the Python process's platform (pane shell is a herdr/OS property).
-- Exit criteria: an agent spawns and pins into a Windows pane.
+**Phase 3 — make agent spawn work (B5, F8, F7's `broker.py` half).** Gated on **H1 and H2**.
+- Branch `_ready_pane` (B5, including the marker at `broker.py:3348`) and `board.open_beside` (F8)
+  by pane shell family, **defaulting to POSIX when the family is unknown**. Do not infer from the
+  Python process's platform — pane shell is a herdr/OS property.
+- Exit criteria: (a) CI, all OSes — the builder emits today's byte-identical POSIX string when the
+  herdr shell-family fact is absent; (b) hands-on — an agent spawns and pins into a Windows pane.
 
 **Phase 3b — collector detachment (F13).** Windows `creationflags` on the `panel.py:583` spawn.
-Small, but it is the difference between one elected collector and a collector that dies with a
-console window. Exit criterion: closing the electing renderer's console leaves the collector up.
+Gated on H1. Small, but it is the difference between one elected collector and a collector that
+dies with a console window. Exit criterion: closing the electing renderer's console leaves the
+collector up (hands-on; no CI path).
 
 **Phase 4 — process/liveness backend (D1, F1/F2).**
-- `procscan.py` (psutil or ctypes); repoint `live.scan`, `stats`, `broker._parents`.
+- `procscan.py` (psutil), holding the four rules in §2. Repoint `live.scan`, `stats`,
+  `broker._parents`.
+- **`procscan` must fail loudly if psutil is missing.** `panel.py:578-587` spawns the collector
+  with `stderr=subprocess.DEVNULL`, so on any interpreter without psutil the collector dies into
+  `/dev/null` and the panel just goes stale — B7's exact shape, reintroduced on macOS by this
+  phase. `stats.py:497-499` rejected psutil originally for this precise reason ("a dependency the
+  collector's interpreter is not promised"). Surface the missing dep as a panel-visible state, not
+  a silent death.
 - Add `_available_windows()` to the `stats` memory dispatch.
+- Rewrite `stats.py:454-457`'s `%CPU` docstring: the number's definition changes (D1 cost 3).
 - Fix the `live.py` docstring + `is_under` NTFS case-fold at **`live.py:136`** (M6); remove the bogus
   `tests/test_live.py` Linux skip and add a static-fixture parse test.
-- Exit criteria: `sb workspace close` gate answers correctly on Windows; CPU/mem stats populate.
+- CI: `psutil` joins the install step. **This phase, not the matrix change, is what can turn the
+  existing ubuntu and macOS legs red** — `tests/test_live.py` and `tests/test_stats.py` import the
+  repointed modules, and without an install step every existing leg fails at import. §4's
+  "additive, no risk to existing legs" was true of adding an OS and was never a statement about
+  adding a required dependency.
+- Exit criteria — worded to fail on D1's own predicted failures, because "populate" and "answers
+  correctly" are both green over them:
+  1. Fleet CPU% is **non-zero across two consecutive collector samples** (D1 cost 3: a stateless
+     `procscan` reads `0.0` forever, and `0.0` is a populated number).
+  2. `sb workspace close` **actually closes an empty workspace** (D1 cost 5: the empty-cwd trap
+     makes the gate refuse forever, and refusal is the fail-safe at `broker.py:2305` — a check
+     that only confirms "refuses while an agent is live" is green over a permanently dead gate).
+  3. The existing ubuntu and macOS legs are still green.
 
 **Phase 5 — worktree filesystem (D4, F5, M5).**
 - `symlink_to` → `target_is_directory` + junction/copy fallback; update the two `is_symlink`
   detection sites in lockstep.
-- Exit criteria: a fresh worktree on an unprivileged Windows box has working `.switchboard` +
-  `CLAUDE.md`.
+- Exit criteria — **two, one per branch**, because the old single criterion tested only the path
+  Andrew will not use:
+  1. *The path Andrew actually runs (D4's primary):* on a Developer-Mode box, a fresh worktree gets
+     a real symlink, created with `target_is_directory` correct for the directory target, and
+     **both** `is_symlink()` sites (`broker.py:1113`, `:1856`) classify it as ours (M5).
+  2. *The fallback:* on an unprivileged box, `.switchboard` is a working junction and `CLAUDE.md`
+     a copy, and the same two detection sites classify **those** as ours. Note this branch is
+     **not reachable on GitHub's `windows-latest`** — those runners are elevated, so `os.symlink`
+     succeeds and the fallback never executes. §4's mocked `OSError(1314)` unit test is the only
+     CI coverage it can have.
 
-**Phase 6 — interactive board input/render (F3, F4, V3).**
+**Phase 6 — interactive board input/render (F3, F4, V3).** Gated on H1.
 - Wire `rawinput.py`'s Windows byte source into the read loop; `SetConsoleMode` VT-enable at
   startup (gated); SIGWINCH→poll.
 - Exit criteria: the board draws and takes keys inside a herdr Windows pane. (Least
   CI-verifiable — largely hands-on.)
 
-**Phase 7 — polish + verify.** M1–M4, M6; run the V1–V5 smoke tests on a real box; update the
+**Phase 7 — polish + verify.** M1–M4, M6; run the V1–V5 smoke tests on a real box; run Phase 2's
+deferred Stop-hook check (V4); drop `continue-on-error` from the `windows-latest` leg; update the
 README "Status" disclaimer.
 
-Phases 1–5 are largely CI-verifiable via platform-parameterized unit tests. Phase 6 and the V-items
-need hands-on Windows.
+**What is actually CI-verifiable.** Phases 1 and 4 are, once their install steps land. Phase 2 is
+half (the shim, not the hook). Phase 3's *dispatch default* is; its pane behaviour is not. Phase
+3b, Phase 5's fallback branch, and Phase 6 are hands-on only — there is no herdr and no tmux on any
+runner, which `tests.yml`'s own header already says for POSIX. The earlier claim that "Phases 1–5
+are largely CI-verifiable" was too broad.
 
 ---
 
 ## 4. Testing & CI strategy
 
-- **Add `windows-latest` to `.github/workflows/tests.yml`** (matrix is ubuntu+macos today,
-  `fail-fast: false` already set, so it's additive — no risk to existing legs). First failures,
-  in order: (1) collection-time import errors (B1–B4) blank the suite until fixed; (2) `lsof`/
-  `ps`/`vm_stat` tests need Windows skips or the psutil backend; (3) mocked-`Herdr` tests should
-  pass once imports clear; (4) any `bin/sb`-execution tests fail until Phase 2.
-- **Register `windows`/`posix` pytest markers** (in the new `pyproject.toml`) instead of ad-hoc
+- **`tests.yml` needs three edits, in three different phases, and no phase used to own any of
+  them.** The file today installs `pip pytest` and nothing else, runs `python -m pytest tests` with
+  **no `pip install -e .`**, and its header comment states the premise out loud: *"switchboard has
+  no dependencies beyond the standard library — no requirements.txt, no pyproject.toml, nothing to
+  install but the test runner."* So:
+  - **Phase 1** adds `windows-latest` to the matrix, `continue-on-error: true` on that leg, and the
+    `windows`/`posix` markers. The matrix change *is* additive and safe — `fail-fast: false` is
+    already set, and there are no caches, artifacts or matrix-wide steps for a new OS to collide
+    with. That is the whole of what "additive, no risk to existing legs" ever covered.
+  - **Phase 2** adds an install step (`pip install -e .`), without which D2's `sb.exe` does not
+    exist and half of Phase 2's gate is unprovable.
+  - **Phase 4** adds `psutil`. **This is the edit that can turn the existing ubuntu and macOS legs
+    red**, and it is a change to the same file's premise, not to its matrix: `tests/test_live.py`
+    and `tests/test_stats.py` import the modules Phase 4 repoints, so the moment psutil becomes
+    required and is not installed, every existing leg fails at import. The header comment has to be
+    rewritten in the same commit — it will no longer be true.
+  - Phase 7 drops `continue-on-error`.
+  First Windows failures, in order: (1) collection-time import errors (B1–B4) blank the suite until
+  fixed; (2) `lsof`/`ps`/`vm_stat` tests need Windows skips or the psutil backend; (3)
+  mocked-`Herdr` tests should pass once imports clear; (4) any `bin/sb`-execution tests fail until
+  Phase 2.
+- **Register `windows`/`posix` pytest markers** (Phase 1, in `pytest.ini`/`setup.cfg`; moved into
+  `pyproject.toml` at Phase 2 — they cannot start there, because Phase 1 is the phase that first
+  needs Windows skips) instead of ad-hoc
   `skipif(sys.platform…)` scattered around, so "what runs only on Windows" is one grep. Mirrors
   the existing `tests/test_live.py` skip precedent.
 - **High-value tests that need no Windows box** (write these regardless of when the port lands):
   - Command-string builders parameterized on shell family — assert the Windows branch never emits
     a bare single-quoted path, and the POSIX branch is **byte-identical to today** (pins the
-    no-regression guarantee). Covers B5, F7, hooks.
+    no-regression guarantee). Covers F7, hooks, and **B5's POSIX half and dispatch default only**.
+    It does *not* cover B5's Windows half: "never emits a bare single-quoted path" is a shape
+    assertion, and whether the emitted cmd/pwsh string actually pins PATH and echoes something
+    `wait_output` matches needs a real Windows shell. The thing that decides `SbUnpinned` is the
+    branched **marker** (`broker.py:3348`) matching what the pane really prints — un-pinnable in
+    CI, and listed in §5 as unproven.
   - `_entry_point()` returns a `.cmd` path under monkeypatched `os.name == "nt"`.
   - `link_config` falls back to copy when `os.symlink` raises `OSError(1314)` (D4).
   - `live._parse` accepts the captured GNU-lsof 4-line fixture (kills the bogus skip).
@@ -407,8 +518,11 @@ need hands-on Windows.
       (D1 cost 6).
     - fleet CPU% is non-zero across two consecutive collector samples (D1 cost 3 — the stateless
       shape reads `0.0` forever and no existing test would notice).
-  - `sb plugin list` reports every shipped plugin `ok` — a regression test for B7's failure mode,
-    where a plugin import error is swallowed into a health line nobody reads. Runs on every OS.
+  - `python bin/sb plugin list` reports **no shipped plugin as `broken`** — a regression test for
+    B7's failure mode, where a plugin import error is swallowed into a health line nobody reads.
+    Runs on every OS. Must grep the output: `cli.py:1411` returns `0` unconditionally. Not "every
+    plugin `ok`" — `todo` ships disabled (`defaults/plugins.toml:61`) and reads `not enabled`, so
+    that wording is unsatisfiable on a healthy Mac today.
   - `SIGHUP`/`SIGWINCH` guards don't raise with the attribute mocked absent (B3/B4).
 - **`defaults/` is in scope for all of the above.** The first cut of §2 and §4 covered
   `switchboard/` only; the plugins carry their own `fcntl`, their own `os.access(X_OK)`, their own
@@ -430,7 +544,24 @@ sequences; the msvcrt raw-byte read (V5); psutil's Windows cwd/`AccessDenied` (D
 (V3); WAL sidecars (V1); `os.replace` mid-read share modes and whether CPython's Windows `open()`
 grants delete-sharing (V2 — unverified in *both* directions, not "very likely fine"); Claude Code's
 hook-runner shell (V4); `CreateProcess` ignoring `PATHEXT` for a bare name (F6b) and `DETACHED_PROCESS`
-behaviour (F13). Two Windows claims here **are** verified, by running them on this Mac rather than
+behaviour (F13).
+
+**The largest unproven claim in this document is one it used to not mention at all: that herdr
+runs natively on Windows and makes a Windows pane (H1).** herdr is an external binary pinned to
+0.8.0 / protocol 19 (`herdr.py:1-11`) and it is the only thing that makes a pane, so Phases 3, 3b
+and 6 and V3/V5 all rest on it. The only claim anywhere is an unevidenced parenthesis in the
+herdr-integration audit ("already Windows-native"), and that same audit does not know where a
+Windows herdr installs. Nothing here verifies it. **H2** — whether herdr's API reports a pane's
+shell family — is unproven in the same way and decides B5's design. Both are Phase 0 questions
+for Andrew.
+
+Also unproven, from review round 3: that B5's Windows command string is one a real cmd/pwsh pane
+accepts and echoes a `wait_output`-matchable marker for (the CI test covers the shape and the
+POSIX default, not this); and whether D2's `@py -3` shim resolves through the Windows launcher
+rather than the interpreter `actions/setup-python` chose — if it does, anything exercised *through*
+the shim on `windows-latest` is not testing the matrix's 3.11/3.12 axis. The reviewer who raised
+that had no Windows box and did not verify it; a shim spelled `python "%~dp0sb"` instead of
+`py -3` would sidestep it without reopening D2. Two Windows claims here **are** verified, by running them on this Mac rather than
 asserting them: the cp1252 decode of the repo's own text files (F9), and CPython 3.11.5's Windows
 `_execute_child` discarding `start_new_session` (`subprocess.py:1445`, F13). **The zero-regression claim is per-item, not blanket.** An earlier draft said "the POSIX side of
 every proposed change is a verbatim extraction of current code" — round 2 showed that is false for
@@ -471,6 +602,15 @@ side still needs a real box or a `windows-latest` CI leg to move from "documente
   confirmed *held*: `broker._parents`, the psutil cwd set, RSS and `available` are all
   behaviour-preserving on macOS by measurement; F9/F12 are true POSIX no-ops; F7 and F3 are clean
   forks; the `lockfile(fd)` signature respects `panel.acquire`'s "the fd IS the lock" contract.
+
+- **Round 3, phase-ordering / testability lens**
+  (`.switchboard/notes/reviewer-phasing-testability-phase-ordering.md`): 13 findings, all accepted.
+  §3 was rewritten around them. The attack did **not** land on the ordering — the code-dependency
+  graph held, as did D5's placement and the completeness of the B1–B4 import-blocker set. It landed
+  on the exit criteria (five were unsatisfiable or green over the failure they exist to catch), on
+  the CI story (three `tests.yml` edits across three phases, none previously owned; the "additive,
+  no risk" line only ever covered the matrix change), and on **H1/H2** — a herdr-on-Windows
+  assumption four phases rested on and the plan never named.
 
 ---
 
