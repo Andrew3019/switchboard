@@ -439,18 +439,20 @@ picture, the plan's own listing is the full text. — confirmed 2026-08-19
 a DAG drawn from the deps, so a plan recording no order between its steps renders as a loose
 vertical stack with no arrows — which is what every early plan did. The first step is the
 exempt root, and a second start is exempt too where the step SAYS it is one — `root: true`,
-written by `dep <step> --root` and taken back off by any `--after`. Nothing can tell a
-deliberate second root from a forgotten edge by looking at it, so the plan says which it is:
-a marked start is complete and draws like anything else, an unmarked one still reports. The
-mark exists because the only other way off the warning was an edge nobody meant, and a plan
-that misstates its own order to satisfy a rendering rule is worse than the warning. Display
-and deps are required in more than one place, because a plan is edited by hand as often as
-by command: the shape verbs (`create`, `add-step`, `name-step`, `template use`) refuse to
-mint a step with no display; every other write warns and still writes, naming the offending
-steps — a `tick` that would not land because of a rendering rule is worse than the
-rendering; and the board draws the defect red. Completeness is never a whole-file refusal —
-that is `_check`'s job and it stays structure-only. — confirmed 2026-08-19, the deliberate
-second root confirmed 2026-08-20
+written into the file, and written for a step the library places ahead of everything already
+in the plan. Nothing can tell a deliberate second root from a forgotten edge by looking at
+it, so the plan says which it is: a marked start is complete and draws like anything else, an
+unmarked one still reports, and a step carrying the mark AND a dep is reported too rather
+than one half of it being quietly picked. The mark exists because the only other way off the
+warning was an edge nobody meant, and a plan that misstates its own order to satisfy a
+rendering rule is worse than the warning. Display and deps are required in more than one
+place, because a plan is edited by hand as often as by command: the shape verbs (`create`,
+`name-step`, `template use`) refuse to mint a step with no display; every other write warns
+and still writes, naming the offending steps — a `tick` that would not land because of a
+rendering rule is worse than the rendering; and the board draws the defect red.
+Completeness is never a whole-file refusal — that is `_check`'s job and it stays
+structure-only. — confirmed 2026-08-19, the deliberate second root confirmed 2026-08-20,
+restated 2026-08-21 for the going of `dep` and `add-step`
 
 ### Scope
 
