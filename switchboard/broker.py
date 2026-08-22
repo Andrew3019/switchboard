@@ -65,6 +65,16 @@ MAIN = config.setting("vocabulary.main_role")
 # what the top IS, and the top-level agent still wants an obvious name.
 MAIN_NAME = config.setting("vocabulary.main_name")
 
+# THE CAPABILITY STRINGS. A gated action is one of these, checked through
+# `Broker.require_capability`; adding a rule means adding a string here, not another
+# refusal function beside the gate.
+#
+# There is deliberately no `start`. `sb start` is a hardcoded, fail-closed, human-only gate
+# in the CLI (`cli.py`, the `start` branch) and it stays there: a grantable version of it is
+# how a top would come to mint another top, so the string does not exist to be granted.
+CAP_SPAWN = "spawn"     # may this caller spawn an agent at all? (was the role `delegate` bool)
+CAP_FORK = "fork"       # does this caller's spawn mint a space of its own? (was `is_top`)
+
 # Config that must follow work into a worktree. Deliberately NOT committed: it is local
 # setup, not source. Worktrees get symlinks to the main checkout's copies, so there is
 # exactly one true file and no per-worktree `sb init`.
@@ -1012,32 +1022,107 @@ class Broker:
 
     # -- structure: who may spawn, and who may see whom ------------------
 
-    def _refuse_bare_delegate(self, me: str) -> None:
-        """A bare agent does not spawn. DESIGN-TRUTH: "A bare agent's delegate is refused
-        outright."
+    def require_capability(self, agent: str, cap: str) -> None:
+        """The gate. Raise unless this caller holds `cap`.
 
-        Bareness is read off the ROLE's `delegate` field, never off the role's name — see
-        `roles.Role`. The human is not an agent and is refused nothing; a caller we hold no
-        row for is not refused either, because there is no role to read and inventing one
-        would refuse `sb start` on a store that has not caught up yet.
+        ONE function for every gated action, and a new gated action is a new capability
+        STRING — not a new refusal function beside this one. That is the whole reason the
+        set is data: `spawn` (a bare agent does not spawn — DESIGN-TRUTH: "A bare agent's
+        delegate is refused outright.") and `fork` (whose spawn mints a space of its own)
+        were two hardcoded checks reading two different columns, and every rule added
+        beside them would have been a third.
 
-        Enforced here rather than in the CLI so that every door into a spawn goes through
-        it — every spawn is a `delegate`, whoever asked for it.
+        THREE-VALUED, and that is not a boolean read with a default. *No row for this
+        caller* ⇒ allow; *row present, cap held* ⇒ allow; *row present, cap absent* ⇒
+        refuse. The first of those is the fail-open, and it is load-bearing rather than
+        lenient — see `_capability_row`.
         """
-        if me == HUMAN:
+        row = self._capability_row(agent)
+        if row is None or cap in self._capabilities_of(row):
             return
-        row = store.get_agent(self.db, me)
-        if row is None:
-            return
-        role = row["role"]
+        raise ValueError(self._capability_refusal(row["role"], cap))
+
+    def holds_capability(self, agent: str, cap: str) -> bool:
+        """`require_capability` as a predicate, for the gates that BRANCH rather than
+        refuse.
+
+        Same three values and the same fail-open — a caller with no row answers True here
+        for exactly the reason it is not refused there. Two spellings of one check, so a
+        rule cannot come to mean one thing where it raises and another where it decides.
+        """
+        row = self._capability_row(agent)
+        return row is None or cap in self._capabilities_of(row)
+
+    def _capability_row(self, agent: str) -> Optional[sqlite3.Row]:
+        """The row the check reads, or None where there is nothing to read — which is the
+        allow case, deliberately.
+
+        The human is not an agent, holds no row and is refused nothing. A caller we hold no
+        row for is not refused either: there is no role to read, and inventing one would
+        refuse `sb start` on a store that has not caught up yet. Dropping either of those
+        is the one way this becomes a regression rather than a refactor — `sb start` has to
+        survive a cold store.
+        """
+        if agent == HUMAN:
+            return None
+        return store.get_agent(self.db, agent)
+
+    def _capabilities_of(self, row: sqlite3.Row) -> set:
+        """What this row holds. From the table when it has been seeded, DERIVED when it
+        has not.
+
+        A NULL `seed_capabilities` is a row written before the substrate existed — an older
+        store, or a row inserted straight into `agents` by something that never read a role
+        — and it has no capability rows for the same reason. Reading the empty table for it
+        would refuse an agent that has always been allowed, so it falls back to the two
+        facts the hardcoded gates read: the role's `delegate` field and the `is_top` stamp.
+        That fallback is what makes adding the substrate a no-op for every row that already
+        exists.
+        """
+        # NOT `_column`: that collapses NULL to "", and "" is a row seeded with NOTHING —
+        # a worker — while NULL is a row nobody seeded. Those are the two sides of this
+        # branch, so the read has to keep them apart.
+        try:
+            seed = row["seed_capabilities"]
+        except (IndexError, KeyError, TypeError):
+            seed = None                 # a store or a stub row older than the column
+        if seed is None:
+            return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
+        return store.capabilities_of(self.db, row["name"])
+
+    def seed_for(self, role: str, is_top: bool) -> list:
+        """The set an agent of this role gets at spawn. The BACK-COMPAT READ.
+
+        `spawn` comes from the role's `delegate` field (`roles.Role`), never from the
+        role's NAME, so a repo's own orchestrating role is seeded correctly and an
+        unedited `roles.toml` still loads. `fork` comes from the `is_top` stamp, which
+        stays exactly where it is — a raw, unresolved identity fact written by `sb start`
+        and read here, not a capability that could be granted to anything else.
+
+        There is no `start` in this function and there is none anywhere: `sb start` is a
+        hardcoded human-only gate in the CLI, and a grantable version of it is how a top
+        would come to mint another top.
+        """
+        caps = []
         if roles_mod.get(self.roles, role, self.repo).delegate:
-            return
-        raise ValueError(
-            f"a {role} does not spawn agents — only a role with delegate rights does "
-            f"(today: {', '.join(self._delegating_roles()) or 'none'}). If this task is "
-            f"bigger than one agent, or needs a decision you were not given, say so to "
-            f"your parent with `sb done` rather than growing a tree under yourself."
-        )
+            caps.append(CAP_SPAWN)
+        if is_top:
+            caps.append(CAP_FORK)
+        return sorted(caps)
+
+    def _capability_refusal(self, role: str, cap: str) -> str:
+        """What a refused caller is told. Word for word what the spawn gate said before
+        this was generic — a refusal message is a contract with the agent reading it, and
+        the point of this unit is that nothing observable moved.
+        """
+        if cap == CAP_SPAWN:
+            return (
+                f"a {role} does not spawn agents — only a role with delegate rights does "
+                f"(today: {', '.join(self._delegating_roles()) or 'none'}). If this task is "
+                f"bigger than one agent, or needs a decision you were not given, say so to "
+                f"your parent with `sb done` rather than growing a tree under yourself."
+            )
+        return f"a {role} may not {cap}: that is not one of this agent's capabilities."
 
     def _delegating_roles(self) -> list[str]:
         """The roles that may spawn, generated from the roles themselves.
@@ -3162,13 +3247,15 @@ class Broker:
 
         Everybody else may not: their spawn is a tab in their own space, and its whole
         subtree stays there.
+
+        Asked of the capability set now rather than of the stamp directly, and the answer
+        is the same one: `fork` is seeded from `is_top` and from nothing else
+        (`seed_for`), the human and a caller with no row still answer True through the same
+        rowless fail-open the spawn gate uses, and no row anywhere gains `fork` by any
+        other route. The stamp has not moved — it is still what decides — it is just read
+        through the one gate every other rule is read through.
         """
-        if agent == HUMAN:
-            return True
-        row = store.get_agent(self.db, agent)
-        if row is None:
-            return True                 # no row, no space to lend — fork rather than guess
-        return bool(_column(row, "is_top"))
+        return self.holds_capability(agent, CAP_FORK)
 
     def worktree_branch(self, agent: str) -> Optional[str]:
         """The branch of that agent's worktree, or None if it has no worktree."""
@@ -3623,7 +3710,7 @@ class Broker:
         is_top: bool = False,           # `sb start` only — see `_top`
     ) -> str:
         me = me or self.whoami()
-        self._refuse_bare_delegate(me)
+        self.require_capability(me, CAP_SPAWN)
         r = roles_mod.get(self.roles, role, self.repo)
         # What was TYPED is not necessarily what this agent is: a retired name resolves
         # through `[vocabulary] role_aliases` to the role that replaced it, and `r.name` is
@@ -3776,6 +3863,13 @@ class Broker:
             claimed = store.claim_agent(self.db, **claim)
         if not claimed:
             raise AgentNameTaken(name)
+
+        # SEED THE CAPABILITY SET, from the role and the stamp this claim just wrote. After
+        # the claim rather than inside it, because the claim is the arbiter two concurrent
+        # spawners share and it stays one statement; a spawn that dies in between leaves a
+        # row whose seed is NULL, and that row reads exactly as every row written before
+        # this existed does — derived from the same two facts, same answer.
+        store.seed_capabilities(self.db, name, self.seed_for(role, is_top))
 
         # `model` is a TIER name (`sb delegate --model strong`), not a model id, and it
         # only overrides which tier — the table still decides what that tier means. The
