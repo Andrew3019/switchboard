@@ -3573,6 +3573,31 @@ class MarkdownTest(PlansSandbox):
         self.assertNotIn("a\nb", md)
         self.assertIn("c\\|d", md)
 
+    def test_a_forged_row_cannot_forge_one_on_the_comment_either(self):
+        """The same property, on the path that now matters. The test above builds a plan
+        with no `steps`, so it pins the WALK — and the pull request comment is the other
+        renderer, and the one that actually has the table a forged row is aiming at. Every
+        stored scalar on a step still goes through `_cell`, so a newline is the `\\n` it is
+        and a pipe is escaped, and the plan's table has exactly one row per step however
+        the fields are spelled. The one field allowed to keep its newlines is `output`, and
+        it is not in this table at all — see the block test below."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        md = _plans()._markdown(
+            {"id": "p-1", "title": "t",
+             "steps": [{"id": "s-1", "display": "a\nb", "name": "c|d",
+                        "owner": "e\n| x | y |", "progress": "f\ng",
+                        "why": "h|i", "gate": "j\nk"},
+                       {"id": "s-2", "name": "the second"}]})
+
+        for escaped in ("a\\nb", "c\\|d", "e\\n\\| x \\| y \\|", "f\\ng", "h\\|i", "j\\nk"):
+            self.assertIn(escaped, md)
+        self.assertNotIn("\n| x | y |", md)
+        # The header and one row per step, and not a line more: nothing above forged one.
+        table = md.split("## steps", 1)[1].split("<details>", 1)[0]
+        rows = [ln for ln in table.splitlines()
+                if ln.startswith("|") and not ln.startswith("| ---")]
+        self.assertEqual(len(rows), 3, rows)
+
     _DUMP = ("Scope & Objectives\n"
              "\n"
              "- The change adds one field to a step and one rule to the renderer.\n"
@@ -3691,6 +3716,10 @@ class MarkdownTest(PlansSandbox):
             {"id": "p-1", "title": "t",
              "steps": [{"id": "s-1", "name": "write it", "deps": ["s-9"]}]})
         self.assertNotIn("-->", loose.split("```mermaid", 1)[1].split("```", 1)[0])
+        # And the steps table says the same thing the graph does: the dep is DRAWN, so the
+        # defect is not hidden, and it is not linked, because there is no row to land on.
+        self.assertIn("| step-9 |", loose)
+        self.assertNotIn("[step-9]", loose)
 
     def test_the_status_line_counts_what_is_settled_and_names_the_gate(self):
         """The one line at the top, and the two things it has to get right: the counts, and

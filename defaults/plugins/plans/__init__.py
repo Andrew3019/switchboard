@@ -81,13 +81,15 @@ content rather than a reference — it is that because the whole point of it is 
 DUMPED. A change approval that a human approved has to reach the pull request in full, and
 a ref does not dump: `create-pr` posts `show --markdown` and whoever reads the PR gets
 whatever that carries. So the text is kept on the step, multi-line, and `--markdown`
-renders it as a blockquote block rather than flattening it to one line (`_BLOCK`). Written
-BY HAND by the agent that did the step, as it ticks, like `gate` and unlike `tick`: no
-verb writes it, because a verb would have to be exempted from both doors `_cap` keeps —
-`MAX_TEXT` and the control character — and an approved contract is longer than one and
-made of the other. REPLACED and never appended: a rejected contract is overwritten by the
-redone one, and what records the loop is `tries` and the changelog, which is exactly why
-this is not a note.
+renders it as PROSE rather than flattening it to one line (`_BLOCK`) — on the pull request
+comment as a headed, collapsible section of its own, rendered as the markdown it was
+written as, and in the walk `show <step> --markdown` still takes, quoted line by line.
+Written BY HAND by the agent that did the step, as it ticks, like `gate` and unlike
+`tick`: no verb writes it, because a verb would have to be exempted from both doors `_cap`
+keeps — `MAX_TEXT` and the control character — and an approved contract is longer than one
+and made of the other. REPLACED and never appended: a rejected contract is overwritten by
+the redone one, and what records the loop is `tries` and the changelog, which is exactly
+why this is not a note.
 
 Gates
 -----
@@ -843,10 +845,10 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
 
   `id`, `def`, `name`, `obliged_by` and the plan's `next_step` are MINTED and are not
   yours: a `def` typed by hand brings neither what its definition composes nor what it
-  obliges, and `next_step` is the plan's own step counter, which shows up as a row in the
-  `--markdown` dump because that rendering reads the record rather than a schema. A
-  definition's `command` is not on the record at all — it is resolved out of the library
-  every time the step is drawn.
+  obliges, and `next_step` is the plan's own step counter, which shows up in the collapsed
+  metadata of the PR comment because everything that rendering does not draw by name is
+  still walked off the record rather than off a schema. A definition's `command` is not on
+  the record at all — it is resolved out of the library every time the step is drawn.
 
   A FIELD THIS LIST HAS NEVER HEARD OF IS ALLOWED. There is no schema to satisfy: put what
   the job needs on the step, and `show`, `--json` and the PR comment all print it — a
@@ -1937,10 +1939,11 @@ def _lines(text: Any) -> list[str]:
     Splits on the newline and then escapes each line, so the newline is the only control
     character spared and it is spared as a SEPARATOR rather than as content. Every renderer
     that uses this puts each line somewhere a forged row cannot reach — indented under a
-    label in the terminal, blockquoted in markdown — so the property `_flat` holds
-    everywhere else in this file is held here by where the lines go instead of by escaping
-    them. Anything that is not a string is one line, which is the fallback: this is asked
-    of a hand-edited field and must not raise on a list somebody put there.
+    label in the terminal, quoted in the markdown walk, and lifted clean out of the steps
+    table into a section of its own in the pull request comment — so the property `_flat`
+    holds everywhere else in this file is held here by where the lines go instead of by
+    escaping them. Anything that is not a string is one line, which is the fallback: this
+    is asked of a hand-edited field and must not raise on a list somebody put there.
     """
     return [_flat(line) for line in str(text).split("\n")]
 
@@ -2010,7 +2013,8 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     pull request `create-pr` comments the plan onto. Multi-line by construction and longer
     than `MAX_TEXT`, so no verb writes it and it never goes through `_cap`: the agent that
     did the step writes it into the file by hand as it ticks, exactly as `gate` arrives.
-    `--markdown` renders it as a quoted block rather than one escaped line (`_BLOCK`).
+    `--markdown` renders it as a block rather than one escaped line (`_BLOCK`) — on the
+    pull request comment as the markdown it was written as, in a section of its own.
     Explicit null for the same reason `gate` and `why` are.
 
     `name` and `def` are the two ways a step says what it is, and exactly one of them is
@@ -2743,7 +2747,8 @@ def _plan_result(shown: dict, markdown: bool = False,
     swaps nothing else: `data` is the same record either way, so `--json` means what it
     always meant and a reader of it cannot tell which rendering was asked for. What is
     incomplete follows the plan into the markdown too — it is a key on the record by then,
-    so the generic renderer picks it up without being told, which is the point of it.
+    and the comment draws it high up (`_defect_lines`), because somebody at a merge is who
+    it was written for.
     """
     lines = _defects(shown)
     doc = dict(shown, incomplete=lines) if lines else shown
@@ -4402,6 +4407,7 @@ def _rows(steps: list) -> list[str]:
     for s in steps:
         if _some(s.get("obliged_by")):
             obliges.setdefault(s["obliged_by"], []).append(s.get("id"))
+    here = {s.get("id") for s in steps}
     blocks = {s.get("id") for s in steps
               if isinstance(s.get("output"), str) and _some(s["output"])}
     out = ["| id | step | status | owner | after | obliges |",
@@ -4415,8 +4421,8 @@ def _rows(steps: list) -> list[str]:
             _named(s),
             _state(s),
             _cell("owner", s.get("owner")) if _some(s.get("owner")) else "",
-            _refs(s.get("deps")),
-            _refs(obliges.get(sid)))) + " |")
+            _refs(s.get("deps"), here),
+            _refs(obliges.get(sid), here))) + " |")
     return out
 
 
@@ -4440,9 +4446,17 @@ def _fragment(heading: str) -> str:
     return _UNSAFE.sub("-", heading).strip("-").lower()
 
 
-def _refs(ids) -> str:
-    """A cell of step ids, each linking to that step's own row."""
-    return ", ".join(f"[{_cell('id', i)}](#{_tag(i)})" for i in (ids or ()))
+def _refs(ids, here: set) -> str:
+    """A cell of step ids, each linking to that step's own row.
+
+    An id naming a step that is NOT in the plan is drawn without the link, which is the
+    same answer `_graph` gives when it draws no edge for one. Drawn, because the record
+    says that edge is there and a rendering that hid it would hide the defect `incomplete`
+    reports in words; not linked, because there is no row to land on. Shown and dead-ended
+    is the only pair of those two that is honest.
+    """
+    return ", ".join(f"[{_cell('id', i)}](#{_tag(i)})" if i in here else _cell("id", i)
+                     for i in (ids or ()))
 
 
 def _state(s: dict) -> str:
