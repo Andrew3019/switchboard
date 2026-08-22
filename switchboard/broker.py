@@ -204,6 +204,52 @@ RING_SCAN = 8
 RING_OPEN = "ring_sent"
 RING_TRY = "ring_repaired"
 RING_CLOSED = ("ring_confirmed", "ring_unconfirmed")
+# How long a coalescible doorbell is held back before it is allowed to ring, in seconds.
+# A burst of sibling `done`s used to ring an idle parent once EACH — five children
+# finishing inside a second put five doorbells in one pane, and every one of them said the
+# same thing, because the doorbell carries no payload. The holdback is the quiet period
+# that turns that burst into one ring: while `done` rows for a recipient keep arriving,
+# nothing rings; once the newest of them is this old, `flush_pending` rings once and names
+# every sender in it.
+#
+# **Five is a tuning guess and is written down as one.** It is `DOORBELL_GAP`'s kind of
+# number — a floor that divides a cost rather than a measured threshold — and the only
+# thing it trades is "the parent hears about the first child a few seconds later" against
+# "the parent hears about all of them once". Nothing downstream depends on the value: a
+# held ring is a LATE ring and never a lost one, because the messages themselves are
+# committed whole and `sb inbox` reads them whatever the doorbell did.
+#
+# The store stamps `created_at` in whole seconds (`store.now`), so the comparison has
+# one-second granularity; a holdback smaller than a couple of seconds would be noise.
+RING_HOLDBACK = 5
+# The message kinds whose doorbell may be held back and coalesced — the "held ring class".
+# One class, not a `done`-only special case: a child finishing (`done`) and a child dying
+# (`failed`, written by `status._record_gone`) are the same news to a parent, arrive in
+# the same fan-out bursts, and later mutation rings (grant / promote / re-attach) join
+# this tuple rather than growing a second mechanism.
+#
+# What is NOT here is the point. `tell` and `ask` are direct mail — somebody wrote to this
+# agent on purpose, and delaying that would be a new latency for the sake of a burst that
+# does not happen. And the two absolute carve-outs are not in this tuple's gift at all:
+# `block` writes no message row and rings nothing (it goes to `_surface`), and
+# `--interrupt` is `mode=INTERRUPT`, which never reaches the holdback because it never
+# reaches the when-idle branch. Neither is exempted by being missing from a kind list;
+# both are exempt because they are not this shape of thing.
+HELD_RING_KINDS = ("done", "failed")
+# The event `_ring` writes when it holds a doorbell back on the IDLE path, and the one
+# thing `_burst_still_arriving` reads to know a burst is in progress. A kind of its own
+# rather than a `reason=` on `ring_deferred` because it is queried, not just read by a
+# human in `sb log`: `ring_deferred` is the BUSY hold, it is written on every command for
+# as long as an agent works, and the two must never be confused — a busy backlog is
+# already coalesced and is held for nothing.
+RING_HELD_BACK = "ring_held_back"
+# There is deliberately NO ceiling on the wait, and that is a design decision and not an
+# omission (§9.2, and A1's own objectives): a hard deadline on a holdback is the extra
+# this unit DECLINED. The quiet period is the whole rule — the wait resets on every fresh
+# `RING_HELD_BACK`, and it ends when the burst does. What eventually fires a held ring is
+# the opportunistic drain at the top of every `sb` command anyone runs, with the
+# collector's own `sb flush` on its tick as the backstop; nothing expires, nothing is
+# scheduled, and there is no second mechanism to keep in step with the first.
 
 class AgentNameTaken(ValueError):
     """Somebody else holds this agent name.
@@ -4206,8 +4252,15 @@ class Broker:
             # A parent that is mid-turn is already working; a child finishing is not news
             # worth reaching it before its own next boundary, and a fan-out of five would
             # otherwise poke it five times in one turn.
+            #
+            # HELD WHEN A BURST IS POSSIBLE, and this is the ring the holdback exists
+            # for. Five children finishing inside a second used to ring an idle parent
+            # five times with five copies of one payload-free doorbell; held, the ring is
+            # owed to `flush_pending`, which sends one naming all five. The summaries are
+            # untouched either way — they are in the mailbox above, and `sb inbox` reads
+            # them whatever the doorbell did.
             self._ring(parent, f"{tag(me)} {self._say('notify.child_done')}",
-                       mode=WHEN_IDLE)
+                       mode=WHEN_IDLE, hold=self._burst_possible(parent))
         else:
             # No parent to poke, and the human has no mailbox — so the notification IS the
             # delivery, not a copy of one. A root reporting done is the end of the run, and
@@ -4218,6 +4271,32 @@ class Broker:
             # done row, and this only says "now".
             self._surface(me, f"done — {summary}")
         return still_working
+
+    def _burst_possible(self, parent: str) -> bool:
+        """Could this parent be about to hear from a sibling too?
+
+        The one question the idle-ring holdback turns on (`RING_HOLDBACK`). Coalescing is
+        only ever worth a moment's latency where there is something to coalesce WITH, and
+        for a `done` that is a fan-out: the caller's row is already `done` by the time
+        this is asked, so a live sibling here is another summary that may land in the next
+        breath — hold, and let `flush_pending` send one doorbell naming all of them.
+
+        A parent with no other live child cannot have a burst, so nothing is held and its
+        doorbell rings on the spot exactly as it always has. That is objective-level
+        deliberate: single-child notification is the common case and the one people have
+        a feel for, and buying it a five-second wait to fix a five-child pile-up would be
+        paying everywhere for a problem that happens in one shape.
+
+        The second half is what makes the LAST child of a burst behave like the rest of
+        it. It has no live sibling left — by then they have all reported — so the first
+        test alone would ring immediately and name only itself, and the four held
+        doorbells behind it would still be owed. An open holdback (`RING_HELD_BACK` inside
+        the window) says a burst is already in flight, so that last one joins it and the
+        single ring that follows names every child in the pile.
+        """
+        live = any(c["state"] not in FINISHED
+                   for c in store.children_of(self.db, parent))
+        return live or self._holdback_open(parent)
 
     def block(self, why: str, *, me: Optional[str] = None) -> None:
         """Stop and surface to the human — never to the parent.
@@ -5868,6 +5947,20 @@ class Broker:
         This is the stand-in for an events daemon. When one exists it replaces this
         trigger, not the model: deferred-then-delivered stays exactly the same.
 
+        It is now also where the IDLE-path holdback lands — `_burst_still_arriving`, and
+        `_ring`'s `hold`. A burst of sibling `done`s used to ring an idle parent once each;
+        the ring is instead owed to this loop, which was already the one place that rings
+        ONCE for a whole backlog and names every sender in it. Nothing new fires it: the
+        opportunistic drain at the top of every `sb` command is the trigger, and the
+        collector's own `sb flush` on its tick is the backstop when the fleet is quiet.
+
+        **The honest limit of that**, unchanged in kind from before the collector existed:
+        on a quiet, unwatched fleet — no board panel open, the collector exited on
+        `panel.collector_idle_exit` — nothing runs `sb` and the doorbell waits for the
+        next command anybody happens to run. That is a LATE doorbell and never a lost one.
+        The messages are committed whole before any of this, `sb inbox` reads them
+        regardless, and no summary is ever collapsed or dropped to make a ring smaller.
+
         It is also where the backlog for agents that will never read again gets cleared —
         see `_clear_unreadable_mail`. Those rows are already in this work list, so the
         sweep is this loop rather than a migration: it costs nothing when there is none,
@@ -5901,6 +5994,8 @@ class Broker:
             answer = any(m["from_agent"] == HUMAN for m in mine)
             if not answer and self._is_blocked(who):
                 continue
+            if not answer and self._burst_still_arriving(who, mine):
+                continue
             # One doorbell for the whole backlog, so it names every sender waiting in it —
             # `[sb: from parent, w3]`. Not one ring per sender: that is the per-message
             # loop C0 exists to prevent, and the payload is in the inbox either way.
@@ -5909,6 +6004,65 @@ class Broker:
                 rung.append(who)
         self._confirm_rings(skip=rung)
         return rung
+
+    def _burst_still_arriving(self, who: str, mine: Sequence[sqlite3.Row]) -> bool:
+        """Is this a fan-out that has not finished landing yet?
+
+        The other half of the idle-ring holdback (`RING_HOLDBACK`, and `_ring`'s `hold`).
+        `_ring` leaves a held doorbell owed to this drain; this decides when to send it,
+        and sending it once is the entire fix — the loop below already rings ONE doorbell
+        for a whole backlog and names every sender in it, so a burst that waits here
+        arrives as one ring rather than five.
+
+        **The BUSY path is not this and must not become it.** Mail deferred because the
+        recipient was mid-turn is already coalesced, by the same loop, for free: nothing
+        rings until the turn ends and then one ring names every sender that piled up. So
+        the question here is not "how old is this mail" but "was a ring HELD BACK on the
+        idle path, and how long ago" — `RING_HELD_BACK`, written by `_ring` and by nothing
+        else. A backlog that never took that branch is not held for a moment.
+
+        A quiet period and NOT a deadline, with no ceiling on it: each further `done` in
+        the burst takes the same branch in `_ring` and writes another row, which restarts
+        the wait. A hard-deadline expiry is the extra this unit declined (§9.2), so there
+        is none — one plain comparison, made by the drain that was going to run anyway at
+        the top of every `sb` command anyone runs, and the collector's `sb flush` behind
+        it. Nothing is scheduled and nothing wakes up to fire a held ring.
+
+        Three ways OUT of the hold, all structural:
+
+        - **Anything outside the held class rings now.** One `tell` in the backlog and the
+          whole thing goes immediately: direct mail was written to this agent on purpose,
+          and this must not become a new latency on it. (The human's answer is out one
+          step earlier still, at the caller — see `answer`.)
+        - **`block` is not in this work list at all.** It writes no message row; it goes
+          to `_surface`, straight to a person.
+        - **`--interrupt` never reaches this method.** It is delivered by `_ring` on the
+          spot with `mode=INTERRUPT`, and every ring this drain sends is when-idle.
+
+        None of the three is a `kind` a filter has to remember to exclude, which is the
+        property that keeps this safe to extend: a new coalescing ring joins
+        `HELD_RING_KINDS` and passes `hold=True`, and everything else keeps ringing the
+        moment it lands.
+        """
+        if not mine or any(m["kind"] not in HELD_RING_KINDS for m in mine):
+            return False
+        return self._holdback_open(who)
+
+    def _holdback_open(self, who: str) -> bool:
+        """Was a doorbell for this agent held back on the idle path, recently enough that
+        the burst behind it may still be arriving?
+
+        `RING_HELD_BACK` is written by `_ring` and by nothing else, so this asks about the
+        held ring itself rather than about the age of the mail — which is what keeps the
+        BUSY path out of it. Mail deferred because the recipient was mid-turn is already
+        coalesced for free by `flush_pending`'s one-ring-per-backlog loop, has no
+        `RING_HELD_BACK` row, and is held here for not one moment.
+        """
+        row = self.db.execute(
+            "SELECT MAX(created_at) AS t FROM events WHERE agent=? AND kind=?",
+            (who, RING_HELD_BACK)).fetchone()
+        held_at = row["t"] if row else None
+        return held_at is not None and store.now() - held_at < RING_HOLDBACK
 
     def _confirm_rings(self, *, skip: Sequence[str] = ()) -> None:
         """Did the doorbells we rang actually get SUBMITTED — and send again the ones that
@@ -6214,7 +6368,7 @@ class Broker:
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
 
     def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
-              answer: bool = False, repair: bool = True) -> bool:
+              answer: bool = False, repair: bool = True, hold: bool = False) -> bool:
         """The doorbell. Carries no payload — the message is in the store.
 
         `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`), and the
@@ -6247,6 +6401,15 @@ class Broker:
         `answer=True` is the one ring that is the human's reply, and it is the only thing
         that clears a block. Everything else waits its turn: the message stays queued and
         `flush_pending` rings it once the block is answered.
+
+        `hold=True` says this ring belongs to the HELD RING CLASS (`HELD_RING_KINDS`):
+        a child finishing or dying, and later the mutation rings. Those arrive in bursts —
+        a fan-out of five reporting `done` inside a second — and the doorbell carries no
+        payload, so five of them tell the parent one thing five times. A held ring is
+        never sent from here; it is left owed to `flush_pending`, which already rings once
+        for a whole backlog and names every sender in it, and which waits out the rest of
+        the burst first (`RING_HOLDBACK`). It only ever affects the *idle* path: the busy
+        path was already a hold, and its behaviour is unchanged.
 
         There is no fallback when `agent prompt` fails. There used to be one — type the
         text into the agent's pane with `pane run` — and it was a shell: any backtick or
@@ -6310,6 +6473,26 @@ class Broker:
             return False
         if mode == WHEN_IDLE and self._busy(who):
             store.log_event(self.db, kind="ring_deferred", agent=who)
+            return False
+        if hold and mode == WHEN_IDLE and not answer:
+            # The IDLE-path holdback, and the only new hold in this method. The busy path
+            # above is untouched: mail deferred while the recipient was mid-turn is still
+            # `flush_pending`'s to ring, unchanged.
+            #
+            # An idle recipient used to be rung here and now, individually — which is
+            # correct for one child and wrong for five, because the doorbell carries no
+            # payload and five of them say one thing five times. So a ring in the held
+            # class does not ring from here at all: it is owed to the same opportunistic
+            # drain that already coalesces a backlog into one doorbell naming every
+            # sender (`flush_pending`), and that drain decides when the burst is over
+            # (`RING_HOLDBACK`). Returning False is exactly what leaves it owed — the
+            # message stays unseen and undelivered, which is the drain's work list.
+            #
+            # `answer` is out, structurally: the human's reply is the one ring that
+            # clears a block, and holding it would leave an agent stopped on a question
+            # that has already been answered. INTERRUPT never arrives here — it is not
+            # `WHEN_IDLE` — and `block` never rings at all.
+            store.log_event(self.db, kind=RING_HELD_BACK, agent=who)
             return False
         if answer:
             self._unblock_if_needed(who)

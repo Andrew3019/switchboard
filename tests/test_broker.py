@@ -1243,6 +1243,80 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
                          ["[done] shipped it"])
 
+    def _fanout(self, kids=("k1", "k2", "k3")):
+        """An idle lead with `kids` children all still working."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        for i, k in enumerate(kids):
+            store.create_agent(self.db, name=k, role="worker", parent="lead",
+                               pane_id=f"w1:p{i + 2}")
+        self.h.states_by_name = {"lead": "idle", **{k: "working" for k in kids}}
+        self.b._alive_cache = None
+        return list(kids)
+
+    @staticmethod
+    def _later(seconds):
+        """The clock the store stamps and reads with, moved on. Nothing else is faked:
+        the holdback is decided by `store.now()` against rows the real code wrote."""
+        return mock.patch.object(store, "now", lambda: int(time.time()) + seconds)
+
+    def test_a_burst_of_sibling_dones_rings_the_parent_once(self):
+        """#168. Three children finishing inside a second rang an idle parent three
+        times, and the doorbell carries no payload — so it was the same sentence three
+        times over, and the parent burned a turn on each.
+
+        The ring is held on the IDLE path and owed to `flush_pending`, which was already
+        the one place that rings once for a whole backlog and names every sender in it.
+        No timer and no process: the drain at the top of every `sb` command fires it.
+        """
+        kids = self._fanout()
+        for k in kids:
+            self.b.done(f"{k} shipped", me=k)
+        self.assertEqual(self.h.prompts, [])            # not one ring during the burst
+        self.assertEqual(self.b.flush_pending(), [])    # nor from the drain, mid-burst
+
+        with self._later(broker_mod.RING_HOLDBACK + 1):  # the burst goes quiet
+            self.assertEqual(self.b.flush_pending(), ["lead"])
+        [(who, text)] = self.h.prompts
+        self.assertEqual(who, "lead")
+        for k in kids:                                   # ONE doorbell, naming all three
+            self.assertIn(k, text)
+        # And nothing was collapsed to make it: every summary is in the mailbox, whole.
+        self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
+                         [f"[done] {k} shipped" for k in kids])
+
+    def test_the_holdback_never_touches_a_block_or_an_interrupt(self):
+        """The two absolute carve-outs, checked while a holdback is open on the target.
+
+        Neither is exempted by name: `block` writes no message row and reaches a person
+        through `_surface`, and an interrupt is `mode=INTERRUPT`, which never reaches the
+        when-idle branch the holdback lives on.
+        """
+        kids = self._fanout(("k1", "k2"))
+        self.b.done("k1 shipped", me=kids[0])
+        self.assertEqual(self.h.prompts, [])                       # a hold is open on lead
+        self.assertTrue(self.b._holdback_open("lead"))
+
+        self.b.tell(["lead"], "stop, do this instead", me=HUMAN, mode=INTERRUPT)
+        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])  # straight through
+
+        self.b.done("k2 shipped", me=kids[1])                      # hold still open
+        self.b.block("which branch?", me="lead")
+        self.assertTrue(any("which branch?" in n for n in self.h.notifications))
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
+
+    def test_one_child_reporting_to_an_idle_parent_still_rings_at_once(self):
+        """No regression for the common shape. A parent with no other live child cannot
+        have a burst, so there is nothing to coalesce with and nothing is held — the
+        doorbell rings from `done` itself, exactly as before #168."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p2")
+        self.h.states_by_name = {"lead": "idle", "kid": "working"}
+        self.b.done("shipped it", me="kid")
+        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
+        self.assertFalse(self.b._holdback_open("lead"))
+        self.assertEqual(store.undelivered(self.db), [])
+
     def test_a_dead_childs_ping_waits_for_a_busy_parent_and_for_a_blocked_one(self):
         """A failure travels the same rails as a `done`, so it inherits both holds without
         a line of its own: `status._record_gone` writes the message, `flush_pending` rings
