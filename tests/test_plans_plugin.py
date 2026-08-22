@@ -3573,6 +3573,31 @@ class MarkdownTest(PlansSandbox):
         self.assertNotIn("a\nb", md)
         self.assertIn("c\\|d", md)
 
+    def test_a_forged_row_cannot_forge_one_on_the_comment_either(self):
+        """The same property, on the path that now matters. The test above builds a plan
+        with no `steps`, so it pins the WALK — and the pull request comment is the other
+        renderer, and the one that actually has the table a forged row is aiming at. Every
+        stored scalar on a step still goes through `_cell`, so a newline is the `\\n` it is
+        and a pipe is escaped, and the plan's table has exactly one row per step however
+        the fields are spelled. The one field allowed to keep its newlines is `output`, and
+        it is not in this table at all — see the block test below."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        md = _plans()._markdown(
+            {"id": "p-1", "title": "t",
+             "steps": [{"id": "s-1", "display": "a\nb", "name": "c|d",
+                        "owner": "e\n| x | y |", "progress": "f\ng",
+                        "why": "h|i", "gate": "j\nk"},
+                       {"id": "s-2", "name": "the second"}]})
+
+        for escaped in ("a\\nb", "c\\|d", "e\\n\\| x \\| y \\|", "f\\ng", "h\\|i", "j\\nk"):
+            self.assertIn(escaped, md)
+        self.assertNotIn("\n| x | y |", md)
+        # The header and one row per step, and not a line more: nothing above forged one.
+        table = md.split("## steps", 1)[1].split("<details>", 1)[0]
+        rows = [ln for ln in table.splitlines()
+                if ln.startswith("|") and not ln.startswith("| ---")]
+        self.assertEqual(len(rows), 3, rows)
+
     _DUMP = ("Scope & Objectives\n"
              "\n"
              "- The change adds one field to a step and one rule to the renderer.\n"
@@ -3593,61 +3618,136 @@ class MarkdownTest(PlansSandbox):
         self.ok(*_create("ship a change", "get it approved", "write it"))
         self.edit_step("s-1", output=self._DUMP, progress="done")
 
-    def test_a_dumped_output_reaches_the_pull_request_as_every_line_of_itself(self):
-        """The requirement the field exists for. A change approval is approved as prose and
-        has to arrive on the pull request as prose — so `--markdown` renders `output` as a
-        BLOCK, line by line, where every other field in this plugin is flattened to one.
-        Before this the whole contract came out as one line with its newlines spelled
-        `\\n`, which is correct for a name and useless for the one field whose reason to
-        exist is being read by whoever turns up at the PR."""
+    def test_a_dumped_output_reaches_the_pull_request_as_the_markdown_it_is(self):
+        """The requirement the field exists for, and the decision that replaced the
+        blockquote. A change approval is approved as markdown prose and has to arrive on
+        the pull request as that prose — headed, nested, readable — rather than as one
+        escaped line (the first failure) or as a wall of somebody else's quoted text (the
+        second). So the block is lifted out of the steps table into a section of its own
+        and rendered line for line, inside a `<details>` so the comment stays short."""
         self._approved()
         md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
 
         for line in self._DUMP.strip().split("\n"):
             self.assertIn(line.strip(), md)
-        # As separate lines and not as one escaped run — the failure this replaces.
+        # As separate lines and not as one escaped run — the first failure this replaces.
         self.assertNotIn("\\n", md)
-        self.assertIn("> Change Contract", md)
+        # As markdown and not inside a quote — the second.
+        self.assertIn("\nChange Contract", md)
+        self.assertNotIn("> Change Contract", md)
         self.assertIn("  - Nothing else in the plugin moves.", md)
+        # Collapsed, and with the blank lines GitHub requires: without the one after
+        # `</summary>` and the one before `</details>` the whole block renders as literal
+        # text, which is the same failure as the blockquote by another route.
+        body = md.split("<details>", 1)[1]
+        self.assertTrue(body.split("\n", 1)[1].startswith("<summary>"), body[:80])
+        rest = body.split("</summary>", 1)[1]
+        self.assertTrue(rest.startswith("\n\n"), rest[:40])
+        self.assertIn("\n\n</details>", rest)
 
-    def test_a_dumped_output_cannot_forge_a_step_row_or_a_table_row(self):
-        """The anti-forgery property, kept by WHERE the lines go rather than by escaping
-        them. Every line of a dump is blockquoted, so a line spelled like a step row or a
-        markdown table row is a line inside a quote and draws neither. This is the property
-        `test_a_forged_row_cannot_forge_one_here_either` pins for every other field, and
-        the block is the one place in this plugin where a newline survives at all."""
+    def test_a_dumped_output_cannot_forge_a_row_of_the_plan_s_own_table(self):
+        """The anti-forgery property, kept by WHERE the block goes rather than by quoting
+        it. The dump is lifted out of the steps table entirely, into a section of its own,
+        so a line spelled like a markdown table row draws a row of the DUMP and never a row
+        of the plan. That is what the blockquote used to buy, at the cost of the field's
+        whole reason to exist; the property every stored SCALAR still holds by escaping is
+        pinned next door in `test_a_forged_row_cannot_forge_one_here_either`."""
         self._approved()
-        self.edit_step("s-1", output="s-9   done      merged\n| a | b |\n| --- | --- |")
+        self.edit_step("s-1", output="| a | b |\n| --- | --- |\n| c | d |")
         md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
 
-        self.assertIn("> s-9   done      merged", md)
-        self.assertIn("> | a | b |", md)
-        # Not one of those lines starts a row: the plan's own table is still there, and
-        # every line that came out of the dump is behind a `>` in somebody else's quote.
-        for line in md.splitlines():
-            self.assertFalse(line.lstrip().startswith("s-9"), line)
-            if "a | b" in line or "done      merged" in line:
-                self.assertIn("> ", line)
+        self.assertIn("| a | b |", md)
+        # The plan's own table is the block under `## steps`, and every row of it opens
+        # with its own id cell — there is no row in it the dump wrote.
+        table = md.split("## steps", 1)[1].split("<details>", 1)[0]
+        rows = [ln for ln in table.splitlines()
+                if ln.startswith("|") and not ln.startswith("| ---")]
+        self.assertEqual(rows[0], "| id | step | status | owner | after | obliges |")
+        for row in rows[1:]:
+            self.assertTrue(row.startswith('| <a id="step-'), row)
+        # And the forged rows are up in the dump's own collapsible, above that table.
+        self.assertLess(md.index("| a | b |"), md.index("## steps"))
 
-    def test_a_step_carrying_a_dump_is_never_squeezed_into_a_table(self):
-        """A table cell is one line, so a plan whose steps happen to be flat — no deps, no
-        notes, nothing nested — must still render its steps as bullets once one of them
-        carries a block. Otherwise the shape rule would put a whole approved contract in a
-        cell and flatten exactly the field the block rule exists for."""
+    def test_a_step_carrying_a_dump_still_renders_as_a_table(self):
+        """The decision the block rule used to force the other way round. A table cell is
+        one line, so the walker degraded a whole plan into bullets the moment one step
+        carried a dump — which is exactly when the plan had the most to say. The comment
+        lifts the block OUT of the row instead: the steps are a table always, and the row
+        links to the block's own section.
+
+        The walker still has the old rule and still needs it — `show <step> --markdown` is
+        walked, and a block in a cell there would be the same wall of text."""
         self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
         flat = {"id": "p-1", "title": "t",
                 "steps": [{"id": "s-1", "name": "get it approved", "output": "a\nb"},
                           {"id": "s-2", "name": "write it"}]}
         md = _plans()._markdown(flat)
 
+        self.assertIn("| id | step | status | owner | after | obliges |", md)
+        self.assertIn("get it approved", md)
+        self.assertIn("[step-1](#step-1-output)", md)
+        self.assertIn("## step-1 output", md)
+        self.assertIn("\na\nb\n", md)
         self.assertFalse(_plans()._tabular(flat["steps"]))
-        self.assertIn("> a", md)
-        self.assertIn("> b", md)
-        self.assertNotIn("| get it approved |", md)
-        # And with no block on any step the same plan is still a table: the rule is about
-        # the block that is there, not about the field existing in the schema.
-        del flat["steps"][0]["output"]
-        self.assertTrue(_plans()._tabular(flat["steps"]))
+
+    def test_the_steps_are_drawn_as_a_graph_with_one_node_and_one_edge_per_dep(self):
+        """The dependency graph, which is the half of a plan no rendering had before: the
+        deps were a cell of ids and the shape of the job was left to be assembled in
+        somebody's head. GitHub draws a ```mermaid fence natively, so the comment ships one.
+
+        A dep naming a step that is not in the plan draws nothing. That is a defect the
+        three doors report in words, and a graph that invented a node for it would be
+        drawing a plan that does not exist."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        md = _plans()._markdown(
+            {"id": "p-1", "title": "t",
+             "steps": [{"id": "s-1", "name": "write it"},
+                       {"id": "s-2", "name": "review it", "deps": ["s-1"]},
+                       {"id": "s-3", "name": "merge it", "deps": ["s-2"]}]})
+        graph = md.split("```mermaid", 1)[1].split("```", 1)[0]
+
+        self.assertIn("flowchart LR", graph)
+        for node in ("step-1 · write it", "step-2 · review it", "step-3 · merge it"):
+            self.assertIn(node, graph)
+        self.assertEqual([ln.strip() for ln in graph.splitlines() if "-->" in ln],
+                         ["n_s_1 --> n_s_2", "n_s_2 --> n_s_3"])
+
+        loose = _plans()._markdown(
+            {"id": "p-1", "title": "t",
+             "steps": [{"id": "s-1", "name": "write it", "deps": ["s-9"]}]})
+        self.assertNotIn("-->", loose.split("```mermaid", 1)[1].split("```", 1)[0])
+        # And the steps table says the same thing the graph does: the dep is DRAWN, so the
+        # defect is not hidden, and it is not linked, because there is no row to land on.
+        self.assertIn("| step-9 |", loose)
+        self.assertNotIn("[step-9]", loose)
+
+    def test_the_status_line_counts_what_is_settled_and_names_the_gate(self):
+        """The one line at the top, and the two things it has to get right: the counts, and
+        the difference between a gate that is HOLDING the plan up and one five steps out.
+        A status line that called both "blocked" would say it on every plan that has a
+        merge, which is all of them."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        plan = {"id": "p-1", "title": "t", "steps": [
+            {"id": "s-1", "name": "write it", "progress": "done"},
+            {"id": "s-2", "name": "review it", "progress": "skipped", "deps": ["s-1"]},
+            {"id": "s-3", "name": "merge it", "display": "merge", "deps": ["s-2"],
+             "gate": "Andrew: merge it?"}]}
+        line = _plans()._markdown(plan).splitlines()[2]
+
+        self.assertTrue(line.startswith("**Status:**"), line)
+        self.assertIn("in progress", line)
+        self.assertIn("1/3 done", line)
+        self.assertIn("1 skipped", line)
+        self.assertIn("blocked at the merge gate", line)
+        # The gate the plan has not reached yet is named and is not called a block.
+        plan["steps"][1]["progress"] = "open"
+        ahead = _plans()._markdown(plan).splitlines()[2]
+        self.assertIn("merge gate ahead", ahead)
+        self.assertNotIn("blocked", ahead)
+        # And a progress word nobody here wrote is NAMED rather than counted as open:
+        # `progress` is an open vocabulary and a hand-edit is where that word comes from.
+        plan["steps"][1]["progress"] = "waiting on Andrew"
+        self.assertIn("waiting on Andrew", _plans()._markdown(plan).splitlines()[2])
 
     def test_a_dump_that_is_not_a_string_takes_the_ordinary_path(self):
         """The fallback, in the spirit of the field-nobody-wrote-this-for test above. The
