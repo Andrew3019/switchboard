@@ -1862,8 +1862,11 @@ class Broker:
             return "bare" if store.workspace_branch(self.db, name) is None else "worktree"
         return None
 
-    def _record_workspace(self, name: str, path: Optional[str]) -> None:
-        """Write down where this workspace's checkout is — on every attach, not just the first.
+    def _record_workspace(self, name: str, path: Optional[str], *,
+                          branch: Optional[str] = None,
+                          base_ref: Optional[str] = None,
+                          created_by: Optional[str] = None) -> None:
+        """Write down what this workspace IS — on every attach, not just the first.
 
         A record of where the checkout *is* rather than of where it once was, which is the
         whole reason an attach re-writes it: a row left pointing at a directory that has
@@ -1873,15 +1876,24 @@ class Broker:
         NULL is a value, not a gap: it says this workspace has no checkout of its own,
         which is what bare means. It is never written over a live worktree workspace's
         path, and reopening a retired name is what typing it again means.
+
+        The workspace's own facts (§2.2) ride the same call because this is the one place
+        that has them: `branch` and `base_ref` come off the attach that just resolved or
+        forked the worktree, and `created_by` off the spawn that asked for it. Omitting
+        them leaves what is recorded (`store.record_workspace`), so the early-return above
+        is the only path that writes nothing at all — and it is the path where nothing is
+        new.
         """
         row = store.get_workspace(self.db, name)
         if path is None and row is not None and row["checkout"] and not row["retired_at"]:
             return
         if row is not None and row["retired_at"]:
-            store.reopen_workspace(self.db, name, path)
+            store.reopen_workspace(self.db, name, path, branch=branch, base_ref=base_ref,
+                                   created_by=created_by)
             store.log_event(self.db, kind="workspace_reopen", workspace=name)
         else:
-            store.record_workspace(self.db, name, path)
+            store.record_workspace(self.db, name, path, branch=branch, base_ref=base_ref,
+                                   created_by=created_by)
 
     def _open_board(self, name: str, pane: Optional[str], *,
                     cwd: Optional[str] = None) -> None:
@@ -3260,7 +3272,15 @@ class Broker:
                 # the checkout actually is, and a record that is only written at creation
                 # is a memory rather than a fact. It is also what reopens a name somebody
                 # retired — the attach is what makes it live again.
-                self._record_workspace(name, facts["path"] or None)
+                # The branch and the base ride along: this call IS the moment a worktree
+                # workspace's branch is known first-hand (herdr's own answer, or the name
+                # we asked for), and the base is known here and nowhere else — `_fork_base`
+                # resolved it a few lines up and a fallback may have resolved it to
+                # something else again. Neither is re-derivable afterwards, which is why
+                # they are recorded rather than looked up (§2.2).
+                self._record_workspace(name, facts["path"] or None,
+                                       branch=facts.get("branch"),
+                                       base_ref=facts.get("base"))
                 return facts
             except HerdrError as e:
                 first = first or e
@@ -3544,6 +3564,102 @@ class Broker:
         row for both answer False, which forks rather than assuming somebody else's tree.
         """
         return self.worktree_branch(agent) is not None
+
+    def attach(self, target: str, workspace: str, *,
+               me: Optional[str] = None) -> dict:
+        """Point an agent at a workspace. The §2.2 attachment, moved.
+
+        A workspace is a RESOURCE an agent is attached to, not a structural consequence of
+        being top: `agents.workspace` is a single changeable name reference, and this is
+        the one path that changes it after the spawn wrote it.
+
+        The refusals, in the order they are asked:
+
+        1. **No such agent, and no workspace named** — nothing is pointed at nothing.
+        2. **THE TOP'S PLACEMENT IS IMMUTABLE** (§2.0). A top lives in a bare space over
+           the main checkout, *above* the worktrees, and every fork in the fleet is a fork
+           from there. Attaching it would put it INSIDE a worktree and destroy that
+           placement without touching a grant, a parent link or the `is_top` stamp — so it
+           is refused here, one predicate, exactly as `grant` refuses a top as a target.
+        3. **A LIVE AGENT IS REFUSED.** Re-attachment is POINTER-ONLY: it moves the row,
+           never a running process's cwd or pane. The store is never allowed to say a
+           process is somewhere it is not, so the attachable set is agents that have not
+           started — a claimed row, or a finished one being re-placed before `restore`
+           opens its next life. Asked of the store's own state (C7: the store is the
+           truth), not of herdr: a live row that crashed without reporting still reads
+           live, and refusing it is the conservative direction. Moving a live agent's
+           checkout, if ever wanted, is a separate design.
+        4. **A workspace mid-teardown** — the same refusal a fork gets, for the same
+           reason: its checkout may be gone by the time anyone gets there.
+
+        **IT COMMITS ATOMICALLY OR NOT AT ALL.** Attach is two steps — allocate a
+        workspace, then point at it — and unlike a grant the first step can fail: opening
+        or forking a worktree goes through herdr and raises `ForkFailed`
+        (`_fork_for`'s posture, and DESIGN-TRUTH's "A fork that fails refuses"). So the
+        allocation happens FIRST and entirely outside the transaction, and the pointer
+        moves only once there is somewhere to point: a failure leaves the agent on exactly
+        the workspace it was on, with no torn state and no silent fallback into whatever
+        checkout `sb` ran in.
+
+        **The pointer and the signal are one transaction** (C4). An agent whose place
+        changed and that was never told is the same silent divergence a grant's signal
+        exists to prevent, and it is worse here — the agent would go on working in a
+        checkout the store no longer says is its. The change arrives as MAIL plus a redraw
+        (the gutter is redrawn by the ring), never as state anybody is expected to re-scan.
+        """
+        me = me or self.whoami()
+        if not workspace:
+            raise ValueError("attach needs the NAME of a workspace to attach to.")
+        row = store.get_agent(self.db, target)
+        if row is None:
+            raise KeyError(f"no such agent: {target}")
+        if bool(_column(row, "is_top")):
+            raise ValueError(
+                f"{target} is a top dispatcher: its workspace is fixed and is never "
+                f"re-attached. A top's bare space sits ABOVE the worktrees — attaching it "
+                f"would put the whole fleet's forks inside one — so place the work "
+                f"instead, with `sb delegate --workspace {workspace}`.")
+        if row["state"] in store.LIVE_STATES and row["ended_at"] is None:
+            raise ValueError(
+                f"{target} is already running, and an attach moves the POINTER, not the "
+                f"process — its pane and its checkout would stay where they are and the "
+                f"store would be claiming otherwise. Attach applies to an agent that has "
+                f"not started: close it first (`sb cleanup {target}`), attach, then "
+                f"`sb restore {target}`.")
+        self._refuse_retiring(workspace)
+        current = row["workspace"] or None
+        # ALLOCATE, THEN POINT. Nothing below the try touches the row.
+        if self._name_held_by(workspace) == "bare":
+            # A bare space has no worktree to open, and asking herdr for one would be
+            # asking it to MAKE one — the trap `_workspace_id` documents.
+            facts = {"branch": None, "path": None,
+                     "workspace_id": self._workspace_id(workspace)}
+        else:
+            try:
+                facts = self._attach_workspace(workspace, base=self._inherited_base())
+            except HerdrError as e:
+                store.log_event(self.db, kind="attach_failed", agent=target,
+                                workspace=workspace, previous=current, error=str(e))
+                raise ForkFailed(workspace, self.repo, e) from None
+        branch, path = facts.get("branch"), facts.get("path")
+        with store.mutation(self.db):
+            store.attach_workspace(self.db, target, workspace, branch=branch,
+                                   checkout=path, workspace_id=facts.get("workspace_id"),
+                                   commit=False)
+            store.log_event(self.db, kind="attach", agent=target, workspace=workspace,
+                            previous=current, branch=branch, path=path, by=me,
+                            commit=False)
+            told = self._mutation_signals(
+                [(target, self._say("notify.attached", workspace=workspace, who=me,
+                                    where=(f" Its checkout is {path}." if path else
+                                           " It has no checkout of its own (bare)."),
+                                    branch=(f" You are on branch `{branch}`."
+                                            if branch else "")))],
+                frm=me)
+        # OUTSIDE the transaction: the doorbell is a herdr subprocess (see `grant`).
+        self._ring_mutation_signals(told, frm=me)
+        return {"agent": target, "workspace": workspace, "previous": current,
+                "branch": branch, "path": path, "attached_by": me}
 
     def is_top(self, agent: str) -> bool:
         """Was this agent created by `sb start`? The stamp, read — never re-derived.
@@ -3937,6 +4053,11 @@ class Broker:
             store.log_event(self.db, kind="fork_failed", agent=name, parent=parent,
                             error=str(e))
             raise ForkFailed(name, self.repo, e) from None
+        # WHO MINTED IT, recorded once. `_attach_workspace` cannot know: it is reached by
+        # a lookup and by a fork alike, and only the fork has a parent to name.
+        store.record_workspace(self.db, ws["workspace"], ws["path"] or None,
+                               branch=ws.get("branch"), base_ref=ws.get("base"),
+                               created_by=parent)
         store.log_event(self.db, kind="fork", agent=name, parent=parent,
                         workspace=ws["workspace"], branch=ws.get("branch"),
                         path=ws["path"], base=ws.get("base"),
