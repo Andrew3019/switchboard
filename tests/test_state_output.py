@@ -127,6 +127,18 @@ class CommandRuleTest(unittest.TestCase):
         self.assertIn(guidance.MARK, first)
         self.assertNotIn("wants a `lead`", self.out("delegate", "delegate"))
 
+    def test_isolation_is_offered_through_the_same_call_site(self):
+        """The second `command = "delegate"` row, proved at the real call site rather than
+        at the resolver: a rule that matches in `guidance.resolve` and never reaches an
+        agent is the failure this test exists to rule out. `fork` is seeded because the row
+        is keyed on holding it — a lead that may not fork is never offered the flag."""
+        store.grant_capability(self.db, "lead-x", "fork", delegable=False,
+                               granted_by="human")
+        out = self.out("delegate", "delegate")
+        self.assertIn("--isolation own", out)
+        self.assertIn(guidance.MARK, out)
+        self.assertNotIn("--isolation own", self.out("delegate", "delegate"))
+
     def test_the_cursor_is_shared_with_the_turn_start_channel(self):
         """Obj. 2 — a complement, not a second mechanism. Both call `guidance.deliver`, so
         a `once` rule spent at a command is spent for the hook too; two cursors would mean

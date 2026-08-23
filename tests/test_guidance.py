@@ -301,6 +301,54 @@ class PolicyMechanismTest(Fixture, unittest.TestCase):
                          [r.id for r in guidance.resolve(self.db, "w1", command="delegate")])
 
 
+class DiscoverabilityTest(Fixture, unittest.TestCase):
+    """The two verbs that shipped without ever being said to an agent: `sb delegate
+    --isolation own` and `sb done --preserve-children`. Both are taught here rather than in
+    the spawn prompt, so what a test can pin is that each fires on its own condition and on
+    nothing else — the ledger's whole claim being that a rule costs only the agent the state
+    describes."""
+
+    def test_isolation_is_offered_at_the_spawn_and_only_to_an_agent_that_may_fork(self):
+        """Keyed on the command, because the choice exists while delegating and at no other
+        turn — so the silence at turn start is half the rule. `holds = ["fork"]` is the
+        other half: an agent whose `--isolation own` would be refused is never told it."""
+        self.agent("lead-x", role="lead")
+        store.seed_capabilities(self.db, "lead-x", ["spawn", "fork"])
+        ids = lambda who, **kw: [r.id for r in guidance.resolve(self.db, who, **kw)]  # noqa: E731
+        self.assertNotIn("isolation-at-the-spawn", ids("lead-x"))
+        self.assertIn("isolation-at-the-spawn", ids("lead-x", command="delegate"))
+
+        self.agent("w1")
+        store.seed_capabilities(self.db, "w1", ["spawn"])
+        self.assertNotIn("isolation-at-the-spawn", ids("w1", command="delegate"))
+
+    def test_a_command_keyed_rule_names_a_verb_that_actually_carries_the_key(self):
+        """The failure mode the ledger header warns about: a rule keyed on a verb outside
+        `cli.STATE_COMMANDS` never fires, and nobody notices because a nudge that is never
+        delivered looks exactly like a nudge nobody needed. This is why the promote rule
+        below turns on live state instead — `done` is not one of these."""
+        from switchboard import cli
+        for r in guidance.ledger():
+            if r.command:
+                self.assertIn(r.command, cli.STATE_COMMANDS, r.id)
+        self.assertNotIn("done", cli.STATE_COMMANDS)
+
+    def test_promote_is_taught_while_children_are_still_live_and_not_after(self):
+        """`live_children >= 1` is the state the hand-off is about: finish now and they are
+        left under an agent that has finished. An agent with no children, or whose children
+        have all reported, has nothing to hand up and hears nothing."""
+        ids = lambda who: [r.id for r in guidance.resolve(self.db, who)]  # noqa: E731
+        self.agent("lead-x", role="lead", branch="lead-x")
+        self.assertNotIn("hand-children-up-when-you-step-out", ids("lead-x"))
+
+        store.create_agent(self.db, name="c1", role="worker", parent="lead-x",
+                           branch="lead-x")
+        self.assertIn("hand-children-up-when-you-step-out", ids("lead-x"))
+
+        store.set_state(self.db, "c1", "done")
+        self.assertNotIn("hand-children-up-when-you-step-out", ids("lead-x"))
+
+
 class SubtractiveTest(Fixture, unittest.TestCase):
     """Obj. 11 — the prompt SHRANK. Moved, not copied, and not merely added."""
 
