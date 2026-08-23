@@ -167,6 +167,10 @@ def forget_home(name: str, cwd: Optional[Path] = None) -> None:
     sqlite state in here, tens of megabytes per agent. This function is what a caller that
     genuinely means "this agent is gone for good" calls — `sb workspace close`, or a hand
     sweep — and there is deliberately nothing automatic on the other end of it yet.
+
+    The other caller is `Broker._release_name`, and it is the same claim by a different
+    route: the name is being handed to a new agent and the row that held the session id
+    is going with it, so nothing in the directory is reachable under that name any more.
     """
     try:
         shutil.rmtree(home_path(name, cwd), ignore_errors=True)

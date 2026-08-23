@@ -1614,8 +1614,30 @@ class Broker:
         unread = store.unread_for(self.db, name)     # marks them read in the same call
         if unread:
             store.log_event(self.db, kind="mail_closed", agent=name, count=len(unread))
-        store.drop_agent(self.db, name)
+        self._release_name(name)
         store.log_event(self.db, kind="name_reopened", agent=name)
+
+    def _release_name(self, name: str) -> None:
+        """Drop the row standing under `name` so somebody else can take it — and take the
+        codex home with it.
+
+        The home is what `codex.is_codex_agent` reads to answer "which provider is this
+        agent?", and it is deliberately outlived by `sb cleanup` so a closed codex agent
+        stays restorable and readable. That contract is about an agent whose NAME still
+        belongs to it. Here the name is being handed to somebody else, and the row —
+        which is where the session id lives — is going with it, so `sb restore <name>` has
+        already stopped being a route back to that agent. Leaving the directory would not
+        preserve anything reachable; it would only make the NEXT agent under this name
+        look like a codex one. `sb start --name general --model gpt-5.5`, then tomorrow
+        `sb start --name general` on claude: the claude top would get the codex delivery
+        proof, which can never confirm, so its first task is delivered three times, and
+        `_capture_session_id` would take the codex fallback and record nothing.
+
+        Delegate-composed names are untouched by this: `_compose_name` suffixes while a
+        row exists, so a live agent's name is never released underneath it.
+        """
+        store.drop_agent(self.db, name)
+        codex_mod.forget_home(name, self.repo)
 
     def _refuse_outside_main_checkout(self) -> None:
         """`sb start` belongs in the main checkout, and nowhere else.
@@ -2348,8 +2370,9 @@ class Broker:
     def _forget_codex_homes(self, workspace: str, result: dict) -> dict:
         """Take the private homes of this workspace's codex agents away with it.
 
-        THE ONE PLACE that means "these agents are gone for good", which is the thing
-        `sb cleanup` deliberately does not mean — see `codex.forget_home`. A home holds the
+        The place that means "these agents are gone for good", which is the thing
+        `sb cleanup` deliberately does not mean — see `codex.forget_home`. (`_release_name`
+        is the only other caller, and it says the same thing about one name at a time.) A home holds the
         agent's rollouts and its `AGENTS.md`, so removing it costs the transcript and the
         restore, and that is exactly what closing a workspace already costs: the checkout
         itself is being deleted.
@@ -4220,7 +4243,7 @@ class Broker:
             # its own. Check-then-act, so two spawners can both find the
             # husk — but the second claim is still the arbiter, and the loser is refused
             # below exactly as before.
-            store.drop_agent(self.db, name)
+            self._release_name(name)
             claimed = store.claim_agent(self.db, **claim)
         if not claimed:
             raise AgentNameTaken(name)

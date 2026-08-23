@@ -463,6 +463,65 @@ class DelegateOntoCodexTest(unittest.TestCase):
         self.assertTrue(codex.is_codex_agent(name, self.repo))
 
 
+class ReusedNameTest(unittest.TestCase):
+    """A top-level name is a PLACE, not a session — so a stale home must not follow it.
+
+    `is_codex_agent` asks the directory rather than the tier, deliberately: a tier's
+    provider is whatever the model table says it means today. But `sb start --name` may be
+    typed again after the first agent under that name has ended, and `_reopen_name` deletes
+    the row so it can be. Left behind, the home makes the NEXT agent under that name look
+    like a codex one — a claude top handed the codex proof (delivered three times, never
+    confirmed) and a session id nothing records.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = _git_repo(Path(self.tmp.name))
+        env = mock.patch.dict(
+            os.environ, {"SWITCHBOARD_MODELS_CONFIG": str(self.repo / "none.toml")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.b = Broker(self.db, FakeHerdrAPI(), repo=self.repo)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _ended_codex_top(self, name="general"):
+        store.create_agent(self.db, name=name, role="main", cwd=str(self.repo),
+                           is_top=True, tier="gpt-5.5")
+        codex.write_home(name, prompts=["p"], worktree=str(self.repo), cwd=self.repo)
+        store.set_state(self.db, name, "done")
+        self.assertTrue(codex.is_codex_agent(name, self.repo))
+        return name
+
+    def test_reopening_a_top_name_takes_the_home_with_the_row(self):
+        name = self._ended_codex_top()
+        self.b._reopen_name(name)
+        self.assertFalse(codex.is_codex_agent(name, self.repo))
+
+    def test_the_husk_of_a_failed_codex_spawn_does_not_outlive_its_name(self):
+        """The other place a row is deleted so the name can be claimed again — a spawn
+        that died leaves a `failed` row with no pane and no session, and the home its
+        adapter had already written."""
+        name = "w1"
+        store.create_agent(self.db, name=name, role="worker", parent="orch",
+                           cwd=str(self.repo), tier="gpt-5.5")
+        store.set_state(self.db, name, "failed")
+        codex.write_home(name, prompts=["p"], worktree=str(self.repo), cwd=self.repo)
+        self.assertTrue(self.b._spawn_husk(name))
+        self.b._release_name(name)
+        self.assertFalse(codex.is_codex_agent(name, self.repo))
+        self.assertIsNone(store.get_agent(self.db, name))
+
+    def test_cleanup_still_leaves_a_live_name_s_home_alone(self):
+        """The contract this must not break: closing costs only the pane, and for codex
+        the transcript and the standing instructions are both inside the home."""
+        name = self._ended_codex_top("cx")
+        self.b.cleanup([name])
+        self.assertTrue(codex.is_codex_agent(name, self.repo))
+
+
 class CodexDeliveryProofTest(unittest.TestCase):
     """The proof is asked in three places; all three must ask the right provider.
 
