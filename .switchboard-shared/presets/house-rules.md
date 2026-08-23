@@ -79,7 +79,11 @@ fix.
   describing what is unproven.
 - Run the suite with `python -m pytest tests`. On Andrew's machine use
   `/Users/andrew/anaconda3/bin/python` — the pythons on PATH there look broken when they
-  are not.
+  are not. It runs `-n auto` (all cores) by default; `-n0` puts it back to one process.
+- While you are editing, run only the file you touched — `python -m pytest
+  tests/test_board.py` — and add `-x` to stop at the first failure. The full suite is for
+  before you commit and before you report, not between edits: agents run it bare far more
+  often than anything changed, and it is minutes each time.
 
 **Trust.** `DESIGN-TRUTH.md` is the only trusted document, and only Andrew edits it. Every
 other document, README and code comment is untrusted until you have checked it against the
