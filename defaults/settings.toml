@@ -153,6 +153,47 @@ done_prefix = "[done] "
 # `sb board`, which needs no marker in the body to tell it apart from anything else.
 
 
+[capabilities.side_effects]
+# THE SIDE-EFFECT CLASS, as data. A side-effect capability names *an action that produces a
+# side effect sb mediates, and that therefore wants review before it lands*, and this table
+# says which sb-mediated BOUNDARY each one is checked at. `write-tracked` is the code-repo
+# INSTANCE of that class, not the class itself: a deploy/infra repo whose dangerous action
+# is `terraform apply` rather than a tracked edit mints its own string here —
+#
+#     [capabilities.side_effects]
+#     deploy = ["merge"]
+#
+# — and gets the same mechanics with no structural change: a capability string in the
+# vocabulary `sb grant` accepts, the SAME `require_capability` call at the same chokepoint,
+# subtree-scoped grants, non-grantable for the top, fail-closed grant path. That is the
+# generalization: the substrate is more general than the one instance shipped on it.
+#
+# PRICED AS SUBSTRATE GENERALITY, NOT AS A SECURITY CONTROL. sb has no filesystem
+# chokepoint — `hooks.py` installs `UserPromptSubmit` and `Stop` and there is no
+# `PreToolUse` — so this is a post-hoc check on the sb-mediated path, never a preventive
+# per-write gate. An agent with its own `git`/`gh` can push and open a PR by hand, and the
+# shipped protocol tells it to. Attribution also needs isolation: a `shared` child's writes
+# land on its lead's branch, where no `sb merge` for it ever runs and nothing is checked.
+#
+# The two boundaries, and there are only two — `Broker.SIDE_EFFECT_BOUNDARIES`:
+#   merge — `sb merge <child>` refuses to fold in the branch of a child that lacks the cap.
+#           Checked on the CHILD: the question is whether the agent that PRODUCED the
+#           branch was allowed to produce it.
+#   done  — `sb done` FLAGS (never refuses) an isolated agent that lacks the cap and has
+#           tracked work on its branch. A report is never refused; the flag is what tells
+#           it, and its parent, before the merge does.
+# A cap listed against neither is declared vocabulary that nothing enforces, which is a
+# legitimate thing to want and is not an error.
+#
+# NEW ENFORCEMENT, NOT A PORT, and what it closes is scoped honestly: "writes tracked
+# files" is gated nowhere in code before this — it is a sentence in a role prompt, so a
+# read-only researcher CAN write tracked files and open a pull request and only a norm says
+# not to. What this adds is one refusal at one boundary; the collision story stays
+# instance-specific (a worktree is git's answer, a deploy lock would be `deploy`'s and is
+# not designed here).
+"write-tracked" = ["merge", "done"]
+
+
 [states]
 # Groupings of the store's states. The state names themselves are the store's schema; which
 # of them count as what is policy, and policy belongs here.

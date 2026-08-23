@@ -58,6 +58,55 @@ CAP_WRITE_TRACKED = "write-tracked"    # may it write files git tracks?
 # whatever a caller types. `start` is not in it and never will be.
 CAPABILITIES = frozenset({CAP_SPAWN, CAP_FORK, CAP_DISPATCH, CAP_WRITE_TRACKED})
 
+# THE SIDE-EFFECT CLASS (spec §2.1, unit E4). `write-tracked` above is ONE INSTANCE of it,
+# and this is the reader that makes the class a class: which capability strings name *an
+# action that produces a side effect sb mediates, and that therefore wants review before it
+# lands*, and which sb-mediated BOUNDARY each is checked at. It is DATA — a table in
+# `[capabilities.side_effects]`, shipped with one row and extensible by any repo — for the
+# same reason the capability vocabulary is open-ended: a deploy repo whose dangerous action
+# is `terraform apply` mints `deploy` there and gets the same grant/seed/enforcement
+# mechanics with no structural change and no second refusal function.
+#
+# NOT A SECURITY CONTROL, and the code that reads this must not be built as one. There is
+# no filesystem chokepoint anywhere in sb (`hooks.py` installs `UserPromptSubmit` and
+# `Stop`; there is no `PreToolUse`), so every instance of this class is a POST-HOC check on
+# the sanctioned path, never a preventive per-write gate. This is substrate generality:
+# the substrate is more general than the one instance shipped on it.
+#
+# `write-tracked`'s semantics are NOT stretched to cover cloud state. It would gate the
+# `.tf` EDIT — the safe half — and be silent on the APPLY, and two agents in two isolated
+# worktrees can each still apply against the same state file. The answer to that repo is
+# its own string in this table, not a wider reading of this one.
+def side_effect_capabilities(repo: Optional[Path] = None) -> dict[str, tuple[str, ...]]:
+    """`{capability: the boundaries it is checked at}` for this repo.
+
+    Read fresh rather than frozen at import: a repo's `.switchboard/settings.toml` is one
+    of the layers, so freezing it would mean the shipped table was the only one that could
+    ever be true.
+
+    `start` is dropped whatever any file says, for the one reason it is dropped from
+    `Broker.known_capabilities`: it is not a capability, it is a hardcoded human-only gate,
+    and no path may make it grantable — including this one, which feeds that vocabulary.
+    """
+    table = config.setting("capabilities.side_effects", {}, repo=repo)
+    if not isinstance(table, dict):
+        raise config.ConfigError(
+            "[capabilities.side_effects] must be a table of `capability = [boundary, ...]`, "
+            f"got {table!r}")
+    out: dict[str, tuple[str, ...]] = {}
+    for cap, boundaries in table.items():
+        if cap == "start":
+            continue
+        if isinstance(boundaries, str):     # one boundary, unbracketed — meant, not a typo
+            boundaries = [boundaries]
+        if not isinstance(boundaries, list) or any(not isinstance(b, str) for b in boundaries):
+            raise config.ConfigError(
+                f"side-effect capability '{cap}' must name the boundaries it is checked at "
+                f"as a list of strings, got {boundaries!r}")
+        out[cap] = tuple(b for b in boundaries if b != config.RESET)
+    return out
+
+
 # What a role gets when its own definition names no bundle. A role nobody thought about is
 # a LEAF that may write — the same answer the retired `delegate = false` default gave, for
 # the same reason: being wrong this way costs a refusal a person can lift, and being wrong

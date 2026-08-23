@@ -1315,8 +1315,18 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             note = ("already reported — you called `sb done` before, and your parent has "
                     "that summary. This one is recorded in the log, but it is not sent "
                     "again and the first summary stays on the board. Nothing to redo.")
+        if b.done_flags:
+            # The `done` boundary of the side-effect class (E4). A FLAG, not a refusal:
+            # exit 0, the report stands and has already been mailed, and this is what says
+            # — to the one agent that can still do something about it — that the branch
+            # underneath the report will be refused at `sb merge`.
+            note += ("\n" + "\n".join(
+                f"flagged: you do not hold `{cap}`, and there is tracked work on your "
+                f"branch. `sb merge` will refuse to fold it in for whoever runs it. Say so "
+                f"to your parent — they can `sb grant` it if that was wrong."
+                for cap in b.done_flags))
         _emit(args, note, {"agent": me, "live_children": still,
-                           "repeat": b.done_repeat})
+                           "repeat": b.done_repeat, "flagged": b.done_flags})
         return 0
 
     if cmd == "block":
