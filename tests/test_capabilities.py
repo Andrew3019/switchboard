@@ -20,8 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
-from switchboard.broker import CAP_FORK, CAP_SPAWN, HUMAN, Broker  # noqa: E402
+from switchboard.broker import (  # noqa: E402
+    CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED, HUMAN, Broker,
+)
 
 from test_workspace import FakeHerdr  # noqa: E402
 
@@ -128,9 +131,101 @@ class NoStartCapabilityTest(Fixture, unittest.TestCase):
                 self.assertNotIn("start", self.b.seed_for(role, is_top))
 
     def test_the_string_appears_in_no_seeded_row(self):
+        """C1 widened the vocabulary a seed may contain (`dispatch`, `write-tracked`), so
+        the assertion is the one this test was always about — `start` is in no row — and
+        not the incidental "only these two strings exist" it could be written as while
+        only two did."""
         self.b.delegate("t", topic="t", role="lead", me=self._top())
         held = {r["cap"] for r in self.db.execute("SELECT cap FROM capabilities")}
-        self.assertTrue(held <= {CAP_SPAWN, CAP_FORK}, held)
+        self.assertTrue(held)                          # something was seeded to look at
+        self.assertNotIn("start", held)
+
+
+class RoleBundleTest(Fixture, unittest.TestCase):
+    """Phase 1 — the role side becomes DATA. A role carries a default capability bundle
+    instead of a `delegate` bool, and what an agent is seeded with is that bundle."""
+
+    def test_each_shipped_role_seeds_its_own_bundle(self):
+        """§6.2's table, one assertion per role. `fork` is in no seeded set below a top:
+        a template naming it states a ceiling, and the fork decision is still the stamp's
+        (`mints_space`), so seeding it would turn a nested lead's every spawn into a new
+        workspace."""
+        expected = {
+            "dispatcher": ["dispatch", "spawn", "write-tracked"],
+            "lead":       ["dispatch", "spawn", "write-tracked"],   # template also has fork
+            "worker":     ["write-tracked"],
+            "researcher": [],
+            "reviewer":   [],
+            "qa":         [],                                       # read-only by default
+        }
+        for role, caps in expected.items():
+            with self.subTest(role=role):
+                self.assertEqual(self.b.seed_for(role, is_top=False), caps)
+
+    def test_the_top_takes_its_fixed_set_and_never_write_tracked(self):
+        """§2.0: the top is a placement, a stamp and a FIXED bundle — not a template. It
+        holds `fork` because forking is what a top is for, and never `write-tracked`,
+        which is the whole invariant over a person's own checkout."""
+        for role in ("dispatcher", "lead", "worker"):
+            with self.subTest(role=role):
+                self.assertEqual(self.b.seed_for(role, is_top=True),
+                                 ["dispatch", "fork", "spawn"])
+                self.assertNotIn(CAP_WRITE_TRACKED, self.b.seed_for(role, is_top=True))
+
+    def test_no_bundle_carries_a_topology_capability(self):
+        """Promote is self-service (§2.3), so `reparent` is not a capability and the string
+        does not exist — stated as a test so it is not re-derived as a new primitive."""
+        for role in list(self.b.roles) + ["invented-yesterday"]:
+            for is_top in (False, True):
+                self.assertNotIn("reparent", self.b.seed_for(role, is_top))
+
+    def test_an_old_roles_toml_still_reads(self):
+        """BACK-COMPAT. A file in the wild still says `delegate = true/false`; it must load
+        without error and map onto the bundle it always meant, or retiring the field breaks
+        somebody's config on upgrade."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "roles.toml").write_text(
+            "[foreman]\ndelegate = true\n[dogsbody]\ndelegate = false\n")
+        b = Broker(self.db, self.h, repo=self.repo)     # reads the file just written
+        self.assertIn(CAP_SPAWN, b.seed_for("foreman", is_top=False))
+        self.assertNotIn(CAP_SPAWN, b.seed_for("dogsbody", is_top=False))
+        self.assertIn("foreman", b._delegating_roles())
+        # And the gate itself still decides the way the bool did.
+        store.create_agent(self.db, name="f", role="foreman", parent=self._top(),
+                           workspace="api", branch="api")
+        store.create_agent(self.db, name="d", role="dogsbody", parent="f",
+                           workspace="api", branch="api")
+        b.require_capability("f", CAP_SPAWN)                    # does not raise
+        with self.assertRaises(ValueError):
+            b.require_capability("d", CAP_SPAWN)
+
+    def test_an_old_bool_still_overrides_a_shipped_bundle_both_ways(self):
+        """The half of back-compat that is easy to lose. `delegate` is layered config: a
+        repo writing it over a SHIPPED role whose file now names `capabilities` must still
+        decide, and in both directions — the bool replaced what was underneath, it never
+        added to it, so a `false` must narrow rather than union."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "roles.toml").write_text(
+            "[qa]\ndelegate = true\n[lead]\ndelegate = false\n")
+        b = Broker(self.db, self.h, repo=self.repo)
+        self.assertIn(CAP_SPAWN, b.seed_for("qa", is_top=False))          # widened
+        self.assertNotIn(CAP_SPAWN, b.seed_for("lead", is_top=False))     # and narrowed
+        self.assertEqual(b._delegating_roles(), ["dispatcher", "qa"])
+
+    def test_delegating_roles_is_capability_membership_and_names_the_same_roles(self):
+        """`_delegating_roles()` filtered `.delegate`; it filters `spawn` in the bundle.
+        Same answer — the shipped roles that spawn are the two halves of the split — and
+        the refusal message that quotes it is unchanged in structure."""
+        self.assertEqual(self.b._delegating_roles(), ["dispatcher", "lead"])
+        self.assertEqual(
+            self.b._delegating_roles(),
+            sorted(n for n, r in self.b.roles.items()
+                   if CAP_SPAWN in r.capabilities))
+
+    def test_the_role_model_no_longer_carries_the_bool(self):
+        """Fully removed, not deprecated in place: a field the model still accepted is a
+        field somebody could still read."""
+        self.assertFalse(hasattr(roles_mod.Role("worker"), "delegate"))
 
 
 if __name__ == "__main__":

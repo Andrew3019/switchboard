@@ -1,6 +1,9 @@
 +++
 model = "cheap"
-delegate = true
+capabilities = ["spawn", "dispatch", "write-tracked"]
+# The NON-TOP dispatcher's bundle. `sb start`'s top reads none of this: its set is fixed in
+# code (`roles.TOP_CAPABILITIES`) and drops `write-tracked` for `fork`, because the top
+# works over a person's own checkout and has no space of its own to lend.
 +++
 
 <!--

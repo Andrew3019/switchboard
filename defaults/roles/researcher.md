@@ -1,5 +1,8 @@
 +++
 model = "cheap"
+capabilities = []
+# Read-only: an agent with no `write-tracked` is literally today's "read, report, no PR"
+# brief, said in the model instead of only in the prompt.
 +++
 
 <!--

@@ -1,5 +1,8 @@
 +++
 model = "careful"
+capabilities = []
+# READ-ONLY by default. `write-tracked` is a grant, not a default: a qa agent that reports
+# what it found is the job, and one that fixes what it found is a change nobody reviewed.
 +++
 
 <!--

@@ -1,5 +1,8 @@
 +++
 model = "default"
+capabilities = ["write-tracked"]
+# A leaf that writes. `spawn` arrives, if ever, as a one-shot grant for a fan-out, and what
+# that spawn may seed is bounded by the worker's own set.
 +++
 
 <!--
