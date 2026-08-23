@@ -27,6 +27,7 @@ from switchboard import codex, models, output, store  # noqa: E402
 from switchboard.broker import HUMAN, Broker  # noqa: E402
 from switchboard.herdr import Herdr  # noqa: E402
 from tests.test_broker import FakeHerdrAPI  # noqa: E402
+from tests.test_models import _StubBroker  # noqa: E402
 from tests.test_herdr import AGENT_JSON, FakeHerdr, ok  # noqa: E402
 
 
@@ -473,6 +474,37 @@ class StartOnCodexTest(unittest.TestCase):
         self.b.start(name="general", task="t")
         self.assertEqual(self.h.started[0]["provider"], "claude")
         self.assertIsNone(store.get_agent(self.db, "general")["tier"])
+
+
+class ModelsListingTest(unittest.TestCase):
+    """`sb models` has to tell the truth about a codex tier.
+
+    The listing shows the flags a tier reaches the provider CLI with, and a codex tier has
+    none — which would print as "(provider default)", saying the exact opposite of what is
+    true: it has a model and an effort, they just travel in the agent's private home.
+    """
+
+    def test_a_codex_tier_shows_its_model_and_effort_and_where_they_go(self):
+        line = _models_line("gpt-5.5")
+        self.assertIn("gpt-5.5", line)
+        self.assertIn("medium", line)
+        self.assertNotIn("(provider default)", line)
+
+    def test_a_tier_that_really_defers_still_says_so(self):
+        self.assertIn("(provider default)", _models_line("default"))
+
+
+def _models_line(tier: str) -> str:
+    """The one line `sb models` prints for a tier."""
+    import argparse
+    import contextlib
+    import io
+    from switchboard import cli
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cli._dispatch(argparse.Namespace(cmd="models", json=False),
+                      _StubBroker(None), None, None)
+    return next(ln for ln in out.getvalue().splitlines() if ln.split()[:1] == [tier])
 
 
 class WhoamiByNameTest(unittest.TestCase):

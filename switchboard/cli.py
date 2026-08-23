@@ -1148,12 +1148,15 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         tiers = models_mod.load(b.repo)
         rows = [(n, tiers.resolve(n)) for n in tiers.names()]
         # The flags column is what actually reaches the provider CLI, so it is what gets
-        # shown. Two rows read as empty for opposite reasons and must not look alike: a
+        # shown. THREE rows read as empty for different reasons and must not look alike: a
         # tier with neither model nor effort is deferring to the CLI's own default (a
-        # choice), while an unwired provider cannot be spawned at all. The second is legal
-        # config — models.py keeps `provider` real ahead of its backend — so it is reported
-        # per row rather than allowed to take the whole listing down, since finding out
-        # WHICH tier is unspawnable is why anyone runs this.
+        # choice); a codex tier has a model and an effort and simply does not deliver them
+        # as flags (they are keys in a private per-agent `CODEX_HOME/config.toml` —
+        # `switchboard/codex.py`), so printing "(provider default)" there would say the
+        # opposite of what is true; and an unwired provider cannot be spawned at all. The
+        # last is legal config — models.py keeps `provider` real ahead of its backend — so
+        # it is reported per row rather than allowed to take the whole listing down, since
+        # finding out WHICH tier is unspawnable is why anyone runs this.
         out: dict[str, dict] = {}
         lines = []
         for n, s in rows:
@@ -1163,8 +1166,13 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 flags, note = [], f"UNAVAILABLE — {e}"
             out[n] = {"provider": s.provider, "model": s.model, "effort": s.effort,
                       "cli_args": flags, "error": note or None}
-            lines.append(f"  {n:12}{s.provider:10}"
-                         f"{note or ' '.join(flags) or '(provider default)'}")
+            settings = " ".join(
+                x for x in (f"model {s.model}" if s.model else "",
+                            f"effort {s.effort}" if s.effort else "") if x)
+            shown = note or " ".join(flags) or (
+                f"{settings} (in the agent's codex home)" if settings
+                else "(provider default)")
+            lines.append(f"  {n:12}{s.provider:10}{shown}")
         _emit(args, "\n".join(lines),
               {"default_provider": tiers.default_provider, "tiers": out})
         return 0
