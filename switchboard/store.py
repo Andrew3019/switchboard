@@ -1733,7 +1733,107 @@ def known_workspace(db: sqlite3.Connection, workspace: str) -> bool:
     ).fetchone() is not None
 
 
+# ---------------------------------------------------------------------------
+# Resolved identity: parent (§2.3)
+# ---------------------------------------------------------------------------
+#
+# `agents.parent` is a MUTABLE column behind a THIN resolver. Thin is the whole
+# specification: `current_parent` means exactly what `a["parent"]` meant before it existed
+# — one equality read of one column, no derivation, no fallback, no second source of truth
+# — because one of the six raw read sites CANNOT route through anything the broker owns.
+#
+# `hooks._has_live_child` is that site. The Stop hook runs in a process that must not
+# import `broker` and must fail open, so its SQL is a deliberate second copy of the same
+# `WHERE parent=?` (see `Broker._has_live_child`, which says so from the other side). A
+# resolver with any thickness at all — a join, an ancestry walk, a cache, a derived
+# fallback — would make that copy WRONG the moment `parent` moved, and there is no place
+# to fix it that the hook is allowed to reach. So the resolver bottoms out in the one
+# column the hook can still query raw, and the hook keeps querying it raw.
+#
+# The torn-read rule for every reader of this column: ONE STATEMENT, or one snapshot.
+# A single equality read observes the pre-state or the post-state of a re-parent `UPDATE`
+# and never a mix; a multi-statement WALK over the column (`Broker._descendants`) needs
+# `read_snapshot` around it, or it can see a row under its old parent and its new one in
+# the same answer.
+
+
+def current_parent(db: sqlite3.Connection, name: str) -> Optional[str]:
+    """Who this agent reports to RIGHT NOW. None = root (or no such row).
+
+    THE resolver for `parent`, and deliberately the whole of it. Read at the point of use
+    rather than off a row fetched earlier in the call: that staleness is exactly what a
+    mutable `parent` makes wrong, and `done`/`cleanup` are the two callers that must
+    follow a change rather than a copy of the state before it.
+
+    Torn-safe by shape: one statement, one row, one column.
+    """
+    row = db.execute("SELECT parent FROM agents WHERE name=?", (name,)).fetchone()
+    return (row["parent"] or None) if row is not None else None
+
+
+def current_parentage(db: sqlite3.Connection) -> dict:
+    """`{name: (parent, is_top)}` for the whole store, in ONE statement.
+
+    The bulk form of `current_parent`, for the readers that ask about every row at once
+    (board rendering, `_root_of`). One statement rather than a walk per agent, and that is
+    now load-bearing rather than merely cheap: a per-row walk over a moving column can see
+    two different trees in one readout.
+
+    `is_top` rides along and is NOT resolved — it is a one-time stamp and stays raw by
+    design (§6.10). It is here only because the readers that want a parent want it in the
+    same breath, and a second query for it would be a second snapshot.
+    """
+    return {r["name"]: (r["parent"], bool(r["is_top"]))
+            for r in db.execute("SELECT name, parent, is_top FROM agents")}
+
+
+@contextlib.contextmanager
+def read_snapshot(db: sqlite3.Connection):
+    """One consistent view of the store across SEVERAL reads.
+
+    For the one reader that cannot be a single statement: a walk down `parent` asks the
+    column once per level (`Broker._descendants`), and between two of those questions a
+    re-parent can commit. Without this, the walk can miss a row entirely (moved out of a
+    branch already visited) or return it twice (moved into one not yet visited) — a torn
+    answer assembled from two different trees, which is what `cleanup` would then act on.
+
+    `BEGIN DEFERRED` in WAL: the snapshot is taken at the first read and held to the end
+    of the block. It takes no write lock, blocks no writer, and never upgrades — nothing
+    inside may write.
+
+    NESTING IS A NO-OP, not an error. A transaction already open on this connection is
+    already a snapshot (or a writer's own consistent view), and joining it is the correct
+    answer; `mutation` raises on nesting because a WRITE swept into someone else's
+    half-written work is a different thing entirely.
+
+    NEVER RAISES over the transaction itself. If `BEGIN` fails, the reads still happen —
+    unsnapshotted, exactly as they did before this existed. A readout is not worth a
+    crash, and the failure mode it guards against is rare and benign next to one.
+    """
+    if db.in_transaction:
+        yield db
+        return
+    try:
+        db.execute("BEGIN DEFERRED")
+    except sqlite3.Error:
+        yield db
+        return
+    try:
+        yield db
+    finally:
+        try:
+            db.commit()
+        except sqlite3.Error:
+            pass
+
+
 def children_of(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    """This agent's direct children, oldest first.
+
+    One statement, so it observes the pre-state or the post-state of a re-parent and never
+    a mix. A CALLER that runs it repeatedly to walk a subtree gets no such guarantee for
+    the walk as a whole — see `read_snapshot`, and `Broker._descendants` which uses it.
+    """
     return db.execute(
         "SELECT * FROM agents WHERE parent=? ORDER BY created_at", (name,)
     ).fetchall()

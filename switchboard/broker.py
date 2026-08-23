@@ -1111,10 +1111,27 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="claim_session_failed", agent=name, error=str(e))
 
+    def current_parent(self, name: str) -> Optional[str]:
+        """Who this agent reports to RIGHT NOW — the resolver, broker side (§2.3).
+
+        One line on purpose. `parent` is a mutable column behind a THIN resolver, and the
+        thinness is the design: `hooks._has_live_child` is a second, deliberately
+        broker-independent copy of the same `WHERE parent=?` that cannot route through
+        anything here, so the resolver must stay a plain read of the one column that copy
+        can still ask about raw. See `store.current_parent`.
+
+        Every broker reader that decides something about a live parent link goes through
+        this rather than off an `agents` row fetched earlier in the same call: reading the
+        column at the point of USE is what makes `done` and `cleanup` follow a change
+        instead of a copy of the state before it.
+        """
+        return store.current_parent(self.db, name)
+
     def _resolve(self, who: str, me: str) -> str:
         if who == PARENT:
-            a = store.get_agent(self.db, me)
-            return (a["parent"] if a and a["parent"] else HUMAN)
+            # RESOLVED, not read off a spawn-time row: `sb tell parent` addresses whoever
+            # this agent reports to at the moment it is typed (§2.3, raw reader 1).
+            return self.current_parent(me) or HUMAN
         return who
 
     # -- structure: who may spawn, and who may see whom ------------------
@@ -1686,9 +1703,13 @@ class Broker:
 
         One query rather than a walk per agent: `tree_of` asks this question of every row,
         and doing it per row is a few hundred statements for a readout.
+
+        THE SINGLE STATEMENT IS ALSO THE TORN-READ GUARANTEE (§2.3, raw reader 2). `parent`
+        moves under this reader now, and a per-row walk could draw one half of the board
+        from the tree before a re-parent and the other half from the tree after it. One
+        statement sees one of them. `is_top` comes along raw and unresolved, by design.
         """
-        return {r["name"]: (r["parent"], bool(r["is_top"]))
-                for r in self.db.execute("SELECT name, parent, is_top FROM agents")}
+        return store.current_parentage(self.db)
 
     @staticmethod
     def _root_of(name: str, rows: dict) -> str:
@@ -4061,8 +4082,13 @@ class Broker:
         return None
 
     def _workspace_of(self, me: str) -> Optional[str]:
-        a = store.get_agent(self.db, me) if me != HUMAN else None
-        return a["workspace"] if a else None
+        """The workspace this agent is attached to right now — resolved, not spawn-frozen.
+
+        `store.attached_workspace` IS the workspace half of §2.3's resolver (it landed with
+        workspace-as-a-resource in §2.2, under that name). Going through it rather than
+        re-reading the column here keeps one reader of a pointer that `attach` may move.
+        """
+        return store.attached_workspace(self.db, me) if me != HUMAN else None
 
     def _workspace_id(self, name: Optional[str]) -> str:
         """herdr's id for a workspace we already know by name.
@@ -5570,7 +5596,12 @@ class Broker:
                             summary=summary[:EVENT_CLIP])
             self.done_repeat = True
             return self.live_descendants(me)
-        parent = a["parent"] if a else None
+        # RESOLVED HERE, not taken off `a` — the row read at the top of this call may
+        # predate a re-parent, and `done` must mail whoever this agent reports to NOW
+        # (§2.3, raw reader 3). Read ONCE and reused below: the mail, the ring and the
+        # holdback are one decision about one parent, and re-reading per use could split
+        # them across a change.
+        parent = self.current_parent(me) if a else None
         if parent:
             store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",
                               body=f"[done] {summary}")
@@ -6689,11 +6720,25 @@ class Broker:
         return [a["name"] for a in self._descendants(name) if a["pane_id"]]
 
     def _descendants(self, name: str) -> list:
+        """Every row beneath this one, by a walk down `parent`.
+
+        THE ONE READER THAT IS NOT A SINGLE STATEMENT (§2.3, raw reader 4), and so the one
+        that needs `read_snapshot`. The walk asks `children_of` once per level; a
+        re-parent committing between two of those questions could move a row out of a
+        branch already visited (it vanishes from the answer) or into one not yet visited
+        (it appears twice) — a subtree assembled from two different trees, which `cleanup`
+        would then act on. Inside one snapshot the whole walk sees the pre-state or the
+        post-state and never a mix.
+
+        The walk itself is UNCHANGED — same order, same rows, same cycle behaviour (a
+        cycle in `parent` does not terminate here; `_leaves_up` says so too).
+        """
         out, frontier = [], [name]
-        while frontier:
-            kids = store.children_of(self.db, frontier.pop())
-            out.extend(kids)
-            frontier.extend(k["name"] for k in kids)
+        with store.read_snapshot(self.db):
+            while frontier:
+                kids = store.children_of(self.db, frontier.pop())
+                out.extend(kids)
+                frontier.extend(k["name"] for k in kids)
         return out
 
     def _restore_tab(self, a, wsid: str, where, *, env: Optional[dict] = None) -> str:
@@ -8302,6 +8347,12 @@ class Broker:
         agent's own session and everything it touches has to stay small enough to fail
         open. Two callers, one SQL line, and a test on each side is cheaper than a shared
         module that exists to hold it.
+
+        NOT ROUTED THROUGH THE RESOLVER either, and for the same reason (§2.3, raw reader
+        5): its whole value is that it asks the question the way the hook asks it. It is
+        torn-safe on its own shape — one statement, one equality read on `parent` — which
+        is exactly the property the resolver is kept thin enough to preserve for the hook's
+        copy as well.
         """
         return self.db.execute(
             "SELECT 1 FROM agents WHERE parent=? AND state IN ('working', 'blocked') "
