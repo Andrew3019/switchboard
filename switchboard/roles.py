@@ -58,6 +58,55 @@ CAP_WRITE_TRACKED = "write-tracked"    # may it write files git tracks?
 # whatever a caller types. `start` is not in it and never will be.
 CAPABILITIES = frozenset({CAP_SPAWN, CAP_FORK, CAP_DISPATCH, CAP_WRITE_TRACKED})
 
+# THE SIDE-EFFECT CLASS (spec §2.1, unit E4). `write-tracked` above is ONE INSTANCE of it,
+# and this is the reader that makes the class a class: which capability strings name *an
+# action that produces a side effect sb mediates, and that therefore wants review before it
+# lands*, and which sb-mediated BOUNDARY each is checked at. It is DATA — a table in
+# `[capabilities.side_effects]`, shipped with one row and extensible by any repo — for the
+# same reason the capability vocabulary is open-ended: a deploy repo whose dangerous action
+# is `terraform apply` mints `deploy` there and gets the same grant/seed/enforcement
+# mechanics with no structural change and no second refusal function.
+#
+# NOT A SECURITY CONTROL, and the code that reads this must not be built as one. There is
+# no filesystem chokepoint anywhere in sb (`hooks.py` installs `UserPromptSubmit` and
+# `Stop`; there is no `PreToolUse`), so every instance of this class is a POST-HOC check on
+# the sanctioned path, never a preventive per-write gate. This is substrate generality:
+# the substrate is more general than the one instance shipped on it.
+#
+# `write-tracked`'s semantics are NOT stretched to cover cloud state. It would gate the
+# `.tf` EDIT — the safe half — and be silent on the APPLY, and two agents in two isolated
+# worktrees can each still apply against the same state file. The answer to that repo is
+# its own string in this table, not a wider reading of this one.
+def side_effect_capabilities(repo: Optional[Path] = None) -> dict[str, tuple[str, ...]]:
+    """`{capability: the boundaries it is checked at}` for this repo.
+
+    Read fresh rather than frozen at import: a repo's `.switchboard/settings.toml` is one
+    of the layers, so freezing it would mean the shipped table was the only one that could
+    ever be true.
+
+    `start` is dropped whatever any file says, for the one reason it is dropped from
+    `Broker.known_capabilities`: it is not a capability, it is a hardcoded human-only gate,
+    and no path may make it grantable — including this one, which feeds that vocabulary.
+    """
+    table = config.setting("capabilities.side_effects", {}, repo=repo)
+    if not isinstance(table, dict):
+        raise config.ConfigError(
+            "[capabilities.side_effects] must be a table of `capability = [boundary, ...]`, "
+            f"got {table!r}")
+    out: dict[str, tuple[str, ...]] = {}
+    for cap, boundaries in table.items():
+        if cap == "start":
+            continue
+        if isinstance(boundaries, str):     # one boundary, unbracketed — meant, not a typo
+            boundaries = [boundaries]
+        if not isinstance(boundaries, list) or any(not isinstance(b, str) for b in boundaries):
+            raise config.ConfigError(
+                f"side-effect capability '{cap}' must name the boundaries it is checked at "
+                f"as a list of strings, got {boundaries!r}")
+        out[cap] = tuple(b for b in boundaries if b != config.RESET)
+    return out
+
+
 # What a role gets when its own definition names no bundle. A role nobody thought about is
 # a LEAF that may write — the same answer the retired `delegate = false` default gave, for
 # the same reason: being wrong this way costs a refusal a person can lift, and being wrong
@@ -116,6 +165,14 @@ class Role:
     model: str = ""                 # a TIER name, not a model id
     prompt: str = ""
     capabilities: frozenset = DEFAULT_CAPABILITIES   # the role's DEFAULT bundle
+    # How far an agent of this role may tune ITSELF with `sb configure` — the E3 ceiling,
+    # `{setting: furthest permitted value}` for the settings this role wants bounded
+    # differently from the shipped default. A role that names none inherits every ceiling
+    # from `[config.settings]`, which is why the default is empty rather than the full
+    # table: this field is the role's OVERRIDE, and `template_ceiling` is where the two
+    # layers meet. Not a frozenset because a ceiling is a value per setting, not a
+    # membership question.
+    config_ceiling: dict = field(default_factory=dict)
     tiers: Optional[models.Tiers] = field(default=None, repr=False, compare=False)
 
     # The bundle is a FIELD, not a check against the literal role name. "Bare" is a
@@ -142,6 +199,7 @@ class Role:
         # A list from TOML, a set from a caller: one type past this point, so membership
         # reads the same everywhere and nothing mutates a role's ceiling in place.
         self.capabilities = frozenset(self.capabilities)
+        self.config_ceiling = dict(self.config_ceiling or {})
 
     def spec(self, override: Optional[str] = None) -> models.ModelSpec:
         """The resolved provider + model + effort for this role's tier.
@@ -166,6 +224,7 @@ def load(repo: Optional[Path] = None) -> dict[str, Role]:
     merged = config.roles(repo)
     tiers = models.load(repo)
     return {k: Role(name=k, tiers=tiers, capabilities=_bundle(v),
+                    config_ceiling=_declared_ceiling(v),
                     **{f: x for f, x in v.items() if f not in _BUNDLE_FIELDS})
             for k, v in merged.items()}
 
@@ -173,7 +232,7 @@ def load(repo: Optional[Path] = None) -> dict[str, Role]:
 # The two spellings `_bundle` reads. Kept OUT of the `Role(**v)` splat rather than absorbed
 # by the dataclass: `delegate` is gone from the model, and a field the model still accepted
 # would be a field somebody could still read.
-_BUNDLE_FIELDS = ("capabilities", "delegate")
+_BUNDLE_FIELDS = ("capabilities", "delegate", "config_ceiling")
 
 
 def get(roles: dict[str, Role], name: str, repo: Optional[Path] = None) -> Role:
@@ -213,7 +272,8 @@ def get(roles: dict[str, Role], name: str, repo: Optional[Path] = None) -> Role:
     fallback = config.setting("vocabulary.fallback_role", repo=repo)
     base = roles.get(fallback) or Role(fallback)
     return Role(name=name, model=base.model, prompt=base.prompt,
-                capabilities=base.capabilities, tiers=base.tiers)
+                capabilities=base.capabilities, config_ceiling=base.config_ceiling,
+                tiers=base.tiers)
 
 
 def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
@@ -250,3 +310,183 @@ def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
     if is_top:
         return frozenset(TOP_CAPABILITIES)
     return get(roles, name, repo).capabilities
+
+
+# ---------------------------------------------------------------------------
+# The config ceiling — how far an agent may tune ITSELF (spec §2.4, unit E3)
+# ---------------------------------------------------------------------------
+#
+# `sb configure` is the second thing a role template bounds, and it lives here beside the
+# first for one reason: both are the template's answer to a question about an agent, and
+# keeping "what may this role do" and "how far may this role tune itself" in one file is
+# what stops them being read off two different things. They are NOT the same question,
+# and the resolver answering both is a property rather than a contradiction (spec §2.4):
+# capabilities are LIVE — seeded, then grown by `sb grant`, read fresh at every gate —
+# while the ceiling is FIXED, because it is read off `role`, which is stamped at spawn and
+# never rewritten (§6.10).
+#
+# THE CEILING IS THE TEMPLATE'S AND NOT THE PARENT'S, and that is the whole design
+# decision. `parent` is mutable — `sb promote` re-homes an agent under somebody else — so
+# a ceiling derived from the parent would mean a promote ABOVE an agent silently changed
+# what that agent may do to its own reminders, with nothing in the log and nobody having
+# asked for it. The role never moves, so neither does the ceiling.
+
+
+# The key naming a setting's starting value in `[config.settings]`. A constant because
+# `test_config` forbids these modules from carrying a literal that collides with a TIER
+# name, and `default` is one — which is the same reason the TOML key is spelled this way.
+INITIAL = "initial"
+
+
+class ConfigRefused(ValueError):
+    """A `sb configure` that was refused. `ValueError` so `cli.main` prints it as one line."""
+
+
+def settings_spec(repo: Optional[Path] = None) -> dict:
+    """The setting vocabulary: `{name: {kind, default, ceiling, ...}}`, from settings.toml.
+
+    Data for the same reason the capability strings are a set rather than a field per rule:
+    a new knob is a table in `[config.settings]`, not another branch in the CLI. A repo may
+    add its own — the settings file merges table by table — and every path below is written
+    against the spec rather than against the two names shipped today.
+    """
+    return config.setting("config.settings", repo=repo)
+
+
+def _declared_ceiling(fields: dict) -> dict:
+    """A merged role definition's own `[config_ceiling]`, or nothing."""
+    raw = fields.get("config_ceiling") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def template_ceiling(roles: dict[str, "Role"], name: str,
+                     repo: Optional[Path] = None) -> dict:
+    """How far an agent of this role may tune each setting, ever.
+
+    `template_capabilities`' twin, and deliberately the same shape of function: ONE place
+    that answers what a template says, so the gate that refuses a value and the readout
+    that prints the ceiling cannot come to disagree about it.
+
+    A role that names no ceiling of its own inherits the one in `[config.settings]`. There
+    is no `is_top` branch here and that is deliberate: the top's capability set is fixed
+    because a second top would be a topology event (§2.0), while how loudly the dispatcher
+    wants to be reminded of things is an ordinary preference with nothing structural in it.
+    """
+    spec = settings_spec(repo)
+    mine = get(roles, name, repo).config_ceiling
+    return {k: mine.get(k, v.get("ceiling")) for k, v in spec.items()}
+
+
+def split_setting(setting: str) -> tuple[str, Optional[str]]:
+    """`reminders.merge` -> `("reminders", "merge")`; `debounce` -> `("debounce", None)`.
+
+    The dotted form is how a setting is addressed per reminder CATEGORY, and it is one
+    name space rather than two so that the ceiling, the store row and the refusal all key
+    on the same string an agent typed.
+    """
+    base, _, category = setting.partition(".")
+    return base, category or None
+
+
+def check_setting(setting: str, repo: Optional[Path] = None) -> tuple[str, Optional[str]]:
+    """Refuse anything that is not a setting, before a value is even looked at.
+
+    THE CLOSED VOCABULARY IS THE ANSWER TO "no self-widening by ANY path" (spec §2.1, plan
+    E3 obj. 5). `sb configure` tunes config and never rights, and the way that is enforced
+    is that a capability string is simply not a setting name — `sb configure spawn true`
+    finds no `[config.settings.spawn]` table and is refused here, in the same breath as a
+    typo, rather than by a special case that has to remember to name every capability.
+    """
+    spec = settings_spec(repo)
+    base, category = split_setting(setting)
+    if base not in spec:
+        raise ConfigRefused(
+            f"no such setting `{setting}` — `sb configure` tunes how loudly switchboard "
+            f"talks to you, one of: {', '.join(sorted(spec))}. It never changes what an "
+            f"agent may DO; that is a capability, and capabilities are granted from above "
+            f"with `sb grant`, never set by the agent that wants one.")
+    if category and not spec[base].get("per_category"):
+        raise ConfigRefused(
+            f"`{base}` is one value for this agent, not one per category — set it as "
+            f"`sb configure {base} <value>`.")
+    return base, category
+
+
+def check_value(setting: str, raw: str, *, role: str, ceiling,
+                repo: Optional[Path] = None):
+    """The typed, ceiling-bounded value this setting may take, or a refusal saying why not.
+
+    The refusal is written in the style of `Broker._capability_refusal` on purpose: an
+    agent meets both of these the same way — it asked for something and was told no — and
+    the two messages are the whole of what it can act on. So each says what was asked for,
+    what bounds it, and what to do instead.
+    """
+    spec = settings_spec(repo)[split_setting(setting)[0]]
+    kind = spec.get("kind", "enum")
+    if kind == "int":
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            raise ConfigRefused(
+                f"`{setting}` is a number of seconds, and `{raw}` is not one.") from None
+        if value < 0:
+            raise ConfigRefused(f"`{setting}` cannot be negative.")
+        if ceiling is not None and value > int(ceiling):
+            raise ConfigRefused(_ceiling_refusal(setting, raw, role, ceiling))
+        return value
+    values = list(spec.get("values") or [])
+    value = str(raw).strip()
+    if value not in values:
+        raise ConfigRefused(
+            f"`{setting}` is one of: {', '.join(values)} — not `{raw}`.")
+    if ceiling is not None and ceiling in values and values.index(value) > values.index(ceiling):
+        raise ConfigRefused(_ceiling_refusal(setting, value, role, ceiling))
+    return value
+
+
+def _ceiling_refusal(setting: str, asked, role: str, ceiling) -> str:
+    """What an agent that asked to go past its ceiling is told.
+
+    It names the ROLE, because that is the thing the ceiling is pinned to and the one fact
+    that makes the refusal actionable: nothing above this agent can lift it, no grant
+    exists for it, and being promoted under somebody more permissive will not move it
+    either. The way past it is a person editing the role template — which is a decision
+    about every agent of that role, made once, in a file, rather than per agent at
+    run time.
+    """
+    return (f"a {role} may not set `{setting}` to `{asked}`: its role template allows at "
+            f"most `{ceiling}`. That ceiling is the ROLE TEMPLATE'S, so nobody above you "
+            f"can lift it and being re-homed under another agent does not move it — "
+            f"`sb configure {setting} {ceiling}` is as far as this role goes.")
+
+
+def effective_config(stored: dict, ceiling: dict, repo: Optional[Path] = None) -> dict:
+    """What this agent's settings actually ARE: the defaults, overlaid by what it set,
+    with anything now out of range pulled back to the ceiling.
+
+    THE CLAMP IS ON THE READ, not only on the write, and that is what makes the ceiling a
+    ceiling rather than a check somebody once passed: a role template narrowed after an
+    agent configured itself would otherwise leave that agent running past the new bound
+    for the rest of its life, with the stored row as the only evidence.
+
+    Per-category keys ride through untouched — they are read against the same base
+    setting's ceiling by the same clamp, one entry at a time.
+    """
+    spec = settings_spec(repo)
+    out = {k: v.get(INITIAL) for k, v in spec.items()}
+    for key, raw in stored.items():
+        base, _ = split_setting(key)
+        if base not in spec:
+            continue                      # a setting this repo has since retired
+        try:
+            out[key] = check_value(key, raw, role="", ceiling=ceiling.get(base), repo=repo)
+        except ConfigRefused:
+            out[key] = _clamped(spec[base], ceiling.get(base))
+    return out
+
+
+def _clamped(spec: dict, ceiling):
+    """The furthest value still allowed — what a stored value that is now too far reads as."""
+    if ceiling is None:
+        return spec.get(INITIAL)
+    return int(ceiling) if spec.get("kind") == "int" else ceiling

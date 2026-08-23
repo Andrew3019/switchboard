@@ -1416,6 +1416,8 @@ class StatusCliTest(unittest.TestCase):
             "cleanup": [], "workspace": ["list"], "restore": ["w1"],
             "grant": ["w1", "spawn"],
             "who-holds": ["spawn"],
+            # Both arguments optional: with none it prints what the caller is tuned to.
+            "configure": [],
             "merge": ["w1"],
             "inspect": ["w1"], "log": [],
             "board": [], "flush": [], "reconcile": [], "sweep": [],

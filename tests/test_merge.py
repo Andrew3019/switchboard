@@ -368,9 +368,18 @@ class CommandTest(Fixture, unittest.TestCase):
         with self.assertRaises(SystemExit):       # one child at a time, not a batch
             build_parser().parse_args(["merge", "worker-one", "worker-two"])
 
-    def test_the_protocol_teaches_it(self):
-        from switchboard import config
-        self.assertIn("sb merge", config.protocol(self.repo))
+    def test_the_ledger_teaches_it_and_the_protocol_no_longer_does(self):
+        """CHANGED BY E1, and the change is the point: this asserted that the protocol
+        taught `sb merge`, and it does not any more. The paragraph MOVED to the guidance
+        ledger (`defaults/guidance.toml`, `merge-finished-isolated-child`), where it is
+        delivered at the start of a turn on which the caller actually has a finished child
+        on a branch of its own — instead of being paid for at spawn by every agent that
+        will never merge anything. Still taught, later and to fewer people; the fuller
+        assertions live in `tests/test_guidance.py`."""
+        from switchboard import config, guidance
+        self.assertNotIn("sb merge", config.protocol(self.repo))
+        taught = [r for r in guidance.ledger(self.repo) if "sb merge" in r.text]
+        self.assertTrue(taught, "no ledger rule teaches `sb merge`")
 
 
 if __name__ == "__main__":

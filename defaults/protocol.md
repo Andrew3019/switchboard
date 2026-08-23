@@ -185,6 +185,22 @@ and a blocked child counts as live so `cleanup` will not close it out from under
 diagnosis found this rule missing from `dispatcher` precisely because it lived only in
 `lead.md`, and three copies of one paragraph is three copies to keep in sync.
 
+MOVED TO THE GUIDANCE LEDGER (2026-08-22, unit E1). The paragraph that taught `sb merge`
+— what it folds where, that it never pushes, that it refuses over uncommitted changes —
+used to sit right after the delegate paragraph, and every agent paid for it on every spawn:
+leaf workers that will never spawn anything, and every parent whose children are all
+`shared`. It is reminder-shaped rather than orientation — there is nothing to do with it
+until a child has actually finished on a branch of its own — so it is now a row in
+`defaults/guidance.toml` (`merge-finished-isolated-child`), keyed on the observable
+`mergeable_children >= 1` and delivered at the start of the turn where that is true.
+
+DELETED here rather than duplicated, which is the whole of the subtractive claim: a rule in
+both places is paid for twice and drifts apart. What did NOT move is anything an agent must
+know from turn one — identity, who reads it, why `sb block` exists — because guidance
+arrives at the turn it applies to and turn one is too late to learn who you are. The
+delegate paragraph above keeps `--isolation own` itself: choosing it is a decision the
+parent makes when it spawns, not a reminder waiting for a later state.
+
 `sb presets` is named here, not just in the orchestrator role, because DESIGN-TRUTH says
 this must be known to ALL sessions and only orchestrators were told. Three verbs in one
 sentence, because a list you cannot read is not discoverable and a procedure you cannot
@@ -255,11 +271,6 @@ reports. `--name` is two or three words for the SUBJECT — the agent is named
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,
 because `worker-7` on the board tells the person watching nothing at all.
-An `--isolation own` child comes back with `sb merge <child>`: it folds that one
-child's branch into YOUR branch, in your own checkout, and you run it as each child
-finishes rather than saving them up. It never pushes and never opens a pull request —
-landing the assembled branch is still the separate step. It refuses if your checkout has
-uncommitted changes, and a real conflict spawns one agent to resolve that merge.
 `sb status` lists your children, and `sb cleanup [names]` closes finished
 ones beneath you, plus any whose turn switchboard gave up on — closing costs
 only the pane: session, summary, messages and transcript survive, and
@@ -267,6 +278,9 @@ only the pane: session, summary, messages and transcript survive, and
 Some ways of working are written down rather than left to you: `sb presets` lists
 them, `sb presets <name>` prints one, and `sb presets <name> --apply` pastes it into
 your own session to work from. Read one before improvising something similar.
+`sb configure` tunes how much switchboard reminds you and nothing else — with no
+arguments it prints what you are tuned to and how far your role allows; it changes
+nothing about what you may do, and safety reminders are never tunable.
 Stop and get a human if you hit a genuine, big, behaviour-changing design question;
 if you are blocked on running something, or a tool fails twice; if you were told to
 block; if an instruction is ambiguous; if the human is already going back and forth

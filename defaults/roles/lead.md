@@ -1,6 +1,16 @@
 +++
 model = "prose"
 capabilities = ["spawn", "dispatch", "write-tracked", "fork"]
+
+# How far a lead may tune its own reminders (`sb configure`). A lead runs long, spawns,
+# merges and is the agent most rules are written for, so it is the one role that may space
+# a repeating rule out further than the shipped 300s — the knob it actually needs, and the
+# one that cannot silence anything, because the repeat policies still decide whether a rule
+# has anything to say at all. Its `reminders` ceiling is left at the shipped `brief`: a
+# lead is where guidance is most load-bearing, and the case for letting it go quiet has
+# not been made.
+[config_ceiling]
+debounce = 900
 # `fork` is the ceiling for "may ask for isolation", not something a lead does today: the
 # fork decision is still the caller's `is_top` stamp, so a nested lead is seeded without it
 # until the isolation request site exists. There is no topology capability here — becoming
