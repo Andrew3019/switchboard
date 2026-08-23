@@ -1735,6 +1735,42 @@ def all_workspaces(db: sqlite3.Connection) -> list[sqlite3.Row]:
     return db.execute("SELECT * FROM workspaces ORDER BY name").fetchall()
 
 
+def open_worktree_counts(db: sqlite3.Connection) -> dict[str, int]:
+    """How many OPEN WORKTREES each agent has minted, in one scan. The readout's read.
+
+    The already-available data D4 surfaces (spec §2.2). `created_by` is written by exactly
+    one caller — the fork that mints a child's space (`broker._fork_for`) — so grouping by
+    it answers "how many worktrees did this lead open" without a second source, and it
+    keeps answering after the children it forked are gone, which is the honest reading: the
+    worktree is still on disk.
+
+    OPEN is `retired_at IS NULL AND checkout IS NOT NULL`, which is two facts and not one.
+    A retired workspace's worktree has been taken away, and a BARE workspace never had one
+    (`checkout` NULL is exactly what bare means, see the schema note) — the four
+    orchestrators over one primary checkout are not four worktrees and must not count as
+    them.
+
+    One scan for the whole fleet, like `all_capabilities` and for the same reason: this
+    runs on every draw of a board that redraws every two seconds.
+
+    Fails soft on a store too old for the table, for `log_event`'s reason — a readout that
+    dies on a store an older `sb` created is a readout you stop running. A reader's
+    connection never migrates (`_connect_readonly`), so this is a real shape it will meet.
+    """
+    out: dict[str, int] = {}
+    try:
+        rows = db.execute(
+            "SELECT created_by, COUNT(*) AS n FROM workspaces "
+            "WHERE created_by IS NOT NULL AND retired_at IS NULL AND checkout IS NOT NULL "
+            "GROUP BY created_by"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return out
+    for r in rows:
+        out[r["created_by"]] = r["n"]
+    return out
+
+
 def record_workspace(
     db: sqlite3.Connection, name: str, checkout: Optional[str] = None, *,
     branch: Optional[str] = None, base_ref: Optional[str] = None,

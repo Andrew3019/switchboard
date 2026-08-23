@@ -346,6 +346,20 @@ TASK_CLIP = config.setting("limits.task_clip")
 # usually one grant, and the sign — never the names — is the half that must survive.
 ROLE_MARK_MAX = 24
 
+# THE SOFT WORKTREE THRESHOLD (D4, spec §2.2) — a number with deliberately NOTHING behind
+# it in this build. Past it, a guidance-ledger rule nudges the lead; the judgement stays
+# with the operator and NOTHING here refuses, caps or marks a row for exceeding it. A hard
+# ceiling would refuse a legitimate 20-way fan-out at exactly the moment the fleet is doing
+# its most valuable work, so the chosen answer is visibility, not policing.
+#
+# TODO(E1 — guidance ledger): the rule that reads this is ledger DATA keyed on the live
+# state `worktrees > threshold`, fired at turn start on E1's existing channel
+# (`hooks.run_activity`). E1 is not built, so there is no consumer here and no fake nudge
+# invented in its place — a reminder printed from a renderer would be a second guidance
+# mechanism, which is precisely what the ledger exists to avoid. The count it fires on is
+# `AgentStatus.worktrees`, computed below and already on the row.
+WORKTREE_SOFT_THRESHOLD = 8
+
 # Whether whole archived subtrees are drawn row by row or collapsed to one line. Read here
 # rather than in each renderer so `sb status` and the panel cannot end up on different
 # defaults — `board.layout` takes this one too. `config.flag`, not `config.setting`,
@@ -515,6 +529,28 @@ class AgentStatus:
     # scanned. Computed in `collect` by walking up from each diverged row, the way
     # `richboard.busy_below` aggregates liveness; False on a row nobody computed it for.
     diverged_below: bool = False
+    # OPEN WORKTREES THIS AGENT MINTED, and how many its descendants hold between them
+    # (§2.2).
+    #
+    # WHAT THIS REPLACES, named because it was never a decision: until D2, `fork` was fused
+    # to `is_top`, so only a top-level orchestrator ever held an open worktree and the
+    # fleet's worktree count was small BY CONSTRUCTION. That was an ACCIDENTAL resource
+    # bound — nobody chose it, nothing enforced it, and it fell out of a coupling that
+    # existed for a different reason. Decoupling the two removed it, and this count is what
+    # went in its place: the number a person can see, not a ceiling a lead runs into.
+    #
+    # `worktrees` is `store.open_worktree_counts` for this row verbatim — spaces
+    # this agent forked that still have a checkout; `worktrees_below` is the same number
+    # summed over everything beneath it, EXCLUDING its own, so the two are never added up
+    # twice by a reader and a lead that forked none itself still says what its subtree
+    # costs.
+    #
+    # 0 on a row nobody computed it for, which is the same shape `diverged_below` uses:
+    # the count is not a third-valued fact — an agent that minted nothing and a fleet
+    # nobody counted both draw no mark, and drawing one on the second would be the readout
+    # inventing news.
+    worktrees: int = 0
+    worktrees_below: int = 0
 
     @property
     def caps_diverged(self) -> bool:
@@ -586,6 +622,36 @@ class AgentStatus:
         if self.diverged_below:
             named.append("\u2193")
         return self.role + signs + "".join(" " + n for n in named)
+
+    @property
+    def workspace_cell(self) -> str:
+        """The WORKSPACE column's text: where this agent IS, plus the worktrees it has
+        OPENED (D4, §2.2).
+
+        Two different facts in one column on purpose. `agents.workspace` is a pointer —
+        one name, the space this row is attached to — and the count is a resource this row
+        is responsible for; they share a column because they are the same subject and
+        because the alternative is a new column on a line that already carries eight.
+
+        THE NUMBER IS ALL IT IS. There is no threshold rendering, no colour and no mark for
+        a large one: the design's answer to a wide fan-out is visibility, not policing
+        (§2.2), and a renderer that started shouting past some number would be a hard cap
+        wearing a different hat. Twenty reads as `wt20` and nothing else happens.
+
+        `↓` is the subtree, and it means here what it means in `role_cell`: the news is
+        BELOW this row. At twenty sibling rows, adding up twenty leaf counts to find what a
+        lead's fan-out cost is not a glance. It EXCLUDES this row's own, so `wt2 ↓18` is
+        twenty worktrees and never twenty-two.
+
+        A row that minted none and has none beneath it is exactly what it was before this:
+        the workspace name, or `-`.
+        """
+        cell = self.workspace or "-"
+        if self.worktrees:
+            cell += f" wt{self.worktrees}"
+        if self.worktrees_below:
+            cell += f" \u2193{self.worktrees_below}"
+        return cell
 
     @property
     def blocked(self) -> bool:
@@ -897,6 +963,7 @@ class AgentStatus:
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
             "needs_for", "awaiting_keypress", "pane_id",
             "caps_held", "caps_delegable", "caps_template", "diverged_below",
+            "worktrees", "worktrees_below",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -1175,6 +1242,9 @@ def collect(
     # per agent: this runs on every draw of a board that redraws every two seconds.
     caps = store.all_capabilities(db)
     templates = _templates(rows, repo)
+    # And the worktree side, on the same rule and for the same reason: one scan of the
+    # workspaces table for the whole fleet, not one query per row (§2.2).
+    worktrees = store.open_worktree_counts(db)
 
     ordered = _tree(rows)
     # Whether this store can remember an absence at all. A store an older `sb` last stamped
@@ -1394,6 +1464,9 @@ def collect(
             # pane has moved carries a stale id and matches nothing, which is the harmless
             # end of this field's only use — see the field's own note.
             pane_id=row["pane_id"] or None,
+            # THE WORKTREES THIS ROW MINTED (§2.2). `worktrees_below` is stamped after
+            # the loop, with `diverged_below`, because it needs every row built first.
+            worktrees=worktrees.get(row["name"], 0),
             # THE THREE CAPABILITY SETS, or None where this store cannot say (a row older
             # than the substrate, a role table that would not load). See `role_cell` for
             # what is drawn from them, and `_capability_sets` for why NULL is not empty.
@@ -1412,6 +1485,15 @@ def collect(
     below = _diverged_below(agents)
     for a in agents:
         a.diverged_below = a.name in below
+
+    # THE SAME AGGREGATE FOR THE SAME REASON, over a count rather than a bit (§2.2): a
+    # lead's row says what its whole fan-out is holding, so nobody adds twenty leaf rows
+    # up by eye. Separate from the walk above because the two facts are aggregated
+    # differently — divergence is an OR and this is a SUM — and one pass computing both
+    # would be a function whose name could only be `_stuff_below`.
+    beneath = _worktrees_below(agents)
+    for a in agents:
+        a.worktrees_below = beneath.get(a.name, 0)
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.
@@ -1524,6 +1606,33 @@ def _diverged_below(agents: list[AgentStatus]) -> set:
         while up is not None and up.name not in seen:
             seen.add(up.name)
             out.add(up.name)
+            up = by_name.get(up.parent) if up.parent else None
+    return out
+
+
+def _worktrees_below(agents: list[AgentStatus]) -> dict[str, int]:
+    """Open worktrees held BENEATH each agent, excluding its own. `{name: count}`.
+
+    Walks up from each row that minted something, the way `_diverged_below` walks up from
+    each diverged one: one pass over the fleet, no recursion to blow up on a deep tree, and
+    the same two guards against the shapes a live snapshot can hold — a parent naming a row
+    that is not in the snapshot ends the walk, and `seen` (which starts holding the agent
+    itself) stops a cycle and keeps anything from being its own descendant.
+
+    The agent's own count is never added to its own entry: `worktrees` already carries it,
+    and a reader that wanted the subtree total would otherwise have no way to get it
+    without double-counting the row it is standing on.
+    """
+    by_name = {a.name: a for a in agents}
+    out: dict[str, int] = {}
+    for a in agents:
+        if not a.worktrees:
+            continue
+        seen = {a.name}
+        up = by_name.get(a.parent) if a.parent else None
+        while up is not None and up.name not in seen:
+            seen.add(up.name)
+            out[up.name] = out.get(up.name, 0) + a.worktrees
             up = by_name.get(up.parent) if up.parent else None
     return out
 
@@ -2433,8 +2542,10 @@ def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
     # divergence marker widens the column rather than being cut off it (§2.5).
     w_role = max([len("ROLE")]
                  + [len(r.role_cell) for r in rows if not isinstance(r, Collapsed)])
+    # `workspace_cell`, not `workspace`: like ROLE, this column is sized to CONTENT, so
+    # the worktree count widens it rather than pushing the flags off the line (§2.2).
     w_ws = max([len("WORKSPACE")]
-               + [len(r.workspace or "-") for r in rows if not isinstance(r, Collapsed)])
+               + [len(r.workspace_cell) for r in rows if not isinstance(r, Collapsed)])
 
     lines.append(f"{'AGENT':<{w_name}}  {'ROLE':<{w_role}}  {'STATE':<8}  {'HERDR':<7}  "
                  f"{'MAIL':>4}  {'AGE':>6}  {'IDLE':>6}  {'WORKSPACE':<{w_ws}}")
@@ -2445,7 +2556,7 @@ def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
         lines.append(
             f"{label:<{w_name}}  {a.role_cell:<{w_role}}  {a.display_state:<8}  {_herdr_cell(a):<7}  "
             f"{(str(a.unread) if a.unread else '-'):>4}  {fmt_age(a.age):>6}  "
-            f"{fmt_age(a.idle):>6}  {(a.workspace or '-'):<{w_ws}}{_flags(a)}"
+            f"{fmt_age(a.idle):>6}  {a.workspace_cell:<{w_ws}}{_flags(a)}"
         )
         lines.extend(_what(a))
 

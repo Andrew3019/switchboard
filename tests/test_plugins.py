@@ -1052,6 +1052,10 @@ class IsolationTest(Sandbox):
         verbs = set(cli.build_parser()._subparsers._group_actions[0].choices)
         higher = {"presets",                            # level 1
                   "delegate", "start",                  # level 2
+                  # level 2 for `delegate`'s own reason and no other: a conflicting merge
+                  # spawns ONE integrator through the same call, so the same fragments have
+                  # to be loadable. The git plumbing either side of that is level 0 work.
+                  "merge",
                   "workspace",                          # reads and tears down; no spawn
                   "plugin", "doctor",                   # level 3
                   "plugins"}                            # retired, answers before anything
