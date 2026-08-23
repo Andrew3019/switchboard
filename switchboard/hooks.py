@@ -24,6 +24,13 @@ than the existing 72-second grace and the longest ran 18 minutes, so no timeout 
 edges cost nothing per tool call, about 74 ms once per turn, and need no timeout at all: a
 long tool call is inside a turn that began and has not ended, however long it runs.
 
+The turn-STARTED edge carries a third thing since the guidance ledger (spec §2.4). What the
+CLI does with a `UserPromptSubmit` hook's stdout — add it to the agent's context — is a
+per-turn injection channel that was deliberately going unused, and `guidance.deliver` is
+what now speaks on it. No new hook, no new settings entry, no new process: the hook that
+already fired once per turn returns a line when a rule applies to that agent, and the empty
+string, exactly as before, when none does.
+
 Three pieces:
 
 * `settings_file()` writes the per-repo settings JSON that carries BOTH hooks, and
@@ -61,6 +68,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
+from . import guidance
 from . import store
 
 # The states that mean "this agent reported". `blocked` is a report — it is the one way an
@@ -509,19 +517,57 @@ def run(stdin_text: str, db_path: Optional[Path] = None) -> dict[str, Any]:
     return {"decision": "block", "reason": reason} if reason else {}
 
 
-def run_activity(stdin_text: str, db_path: Optional[Path] = None) -> None:
-    """The `UserPromptSubmit` hook: a turn is beginning. Returns nothing, on purpose.
+def run_activity(stdin_text: str, db_path: Optional[Path] = None) -> str:
+    """The `UserPromptSubmit` hook: a turn is beginning. -> what to tell the agent, or "".
 
-    Nothing is printed by its entry point either, and that is not tidiness: on
-    `UserPromptSubmit` the CLI adds a hook's stdout to the agent's CONTEXT. Anything this
-    said would be read by the agent as an instruction arriving with its task.
+    Two things, in this order: the turn-started edge is recorded, and then the guidance
+    ledger is asked whether anything applies to this agent right now (`guidance.deliver`).
+
+    WHAT IT RETURNS IS INJECTED INTO THE AGENT'S CONTEXT. On `UserPromptSubmit` the CLI
+    adds a hook's stdout to the context of the turn that is beginning, which used to make
+    printing anything here a bug — a stray line would arrive in front of the agent as
+    though it were part of its task. That property is now the CHANNEL rather than the
+    hazard: the ledger is the one thing allowed to use it, everything it says is marked
+    `[sb: guidance]` so it cannot be mistaken for the human typing, and when no rule
+    matches this returns the empty string and the hook prints exactly what it printed
+    before — nothing.
+
+    **Guidance never costs a turn edge.** The mark is written first and the ledger is
+    wrapped in its own `try`, so a rule that cannot be read, a ledger that will not parse
+    and a store that lacks the cursor table all cost silence, not the activity signal the
+    board reads. Everything in this file fails open; the cost of a missed nudge is a
+    reminder nobody got, and the cost of a raised hook is an agent whose turns stop being
+    recorded.
     """
     payload, db = _open(stdin_text, db_path)
     if db is None:
-        return
+        return ""
     try:
-        mark_turn(payload, db, store.TURN_WORKING)
+        name = mark_turn(payload, db, store.TURN_WORKING)
     except Exception:                            # noqa: BLE001 — never trap an agent
-        return
+        return ""
+    try:
+        # An unresolvable caller is not one of ours — no row, no rules, nothing to say.
+        return guidance.deliver(db, name, repo=_repo()) if name else ""
+    except Exception:                            # noqa: BLE001 — a nudge is never worth a turn
+        return ""
     finally:
         db.close()
+
+
+def _repo() -> Optional[Path]:
+    """The checkout whose `.switchboard/guidance.toml` should be layered on the shipped one.
+
+    THIS worktree, resolved the way `cli.main` resolves it (`store.worktree_root`) so the
+    ledger a hook reads and the ledger a command would read cannot come apart. The hook
+    runs in the agent's own working directory, which is what makes the process cwd the
+    right question to ask.
+
+    None on anything that will not resolve — a session outside a repo, git unavailable —
+    and None simply means the shipped ledger alone, which is a smaller answer rather than
+    a wrong one.
+    """
+    try:
+        return store.worktree_root()
+    except Exception:                            # noqa: BLE001 — shipped rules still apply
+        return None

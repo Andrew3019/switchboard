@@ -437,6 +437,38 @@ CREATE TABLE capabilities (
                                       -- says who, this says why.
 );
 CREATE UNIQUE INDEX idx_caps_agent_cap ON capabilities(agent, cap);
+
+CREATE TABLE guidance (
+    agent         TEXT,               -- who was told. Keyed by NAME, like `capabilities`
+                                      -- and for the same reason: every read is by name,
+                                      -- and a row outliving its agent costs a row rather
+                                      -- than a wrong answer.
+    rule_id       TEXT,               -- which ledger rule (`guidance.toml`'s `id`). The
+                                      -- pair (agent, rule_id) IS the repeat-policy cursor
+                                      -- the spec asks for — the generalization of
+                                      -- `hooks._already_nudged`, which is this same fact
+                                      -- for exactly one hardcoded rule, read off the
+                                      -- event log because it had nowhere else to live.
+    delivered_at  INTEGER,            -- epoch of the most recent delivery. Not a turn
+                                      -- number: switchboard counts no turns, and a clock
+                                      -- reading is the observable this store already has.
+    deliveries    INTEGER NOT NULL DEFAULT 1,
+                                      -- how many times this rule has reached this agent.
+                                      -- Nothing decides on it — `once` turns on the row
+                                      -- existing and `once-until-clear` on its
+                                      -- `cleared_at` — so it is here to make nag-fatigue (spec §5)
+                                      -- countable rather than anecdotal.
+    cleared_at    INTEGER             -- epoch this cursor was last CLEARED — the turn a
+                                      -- `once-until-clear` rule's condition stopped
+                                      -- holding. NULL means the cursor is still standing,
+                                      -- which is what suppresses a repeat. The row is
+                                      -- updated rather than deleted, so `deliveries` and
+                                      -- the delivery history survive a clear: "told once"
+                                      -- and "told again because the state came back" are
+                                      -- different facts and the board should be able to
+                                      -- tell them apart.
+);
+CREATE UNIQUE INDEX idx_guidance_agent_rule ON guidance(agent, rule_id);
 """
 
 # A cache key, NOT a version. It covers the SCHEMA string verbatim, so editing a comment
@@ -1440,6 +1472,57 @@ def all_capabilities(db: sqlite3.Connection) -> dict[str, tuple[set, set]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Guidance cursors — the per-(agent, rule) repeat-policy state (spec §2.4)
+# ---------------------------------------------------------------------------
+#
+# THE ROW IS THE CURSOR. Three functions, and no policy in any of them: which policy a rule
+# carries, and what it means, is `guidance.py`'s — this file only records what was told to
+# whom and when it stopped applying. That split is deliberate. `hooks._already_nudged` is
+# the same fact for one hardcoded rule, and it reads the EVENT LOG for it precisely because
+# there was no table; the moment a second rule existed, "was this one delivered?" needed a
+# key, and the key is `(agent, rule_id)`.
+
+
+def guidance_cursors(db: sqlite3.Connection, name: str) -> dict[str, sqlite3.Row]:
+    """Every cursor this agent holds, by rule id. One query, not one per rule.
+
+    Read whole because the resolver asks about every rule in the ledger on every turn: a
+    query per rule would put the ledger's SIZE into the per-turn cost of a hook that is
+    supposed to be free when it has nothing to say.
+    """
+    return {r["rule_id"]: r for r in
+            db.execute("SELECT * FROM guidance WHERE agent=?", (name,))}
+
+
+def record_guidance(db: sqlite3.Connection, name: str, rule_id: str) -> None:
+    """This rule reached this agent, now. Sets the cursor and clears any `cleared_at`.
+
+    UPSERT rather than INSERT OR REPLACE: the count has to survive the second delivery,
+    and REPLACE would delete the row and write a fresh one with `deliveries` back at 1.
+    """
+    db.execute(
+        "INSERT INTO guidance(agent, rule_id, delivered_at, deliveries, cleared_at) "
+        "VALUES(?, ?, ?, 1, NULL) "
+        "ON CONFLICT(agent, rule_id) DO UPDATE SET "
+        "  delivered_at=excluded.delivered_at, deliveries=deliveries+1, cleared_at=NULL",
+        (name, rule_id, now()),
+    )
+    db.commit()
+
+
+def clear_guidance(db: sqlite3.Connection, name: str, rule_id: str) -> None:
+    """The condition stopped holding: a `once-until-clear` rule may fire again.
+
+    Only ever touches a cursor that is standing, so a clear on an already-cleared rule —
+    which is every turn an agent spends in the ordinary state — writes nothing at all.
+    That `WHERE cleared_at IS NULL` is what keeps the hook's cost zero on a quiet turn.
+    """
+    db.execute("UPDATE guidance SET cleared_at=? WHERE agent=? AND rule_id=? "
+               "AND cleared_at IS NULL", (now(), name, rule_id))
+    db.commit()
+
+
 def drop_agent(db: sqlite3.Connection, name: str) -> None:
     """Remove a row. Only ever used to undo a claim whose spawn then failed — otherwise
     an agent that never started would hold its name against every later attempt.
@@ -1450,6 +1533,10 @@ def drop_agent(db: sqlite3.Connection, name: str) -> None:
     """
     db.execute("DELETE FROM agents WHERE name=?", (name,))
     db.execute("DELETE FROM capabilities WHERE agent=?", (name,))
+    # The guidance cursors go with them, by the same key and for the same reason: a name
+    # about to be handed to a different agent must not hand it rules already marked as
+    # delivered, or the next holder is silently born having "already been told".
+    db.execute("DELETE FROM guidance WHERE agent=?", (name,))
     db.commit()
 
 

@@ -1,0 +1,118 @@
+# The guidance ledger: situational rules, delivered at the turn where they apply.
+#
+# THIS FILE IS THE ALTERNATIVE TO A LONGER SPAWN PROMPT. Everything in `protocol.md` is paid
+# for by every agent on every spawn, forever, whether or not it ever becomes relevant — so a
+# rule that only matters once some state holds ("you have a finished isolated child, fold it
+# in") was being bought for every agent that would never reach that state. A rule here is
+# bought only by the agent the state actually describes, at the turn it describes it.
+#
+# WHAT BELONGS HERE, and what does not. Only REMINDER-shaped rules: "before your next
+# action, remember X". Identity and orientation prose — who you are, who reads you, why
+# `sb block` exists — has no later turn to wait for; it must be true from turn one, so it
+# stays in the spawn prompt and moving it here would break the agent's first turn. Moving a
+# rule here means DELETING it there: a rule in both places is paid for twice and drifts.
+#
+# A LEDGER THAT ONLY GROWS IS THE FAILURE MODE. Every row costs the attention of the agent
+# it fires on, at the moment it is trying to do something else, and an agent that is nagged
+# routinely stops reading nudges at all (spec §5). So: prune. Before adding a row, ask
+# whether an existing one should be reworded instead; before keeping one, ask whether it has
+# ever changed what an agent did. `deliveries` in the `guidance` store table counts how often
+# each rule has fired, per agent, so that question has an answer rather than an opinion.
+#
+# HOW A RULE IS MATCHED. Every key is optional and they AND together:
+#
+#   id      required, unique. The cursor key — renaming an id re-arms the rule for every
+#           agent that has already been told it.
+#   text    what the agent is told. One line, no placeholders, and it reaches the agent
+#           marked `[sb: guidance]` so it is never mistaken for the human typing.
+#   role    fires only for agents of that role.
+#   command fires only when the rule is resolved with that command in context. Nothing
+#           resolves with one yet — command output is E2 — so a `command` rule is inert
+#           until then, and the key exists so a row written for it does not need the
+#           resolver changed.
+#   holds / lacks
+#           capability names, matched against the agent's LIVE capability set — what it
+#           holds NOW, grants included, never the role template. Anything else would nag a
+#           worker to "ask your lead" the moment after its lead granted it `spawn`.
+#   when    a list of DETERMINISTIC clauses over observable store facts, `{fact, op, value}`.
+#           `op` is one of == != > >= < <=. The facts are listed in `guidance.FACTS`, and a
+#           fact this file names and that file does not is a startup error rather than a
+#           rule that silently never fires. There is deliberately NO free-text condition and
+#           no "is this non-trivial" judgement: a rule either has an observable it turns on
+#           or it does not belong here.
+#   repeat  `every-time`, `once`, or `once-until-clear` (the default). `once` is for a fact
+#           that is worth saying exactly once per agent; `once-until-clear` says it again
+#           only if the state went away and came back, which is what makes a recurring
+#           situation recur without turning into a per-turn drip.
+#
+# PRECEDENCE. Most specific wins the ORDER things are said in, not the right to be said:
+# live-state (`when`/`holds`/`lacks`) first, then `command`, then `role`, then global, ties
+# broken by the order rows appear here. Every matching rule is delivered.
+#
+# A repo adds its own rows in `<repo>/.switchboard/guidance.toml` with the same `[[rule]]`
+# blocks; arrays JOIN, so the shipped rows survive. The file is read afresh EVERY TURN, so
+# an edit here reaches agents that are already running — including this one — on their next
+# turn. That is the point of it being data.
+
+
+# MOVED OUT OF `protocol.md` (2026-08-22, unit E1). This paragraph used to sit in the
+# protocol, where every agent paid for it — including every leaf worker that will never
+# spawn anything, and every agent whose children are all `shared`. It is the canonical
+# reminder shape: nothing to do with it until a child has actually finished on a branch of
+# its own, and at that moment it is exactly what the parent needs.
+#
+# `once-until-clear` rather than `every-time`: a lead folding in a five-way fan-out is told
+# once, not once per turn while it works through them, and is told again the next time a
+# cohort finishes — because the cursor clears in between, when no child is left to merge.
+[[rule]]
+id = "merge-finished-isolated-child"
+when = [{fact = "mergeable_children", op = ">=", value = 1}]
+repeat = "once-until-clear"
+text = "A child of yours has finished on a branch of its own. `sb merge <child>` folds that one child's branch into YOUR branch, in your own checkout — run it as each child finishes rather than saving them up. It never pushes and never opens a pull request; landing the assembled branch is still the separate step. It refuses if your checkout has uncommitted changes, and a real conflict spawns one agent to resolve that merge."
+
+
+# D4's soft worktree threshold (spec §2.2), which `status.WORKTREE_SOFT_THRESHOLD` names and
+# deliberately left with nothing behind it: the count is real, the judgement stays with the
+# operator, and this row is the consumer that TODO points at. NOTHING refuses, caps or marks
+# a row for crossing it — a 20-way fan-out is sometimes the right call, and this says so in
+# the same breath as it raises the question.
+#
+# `value` duplicates that constant, which is the price of the threshold being data here and
+# a number there; `test_guidance` asserts the two are equal, so drift fails a test rather
+# than going quietly out of step.
+[[rule]]
+id = "worktree-fan-out"
+when = [{fact = "worktrees", op = ">", value = 8}]
+repeat = "once-until-clear"
+text = "You are holding more open worktrees than usual for one agent. That is not a limit and nothing is refused — but each one is a checkout on disk, so close the workspaces whose work has already landed (`sb workspace close <name>`) before you fork more, or say plainly why they all need to stay open."
+
+
+# D2's fan-out nudge (spec §2.2), the second rule the plan gives a home here. The spec's
+# wording is "the Nth `write-tracked` child in a turn without `isolation=own`"; switchboard
+# counts no turns, so what is actually observed is the standing fact underneath it — how
+# many children hold `write-tracked` and are working in the caller's own checkout right now.
+# That is the state the nudge is about, and it is observable; "in a turn" is not.
+[[rule]]
+id = "shared-write-tracked-fan-out"
+when = [{fact = "shared_write_tracked_children", op = ">=", value = 3}]
+repeat = "once-until-clear"
+text = "Several of your children are writing tracked files in YOUR checkout at the same time (`isolation shared`, the default). That is allowed and often right for small edits — but if they are editing the same files, spawn them with `--isolation own` and fold each one back with `sb merge <child>` instead."
+
+
+# THE POLICY/MECHANISM SPLIT, as a row (spec §2.1, "policy/mechanism split"). The hard wall
+# is the capability check — CAN this agent spawn at all — and it stays exactly where it is,
+# in `require_capability`. The CONVENTION about who you should hand a piece of work to is a
+# different kind of thing, it used to be fused into that same flag, and here it is soft
+# guidance instead: something an agent is told, not something it is refused for.
+#
+# Keyed on the COMMAND, because "who should I delegate this to" is a question that only
+# exists at the moment of delegating; there is no standing state at turn start that means
+# it. Nothing resolves with a command yet — surfacing state in command output is E2 — so
+# this row is inert until that call site exists, and it is written now so that E2 adds a
+# call and not a rule. `holds = ["spawn"]` keeps it off every agent that could not act on it.
+[[rule]]
+id = "delegate-to-a-lead"
+command = "delegate"
+holds = ["spawn"]
+repeat = "once"
+text = "Work that will fan out further wants a `lead`, not a `worker`: a lead is expected to split what it is given and delegate on, a worker is expected to do one piece itself. Nothing refuses either choice — this is a convention, and the capability check is the only wall."

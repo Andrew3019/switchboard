@@ -42,6 +42,12 @@ settings_file = "settings.toml"
 # table per entry. Array-of-tables, so a repo's entries JOIN the shipped ones.
 operator_skills_file = "operator_skills.toml"
 
+# The guidance ledger — situational rules delivered at the turn they apply to, one
+# `[[rule]]` table per entry. Array-of-tables like the one above, so a repo's rows JOIN the
+# shipped ones rather than replacing them. Read on EVERY turn, which is what makes an edit
+# reach agents that are already running.
+guidance_file = "guidance.toml"
+
 # One directory and one file, each meaning two things during the transition — and needing
 # no disambiguation, because the two are told apart by SHAPE rather than by name:
 #
