@@ -250,8 +250,21 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("--peek", action="store_true",
                     help="do not mark as read (safe for polling)")
 
-    dn = cmd("done", help="you have finished")
+    dn = cmd(
+        "done", help="you have finished",
+        # PROMOTE, said where the caller looks before it types the flag. The two things
+        # worth knowing before using it are that it is the CHILDREN that move (not the
+        # promoter, which finishes normally) and that it needs no permission from anybody
+        # — see `broker.Broker.done`.
+        description="With --preserve-children this is the hand-off: your live children "
+                    "rise one level and report to whoever you report to, instead of being "
+                    "left under an agent that has finished. Your summary is the hand-off "
+                    "note they read it with.")
     dn.add_argument("summary")
+    dn.add_argument("--preserve-children", action="store_true",
+                    help="hand your live children up to your own parent as you finish — "
+                         "they keep their panes, their checkouts and their work, and "
+                         "report to your parent from now on")
 
     bl = cmd(
         "block", help="stop and surface to the human (they answer with `sb tell`)",
@@ -1300,7 +1313,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "done":
-        still = b.done(args.summary, me=me)
+        still = b.done(args.summary, me=me,
+                       preserve_children=args.preserve_children)
         # Legal, and worth saying out loud: the agent is finishing a turn its children
         # have not finished, and their summaries will arrive here after it.
         note = "done" if not still else (
@@ -1315,6 +1329,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             note = ("already reported — you called `sb done` before, and your parent has "
                     "that summary. This one is recorded in the log, but it is not sent "
                     "again and the first summary stays on the board. Nothing to redo.")
+        if b.promoted:
+            # The promote is worth saying back even though it succeeded: the caller has
+            # just changed somebody ELSE's reporting line, and this is the only place it
+            # sees whose. `still` is empty by construction after one — the children are no
+            # longer underneath it — so the "still working underneath you" note above is
+            # not the thing that reports this.
+            up_to = b.current_parent(me) or "the human"
+            note += (f"\nhanded up to {up_to}: {', '.join(b.promoted)}. They report "
+                     f"there from now on and have been told so; nothing else about them "
+                     f"moved.")
         if b.done_flags:
             # The `done` boundary of the side-effect class (E4). A FLAG, not a refusal:
             # exit 0, the report stands and has already been mailed, and this is what says
@@ -1326,7 +1350,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 f"to your parent — they can `sb grant` it if that was wrong."
                 for cap in b.done_flags))
         _emit(args, note, {"agent": me, "live_children": still,
-                           "repeat": b.done_repeat, "flagged": b.done_flags})
+                           "repeat": b.done_repeat, "flagged": b.done_flags,
+                           "promoted": b.promoted})
         return 0
 
     if cmd == "block":

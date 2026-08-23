@@ -1839,6 +1839,57 @@ def children_of(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def live_children_of(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    """The direct children whose work is still going. The rows a PROMOTE moves (§2.3).
+
+    Deliberately the SAME predicate as `promote_children`'s `WHERE`, in the same
+    transaction as it: the set that is signalled has to be exactly the set that moved, and
+    two predicates that could drift apart would be a promote that told the wrong agents.
+
+    Finished rows stay where they are. They report to nobody, nothing is waiting on their
+    summaries, and moving an archived row up a level would rewrite history the event log
+    is the record of.
+    """
+    return db.execute(
+        f"SELECT * FROM agents WHERE parent=? AND state IN {LIVE_STATES} "
+        f"AND ended_at IS NULL ORDER BY created_at", (name,)
+    ).fetchall()
+
+
+def promote_children(db: sqlite3.Connection, *, promoter: str,
+                     new_parent: Optional[str], commit: bool = True) -> None:
+    """Re-home a promoter's live children onto `new_parent`. THE topology write (§2.3, F2).
+
+    The first `UPDATE agents SET parent` this codebase has ever had, and it is one
+    statement on purpose. A torn intermediate is not merely prevented by the write lock —
+    it has **no shape to take**: every reader of this column is a plain equality read
+    (`current_parent`, `current_parentage`, `children_of`, `Broker._has_live_child`,
+    `hooks._has_live_child`) and so observes the pre-state or the post-state, and the one
+    multi-statement walk over it (`Broker._descendants`) holds a `read_snapshot`. NO ROW IS
+    CREATED and no row is deleted; a set of pointers moves up one level.
+
+    `new_parent=None` is legal and is not the top's case: a NON-top promoter that was
+    spawned by the human has `parent IS NULL` itself, and its children simply inherit that
+    — their `done` then takes the root branch and surfaces to the human. The TOP is refused
+    a level up (`Broker.done`), because setting ITS children's parent to NULL would unhook
+    the fleet from the row `top_agents` and `Broker._root_of` resolve against.
+
+    ACYCLIC BY CONSTRUCTION, and more strongly than any move that could go downward: the
+    new parent is an ancestor of every row moved, and a cycle would need it to sit BELOW
+    one of them, which a tree forbids. Worth saying because `Broker._descendants` does not
+    terminate on a cycle at all.
+
+    `commit=False` for a caller inside `mutation()`: the topology write, the `done` it
+    rides on and every signal it owes land together or not at all.
+    """
+    db.execute(
+        f"UPDATE agents SET parent=? WHERE parent=? AND state IN {LIVE_STATES} "
+        f"AND ended_at IS NULL", (new_parent, promoter),
+    )
+    if commit:
+        db.commit()
+
+
 def live_agents(db: sqlite3.Connection) -> list[sqlite3.Row]:
     return db.execute(
         f"SELECT * FROM agents WHERE state IN {LIVE_STATES} AND ended_at IS NULL"
@@ -1885,13 +1936,22 @@ def live_tops(db: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def set_state(db: sqlite3.Connection, name: str, state: str) -> None:
+def set_state(db: sqlite3.Connection, name: str, state: str,
+              commit: bool = True) -> None:
+    """`commit=False` for a caller inside `mutation()` — see `put_message`.
+
+    `done --preserve-children` is the caller that needs it: the state write is one of the
+    four things (topology, `done` mail, state, signals) that has to land in one
+    transaction, and a `set_state` that committed on its own would break the promote in
+    half at exactly the point the signal rule exists to protect.
+    """
     ended = now() if state in ("done", "failed") else None
     db.execute(
         "UPDATE agents SET state=?, ended_at=COALESCE(?, ended_at) WHERE name=?",
         (state, ended, name),
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def set_turn(db: sqlite3.Connection, name: str, turn: Optional[str]) -> None:

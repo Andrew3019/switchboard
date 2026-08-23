@@ -213,4 +213,25 @@ granted_delegable = "This one is PASS-THROUGH ONLY: you may NOT do it yourself �
 #   {where} the checkout clause, already formatted     {branch} the branch clause, or empty
 attached = "[workspace changed] {who} attached you to the workspace `{workspace}`.{where}{branch} This is where your work belongs from now on — start your next command there rather than in the directory you were spawned in."
 
+# A PROMOTE, told to a re-homed child (§2.3, F2), over the same in-transaction channel as
+# `granted` and `attached` above (C4). This is the one fact the child cannot discover by
+# carrying on: "You report to '{parent}'" was baked into its spawn prompt exactly once and
+# is now stale, and an agent that believes it still reports to a closed proxy is the silent
+# divergence the signal rule exists for. The plumbing follows on its own — `sb tell parent`
+# resolves live — so the message says only what changed and what did NOT: nothing about its
+# task, its checkout or its pane moved, and it is not being asked to redo or re-scan a
+# thing.
+#   {who} the agent that promoted it (its old parent, now finished)
+#   {parent} who it reports to now, already quoted — or the human clause, for a root
+promoted_child = "[you report somewhere else now] {who} has finished and handed you up a level. You no longer report to {who}: from now on you report to {parent}. Your `sb done` summary goes there and `sb tell parent` reaches there. Nothing else changed — same task, same checkout, same pane — and there is nothing to redo."
+
+# The other half of a promote: told to the GRANDPARENT, which gains direct children. It
+# rides in on the `done` message that agent is already receiving in the same transaction,
+# as one more line rather than a separate doorbell, so it is worded to be read directly
+# under a summary. It is the party that would otherwise read the board it swept a moment
+# ago and close agents it never saw — hence the explicit note about `cleanup` scope.
+#   {who} the agent that promoted (whose summary this line sits under)
+#   {children} the re-homed agents, comma-separated
+promoted_to_you = "[promote] {who} handed its children up to you before finishing: {children} — reporting to you DIRECTLY from now on. Their summaries come to you, `sb cleanup` under you now reaches them, and they are still in the panes and checkouts they were already in — nothing moved but the reporting line."
+
 stalled = "[sb] Your turn ended {idle} ago without a report, so nothing in the fleet knows where you are. If you are finished, run `sb done \"<summary>\"`; if you are stuck or need a person, run `sb block \"<why>\"`; if you are neither, carry on with your task — this is asked once, not repeatedly."
