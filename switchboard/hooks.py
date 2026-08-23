@@ -30,6 +30,11 @@ Three pieces:
   `stop_hook_args()` turns it into the `--settings <path>` every spawn passes. Only agents
   we spawn are handed the file, which is the whole of the isolation — an ordinary `claude`
   session never sees it, and no file of the human's is ever written to or read.
+* `codex_hook_commands()` is the same two hooks for the other provider. Codex's hook
+  system is Claude-Code-shaped on purpose — same event names, same output schema, same
+  `stop_hook_active` flag — so only the WIRING differs: a TOML block in the agent's
+  private `CODEX_HOME` rather than a settings JSON handed over as `--settings`. The
+  decision below is shared and is not written twice.
 * `stop_gate()` is the decision, run once per turn end by `bin/sb-stop-hook`.
 * `mark_turn()` is the signal, written by `bin/sb-activity-hook` at the start of a turn
   and by `run()` at the end of one — AFTER the gate has decided, and only if the turn is
@@ -160,6 +165,42 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
     tmp.write_text(body)
     tmp.replace(p)
     return p
+
+
+def codex_hook_commands(cwd: Optional[Path] = None) -> dict[str, str]:
+    """The same two hooks, as command LINES for a codex `config.toml` block.
+
+    Codex's hook system is not an approximation of Claude Code's — it is deliberately
+    modelled on it. The binary's own embedded schema carries `Stop`, `UserPromptSubmit`,
+    the identical `{continue, decision, reason, stopReason, suppressOutput, systemMessage}`
+    output shape and the `stop_hook_active` input flag, and one of its schema comments
+    names Claude directly. Verified live against codex-cli 0.147.0: both events fire, the
+    payload carries `session_id`, `stop_hook_active` and `transcript_path`, and a
+    `{"decision":"block"}` on stdout re-opens the turn exactly as it does for Claude.
+
+    So the DECISION is shared. `stop_gate`, `mark_turn`, `run` and `run_activity` are
+    provider-agnostic already and are not duplicated here; what differs is where the
+    wiring is written — a TOML block in the agent's private `CODEX_HOME` instead of a
+    settings JSON — and that is all this returns. `switchboard/codex.py` turns it into
+    TOML; the matcher, the shape and the timeout are its business, not this file's.
+
+    THE CAP IS NOT OPTIONAL HERE. `_already_nudged` is a defensive cap for Claude and a
+    mandatory one for codex: openai/codex#37937 is an open bug in which a Stop hook that
+    keeps blocking loops with no escape at all. The cap is what stops the gate meeting
+    that bug — one block per agent until it reports — and it lives in the shared decision
+    above precisely so this path cannot be wired up without it.
+
+    Returns {} rather than raising, for `stop_hook_args`' reason: enforcement is worth a
+    lot, but not a spawn.
+    """
+    try:
+        db = shlex.quote(str(store.db_path(cwd)))
+        return {
+            "UserPromptSubmit": f"{shlex.quote(str(_entry_point('sb-activity-hook')))} --db {db}",
+            "Stop": f"{shlex.quote(str(_entry_point()))} --db {db}",
+        }
+    except Exception:                            # noqa: BLE001 — not in a repo
+        return {}
 
 
 def stop_hook_args(cwd: Optional[Path] = None) -> list[str]:
