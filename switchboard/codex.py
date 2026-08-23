@@ -48,7 +48,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections import deque
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -72,14 +71,18 @@ APPROVAL_POLICY = config.setting("codex.approval_policy")
 HOOK_TIMEOUT = config.setting("codex.hook_timeout")
 HERDR_CONFIG_DIR = config.setting("codex.herdr_config_dir")
 
-# How much of a rollout's tail the delivery proof reads, and the slack between our clock
-# and codex's own timestamps. The tail is an order of magnitude longer than `output.py`'s
-# 50 and that is not a copy gone wrong: Claude Code writes roughly one record per message,
-# where codex writes one per tool call, per reasoning step and per token count — a single
-# small task produced 132. The clock slop is the same number for the same reason (two
-# clocks, ours and codex's, not agreeing to the second). Written here rather than imported:
-# `output` reaches `store`, and `store` reaches this module.
-_ARRIVAL_RECORDS = 500
+# The slack between our clock and codex's own timestamps — two clocks not agreeing to the
+# second. Written here rather than imported: `output` reaches `store`, and `store` reaches
+# this module.
+#
+# There is deliberately no companion "how many records to read". An earlier version read
+# the tail 500, ten times `output.py`'s 50 because codex writes one record per tool call,
+# per reasoning step and per token count where Claude Code writes roughly one per message
+# — one small task produced 132. But a tail is a window a busy agent can push its own
+# submitted prompt out of between the send and the proof, and the cost of that is not a
+# missing line: `deliver` re-sends a task it cannot confirm, so the agent does the work
+# twice. Scanned whole instead, and streamed rather than buffered, which is also less work
+# than the deque was doing — it read every line of the file too, and kept 500 of them.
 _CLOCK_SLOP = 5.0
 
 
@@ -472,36 +475,47 @@ def _submitted(path: Path, needle: str) -> bool:
     out the assistant's own messages and any shell command that echoes the text.
     """
     try:
-        with path.open(errors="replace") as fh:
-            tail = deque(fh, maxlen=_ARRIVAL_RECORDS)
+        fh = path.open(errors="replace")
     except OSError:
         return False
-    for line in tail:
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue                     # a torn last line on a live session
-        if not isinstance(rec, dict):
-            continue
-        payload = rec.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        kind, outer = payload.get("type"), rec.get("type")
-        text = ""
-        if outer == "event_msg" and kind == "user_message":
-            text = str(payload.get("message") or "")
-        elif outer == "event_msg" and kind == "item_completed":
-            item = payload.get("item") or {}
-            if item.get("type") == "UserMessage":
-                text = _content_text(item.get("content"))
-        elif outer == "response_item" and kind == "message" and payload.get("role") == "user":
-            text = _content_text(payload.get("content"))
-        if text and needle in text:
-            return True
+    with fh:
+        for line in fh:
+            rec = _record(line)
+            if rec is None:
+                continue
+            text = _submitted_text(rec)
+            if text and needle in text:
+                return True
     return False
 
 
-def _content_text(content) -> str:
+def _record(line: str) -> Optional[dict]:
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        return None                      # a torn last line on a live session
+    return rec if isinstance(rec, dict) else None
+
+
+def _submitted_text(rec: dict) -> str:
+    """The text this record puts TO the agent, or empty for every other record."""
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    kind, outer = payload.get("type"), rec.get("type")
+    if outer == "event_msg" and kind == "user_message":
+        return str(payload.get("message") or "")
+    if outer == "event_msg" and kind == "item_completed":
+        item = payload.get("item") or {}
+        if isinstance(item, dict) and item.get("type") == "UserMessage":
+            return content_text(item.get("content"))
+        return ""
+    if outer == "response_item" and kind == "message" and payload.get("role") == "user":
+        return content_text(payload.get("content"))
+    return ""
+
+
+def content_text(content) -> str:
     """The text of a codex content list — `text`/`Text` in the item stream,
     `input_text`/`output_text` in the raw model items."""
     if isinstance(content, str):

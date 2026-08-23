@@ -2244,7 +2244,7 @@ def _codex_assistant_texts(rec: dict) -> list[str]:
     if not isinstance(content, list):
         return []
     # `text`/`Text` in the item stream, `output_text` in the raw model items — the same
-    # four part names `codex._content_text` reads, and matched case-insensitively for
+    # four part names `codex.content_text` reads, and matched case-insensitively for
     # the same reason: the TUI capitalises where the model items do not.
     return [str(p["text"]) for p in content
             if isinstance(p, dict)

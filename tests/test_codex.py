@@ -235,6 +235,19 @@ class RolloutTest(HomeFixture, unittest.TestCase):
                                                "text": "do the thing"}]}}}) + "\n")
         self.assertFalse(codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
 
+    def test_the_prompt_is_found_however_busy_the_agent_has_been_since(self):
+        """The nit that was a false negative with teeth. This used to read the tail 500
+        records; codex writes one per tool call, per reasoning step and per token count,
+        so a busy agent pushes its own submitted prompt out of any window between the send
+        and the proof. The cost is not a missing line — `deliver` re-sends a task it cannot
+        confirm, so the agent does the work twice."""
+        self.write()
+        noise = json.dumps({"type": "event_msg",
+                            "payload": {"type": "token_count", "info": {}}}) + "\n"
+        self.rollout().write_text(
+            json.dumps(self.EXEC_PROMPT) + "\n" + noise * 2000)
+        self.assertTrue(codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
+
     def test_a_claude_agent_has_no_rollouts_to_find(self):
         self.assertIsNone(codex.newest_session_id("w1", self.repo))
         self.assertIsNone(codex.sessions_dir("w1", self.repo))

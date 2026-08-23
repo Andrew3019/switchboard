@@ -462,17 +462,16 @@ def _render_codex_item(item: dict) -> list[str]:
 
 
 def _codex_text(content: Any) -> str:
-    """The text of a codex content list. Its part `type` is `text`/`Text` in the item
-    stream and `input_text`/`output_text` in the raw model items; all four are read."""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    return " ".join(
-        str(p.get("text") or "") for p in content
-        if isinstance(p, dict)
-        and str(p.get("type", "")).lower() in ("text", "input_text", "output_text")
-    )
+    """The text of a codex content list — `text`/`Text` in the item stream,
+    `input_text`/`output_text` in the raw model items.
+
+    One line, because it was two copies of the same function: this module's and
+    `codex.content_text`. Kept as a name here rather than calling through everywhere so
+    the renderer above still reads as a renderer, and imported locally because `codex`
+    reaches back into `store`, which reaches this way.
+    """
+    from . import codex
+    return codex.content_text(content)
 
 
 def _text_of(content: Any) -> str:
