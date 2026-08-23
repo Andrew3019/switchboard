@@ -26,10 +26,12 @@ import sys
 from typing import Any, NamedTuple, Optional
 
 from . import config
+from . import guidance
 from . import models as models_mod
 from . import panel as panel_mod
 from . import plugins as plugins_mod
 from . import presets as presets_mod
+from . import roles as roles_mod
 from . import status as status_mod
 from . import store
 from . import validate
@@ -713,6 +715,96 @@ def _who_holds_text(cap: str, holders: list) -> str:
     return "\n".join(lines)
 
 
+# THE COMMANDS WHOSE OUTPUT CARRIES THE CALLER'S STATE (E2, spec §2.4), and the key a
+# `command` guidance rule is matched on. Deliberately short, and chosen by a rule rather
+# than by taste: these are the verbs that SPEND something of the caller's — a capability
+# (`delegate` spends `spawn` and `fork`, `grant` spends what you hold or may pass down),
+# or a resource it is answerable for (`merge` folds another branch into your checkout,
+# `workspace close` destroys one). They are exactly the commands where "what am I, and
+# where am I?" changes what the caller should do next.
+#
+# Everything else stays quiet, and that is the half worth defending (obj. 5). `tell`,
+# `inbox`, `done`, `block`, `status`, `log`, `inspect` are the verbs an agent runs dozens
+# of times a turn-cycle; a state readout under each of them would be the nag-fatigue
+# §5 warns about, arriving through a second channel. The read verbs are also the ones
+# that already SHOW state — `sb status` draws the divergence marker, `sb who-holds`
+# answers about capabilities outright — so a footer there would be a second, shorter
+# answer to the question the command was asked.
+STATE_COMMANDS = frozenset({"delegate", "grant", "merge", "workspace"})
+
+
+def _state_key(args) -> Optional[str]:
+    """The command key for this invocation, or None on a trivial one.
+
+    `workspace` is the one verb that splits: `close` retires a checkout somebody is
+    responsible for, `list` is a read like any other, so the key is the verb only when the
+    subcommand is the one that acts.
+    """
+    cmd = getattr(args, "cmd", None)
+    if cmd not in STATE_COMMANDS:
+        return None
+    if cmd == "workspace" and getattr(args, "wcmd", None) != "close":
+        return None
+    return cmd
+
+
+def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
+    """Print the caller's own state under a non-trivial command's output, and ask the
+    ledger whether any `command`-keyed rule fires (E2, spec §2.4).
+
+    TWO THINGS THROUGH ONE DOOR, and neither is a new mechanism. The readout is
+    `guidance.state_note` — what this agent may do, where it is attached, what config it
+    runs under, what was granted to it since it was spawned. The rules are
+    `guidance.deliver` with the command in hand, which is the call site E1 built the
+    `command` key for and left with nobody to call it: until this line existed, a rule
+    keyed on a command could never match, because the only resolver call passed None.
+    `delegate-to-a-lead` is that rule, and this is where it starts firing.
+
+    A COMPLEMENT TO THE TURN-START CHANNEL, NOT A REPLACEMENT (obj. 2). Both ship, and they
+    answer different questions: the hook says "before your next action, remember X" at the
+    turn, this says "here is what you are" at the action. The cursor is shared, so a `once`
+    rule said here is not said again at the next turn start — one ledger, one memory, two
+    moments.
+
+    QUIET IN `--json`. The footer is prose for a reader, and stdout in `--json` mode is one
+    JSON document that a program parses; appending lines to it would corrupt the one output
+    of `sb` that is machine-readable. A caller that wants this data structured already has
+    `sb inspect --json` and `sb who-holds --json`.
+
+    QUIET FOR THE HUMAN, and for a caller with no row: neither holds capabilities, neither
+    is attached to anything, and `held_for` answers None for both — the same rowless
+    fail-open the capability gate has.
+
+    NEVER FATAL. Wrapped whole, for `hooks.run_activity`'s reason: the command has already
+    run and its result is already printed, so a ledger that will not parse or a store that
+    lacks the cursor table must cost a reminder nobody got, not an exit code on work that
+    succeeded.
+    """
+    if key is None or getattr(args, "json", False):
+        return
+    try:
+        me = b.whoami()
+        if me == HUMAN:
+            return
+        held, passable = b.held_for(me), b.passable_for(me)
+        if held is None or passable is None:
+            return
+        row = store.get_agent(db, me)
+        # The config in effect: the tier this agent was pinned to, else its role's own.
+        # `agents.tier` is NULL for every agent nobody pinned, which is most of them, and
+        # the role's answer is the true one there.
+        tier = (store._value(row, "tier") if row is not None else None) or (
+            roles_mod.get(b.roles, row["role"], b.repo).model if row is not None else None)
+        text = "\n".join(t for t in (
+            guidance.state_note(db, me, held=held, delegable=passable - held, tier=tier),
+            guidance.deliver(db, me, command=key, repo=b.repo),
+        ) if t)
+        if text:
+            print(text)
+    except Exception:                            # noqa: BLE001 — never over a reminder
+        pass
+
+
 def _degraded(deficit: list[str], cmd: str) -> str:
     """Why this one command cannot run while the rest of `sb` still can.
 
@@ -829,10 +921,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     try:
-        return _dispatch(args, b, db, h)
+        code = _dispatch(args, b, db, h)
     except HerdrError as e:
         print(f"sb: herdr [{e.code}] {e.message}", file=sys.stderr)
-        return 1
+        code = 1
     except sqlite3.OperationalError as e:
         # On a degraded store this is a command that turned out to need the new schema
         # after all — `_NEEDS_FRESH_SCHEMA` is a judgement, and this is what a wrong
@@ -840,14 +932,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         # "no such column: agents.branch" to an agent that cannot act on it.
         print(_degraded(deficit, args.cmd) if deficit else f"sb: store: {e}",
               file=sys.stderr)
-        return 1
+        code = 1
     except plugins_mod.PluginError as e:
         # Already logged, by the dispatch that raised it — one event per handler
         # invocation, not two for the ones that failed.
-        return _plugin_failed(e)
+        code = _plugin_failed(e)
     except (ValueError, KeyError) as e:
         print(f"sb: {_reason(e)}", file=sys.stderr)
-        return 1
+        code = 1
+
+    # AFTER the command, and on the refusals too. State is most worth reading exactly when
+    # a command did not do what its caller expected — an agent refused `--isolation own`
+    # wants to see that it does not hold `fork` — and reading it afterwards is what makes
+    # it true: a spawn that just moved this agent's child into a new workspace, or a grant
+    # that just widened somebody, is already reflected.
+    _state_output(args, b, db, _state_key(args))
+    return code
 
 
 def _plugin_failed(e: plugins_mod.PluginError) -> int:

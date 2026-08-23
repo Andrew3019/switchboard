@@ -286,8 +286,8 @@ class PolicyMechanismTest(Fixture, unittest.TestCase):
     def test_the_delegate_convention_is_a_command_rule_and_fires_on_no_turn(self):
         """It is keyed on the command, because "who should I hand this to" is a question
         that only exists while delegating — there is no standing state at turn start that
-        means it. Nothing passes a command yet (that is E2), so today it resolves only when
-        one is asked for explicitly, which is exactly what this pins."""
+        means it. The half pinned here is the SILENCE at turn start; that it now fires
+        under `sb delegate` is E2's call site (`cli._state_output`, `test_state_output`)."""
         self.agent("lead-x", role="lead")
         store.seed_capabilities(self.db, "lead-x", ["spawn"])
         ids = lambda **kw: [r.id for r in guidance.resolve(self.db, "lead-x", **kw)]  # noqa: E731

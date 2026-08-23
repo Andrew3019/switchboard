@@ -26,10 +26,10 @@
 #   text    what the agent is told. One line, no placeholders, and it reaches the agent
 #           marked `[sb: guidance]` so it is never mistaken for the human typing.
 #   role    fires only for agents of that role.
-#   command fires only when the rule is resolved with that command in context. Nothing
-#           resolves with one yet — command output is E2 — so a `command` rule is inert
-#           until then, and the key exists so a row written for it does not need the
-#           resolver changed.
+#   command fires only when the rule is resolved with that command in context — which is
+#           the moment the agent RUNS that `sb` verb, not turn start. The verbs that carry
+#           it are `cli.STATE_COMMANDS`; a rule keyed on anything else never fires, and a
+#           rule with no `command` is unaffected by any of this.
 #   holds / lacks
 #           capability names, matched against the agent's LIVE capability set — what it
 #           holds NOW, grants included, never the role template. Anything else would nag a
@@ -107,9 +107,10 @@ text = "Several of your children are writing tracked files in YOUR checkout at t
 #
 # Keyed on the COMMAND, because "who should I delegate this to" is a question that only
 # exists at the moment of delegating; there is no standing state at turn start that means
-# it. Nothing resolves with a command yet — surfacing state in command output is E2 — so
-# this row is inert until that call site exists, and it is written now so that E2 adds a
-# call and not a rule. `holds = ["spawn"]` keeps it off every agent that could not act on it.
+# it. The call site is `cli._state_output` (E2), which resolves the ledger with the verb
+# the caller just ran — so this fires under the output of `sb delegate` and nowhere else.
+# `holds = ["spawn"]` keeps it off every agent that could not act on it, and `once` keeps
+# it off every delegate after the first.
 [[rule]]
 id = "delegate-to-a-lead"
 command = "delegate"

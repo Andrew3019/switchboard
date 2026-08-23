@@ -34,6 +34,14 @@ directly touches no command, and a dispatch-time hook would miss exactly it.
 this file existed, which is what makes the whole mechanism free on the turns it has nothing
 to say.
 
+**The second moment is a COMMAND** (`state_note`, and `cli._state_output`). A handful of
+verbs — the ones that spend a capability or a resource — print the caller's own state under
+their output, and resolve the ledger with the verb in hand, which is what a `command`-keyed
+rule is keyed on. It is a complement to the turn-start channel and not a replacement: the
+hook reaches an agent that never talks to sb, this reaches an agent at the instant it acts,
+and both go through one ledger and one cursor, so a `once` rule spent at either is spent at
+both.
+
 **The subtractive rule.** A rule that moves here is DELETED from the spawn prompt. A rule
 in both places is paid for twice and drifts, and the only win being claimed is the one that
 comes from the prompt getting SHORTER. Reminder-shaped rules move; identity and orientation
@@ -380,10 +388,12 @@ def resolve(db: sqlite3.Connection, name: str, *, command: Optional[str] = None,
     recorded at load: the author's order is the only tie-break that stays stable as rules
     are added, and sorting by id or text would reshuffle a fleet's guidance on a reword.
 
-    `command` is the command-context key. Nothing passes one yet — surfacing state in
-    command output is E2 — so today it is only ever None, and a `command` rule therefore
-    never matches at turn start. That is the intended reading of "and/or command output":
-    the resolver takes the key, and the second call site is E2's to add.
+    `command` is the command-context key, and it has TWO callers with two different
+    answers. The turn-start hook passes None, because a turn is not a command and a
+    `command` rule must not fire at one; `cli._state_output` passes the verb an agent has
+    just run (E2), which is the call site this key was shaped for and the reason a
+    `command` rule stopped being inert. That is the whole of "and/or command output": one
+    resolver, one ledger, two moments.
     """
     row = store.get_agent(db, name)
     if row is None:
@@ -441,3 +451,97 @@ def deliver(db: sqlite3.Connection, name: str, *, command: Optional[str] = None,
     for rule in firing:
         store.record_guidance(db, name, rule.id)
     return "\n".join(f"{MARK} {r.text}" for r in firing)
+
+
+# ---------------------------------------------------------------------------
+# The caller's own state, in the output of the command it just ran (E2, spec §2.4)
+# ---------------------------------------------------------------------------
+
+# Its own mark, not `MARK`. Both arrive by the same promise — everything sb puts in front
+# of an agent is labelled so it is never mistaken for the human typing — but they are two
+# different kinds of thing, and an agent that reads `[sb: guidance]` in front of a fact
+# about itself would be right to wonder which rule it broke. Rules are advice; this is a
+# readout.
+STATE_MARK = "[sb: state]"
+
+# The arrow C3 draws in the board's ROLE column for a pass-through capability
+# (`status.AgentStatus.role_cell`, `status._named_mark`). Duplicated here rather than
+# imported: `hooks` imports this module on every turn edge and `status` pulls in herdr and
+# the whole collector with it. `test_guidance` asserts the two are the same character, so
+# a change to one that misses the other fails a test rather than quietly giving "may pass
+# down" two spellings in one fleet.
+DELEGABLE_MARK = "→"
+
+
+def state_note(db: sqlite3.Connection, name: str, *, held, delegable,
+               tier: Optional[str] = None) -> str:
+    """What this agent currently IS, as lines to print under a command's own output.
+
+    The other half of §2.4, and a complement to the turn-start channel rather than a
+    replacement for it: the ledger says *"before your next action, remember X"* at the
+    turn, and this says *"and here is what you are, at the moment you acted"* at the
+    command. An agent that has just been granted a capability, moved to another workspace
+    or handed a worktree learns it here, in the output of the next thing it does, instead
+    of carrying whatever its spawn prompt said forever.
+
+    **Held and delegable-only are said apart**, with the same arrow the board's ROLE column
+    uses, because they are the two halves `--delegable` exists to keep apart: a set that
+    ran them together would read to a researcher as "you may write" when what it may do is
+    equip a worker that writes.
+
+    **`held` and `delegable` are passed in, not read here.** Both come from
+    `Broker.held_for`/`passable_for`, which are the two reads that know about the DERIVED
+    fallback for a row predating the capability substrate (`Broker._held_of`). Reading the
+    table directly would tell every such agent it may do nothing, which is the one answer
+    that is never true.
+
+    **`tier` is the config in effect, and it is the only one there is yet** — `agents.tier`
+    if a spawn pinned it, else the role's own. Per-agent config prefs are E3's (`sb
+    configure`), and this deliberately does not invent a readout for data the store does
+    not hold: obj. 4 says this unit shows what Phases 1 and 2 built and nothing else.
+    """
+    row = store.get_agent(db, name)
+    if row is None:
+        return ""
+
+    lines = [f"you are {name} ({row['role']}) — "
+             f"may do: {', '.join(sorted(held)) or 'nothing'}"]
+    if delegable:
+        lines[0] += ("; may pass down only: "
+                     + ", ".join(DELEGABLE_MARK + c for c in sorted(delegable)))
+
+    ws = store.attached_workspace(db, name)
+    branch = store.agent_branch(db, name)
+    where = f"workspace {ws}" if ws else "attached to no workspace"
+    where += (f", branch {branch}" if branch
+              else " — bare, with no checkout of its own")
+    opened = store.open_worktree_counts(db).get(name, 0)
+    if opened:
+        where += f", {opened} open worktree{'' if opened == 1 else 's'}"
+    if tier:
+        where += f"; model tier {tier}"
+    lines.append(where)
+
+    grants = _grants(db, name)
+    if grants:
+        lines.append("granted since you were spawned: " + "; ".join(grants))
+    return "\n".join(f"{STATE_MARK} {line}" for line in lines)
+
+
+def _grants(db: sqlite3.Connection, name: str) -> list[str]:
+    """The capability rows somebody GRANTED, as text — provenance and all.
+
+    Seeded rows are left out: what an agent was spawned with is the unremarkable half, it
+    is already in the "may do" line above, and a list that repeated it would bury the one
+    row that is news. A grant is irrevocable and arrives from outside, which is exactly the
+    fact an agent is least likely to have in its context.
+    """
+    out = []
+    for r in store.capability_rows(db, name):
+        by = store._value(r, "granted_by")
+        if not by:
+            continue
+        mark = "" if r["held"] else DELEGABLE_MARK
+        why = store._value(r, "reason")
+        out.append(f"{mark}{r['cap']} by {by}" + (f" — {why}" if why else ""))
+    return out
