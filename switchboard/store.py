@@ -1934,11 +1934,25 @@ def transcript_dir(cwd: Optional[str]) -> Optional[Path]:
 
 
 def transcript_path(agent: sqlite3.Row) -> Optional[Path]:
-    """Where Claude Code already wrote this agent's full transcript.
+    """Where the provider already wrote this agent's full transcript.
 
-    Free debuggability: nothing is captured by us, and it survives pane close. Bucketed
-    by cwd, which is why cwd is stored alongside the session id.
+    Free debuggability: nothing is captured by us, and it survives pane close. For Claude
+    Code it is bucketed by cwd, which is why cwd is stored alongside the session id.
+
+    Codex keeps its own instead, under the private per-agent `CODEX_HOME` the spawn built
+    — a date tree of `rollout-<iso>-<id>.jsonl` rather than a flat `<id>.jsonl` bucket, so
+    it cannot be reached by pointing `transcript_dir` somewhere else. Asked of the agent's
+    home rather than of its tier: the directory exists only because a codex spawn wrote
+    it, whereas a tier is config that may since have been edited to mean something else.
+
+    The codex branch is a strictly ADDITIVE first look. It answers None for every claude
+    agent, at the cost of one `is_dir()`, and the Claude path below is untouched.
     """
+    from . import codex                    # `codex` reaches back here for `store_dir`
+    if agent["session_id"]:
+        p = codex.rollout_path(agent["name"], str(agent["session_id"]))
+        if p is not None:
+            return p
     d = transcript_dir(agent["cwd"])
     if not agent["session_id"] or d is None:
         return None

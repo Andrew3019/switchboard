@@ -222,23 +222,64 @@ def stop_hook_args(cwd: Optional[Path] = None) -> list[str]:
 def _agent_row(db: sqlite3.Connection, payload: dict) -> Optional[sqlite3.Row]:
     """Who is stopping, resolved the way `Broker.whoami` resolves it.
 
-    Session id first, and then `HERDR_PANE_ID` — which the hook inherits from the pane the
-    session was started in. The fallback is load-bearing rather than decorative: the store
-    learns an agent's session id on its FIRST `sb` call, so an agent that has run none has
-    no `session_id` row to match, and that is precisely the agent this gate exists for.
+    Session id first, then `SB_AGENT`, then `HERDR_PANE_ID` — the last two inherited from
+    the pane the session was started in. The fallbacks are load-bearing rather than
+    decorative: the store learns an agent's session id on its FIRST `sb` call, so an agent
+    that has run none has no `session_id` row to match, and that is precisely the agent
+    this gate exists for.
+
+    `SB_AGENT` is switchboard's own and is the only one of the three a codex agent has at
+    spawn — codex sets no session variable, and the payload's `session_id` is a codex
+    thread id nothing has written down yet, which is what `_claim_session` below fixes.
     """
     sid = payload.get("session_id")
     if sid:
         row = store.agent_by_session(db, str(sid))
         if row is not None:
             return row
+    me = os.environ.get("SB_AGENT")
+    if me:
+        row = db.execute("SELECT * FROM agents WHERE name=?", (me,)).fetchone()
+        if row is not None:
+            return _claim_session(db, row, sid)
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
-        return db.execute(
+        row = db.execute(
             "SELECT * FROM agents WHERE pane_id=? ORDER BY created_at DESC LIMIT 1",
             (pane,),
         ).fetchone()
+        if row is not None:
+            return _claim_session(db, row, sid)
     return None
+
+
+def _claim_session(db: sqlite3.Connection, row: sqlite3.Row,
+                   sid: Optional[str]) -> sqlite3.Row:
+    """Record the session id the payload carried, if this row has none yet.
+
+    THE CODEX SESSION-ID CAPTURE, and it lives here because this is the earliest moment
+    the id exists at all. Codex allocates no thread id at `agent start` — nothing is
+    written until a turn actually begins — so unlike Claude Code there is no id to read
+    back from the spawn call. Both hooks carry it in their payload from the first turn
+    onwards (verified live: `session_id`, matching the rollout filename and
+    `CODEX_THREAD_ID` exactly), and this hook fires before the agent has run a single `sb`
+    command, which is precisely the window in which an agent used to be unrestorable.
+
+    Only when the row has none. An id already on the row was written by something that
+    knew more than a hook payload does, and a hook that overwrote it could re-point
+    `sb restore` at a session belonging to a different life of the same name.
+
+    Never raises and never blocks: a failed write here costs restorability, and the gate
+    it shares a process with must still decide.
+    """
+    if not sid or row["session_id"]:
+        return row
+    try:
+        store.update_agent(db, row["name"], session_id=str(sid))
+        store.log_event(db, kind="session_captured", agent=row["name"])
+        return db.execute("SELECT * FROM agents WHERE name=?", (row["name"],)).fetchone() or row
+    except Exception:                            # noqa: BLE001 — never trap an agent
+        return row
 
 
 def _has_live_child(db: sqlite3.Connection, name: str) -> bool:

@@ -664,6 +664,14 @@ agent_kind = "claude"
 # call waiting for a human who is not watching.
 permission_mode = "auto"
 
+# herdr's own `--kind` vocabulary, keyed by the PROVIDER a tier resolves to. `agent_kind`
+# above is still the answer when nothing resolved a provider at all. Both names happen to
+# match today; they are two vocabularies that agree, not one — `--kind` is herdr's list of
+# binaries it can drive, and `provider` is `defaults/models.toml`'s.
+[herdr.agent_kinds]
+claude = "claude"
+codex = "codex"
+
 
 [editor]
 # The CLI the board's double-`o` action shells out to. Not a preference so much as a
@@ -673,3 +681,27 @@ permission_mode = "auto"
 # may not. See `board.open_report_files`.
 # setup: { type = "string", hint = "the CLI your editor uses to open a folder and add a file as a tab (e.g. \"code\") — only if it isn't cursor" }
 command = "cursor"
+
+
+[codex]
+# Facts about the `codex` binary on your PATH, in the same sense as `[herdr]` above:
+# changing one is a claim about that binary. Everything here was verified against
+# codex-cli 0.147.0 rather than read from its docs.
+
+# The credential a per-agent CODEX_HOME is SYMLINKED to. A private home with no
+# `auth.json` 401s on every request; a copy per agent would go stale the moment the human
+# re-logs in. One owner, and re-login is picked up by every agent at once.
+auth_file = "~/.codex/auth.json"
+
+# The closest codex has to `--permission-mode auto`, and not the same thing: Claude's flag
+# runs a model-driven classifier deciding what still needs a human, while codex's risk
+# control is the sandbox alone — `codex exec` has no `--ask-for-approval` at all. So
+# approvals are off and the sandbox is what bounds an agent: one that stops for a human
+# who is not watching is not safer, it is stalled.
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+
+# Seconds a codex hook may take before codex gives up on it. The same number the Claude
+# settings file uses, and well over the gate's own cost (one sqlite read) — a timeout is a
+# non-blocking failure, so this only ever fails open.
+hook_timeout = 10

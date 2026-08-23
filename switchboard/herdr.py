@@ -19,7 +19,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from . import config, validate
 
@@ -36,6 +36,43 @@ SOURCE = config.setting("herdr.source")
 # human who is not watching.
 AGENT_KIND = config.setting("herdr.agent_kind")
 PERMISSION_MODE = config.setting("herdr.permission_mode")
+
+# herdr's `--kind` vocabulary keyed by the PROVIDER a tier resolves to. Config rather than
+# a dict here for the reason every other name in this file is config: `--kind` is a fact
+# about the binary on your PATH, and the day it grows a kind switchboard can drive, that
+# is an edit to a file rather than to the adapter.
+AGENT_KINDS = config.setting("herdr.agent_kinds")
+
+
+def kind_for(provider: str) -> str:
+    """The `--kind` herdr is asked for, for a spec resolved to `provider`.
+
+    An unknown provider falls back to `AGENT_KIND` rather than raising: resolution is
+    where an unwired provider is refused (`models.ModelSpec.cli_args`), with a message
+    that can still say what is wrong, and a second refusal here would only ever fire
+    after that one had already been passed."""
+    return (AGENT_KINDS or {}).get(provider or "", AGENT_KIND)
+
+
+def _env_args(env: Optional[Mapping[str, str]]) -> list[str]:
+    """`--env KEY=VALUE`, repeated, for the three calls that CREATE a pane.
+
+    Only those three. herdr sets a pane's environment when the pane's shell is launched
+    and has no way to change it afterwards — `agent start` takes no `--env` at all — so
+    anything an agent's process must see has to be decided before the pane exists. That
+    is why `Broker.delegate` resolves the model tier before it asks for a tab.
+
+    A `=` in the VALUE is fine and a `=` in the key is not, which is the only thing worth
+    refusing here: `A=B=C` is unambiguous to herdr's own split, and a key containing one
+    would silently become a different variable.
+    """
+    args: list[str] = []
+    for key, value in (env or {}).items():
+        if not key or "=" in key:
+            raise ValueError(f"not an environment variable name: {key!r}")
+        args += ["--env", f"{key}={value}"]
+    return args
+
 
 # What a worktree is forked from when the caller names no base. `[vocabulary]`, because it
 # is the same branch every other layer means by "where work starts".
@@ -344,7 +381,7 @@ class Herdr:
     # -- topology --------------------------------------------------------
 
     def create_tab(self, *, cwd: Optional[str] = None, workspace: Optional[str] = None,
-                   focus: bool = False) -> str:
+                   focus: bool = False, env: Optional[Mapping[str, str]] = None) -> str:
         """A tab per agent, in a named workspace.
 
         NOT a pane split: splits exhaust after ~4 and then return no pane id at all,
@@ -360,6 +397,7 @@ class Herdr:
             args += ["--workspace", workspace]
         if cwd:
             args += ["--cwd", cwd]
+        args += _env_args(env)
         r = self._call(*args)
         # verified shape: {"root_pane": {"pane_id": ...}, "tab": {...}} — the tab object
         # itself carries no pane_id, only pane_count.
@@ -371,7 +409,8 @@ class Herdr:
         return pane
 
     def create_workspace(self, label: str, *, cwd: Optional[str] = None,
-                         focus: bool = False) -> dict:
+                         focus: bool = False,
+                         env: Optional[Mapping[str, str]] = None) -> dict:
         """A fresh workspace with its own root pane.
 
         No worktree: a top-level orchestrator does no writes, so it needs somewhere to
@@ -381,11 +420,12 @@ class Herdr:
                 "--focus" if focus else "--no-focus"]
         if cwd:
             args += ["--cwd", str(cwd)]
+        args += _env_args(env)
         return self._call(*args)
 
     def split_pane(self, pane_id: str, *, direction: str = "right",
                    ratio: float = 0.66, cwd: Optional[str] = None,
-                   focus: bool = False) -> str:
+                   focus: bool = False, env: Optional[Mapping[str, str]] = None) -> str:
         """Split a pane and return the new pane's id.
 
         `ratio` is the share kept by the pane BEING SPLIT, not the share given to
@@ -404,6 +444,7 @@ class Herdr:
                 "--ratio", str(ratio), "--focus" if focus else "--no-focus"]
         if cwd:
             args += ["--cwd", str(cwd)]
+        args += _env_args(env)
         r = self._call(*args)
         pane = ((r.get("pane") or {}).get("pane_id")
                 or r.get("pane_id")
@@ -514,14 +555,47 @@ class Herdr:
         text = " ".join(prompts)
         return ["--append-system-prompt-file", str(write_prompt_file(name, text))]
 
+    def _codex_args(self, name: str, prompts: Sequence[str], spec: Any,
+                    resume: Optional[str], cwd: Optional[Path]) -> list[str]:
+        """The whole of a codex spawn's command line — which is almost none of it.
+
+        THE SEAM. Everything above this line is provider-agnostic already: the prompt
+        corpus, the roles, the protocol, the tier table. What is Claude-specific is the
+        DELIVERY, and codex has an equivalent for not one of the five flags the branch
+        below passes. `--append-system-prompt-file`, `--model`, `--effort`, `--settings`
+        and `--permission-mode` all become entries in a private per-agent directory
+        instead, and `switchboard/codex.py` is the module that writes it.
+
+        So this returns the two flags that genuinely are arguments (see
+        `codex.agent_args`) and nothing else, having written the rest to disk first. The
+        Claude branch is untouched by any of it.
+        """
+        from . import codex, hooks       # both reach the store — see `start_agent`
+        home = codex.write_home(
+            name,
+            prompts=prompts,
+            worktree=str(cwd) if cwd else None,
+            model=getattr(spec, "model", None),
+            effort=getattr(spec, "effort", None),
+            hooks=hooks.codex_hook_commands(cwd),
+            cwd=cwd,
+        )
+        # Not returned and not used here: the pane it will run in had to be created with
+        # `CODEX_HOME` already in its environment, long before this call. `Broker.delegate`
+        # owns that (`codex.spawn_env`), and this only writes what that env points at.
+        del home
+        return codex.agent_args(resume)
+
     def start_agent(
         self,
         name: str,
         pane_id: str,
         *,
         prompts: Sequence[str] = (),
-        kind: str = AGENT_KIND,
+        kind: Optional[str] = None,
         model_args: Sequence[str] = (),
+        spec: Any = None,
+        cwd: Optional[Path] = None,
         resume: Optional[str] = None,
         timeout_ms: int = SPAWN_TIMEOUT_MS,
         attempts: int = SPAWN_ATTEMPTS,
@@ -538,8 +612,29 @@ class Herdr:
         tier name: it used to take `model=` and splice it straight into `--model`, which
         handed the provider CLI the literal string "strong" and dropped effort entirely.
         Resolution belongs to the one file that is allowed to know model names, and the
-        adapter stays ignorant of both tiers and providers.
+        adapter stays ignorant of tiers.
+
+        `spec` is the same resolved `ModelSpec`, and it is the ONE thing the adapter now
+        does read a provider off. It has to: which flags exist at all is a fact about the
+        binary herdr is about to type a command line for, and for codex the answer is
+        "almost none of them" (`_codex_args`). A caller that passes only `model_args`
+        keeps the Claude behaviour it always had, which is what every existing call site
+        and every test does.
+
+        `cwd` is the checkout the agent will stand in. Claude needs none — its transcript
+        bucket is derived from the pane's own cwd — but codex's private home has to
+        pre-seed directory TRUST for that exact path, or the TUI opens on a prompt nobody
+        is there to answer.
         """
+        provider = getattr(spec, "provider", "") or ""
+        kind = kind or kind_for(provider)
+        if spec is not None and provider == "codex":
+            # The whole codex branch, and deliberately an early return: none of what
+            # follows — permission mode, the settings file, model flags, the prompt file —
+            # is a thing codex has. See `_codex_args`.
+            return self._start(name, pane_id, kind,
+                               self._codex_args(name, prompts, spec, resume, cwd),
+                               timeout_ms, attempts)
         for p in prompts:
             if "\n" in p:
                 # This was herdr's rule, not ours: a newline in an agent ARGUMENT is
@@ -578,7 +673,13 @@ class Herdr:
         # bytes rather than 12KB and cannot be cut by MAX_CANON. See `_prompt_flags` for
         # the measurement and for why this raises rather than degrading.
         agent_args += self._prompt_flags(name, prompts)
+        return self._start(name, pane_id, kind, agent_args, timeout_ms, attempts)
 
+    def _start(self, name: str, pane_id: str, kind: str, agent_args: Sequence[str],
+               timeout_ms: int, attempts: int) -> Agent:
+        """The `agent start` call itself, retried. Provider-agnostic by construction —
+        what differs between providers is entirely in `agent_args`, which is why the
+        retry loop is shared rather than written once per branch."""
         last: Optional[HerdrError] = None
         for attempt in range(attempts):
             try:
