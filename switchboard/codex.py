@@ -214,9 +214,10 @@ def _agents_md(prompts: Sequence[str]) -> str:
 def _writable_roots(cwd: Optional[Path]) -> list[str]:
     """The directories outside its own worktree a codex agent must be able to write to.
 
-    Two, and no more than two. Narrow on purpose: the sandbox is the only risk control
+    Four, and no more than four. Narrow on purpose: the sandbox is the only risk control
     codex has in this mode (there is no `--ask-for-approval` analogue), so every path
-    here is one the agent genuinely cannot work without.
+    here is one the agent genuinely cannot work without. The test of a root is the
+    INJECTED PROTOCOL: each of these is somewhere that text tells every agent to write.
 
     * The shared `.git` — the whole of it, not just the `agentflow` store beneath it.
       Two things live there and an agent needs both. The STORE (`<shared .git>/agentflow`)
@@ -234,19 +235,47 @@ def _writable_roots(cwd: Optional[Path]) -> list[str]:
       board goes through the herdr binary, which talks to that socket; a denied write
       there is an agent that can do its work and tell nobody.
 
-    Read from the environment where herdr itself put it, falling back to the documented
-    default — the same reasoning as every other fact about the binary on your PATH.
+      Read from the environment where herdr itself put it, falling back to the documented
+      default — the same reasoning as every other fact about the binary on your PATH.
+    * The REAL `.switchboard` tree, resolved. In a worktree that name is a SYMLINK to the
+      primary checkout's directory, and the sandbox resolves symlinks before it decides —
+      so a write to `.switchboard/notes/<agent>-<topic>.md` lands outside the worktree and
+      is denied even though the path an agent types is inside it. That is where notes and
+      briefs live, and the protocol tells children to write both. Found live, 2026-08-23:
+      `apply_patch` on a note failed until the human dropped the sandbox entirely.
+      Computed from the worktree TOP rather than `cwd`, which may be a subdirectory; in the
+      primary checkout the same computation finds the real directory it already is.
+    * The switchboard USER-STATE root — `~/.local/state/switchboard` by default. Every
+      user-scope plugin keeps its data under it, `report-bug` included, and the protocol
+      tells every agent to file a bug when switchboard itself breaks. Found live in the
+      same session: `sb plugin report-bug file` died with `[Errno 1] Operation not
+      permitted`, which is an agent that cannot report the very thing stopping it. Granted
+      as the whole root rather than one plugin's subdirectory, because the protocol names
+      more than one plugin and each keeps its state beside the others.
     """
     roots: list[str] = []
+    from . import store
     try:
-        from . import store
         roots.append(str(store.repo_root(cwd)))
     except Exception:                    # noqa: BLE001 — not in a repo; codex will say so
         pass
     sock = os.environ.get("HERDR_SOCKET_PATH")
     roots.append(str(Path(sock).expanduser().parent if sock
                      else Path(HERDR_CONFIG_DIR).expanduser()))
-    return roots
+    try:
+        # Not `.exists()`-guarded: granting the intended location costs nothing and a tree
+        # created after the spawn (a first note, a first brief) is still inside the grant.
+        roots.append(str((store.worktree_root(cwd) / ".switchboard").resolve()))
+    except Exception:                    # noqa: BLE001 — same as above: not in a repo
+        pass
+    try:
+        roots.append(str(Path(config.setting("paths.user_state", repo=cwd))
+                         .expanduser().resolve()))
+    except Exception:                    # noqa: BLE001 — no config to read is not a spawn
+        pass                             # failure; the agent loses report-bug, not its job
+    # De-duplicated, order kept: the primary checkout can make two of these the same path,
+    # and a repeated root in the TOML is noise in a file a human sometimes reads.
+    return list(dict.fromkeys(roots))
 
 
 def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional[str],
@@ -280,26 +309,32 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         f"sandbox_mode = {_s(SANDBOX_MODE)}",
         f"approval_policy = {_s(APPROVAL_POLICY)}",
         "",
-        # WHAT `workspace-write` DOES NOT COVER, and both gaps were found by running a
-        # real codex agent rather than by reading (the spike, 2026-08-22).
+        # WHAT `workspace-write` DOES NOT COVER, and every gap here was found by running
+        # a real codex agent rather than by reading (the spike, 2026-08-22; two bug
+        # reports from a codex agent, 2026-08-23).
         #
-        # `writable_roots` — an agent's own worktree is not where switchboard's state is.
-        # The store, the prompt files and the hook settings all live under the SHARED
-        # `.git`, which for a worktree agent is a different directory entirely, and the
-        # herdr socket is under the human's config dir. Without these, `sb done` cannot
-        # write the store and every herdr call an agent makes fails `PermissionDenied` —
-        # observed live: the report landed only because that spike's checkout happened to
-        # be under /tmp, and `pane report-agent-session` and `notification show` failed
-        # anyway. So an agent can neither be seen nor ring anyone.
+        # `writable_roots` — an agent's own worktree is not where switchboard's state is,
+        # and one path that looks like it is inside the worktree is not. The store, the
+        # prompt files and the hook settings all live under the SHARED `.git`, which for a
+        # worktree agent is a different directory entirely; the herdr socket is under the
+        # human's config dir; `.switchboard` is a SYMLINK out to the primary checkout, and
+        # the sandbox resolves it before deciding; and user-scope plugin state lives under
+        # the user-state root. Without these, `sb done` cannot write the store and every
+        # herdr call an agent makes fails `PermissionDenied` — observed live: the report
+        # landed only because that spike's checkout happened to be under /tmp, and `pane
+        # report-agent-session` and `notification show` failed anyway. So an agent can
+        # neither be seen nor ring anyone. Nor, once those were fixed, write the note the
+        # protocol asks it for or file the bug the protocol tells it to file. See
+        # `_writable_roots` for what each of the four is and why it is not optional.
         #
         # `network_access` — off by default in this mode, which is not what
         # `--permission-mode auto` means for a claude agent: no `git fetch`, no `git
         # push`, no `gh pr create`. Work that ships has a default shape and it needs the
         # network.
         #
-        # Both are inside the settled sandbox choice rather than a widening of it: the
-        # decision was "workspace-write, no approval prompts, matching Claude's auto
-        # posture", and without these two an agent cannot do the job that posture assumes.
+        # Both keys are inside the settled sandbox choice rather than a widening of it:
+        # the decision was "workspace-write, no approval prompts, matching Claude's auto
+        # posture", and without them an agent cannot do the job that posture assumes.
         "[sandbox_workspace_write]",
         "writable_roots = [" + ", ".join(_s(r) for r in _writable_roots(cwd)) + "]",
         "network_access = true",
