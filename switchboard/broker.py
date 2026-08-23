@@ -4310,10 +4310,7 @@ class Broker:
             # time.
             self.h.deliver(
                 name, task,
-                proof=lambda since: (
-                    codex_mod.task_arrived(name, task, since=since, cwd=self.repo)
-                    if codex_mod.is_codex_agent(name, self.repo)
-                    else output.task_arrived(str(where), task, since=since)),
+                proof=lambda since: self._task_arrived(name, str(where), task, since),
             )
         except HerdrError as e:
             # UNCONFIRMED IS NOT FAILED. The proof is the child's own transcript and the
@@ -4406,6 +4403,24 @@ class Broker:
         except Exception:
             return
 
+    def _task_arrived(self, name: str, cwd: Optional[str], text: str,
+                      since: Optional[float]) -> bool:
+        """Is `text` in this agent's OWN transcript, written since `since`?
+
+        One question, two record shapes, and the reason it is a method rather than a call
+        each site makes for itself. Claude Code's transcript is found from the agent's
+        CWD; a codex agent's rollouts live in its private CODEX_HOME, which is found from
+        its NAME. Three places ask this — the spawn's proof, the interrupt's proof, and
+        `_took_a_turn` — and only the first was given the codex branch, so for the other
+        two a codex agent got a proof that can only ever answer no. That is worse than no
+        proof at all: `deliver` re-sends until confirmed, so an interrupt that landed on
+        the first send is typed three times and then raised as `Undeliverable` anyway.
+        """
+        if codex_mod.is_codex_agent(name, self.repo):
+            return codex_mod.task_arrived(name, text, since=since, cwd=self.repo)
+        return bool(cwd) and since is not None and output.task_arrived(
+            cwd, text, since=since)
+
     def _took_a_turn(self, name: str, *, task: Optional[str] = None,
                      cwd: Optional[str] = None,
                      since: Optional[float] = None) -> Optional[str]:
@@ -4435,7 +4450,7 @@ class Broker:
         it. None means none of them holds — nobody is doing that work as far as we can
         tell.
         """
-        if task and since is not None and output.task_arrived(cwd, task, since=since):
+        if task and since is not None and self._task_arrived(name, cwd, task, since):
             return "the task is in its own transcript, it just landed late"
         a = store.get_agent(self.db, name)
         if a is not None and a["state"] in ("done", "blocked"):
@@ -7092,11 +7107,11 @@ class Broker:
 
         So this is `Herdr.deliver` — the same retry-until-proved path `_spawn` uses, and
         for the same reason — with the same proof: the text in the agent's OWN
-        transcript, written since the send (`output.task_arrived`). Nothing herdr says
-        about its terminal can fake that, and a prompt a dialog swallowed leaves no
-        record because it never happened. Without a recorded cwd there is no transcript
-        to read, so `deliver` falls back to its own weaker test rather than to a proof
-        that can only ever answer no.
+        transcript, written since the send (`_task_arrived`, whichever provider wrote
+        it). Nothing herdr says about its terminal can fake that, and a prompt a dialog
+        swallowed leaves no record because it never happened. With neither a recorded cwd
+        nor a codex home there is no transcript to read, so `deliver` falls back to its
+        own weaker test rather than to a proof that can only ever answer no.
 
         UNCONFIRMED IS NOT FAILED here either (see `deliver`), and the caller's handling
         of that is deliberately the strict one: an interrupt nobody could confirm raises
@@ -7108,8 +7123,8 @@ class Broker:
         a = store.get_agent(self.db, who)
         cwd = a["cwd"] if a is not None else None
         proof = None
-        if cwd:
-            proof = lambda since: output.task_arrived(cwd, text, since=since)  # noqa: E731
+        if cwd or codex_mod.is_codex_agent(who, self.repo):
+            proof = lambda since: self._task_arrived(who, cwd, text, since)  # noqa: E731
         self.h.deliver(who, text, proof=proof)
 
     def _binding_lost(self, who: str, e: HerdrError) -> bool:

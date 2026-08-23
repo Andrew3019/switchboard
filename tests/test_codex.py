@@ -463,6 +463,80 @@ class DelegateOntoCodexTest(unittest.TestCase):
         self.assertTrue(codex.is_codex_agent(name, self.repo))
 
 
+class CodexDeliveryProofTest(unittest.TestCase):
+    """The proof is asked in three places; all three must ask the right provider.
+
+    A proof that can only ever answer no is worse than none: `deliver` re-sends until it
+    is confirmed, so an interrupt that landed on the first send is typed three times and
+    then raised as `Undeliverable` anyway — the store row stays unread and the agent
+    reads it a fourth time out of its inbox. Only the spawn site had the codex branch;
+    these pin the other two, through the single `_task_arrived` they now share.
+    """
+
+    TASK = "do the thing"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = _git_repo(Path(self.tmp.name))
+        env = mock.patch.dict(
+            os.environ, {"SWITCHBOARD_MODELS_CONFIG": str(self.repo / "none.toml")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = FakeHerdrAPI()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def _codex_agent(self, name="cx", *, arrived: str = "") -> str:
+        """A real home with a real rollout — the same evidence the live proof reads."""
+        codex.write_home(name, prompts=["p"], worktree=str(self.repo), cwd=self.repo)
+        store.create_agent(self.db, name=name, role="worker", parent="orch",
+                        cwd=str(self.repo))
+        if arrived:
+            d = codex.home_path(name, self.repo) / "sessions" / "2026/08/22"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "rollout-2026-08-22T17-50-40-01a02c19-22e8-7641-b219-cae9025f4f06.jsonl"
+             ).write_text(json.dumps(
+                 {"type": "event_msg",
+                  "payload": {"type": "user_message", "message": arrived}}) + "\n")
+        return name
+
+    def test_an_interrupt_to_a_codex_agent_is_proved_from_its_rollout(self):
+        """`_deliver_interrupt`, the `sb tell --interrupt` path. Its cwd IS recorded, so
+        before this it installed a claude-shaped proof rather than none — the trap its own
+        docstring describes for the no-cwd case."""
+        name = self._codex_agent(arrived=self.TASK)
+        self.b._deliver_interrupt(name, self.TASK)
+        who, proof = self.h.proofs[-1]
+        self.assertEqual(who, name)
+        self.assertIsNotNone(proof)
+        self.assertTrue(proof(0))
+        # And it is the TEXT that confirms, not merely the home existing.
+        self.b._deliver_interrupt(name, "something else entirely")
+        self.assertFalse(self.h.proofs[-1][1](0))
+
+    def test_a_slow_codex_spawn_is_not_stamped_failed(self):
+        """`_took_a_turn`'s first and strongest question, asked when a spawn's delivery
+        deadline expired. Claude-only, it always answered no for a codex agent, leaving a
+        working agent to the two weaker signals."""
+        name = self._codex_agent(arrived=self.TASK)
+        self.assertIn("transcript",
+                      self.b._took_a_turn(name, task=self.TASK, cwd=str(self.repo),
+                                          since=0) or "")
+
+    def test_a_claude_agent_is_still_read_from_its_cwd(self):
+        """The other half: no home, so the claude reader is what answers — and a codex
+        home belonging to nobody of that name must not change that."""
+        store.create_agent(self.db, name="cl", role="worker", parent="orch",
+                        cwd=str(self.repo))
+        with mock.patch.object(output, "task_arrived", return_value=True) as m:
+            self.assertTrue(self.b._task_arrived("cl", str(self.repo), self.TASK, 0))
+        m.assert_called_once()
+        self.assertEqual(m.call_args[0][0], str(self.repo))
+
+
 class StartOnCodexTest(unittest.TestCase):
     """`sb start --model <tier>` — net-new plumbing, for any provider.
 
