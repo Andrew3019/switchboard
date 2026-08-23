@@ -99,8 +99,13 @@ class RowlessCallerFailsOpenTest(Fixture, unittest.TestCase):
 
 
 class ForkRuleParityTest(Fixture, unittest.TestCase):
-    """`mints_space` reads `fork`, `fork` is seeded from the `is_top` STAMP and from
-    nothing else, so the fork decision is the stamp's exactly as it was."""
+    """The fork decision is the stamp's, exactly as it was.
+
+    It was written when `mints_space` read `fork` and the two were the same fact (`fork`
+    was seeded from the `is_top` stamp and from nothing else). D2 gave `fork` a second,
+    weaker meaning — may this caller ASK for an isolated child — so `mints_space` asks the
+    stamp directly again and these assertions, which were always about the stamp, are
+    unchanged."""
 
     def test_the_fork_answer_is_still_the_stamp_for_every_row(self):
         top = self._top()
@@ -146,13 +151,14 @@ class RoleBundleTest(Fixture, unittest.TestCase):
     instead of a `delegate` bool, and what an agent is seeded with is that bundle."""
 
     def test_each_shipped_role_seeds_its_own_bundle(self):
-        """§6.2's table, one assertion per role. `fork` is in no seeded set below a top:
-        a template naming it states a ceiling, and the fork decision is still the stamp's
-        (`mints_space`), so seeding it would turn a nested lead's every spawn into a new
-        workspace."""
+        """§6.2's table, one assertion per role. `fork` reaches the `lead` seed because its
+        template names it (D2): the fork DECISION is still the stamp's (`mints_space`), so
+        a seeded lead's ordinary spawns are unaffected — what the cap buys it is the right
+        to ASK, with `delegate(isolation="own")`. Every other bundle is untouched, because
+        none of them named `fork` in the first place."""
         expected = {
             "dispatcher": ["dispatch", "spawn", "write-tracked"],
-            "lead":       ["dispatch", "spawn", "write-tracked"],   # template also has fork
+            "lead":       ["dispatch", "fork", "spawn", "write-tracked"],
             "worker":     ["write-tracked"],
             "researcher": [],
             "reviewer":   [],

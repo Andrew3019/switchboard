@@ -203,4 +203,14 @@ granted_held = "You may now do it yourself: every gate that asked for `{cap}` wi
 #   {cap} the capability
 granted_delegable = "This one is PASS-THROUGH ONLY: you may NOT do it yourself — a gate asking for `{cap}` still refuses you — but the agents you spawn are seeded with it and they may."
 
+# A WORKSPACE RE-ATTACH, over the same in-transaction channel as `granted` above (C4).
+# The agent's PLACE has changed, which is the one fact it cannot discover by carrying on:
+# it would keep working in the checkout it was started in while the store says otherwise.
+# So it says where it now is, whose branch that is, and who moved it — the same three
+# things `granted` says, for the other kind of change. Nothing here asks it to re-scan
+# anything: the message IS the change, and the gutter redraws with the ring that carries it.
+#   {workspace} the workspace name        {who} who attached it
+#   {where} the checkout clause, already formatted     {branch} the branch clause, or empty
+attached = "[workspace changed] {who} attached you to the workspace `{workspace}`.{where}{branch} This is where your work belongs from now on — start your next command there rather than in the directory you were spawned in."
+
 stalled = "[sb] Your turn ended {idle} ago without a report, so nothing in the fleet knows where you are. If you are finished, run `sb done \"<summary>\"`; if you are stuck or need a person, run `sb block \"<why>\"`; if you are neither, carry on with your task — this is asked once, not repeatedly."

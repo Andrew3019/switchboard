@@ -344,6 +344,38 @@ CREATE TABLE workspaces (
                                       -- represented, the same fact `agents.branch` says
                                       -- by being NULL. A recorded path is never trusted
                                       -- as a live one; see `checkout_verdict`.
+    branch        TEXT,               -- the git branch this workspace's worktree sits on,
+                                      -- NULL for a bare one. THE OWNER OF THIS FACT (§2.2).
+                                      -- It lived on `agents.branch`, where nothing could
+                                      -- enforce one branch per workspace and every reader
+                                      -- re-derived it by grouping agent rows
+                                      -- (`workspace_branch`) — a workspace with no rows
+                                      -- (retired, or a worktree nobody worked in) could
+                                      -- not state it at all. `agents.branch` is KEPT as a
+                                      -- back-compat derived read through Phase 2: still
+                                      -- written at spawn, still there for every raw
+                                      -- reader, and answered from HERE whenever this
+                                      -- column has an answer. Rows that predate it are
+                                      -- filled once from exactly the selector that
+                                      -- derivation used (`_backfill_workspace_branch`),
+                                      -- which is what makes moving the ownership a no-op
+                                      -- for every store that already exists.
+    base_ref      TEXT,               -- what this workspace's worktree was forked FROM,
+                                      -- recorded at the moment of the fork by the only
+                                      -- code that knows it (`_fork_base` resolves it, and
+                                      -- a fallback resolves to something else again).
+                                      -- NULL means unrecorded and is never re-derived:
+                                      -- git can say where the branch is now, which is not
+                                      -- the ref somebody forked at, and an inferred base
+                                      -- would read exactly like a recorded one.
+    created_by    TEXT,               -- the agent that minted this workspace, verbatim.
+                                      -- Provenance, the same fact `capabilities.granted_by`
+                                      -- carries for a grant: a workspace outlives the
+                                      -- spawn that made it and the parent link that
+                                      -- explained it. NULL for rows that predate the
+                                      -- column — there is no evidence to fill it from, and
+                                      -- a guessed name here would be indistinguishable
+                                      -- from a recorded one.
     retired_at    INTEGER,            -- epoch the workspace was retired. Not a tombstone
                                       -- on the name: reopening one clears this.
     retiring      TEXT,               -- who holds the retiring mark — an agent name, not a
@@ -617,6 +649,22 @@ def schema_deficit(db: sqlite3.Connection) -> list[str]:
     return _deficit(db)[2]
 
 
+def _value(row, name: str):
+    """One column off a row that may not carry it. None when it does not.
+
+    A degraded store (`schema_deficit`) is one whose rows are genuinely narrower than this
+    code's schema — that is the whole point of serving it rather than rebuilding under a
+    live fleet — and asking a `sqlite3.Row` for a column it lacks raises `IndexError`. The
+    reads that resolve through a NEW column go through here so that a store which has not
+    taken it yet falls back instead of raising. `broker._column` is the same guard for the
+    same reason; this one keeps `None` distinct from `""`, because a NULL branch is a fact.
+    """
+    try:
+        return row[name]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def _columns(db: sqlite3.Connection, table: str) -> set:
     return {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
 
@@ -695,10 +743,42 @@ def _backfill_is_top(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
     db.execute("UPDATE agents SET is_top=1 WHERE parent IS NULL AND branch IS NULL")
 
 
+def _backfill_workspace_branch(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
+    """Move `branch`'s ownership onto the workspaces that predate the column.
+
+    The fact does not change hands by being declared: a store written before this column
+    holds every branch on `agents.branch` and nowhere else, and a workspace row that says
+    NULL there would read as BARE — the one wrong answer this whole area exists to prevent
+    (`_WORKSPACE_CHECKOUT`'s note: bare is decided by the PRESENCE of a branch).
+
+    So it is filled from exactly the selector every reader used to run at read time — the
+    first agent row under that name that recorded a branch — which makes the move a no-op:
+    the same query, asked once and written down, instead of asked at every call.
+
+    Idempotent and safe against a concurrent one: `WHERE branch IS NULL` means a row
+    somebody already answered for is left alone, and a workspace with no branch-carrying
+    row stays NULL, which is what bare means.
+    """
+    db.execute(
+        "UPDATE workspaces SET branch = ("
+        "  SELECT branch FROM agents WHERE agents.workspace = workspaces.name"
+        "   AND agents.branch IS NOT NULL ORDER BY agents.created_at LIMIT 1)"
+        " WHERE branch IS NULL"
+    )
+
+
+# `base_ref` and `created_by` get no fill on purpose. Neither is derivable from anything
+# the store holds — the base a worktree was forked at is not what git can say about that
+# branch today, and the agent that minted a workspace is not the agent whose name it shares
+# — and a filled-in guess is indistinguishable from a recorded fact for every reader after
+# it. NULL says "nobody wrote this down", which is the truth about every row that predates
+# them.
+
 # Columns that mean something for rows written before they existed. Keyed by
 # (table, column), run once, right after the ALTER that added them — see `_reconcile`.
 _BACKFILLS = {("agents", "branch"): _backfill_branch,
-              ("agents", "is_top"): _backfill_is_top}
+              ("agents", "is_top"): _backfill_is_top,
+              ("workspaces", "branch"): _backfill_workspace_branch}
 
 # The bare-versus-worktree selector, written down once. A row means a worktree workspace
 # and that `cwd` is its checkout; no row means bare and the path is NULL — the rule reads
@@ -712,6 +792,15 @@ _BACKFILLS = {("agents", "branch"): _backfill_branch,
 # them. The fill runs once, so the wrong answer is the permanent one.
 _WORKSPACE_CHECKOUT = """SELECT cwd FROM agents
  WHERE workspace = ? AND cwd IS NOT NULL AND branch IS NOT NULL
+ ORDER BY created_at LIMIT 1"""
+
+# The same rule for the other half of the pair, and deliberately the same shape: the
+# workspace's BRANCH is whatever the first agent row that recorded one says, because every
+# agent in a worktree space shares that space's checkout. This is the query
+# `workspace_branch` used to BE — it is now the migration that moves the fact onto the
+# workspace row, and the fallback that still answers for a store mid-migration.
+_WORKSPACE_BRANCH = """SELECT branch FROM agents
+ WHERE workspace = ? AND branch IS NOT NULL
  ORDER BY created_at LIMIT 1"""
 
 
@@ -739,9 +828,15 @@ def _backfill_workspaces(db: sqlite3.Connection, cwd: Optional[Path]) -> None:
     ).fetchall():
         name = r["workspace"]
         found = db.execute(_WORKSPACE_CHECKOUT, (name,)).fetchone()
+        # The branch comes with the checkout, from the same rows and by the same rule: a
+        # table created new already HAS the column, so no per-column fill will ever run for
+        # it and this is the only place a store predating the whole table gets its branches.
+        on = db.execute(_WORKSPACE_BRANCH, (name,)).fetchone()
         db.execute(
-            "INSERT OR IGNORE INTO workspaces(name, checkout, created_at) VALUES(?,?,?)",
-            (name, found["cwd"] if found else None, r["first_seen"]),
+            "INSERT OR IGNORE INTO workspaces(name, checkout, branch, created_at) "
+            "VALUES(?,?,?,?)",
+            (name, found["cwd"] if found else None, on["branch"] if on else None,
+             r["first_seen"]),
         )
 
 
@@ -1380,24 +1475,86 @@ def agent_by_session(db: sqlite3.Connection, session_id: str) -> Optional[sqlite
     ).fetchone()
 
 
+def attached_workspace(db: sqlite3.Connection, name: str) -> Optional[str]:
+    """The workspace this agent is attached to, by NAME. None = attached to nothing.
+
+    `agents.workspace` IS the attachment pointer (§2.2) — a single changeable name
+    reference, not a structural consequence of being top — and this is the read that says
+    so. The column is unchanged and every existing reader of it still reads the same
+    thing; what changed is that `attach` may now move it after the spawn wrote it.
+    """
+    row = get_agent(db, name)
+    return (row["workspace"] or None) if row is not None else None
+
+
+def attach_workspace(
+    db: sqlite3.Connection, name: str, workspace: Optional[str], *,
+    branch: Optional[str] = None, checkout: Optional[str] = None,
+    workspace_id: Optional[str] = None, commit: bool = True,
+) -> None:
+    """Point an agent at a workspace — the pointer and everything resolved through it.
+
+    ONE STATEMENT, and that is the point of it being here rather than three
+    `update_agent` calls: the pointer and the facts that resolve through it (the branch of
+    that workspace's worktree, the checkout to run in, herdr's cached id for it) describe
+    ONE place, and a row carrying half of a move names a place that does not exist.
+
+    `commit=False` for a caller that is already inside `mutation()` — how the broker gets
+    the move and the signal that announces it into one transaction.
+
+    `branch` and `checkout` are written as given, NULL included: attaching to a bare
+    workspace means no worktree and no checkout of its own, which is a value here.
+    `workspace_id` is herdr's volatile cache and is written the same way — an id that
+    belonged to the old workspace is worse than none.
+    """
+    db.execute(
+        "UPDATE agents SET workspace=?, branch=?, workspace_id=?, "
+        "cwd=COALESCE(?, cwd) WHERE name=?",
+        (workspace, branch, workspace_id or None, checkout, name),
+    )
+    if commit:
+        db.commit()
+
+
 def agent_branch(db: sqlite3.Connection, name: str) -> Optional[str]:
     """The branch of the worktree this agent works in. None = it has no worktree.
 
     THE question the fork rule asks ("does my parent have a worktree?"), answered as a
     fact rather than by reading the workspace name — which says branch for one kind of
     space and says nothing at all for the other.
+
+    RESOLVED THROUGH THE ATTACHMENT (§2.2). The branch belongs to the workspace now, so
+    the workspace this agent is attached to is asked first and `agents.branch` is the
+    back-compat read behind it: still written at spawn, still what answers for a row whose
+    workspace has no row of its own (a store mid-migration), for a retired workspace whose
+    branch was cleared with its checkout, and for an agent attached to nothing. The
+    fallback only ever ADDS an answer — a workspace that states a branch always wins, and
+    neither path can turn a worktree agent bare.
     """
     row = get_agent(db, name)
-    return row["branch"] if row is not None else None
+    if row is None:
+        return None
+    ws = row["workspace"]
+    if ws:
+        on = get_workspace(db, ws)
+        if on is not None and _value(on, "branch"):
+            return on["branch"]
+    return row["branch"]
 
 
 def workspace_branch(db: sqlite3.Connection, workspace: str) -> Optional[str]:
     """The branch of the worktree a NAMED workspace sits on. None = bare, or unknown.
 
-    A property of the workspace, not of any one agent in it: every agent in a worktree
-    space shares its checkout, so the first row that recorded a branch answers for all of
-    them. That is also how a child picks up the branch it inherits.
+    A property of the workspace, not of any one agent in it — which is now where it is
+    STORED (§2.2) rather than something this function derives. The derivation is kept
+    behind it, unchanged, and answers exactly the rows the column cannot yet: a store
+    whose fill has not run, and a workspace name that has agent rows but no row of its own
+    (`workspace_fill_gap`). Every agent in a worktree space shares its checkout, so the
+    first row that recorded a branch answers for all of them.
     """
+    on = get_workspace(db, workspace)
+    if on is not None and _value(on, "branch"):
+        return on["branch"]
     row = db.execute(
         "SELECT branch FROM agents WHERE workspace=? AND branch IS NOT NULL "
         "ORDER BY created_at LIMIT 1", (workspace,)
@@ -1579,32 +1736,51 @@ def all_workspaces(db: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def record_workspace(
-    db: sqlite3.Connection, name: str, checkout: Optional[str] = None
+    db: sqlite3.Connection, name: str, checkout: Optional[str] = None, *,
+    branch: Optional[str] = None, base_ref: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> None:
-    """Write down where a workspace's checkout is — on creation, and on every attach.
+    """Write down what a workspace IS — on creation, and on every attach.
 
     A record of where the checkout *is*, not of where it once was, which is why attaching
     re-writes it rather than leaving the first answer standing. NULL is a value here like
     any other: passing it says "this workspace has no checkout of its own", which is what
     bare means.
+
+    The three resource facts (§2.2) are NOT written on that rule, and the difference is
+    deliberate. `checkout` is re-stated by every caller on every attach, so overwriting it
+    with what the caller was just told is right. `branch`, `base_ref` and `created_by` are
+    known to ONE caller at ONE moment — the fork that minted the workspace — and every
+    attach afterwards passes nothing. Overwriting on the same rule would have the second
+    attach erase the provenance the first recorded, so an omitted argument leaves what is
+    there (`COALESCE`) and only a value given replaces one. Clearing them is retirement's
+    job, where the worktree they describe stops existing.
     """
     db.execute(
-        "INSERT INTO workspaces(name, checkout, created_at) VALUES(?,?,?) "
-        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout",
-        (name, checkout, now()),
+        "INSERT INTO workspaces(name, checkout, branch, base_ref, created_by, created_at) "
+        "VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout, "
+        "branch=COALESCE(excluded.branch, workspaces.branch), "
+        "base_ref=COALESCE(excluded.base_ref, workspaces.base_ref), "
+        "created_by=COALESCE(excluded.created_by, workspaces.created_by)",
+        (name, checkout, branch, base_ref, created_by, now()),
     )
     db.commit()
 
 
 def retire_workspace(db: sqlite3.Connection, name: str) -> None:
-    """Stamp a workspace retired, clear its path, and drop the retiring mark.
+    """Stamp a workspace retired, clear its path and branch, and drop the retiring mark.
 
     The path goes because it is a record of where the checkout is, and after a retirement
     there is no checkout: leaving the old one behind would hand the next reader a path
-    that re-validates as absent and reads as something still to clean up.
+    that re-validates as absent and reads as something still to clean up. The branch goes
+    for that reason and no other — a retirement takes the worktree and the branch with it,
+    so a name left standing here describes a ref that is gone. It does not demote the
+    workspace to bare: `retired_at` is what says this one is not live, and an agent still
+    pointing at the name goes on reading its branch off its own row (`agent_branch`).
     """
     db.execute(
-        "UPDATE workspaces SET retired_at=?, checkout=NULL, retiring=NULL, "
+        "UPDATE workspaces SET retired_at=?, checkout=NULL, branch=NULL, retiring=NULL, "
         "retiring_at=NULL WHERE name=?",
         (now(), name),
     )
@@ -1612,17 +1788,28 @@ def retire_workspace(db: sqlite3.Connection, name: str) -> None:
 
 
 def reopen_workspace(
-    db: sqlite3.Connection, name: str, checkout: Optional[str] = None
+    db: sqlite3.Connection, name: str, checkout: Optional[str] = None, *,
+    branch: Optional[str] = None, base_ref: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> None:
     """Make a retired workspace live again, at wherever its checkout is now.
 
     Retirement is not a tombstone on the name — the name is identity, and a person who
     types it again means the workspace they are naming.
+
+    The resource facts follow the same `COALESCE` rule as `record_workspace`, and a reopen
+    is the one place it earns its keep twice over: retirement cleared the branch because
+    the ref was gone, and the attach that reopens the name is the caller that knows what
+    the new one is.
     """
     db.execute(
-        "INSERT INTO workspaces(name, checkout, created_at) VALUES(?,?,?) "
-        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout, retired_at=NULL",
-        (name, checkout, now()),
+        "INSERT INTO workspaces(name, checkout, branch, base_ref, created_by, created_at) "
+        "VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET checkout=excluded.checkout, retired_at=NULL, "
+        "branch=COALESCE(excluded.branch, workspaces.branch), "
+        "base_ref=COALESCE(excluded.base_ref, workspaces.base_ref), "
+        "created_by=COALESCE(excluded.created_by, workspaces.created_by)",
+        (name, checkout, branch, base_ref, created_by, now()),
     )
     db.commit()
 

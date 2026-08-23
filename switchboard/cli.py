@@ -144,6 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="join this EXISTING workspace instead of working where you are "
                         "(a workspace is opened by a dispatcher delegating: the "
                         "child's --name is the workspace's name)")
+    # WHERE the child works, when nothing else has already decided (`--workspace` and a
+    # top's fork both outrank it — broker `isolates`). `own` needs the `fork` capability.
+    d.add_argument("--isolation", choices=broker_mod.ISOLATIONS,
+                   default=broker_mod.ISOLATION_SHARED,
+                   help="'shared' (default) works in YOUR checkout, alongside you and "
+                        "your other children; 'own' gives this child a worktree and "
+                        "branch of its own to be merged back later (needs `fork`)")
     d.add_argument("--model", help=_tier_help())
 
     # A capability, handed to an agent in your own subtree, for the rest of its life.
@@ -959,7 +966,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # caller's workspace or forks, as it always has.
         join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
-                          topic=args.name,
+                          topic=args.name, isolation=args.isolation,
                           model=args.model, with_=args.with_, me=me, **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
