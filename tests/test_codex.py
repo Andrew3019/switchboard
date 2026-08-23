@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import codex, models, output, store  # noqa: E402
+from switchboard import codex, config, models, output, store  # noqa: E402
 from switchboard.broker import HUMAN, Broker  # noqa: E402
 from switchboard.herdr import Herdr  # noqa: E402
 from tests.test_broker import FakeHerdrAPI  # noqa: E402
@@ -126,6 +127,36 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", str(wt)],
                            cwd=self.repo, capture_output=True)
+
+    def test_the_notes_tree_is_granted_where_the_symlink_really_points(self):
+        """B2, found live 2026-08-23: in a worktree `.switchboard` is a SYMLINK to the
+        primary checkout, and the sandbox resolves symlinks before it decides — so a path
+        that looks like it is inside the worktree is not, and `apply_patch` on
+        `.switchboard/notes/<agent>-<topic>.md` was denied for a real codex agent. The
+        protocol tells children to write notes and briefs there. Pinned on the RESOLVED
+        target, which is the only string the sandbox ever compares."""
+        real = Path(self.tmp.name).parent / f"{self.repo.name}-sb"
+        real.mkdir()
+        try:
+            (self.repo / ".switchboard").symlink_to(real)
+            roots = [Path(r) for r in
+                     self.config(self.write())["sandbox_workspace_write"]
+                     ["writable_roots"]]
+            self.assertIn(real.resolve(), roots, roots)
+        finally:
+            shutil.rmtree(real, ignore_errors=True)
+
+    def test_the_user_state_tree_is_granted_so_report_bug_can_write(self):
+        """The other half of the same report: `sb plugin report-bug file` died with
+        `[Errno 1] Operation not permitted` writing under `~/.local/state/switchboard`,
+        and the protocol tells every agent to file a bug when switchboard breaks. The
+        whole root, not one plugin's subdirectory — every user-scope plugin's state sits
+        beside the others."""
+        roots = [Path(r) for r in
+                 self.config(self.write())["sandbox_workspace_write"]["writable_roots"]]
+        user_state = Path(config.setting("paths.user_state",
+                                         repo=self.repo)).expanduser().resolve()
+        self.assertIn(user_state, roots, roots)
 
     def test_auth_is_a_symlink_to_the_one_credential(self):
         """Decided, not incidental (Andrew, 2026-08-22): a copy would be a second
