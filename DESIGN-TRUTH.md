@@ -55,12 +55,15 @@ and clear enough for one agent end to end stays that lead's judgement to make. �
 2026-08-14, the dispatcher's own lead-or-worker choice 2026-08-15
 
 **Only `sb start` ever creates a TOP — that is the only path.** Being a top is stamped at
-that moment, and `sb delegate` branches on the stamp: a top's spawn gets a new space and
-worktree, anyone else's gets a tab in the caller's space. A bare agent's delegate is
-refused outright. That stamp, not the prompt, is what decides where an agent's children
-land. What an agent may do *itself* is a different question, and the answer to it is the
-role it was spawned as: dispatcher and lead are two roles with two prompts, not one role
-told its scope. — confirmed 2026-08-09, the second half confirmed 2026-08-14
+that moment, and `sb delegate` still branches on the stamp: a top's spawn gets a new space
+and worktree, anyone else's gets a tab in the caller's space unless that spawn asks for
+isolation. A bare agent's delegate is refused outright. That stamp, not the prompt, is what
+decides where an agent's children land by default. What an agent may do *itself* is a
+different question, and the answer to it is no longer the role alone: a role is a TEMPLATE
+that seeds a live per-agent capability set, and that set is what every gate reads — see
+Capabilities and isolation below. Dispatcher and lead are still two roles with two prompts,
+not one role told its scope. — confirmed 2026-08-09, the second half confirmed 2026-08-14,
+corrected against the merged capability and isolation code 2026-08-23
 
 **The dispatcher ROLE is not gated, and saying "only `sb start` makes a dispatcher" would
 be false.** `dispatcher` is a name `--role` takes like any other, the roles fragment every
@@ -74,24 +77,30 @@ confirmed 2026-08-14
 
 **Only a human may create a top; `sb start` is refused for agents.** The refusal is on
 that one command, so what an agent cannot do is create a top — asking for the dispatcher
-role at `sb delegate` is a different act and is not refused, per the entry above. —
-confirmed 2026-08-11, narrowed to what the refusal actually covers 2026-08-14
+role at `sb delegate` is a different act and is not refused, per the entry above. The
+refusal is hardcoded and there is no capability string standing for it, so no grant can
+reach it — see Explicitly rejected. — confirmed 2026-08-11, narrowed to what the refusal
+actually covers 2026-08-14, the non-grantability said out loud 2026-08-23
 
 **A fork that fails refuses the spawn and tells the parent.** It never falls back to
 Andrew's own checkout. `sb start` run inside a worktree is refused too, naming the main
 checkout to run it from. — confirmed 2026-08-09
 
 **Where each spawn lands.** `sb start` = new bare space + dispatcher. A dispatcher spawns
-a bare agent = new worktree/space and agent, and that agent cannot spawn other agents.
-A dispatcher spawns a lead = same thing. A lead spawning anything = new tab in the same
-exact space. So only the dispatcher ever creates a space: a sub-lead a lead spawns is a
-tab in the lead's space, and its whole subtree stays in that one space. — confirmed
-2026-08-09
+a bare agent = new worktree/space and agent, and that agent does not spawn other agents
+unless something above it granted `spawn`. A dispatcher spawns a lead = same thing. A lead
+spawning anything = new tab in the same exact space, unless that spawn asks for isolation.
+So by default a sub-lead a lead spawns is a tab in the lead's space, and its whole subtree
+stays in that one space — but the dispatcher is no longer the only agent that can create
+one. — confirmed 2026-08-09, the grant and isolation exceptions corrected against the
+merged code 2026-08-23
 
 **A worktree belongs to a space, not to an agent.** Everything in a lead's space shares
-that lead's worktree, since a lead's spawns are tabs in it. A bare agent gets its own
-worktree because it gets its own space. — confirmed 2026-08-09, read-only exception
-dropped 2026-08-12
+that lead's worktree, since a lead's spawns are tabs in it by default. A bare agent gets
+its own worktree because it gets its own space, and so does a child spawned with
+`--isolation own`: isolation mints a space, it never gives one agent a private tree inside
+somebody else's. — confirmed 2026-08-09, read-only exception dropped 2026-08-12, isolation
+added 2026-08-23
 
 **Work heading for a change that will land gets a plan.** That is the whole trigger, and
 small is not exempt: a one-line docs change bound for a PR gets a plan, only a short one.
@@ -113,7 +122,9 @@ lead either reports done or blocks, depending on whether the task is fully compl
 fully complete, report done; Andrew's input needed to finish it, block. Once that is done
 it reports done, and the dispatcher blocks. A lead cleans up its children, pushes the PR
 if relevant, and summarizes — it does not close itself, since cleaning a lead takes its
-children and it still has to report. A dispatcher hands work to a lead or to a single
+children and it still has to report; where its children were isolated, folding their
+branches in with `sb merge` comes before it pushes anything. A dispatcher hands work to a
+lead or to a single
 worker, and where a worker is directly under it, that agent pushes and opens its own PR if
 it was told to; the dispatcher blocks for it either way, since being told his work has
 landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
@@ -146,7 +157,11 @@ and that it can call it — not specifically how to use it; it can then go in an
 Agents cannot be trusted to take the initiative and work out what is available. What
 needs to be known differs by agent and by role: not every plugin for every agent. Put
 what is needed at spawn for now; we can clean up and prune later, but we want to get
-things working first. — confirmed 2026-08-09
+things working first. The pruning now has a mechanism and has partly happened: a
+reminder-shaped rule is delivered at the turn it applies to rather than bought at spawn by
+every agent — see the guidance ledger below — while anything that must be true from turn
+one still travels in the spawn prompt. — confirmed 2026-08-09, the ledger's carve-out
+2026-08-23
 
 **How herdr actually talks to Claude.** It types into the chat box and presses enter, so
 a message from sb arrives looking exactly like one Andrew typed — they are the same
@@ -173,8 +188,9 @@ and that text is generated from the roles themselves, never hardcoded. — confi
 **We should detect failures, and can start with just telling the parent that it has
 failed.** How detection works, whether anything retries, and what becomes of
 half-finished work are all deferred for now. One known hole to be aware of while it is
-deferred: a dead agent's half-finished edits sit in the worktree its whole space shares,
-and nobody owns them. — confirmed 2026-08-09
+deferred: a dead agent's half-finished edits sit in the worktree its whole space shares —
+or in its own, if it was spawned isolated — and nobody owns them. — confirmed 2026-08-09,
+the isolated case named 2026-08-23
 
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
@@ -288,9 +304,11 @@ worktrees and repos — its scope is the whole of its own tree — though in pra
 usually specific to one repo. Below it is a lead in a worktree of its own — or a single
 worker in that same worktree of its own, where the whole job fits one agent — then another
 lead or worker below that, to no fixed depth: unlimited levels are allowed,
-but stupid levels of it are not wanted and have not been observed. — confirmed
-2026-08-09, hierarchy restated 2026-08-14, what a dispatcher spawns being a lead or a
-worker 2026-08-15
+but stupid levels of it are not wanted and have not been observed. The dispatcher's scope
+is a placement and a capability set, not only a prompt: it is above the worktrees and it
+does not hold the right to write files git tracks — see the entry on its fixed set below.
+— confirmed 2026-08-09, hierarchy restated 2026-08-14, what a dispatcher spawns being a
+lead or a worker 2026-08-15, the capability half 2026-08-23
 
 **One space per repo, and one space per dispatcher.** That is what the herdr UI should
 show: a single space for each repo, a single space for each dispatcher, and everything
@@ -347,7 +365,10 @@ adopted by anything; an agent was simply in the wrong repo. — confirmed 2026-0
 handover reworded 2026-08-14 so it cannot be read as a spawn the dispatcher performs
 
 **A lead's children share its worktree, so the lead assigns disjoint files and
-serialises anything that overlaps.** — confirmed 2026-08-09
+serialises anything that overlaps.** That is the default and stays the common case. Where
+it is not wanted, the lead spawns the child with `--isolation own` and folds its branch
+back with `sb merge` once it finishes — see Capabilities and isolation below. — confirmed
+2026-08-09, the isolation escape hatch built and named 2026-08-23
 
 **Not every level gets a worktree of its own — the shared model is the one Andrew
 means, and it is what the code already does.** A dispatcher's children each get a
@@ -360,11 +381,12 @@ one worktree for the whole subtree, differing only by pane. It was ever in doubt
 everything Andrew had watched was spawned by a top, which forks a worktree per child
 under either model, so observation alone could not tell the two apart. What stays
 genuinely unknown: no collision between siblings editing the same file has ever been
-observed in this repo, and nothing prevents one — that is the record's silence, not a
-failed attempt to provoke one. If it ever happens, the fallback named is letting a lead
-choose isolated worktrees for a particular fan-out, an occasional escape hatch rather
-than an isolated-by-default rebuild; it is not built and is not proposed. — confirmed
-2026-08-14
+observed in this repo — that is the record's silence, not a failed attempt to provoke one.
+What has changed is that the fallback named then is now built. A lead may choose an
+isolated worktree for a particular spawn, and that is exactly the shape it was described
+in: a per-spawn escape hatch asked for one child at a time, not an isolated-by-default
+rebuild. Shared is still the default for everyone below the top. — confirmed 2026-08-14,
+the escape hatch built 2026-08-23
 
 **A lead's job is to orchestrate other agents and stuff.** Review is coordinated by it.
 — confirmed 2026-08-09
@@ -377,13 +399,132 @@ through the split. — confirmed 2026-08-09
 
 **Dispatcher and lead must be clearly differentiated, and some mechanism other than the
 prompt must make that true as well.** The mechanism is the `is_top` stamp, which decides
-where each one's children land. Past that, the prompt is the mechanism and is judged
-enough — see Explicitly rejected. — confirmed 2026-08-09, prompt-is-enough confirmed
-2026-08-14
+where each one's children land, and — since the capability migration — the two sets the
+templates seed, which genuinely differ: the top holds no `write-tracked`, a lead holds it
+and `fork`. Past that, the prompt is the mechanism and is judged enough — see Explicitly
+rejected. — confirmed 2026-08-09, prompt-is-enough confirmed 2026-08-14, the capability
+half 2026-08-23
 
 **`orchestrator` is retired as a role name.** It survives only as a config alias for
 `lead`, resolving all the way through — so a stale `--role orchestrator` gets a lead
-rather than falling through to a role that cannot delegate at all. — confirmed 2026-08-14
+rather than falling through to the fallback role, whose template holds no `spawn` and so
+cannot delegate at all. — confirmed 2026-08-14, the wording read off the capability
+templates 2026-08-23
+
+### Capabilities and isolation
+
+*What an agent may DO, and where its children land. Both used to be read off the role name
+and the `is_top` stamp; both are now live per-agent state. The stamp survives and still
+decides placement by default — the entries above under CUJs are what these are read
+against. — confirmed 2026-08-23*
+
+**Capabilities are a live per-agent set, and a role is only the template it is seeded
+from.** The retired shape was one bool per role (`delegate = true/false`), which answered
+exactly one question and would have needed a second field for every rule after it. Now
+every gated action is a capability STRING checked through one function, so adding a rule
+means adding a string rather than another refusal function beside the gate. Four strings
+ship — `spawn`, `fork`, `write-tracked` and `dispatch` — and the first three are the ones
+with a gate site today; `dispatch` is seeded and grantable vocabulary with nothing checking
+it yet. The set is open-ended and a repo may add to it. A
+spawn NARROWS and never widens: a child is seeded with its role template intersected with
+what its spawner may pass down, so nobody reaches past their own ceiling by spawning
+something more capable and driving it by `sb tell`. The one exception is the top, which
+seeds its children from the full template even for capabilities it does not itself hold,
+because commissioning fully-capable leads while holding none of their rights is precisely
+its job. What the role name still decides on its own is the prompt, the model tier, and how
+far the agent may tune its own reminders. — confirmed 2026-08-23, against the merged code
+
+**The top dispatcher's capability set is fixed, and it holds no `write-tracked`.** It is
+the one bundle that is not data: not editable by a repo's role files, not derived from any
+mutable row, and never the target of a grant. It holds `spawn`, `dispatch` and `fork` —
+`fork` because forking is what a top is for, having no space of its own to lend — and it
+does not hold the right to write files git tracks, because it works over a person's own
+main checkout. This is the placement half of the dispatcher, not the role half: a non-top
+agent given the `dispatcher` role is an ordinary agent with that prompt and that template's
+own bundle, which is a different thing and is the entry above on the role not being gated.
+— confirmed 2026-08-23, against the merged code
+
+**`sb grant` is how an agent gets a capability it was not seeded with.** One shot and
+lifetime-scoped: there is no revoke and no expiry, `cleanup` ends the grant and `restore`
+starts a fresh lifetime from the stored seed. The refusals are the design — an unknown
+capability string is refused rather than written down, a grant never targets the granter, a
+grant reaches only inside the granter's own subtree, the top is never a target, and a
+granter may only hand on what it holds or may itself pass down. `--delegable` splits those
+two: the recipient's children are seeded with the capability while the recipient still may
+not use it, which is what lets a read-only researcher equip the writers below it without
+becoming a writer. The subtree rule is an admission check at the moment of granting and not
+an invariant anything maintains: a later promote may lift a granted agent under a lead that
+never authorized it, and what carries that residual is `sb who-holds` and the divergence
+marker on the agent's row rather than a re-check — `sb status` draws that marker in the
+ROLE column, on the agent and on everything above it. — confirmed 2026-08-23, against the
+merged code
+
+**Isolation is asked for per spawn, and `sb merge` is the way back off it.** `sb delegate
+--isolation own|shared` decides whether a child gets a worktree and branch of its own.
+`shared` is the default, and `own` needs `fork`, which the lead template carries — so a
+lead arrives able to isolate a child that needs it, and its ordinary spawns are unchanged.
+Three rules decide placement, in order: a workspace named outright wins, otherwise a caller
+with no space to lend forks anyway, otherwise what the spawn asked for. `sb merge <child>`
+folds one finished child's branch into the caller's own branch, in the caller's own
+checkout, called as each child finishes rather than saved up. It is assembly and not
+landing: it never pushes, never touches `main` and opens no pull request, so it clears no
+gate and bypasses none, and one PR at the end survives for free because every child folds
+into the same branch. It refuses on a dirty checkout rather than stashing, since a lead's
+shared children are working in that same checkout and their uncommitted work is not the
+caller's to move. A real conflict spawns one integrator for that one merge, and the caller
+carries on with the next child against the result. — confirmed 2026-08-23, against the
+merged code
+
+**An agent's parent is mutable, and `sb done --preserve-children` is the one thing that
+moves it.** `parent` is read through a thin resolver at the point of use, so `done` mails
+and `cleanup` scopes on whoever an agent reports to now rather than on a copy of the state
+at spawn. Promote re-homes an agent's live children onto its own parent in the same
+transaction as its own report: they rise one level and the promoter drops out of the chain.
+The case it is for is an agent that finds the job is bigger than it was given — a
+researcher spawns the lead the work actually needs, hands its findings over as the brief,
+and finishes with `--preserve-children`. It takes no capability and there is no topology
+capability string at all, because it re-homes your own children onto your own parent and
+those children were already that parent's descendants: nobody gains authority over anybody
+new, and the promoter gives up its own reporting line as part of finishing. The one refusal
+is structural rather than a permission — the top may not promote, since that would leave
+its children parentless and unhook the fleet from the row everything else resolves against.
+It is a different thing from the reporting handoff under CUJs, which moves a conversation
+and leaves the tree where it is. — confirmed 2026-08-23, against the merged code
+
+**Guidance is a ledger of situational rules, delivered at the turn they apply to.** A rule
+is data — `defaults/guidance.toml`, joined with a repo's own and re-read every turn, so an
+edit reaches agents already running — keyed by role, by the `sb` verb just run, by the
+agent's live capability set, and by deterministic facts the store can be asked about. There
+is no free-text condition and nothing that asks a model whether a situation applies. It
+rides the `UserPromptSubmit` hook that already exists, so it reaches an agent that never
+talks to sb at all, and when nothing matches nothing is printed. It is SUBTRACTIVE: a rule
+that moves here is deleted from the spawn prompt, because a rule in both places is paid for
+twice and drifts. Reminder-shaped rules move; identity and orientation prose does not,
+since it has no later turn to wait for and must be true from turn one. A ledger that only
+grows is the failure mode, so rows are pruned against how often they have actually changed
+what an agent did. — confirmed 2026-08-23, against the merged code
+
+**`sb configure` tunes how loudly an agent is reminded, and never what it may do.** It is
+self-directed and has no target: one agent cannot configure another by any path. Its bound
+is a ceiling its ROLE template sets — the role and not the parent, deliberately, because
+`parent` is mutable and a promote above an agent must not silently change what that agent
+may do to its own reminders. Nobody above can lift it either; the way past it is a person
+editing the role template, which is one decision about every agent of that role. The
+setting vocabulary is closed, which is how "no self-widening by any path" is enforced: a
+capability string is simply not a setting name, so `sb configure spawn true` is refused in
+the same breath as a typo. Safety-category rules are delivered whatever anybody has
+configured. — confirmed 2026-08-23, against the merged code
+
+**`write-tracked` is one instance of a repo-configurable side-effect class, not a rule of
+its own.** `[capabilities.side_effects]` names the capability strings that stand for an
+action producing a side effect sb mediates, and says which sb-mediated boundary each is
+checked at: `sb merge` refuses a child that does not hold it, `sb done` only flags. A repo
+whose dangerous act is a deploy rather than a tracked edit mints its own string there and
+gets the same gate, the same subtree-scoped grants and the same fail-closed path with no
+structural change anywhere. It is NOT a security control and must not be built as one:
+there is no filesystem chokepoint anywhere in sb, so every instance of the class is a
+post-hoc check on the sanctioned path, and an agent with its own `git` can push a branch by
+hand. — confirmed 2026-08-23, against the merged code
 
 ### Plans
 
@@ -466,7 +607,10 @@ crosses freely into any tree. — confirmed 2026-08-09
 
 **Agents the dispatcher spawns directly are owned by it — no other agent owns
 them — and they answer to it.** They can talk to each other, but they should not: keeping
-it simple is the point. — confirmed 2026-08-09
+it simple is the point. That set can grow without it spawning anything: a lead finishing
+with `--preserve-children` hands its live children up to whoever it reported to. Nothing
+takes one away, and nobody outside its tree ever gains one. — confirmed 2026-08-09, the
+promote case added 2026-08-23
 
 ### Interface
 
@@ -504,15 +648,18 @@ later.) — confirmed 2026-08-09
 
 ### Commands
 
-**`sb delegate` figures out where a spawn lands rather than the caller passing flags for
-it.** A dispatcher's spawn gets a space and a worktree of its own whatever role it is
-given — the code branches on the `is_top` stamp, not on the role. What a dispatcher hands
+**`sb delegate` works out where a spawn lands, and `--isolation` is the one flag that
+overrides it.** A dispatcher's spawn gets a space and a worktree of its own whatever role
+it is given — the code branches on the `is_top` stamp, not on the role. Below the top the
+default is still a tab in the caller's own space with no flag passed at all, and
+`--isolation own` is the one way a caller asks for something else. What a dispatcher hands
 out is a lead or a single worker, and it chooses: a worker when one agent can carry the
 whole thing to done, a lead otherwise and whenever it is unsure. A worker it hands out
 gets exactly the same setup and environment a lead would have got — its own space, its own
-worktree, all of it — and the only difference is the role it runs as. — confirmed
+worktree, all of it — and the only difference is the role it runs as, which now also means
+the capability set that role's template seeds. — confirmed
 2026-08-09, lead-or-worker 2026-08-15, superseding the 2026-08-14 rule that a dispatcher
-hands out a lead every time
+hands out a lead every time; `--isolation` and the capability half 2026-08-23
 
 **The lead handles cleanup itself, and it should do this aggressively** — probably
 literally every agent that is done. Cleaning up a lead always cleans its children. What
@@ -640,6 +787,8 @@ down. So it is never merge without asking your parent. The default shape of ship
 is branch named for the workspace, push, open the PR, and put its URL in the summary. The
 plans plugin can override this: where a plan is running, its merge gate decides pushing and
 merging — the agent asks once, and once approved merges and cleans up without asking again.
+`sb merge` is not the act this entry governs: it folds a child's branch into the caller's
+own branch and reaches no push, no `main` and no pull request.
 — confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
 explicit approval and that no agent merges without asking first; the plans plugin's
 merge-gate override 2026-08-17
@@ -687,7 +836,35 @@ than the lead's 2026-08-15, since a dispatcher now closes on Andrew's say-so
 **Hard tool-layer enforcement of what a dispatcher may do.** No gate, no blocked verbs: a
 dispatcher legitimately writes a handoff file and legitimately reads one, and a rule that
 cannot tell those from doing the work would either block the job or wave the work through.
-A well-written prompt is judged sufficient. — confirmed 2026-08-14
+A well-written prompt is judged sufficient. The capability set that arrived later did not
+reopen this: there is no filesystem chokepoint anywhere in sb, so `write-tracked` is checked
+after the fact at `sb merge` and only flagged at `sb done`, never at the write itself. —
+confirmed 2026-08-14, the capability set placed against it 2026-08-23
+
+**A revoke, and an expiry on a grant.** A grant is one shot and lasts the agent's
+lifetime: `cleanup` ends the lifetime and `restore` starts a fresh one from the stored
+seed. That bound is what makes a grant cheap to give and impossible to forget about. —
+confirmed 2026-08-23
+
+**A grantable `start`.** `sb start` stays a hardcoded, fail-closed, human-only gate and
+`start` is not a capability string at all — a grantable version of it is how a top would
+come to mint a second top. A repo naming it in a role template does not reopen it. —
+confirmed 2026-08-23
+
+**A capability for topology.** Promote is self-service and there is no topology capability
+string: re-homing your own children onto your own parent takes a right over nobody, and the
+one refusal on it is structural rather than a permission. — confirmed 2026-08-23
+
+**A hard cap on worktrees or on fan-out width.** Nothing is refused and no number is
+enforced. `sb status` carries the open-worktree count — the agent's own and its subtree's
+— and the guidance ledger nudges past a soft threshold; a ceiling would refuse a legitimate
+twenty-way fan-out at the moment the fleet is doing its most valuable work. — confirmed
+2026-08-23
+
+**`sb handoff` as its own verb, and a batch `sb merge`.** The handoff is a flag on the verb
+that already exists, because the spawn half is `sb delegate` unchanged and the message half
+is the `done` summary. Merging is one child at a time, because batching made assembly wait
+for the last child. — confirmed 2026-08-23
 
 **`--no-board`.** Every sb-made view is split with the board. — confirmed 2026-08-09
 
