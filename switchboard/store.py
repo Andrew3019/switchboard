@@ -374,10 +374,34 @@ CREATE TABLE capabilities (
                                       -- unused until grants ship: the column belongs to
                                       -- the row's shape, and adding it later would mean
                                       -- an ALTER against a table full of live grants.
-    granted_at    INTEGER              -- epoch the row was written. Seeded rows carry the
+    held          INTEGER NOT NULL DEFAULT 1,
+                                      -- may the holder DO the thing itself? The other
+                                      -- half of `delegable`, and a SEPARATE BIT rather
+                                      -- than its opposite: the spec's two sets are "held
+                                      -- = rows where delegable is false" and "passable =
+                                      -- held ∪ delegable", which reads as one flag right
+                                      -- up until a cap is BOTH (granted twice, or
+                                      -- `--delegable` over a cap already held — §2.1
+                                      -- says outright these are independent bits). One
+                                      -- row per (agent, cap) is enforced by the unique
+                                      -- index below, so "both" has nowhere to live
+                                      -- except a second column. DEFAULT 1 is what makes
+                                      -- every row written before this column existed —
+                                      -- seeds, all of them — read as held, which is what
+                                      -- they were.
+    granted_at    INTEGER,             -- epoch the row was written. Seeded rows carry the
                                       -- spawn time; the column exists so a later grant is
                                       -- distinguishable from the seed by more than
                                       -- inference.
+    granted_by    TEXT,                -- WHO decided this, for a grant. NULL on a seeded
+                                      -- row: nobody decided it, the role template and the
+                                      -- spawner's passable set did, and writing the
+                                      -- spawner's name here would make every spawn look
+                                      -- like a grant in the audit.
+    reason        TEXT                 -- the granter's `--reason`, verbatim and optional.
+                                      -- Provenance is the whole audit story for a right
+                                      -- that has no revoke and no expiry: `granted_by`
+                                      -- says who, this says why.
 );
 CREATE UNIQUE INDEX idx_caps_agent_cap ON capabilities(agent, cap);
 """
@@ -1143,21 +1167,101 @@ def seed_capabilities(db: sqlite3.Connection, name: str, caps) -> None:
     db.execute("UPDATE agents SET seed_capabilities=? "
                "WHERE name=? AND seed_capabilities IS NULL", (" ".join(caps), name))
     for cap in caps:
-        db.execute("INSERT OR IGNORE INTO capabilities(agent, cap, delegable, granted_at) "
-                   "VALUES (?,?,0,?)", (name, cap, ts))
+        # HELD, never delegable. A worker seeded `write-tracked` that could not write
+        # would defeat the point (§2.1), and a seed that arrived delegable-only would
+        # cripple the agent while widening its children — the exact inversion.
+        db.execute("INSERT OR IGNORE INTO capabilities"
+                   "(agent, cap, delegable, held, granted_at) VALUES (?,?,0,1,?)",
+                   (name, cap, ts))
     db.commit()
 
 
-def capabilities_of(db: sqlite3.Connection, name: str) -> set:
-    """The capabilities this agent holds NOW, read from the table.
+def reseed_capabilities(db: sqlite3.Connection, name: str, caps) -> int:
+    """Put this agent's set back to the caps named, dropping everything else. -> grants dropped.
+
+    `restore`'s write, and the only one that ever REMOVES a capability row. `cleanup` ends
+    the grant lifetime and `restore` starts a fresh one (§2.1), so a restored agent comes
+    back with its seed and nothing else — rehydrating grants would make a right that has no
+    revoke effectively permanent.
+
+    The count returned is what `restore` says out loud. A grant that vanishes silently is
+    a narrowing nobody can act on, so the number of rows this deleted that were not the
+    seed is part of the command's report, not an implementation detail.
+
+    Deliberately NOT a re-derivation from the role: the caps passed in are the STORED seed
+    (`agents.seed_capabilities`). Reseeding from the template would return a ∩-narrowed
+    lead as a full one, which is a silent widening past the exact ceiling ∩-seeding exists
+    to enforce, with no grant recorded and no granter in the log.
+    """
+    caps = sorted(set(caps))
+    dropped = len([r for r in
+                   db.execute("SELECT cap, held, delegable FROM capabilities WHERE agent=?",
+                              (name,))
+                   if r["cap"] not in caps or not r["held"] or r["delegable"]])
+    db.execute("DELETE FROM capabilities WHERE agent=?", (name,))
+    ts = now()
+    for cap in caps:
+        db.execute("INSERT INTO capabilities(agent, cap, delegable, held, granted_at) "
+                   "VALUES (?,?,0,1,?)", (name, cap, ts))
+    db.commit()
+    return dropped
+
+
+def grant_capability(db: sqlite3.Connection, name: str, cap: str, *,
+                     delegable: bool, granted_by: str, reason: Optional[str] = None) -> None:
+    """Write one granted capability row. The authorization happened in `Broker.grant`.
+
+    UNION, never replacement. A `--delegable` grant over a cap the agent already holds
+    leaves it held and adds the passable bit; a plain grant over a delegable-only cap adds
+    the held bit and leaves the passable one. "Held" and "passable" are independent bits
+    (§2.1), and `OR`-ing them is what makes that true of the row as well as of the prose —
+    an assignment either way would silently take a capability away as the side effect of
+    adding one.
+
+    There is no removal counterpart, on purpose: no `sb revoke`, no TTL. The agent's
+    lifecycle ends the grant, and `reseed_capabilities` is the only thing that unwrites it.
+    """
+    db.execute(
+        """INSERT INTO capabilities(agent, cap, delegable, held, granted_at, granted_by, reason)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(agent, cap) DO UPDATE SET
+             delegable = delegable OR excluded.delegable,
+             held      = held      OR excluded.held,
+             granted_at = excluded.granted_at,
+             granted_by = excluded.granted_by,
+             reason     = excluded.reason""",
+        (name, cap, 1 if delegable else 0, 0 if delegable else 1,
+         now(), granted_by, reason))
+    db.commit()
+
+
+def held_capabilities(db: sqlite3.Connection, name: str) -> set:
+    """What this agent may DO — the set `require_capability` reads.
 
     Only meaningful for a row that has been seeded — a NULL `seed_capabilities` means
     nobody has written these rows, and an empty set read here would be the substrate
     inventing a refusal for a row that predates it. The caller checks that first
-    (`Broker._capabilities_of`); this function just answers what the table says.
+    (`Broker._held_of`); this function just answers what the table says.
+    """
+    return {r["cap"] for r in
+            db.execute("SELECT cap FROM capabilities WHERE agent=? AND held=1", (name,))}
+
+
+def passable_capabilities(db: sqlite3.Connection, name: str) -> set:
+    """What this agent may PASS DOWN — held ∪ delegable-only. The set ∩-seeding reads.
+
+    The second of the two read sites in the whole design, and there are exactly two: this
+    one at spawn, and `held_capabilities` at the gate. A third would be somebody deciding
+    that "may pass it on" is close enough to "may do it".
     """
     return {r["cap"] for r in
             db.execute("SELECT cap FROM capabilities WHERE agent=?", (name,))}
+
+
+def capability_rows(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    """Every capability row for this agent, provenance and all — for reporting, not deciding."""
+    return db.execute(
+        "SELECT * FROM capabilities WHERE agent=? ORDER BY cap", (name,)).fetchall()
 
 
 def drop_agent(db: sqlite3.Connection, name: str) -> None:

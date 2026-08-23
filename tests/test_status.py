@@ -1414,6 +1414,7 @@ class StatusCliTest(unittest.TestCase):
             "tell": ["w1", "hi"], "inbox": [], "done": ["finished"], "block": ["why"],
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             "cleanup": [], "workspace": ["list"], "restore": ["w1"],
+            "grant": ["w1", "spawn"],
             "inspect": ["w1"], "log": [],
             "board": [], "flush": [], "reconcile": [], "sweep": [],
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,

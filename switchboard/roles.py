@@ -48,6 +48,16 @@ CAP_FORK = "fork"                      # does this caller's spawn mint a space o
 CAP_DISPATCH = "dispatch"              # may it hand work to an agent it did not spawn?
 CAP_WRITE_TRACKED = "write-tracked"    # may it write files git tracks?
 
+# THE WHOLE VOCABULARY, as one set. `sb grant` checks against it and refuses anything else,
+# and that refusal is the fail-CLOSED half of the grant path: a grant is durable, silent and
+# irrevocable, so a typo (`--delegable wrte-tracked`) must be an error rather than a row
+# nothing will ever read and nobody will ever notice is dead.
+#
+# Open-ended still means what it said — a new gated action is a new string here plus one
+# gate, not a subsystem — but "open-ended" is about how the set GROWS, not about accepting
+# whatever a caller types. `start` is not in it and never will be.
+CAPABILITIES = frozenset({CAP_SPAWN, CAP_FORK, CAP_DISPATCH, CAP_WRITE_TRACKED})
+
 # What a role gets when its own definition names no bundle. A role nobody thought about is
 # a LEAF that may write — the same answer the retired `delegate = false` default gave, for
 # the same reason: being wrong this way costs a refusal a person can lift, and being wrong

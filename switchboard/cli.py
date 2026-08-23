@@ -146,6 +146,30 @@ def build_parser() -> argparse.ArgumentParser:
                         "child's --name is the workspace's name)")
     d.add_argument("--model", help=_tier_help())
 
+    # A capability, handed to an agent in your own subtree, for the rest of its life.
+    # There is deliberately NO `sb revoke` and no `--ttl`: the agent's lifecycle is the
+    # grant's, `cleanup` ends it and `restore` starts a fresh one from the stored seed. A
+    # revoke would be a second, racier way to say `cleanup`, and a TTL would put a clock on
+    # a decision nobody would be watching when it fired.
+    g = cmd(
+        "grant", help="give an agent below you a capability it does not have",
+        description="One-shot and permanent for that agent's life: it holds the capability "
+                    "until it closes, and there is no revoke. You may grant only what you "
+                    "hold yourself, and only inside your own subtree — a grant hands a "
+                    "right to somebody another lead is answerable for, so cross-subtree "
+                    "sharing goes through the agent you both report to. A grant never "
+                    "targets you: rights are somebody else's to give.")
+    g.add_argument("agent", help="who gets it — must be in your subtree, and not you")
+    g.add_argument("cap", metavar="CAPABILITY",
+                   help="the capability string (see the refusal for the list)")
+    # The pass-through half of the model, and the flag exists because "may do it" and "may
+    # hand it down" are two different decisions: a read-only researcher equips the workers
+    # it spawns without ever becoming a writer itself.
+    g.add_argument("--delegable", action="store_true",
+                   help="the agent may pass this DOWN to what it spawns, without being "
+                        "able to do it itself")
+    g.add_argument("--reason", help="why, recorded with your name against the grant")
+
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
     t.add_argument("message")
@@ -412,6 +436,15 @@ def _validate(args) -> None:
         # prompt text, so both are checked again after resolution (see _dispatch).
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
+
+    elif cmd == "grant":
+        args.agent = validate.agent_name(args.agent)
+        # One word, and the broker checks it against the vocabulary — this only keeps a
+        # sentence out of the column. Names like `write-tracked` carry a hyphen, which
+        # `token` allows; whitespace is what it refuses.
+        args.cap = validate.token(args.cap, "capability")
+        if args.reason is not None:
+            args.reason = validate.line(args.reason, "--reason")
 
     elif cmd == "tell":
         args.who = validate.targets(args.who)
@@ -903,6 +936,19 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
               {"name": name, "workspace": join.get("workspace"), "unconfirmed": note})
         return 0
 
+    if cmd == "grant":
+        r = b.grant(args.agent, args.cap, delegable=args.delegable,
+                    reason=args.reason, me=me)
+        # The two halves are said apart, because they are two different facts about the
+        # recipient and confusing them is the whole reason `--delegable` exists: one says
+        # what that agent may now DO, the other says what its children may be SEEDED with
+        # while it still may not do it.
+        what = (f"may pass {r['cap']} down to agents it spawns (it still does not hold "
+                f"{r['cap']} itself)" if r["delegable"] else f"holds {r['cap']}")
+        _emit(args, f"{r['agent']} {what} — for the rest of its life; there is no revoke",
+              r)
+        return 0
+
     if cmd == "tell":
         ids = b.tell(args.who, args.message, me=me,
                      needs_reply=args.needs_reply, mode=args.mode)
@@ -1212,7 +1258,13 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "restore":
         b.restore(args.name, me=me)
-        _emit(args, f"restored {args.name}", {"name": args.name})
+        # The capability note, when there is one. A restored agent comes back on its
+        # stored seed and its grants are gone — a narrowing the operator can put right in
+        # one line, and cannot if nobody says it happened. The agent is told the same
+        # thing through its inbox (`Broker._reseed_on_restore`).
+        note = b.restore_note
+        _emit(args, f"restored {args.name}" + (f" — {note}" if note else ""),
+              {"name": args.name, "capabilities": note})
         return 0
 
     if cmd == "inspect":

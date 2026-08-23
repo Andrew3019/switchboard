@@ -697,6 +697,11 @@ class Broker:
         # above: the CLI has to tell the caller what happened, and the return value of
         # `done` is already the live-children list. Read by `cli` right after the call.
         self.done_repeat = False
+        # What the last `restore` did to that agent's capability set: it comes back on its
+        # STORED SEED and any grants it held are gone (§2.1). Same shape and reason as the
+        # two above — the operator has to be told, because a narrowing nobody can see is
+        # one nobody can put right with the one cheap line (`sb grant`) that would.
+        self.restore_note: Optional[str] = None
 
     def _protocol(self) -> str:
         return config.flatten(self._protocol_override) if self._protocol_override \
@@ -1036,9 +1041,15 @@ class Broker:
         caller* ⇒ allow; *row present, cap held* ⇒ allow; *row present, cap absent* ⇒
         refuse. The first of those is the fail-open, and it is load-bearing rather than
         lenient — see `_capability_row`.
+
+        It reads the HELD set and only the held set. A cap granted `--delegable` counts in
+        what this agent's children may be seeded with and NEVER in what it may do itself —
+        one of exactly two read sites in the design, the other being `passable_for` at the
+        spawn. That split is the whole of #163's motivating case: a read-only researcher
+        equips the workers below it without ever becoming a writer.
         """
         row = self._capability_row(agent)
-        if row is None or cap in self._capabilities_of(row):
+        if row is None or cap in self._held_of(row):
             return
         raise ValueError(self._capability_refusal(row["role"], cap))
 
@@ -1051,7 +1062,7 @@ class Broker:
         rule cannot come to mean one thing where it raises and another where it decides.
         """
         row = self._capability_row(agent)
-        return row is None or cap in self._capabilities_of(row)
+        return row is None or cap in self._held_of(row)
 
     def _capability_row(self, agent: str) -> Optional[sqlite3.Row]:
         """The row the check reads, or None where there is nothing to read — which is the
@@ -1067,8 +1078,8 @@ class Broker:
             return None
         return store.get_agent(self.db, agent)
 
-    def _capabilities_of(self, row: sqlite3.Row) -> set:
-        """What this row holds. From the table when it has been seeded, DERIVED when it
+    def _held_of(self, row: sqlite3.Row) -> set:
+        """What this row may DO. From the table when it has been seeded, DERIVED when it
         has not.
 
         A NULL `seed_capabilities` is a row written before the substrate existed — an older
@@ -1088,9 +1099,41 @@ class Broker:
             seed = None                 # a store or a stub row older than the column
         if seed is None:
             return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
-        return store.capabilities_of(self.db, row["name"])
+        return store.held_capabilities(self.db, row["name"])
 
-    def seed_for(self, role: str, is_top: bool) -> list:
+    def _passable_of(self, row: sqlite3.Row) -> set:
+        """What this row may PASS DOWN — held ∪ delegable-only. Same derived fallback.
+
+        The fallback derives the same set as `_held_of` and that is right rather than
+        lazy: a row nobody seeded has no grants either, so nothing about it can be
+        delegable-only.
+        """
+        try:
+            seed = row["seed_capabilities"]
+        except (IndexError, KeyError, TypeError):
+            seed = None
+        if seed is None:
+            return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
+        return store.passable_capabilities(self.db, row["name"])
+
+    def passable_for(self, agent: str) -> Optional[set]:
+        """What this agent may hand DOWN to something it spawns. `None` means "no ceiling".
+
+        `None` is the rowless fail-open in the shape ∩-seeding needs it: the human, and a
+        caller this store has no row for, bound a child by nothing — intersecting with an
+        empty set instead would cripple every agent spawned against a cold store, which is
+        the same regression the gate's third value exists to avoid, arriving at the spawn
+        rather than at the check.
+        """
+        row = self._capability_row(agent)
+        return None if row is None else self._passable_of(row)
+
+    def held_for(self, agent: str) -> Optional[set]:
+        """What this agent may DO, or `None` for a caller with no row. `passable_for`'s twin."""
+        row = self._capability_row(agent)
+        return None if row is None else self._held_of(row)
+
+    def seed_for(self, role: str, is_top: bool, spawner: Optional[str] = None) -> list:
         """The set an agent of this role gets at spawn: its role's DEFAULT BUNDLE.
 
         Read off the role (`roles.Role.capabilities`), never off the role's NAME, so a
@@ -1114,11 +1157,31 @@ class Broker:
         There is no `start` in this function and there is none anywhere: `sb start` is a
         hardcoded human-only gate in the CLI, and a grantable version of it is how a top
         would come to mint another top.
+
+        THE ∩-RULE (§2.1). Given a `spawner`, the answer is `template ∩ passable(spawner)`:
+        a spawn NARROWS, never widens. Without it `spawn` is a second, unguarded
+        cap-minting path — a worker granted `spawn` runs `sb delegate --role lead`, the
+        child seeds the full lead bundle, and the worker drives it by `sb tell`, escalating
+        transitively past its own ceiling. Under the rule that "lead" comes out
+        `{spawn, write-tracked}`: crippled, and nothing escalated.
+
+        THE ONE EXCEPTION IS THE TOP. It seeds its children from the FULL template even for
+        caps it does not itself hold — commissioning fully-capable leads while holding no
+        `write-tracked` is precisely its job. Safe because the top is singular, non-grantable
+        as a target and placement-fixed (§2.0), and no non-top can reach it: the branch asks
+        the `is_top` stamp of the spawner, which nothing but `sb start` writes.
+
+        A spawner with NO ROW bounds nothing either (`passable_for` -> None) — the human,
+        and the cold-store bootstrap, for the gate's own fail-open reason. Intersecting
+        with an empty set there would cripple every agent spawned against a fresh store.
         """
         if is_top:
             return sorted(roles_mod.TOP_CAPABILITIES)
-        bundle = roles_mod.get(self.roles, role, self.repo).capabilities
-        return sorted(bundle - {CAP_FORK})
+        bundle = roles_mod.get(self.roles, role, self.repo).capabilities - {CAP_FORK}
+        if spawner is None or self.is_top(spawner):
+            return sorted(bundle)
+        passable = self.passable_for(spawner)
+        return sorted(bundle if passable is None else bundle & passable)
 
     def _capability_refusal(self, role: str, cap: str) -> str:
         """What a refused caller is told. Word for word what the spawn gate said before
@@ -1146,6 +1209,160 @@ class Broker:
         asked of its capabilities.
         """
         return sorted(n for n, r in self.roles.items() if CAP_SPAWN in r.capabilities)
+
+    # -- grants ----------------------------------------------------------
+
+    def known_capabilities(self) -> set:
+        """Every capability string this repo has a meaning for. What `sb grant` will accept.
+
+        The shipped vocabulary (`roles.CAPABILITIES`) plus anything a repo's own role
+        templates name, because a repo that adds a string to a template has added it to the
+        vocabulary — refusing to grant a cap the seeder happily hands out would be two
+        vocabularies again, which is the thing C1 collapsed.
+
+        `start` is subtracted whatever any file says. It is the one string that is not a
+        capability and must never become grantable: `sb start` is a hardcoded, fail-closed,
+        human-only gate, and a grantable version of it is how a top comes to mint a second
+        top. A repo naming it in a template does not get to reopen that.
+        """
+        return (set(roles_mod.CAPABILITIES) | self._template_caps()) - {"start"}
+
+    def grant(self, target: str, cap: str, *, delegable: bool = False,
+              reason: Optional[str] = None, me: Optional[str] = None) -> dict:
+        """Hand another agent a capability, for the rest of its life. `sb grant`.
+
+        ONE-SHOT AND LIFETIME-SCOPED (§2.1, §6.4). There is no `sb revoke` and no TTL: the
+        agent's lifecycle ends the grant, `cleanup` closes the lifetime and `restore`
+        starts a fresh one from the stored seed. That bound is what makes a grant cheap to
+        give and impossible to forget about.
+
+        THE GRANT PATH FAILS CLOSED, and it is a DIFFERENT PREDICATE from the gate above.
+        `require_capability` is three-valued and allows a caller with no row, because
+        `sb start` has to survive a cold store. A grant is durable, silent and irrevocable,
+        so it requires a real agent row that actually holds the cap, and a rowless caller —
+        the human, or an agent standing in a fresh clone whose store has no rows at all
+        (`cli._agent_caller` documents how that clone resolves to HUMAN) — is REFUSED.
+        Clone-based verification is this repo's own convention, so "rowless ⇒ allow" here
+        would mean any clone bootstrap silently grants anything.
+
+        The refusals, in the order they are asked:
+
+        1. **An unknown capability string** — a typo is refused, not written (fail-closed).
+        2. **No such target** — nothing is granted into thin air.
+        3. **NO SELF-GRANT.** A grant never targets the granter, whatever the cap and
+           whichever bits the caller holds. Without it a delegable-only holder grants
+           itself the held form and the split lasts as long as it takes to type one line.
+           No agent widens its own HELD set by any path: held caps come from exactly two
+           places, the ∩-seed at spawn and a grant from SOMEBODY ELSE. This does not
+           conflict with promote being self-service (§2.3) — reorganizing yourself is
+           position and takes rights over no third party; widening yourself takes one from
+           the lead who authorized a routing hub and would silently get a writer.
+        4. **A rowless caller** — the fail-closed predicate above.
+        5. **THE TOP IS NEVER A TARGET.** Its capability set is fixed (§2.0), so the
+           refusal is one predicate here rather than a special case scattered downstream.
+        6. **SUBTREE REACH.** A grant reaches only inside the granter's own subtree;
+           cross-subtree sharing routes through the common ancestor that owns both. A grant
+           affects a third party — the recipient's lead, whose span of control now holds a
+           more-capable agent it never authorized — so it stays inside a region one agent
+           can already see. **This is a grant-TIME admission check, NOT a maintained
+           invariant:** a later promote (F2) may lift a granted agent under a lead that
+           never authorized it and NOTHING RE-CHECKS. That residual is carried by what
+           travels with the agent — the divergence marker in `sb status`'s ROLE column, the
+           promote signal, and `sb who-holds` (all C3/F2).
+        7. **THE GRANTER MUST ALREADY HOLD IT** — held or delegable, i.e. its PASSABLE set.
+           No escalation past your own ceiling. A delegable-only holder may grant, which is
+           the same one-hop-down semantics ∩-seeding gives it.
+        8. **THE TOP'S EXEMPTION**, and it is the only way past 7: the top may grant any
+           capability in any role template it may spawn, even one it does not itself hold.
+           Without it cross-subtree sharing has no mechanism at all when the common ancestor
+           is the top — it holds no `write-tracked`, so two sibling subtrees under it could
+           be minted capable and never repaired afterwards.
+        9. **A GRANT THE GRANTER DOES NOT ITSELF HOLD MUST BE `--delegable`** — the bound on
+           8. A delegable-only grant never widens what the target may DO: its held set, and
+           every `require_capability` answer about its own actions, is untouched; it widens
+           only what the target's CHILDREN are seeded with, which is the top's commissioning
+           power expressed one hop later. The top still never gains `write-tracked` and the
+           read-only agent it grants through still never holds it.
+
+           **Spec conflict, resolved and flagged.** §2.1 and objective 24 word this bound as
+           *"a grant beyond the TARGET's own template must be `--delegable`"*. Taken
+           literally that refuses two cases the same documents require: §2.1's own headline
+           example (*"a lead hands a worker `spawn` for a fan-out"* — `spawn` is not in the
+           worker template) and objective 27's promote chain (*a top grants a researcher
+           **held `spawn`*** — the researcher template is `{}`). Both are grants of a cap
+           the granter genuinely holds. So the bound is written where it actually bites —
+           on the caps the granter does NOT hold, which is exactly the set the top's
+           exemption adds — and the target's template is honoured as the additional
+           licence it was meant to be: within the target's own template, a held grant is
+           fine even from a delegable-only holder. Everything objective 24 refuses on the
+           exemption path is still refused.
+        """
+        me = me or self.whoami()
+        if cap not in self.known_capabilities():
+            raise ValueError(
+                f"'{cap}' is not a capability. The ones that exist: "
+                f"{', '.join(sorted(self.known_capabilities()))}."
+                + ("  `start` is not one of them and never will be: only a human starts a "
+                   "top dispatcher." if cap == "start" else ""))
+        row = store.get_agent(self.db, target)
+        if row is None:
+            raise KeyError(f"no such agent: {target}")
+        if target == me:
+            raise ValueError(
+                f"a grant never targets the granter — {cap} would be you widening your own "
+                f"rights, and rights are always somebody else's to give. If you need it, "
+                f"ask your parent with `sb tell parent \"...\"`.")
+        if self._capability_row(me) is None:
+            raise ValueError(
+                "granting is an agent's act and this store has no row for you, so there is "
+                "nothing to grant FROM — a grant is permanent and has no revoke, so it is "
+                "refused rather than assumed. (A human hands capabilities out by spawning "
+                "the role that carries them.)")
+        if bool(_column(row, "is_top")):
+            raise ValueError(
+                f"{target} is a top dispatcher: its capabilities are fixed and it is never "
+                f"the target of a grant.")
+        self.require_same_tree(me, target)
+        if target not in {a["name"] for a in self._descendants(me)}:
+            raise ValueError(
+                f"{target} is not in your subtree, and a grant reaches no further than "
+                f"that: it hands a right to somebody another lead is answerable for. Ask "
+                f"the agent you both report to — `sb tell parent \"...\"` — to grant it.")
+        passable = self.passable_for(me) or set()
+        if cap not in passable:
+            # THE TOP'S EXEMPTION. Any cap in any template it may spawn, and `--delegable`
+            # is the bound on it.
+            if not self.is_top(me):
+                raise ValueError(
+                    f"you do not hold {cap}, so you cannot grant it — a grant never "
+                    f"escalates past the granter's own ceiling. You hold: "
+                    f"{', '.join(sorted(passable)) or 'nothing grantable'}.")
+            if cap not in self._template_caps():
+                raise ValueError(
+                    f"{cap} is in no role you can spawn, so there is nothing to endow.")
+            if not delegable:
+                raise ValueError(
+                    f"you do not hold {cap} yourself, so it can only be passed THROUGH "
+                    f"{target} to what it spawns: use `--delegable`. A capability nobody "
+                    f"in the chain holds is not one this agent can be handed to use.")
+        store.grant_capability(self.db, target, cap, delegable=delegable,
+                               granted_by=me, reason=reason)
+        # PROVENANCE. The row carries `granted_by` and `reason`; the event log carries the
+        # same facts in the order they happened, which is what a person reads after a
+        # promote has moved the agent somewhere the row alone no longer explains.
+        store.log_event(self.db, kind="grant", agent=target, cap=cap,
+                        granted_by=me, delegable=delegable, reason=reason)
+        return {"agent": target, "cap": cap, "delegable": delegable,
+                "granted_by": me, "reason": reason}
+
+    def _template_caps(self) -> set:
+        """Every capability named by any role template — what the top may endow.
+
+        Its own fixed bundle is NOT unioned in: the top's set is what it holds, and it is
+        already allowed to grant those by the ordinary hold-or-delegable rule.
+        """
+        return set().union(*(r.capabilities for r in self.roles.values())) \
+            if self.roles else set()
 
     def top_of(self, name: str) -> str:
         """Which tree this agent stands in, named by its top. The unit of scope.
@@ -3883,7 +4100,11 @@ class Broker:
         # spawners share and it stays one statement; a spawn that dies in between leaves a
         # row whose seed is NULL, and that row reads exactly as every row written before
         # this existed does — derived from the same two facts, same answer.
-        store.seed_capabilities(self.db, name, self.seed_for(role, is_top))
+        # `me` is what turns the seed from a template read into the ∩-RULE: what this
+        # child gets is its role's bundle narrowed by what its spawner may pass down, and
+        # the result is PERSISTED on the row because `restore` reseeds from it and must
+        # never re-widen back to the raw template.
+        store.seed_capabilities(self.db, name, self.seed_for(role, is_top, spawner=me))
 
         # `model` is a TIER name (`sb delegate --model strong`), not a model id, and it
         # only overrides which tier — the table still decides what that tier means. The
@@ -5619,7 +5840,59 @@ class Broker:
             (name,))
         self.db.commit()
         store.log_event(self.db, kind="restore", agent=name)
+        self._reseed_on_restore(a)
         return name
+
+    def _reseed_on_restore(self, a) -> None:
+        """A restored agent comes back on its STORED SEED, with its grants dropped.
+
+        Two rules, and the second is the subtler one.
+
+        **Grants do not rehydrate.** `cleanup` ends the grant lifetime and `restore` starts
+        a fresh one (§2.1). Bringing them back would make a right that has no revoke and no
+        expiry effectively permanent, and remove the blast-radius bound that makes grants
+        cheap to give.
+
+        **The seed, never the raw role template.** A lead spawned by a ∩-narrowed lead
+        legitimately holds less than its template — `{spawn, write-tracked}`, no `dispatch`,
+        no `fork` — and reseeding from `roles` would return it as a full lead. That is a
+        silent widening past the exact ceiling ∩-seeding exists to enforce, reachable by any
+        operator, with no grant recorded and no granter in the log. `agents.seed_capabilities`
+        is written once at spawn and never mutated precisely so this read is possible.
+
+        **It is not a silent narrowing.** The count of dropped grants goes to the operator
+        (`restore_note`, printed by the CLI) AND to the agent, as mail it reads on its first
+        turn back — anything still needed is one `sb grant` away, and neither party can act
+        on a set that changed without being told. The agent's copy travels as a MESSAGE
+        rather than as an inline prompt: it is durable, it survives a doorbell that does not
+        ring, and it arrives through the same inbox everything else does.
+
+        A NULL seed is a row from before the substrate and has no capability rows either;
+        there is nothing to reseed from and nothing to report, and deriving a seed for it
+        here would be the substrate inventing a set for a row it never wrote.
+        """
+        self.restore_note = None
+        name = a["name"]
+        try:
+            seed = a["seed_capabilities"]
+        except (IndexError, KeyError, TypeError):
+            seed = None
+        if seed is None:
+            return
+        caps = sorted(seed.split())
+        dropped = store.reseed_capabilities(self.db, name, caps)
+        if not dropped:
+            return
+        self.restore_note = (
+            f"resumed with seed caps ({', '.join(caps) or 'none'}); "
+            f"{dropped} prior grant(s) not carried over")
+        store.put_message(self.db, from_agent=HUMAN, to_agent=name, kind="tell",
+                          body=f"[sb] You were restored, so you are back on the capabilities "
+                               f"you were spawned with ({', '.join(caps) or 'none'}) and "
+                               f"{dropped} capability grant(s) you held before are gone — "
+                               f"grants end when an agent is closed and are not brought back. "
+                               f"If you still need one, ask for it: "
+                               f"sb tell parent \"...\".")
 
     def restore_sweep(self, *, dry_run: bool = False,
                       me: Optional[str] = None) -> "RestoreSweepResult":

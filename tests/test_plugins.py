@@ -1020,6 +1020,9 @@ class IsolationTest(Sandbox):
         "tell": ["w1", "hi"], "inbox": [], "block": ["why"], "log": [], "cleanup": [],
         "inspect": ["w1"], "init": [],
         "restore": ["w1"], "board": [], "models": [],
+        # A capability handed to an agent below the caller: one store write, no spawn and
+        # no plugin code — the same level as the rest of the fleet's own bookkeeping.
+        "grant": ["w1", "spawn"],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],
         # Its reconciler trigger, and level 0 for the same reason: it runs unattended on a
