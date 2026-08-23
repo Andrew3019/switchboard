@@ -11,10 +11,11 @@ capabilities = ["spawn", "dispatch", "write-tracked", "fork"]
 # not been made.
 [config_ceiling]
 debounce = 900
-# `fork` is the ceiling for "may ask for isolation", not something a lead does today: the
-# fork decision is still the caller's `is_top` stamp, so a nested lead is seeded without it
-# until the isolation request site exists. There is no topology capability here — becoming
-# a lead is a grant, and promote is self-service.
+# A lead is seeded with `fork` (see its capabilities above): `fork` means "may ask for
+# isolation=own" on a spawn, so a non-top lead can isolate a fan-out via
+# `delegate --isolation own`. Structural forking — a caller minting its child's own space —
+# is still the caller's `is_top` stamp. There is no topology capability here — becoming a
+# lead is a grant, and promote is self-service.
 +++
 
 <!--

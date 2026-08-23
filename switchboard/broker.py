@@ -4991,8 +4991,9 @@ class Broker:
         blockers = self._merge_blockers(where)
         if blockers:
             # NO STASH, and that is the point of the refusal rather than an omission. A
-            # lead's non-isolated children share this very checkout (DESIGN-TRUTH.md:349),
-            # so what is uncommitted in it is very likely not the caller's, and
+            # lead's non-isolated children share this very checkout (DESIGN-TRUTH:
+            # "A lead's children share its worktree"), so what is uncommitted in it is
+            # very likely not the caller's, and
             # stash-and-pop would be taking somebody else's work sideways through a merge.
             # Names the files, because "commit first" is only actionable if you can see
             # what you would be committing.
