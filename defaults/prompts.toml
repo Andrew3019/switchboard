@@ -176,4 +176,31 @@ preset = "[preset: {name}] You applied this to your own session — it is part o
 # hook's block reason says the same — an agent that genuinely has nothing to report should
 # not spiral trying to satisfy it.
 #   {idle} how long it has been idle, already formatted ("4m")
+# A capability grant, told to the agent that received it (`sb grant`, §2.1). Written in
+# the grant's own transaction, so this message exists exactly when the capability row does.
+#
+# It says three things, and each is there because leaving it out breaks the point of
+# signalling at all: WHAT changed (an agent that does not know it holds a capability does
+# not use it, which is the whole failure this closes), WHO decided (rights are always
+# somebody else's to give, and the recipient may need to go back to them), and — the half
+# that is easy to get wrong — WHETHER IT MAY USE IT ITSELF, because a `--delegable` grant
+# widens only what its children are seeded with and never what it may do.
+#
+# There is no revoke and no expiry: the grant lasts as long as the agent does, and
+# `restore` starts a fresh lifetime from the stored seed. Saying so here stops an agent
+# hoarding a capability for later out of a fear that it is about to be taken away.
+#   {cap} the capability     {granter} who granted it     {use} what it may do with it
+#   {why} the reason, already formatted, or empty
+granted = "[capabilities changed] {granter} granted you the capability `{cap}`.{why} {use} It lasts for the rest of this agent's life — there is no revoke and no expiry — and it is not carried over if you are closed and restored."
+
+# The `{use}` half of `granted`, for a grant the agent HOLDS: it may do the thing.
+#   {cap} the capability
+granted_held = "You may now do it yourself: every gate that asked for `{cap}` will let you through, and it is also passed down to what you spawn."
+
+# The `{use}` half of `granted`, for a `--delegable` grant. The distinction is the whole of
+# #163's motivating case and stating it plainly is the only thing that stops the recipient
+# trying the action itself and reading the refusal as a bug.
+#   {cap} the capability
+granted_delegable = "This one is PASS-THROUGH ONLY: you may NOT do it yourself — a gate asking for `{cap}` still refuses you — but the agents you spawn are seeded with it and they may."
+
 stalled = "[sb] Your turn ended {idle} ago without a report, so nothing in the fleet knows where you are. If you are finished, run `sb done \"<summary>\"`; if you are stuck or need a person, run `sb block \"<why>\"`; if you are neither, carry on with your task — this is asked once, not repeatedly."

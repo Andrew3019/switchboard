@@ -10,6 +10,7 @@ buys us.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -1053,6 +1054,42 @@ def now() -> int:
     return int(time.time())
 
 
+@contextlib.contextmanager
+def mutation(db: sqlite3.Connection):
+    """One state mutation and every signal it owes, committed together or not at all (§2.1).
+
+    A mutation that committed without its signal is precisely the silent divergence the
+    signal exists to prevent — an agent whose rights, workspace or parent changed and that
+    was never told. So the grant row, its event and the recipient's message are ONE
+    transaction: the writers inside take `commit=False` and this commits once at the end,
+    or rolls the lot back on any exception.
+
+    `BEGIN IMMEDIATE`, following `Broker._claim_ring_repair`: the write lock is taken up
+    front rather than upgraded mid-way, so a concurrent `sb` cannot land between the
+    mutation and its signal. Nothing slow happens inside — no herdr call, no file read.
+
+    **THE TRANSACTION COVERS THE ROWS, NOT THE DOORBELL.** The ring is `Broker._ring` ->
+    `Herdr.prompt`, a SUBPROCESS, and it is deliberately outside this block: a subprocess
+    cannot join a sqlite transaction, and holding `BEGIN IMMEDIATE` across one would
+    serialize the whole store behind a herdr round-trip. What is guaranteed is that the
+    MESSAGE is never lost relative to the mutation; the ring may lag, or be missed
+    entirely if the process dies between commit and prompt — and `sb inbox` still has the
+    message, which is the same honest limit `flush_pending` already states for every other
+    doorbell.
+
+    A transaction already open on this connection raises ("cannot start a transaction
+    within a transaction") rather than quietly joining one: loudly wrong beats a mutation
+    swept into somebody else's half-written work.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        yield db
+    except BaseException:
+        db.rollback()
+        raise
+    db.commit()
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
@@ -1208,7 +1245,8 @@ def reseed_capabilities(db: sqlite3.Connection, name: str, caps) -> int:
 
 
 def grant_capability(db: sqlite3.Connection, name: str, cap: str, *,
-                     delegable: bool, granted_by: str, reason: Optional[str] = None) -> None:
+                     delegable: bool, granted_by: str, reason: Optional[str] = None,
+                     commit: bool = True) -> None:
     """Write one granted capability row. The authorization happened in `Broker.grant`.
 
     UNION, never replacement. A `--delegable` grant over a cap the agent already holds
@@ -1220,6 +1258,9 @@ def grant_capability(db: sqlite3.Connection, name: str, cap: str, *,
 
     There is no removal counterpart, on purpose: no `sb revoke`, no TTL. The agent's
     lifecycle ends the grant, and `reseed_capabilities` is the only thing that unwrites it.
+
+    `commit=False` leaves the row uncommitted for a caller that is inside `mutation()` —
+    the grant and the signal telling its recipient commit as one (§2.1, C4).
     """
     db.execute(
         """INSERT INTO capabilities(agent, cap, delegable, held, granted_at, granted_by, reason)
@@ -1232,7 +1273,8 @@ def grant_capability(db: sqlite3.Connection, name: str, cap: str, *,
              reason     = excluded.reason""",
         (name, cap, 1 if delegable else 0, 0 if delegable else 1,
          now(), granted_by, reason))
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def held_capabilities(db: sqlite3.Connection, name: str) -> set:
@@ -1737,13 +1779,25 @@ def put_message(
     body: str,
     reply_to: Optional[int] = None,
     needs_reply: bool = False,
+    commit: bool = True,
 ) -> int:
     # `failed` is the one kind no agent writes: `status._record_gone` writes it about an
     # agent that died, under that agent's name, so its parent hears about it through the
     # mailbox a `done` would have used. It is a separate word from `done` on purpose —
     # `status`'s summaries are the `done` rows, and a failure must never be readable as
     # something the agent reported.
-    if kind not in ("ask", "tell", "done", "failed"):
+    #
+    # `signal` is the same argument one step further: a MUTATION signal (§2.1, C4) —
+    # somebody changed this agent's rights, workspace or place in the tree, and it is being
+    # told. Its own kind, and not `tell`, for two structural reasons rather than for
+    # tidiness. It is exempt from the envelope digest by SHAPE: the digest reads `done`
+    # rows, so news about a state change can never be merged into a count of finished
+    # children. And it joins `broker.HELD_RING_KINDS`, which is what makes its doorbell
+    # coalesce like a `done` burst instead of ringing once per grant.
+    #
+    # `commit=False` writes the row inside the caller's `mutation()` transaction, so the
+    # mutation and the message it owes land together or not at all.
+    if kind not in ("ask", "tell", "done", "failed", "signal"):
         raise ValueError(f"bad message kind: {kind}")
     cur = db.execute(
         """INSERT INTO messages
@@ -1755,8 +1809,17 @@ def put_message(
     # `agents.awaiting_task` records. Cleared HERE rather than in `Broker.tell`, because
     # `ask` and `interrupt` write their rows themselves and would each have to remember;
     # a bit three call sites clear by hand is a bit that goes stale at the fourth.
-    db.execute("UPDATE agents SET awaiting_task=0 WHERE name=?", (to_agent,))
-    db.commit()
+    #
+    # EXCEPT a mutation signal, which is the one kind that is not somebody giving this
+    # agent something to do. A grant, a re-attach or a promote is news about the agent, and
+    # an agent still holding its placeholder task has been told nothing about what to work
+    # on. Clearing the bit there would take away the excuse for being idle that
+    # `status`/`hooks` read it for, and report an agent waiting for its first instruction
+    # as stalled.
+    if kind != "signal":
+        db.execute("UPDATE agents SET awaiting_task=0 WHERE name=?", (to_agent,))
+    if commit:
+        db.commit()
     return int(cur.lastrowid)
 
 
@@ -1924,7 +1987,8 @@ def get_message(db: sqlite3.Connection, mid: int) -> Optional[sqlite3.Row]:
 
 
 def log_event(
-    db: sqlite3.Connection, *, kind: str, agent: Optional[str] = None, **payload: Any
+    db: sqlite3.Connection, *, kind: str, agent: Optional[str] = None,
+    commit: bool = True, **payload: Any
 ) -> None:
     """Append-only. Every `sb` invocation lands here, including failures.
 
@@ -1933,13 +1997,19 @@ def log_event(
     to write: on a degraded store (see `schema_deficit`) this table may not exist yet, and
     an audit trail that can take down the `sb done` it was trying to record is worth less
     than no audit trail at all. Every herdr call routes through here.
+
+    `commit=False` is for a caller inside `mutation()`: the event is part of that
+    transaction and is committed — or rolled back — with the mutation it records. It is
+    NOT a payload key, so nothing that logs `commit=...` as a fact can reach it by
+    accident; `**payload` sees only what is left.
     """
     try:
         db.execute(
             "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
             (agent, kind, json.dumps(payload, default=str) if payload else None, now()),
         )
-        db.commit()
+        if commit:
+            db.commit()
     except sqlite3.OperationalError:
         pass
 
