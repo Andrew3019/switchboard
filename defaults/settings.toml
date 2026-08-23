@@ -716,3 +716,50 @@ hook_timeout = 10
 # A codex agent's sandbox has to be able to write to it or every `sb` verb that reaches
 # another agent — or the board — fails `PermissionDenied` while the work itself succeeds.
 herdr_config_dir = "~/.config/herdr"
+
+
+[config]
+# THE SELF-TUNING VOCABULARY (spec §2.4, unit E3). What `sb configure` will accept, what
+# each setting means, and how far a role may be tuned when its own template names no
+# ceiling of its own.
+#
+# A SETTING IS NOT A CAPABILITY. These tune how loudly switchboard talks to an agent; they
+# never change what it may DO. That is `sb grant`, a different table and a different verb,
+# and the two vocabularies are deliberately disjoint — `sb configure spawn true` names no
+# setting and is refused, which is the shape "no self-widening by ANY path" takes here.
+#
+# THE CEILING IS THE ROLE TEMPLATE'S. A role file may name its own in front matter:
+#
+#     [config_ceiling]
+#     debounce = 900
+#
+# and what is written here is what every role that names none inherits. It is pinned to the
+# TEMPLATE rather than to the parent because `parent` is mutable: a promote above an agent
+# would otherwise silently move that agent's config ceiling, and the role never moves.
+#
+# `values` is ordered LOUDEST FIRST, so a ceiling is "the quietest this role may go" and
+# the check is an index comparison. `ceiling` for an integer is its maximum.
+
+[config.settings.reminders]
+kind    = "enum"
+values  = ["full", "brief", "off"]
+# What the setting is worth before anybody tunes it. Spelled `initial` rather than
+# `default` because every OTHER default in switchboard is a config layer's job, and this
+# is the starting VALUE of one live per-agent knob — see `roles.effective_config`.
+initial = "full"
+# `brief` keeps the rules that turn on this agent's own live state or on the verb it just
+# ran, and drops the standing role-wide and global ones. `off` keeps only the safety
+# categories, which are never tunable at all (`guidance.SAFETY_CATEGORIES`).
+ceiling = "brief"
+# May be addressed per reminder CATEGORY as well — `sb configure reminders.merge brief` —
+# where the category is a ledger rule's `category` field. Safety categories are refused.
+per_category = true
+
+[config.settings.debounce]
+kind    = "int"
+initial = 0
+# Seconds. The shortest gap between two deliveries of the SAME rule to the same agent —
+# the knob for a rule that is right to repeat but not this often. It cannot silence
+# anything permanently: the cursor policies (`once`, `once-until-clear`) still decide
+# whether a rule has anything to say at all, and this only spaces out the ones that do.
+ceiling = 300

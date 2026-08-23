@@ -40,6 +40,15 @@
 #           rule that silently never fires. There is deliberately NO free-text condition and
 #           no "is this non-trivial" judgement: a rule either has an observable it turns on
 #           or it does not belong here.
+#   category
+#           one plain word saying what the rule is ABOUT — `advice` if it says nothing.
+#           An agent may turn one category down on its own with `sb configure
+#           reminders.<category> brief`, within its role's ceiling, so a category is worth
+#           choosing for a rule an agent might reasonably want less of. `safety` is the
+#           one category that is NOT tunable: a rule in it is delivered whatever anybody
+#           has configured, no verbosity reaches it and no debounce spaces it out
+#           (`guidance.SAFETY_CATEGORIES`). Put a rule there only if being told it too
+#           often is genuinely cheaper than missing it once.
 #   repeat  `every-time`, `once`, or `once-until-clear` (the default). `once` is for a fact
 #           that is worth saying exactly once per agent; `once-until-clear` says it again
 #           only if the state went away and came back, which is what makes a recurring

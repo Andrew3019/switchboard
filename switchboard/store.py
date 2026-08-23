@@ -469,6 +469,35 @@ CREATE TABLE guidance (
                                       -- tell them apart.
 );
 CREATE UNIQUE INDEX idx_guidance_agent_rule ON guidance(agent, rule_id);
+
+CREATE TABLE config (
+    agent         TEXT,               -- whose preference this is. Keyed by NAME, like
+                                      -- `capabilities` and `guidance` above and for the
+                                      -- same reason: every read is by name, and a row
+                                      -- outliving its agent costs a row rather than a
+                                      -- wrong answer.
+    setting       TEXT,               -- the setting STRING, from `[config.settings]` in
+                                      -- settings.toml — `reminders`, `debounce`, or the
+                                      -- per-category form `reminders.<category>`. The
+                                      -- vocabulary is DISJOINT from the capability
+                                      -- strings next door, which is what makes "configure
+                                      -- tunes config, never rights" (spec §2.4) a
+                                      -- property of the schema rather than a promise: a
+                                      -- capability name is not a setting name, so no
+                                      -- `sb configure` can ever write one.
+    value         TEXT,               -- as typed, TEXT even for a number. What the value
+                                      -- MEANS is `roles.check_value`'s, and it is read
+                                      -- back through the same function that wrote it, so
+                                      -- a settings file that later retypes or narrows a
+                                      -- setting reinterprets old rows instead of finding
+                                      -- an integer column it can no longer explain.
+    set_at        INTEGER             -- epoch of the most recent write. There is no
+                                      -- `set_by`: this row can only ever have been
+                                      -- written by the agent itself — `sb configure`
+                                      -- takes no target and there is no path by which
+                                      -- one agent configures another.
+);
+CREATE UNIQUE INDEX idx_config_agent_setting ON config(agent, setting);
 """
 
 # A cache key, NOT a version. It covers the SCHEMA string verbatim, so editing a comment
@@ -1523,6 +1552,46 @@ def clear_guidance(db: sqlite3.Connection, name: str, rule_id: str) -> None:
     db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Config prefs — the per-agent values `sb configure` writes (spec §2.4, unit E3)
+# ---------------------------------------------------------------------------
+#
+# TWO FUNCTIONS AND NO POLICY, exactly like the guidance cursors above. What a setting
+# means, what values it may take and how far this role may go are `roles.py`'s — the
+# ceiling is the role TEMPLATE'S and belongs beside the capability bundle it is the twin of
+# — and this file only records what an agent chose. The row is per (agent, setting) and the
+# value is whatever was written, so a settings file that renames or retypes a setting
+# reinterprets the rows rather than colliding with them.
+
+
+def config_values(db: sqlite3.Connection, name: str) -> dict:
+    """Everything this agent has set, by setting name. One query, not one per setting.
+
+    Read whole for `guidance.deliver`'s reason: the delivery pass asks about the config of
+    the agent it is about to talk to on EVERY turn, and a query per setting would put the
+    size of the vocabulary into the cost of a hook that is meant to be free when it has
+    nothing to say.
+    """
+    return {r["setting"]: r["value"] for r in
+            db.execute("SELECT setting, value FROM config WHERE agent=?", (name,))}
+
+
+def set_config(db: sqlite3.Connection, name: str, setting: str, value) -> None:
+    """Record one preference. UPSERT — a setting has one current value, not a history.
+
+    The row is deliberately overwritten rather than appended to: unlike a capability grant,
+    which is irrevocable and whose provenance is the whole audit story, a preference has no
+    "who decided this" to keep (nobody but the agent itself can write one) and no reason to
+    keep the value it replaced.
+    """
+    db.execute(
+        "INSERT INTO config(agent, setting, value, set_at) VALUES(?,?,?,?) "
+        "ON CONFLICT(agent, setting) DO UPDATE SET "
+        "  value=excluded.value, set_at=excluded.set_at",
+        (name, setting, str(value), now()))
+    db.commit()
+
+
 def drop_agent(db: sqlite3.Connection, name: str) -> None:
     """Remove a row. Only ever used to undo a claim whose spawn then failed — otherwise
     an agent that never started would hold its name against every later attempt.
@@ -1537,6 +1606,9 @@ def drop_agent(db: sqlite3.Connection, name: str) -> None:
     # about to be handed to a different agent must not hand it rules already marked as
     # delivered, or the next holder is silently born having "already been told".
     db.execute("DELETE FROM guidance WHERE agent=?", (name,))
+    # And the config prefs, for the third time the same reason: the next holder of this
+    # name must not be born already tuned by somebody it has nothing to do with.
+    db.execute("DELETE FROM config WHERE agent=?", (name,))
     db.commit()
 
 

@@ -73,6 +73,27 @@ ONCE = "once"
 ONCE_UNTIL_CLEAR = "once-until-clear"
 REPEATS = (EVERY_TIME, ONCE, ONCE_UNTIL_CLEAR)
 
+# What a rule is ABOUT, as one word. Only two things read it, and both are E3's: an agent
+# tuning `reminders` down per category names one of these, and the safety categories below
+# are exempt from every knob there is.
+DEFAULT_CATEGORY = "advice"
+
+# THE NON-MUTABLE CATEGORIES (spec §2.4, plan E3 obj. 3). A rule in one of these is
+# delivered whatever an agent has configured: `reminders off` does not reach it, a debounce
+# does not space it out, and `sb configure reminders.safety ...` is refused outright rather
+# than accepted and ignored.
+#
+# ENUMERATED IN PYTHON, and deliberately not in settings.toml beside the rest of the config
+# vocabulary. Everything else about guidance is data because everything else about guidance
+# is a judgement a repo is allowed to make differently — which rules exist, how often they
+# fire, how far a role may turn them down. "An agent may not silence its own safety
+# reminders" is not that kind of statement: it is the carve-out the tuning is bounded BY,
+# and a carve-out an agent could widen by editing a file it can write is not a carve-out.
+# Two hard exemptions and only two is also how §2.4 states the notification carve-outs, and
+# this is the same shape of decision.
+SAFETY = "safety"
+SAFETY_CATEGORIES = frozenset({SAFETY})
+
 # Specificity, most specific first. Precedence decides the ORDER rules are said in, not
 # which of them are said: every matching rule is delivered, because a rule that matched and
 # was suppressed by a more specific one is a rule nobody can reason about from the ledger.
@@ -260,6 +281,7 @@ class Rule:
     id: str
     text: str
     repeat: str = ONCE_UNTIL_CLEAR
+    category: str = DEFAULT_CATEGORY
     role: Optional[str] = None
     command: Optional[str] = None
     when: tuple = ()
@@ -335,7 +357,12 @@ def _rule(raw: Any, order: int) -> Rule:
         raise config.ConfigError(
             f"guidance.toml: rule {rid!r}: no such repeat policy {repeat!r}. "
             f"One of: {' '.join(REPEATS)}.")
-    unknown = set(raw) - {"id", "text", "repeat", "role", "command", "when", "holds", "lacks"}
+    category = raw.get("category", DEFAULT_CATEGORY)
+    if not isinstance(category, str) or not category or "." in category:
+        raise config.ConfigError(
+            f"guidance.toml: rule {rid!r}: `category` is one plain word, got {category!r}")
+    unknown = set(raw) - {"id", "text", "repeat", "category",
+                          "role", "command", "when", "holds", "lacks"}
     if unknown:
         raise config.ConfigError(
             f"guidance.toml: rule {rid!r}: unknown key(s) {sorted(unknown)}")
@@ -346,6 +373,7 @@ def _rule(raw: Any, order: int) -> Rule:
         # window beside the human's own prompt.
         text=config.flatten(str(raw["text"])),
         repeat=repeat,
+        category=category,
         role=raw.get("role"),
         command=raw.get("command"),
         when=tuple(_clause(rid, c) for c in raw.get("when", [])),
@@ -431,6 +459,7 @@ def deliver(db: sqlite3.Connection, name: str, *, command: Optional[str] = None,
         return ""
     facts = Facts(db, row)
     cursors = store.guidance_cursors(db, name)
+    cfg = configuration(db, name, repo=repo)
     firing = []
     for rule in (ledger(repo) if rules is None else rules):
         cursor = cursors.get(rule.id)
@@ -447,10 +476,79 @@ def deliver(db: sqlite3.Connection, name: str, *, command: Optional[str] = None,
             # "once", and it is the only write this function makes for a rule it is not
             # saying anything about.
             store.clear_guidance(db, name, rule.id)
+    # E3: the agent's OWN settings, applied last and applied to nothing that is safety
+    # critical. It is the last filter rather than the first because it is about how loudly
+    # to say a thing, not about whether the thing is true — and because a rule held back
+    # here must not write its cursor, or a `once-until-clear` rule turned down for a while
+    # would come back marked as already told.
+    firing = [r for r in firing if audible(r, cfg, cursors.get(r.id))]
     firing.sort(key=lambda r: (-r.specificity, r.order))
     for rule in firing:
         store.record_guidance(db, name, rule.id)
     return "\n".join(f"{MARK} {r.text}" for r in firing)
+
+
+# ---------------------------------------------------------------------------
+# Self-tuning within a ceiling (E3, spec §2.4)
+# ---------------------------------------------------------------------------
+
+
+def configuration(db: sqlite3.Connection, name: str, repo: Optional[Path] = None,
+                  roles: Optional[dict] = None) -> dict:
+    """This agent's settings as they actually apply: defaults, its own choices, clamped.
+
+    THE TWO QUESTIONS, in one function (plan E3 obj. 6). The ceiling comes from
+    `roles.template_ceiling`, keyed on `agents.role` — the field §6.10 pins as FIXED at
+    spawn — while the values come from the `config` table, which the agent writes for
+    itself. So the resolver answers *"how far may this agent tune itself, ever?"* from the
+    template and *"what is it tuned to now?"* from live rows, and the first answer does not
+    move when the tree does: `sb promote` rewrites `parent`, and nothing here reads it.
+
+    Never raises. It is called from the delivery pass on every turn, and a settings file
+    that has since dropped a setting, or a stored value the template no longer allows, must
+    cost a fallback to the default rather than a hook that fails — see
+    `roles.effective_config`, which does the clamping.
+    """
+    row = store.get_agent(db, name)
+    if row is None:
+        return roles_mod.effective_config({}, {}, repo)
+    table = roles or roles_mod.load(repo)
+    ceiling = roles_mod.template_ceiling(table, row["role"], repo)
+    return roles_mod.effective_config(store.config_values(db, name), ceiling, repo)
+
+
+def audible(rule: Rule, cfg: dict, cursor=None, ts: Optional[int] = None) -> bool:
+    """Does this agent's own configuration let this rule through, right now?
+
+    SAFETY FIRST, AND UNCONDITIONALLY. A rule in a safety category is returned True before
+    a single setting is read (obj. 3): there is no verbosity that reaches it and no
+    debounce that spaces it out, which is what "non-mutable" has to mean at the delivery
+    site as well as at the refusal. The refusal in `Broker.configure` stops an agent asking
+    to silence one; this is what makes the answer the same even for a setting that got
+    written some other way.
+
+    Then the two knobs, and neither of them can silence a rule permanently:
+
+    * **verbosity** — `full` says everything, `brief` keeps the rules that turn on this
+      agent's own live state or on the verb it just ran and drops the standing role-wide
+      and global ones, `off` keeps only the safety categories. A category may be turned
+      down on its own (`reminders.<category>`), and the more specific setting wins.
+    * **debounce** — seconds, the shortest gap between two deliveries of the SAME rule.
+      It spaces out what a rule already decided to say; it never decides that for it.
+    """
+    if rule.category in SAFETY_CATEGORIES:
+        return True
+    level = cfg.get(f"reminders.{rule.category}", cfg.get("reminders"))
+    if level == "off":
+        return False
+    if level == "brief" and rule.specificity < COMMAND_CONTEXT:
+        return False
+    debounce = cfg.get("debounce") or 0
+    if debounce and cursor is not None:
+        last = store._value(cursor, "delivered_at")
+        if last and (ts or store.now()) - last < debounce:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +572,7 @@ DELEGABLE_MARK = "→"
 
 
 def state_note(db: sqlite3.Connection, name: str, *, held, delegable,
-               tier: Optional[str] = None) -> str:
+               tier: Optional[str] = None, config: Optional[dict] = None) -> str:
     """What this agent currently IS, as lines to print under a command's own output.
 
     The other half of §2.4, and a complement to the turn-start channel rather than a
@@ -495,10 +593,12 @@ def state_note(db: sqlite3.Connection, name: str, *, held, delegable,
     table directly would tell every such agent it may do nothing, which is the one answer
     that is never true.
 
-    **`tier` is the config in effect, and it is the only one there is yet** — `agents.tier`
-    if a spawn pinned it, else the role's own. Per-agent config prefs are E3's (`sb
-    configure`), and this deliberately does not invent a readout for data the store does
-    not hold: obj. 4 says this unit shows what Phases 1 and 2 built and nothing else.
+    **`tier` is one half of the config in effect** — `agents.tier` if a spawn pinned it,
+    else the role's own — and `config` is the other, which E3 added when there was finally
+    per-agent config to show (`guidance.configuration`). Only what this agent has actually
+    TUNED is printed: an agent still on the defaults is running the same guidance as every
+    other agent of its role, which is not news, and a line reciting them under every
+    command would be the nag-fatigue (§5) this readout is supposed to stay clear of.
     """
     row = store.get_agent(db, name)
     if row is None:
@@ -522,10 +622,29 @@ def state_note(db: sqlite3.Connection, name: str, *, held, delegable,
         where += f"; model tier {tier}"
     lines.append(where)
 
+    tuned = _tuned(config, db, name)
+    if tuned:
+        lines.append("you have tuned: " + ", ".join(tuned)
+                     + " (`sb configure` — your role's ceiling bounds it)")
+
     grants = _grants(db, name)
     if grants:
         lines.append("granted since you were spawned: " + "; ".join(grants))
     return "\n".join(f"{STATE_MARK} {line}" for line in lines)
+
+
+def _tuned(config: Optional[dict], db: sqlite3.Connection, name: str) -> list[str]:
+    """The settings this agent has moved off their defaults, as text.
+
+    Read from the STORE for which settings were set, and from the resolved config for what
+    they are worth now — the two can differ, because a value the role template no longer
+    allows is clamped on the way out (`roles.effective_config`), and the clamped number is
+    the one actually in effect. Printing the stored value there would tell an agent it is
+    running under a setting it is not.
+    """
+    if not config:
+        return []
+    return [f"{k} {config.get(k, v)}" for k, v in sorted(store.config_values(db, name).items())]
 
 
 def _grants(db: sqlite3.Connection, name: str) -> list[str]:

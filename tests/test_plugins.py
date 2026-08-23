@@ -1026,6 +1026,10 @@ class IsolationTest(Sandbox):
         # The reverse query: two store reads and no spawn, so it must not be able to reach
         # plugin code either.
         "who-holds": ["spawn"],
+        # Self-tuning: one store write against the caller's own row, bounded by a role
+        # template read. Nothing spawns and nothing is handed to anybody, so it sits at the
+        # same level as the rest of an agent's own bookkeeping.
+        "configure": [],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],
         # Its reconciler trigger, and level 0 for the same reason: it runs unattended on a

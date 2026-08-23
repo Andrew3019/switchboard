@@ -45,6 +45,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from . import codex as codex_mod
 from . import config
+from . import guidance
 from . import output
 from . import presets as presets_mod
 from . import roles as roles_mod
@@ -1515,6 +1516,70 @@ class Broker:
                             "held": True, "delegable": False, "granted_by": None,
                             "reason": None, "derived": True})
         return sorted(out, key=lambda o: o["agent"])
+
+    # -- self-configuration (E3, spec §2.4) -------------------------------
+
+    def configure(self, setting: Optional[str] = None, value: Optional[str] = None, *,
+                  me: str) -> dict:
+        """Tune the CALLER'S OWN reminder settings, within its role template's ceiling.
+
+        SELF-DIRECTED, AND THERE IS NO TARGET PARAMETER. That is the whole shape of the
+        verb: `sb grant` acts on somebody else and is therefore bounded by a subtree check
+        and a granter's own set, and this acts on nobody but the caller, so the only bound
+        it needs is the ceiling. One agent cannot configure another by any path, because
+        there is no path — not a flag, not a broker argument, not a store column
+        (`store.config`'s schema note says why it has no `set_by`).
+
+        THE CEILING IS THE ROLE TEMPLATE'S (obj. 2). It is read through
+        `roles.template_ceiling` off `agents.role`, which §6.10 pins as fixed at spawn, so
+        a `sb promote` that re-homes this agent under a more permissive parent moves
+        nothing: there is no parent in this function to read.
+
+        IT TUNES CONFIG AND NEVER RIGHTS (obj. 5). The setting vocabulary is a closed table
+        in settings.toml that shares no string with the capability vocabulary, so
+        `sb configure spawn true` is refused by `roles.check_setting` as a name that is not
+        a setting — the same refusal a typo gets, and no special case that has to remember
+        to enumerate the capabilities.
+
+        With no `setting`, this is the READ: what the caller is tuned to and how far it may
+        go. A verb whose refusal names a ceiling has to have a way to ask what that ceiling
+        is, or the only route to it is trial and error against an error message.
+        """
+        if me == HUMAN or store.get_agent(self.db, me) is None:
+            raise ValueError(
+                "`sb configure` tunes the settings of the agent that runs it, and you are "
+                "not one of them. To change what every agent of a role may do, edit that "
+                "role's template.")
+        row = store.get_agent(self.db, me)
+        ceiling = roles_mod.template_ceiling(self.roles, row["role"], self.repo)
+        if setting is None:
+            return {"agent": me, "role": row["role"], "setting": None,
+                    "config": guidance.configuration(self.db, me, repo=self.repo,
+                                                     roles=self.roles),
+                    "ceiling": ceiling}
+        if value is None:
+            raise ValueError(
+                f"`sb configure {setting}` needs a value — `sb configure` with no "
+                f"arguments prints what the settings are and what your role allows.")
+        base, category = roles_mod.check_setting(setting, self.repo)
+        if category in guidance.SAFETY_CATEGORIES:
+            # Obj. 3, said at the moment it is asked for rather than only enforced at
+            # delivery. Both halves exist on purpose: this one tells an agent that the
+            # thing it is trying to do is not a thing, and `guidance.audible` makes the
+            # answer the same for a row that reached the table some other way.
+            raise ValueError(
+                f"`{category}` is a safety-critical reminder category: it cannot be "
+                f"quietened or silenced, by you or by anything above you. The other "
+                f"categories are tunable — `sb configure {base} <value>` sets them all, "
+                f"`sb configure {base}.<category> <value>` sets one.")
+        checked = roles_mod.check_value(setting, value, role=row["role"],
+                                        ceiling=ceiling.get(base), repo=self.repo)
+        before = guidance.configuration(self.db, me, repo=self.repo, roles=self.roles)
+        store.set_config(self.db, me, setting, checked)
+        return {"agent": me, "role": row["role"], "setting": setting, "value": checked,
+                "was": before.get(setting), "ceiling": ceiling.get(base),
+                "config": guidance.configuration(self.db, me, repo=self.repo,
+                                                 roles=self.roles)}
 
     def _template_caps(self) -> set:
         """Every capability named by any role template — what the top may endow.

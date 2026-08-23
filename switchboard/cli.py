@@ -205,6 +205,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "may only pass it DOWN — and who granted it.")
     wh.add_argument("cap", metavar="CAPABILITY", help="the capability string")
 
+    # The one verb that acts on the caller itself. `grant` above hands somebody else a
+    # right and is bounded by a subtree check; this tunes nothing but how loudly
+    # switchboard talks to YOU, takes no target at all, and is bounded by the ceiling in
+    # your own role template — which nothing above you can lift, and which a promote
+    # cannot move. Safety-critical reminder categories are not tunable at any ceiling.
+    cf = cmd("configure",
+             help="tune your own reminder settings, within your role's ceiling",
+             description="Self-directed and self-directed only: there is no target agent, "
+                         "and no agent configures another. With no arguments it prints "
+                         "what you are tuned to and how far your role may go. It changes "
+                         "how loudly switchboard talks to you and never what you may do — "
+                         "capabilities are granted from above with `sb grant`.")
+    cf.add_argument("setting", nargs="?",
+                    help="e.g. reminders, reminders.<category>, debounce")
+    cf.add_argument("value", nargs="?", help="the value to set it to")
+
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
     t.add_argument("message")
@@ -486,6 +502,15 @@ def _validate(args) -> None:
         if args.reason is not None:
             args.reason = validate.line(args.reason, "--reason")
 
+    elif cmd == "configure":
+        # Both are one word out of a closed table the broker checks against; this only
+        # keeps a sentence out of the column, exactly as `grant` does for a capability.
+        # The setting carries a dot in its per-category form, which `token` allows.
+        if args.setting is not None:
+            args.setting = validate.token(args.setting, "setting")
+        if args.value is not None:
+            args.value = validate.token(args.value, "value")
+
     elif cmd == "merge":
         args.child = validate.agent_name(args.child)
 
@@ -715,6 +740,32 @@ def _who_holds_text(cap: str, holders: list) -> str:
     return "\n".join(lines)
 
 
+def _configure_text(r: dict) -> str:
+    """What `sb configure` says — a READOUT either way, set or not.
+
+    The set case prints the whole resolved config rather than only the line that changed,
+    for the reason the ceiling is worth printing at all: an agent that has just turned
+    something down is exactly the agent about to wonder what else there is and how far it
+    goes, and a one-line "ok" sends it to trial and error against a refusal message.
+    """
+    cfg, ceiling = r["config"], r["ceiling"]
+    if r["setting"] is None:
+        lines = [f"{r['agent']} ({r['role']}) — your own settings; nothing else is tuned "
+                 f"by this and no agent configures another:"]
+        for k, v in sorted(cfg.items()):
+            # A per-category key (`reminders.<category>`) is bounded by its BASE setting's
+            # ceiling — one ceiling per setting, however many categories are addressed
+            # under it — so the lookup splits rather than reading the dotted name.
+            top = ceiling.get(roles_mod.split_setting(k)[0])
+            lines.append(f"  {k} = {v}" + (f"   (your role's ceiling: {top})"
+                                           if top is not None else ""))
+        return "\n".join(lines)
+    was = "" if r["was"] is None else f" (was {r['was']})"
+    top = f"; your role's ceiling is {r['ceiling']}" if r["ceiling"] is not None else ""
+    return (f"{r['setting']} = {r['value']}{was}{top}. Safety-critical reminders are "
+            f"never affected by this.")
+
+
 # THE COMMANDS WHOSE OUTPUT CARRIES THE CALLER'S STATE (E2, spec §2.4), and the key a
 # `command` guidance rule is matched on. Deliberately short, and chosen by a rule rather
 # than by taste: these are the verbs that SPEND something of the caller's — a capability
@@ -796,7 +847,9 @@ def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
         tier = (store._value(row, "tier") if row is not None else None) or (
             roles_mod.get(b.roles, row["role"], b.repo).model if row is not None else None)
         text = "\n".join(t for t in (
-            guidance.state_note(db, me, held=held, delegable=passable - held, tier=tier),
+            guidance.state_note(db, me, held=held, delegable=passable - held, tier=tier,
+                                config=guidance.configuration(db, me, repo=b.repo,
+                                                              roles=b.roles)),
             guidance.deliver(db, me, command=key, repo=b.repo),
         ) if t)
         if text:
@@ -1140,6 +1193,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             text = (f"merged {r['child']} ({r['branch']}) into {r['into']} — your branch "
                     f"only: nothing pushed, no pull request opened.")
         _emit(args, text, r)
+        return 0
+
+    if cmd == "configure":
+        r = b.configure(args.setting, args.value, me=me)
+        _emit(args, _configure_text(r), r)
         return 0
 
     if cmd == "who-holds":

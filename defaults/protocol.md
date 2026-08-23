@@ -278,6 +278,9 @@ only the pane: session, summary, messages and transcript survive, and
 Some ways of working are written down rather than left to you: `sb presets` lists
 them, `sb presets <name>` prints one, and `sb presets <name> --apply` pastes it into
 your own session to work from. Read one before improvising something similar.
+`sb configure` tunes how much switchboard reminds you and nothing else — with no
+arguments it prints what you are tuned to and how far your role allows; it changes
+nothing about what you may do, and safety reminders are never tunable.
 Stop and get a human if you hit a genuine, big, behaviour-changing design question;
 if you are blocked on running something, or a tool fails twice; if you were told to
 block; if an instruction is ambiguous; if the human is already going back and forth
