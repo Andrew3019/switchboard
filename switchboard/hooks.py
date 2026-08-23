@@ -30,6 +30,11 @@ Three pieces:
   `stop_hook_args()` turns it into the `--settings <path>` every spawn passes. Only agents
   we spawn are handed the file, which is the whole of the isolation — an ordinary `claude`
   session never sees it, and no file of the human's is ever written to or read.
+* `codex_hook_commands()` is the same two hooks for the other provider. Codex's hook
+  system is Claude-Code-shaped on purpose — same event names, same output schema, same
+  `stop_hook_active` flag — so only the WIRING differs: a TOML block in the agent's
+  private `CODEX_HOME` rather than a settings JSON handed over as `--settings`. The
+  decision below is shared and is not written twice.
 * `stop_gate()` is the decision, run once per turn end by `bin/sb-stop-hook`.
 * `mark_turn()` is the signal, written by `bin/sb-activity-hook` at the start of a turn
   and by `run()` at the end of one — AFTER the gate has decided, and only if the turn is
@@ -162,6 +167,42 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
     return p
 
 
+def codex_hook_commands(cwd: Optional[Path] = None) -> dict[str, str]:
+    """The same two hooks, as command LINES for a codex `config.toml` block.
+
+    Codex's hook system is not an approximation of Claude Code's — it is deliberately
+    modelled on it. The binary's own embedded schema carries `Stop`, `UserPromptSubmit`,
+    the identical `{continue, decision, reason, stopReason, suppressOutput, systemMessage}`
+    output shape and the `stop_hook_active` input flag, and one of its schema comments
+    names Claude directly. Verified live against codex-cli 0.147.0: both events fire, the
+    payload carries `session_id`, `stop_hook_active` and `transcript_path`, and a
+    `{"decision":"block"}` on stdout re-opens the turn exactly as it does for Claude.
+
+    So the DECISION is shared. `stop_gate`, `mark_turn`, `run` and `run_activity` are
+    provider-agnostic already and are not duplicated here; what differs is where the
+    wiring is written — a TOML block in the agent's private `CODEX_HOME` instead of a
+    settings JSON — and that is all this returns. `switchboard/codex.py` turns it into
+    TOML; the matcher, the shape and the timeout are its business, not this file's.
+
+    THE CAP IS NOT OPTIONAL HERE. `_already_nudged` is a defensive cap for Claude and a
+    mandatory one for codex: openai/codex#37937 is an open bug in which a Stop hook that
+    keeps blocking loops with no escape at all. The cap is what stops the gate meeting
+    that bug — one block per agent until it reports — and it lives in the shared decision
+    above precisely so this path cannot be wired up without it.
+
+    Returns {} rather than raising, for `stop_hook_args`' reason: enforcement is worth a
+    lot, but not a spawn.
+    """
+    try:
+        db = shlex.quote(str(store.db_path(cwd)))
+        return {
+            "UserPromptSubmit": f"{shlex.quote(str(_entry_point('sb-activity-hook')))} --db {db}",
+            "Stop": f"{shlex.quote(str(_entry_point()))} --db {db}",
+        }
+    except Exception:                            # noqa: BLE001 — not in a repo
+        return {}
+
+
 def stop_hook_args(cwd: Optional[Path] = None) -> list[str]:
     """`--settings <file>`, or nothing at all if it could not be written.
 
@@ -181,23 +222,64 @@ def stop_hook_args(cwd: Optional[Path] = None) -> list[str]:
 def _agent_row(db: sqlite3.Connection, payload: dict) -> Optional[sqlite3.Row]:
     """Who is stopping, resolved the way `Broker.whoami` resolves it.
 
-    Session id first, and then `HERDR_PANE_ID` — which the hook inherits from the pane the
-    session was started in. The fallback is load-bearing rather than decorative: the store
-    learns an agent's session id on its FIRST `sb` call, so an agent that has run none has
-    no `session_id` row to match, and that is precisely the agent this gate exists for.
+    Session id first, then `SB_AGENT`, then `HERDR_PANE_ID` — the last two inherited from
+    the pane the session was started in. The fallbacks are load-bearing rather than
+    decorative: the store learns an agent's session id on its FIRST `sb` call, so an agent
+    that has run none has no `session_id` row to match, and that is precisely the agent
+    this gate exists for.
+
+    `SB_AGENT` is switchboard's own and is the only one of the three a codex agent has at
+    spawn — codex sets no session variable, and the payload's `session_id` is a codex
+    thread id nothing has written down yet, which is what `_claim_session` below fixes.
     """
     sid = payload.get("session_id")
     if sid:
         row = store.agent_by_session(db, str(sid))
         if row is not None:
             return row
+    me = os.environ.get("SB_AGENT")
+    if me:
+        row = db.execute("SELECT * FROM agents WHERE name=?", (me,)).fetchone()
+        if row is not None:
+            return _claim_session(db, row, sid)
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
-        return db.execute(
+        row = db.execute(
             "SELECT * FROM agents WHERE pane_id=? ORDER BY created_at DESC LIMIT 1",
             (pane,),
         ).fetchone()
+        if row is not None:
+            return _claim_session(db, row, sid)
     return None
+
+
+def _claim_session(db: sqlite3.Connection, row: sqlite3.Row,
+                   sid: Optional[str]) -> sqlite3.Row:
+    """Record the session id the payload carried, if this row has none yet.
+
+    THE CODEX SESSION-ID CAPTURE, and it lives here because this is the earliest moment
+    the id exists at all. Codex allocates no thread id at `agent start` — nothing is
+    written until a turn actually begins — so unlike Claude Code there is no id to read
+    back from the spawn call. Both hooks carry it in their payload from the first turn
+    onwards (verified live: `session_id`, matching the rollout filename and
+    `CODEX_THREAD_ID` exactly), and this hook fires before the agent has run a single `sb`
+    command, which is precisely the window in which an agent used to be unrestorable.
+
+    Only when the row has none. An id already on the row was written by something that
+    knew more than a hook payload does, and a hook that overwrote it could re-point
+    `sb restore` at a session belonging to a different life of the same name.
+
+    Never raises and never blocks: a failed write here costs restorability, and the gate
+    it shares a process with must still decide.
+    """
+    if not sid or row["session_id"]:
+        return row
+    try:
+        store.update_agent(db, row["name"], session_id=str(sid))
+        store.log_event(db, kind="session_captured", agent=row["name"])
+        return db.execute("SELECT * FROM agents WHERE name=?", (row["name"],)).fetchone() or row
+    except Exception:                            # noqa: BLE001 — never trap an agent
+        return row
 
 
 def _has_live_child(db: sqlite3.Connection, name: str) -> bool:

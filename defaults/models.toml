@@ -100,6 +100,33 @@ model    = "claude-opus-4-8"
 effort   = "medium"
 
 
+# -- the codex tiers -----------------------------------------------------------
+#
+# PINNED IDS, against the alias rule above, and not by choice: codex has no alias
+# vocabulary at all. `codex debug models` reports slugs and nothing else, so a tier here
+# names one — which carries the same cost `prose` accepts and says so about: the day a
+# slug is retired, spawns on this tier fail outright. That is the correct failure. It asks
+# the question again rather than sliding silently onto a different model.
+#
+# Both verified live against the installed codex-cli 0.147.0 (`codex debug models`): both
+# slugs exist and both list `medium` among their supported reasoning levels. The tier NAME
+# is the slug, because for codex there is no more human word available — `gpt-5.5` is what
+# a person picking one would say.
+
+[tiers."gpt-5.5"]
+provider = "codex"
+model    = "gpt-5.5"
+effort   = "medium"
+
+[tiers."gpt-5.6-sol"]
+# The newer frontier model. Its own default reasoning level is `low`; `medium` here is the
+# deliberate override, matching `gpt-5.5` so the choice between the two tiers is a choice
+# of model and not secretly also a choice of effort (Andrew, 2026-08-22).
+provider = "codex"
+model    = "gpt-5.6-sol"
+effort   = "medium"
+
+
 # -- what the code can actually do ---------------------------------------------
 #
 # These two are facts about the backends switchboard has, not preferences, so a repo does
@@ -108,11 +135,20 @@ effort   = "medium"
 # message can still say what is wrong.
 
 [providers]
-# Only `claude` is wired. `provider` stays a real field so config written today remains
-# valid, but there is no codex backend yet.
-wired = ["claude"]
+# Both have a backend. `claude` is the default and gets its per-agent settings as CLI
+# flags; `codex` gets the same settings as keys in a private per-agent `CODEX_HOME`
+# (`switchboard/codex.py`) because it has an equivalent flag for none of them. Which of
+# the two a tier means is the `provider` field above, and `Herdr.start_agent` is the one
+# place that branches on it.
+wired = ["claude", "codex"]
 
 # From `claude --help`: "--effort <level>  Effort level for the current session
 # (low, medium, high, xhigh, max)". A flag, not CLAUDE_EFFORT: an inherited env var would
 # silently give every child its parent's effort.
+#
+# Codex's own set is not identical — `codex debug models` reports `low|medium|high|xhigh|
+# max|ultra` per model, so it accepts every level here and one more. The list stays the
+# intersection-plus-claude rather than the union: a level is refused at RESOLUTION, before
+# anyone knows which provider a tier names, and `ultra` on a claude tier is a spawn that
+# fails at the CLI with a worse message than this one.
 effort_levels = ["low", "medium", "high", "xhigh", "max"]

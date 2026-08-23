@@ -43,6 +43,7 @@ import re
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
+from . import codex as codex_mod
 from . import config
 from . import output
 from . import presets as presets_mod
@@ -491,6 +492,7 @@ def _own_sb_bin(cwd) -> Optional[Path]:
     return sb.parent if os.access(sb, os.X_OK) else None
 
 
+
 def _accepts(fn: Callable, param: str) -> bool:
     """Whether the adapter supports an argument yet.
 
@@ -790,6 +792,17 @@ class Broker:
 
         Session id is preferred over pane id because it is unambiguous: pane ids are
         recycled once a pane closes, and a stale row could otherwise capture a new agent.
+
+        `SB_AGENT` sits between them and is better than either. It is switchboard's own,
+        set on the pane at creation (`_spawn_env`) and inherited by every process the
+        agent runs — including, for codex, the subprocesses its shell tool spawns, which
+        is where every `sb` verb an agent types actually runs. It names the AGENT rather
+        than a pane, so no recycled pane id can capture it, and it needs nothing from the
+        provider: `CLAUDE_CODE_SESSION_ID` is one provider's variable and codex sets no
+        equivalent at all. Still checked after the session id, because the session id is
+        also proof of WHICH session, and still checked against the store rather than
+        trusted — an env var naming an agent this store has never heard of is a clone's
+        agent, not this one's (`cli._agent_caller` is where that case is caught).
         """
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
         if sid:
@@ -799,6 +812,15 @@ class Broker:
             ).fetchone()
             if row:
                 return self._revive(row)
+
+        me = os.environ.get("SB_AGENT")
+        if me:
+            row = self.db.execute(
+                "SELECT name, state, ended_at FROM agents WHERE name=?", (me,)).fetchone()
+            if row:
+                name = self._revive(row)
+                self._claim_session(name)
+                return name
 
         pane = os.environ.get("HERDR_PANE_ID")
         if pane:
@@ -1028,14 +1050,38 @@ class Broker:
         writes. So we claim it ourselves, under our own source.
         """
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-        if not sid:
-            return
         a = store.get_agent(self.db, name)
-        if not a or a["session_id"] == sid or not a["pane_id"]:
+        if not a or not a["pane_id"]:
+            return
+        if not sid:
+            # THE OTHER PROVIDER. Codex sets no session variable at all, so there is
+            # nothing in this process's environment to claim from — the id was captured
+            # from the hook payload instead, the first time either hook fired
+            # (`hooks._claim_session`), which is the earliest moment it exists. What is
+            # left to do here is the half a hook cannot: tell herdr, which needs the
+            # adapter. Once per agent, guarded by the log rather than by comparing ids,
+            # because the id on the row is the very thing being reported.
+            if a["session_id"] and not self._session_reported(name):
+                self._report_session(name, a["pane_id"], a["session_id"])
+            return
+        if a["session_id"] == sid:
             return
         store.update_agent(self.db, name, session_id=sid, cwd=str(Path.cwd()))
+        self._report_session(name, a["pane_id"], sid)
+
+    def _session_reported(self, name: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM events WHERE agent=? AND kind='session_reported' LIMIT 1",
+            (name,)).fetchone() is not None
+
+    def _report_session(self, name: str, pane: str, sid: str) -> None:
+        """Tell herdr which session this pane holds. Never fatal — it is herdr's own
+        bookkeeping for its own restore path, and nothing switchboard does reads it back
+        (`herdr pane get`/`agent get` never surface it, checked directly for both
+        providers). The store's column is what `sb restore` uses."""
         try:
-            self.h.report_session(a["pane_id"], name, sid, store.next_seq(self.db, name))
+            self.h.report_session(pane, name, sid, store.next_seq(self.db, name))
+            store.log_event(self.db, kind="session_reported", agent=name)
         except HerdrError as e:
             store.log_event(self.db, kind="claim_session_failed", agent=name, error=str(e))
 
@@ -1630,7 +1676,8 @@ class Broker:
             pass                                      # not a git repo
         return self.repo
 
-    def start(self, *, name: Optional[str] = None, task: Optional[str] = None) -> str:
+    def start(self, *, name: Optional[str] = None, task: Optional[str] = None,
+              model: Optional[str] = None) -> str:
         """The one command worth remembering. Everything else, an agent does for you.
 
         Always a NEW orchestrator, in a new workspace of its own — a bare one, laid over
@@ -1647,12 +1694,20 @@ class Broker:
         session standing under that name (see `_reopen_name`). So typing it every morning
         gives a new `general` each morning, and never a resumed one.
 
+        `model` is a TIER name, exactly as `sb delegate --model` takes one, and it is the
+        one thing about a top that was never selectable: `sb start` has had no say in what
+        the dispatcher it makes runs on since it existed, so a top has always been whatever
+        the `main` role's tier says. It is threaded rather than resolved here — `_top` is
+        the only path that makes a top, so it is the only place that may decide anything
+        about one — and it is recorded on the row like any other override, which is what
+        lets `sb restore` bring the same top back on the same backend.
+
         Refused from inside a worktree — see `_refuse_outside_main_checkout`.
         """
         self._refuse_outside_main_checkout()
         if name:
-            return self._top(name, task)
-        return self._top(self._next_top_name(), task)
+            return self._top(name, task, model=model)
+        return self._top(self._next_top_name(), task, model=model)
 
     def _reopen_name(self, name: str) -> None:
         """Retire the row standing under a top-level name so the name can be spawned into.
@@ -1674,8 +1729,30 @@ class Broker:
         unread = store.unread_for(self.db, name)     # marks them read in the same call
         if unread:
             store.log_event(self.db, kind="mail_closed", agent=name, count=len(unread))
-        store.drop_agent(self.db, name)
+        self._release_name(name)
         store.log_event(self.db, kind="name_reopened", agent=name)
+
+    def _release_name(self, name: str) -> None:
+        """Drop the row standing under `name` so somebody else can take it — and take the
+        codex home with it.
+
+        The home is what `codex.is_codex_agent` reads to answer "which provider is this
+        agent?", and it is deliberately outlived by `sb cleanup` so a closed codex agent
+        stays restorable and readable. That contract is about an agent whose NAME still
+        belongs to it. Here the name is being handed to somebody else, and the row —
+        which is where the session id lives — is going with it, so `sb restore <name>` has
+        already stopped being a route back to that agent. Leaving the directory would not
+        preserve anything reachable; it would only make the NEXT agent under this name
+        look like a codex one. `sb start --name general --model gpt-5.5`, then tomorrow
+        `sb start --name general` on claude: the claude top would get the codex delivery
+        proof, which can never confirm, so its first task is delivered three times, and
+        `_capture_session_id` would take the codex fallback and record nothing.
+
+        Delegate-composed names are untouched by this: `_compose_name` suffixes while a
+        row exists, so a live agent's name is never released underneath it.
+        """
+        store.drop_agent(self.db, name)
+        codex_mod.forget_home(name, self.repo)
 
     def _refuse_outside_main_checkout(self) -> None:
         """`sb start` belongs in the main checkout, and nowhere else.
@@ -1727,7 +1804,7 @@ class Broker:
         known = self._agent_states()
         return tops if known is None else [n for n in tops if n in known]
 
-    def _top(self, name: str, task: Optional[str]) -> str:
+    def _top(self, name: str, task: Optional[str], *, model: Optional[str] = None) -> str:
         """Each top-level orchestrator gets its OWN herdr workspace.
 
         Not a worktree, and not the repo's main workspace: a top-level orchestrator does
@@ -1767,7 +1844,7 @@ class Broker:
                 # DELETED its row: the session id went with it, so `restore` had nothing
                 # to restore, and `whoami` resolved the still-running agent to HUMAN.
                 store.drop_agent(self.db, name)
-                return self._top(name, task)
+                return self._top(name, task, model=model)
             if a["session_id"] and not self._alive_or_unknown(name):
                 # The name is free again. A top-level name is a PLACE a human comes back
                 # to — `general`, `triage` — and the session that last stood there has
@@ -1782,7 +1859,7 @@ class Broker:
                 # wrong "dead" no longer costs a second pane on the same session, it costs
                 # the row itself, and nothing brings that back.
                 self._reopen_name(name)
-                return self._top(name, task)
+                return self._top(name, task, model=model)
             elif task:
                 # Alive, or a pane we cannot see an agent in yet — a claim somebody made
                 # moments ago and is still spawning into. Either way the name is somebody
@@ -1793,9 +1870,19 @@ class Broker:
             self._focus(name)
             return name
 
+        # The tier this top will run on, resolved before its workspace is created — the
+        # pane's environment depends on the provider (`_spawn_env`) and a pane's
+        # environment is fixed when its shell is launched.
+        spec = roles_mod.get(self.roles, MAIN, self.repo).spec(model)
+
         pane, wsid = None, ""
         try:
-            r = self.h.create_workspace(name, cwd=str(self.repo))
+            # A top's pane is created HERE rather than by `delegate`'s `_tab_for`, so this
+            # is where its environment has to be set — same rule, same reason (see
+            # `_spawn_env`): herdr fixes a pane's environment when the pane's shell is
+            # launched, and `agent start` cannot add to it afterwards.
+            r = self.h.create_workspace(name, cwd=str(self.repo),
+                                        env=self._spawn_env(name, spec))
             wsid = ((r.get("workspace") or {}).get("workspace_id")
                     or r.get("workspace_id") or "")
             pane = ((r.get("root_pane") or {}).get("pane_id")
@@ -1811,7 +1898,7 @@ class Broker:
         # never sets it, which is what keeps "only `sb start` creates a top" a fact of the
         # code rather than a convention. Everything downstream (the fork rule, the tree
         # boundary) reads the stamp, so a second writer would be a second definition.
-        self.delegate(first, role=MAIN, name=name,
+        self.delegate(first, role=MAIN, name=name, model=model,
                       me=HUMAN, pane=pane,
                       workspace=name, workspace_id=wsid, cwd=str(self.repo),
                       awaiting_task=awaiting, is_top=True)
@@ -2394,17 +2481,38 @@ class Broker:
 
         checkout = row["checkout"]
         if checkout is None:
-            return self._close_bare(name, me=me)
+            return self._forget_codex_homes(name, self._close_bare(name, me=me))
         verdict = store.checkout_verdict(checkout, cwd=self.repo)
         if verdict == store.CHECKOUT_ABSENT:
-            return self._close_gone(name, checkout, me=me)
+            return self._forget_codex_homes(name, self._close_gone(name, checkout, me=me))
         if verdict != store.CHECKOUT_OK:
             raise ValueError(
                 f"cannot tell what {name!r}'s recorded checkout is: {checkout} is not a "
                 f"worktree of this repo. Unknown is not empty, so nothing is deregistered "
                 f"and nothing is deleted."
             )
-        return self._close_checkout(name, checkout, me=me, confirm=confirm)
+        return self._forget_codex_homes(
+            name, self._close_checkout(name, checkout, me=me, confirm=confirm))
+
+    def _forget_codex_homes(self, workspace: str, result: dict) -> dict:
+        """Take the private homes of this workspace's codex agents away with it.
+
+        The place that means "these agents are gone for good", which is the thing
+        `sb cleanup` deliberately does not mean — see `codex.forget_home`. (`_release_name`
+        is the only other caller, and it says the same thing about one name at a time.) A home holds the
+        agent's rollouts and its `AGENTS.md`, so removing it costs the transcript and the
+        restore, and that is exactly what closing a workspace already costs: the checkout
+        itself is being deleted.
+
+        After the route, never before: a close that was refused must leave everything
+        where it was, and a refusal raises rather than returns. Best-effort per agent, for
+        `forget_home`'s reason — a teardown that half-happened is worse than a leftover
+        directory, and the directory is visible where a half-torn-down agent is not.
+        """
+        for r in self.db.execute("SELECT name FROM agents WHERE workspace=?",
+                                 (workspace,)).fetchall():
+            codex_mod.forget_home(r["name"], self.repo)
+        return result
 
     def _adopt_orphan(self, name: str):
         """Record a checkout only git knows about, so it can be closed like any other.
@@ -3897,7 +4005,28 @@ class Broker:
             return env, True
         return self._workspace_id(ws), False
 
-    def _tab_for(self, workspace_id: str, cwd) -> tuple[str, str]:
+    def _spawn_env(self, name: str, spec) -> dict[str, str]:
+        """What this agent's pane must be created with in its environment.
+
+        `SB_AGENT` for every agent, whatever the provider. It is the identity signal
+        `whoami` and the hooks fall back to, and it is strictly better than the two they
+        had: `CLAUDE_CODE_SESSION_ID` is set by one provider only, and `HERDR_PANE_ID`
+        names a pane, which is recycled when a pane closes. This names the agent.
+
+        `CODEX_HOME` on top, for a codex spec only — that directory IS the codex spawn
+        (`codex.write_home`), and it has to be in the pane's shell before `agent start`
+        types `codex` into it.
+
+        A pane is created once and the agent lives in it, so this is not a place to put
+        anything that can change during that life.
+        """
+        env = {"SB_AGENT": name}
+        if getattr(spec, "provider", "") == codex_mod.PROVIDER:
+            env.update(codex_mod.spawn_env(name, codex_mod.home_path(name, self.repo)))
+        return env
+
+    def _tab_for(self, workspace_id: str, cwd, *,
+                 env: Optional[dict] = None) -> tuple[str, str]:
         """A child belongs in its parent's workspace, not in whatever tab has focus.
 
         A RECORDED id, though, outlives the herdr that issued it: ids are handed out per
@@ -3917,7 +4046,8 @@ class Broker:
         """
         if workspace_id and _accepts(self.h.create_tab, "workspace"):
             try:
-                return self.h.create_tab(cwd=str(cwd), workspace=workspace_id), workspace_id
+                return (self.h.create_tab(cwd=str(cwd), workspace=workspace_id, env=env),
+                        workspace_id)
             except HerdrError as e:
                 if e.code != "workspace_not_found":
                     raise
@@ -3936,9 +4066,10 @@ class Broker:
                 self._ws_ids = {n: i for n, i in self._ws_ids.items() if i != workspace_id}
                 store.log_event(self.db, kind="workspace_gone", workspace=workspace_id)
                 workspace_id = ""
-        return self.h.create_tab(cwd=str(cwd)), workspace_id
+        return self.h.create_tab(cwd=str(cwd), env=env), workspace_id
 
-    def _ready_pane(self, name: str, pane: str, cwd) -> None:
+    def _ready_pane(self, name: str, pane: str, cwd, *,
+                    env: Optional[dict] = None) -> None:
         """Get one command through this pane's shell before `agent start` types into it —
         and, in a checkout that ships its own `sb`, pin that `bin/` on the way past.
 
@@ -4003,13 +4134,25 @@ class Broker:
         the spawn (`PaneNotReady`) rather than taking 12KB into a shell that is not
         listening.
         """
+        # THE AGENT'S OWN ENVIRONMENT, on the same line and for the same reason the PATH
+        # pin is on it. `--env` at pane creation is the authoritative channel and every
+        # pane switchboard creates gets it (`_spawn_env`, `_tab_for`); the one pane it
+        # cannot reach is the root pane of a FORKED WORKTREE, which herdr hands back
+        # ready-made and `worktree create` takes no `--env` for. That pane is reused
+        # rather than paid for twice, so the export here is what covers it — and it costs
+        # nothing where `--env` already did the job, because it sets the same values.
+        #
+        # Ahead of the PATH pin in the same command so that a shell which somehow takes
+        # only part of the line still leaves the pane unproven rather than half-set: the
+        # marker is at the END, and nothing is asserted until it comes back.
+        exports = "".join(f"export {k}={shlex.quote(str(v))}; " for k, v in (env or {}).items())
         bin_dir = _own_sb_bin(cwd)
         if bin_dir is not None:
             quoted = shlex.quote(str(bin_dir))
             # `command -v`, not `which`: it is the shell's own resolution, which is the
             # thing being asserted. `"$PATH"` quoted, so a PATH with a space in it
             # survives.
-            command = f'export PATH={quoted}:"$PATH"; echo "sb=$(command -v sb)"'
+            command = f'{exports}export PATH={quoted}:"$PATH"; echo "sb=$(command -v sb)"'
             marker = f"sb={bin_dir}/sb"
         else:
             # The same proof with nothing to claim. Split across two quoted halves for
@@ -4017,7 +4160,7 @@ class Broker:
             # echoed back, and a marker present in the typed line would be matched off
             # the echo — which is the pane saying nothing at all. Only the shell's own
             # output joins the halves.
-            command = f'echo "sb-rea""dy={name}"'
+            command = f'{exports}echo "sb-rea""dy={name}"'
             marker = f"sb-ready={name}"
         for attempt in range(PIN_ATTEMPTS):
             try:
@@ -4288,6 +4431,15 @@ class Broker:
         name = name or self._compose_name(role, topic)
         self.delivery_note = None       # this spawn's caveat, not the last one's
 
+        # RESOLVED BEFORE ANY PANE EXISTS, which is earlier than it looks like it needs to
+        # be and is the whole of the pane-environment problem. herdr fixes a pane's
+        # environment when its shell is launched and `agent start` has no `--env` at all,
+        # so a codex agent's `CODEX_HOME` has to be decided before the fork below, not at
+        # the spawn call at the end. An unwired provider still raises at `cli_args()`
+        # rather than here, which is where the message can still say what is wrong.
+        spec = r.spec(model)
+        env = self._spawn_env(name, spec)
+
         # A child inherits its parent's workspace unless told otherwise, so a whole
         # delegation subtree stays inside one worktree without anyone passing it down.
         inherited = workspace is None
@@ -4355,6 +4507,7 @@ class Broker:
             cwd = cwd or forked["path"]
             # A freshly forked workspace already has an idle shell; spending a tab on top
             # of it leaves an empty pane behind forever.
+            #
             pane = pane or forked["pane_id"]
 
         if cwd:
@@ -4405,11 +4558,11 @@ class Broker:
         else:
             wsid, confirmed = workspace_id, True
         if not pane:
-            pane, wsid = self._tab_for(wsid, where)
+            pane, wsid = self._tab_for(wsid, where, env=env)
 
         # Before the claim, so a pane that will not answer costs no row and no name, and
         # so the wait stays outside the window `status.SPAWN_GRACE` covers.
-        self._ready_pane(name, pane, where)
+        self._ready_pane(name, pane, where, env=env)
 
         # Claim the name BEFORE herdr is asked to start anything. `agents.name` is a
         # PRIMARY KEY, and that index is the only arbiter two concurrent spawners share —
@@ -4445,7 +4598,7 @@ class Broker:
             # its own. Check-then-act, so two spawners can both find the
             # husk — but the second claim is still the arbiter, and the loser is refused
             # below exactly as before.
-            store.drop_agent(self.db, name)
+            self._release_name(name)
             claimed = store.claim_agent(self.db, **claim)
         if not claimed:
             raise AgentNameTaken(name)
@@ -4462,11 +4615,19 @@ class Broker:
         store.seed_capabilities(self.db, name, self.seed_for(role, is_top, spawner=me))
 
         # `model` is a TIER name (`sb delegate --model strong`), not a model id, and it
-        # only overrides which tier — the table still decides what that tier means. The
-        # spec goes down as flags, so nothing below here has to know either.
+        # only overrides which tier — the table still decides what that tier means.
+        #
+        # The SPEC goes down beside the flags rather than instead of them. For claude the
+        # flags are still the whole of it; for codex there are no flags to speak of — the
+        # model, the effort, the sandbox, the hooks and the protocol text all travel in a
+        # private per-agent directory instead, and the adapter needs the spec itself to
+        # know which of the two it is building (`Herdr._codex_args`). `cwd` for the same
+        # branch: a codex home pre-seeds directory trust for the exact checkout the agent
+        # will stand in.
         try:
             agent = self.h.start_agent(
-                name, pane, prompts=prompts, model_args=r.spec(model).cli_args()
+                name, pane, prompts=prompts, spec=spec,
+                model_args=spec.cli_args(), cwd=Path(where),
             )
         except Exception as e:
             # Leave a HUSK, not nothing. Deleting the row gave the name back and threw
@@ -4520,9 +4681,14 @@ class Broker:
         # a hair of it — well inside `task_arrived`'s clock slop.
         sent = time.time()
         try:
+            # The proof is the child's own record of the text, whichever provider wrote
+            # it. Without the codex branch a codex task that landed on the first send
+            # cannot be confirmed at all, so it is re-sent the full three times and done
+            # three times over — found by the spike, and idempotent only by luck that
+            # time.
             self.h.deliver(
                 name, task,
-                proof=lambda since: output.task_arrived(str(where), task, since=since),
+                proof=lambda since: self._task_arrived(name, str(where), task, since),
             )
         except HerdrError as e:
             # UNCONFIRMED IS NOT FAILED. The proof is the child's own transcript and the
@@ -4824,13 +4990,43 @@ class Broker:
             a = store.get_agent(self.db, name)
             if a is None or a["session_id"]:
                 return           # herdr answered after all, or the agent beat us to it
-            sid = output.matched_transcript(cwd, task, since=since)
+            # The codex answer to the same question, and a different scan because there is
+            # no shared bucket to disambiguate: a codex agent's rollouts are in a home
+            # nobody else writes to, so the newest one under it IS this agent's — no
+            # content match needed, and none possible, since the task text reaches the
+            # rollout only after the turn has begun.
+            #
+            # The FALLBACK, not the main route: the hook payload carries the id from the
+            # first turn onwards and `hooks._claim_session` records it there. This covers
+            # the spawn whose hooks never fired at all, which for codex is a real case —
+            # an untrusted hook is skipped silently.
+            sid = (codex_mod.newest_session_id(name, self.repo, since=since - 5.0)
+                   if codex_mod.is_codex_agent(name, self.repo)
+                   else output.matched_transcript(cwd, task, since=since))
             if not sid:
                 return
             store.update_agent(self.db, name, session_id=sid)
             store.log_event(self.db, kind="session_captured", agent=name, session_id=sid)
         except Exception:
             return
+
+    def _task_arrived(self, name: str, cwd: Optional[str], text: str,
+                      since: Optional[float]) -> bool:
+        """Is `text` in this agent's OWN transcript, written since `since`?
+
+        One question, two record shapes, and the reason it is a method rather than a call
+        each site makes for itself. Claude Code's transcript is found from the agent's
+        CWD; a codex agent's rollouts live in its private CODEX_HOME, which is found from
+        its NAME. Three places ask this — the spawn's proof, the interrupt's proof, and
+        `_took_a_turn` — and only the first was given the codex branch, so for the other
+        two a codex agent got a proof that can only ever answer no. That is worse than no
+        proof at all: `deliver` re-sends until confirmed, so an interrupt that landed on
+        the first send is typed three times and then raised as `Undeliverable` anyway.
+        """
+        if codex_mod.is_codex_agent(name, self.repo):
+            return codex_mod.task_arrived(name, text, since=since, cwd=self.repo)
+        return bool(cwd) and since is not None and output.task_arrived(
+            cwd, text, since=since)
 
     def _took_a_turn(self, name: str, *, task: Optional[str] = None,
                      cwd: Optional[str] = None,
@@ -4861,7 +5057,7 @@ class Broker:
         it. None means none of them holds — nobody is doing that work as far as we can
         tell.
         """
-        if task and since is not None and output.task_arrived(cwd, task, since=since):
+        if task and since is not None and self._task_arrived(name, cwd, task, since):
             return "the task is in its own transcript, it just landed late"
         a = store.get_agent(self.db, name)
         if a is not None and a["state"] in ("done", "blocked"):
@@ -5724,6 +5920,11 @@ class Broker:
             # accumulating one file per agent ever spawned. After the skip above too — a
             # close that did not happen leaves a live agent's prompt where it is.
             herdr_mod.forget_prompt_file(a["name"], self.repo)
+            # And NOT the codex equivalent, which is a whole private home directory. It
+            # holds this agent's rollouts and its `AGENTS.md`, which are its transcript and
+            # — since a resumed codex session re-reads that file every turn rather than
+            # carrying a system prompt — its protocol. Closing is contractually allowed to
+            # cost the pane and nothing else, so it stays. See `codex.forget_home`.
             store.set_state(self.db, a["name"], "done")
             # The pane is gone, so the row must stop claiming one: the "already gone"
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a
@@ -6252,7 +6453,7 @@ class Broker:
             frontier.extend(k["name"] for k in kids)
         return out
 
-    def _restore_tab(self, a, wsid: str, where) -> str:
+    def _restore_tab(self, a, wsid: str, where, *, env: Optional[dict] = None) -> str:
         """The pane a restore comes back into — in the space it came from, by NAME once the
         recorded id has died with the herdr that issued it.
 
@@ -6280,7 +6481,7 @@ class Broker:
         tier 4), good enough to aim a tab at and never good enough to write down as where
         this agent is.
         """
-        pane, landed = self._tab_for(wsid, where)
+        pane, landed = self._tab_for(wsid, where, env=env)
         if not wsid or landed or not a["workspace"]:
             # Nothing was recorded, or what was recorded still works: no second guess.
             return pane
@@ -6291,7 +6492,7 @@ class Broker:
             self.h.close_pane(pane)
         except HerdrError as e:
             store.log_event(self.db, kind="orphan_pane", agent=a["name"], error=str(e))
-        pane, landed = self._tab_for(byname, where)
+        pane, landed = self._tab_for(byname, where, env=env)
         store.log_event(self.db, kind="restore_workspace_reresolved", agent=a["name"],
                         workspace=a["workspace"], was=wsid, now=landed or "")
         return pane
@@ -6358,23 +6559,16 @@ class Broker:
             )
         # The corrected id is deliberately dropped: restore rewrites pane and state, never
         # `workspace_id`, so a row `_tab_for` just cleared keeps the NULL it was given.
-        pane = self._restore_tab(a, wsid, where)
-        # A restored agent gets the same proof a fresh one does — its pane is just as new,
-        # and it comes back into the same checkout it would otherwise come back on the
-        # installed build for. The tab is ours, so a refusal closes it rather than leaving
-        # an empty shell behind, exactly as a failed `agent start` does below.
-        try:
-            self._ready_pane(name, pane, where)
-        except PaneUnusable:
-            try:
-                self.h.close_pane(pane)
-            except HerdrError as e:
-                store.log_event(self.db, kind="orphan_pane", agent=name, error=str(e))
-            raise
-        # Same tier it was spawned on. The role is what we recorded, and the tier table is
-        # what turns that back into flags — without this a restored agent silently comes
-        # back on the provider CLI's default model, which is the one thing "restored with
-        # its full context" must not quietly mean.
+        # Same tier it was spawned on, resolved BEFORE the tab exists — a restored codex
+        # agent needs `CODEX_HOME` in its new pane's environment exactly as a fresh one
+        # does, and a pane's environment is fixed when its shell launches. The old spec
+        # line lived below the spawn's `start_agent` call; it has moved up rather than
+        # been duplicated.
+        #
+        # The role is what we recorded, and the tier table is what turns that back into a
+        # spawn — without this a restored agent silently comes back on the provider CLI's
+        # default model, which is the one thing "restored with its full context" must not
+        # quietly mean.
         #
         # `tier` is the caller's `--model` override, if there was one, and it wins over the
         # role's own tier for the same reason: restore brings back the SAME agent, not a
@@ -6382,9 +6576,26 @@ class Broker:
         # through to the role's tier, which is exactly what this line did before.
         spec = roles_mod.get(self.roles, a["role"], self.repo).spec(
             _column(a, "tier") or None)
+        pane = self._restore_tab(a, wsid, where, env=self._spawn_env(name, spec))
+        # A restored agent gets the same proof a fresh one does — its pane is just as new,
+        # and it comes back into the same checkout it would otherwise come back on the
+        # installed build for. The tab is ours, so a refusal closes it rather than leaving
+        # an empty shell behind, exactly as a failed `agent start` does below.
         try:
-            agent = self.h.start_agent(name, pane, resume=a["session_id"],
-                                       model_args=spec.cli_args())
+            self._ready_pane(name, pane, where, env=self._spawn_env(name, spec))
+        except PaneUnusable:
+            try:
+                self.h.close_pane(pane)
+            except HerdrError as e:
+                store.log_event(self.db, kind="orphan_pane", agent=name, error=str(e))
+            raise
+        # NO `prompts` on this path, for either provider, and that is deliberate rather
+        # than an omission: `--resume` brings a Claude session back whole, system prompt
+        # included, and a codex home's `AGENTS.md` is still on disk from the spawn and is
+        # re-read every turn. `codex.write_home` leaves it alone when it is handed none.
+        try:
+            agent = self.h.start_agent(name, pane, resume=a["session_id"], spec=spec,
+                                       model_args=spec.cli_args(), cwd=Path(where))
         except Exception:
             # The tab is ours; a failed restore must not leave an empty shell behind.
             try:
@@ -7556,11 +7767,11 @@ class Broker:
 
         So this is `Herdr.deliver` — the same retry-until-proved path `_spawn` uses, and
         for the same reason — with the same proof: the text in the agent's OWN
-        transcript, written since the send (`output.task_arrived`). Nothing herdr says
-        about its terminal can fake that, and a prompt a dialog swallowed leaves no
-        record because it never happened. Without a recorded cwd there is no transcript
-        to read, so `deliver` falls back to its own weaker test rather than to a proof
-        that can only ever answer no.
+        transcript, written since the send (`_task_arrived`, whichever provider wrote
+        it). Nothing herdr says about its terminal can fake that, and a prompt a dialog
+        swallowed leaves no record because it never happened. With neither a recorded cwd
+        nor a codex home there is no transcript to read, so `deliver` falls back to its
+        own weaker test rather than to a proof that can only ever answer no.
 
         UNCONFIRMED IS NOT FAILED here either (see `deliver`), and the caller's handling
         of that is deliberately the strict one: an interrupt nobody could confirm raises
@@ -7572,8 +7783,8 @@ class Broker:
         a = store.get_agent(self.db, who)
         cwd = a["cwd"] if a is not None else None
         proof = None
-        if cwd:
-            proof = lambda since: output.task_arrived(cwd, text, since=since)  # noqa: E731
+        if cwd or codex_mod.is_codex_agent(who, self.repo):
+            proof = lambda since: self._task_arrived(who, cwd, text, since)  # noqa: E731
         self.h.deliver(who, text, proof=proof)
 
     def _binding_lost(self, who: str, e: HerdrError) -> bool:

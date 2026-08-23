@@ -1900,6 +1900,53 @@ class LastAssistantTextsTest(unittest.TestCase):
     def test_a_missing_transcript_is_not_an_error(self):
         self.assertEqual(board.last_assistant_texts(Path("/nope/nothing.jsonl")), [])
 
+    def codex(self, rec):
+        return json.dumps(rec)
+
+    def test_a_codex_rollout_is_read_too(self):
+        """S4: this filtered on Claude Code's record shape alone, so the board's
+        double-`o` — open the files an agent named in its report — silently found nothing
+        for every codex agent. Both of codex's own shapes, since `output.read_transcript`
+        reads both: `item_completed`/`AgentMessage` is the TUI's, `agent_message` is
+        `codex exec`'s."""
+        got = self.texts(
+            self.codex({"type": "event_msg",
+                        "payload": {"type": "item_completed",
+                                    "item": {"type": "UserMessage",
+                                             "content": [{"type": "text",
+                                                          "text": "go and read x.md"}]}}}),
+            self.codex({"type": "event_msg",
+                        "payload": {"type": "item_completed",
+                                    "item": {"type": "AgentMessage",
+                                             "content": [{"type": "Text",
+                                                          "text": "wrote notes/a.md"}]}}}),
+            self.codex({"type": "event_msg",
+                        "payload": {"type": "item_completed",
+                                    "item": {"type": "CommandExecution",
+                                             "command": ["cat", "notes/read-only.md"]}}}),
+            self.codex({"type": "event_msg",
+                        "payload": {"type": "agent_message",
+                                    "message": "and notes/b.md"}}),
+        )
+        self.assertEqual(got, ["wrote notes/a.md", "and notes/b.md"])
+
+    def test_a_codex_turn_is_not_counted_twice(self):
+        """Codex writes every turn twice — once as the item stream the TUI drew from and
+        once as the raw model items. Only the first is read, or `n` would be spent on
+        duplicates of one message."""
+        got = self.texts(
+            self.codex({"type": "event_msg",
+                        "payload": {"type": "item_completed",
+                                    "item": {"type": "AgentMessage",
+                                             "content": [{"type": "Text",
+                                                          "text": "said once"}]}}}),
+            self.codex({"type": "response_item",
+                        "payload": {"type": "message", "role": "assistant",
+                                    "content": [{"type": "output_text",
+                                                 "text": "said once"}]}}),
+        )
+        self.assertEqual(got, ["said once"])
+
 
 class OpenReportFilesTest(unittest.TestCase):
     """The failure paths, which are the ones that matter: this runs inside the event

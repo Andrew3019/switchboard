@@ -106,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--name", help="name it — and, if an orchestrator of that name is "
                                    "running, hand the task to that one instead of "
                                    "starting another")
+    st.add_argument("--model", help=_tier_help())
 
     # Hidden on purpose. The board is a human's screen, and `sb` is the vocabulary
     # agents are handed — see the refusal in main(). SUPPRESS keeps it out of
@@ -441,6 +442,11 @@ def _validate(args) -> None:
             args.name = validate.agent_name(args.name, "--name")
         if args.task is not None:
             args.task = validate.line(args.task, "task")
+        # Same rule as `delegate --model`, and deliberately the same call: both take a
+        # TIER name out of the same open vocabulary, so a value one accepts and the other
+        # rejects would be two answers to one question.
+        if args.model is not None:
+            args.model = validate.token(args.model, "--model")
 
     elif cmd == "delegate":
         args.task = validate.line(args.task, "task")
@@ -622,11 +628,13 @@ def _validate_plugin(args) -> None:
 _NEEDS_FRESH_SCHEMA = {"start", "delegate", "restore"}
 
 
-# A Claude Code session sets both of these in the environment of every command it runs, so
-# either one, in a shell a human is typing into, says the typing is not being done by a
-# human. Two rather than one because they are set by different parts of the harness and an
-# agent that has only one of them is still an agent.
-_CLAUDE_SESSION_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE")
+# Markers that say the typing is not being done by a human, any one of which is enough.
+# The first two are Claude Code's, set in the environment of every command such a session
+# runs — two rather than one because different parts of that harness set them and an agent
+# with only one of them is still an agent. The third is switchboard's own, put on the pane
+# at creation (`Broker._spawn_env`) and inherited by everything the agent runs; it is the
+# only one a codex agent has, since codex sets no session variable of its own.
+_AGENT_SESSION_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "SB_AGENT")
 
 
 def _agent_caller(me: str) -> Optional[str]:
@@ -635,19 +643,20 @@ def _agent_caller(me: str) -> Optional[str]:
     Two signals, because one of them has a hole exactly where it matters.
 
     `whoami()` is the good signal: it resolves a caller against the agents THIS store
-    knows, by session id or pane id, both injected into every pane we spawn. It is what
+    knows, by session id, agent name or pane id, all three injected into every pane we
+    spawn. It is what
     `sb board` is gated on. But it can only recognise an agent the store has a row for,
     and an agent standing in a fresh `git clone` is driving that clone's own store, which
     has no rows at all — so it resolves to HUMAN. That clone is not a hypothetical: it is
     this repo's verification convention, and it is how an agent created three unwanted top
     agents in one afternoon.
 
-    So the environment is the second signal, and it is the one that closes the clone: a
-    Claude Code session marks the environment of every command it runs, wherever it is
-    standing and whatever store it is talking to.
+    So the environment is the second signal, and it is the one that closes the clone: an
+    agent's pane carries a marker in the environment of every command it runs, wherever it
+    is standing and whatever store it is talking to.
 
     This fails CLOSED on the unnameable caller, and the cost is worth naming: a human who
-    runs `sb start` from inside a Claude Code session — `!sb start` at the prompt — is
+    runs `sb start` from inside an agent session — `!sb start` at the prompt — is
     refused along with the agents, because at that point nothing distinguishes them.
     Failing open instead would leave the rule enforced only where it was already enforced.
     A human's own terminal carries neither marker and is untouched, which is the case the
@@ -655,7 +664,7 @@ def _agent_caller(me: str) -> Optional[str]:
     """
     if me != HUMAN:
         return f"you are '{me}'"
-    if any(os.environ.get(v) for v in _CLAUDE_SESSION_ENV):
+    if any(os.environ.get(v) for v in _AGENT_SESSION_ENV):
         # No name to give: an agent this store has never heard of, which in practice means
         # one running against a clone's store rather than the fleet's.
         return "you are an agent, and this store has no row for you"
@@ -965,7 +974,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the only thing left standing between "always start another" and losing track of
         # the ones you have: nothing here reuses them, so the way back has to be said.
         others = [] if args.name else b.running_tops()
-        name = b.start(name=args.name, task=args.task)
+        name = b.start(name=args.name, task=args.task, model=args.model)
         also = (f"\n  still running: {', '.join(others)}"
                 f" — back to one with: sb start --name {others[-1]}") if others else ""
         _emit(args, f"dispatcher '{name}' ready in its own workspace — switch to it, "
@@ -1233,12 +1242,15 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         tiers = models_mod.load(b.repo)
         rows = [(n, tiers.resolve(n)) for n in tiers.names()]
         # The flags column is what actually reaches the provider CLI, so it is what gets
-        # shown. Two rows read as empty for opposite reasons and must not look alike: a
+        # shown. THREE rows read as empty for different reasons and must not look alike: a
         # tier with neither model nor effort is deferring to the CLI's own default (a
-        # choice), while an unwired provider cannot be spawned at all. The second is legal
-        # config — models.py keeps `provider` real ahead of its backend — so it is reported
-        # per row rather than allowed to take the whole listing down, since finding out
-        # WHICH tier is unspawnable is why anyone runs this.
+        # choice); a codex tier has a model and an effort and simply does not deliver them
+        # as flags (they are keys in a private per-agent `CODEX_HOME/config.toml` —
+        # `switchboard/codex.py`), so printing "(provider default)" there would say the
+        # opposite of what is true; and an unwired provider cannot be spawned at all. The
+        # last is legal config — models.py keeps `provider` real ahead of its backend — so
+        # it is reported per row rather than allowed to take the whole listing down, since
+        # finding out WHICH tier is unspawnable is why anyone runs this.
         out: dict[str, dict] = {}
         lines = []
         for n, s in rows:
@@ -1248,8 +1260,13 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 flags, note = [], f"UNAVAILABLE — {e}"
             out[n] = {"provider": s.provider, "model": s.model, "effort": s.effort,
                       "cli_args": flags, "error": note or None}
-            lines.append(f"  {n:12}{s.provider:10}"
-                         f"{note or ' '.join(flags) or '(provider default)'}")
+            settings = " ".join(
+                x for x in (f"model {s.model}" if s.model else "",
+                            f"effort {s.effort}" if s.effort else "") if x)
+            shown = note or " ".join(flags) or (
+                f"{settings} (in the agent's codex home)" if settings
+                else "(provider default)")
+            lines.append(f"  {n:12}{s.provider:10}{shown}")
         _emit(args, "\n".join(lines),
               {"default_provider": tiers.default_provider, "tiers": out})
         return 0

@@ -110,7 +110,8 @@ class OnlyAHumanStartsATopTest(Fixture, unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli._dispatch(argparse.Namespace(cmd="start", name=None, task=None,
-                                                    json=False), self.b, self.db, self.h)
+                                                    model=None, json=False),
+                                 self.b, self.db, self.h)
         return code, out.getvalue() + err.getvalue()
 
     def test_an_agent_this_store_knows_is_refused(self):

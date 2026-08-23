@@ -20,8 +20,12 @@ Effort is set with the verified `--effort <level>` flag rather than the CLAUDE_E
 environment variable. A flag is per-spawn and explicit; an inherited env var would silently
 give every child its parent's effort.
 
-Resolution returns everything the spawn layer needs to build CLI flags, so no caller ever
-branches on provider.
+Resolution returns everything the spawn layer needs, and for one provider that is CLI
+flags. It is not universal: `--model`/`--effort` are Claude Code's flag names, and codex
+has no equivalent for either — its model and effort are keys in a private per-agent
+`CODEX_HOME/config.toml` instead (`switchboard/codex.py`). So `cli_args()` answers [] for
+it, and exactly one place in the system branches on `provider`: `Herdr.start_agent`, which
+is the layer that types a provider's command line.
 """
 
 from __future__ import annotations
@@ -129,11 +133,28 @@ class ModelSpec:
     effort: Optional[str] = None     # None = inherit whatever the provider CLI defaults to
     extra_args: tuple[str, ...] = ()
 
-    def cli_args(self) -> list[str]:
-        """The provider's CLI flags for this tier.
+    # The providers whose per-agent settings travel as CLI FLAGS. Everything else delivers
+    # them some other way and must get an empty list here rather than Claude Code's flag
+    # names — see `cli_args`. A tuple in Python rather than a config key because it is a
+    # fact about which code path exists, not a preference: adding a provider to it without
+    # writing that path would produce flags no binary accepts.
+    _FLAG_PROVIDERS = ("claude",)
 
-        This is the whole point of the module: the caller appends these and never asks
-        which provider it is talking to.
+    def cli_args(self) -> list[str]:
+        """The provider's CLI flags for this tier — which for one provider is none at all.
+
+        This was the whole point of the module and it is now half of it: the caller
+        appends these and never asks which provider it is talking to. What changed is that
+        `--model`/`--effort` are Claude Code's flag NAMES, not a universal vocabulary.
+        Codex has neither; its model and reasoning effort are keys in a private per-agent
+        `CODEX_HOME/config.toml` that `switchboard/codex.py` writes and
+        `Herdr.start_agent` triggers. Emitting the claude flags for it would hand `codex`
+        an argument it rejects outright, so this returns [] and the SPEC goes down beside
+        the flags for the one caller that needs to know (`Broker.delegate`).
+
+        The unwired check stays first and stays here. It is the one refusal that can still
+        name what is wrong — by spawn time the message would be a provider CLI's complaint
+        about an unknown flag.
         """
         wired = wired_providers()
         if self.provider not in wired:
@@ -141,6 +162,8 @@ class ModelSpec:
                 f"tier '{self.tier}' asks for provider '{self.provider}', which has no "
                 f"backend yet (wired: {', '.join(wired)})"
             )
+        if self.provider not in self._FLAG_PROVIDERS:
+            return []
         args: list[str] = []
         if self.model:
             args += ["--model", self.model]

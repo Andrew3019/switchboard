@@ -124,13 +124,38 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(self.load().resolve("mine").provider, "codex")
 
     def test_an_unwired_provider_fails_with_a_clear_message(self):
-        """codex is a valid thing to write down; there is just no backend for it yet."""
-        self.write_repo('[tiers.mine]\nprovider = "codex"\nmodel = "o9"\n')
+        """A provider is a valid thing to write down; having a backend is a separate fact.
+
+        `codex` used to be the example here and is now wired, so the test names one that
+        is not. The rule is what is being pinned, not the membership of the list.
+        """
+        self.write_repo('[tiers.mine]\nprovider = "gemini"\nmodel = "o9"\n')
         spec = self.load().resolve("mine")
-        self.assertEqual(spec.provider, "codex")
+        self.assertEqual(spec.provider, "gemini")
         with self.assertRaises(models.ModelConfigError) as cm:
             spec.cli_args()
-        self.assertIn("codex", str(cm.exception))
+        self.assertIn("gemini", str(cm.exception))
+
+    def test_a_codex_tier_emits_no_claude_flags(self):
+        """The other half of the seam. `--model`/`--effort` are Claude Code's flag names
+        and codex has neither — its model and effort are keys in a private per-agent
+        `CODEX_HOME/config.toml` instead. Emitting them here would hand `codex` an
+        argument it rejects outright; the spec carries the values to the one place that
+        knows what to do with them (`Herdr._codex_args`)."""
+        spec = self.load().resolve("gpt-5.5")
+        self.assertEqual(spec.provider, "codex")
+        self.assertEqual(spec.model, "gpt-5.5")
+        self.assertEqual(spec.effort, "medium")
+        self.assertEqual(spec.cli_args(), [])
+
+    def test_both_shipped_codex_tiers_resolve_at_medium_effort(self):
+        """Two slugs, both verified live against `codex debug models`, both at medium so
+        that choosing between the tiers is a choice of model and not secretly of effort."""
+        for tier, model in (("gpt-5.5", "gpt-5.5"), ("gpt-5.6-sol", "gpt-5.6-sol")):
+            with self.subTest(tier=tier):
+                spec = self.load().resolve(tier)
+                self.assertEqual((spec.provider, spec.model, spec.effort),
+                                 ("codex", model, "medium"))
 
     # -- bad config -------------------------------------------------------
 
@@ -270,10 +295,10 @@ class CliSurfaceTest(unittest.TestCase):
     def test_models_verb_reports_an_unspawnable_tier_instead_of_dying(self):
         """A provider with no backend is legal config; the listing still has to render."""
         (self.repo / ".switchboard" / "models.toml").write_text(
-            '[tiers.later]\nprovider = "codex"\nmodel = "o9"\n')
+            '[tiers.later]\nprovider = "gemini"\nmodel = "o9"\n')
         d = self._models_json()
         self.assertEqual(d["tiers"]["later"]["cli_args"], [])
-        self.assertIn("codex", d["tiers"]["later"]["error"])
+        self.assertIn("gemini", d["tiers"]["later"]["error"])
         self.assertIsNone(d["tiers"]["cheap"]["error"])   # the rest is unaffected
 
 

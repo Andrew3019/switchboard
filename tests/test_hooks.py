@@ -242,5 +242,36 @@ class SpawnCarriesTheHookTest(unittest.TestCase):
         self.assertIn("--db", start)
 
 
+class CodexHookShapeTest(unittest.TestCase):
+    """The other provider's wiring for the same two hooks.
+
+    What is pinned here is that both events are wired, to the same two scripts, naming
+    the same store explicitly — i.e. that the codex path cannot quietly lose one of them.
+    What no test here can pin is that codex honours the block, which is why that half was
+    proved live against the real binary instead (both hooks fired, with arguments, and
+    the payload carried `stop_hook_active`).
+    """
+
+    def test_both_events_are_wired_to_the_same_scripts_and_store(self):
+        cmds = hooks.codex_hook_commands()
+        self.assertEqual(set(cmds), {"Stop", "UserPromptSubmit"})
+        self.assertTrue(cmds["Stop"].split()[0].endswith("bin/sb-stop-hook"), cmds["Stop"])
+        self.assertTrue(
+            cmds["UserPromptSubmit"].split()[0].endswith("bin/sb-activity-hook"),
+            cmds["UserPromptSubmit"])
+        for c in cmds.values():
+            self.assertIn("--db", c)
+            self.assertIn(str(store.db_path()), c)
+
+    def test_the_decision_is_shared_rather_than_a_second_gate(self):
+        """The cap especially. It is defensive for Claude and MANDATORY for codex —
+        openai/codex#37937 is an open unbounded-no-escape loop on a repeatedly blocking
+        Stop hook — so a codex-specific gate that forgot it would be the bug. There is no
+        codex gate to forget it in: `codex_hook_commands` wires the same scripts."""
+        for name in ("stop_gate", "mark_turn", "run", "run_activity"):
+            self.assertTrue(hasattr(hooks, name))
+        self.assertFalse([n for n in dir(hooks) if n.startswith("codex_") and n != "codex_hook_commands"])
+
+
 if __name__ == "__main__":
     unittest.main()

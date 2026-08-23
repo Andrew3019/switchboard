@@ -310,15 +310,25 @@ def _record_time(rec: dict) -> Optional[float]:
 
 
 def read_transcript(path: Path, *, lines: int = DEFAULT_LINES) -> str:
-    """The tail of a Claude Code transcript, flattened to one line per entry.
+    """The tail of a transcript, flattened to one line per entry.
 
     Not a pretty-printer: this is read when something has already gone wrong, so tool
     calls and their results are kept (that is usually where the cause is) and the
     agent's thinking is dropped (it never reached the terminal either).
+
+    Two record shapes, told apart per RECORD rather than per file. Codex's rollout JSONL
+    is a different format from Claude Code's transcript — an outer `{timestamp, type,
+    payload}` envelope around `event_msg`/`response_item`/`session_meta` — and the two
+    vocabularies do not overlap, so `_render_codex_record` answers for the records it
+    recognises and `_render_record` for the rest. Per record and not per file because
+    that needs nothing to be known about the agent at this depth: the caller already
+    resolved which file to read (`store.transcript_path`), and a renderer that also had
+    to be told which provider wrote it would be a second place to get that wrong.
     """
     out: list[str] = []
     for rec in _tail_records(path, lines * _RECORD_OVERSCAN):
-        out.extend(_render_record(rec))
+        out.extend(_render_codex_record(rec) if rec.get("type") in _CODEX_RECORDS
+                   else _render_record(rec))
     return "\n".join(out[-lines:])
 
 
@@ -382,13 +392,98 @@ def _render_record(rec: dict) -> list[str]:
     return out
 
 
+# The outer `type` values a codex rollout record can carry. Named rather than inferred so
+# that a Claude Code record can never fall into the codex renderer by accident: the two
+# formats share no value here (`user`/`assistant`/`queue-operation` against these).
+_CODEX_RECORDS = frozenset({"event_msg", "response_item", "session_meta",
+                            "turn_context", "world_state", "compacted"})
+
+
+def _render_codex_record(rec: dict) -> list[str]:
+    """One codex rollout record, in the same one-line-per-entry shape as the Claude one.
+
+    Read off `event_msg`/`item_completed` wherever possible. Codex writes each turn twice
+    — once as the item stream that drove the TUI and once as the raw model items — and the
+    items are the half that says what a person watching the pane actually saw, which is
+    what this read is for. Verified against a real rollout from a real spawn:
+    `UserMessage`, `AgentMessage`, `CommandExecution`, `FileChange`, `Reasoning`.
+
+    `Reasoning` is dropped for the Claude path's reason — it never reached the terminal
+    either. Commands and their output are kept for the Claude path's other reason: this is
+    read when something has already gone wrong, and that is usually where the cause is.
+
+    `exec` mode writes a slightly different stream (`user_message`/`agent_message` events
+    rather than `item_completed`), so both are read. Switchboard only ever spawns the TUI;
+    the `exec` shapes are here because a rollout is a rollout and a reader that answers for
+    only one of them is a reader that silently shows nothing.
+    """
+    payload = rec.get("payload")
+    if not isinstance(payload, dict) or rec.get("type") != "event_msg":
+        return []
+    kind = payload.get("type")
+    if kind == "user_message":
+        text = payload.get("message") or ""
+        return [f"user: {_clip(text)}"] if text.strip() else []
+    if kind == "agent_message":
+        text = payload.get("message") or ""
+        return [f"assistant: {_clip(text)}"] if text.strip() else []
+    if kind == "error":
+        return [f"  [error] {_clip(str(payload.get('message') or ''))}"]
+    if kind != "item_completed":
+        return []
+    return _render_codex_item(payload.get("item") or {})
+
+
+def _render_codex_item(item: dict) -> list[str]:
+    """One entry of the TUI's own item stream."""
+    kind = item.get("type")
+    if kind == "UserMessage":
+        text = _codex_text(item.get("content"))
+        return [f"user: {_clip(text)}"] if text.strip() else []
+    if kind == "AgentMessage":
+        text = _codex_text(item.get("content"))
+        return [f"assistant: {_clip(text)}"] if text.strip() else []
+    if kind == "CommandExecution":
+        cmd = item.get("command")
+        cmd = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd or "")
+        out = [f"assistant: [exec] {_clip(cmd)}"]
+        text = item.get("stdout") or item.get("aggregated_output") or ""
+        if str(text).strip():
+            # Marked `error` on a non-zero exit for the Claude renderer's reason: a failed
+            # tool call is the single most useful line in a transcript being read to find
+            # out why something failed.
+            flag = "error" if item.get("exit_code") else "result"
+            out.append(f"  [{flag}] {_clip(str(text))}")
+        return out
+    if kind == "FileChange":
+        paths = list((item.get("changes") or {}))
+        return [f"assistant: [edit] {_clip(' '.join(paths))}"] if paths else []
+    return []                 # Reasoning, and anything a later codex adds
+
+
+def _codex_text(content: Any) -> str:
+    """The text of a codex content list — `text`/`Text` in the item stream,
+    `input_text`/`output_text` in the raw model items.
+
+    One line, because it was two copies of the same function: this module's and
+    `codex.content_text`. Kept as a name here rather than calling through everywhere so
+    the renderer above still reads as a renderer, and imported locally because `codex`
+    reaches back into `store`, which reaches this way.
+    """
+    from . import codex
+    return codex.content_text(content)
+
+
 def _text_of(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        # `text` is Claude Code's part key; `input_text`/`output_text` carrying `text` is
+        # codex's. Both are read here rather than in two near-identical helpers.
         return " ".join(
             p.get("text", "") for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
+            if isinstance(p, dict)
+            and p.get("type") in ("text", "input_text", "output_text")
         )
     return "" if content is None else str(content)
 

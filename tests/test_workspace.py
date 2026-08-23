@@ -115,7 +115,7 @@ class FakeHerdr:
     def calls_of(self, kind):
         return [c.split(":", 1)[1] for c in self.calls if c.startswith(kind + ":")]
 
-    def create_workspace(self, label, *, cwd=None, focus=False):
+    def create_workspace(self, label, *, cwd=None, focus=False, env=None):
         if getattr(self, "fail_workspace_create", False):
             raise HerdrError("workspace_create_failed", "nope")
         self.calls.append(f"create_workspace:{label}")
@@ -151,7 +151,7 @@ class FakeHerdr:
         self.opened.append(wt["id"])
         return self._facts(wt)
 
-    def create_tab(self, *, cwd=None, workspace=None, focus=False) -> str:
+    def create_tab(self, *, cwd=None, workspace=None, focus=False, env=None) -> str:
         with self.lock:
             self._n += 1
             pane = f"{workspace or 'w0'}:p{self._n}"
@@ -166,7 +166,8 @@ class FakeHerdr:
         self.closed.append(pane)
         self.panes.discard(pane)
 
-    def split_pane(self, pane, *, direction="right", ratio=0.66, cwd=None, focus=False):
+    def split_pane(self, pane, *, direction="right", ratio=0.66, cwd=None, focus=False,
+                   env=None):
         """Every spawn splits the agent's pane to put the board beside it. `ratio` is
         the share kept by the pane being split — see `Herdr.split_pane`."""
         with self.lock:
@@ -586,7 +587,7 @@ class WorkspaceTest(Fixture, unittest.TestCase):
     def test_an_adapter_without_workspace_scoped_tabs_still_spawns(self):
         """Losing workspace placement is cosmetic; failing to spawn is not."""
         r = self._open("api")
-        plain = lambda *, cwd=None, focus=False: "w9:p9"      # noqa: E731
+        plain = lambda *, cwd=None, focus=False, env=None: "w9:p9"   # noqa: E731
         self.h.create_tab = plain
         kid = self.b.delegate("t", topic="t", role="worker", me="api")
         self.assertEqual(store.get_agent(self.db, kid)["workspace"], "api")

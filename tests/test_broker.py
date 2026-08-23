@@ -59,6 +59,8 @@ class FakeHerdrAPI:
         self.checks = 0
         self._wt = tempfile.TemporaryDirectory()   # where forked checkouts land
         self.check_error: Optional[HerdrError] = None   # a conflicting integration
+        self.tab_envs: list[dict] = []
+        self.workspace_envs: list[dict] = []
         self._n = 0
 
     def check(self, **kw):
@@ -66,14 +68,21 @@ class FakeHerdrAPI:
         if self.check_error:
             raise self.check_error
 
-    def create_tab(self, *, workspace=None, **kw):
+    def create_tab(self, *, workspace=None, env=None, **kw):
         self._n += 1
         self.tabs.append(workspace)
+        # Kept because it is the one thing only the broker can get right: a pane's
+        # environment is fixed when its shell launches, so anything an agent's process
+        # must see has to be decided before `agent start` — see `Broker._spawn_env`.
+        self.tab_envs.append(dict(env or {}))
         return f"{workspace or 'w1'}:p{self._n}"
 
-    def start_agent(self, name, pane, *, prompts=(), model_args=(), resume=None, **kw):
+    def start_agent(self, name, pane, *, prompts=(), model_args=(), spec=None,
+                    resume=None, **kw):
         self.started.append({"name": name, "pane": pane, "prompts": list(prompts),
-                             "model_args": list(model_args), "resume": resume})
+                             "model_args": list(model_args), "resume": resume,
+                             "provider": getattr(spec, "provider", None),
+                             "model": getattr(spec, "model", None)})
         return Agent(name=name, pane_id=pane, terminal_id=f"term_{name}",
                      session_id=f"sess-{name}")
 
@@ -137,9 +146,10 @@ class FakeHerdrAPI:
                 "worktree": {"path": str(path), "branch": branch},
                 "root_pane": {"pane_id": f"wt{self._n}:p1"}}
 
-    def create_workspace(self, label, *, cwd=None, focus=False):
+    def create_workspace(self, label, *, cwd=None, focus=False, env=None):
         self._ws = getattr(self, "_ws", 100) + 1
         self.workspaces.append(label)
+        self.workspace_envs.append(dict(env or {}))
         return {"workspace": {"workspace_id": f"w{self._ws}"},
                 "root_pane": {"pane_id": f"w{self._ws}:p1"}}
     def send_keys(self, name, *keys): self.keys.append((name, keys))
@@ -290,6 +300,20 @@ class BrokerTest(unittest.TestCase):
         self.b.delegate("t", topic="t", role="worker", model="strong", me="orch")
         self.assertEqual(self.h.started[0]["model_args"],
                          ["--model", "opus", "--effort", "high"])
+
+    def test_a_spawn_names_its_agent_in_its_pane_s_environment(self):
+        """`SB_AGENT` for EVERY agent, whatever the provider, and before `agent start`
+        types the provider's command line into that shell.
+
+        Asserted on the READY-PANE command rather than on `--env`, because that is the one
+        channel every pane has: `--env` reaches every pane switchboard creates, and the
+        root pane of a forked worktree is handed over ready-made by a `worktree create`
+        that takes no `--env` at all. The export covers that one and costs nothing where
+        `--env` already did the job.
+        """
+        name = self.b.delegate("t", topic="t", role="worker", me="orch")
+        typed = " ".join(cmd for _, cmd in self.h.pane_prompts)
+        self.assertIn(f"export SB_AGENT={name}", typed)
 
     def test_unknown_role_still_works(self):
         """Vocabulary is data — an undefined role inherits defaults, it does not error."""
