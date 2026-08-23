@@ -380,6 +380,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import textwrap
@@ -1132,7 +1133,7 @@ def comment(ctx, args) -> Result:
     if not re.fullmatch(r"[1-9]\d*", pr):
         return _needs("--pr", "a pull request number is required, e.g. `--pr 181`")
 
-    doc, _ = _read(ctx.state_dir)
+    doc, seal = _read(ctx.state_dir)
     plan = _find(doc, args.plan)
     if plan is None:
         return _missing(doc, args.plan)
@@ -1140,8 +1141,28 @@ def comment(ctx, args) -> Result:
     if bad:
         return bad
 
+    # An issue and a pull request share GitHub's comments API. Resolve through the pulls
+    # endpoint first so `--pr 123` cannot silently post onto ordinary issue 123.
+    pull_endpoint = f"repos/{{owner}}/{{repo}}/pulls/{pr}"
+    _, bad = _github(ctx, [pull_endpoint])
+    if bad:
+        return bad
+
+    # The plan id scopes identity; the persisted random nonce makes that identity
+    # unclaimable by a comment planted before the first upsert. After creation the marker
+    # is visible in the comment source, but a copied duplicate only makes the next call
+    # refuse its multiple exact matches — it never authorizes an overwrite.
+    nonce = plan.get("pr_comment_nonce")
+    if nonce is None:
+        nonce = secrets.token_urlsafe(18)
+        plan["pr_comment_nonce"] = nonce
+        _write(ctx.state_dir, doc, seal)
+    elif not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{24}", nonce):
+        why = f"{plan['id']} has an invalid PR comment nonce; refusing to replace it"
+        return Result(ok=False, human=why, data={"error": why, "plan": plan["id"]})
+
     number = _num(_PLAN_ID, plan.get("id"))
-    marker = f"<!-- switchboard-plan: plan-{number} -->"
+    marker = f"<!-- switchboard-plan: plan-{number}:{nonce} -->"
     rendered = _plan_result(
         _viewed(_shown(plan, lib), _Live(ctx), tokens=True), markdown=True).human
     body = f"{rendered.rstrip()}\n\n{marker}\n"
@@ -4263,33 +4284,27 @@ def _step_lines(steps: list) -> list[str]:
     return out
 
 
-# Resolved onto the view for the code to read and for NO RENDERING TO PRINT. `anchor` is
-# the only one: a step's name, display and command are resolved for a reader, and this is
-# resolved for `_wrong`, which has to know where a step runs to tell an obligation left out
-# of the order from one the anchors ordered the other way, and which is handed a resolved
-# plan and never the catalogue.
+# Machinery the code needs and a human-facing markdown rendering does not. `anchor` is
+# resolved onto a step for `_wrong`; `pr_comment_nonce` is persisted on a plan so a retry
+# can recover the same external identity. Both remain in `--json`, the machine rendering.
 #
-# Kept out of both renderings by two different means, because they are two different
-# mechanisms. The terminal draws only what it does not already know how to draw, so this
-# joins `_DRAWN`. The markdown is WALKED and knows no field names at all — which is the
-# whole point of it — so nothing in that renderer could be taught to skip a key without
-# taking that property away; what happens instead is that the field is dropped from the
-# copy being dumped (`_dumped`), one call above it. `--json` carries it either way, since
-# that rendering is the record and a machine reader is who this field is for.
-_MACHINERY = frozenset({"anchor"})
+# Kept out of markdown by dropping these fields from the copy being dumped (`_dumped`),
+# one call above it. The underlying record and `--json` remain untouched.
+_MACHINERY = frozenset({"anchor", "pr_comment_nonce"})
 
 
 def _dumped(shown: dict) -> dict:
     """A resolved plan with the machinery taken back out, for the rendering a HUMAN reads.
 
     `show --markdown` is what `create-pr` posts onto the pull request, so what is in it is
-    what whoever turns up reads. `anchor: pr` under a step means nothing to that reader and
-    is not a fact about the job — it is how this file decided where to put the step, which
-    it did weeks earlier. Dropped from the copy rather than skipped by the renderer: see
-    `_MACHINERY`. A copy, so `data` is untouched and `--json` still means what it meant.
+    what whoever turns up reads. `anchor: pr` under a step and a plan's external-comment
+    nonce are operational details, not facts about the job. Dropped from the copy rather
+    than skipped by the renderer: see `_MACHINERY`. A copy, so `data` is untouched and
+    `--json` still means what it meant.
     """
-    return dict(shown, steps=[{k: v for k, v in s.items() if k not in _MACHINERY}
-                              for s in (shown.get("steps") or ())])
+    return dict({k: v for k, v in shown.items() if k not in _MACHINERY},
+                steps=[{k: v for k, v in s.items() if k not in _MACHINERY}
+                       for s in (shown.get("steps") or ())])
 
 
 # -- the plan as markdown ------------------------------------------------------

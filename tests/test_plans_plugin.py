@@ -1415,7 +1415,7 @@ class CatalogueTest(PlansSandbox):
         return next(p for p in self._doc()["plans"] if p["id"] == plan)["steps"]
 
     @contextlib.contextmanager
-    def github_comments(self):
+    def github_comments(self, *, pulls=(42, 181)):
         """A PR's issue comments behind the real `gh api` argv the plugin builds.
 
         This fakes GitHub, not sb or herdr: every plans command still crosses the normal
@@ -1431,7 +1431,13 @@ class CatalogueTest(PlansSandbox):
             nonlocal next_id
             if list(argv[:2]) != ["gh", "api"]:
                 return real_run(argv, *args, **kwargs)
-            if "--paginate" in argv:
+            pull = next((str(arg) for arg in argv if "/pulls/" in str(arg)), None)
+            if pull is not None:
+                number = int(pull.rsplit("/", 1)[-1])
+                if number not in pulls:
+                    return subprocess.CompletedProcess(argv, 1, "", "HTTP 404: Not Found")
+                stdout = json.dumps({"number": number})
+            elif "--paginate" in argv:
                 stdout = json.dumps([comments])
             else:
                 body = json.loads(kwargs["input"])["body"]
@@ -2070,10 +2076,10 @@ class CatalogueTest(PlansSandbox):
         byte unchanged, regardless of ordering or authorship.
         """
         self.data(*_create("a job", "write it"))
-        marker = "<!-- switchboard-plan: plan-1 -->"
         with self.github_comments() as comments:
             made = self.data("plugin", "plans", "comment", "p-1", "--pr", "181")
             self.assertEqual(made["action"], "created")
+            marker = made["marker"]
             self.assertIn(marker, comments[0]["body"].splitlines())
             old_plan_body = comments[0]["body"]
 
@@ -2087,18 +2093,40 @@ class CatalogueTest(PlansSandbox):
         self.assertNotEqual(comments[0]["body"], old_plan_body)
         self.assertEqual(comments[1]["body"], later_body)
 
-    def test_comment_upsert_is_idempotent_and_keeps_one_exact_plan_marker(self):
-        """A retry updates the one marked object; it never adds another plan rendering."""
+    def test_comment_upsert_cannot_claim_a_preseeded_predictable_marker(self):
+        """A planted plan-id-only marker is unrelated and remains byte-for-byte intact.
+
+        The first upsert mints and persists an unpredictable marker; a retry finds that
+        exact object and keeps one authoritative plan rendering without claiming the
+        attacker's earlier comment.
+        """
         self.data(*_create("a job", "write it"))
-        marker = "<!-- switchboard-plan: plan-1 -->"
+        planted = "unrelated\n\n<!-- switchboard-plan: plan-1 -->\n"
         with self.github_comments() as comments:
+            comments.append({"id": 77, "body": planted})
             first = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
             second = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
 
+        marker = first["marker"]
         marked = [row for row in comments if marker in row["body"].splitlines()]
         self.assertEqual(len(marked), 1)
+        self.assertEqual(comments[0], {"id": 77, "body": planted})
+        self.assertNotEqual(first["comment_id"], 77)
         self.assertEqual(second["action"], "updated")
         self.assertEqual(second["comment_id"], first["comment_id"])
+        self.assertNotIn(marker, self.ok("plugin", "plans", "show", "p-1", "--markdown"))
+
+    def test_comment_rejects_an_issue_number_that_is_not_a_pull_request(self):
+        """Issue comments share an API, so the pulls endpoint must authorize the target."""
+        self.data(*_create("a job", "write it"))
+        with self.github_comments(pulls=()) as comments:
+            code, out, _ = self.sb(
+                "plugin", "plans", "comment", "p-1", "--pr", "42", "--json")
+
+        self.assertEqual(code, 1)
+        self.assertIn("404", json.loads(out)["data"]["error"])
+        self.assertEqual(comments, [])
+        self.assertNotIn("pr_comment_nonce", self._doc()["plans"][0])
 
     # -- where a named step runs, which is not what it obliges ------------------
 
