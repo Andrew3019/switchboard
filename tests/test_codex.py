@@ -412,19 +412,20 @@ class DelegateOntoCodexTest(unittest.TestCase):
         self.assertIn(f"export CODEX_HOME=", typed)
         self.assertIn(f"codex-homes/{name}", typed)
 
-    def test_the_home_is_taken_away_with_the_agent(self):
-        """`sb cleanup` is cheap because a closed agent's state goes with it. A codex home
-        holds the credential symlink and the rollouts, so it goes the same way the prompt
-        file does — and that cost is honest: a cleaned-up codex agent's transcript is gone
-        where a claude one's survives."""
+    def test_cleanup_leaves_the_home_where_it_is(self):
+        """The closing contract: *closing costs only the pane — session, summary, messages
+        and transcript survive, and `sb restore` brings an agent back*. For a codex agent
+        all three of those are in the home: the rollouts are the transcript, and
+        `AGENTS.md` is the protocol a resumed session re-reads every turn. Deleting it
+        here — which an earlier draft did, beside the prompt file — would make a
+        cleaned-up codex agent unrestorable and unreadable."""
         name = self.b.delegate("t", topic="t", role="worker", model="gpt-5.5", me="orch")
         # Written by hand: the home is built inside the ADAPTER (`Herdr._codex_args`), so
         # a fake herdr never makes one. What is under test here is the teardown.
         codex.write_home(name, prompts=["p"], worktree=str(self.repo), cwd=self.repo)
-        self.assertTrue(codex.is_codex_agent(name, self.repo))
         store.set_state(self.db, name, "done")
         self.b.cleanup([name])
-        self.assertFalse(codex.is_codex_agent(name, self.repo))
+        self.assertTrue(codex.is_codex_agent(name, self.repo))
 
 
 class StartOnCodexTest(unittest.TestCase):

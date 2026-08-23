@@ -22,8 +22,10 @@ This is the same move `herdr.write_prompt_file` already makes for Claude Code �
 once per agent, write to a private file, point the CLI at it — with a directory in place
 of a file. It has the same three properties that file was chosen for: nothing lands in
 the repo (so nothing leaks into a human's own codex sessions and nothing collides between
-agents sharing a checkout), one file per agent rewritten per spawn, and it goes away with
-the agent when `sb cleanup` closes it.
+agents sharing a checkout) and one directory per agent, rewritten per spawn. It does NOT
+go away when `sb cleanup` closes the agent, and that is the one place it differs from the
+prompt file — see `forget_home`, which explains what closing is contractually allowed to
+cost.
 
 Two differences from the Claude path are worth stating because they are semantic, not
 cosmetic:
@@ -150,13 +152,21 @@ def write_home(
 
 
 def forget_home(name: str, cwd: Optional[Path] = None) -> None:
-    """Take it away with the agent. Never raises — a close that half-happened is worse.
+    """Take the agent's home away. Never raises — a close that half-happened is worse.
 
-    Called where the pane is closed, beside `herdr.forget_prompt_file`, and it takes the
-    rollout transcripts with it. That is the honest cost of a per-agent home and it is the
-    same cost the pane already has: `sb cleanup` is cheap because a closed agent's
-    transcript outlives it, and for codex it does not. Anything worth keeping is in the
-    agent's `sb done` summary, which is what a parent reads anyway.
+    NOT called from `sb cleanup`, and the reason is the whole of the closing contract:
+    *closing costs only the pane — session, summary, messages and transcript survive, and
+    `sb restore` brings an agent back*. For codex all three of those live in here. The
+    rollouts ARE the transcript, and `AGENTS.md` is the standing instructions a resumed
+    codex session re-reads every turn — `--resume` brings a Claude session's system prompt
+    back with it, and codex's equivalent is this file still being on disk. Deleting it
+    would make a cleaned-up codex agent unrestorable and unreadable, which is a different
+    contract from the one everything above it is written against.
+
+    So the cost is disk instead, and it is not small: codex writes its own caches and
+    sqlite state in here, tens of megabytes per agent. This function is what a caller that
+    genuinely means "this agent is gone for good" calls — `sb workspace close`, or a hand
+    sweep — and there is deliberately nothing automatic on the other end of it yet.
     """
     try:
         shutil.rmtree(home_path(name, cwd), ignore_errors=True)

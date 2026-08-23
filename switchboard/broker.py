@@ -2332,17 +2332,37 @@ class Broker:
 
         checkout = row["checkout"]
         if checkout is None:
-            return self._close_bare(name, me=me)
+            return self._forget_codex_homes(name, self._close_bare(name, me=me))
         verdict = store.checkout_verdict(checkout, cwd=self.repo)
         if verdict == store.CHECKOUT_ABSENT:
-            return self._close_gone(name, checkout, me=me)
+            return self._forget_codex_homes(name, self._close_gone(name, checkout, me=me))
         if verdict != store.CHECKOUT_OK:
             raise ValueError(
                 f"cannot tell what {name!r}'s recorded checkout is: {checkout} is not a "
                 f"worktree of this repo. Unknown is not empty, so nothing is deregistered "
                 f"and nothing is deleted."
             )
-        return self._close_checkout(name, checkout, me=me, confirm=confirm)
+        return self._forget_codex_homes(
+            name, self._close_checkout(name, checkout, me=me, confirm=confirm))
+
+    def _forget_codex_homes(self, workspace: str, result: dict) -> dict:
+        """Take the private homes of this workspace's codex agents away with it.
+
+        THE ONE PLACE that means "these agents are gone for good", which is the thing
+        `sb cleanup` deliberately does not mean — see `codex.forget_home`. A home holds the
+        agent's rollouts and its `AGENTS.md`, so removing it costs the transcript and the
+        restore, and that is exactly what closing a workspace already costs: the checkout
+        itself is being deleted.
+
+        After the route, never before: a close that was refused must leave everything
+        where it was, and a refusal raises rather than returns. Best-effort per agent, for
+        `forget_home`'s reason — a teardown that half-happened is worse than a leftover
+        directory, and the directory is visible where a half-torn-down agent is not.
+        """
+        for r in self.db.execute("SELECT name FROM agents WHERE workspace=?",
+                                 (workspace,)).fetchall():
+            codex_mod.forget_home(r["name"], self.repo)
+        return result
 
     def _adopt_orphan(self, name: str):
         """Record a checkout only git knows about, so it can be closed like any other.
@@ -5278,11 +5298,11 @@ class Broker:
             # accumulating one file per agent ever spawned. After the skip above too — a
             # close that did not happen leaves a live agent's prompt where it is.
             herdr_mod.forget_prompt_file(a["name"], self.repo)
-            # And the codex equivalent of that file, which is a whole private home
-            # directory (`codex.write_home`): the prompt, the config, the auth symlink and
-            # the rollouts codex wrote under it. Same rule, same place, and a no-op for
-            # every claude agent — the directory only exists if a codex spawn wrote it.
-            codex_mod.forget_home(a["name"], self.repo)
+            # And NOT the codex equivalent, which is a whole private home directory. It
+            # holds this agent's rollouts and its `AGENTS.md`, which are its transcript and
+            # — since a resumed codex session re-reads that file every turn rather than
+            # carrying a system prompt — its protocol. Closing is contractually allowed to
+            # cost the pane and nothing else, so it stays. See `codex.forget_home`.
             store.set_state(self.db, a["name"], "done")
             # The pane is gone, so the row must stop claiming one: the "already gone"
             # guard above is `ended_at and not pane_id`, and a stale id defeated it — a
