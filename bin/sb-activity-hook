@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""The UserPromptSubmit hook's entry point: a turn is starting. Always exit 0, print NOTHING.
+"""The UserPromptSubmit hook's entry point: a turn is starting. Always exit 0.
 
-Prints nothing on stdout, ever, and that is a hard rule rather than a style: the CLI adds a
-`UserPromptSubmit` hook's stdout to the agent's context, so anything written here arrives in
-front of the agent as though it were part of its task. Errors go to stderr.
+Stdout here is the GUIDANCE CHANNEL and nothing else. The CLI adds a `UserPromptSubmit`
+hook's stdout to the agent's context, so anything written on it arrives in front of the
+agent as though it were part of its task — which is why this printed nothing at all until
+the guidance ledger existed, and why the only thing it prints now is what
+`hooks.run_activity` returns: rules the ledger resolved for THIS agent, each marked
+`[sb: guidance]`. When no rule applies that is the empty string and nothing is written,
+which is the old behaviour exactly. Errors still go to stderr — a traceback in an agent's
+context is not guidance.
 
 Deliberately NOT a `sb` subcommand, for `bin/sb-stop-hook`'s reason: every `sb` invocation is
 also a tick of the doorbell (`cli.main` calls `flush_pending`), and this runs at the exact
@@ -24,7 +29,9 @@ def main() -> int:
             db = argv[i + 1]
     try:
         from switchboard import hooks
-        hooks.run_activity(sys.stdin.read(), db_path=db)
+        said = hooks.run_activity(sys.stdin.read(), db_path=db)
+        if said:
+            print(said)
     except Exception as e:                       # noqa: BLE001 — never trap an agent
         print(f"sb-activity-hook: {e}", file=sys.stderr)
     return 0

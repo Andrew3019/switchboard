@@ -45,6 +45,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from . import codex as codex_mod
 from . import config
+from . import guidance
 from . import output
 from . import presets as presets_mod
 from . import roles as roles_mod
@@ -75,6 +76,26 @@ CAP_SPAWN = roles_mod.CAP_SPAWN
 CAP_FORK = roles_mod.CAP_FORK
 CAP_DISPATCH = roles_mod.CAP_DISPATCH
 CAP_WRITE_TRACKED = roles_mod.CAP_WRITE_TRACKED
+
+# THE SIDE-EFFECT BOUNDARIES (spec §2.1/§2.2, unit E4). The sb-mediated points at which a
+# side-effect capability is checked, and there are exactly two because there are exactly two
+# places sb itself stands between an agent's work and its landing:
+#
+#   BOUNDARY_MERGE — `sb merge <child>`, checked ON THE CHILD. The question is whether the
+#       agent that PRODUCED the branch was allowed to produce it, so a child that lacks the
+#       cap has its branch refused and everyone else's still folds in (per-child, D3).
+#   BOUNDARY_DONE  — `sb done`, a FLAG and never a refusal. A report that fails is a report
+#       an agent starts inventing ways around (`hooks.BLOCK_REASON` carries the same worry),
+#       so the agent and its parent are TOLD and the call still succeeds.
+#
+# WHICH capabilities are checked at each is DATA, not code — `[capabilities.side_effects]`
+# in settings, read by `roles.side_effect_capabilities`. That is the generality this unit
+# buys: a deploy repo adds `deploy = ["merge"]` to its own settings file and gets the same
+# gate, the same grants and the same refusals with NO new enforcement path. Adding a
+# boundary is the only thing that is code, and two is all the sanctioned path has.
+BOUNDARY_MERGE = "merge"
+BOUNDARY_DONE = "done"
+SIDE_EFFECT_BOUNDARIES = (BOUNDARY_MERGE, BOUNDARY_DONE)
 
 # ISOLATION — what a spawn asks for when nothing else has already decided where the child
 # goes. Two values and no third: `own` is a worktree and branch of the child's own,
@@ -719,6 +740,11 @@ class Broker:
         # above: the CLI has to tell the caller what happened, and the return value of
         # `done` is already the live-children list. Read by `cli` right after the call.
         self.done_repeat = False
+        # The side-effect capabilities this agent's `done` FLAGGED (E4) — declared at the
+        # `done` boundary, not held, and with tracked work standing behind them. Same shape
+        # and reason as `delivery_note`: the CLI has to say it, and `done`'s return value is
+        # already the live-children list. A list because a repo may declare more than one.
+        self.done_flags: list[str] = []
         # What the last `restore` did to that agent's capability set: it comes back on its
         # STORED SEED and any grants it held are gone (§2.1). Same shape and reason as the
         # two above — the operator has to be told, because a narrowing nobody can see is
@@ -1294,6 +1320,32 @@ class Broker:
 
     # -- grants ----------------------------------------------------------
 
+    def side_effect_capabilities(self, boundary: str) -> list[str]:
+        """The side-effect caps this repo checks at ONE boundary, in a fixed order.
+
+        THE CLASS, RESOLVED (spec §2.1, unit E4). `write-tracked` is the shipped instance
+        and this function knows nothing about it: it reads
+        `[capabilities.side_effects]`, so a repo that mints `deploy` there is enforced by
+        the same call at the same chokepoint, with no branch anywhere that names either
+        string. That is what "one instance of a reusable class" has to mean in code — if
+        adding the second capability took a structural change, the first was never an
+        instance of anything.
+
+        Sorted, so a repo with two of them refuses in a stable order rather than in
+        whatever order its TOML happened to be written.
+
+        Fails OPEN on a broken table and says so in the log, deliberately, and it is the
+        one place in this unit that does: this is not a security control (§2.1), the
+        boundaries it feeds include `done`, and a typo in a settings file that made every
+        agent unable to report finished would cost far more than the check ever buys.
+        """
+        try:
+            declared = roles_mod.side_effect_capabilities(self.repo)
+        except config.ConfigError as e:
+            store.log_event(self.db, kind="side_effects_unreadable", error=str(e))
+            return []
+        return sorted(cap for cap, at in declared.items() if boundary in at)
+
     def known_capabilities(self) -> set:
         """Every capability string this repo has a meaning for. What `sb grant` will accept.
 
@@ -1302,12 +1354,30 @@ class Broker:
         vocabulary — refusing to grant a cap the seeder happily hands out would be two
         vocabularies again, which is the thing C1 collapsed.
 
+        PLUS this repo's own side-effect capabilities (E4). A repo that declares `deploy` in
+        `[capabilities.side_effects]` has declared a string sb will REFUSE a merge over, and
+        a gate you cannot grant past is a gate with no key: the declaration and the
+        vocabulary have to be one fact or minting a capability would take two edits and a
+        role file nobody wanted.
+
         `start` is subtracted whatever any file says. It is the one string that is not a
         capability and must never become grantable: `sb start` is a hardcoded, fail-closed,
         human-only gate, and a grantable version of it is how a top comes to mint a second
         top. A repo naming it in a template does not get to reopen that.
         """
-        return (set(roles_mod.CAPABILITIES) | self._template_caps()) - {"start"}
+        return (set(roles_mod.CAPABILITIES) | self._template_caps()
+                | set(self._declared_side_effects())) - {"start"}
+
+    def _declared_side_effects(self) -> list[str]:
+        """Every side-effect capability this repo declares, checked anywhere or nowhere.
+
+        A cap declared against no boundary is vocabulary a repo has minted and not yet wired
+        to a chokepoint — legitimate, seedable and grantable, and not an error.
+        """
+        try:
+            return sorted(roles_mod.side_effect_capabilities(self.repo))
+        except config.ConfigError:
+            return []
 
     def grant(self, target: str, cap: str, *, delegable: bool = False,
               reason: Optional[str] = None, me: Optional[str] = None) -> dict:
@@ -1515,6 +1585,70 @@ class Broker:
                             "held": True, "delegable": False, "granted_by": None,
                             "reason": None, "derived": True})
         return sorted(out, key=lambda o: o["agent"])
+
+    # -- self-configuration (E3, spec §2.4) -------------------------------
+
+    def configure(self, setting: Optional[str] = None, value: Optional[str] = None, *,
+                  me: str) -> dict:
+        """Tune the CALLER'S OWN reminder settings, within its role template's ceiling.
+
+        SELF-DIRECTED, AND THERE IS NO TARGET PARAMETER. That is the whole shape of the
+        verb: `sb grant` acts on somebody else and is therefore bounded by a subtree check
+        and a granter's own set, and this acts on nobody but the caller, so the only bound
+        it needs is the ceiling. One agent cannot configure another by any path, because
+        there is no path — not a flag, not a broker argument, not a store column
+        (`store.config`'s schema note says why it has no `set_by`).
+
+        THE CEILING IS THE ROLE TEMPLATE'S (obj. 2). It is read through
+        `roles.template_ceiling` off `agents.role`, which §6.10 pins as fixed at spawn, so
+        a `sb promote` that re-homes this agent under a more permissive parent moves
+        nothing: there is no parent in this function to read.
+
+        IT TUNES CONFIG AND NEVER RIGHTS (obj. 5). The setting vocabulary is a closed table
+        in settings.toml that shares no string with the capability vocabulary, so
+        `sb configure spawn true` is refused by `roles.check_setting` as a name that is not
+        a setting — the same refusal a typo gets, and no special case that has to remember
+        to enumerate the capabilities.
+
+        With no `setting`, this is the READ: what the caller is tuned to and how far it may
+        go. A verb whose refusal names a ceiling has to have a way to ask what that ceiling
+        is, or the only route to it is trial and error against an error message.
+        """
+        if me == HUMAN or store.get_agent(self.db, me) is None:
+            raise ValueError(
+                "`sb configure` tunes the settings of the agent that runs it, and you are "
+                "not one of them. To change what every agent of a role may do, edit that "
+                "role's template.")
+        row = store.get_agent(self.db, me)
+        ceiling = roles_mod.template_ceiling(self.roles, row["role"], self.repo)
+        if setting is None:
+            return {"agent": me, "role": row["role"], "setting": None,
+                    "config": guidance.configuration(self.db, me, repo=self.repo,
+                                                     roles=self.roles),
+                    "ceiling": ceiling}
+        if value is None:
+            raise ValueError(
+                f"`sb configure {setting}` needs a value — `sb configure` with no "
+                f"arguments prints what the settings are and what your role allows.")
+        base, category = roles_mod.check_setting(setting, self.repo)
+        if category in guidance.SAFETY_CATEGORIES:
+            # Obj. 3, said at the moment it is asked for rather than only enforced at
+            # delivery. Both halves exist on purpose: this one tells an agent that the
+            # thing it is trying to do is not a thing, and `guidance.audible` makes the
+            # answer the same for a row that reached the table some other way.
+            raise ValueError(
+                f"`{category}` is a safety-critical reminder category: it cannot be "
+                f"quietened or silenced, by you or by anything above you. The other "
+                f"categories are tunable — `sb configure {base} <value>` sets them all, "
+                f"`sb configure {base}.<category> <value>` sets one.")
+        checked = roles_mod.check_value(setting, value, role=row["role"],
+                                        ceiling=ceiling.get(base), repo=self.repo)
+        before = guidance.configuration(self.db, me, repo=self.repo, roles=self.roles)
+        store.set_config(self.db, me, setting, checked)
+        return {"agent": me, "role": row["role"], "setting": setting, "value": checked,
+                "was": before.get(setting), "ceiling": ceiling.get(base),
+                "config": guidance.configuration(self.db, me, repo=self.repo,
+                                                 roles=self.roles)}
 
     def _template_caps(self) -> set:
         """Every capability named by any role template — what the top may endow.
@@ -4760,11 +4894,20 @@ class Broker:
         step. One PR at the end survives for free — every child folds into the same branch,
         so that branch still lands as one change.
 
-        **`write-tracked` is checked on the CHILD, not the caller.** This is the sb-mediated
-        chokepoint for the side-effect class (§2.1), and the question it asks is whether the
-        agent that PRODUCED the branch was allowed to produce it. Per-child rather than
+        **The side-effect class is checked on the CHILD, not the caller.** This is the
+        sb-mediated chokepoint for that class (§2.1), and the question it asks is whether
+        the agent that PRODUCED the branch was allowed to produce it. Per-child rather than
         per-batch, which is strictly the better shape: one refused child no longer refuses
         everybody else's work along with it.
+
+        **WHICH capabilities is data.** `write-tracked` is the shipped INSTANCE, not the
+        rule: what is required here is whatever `[capabilities.side_effects]` declares at
+        the `merge` boundary, so a deploy repo that mints `deploy = ["merge"]` in its own
+        settings file is enforced by this same call, with subtree-scoped grants and the same
+        fail-closed grant path, and no structural change anywhere. Priced as substrate
+        generality and NOT as a security control: there is no filesystem chokepoint in sb,
+        so this is post-hoc on the sanctioned path — an agent with its own `git` can push a
+        branch by hand, and the shipped protocol tells it to.
 
         **A real conflict spawns ONE integrator**, for that one merge, and the merge is left
         in progress for it to finish in this checkout. At most one integrator is ever
@@ -4790,18 +4933,25 @@ class Broker:
                 f"(isolation `shared`), so its tracked work is already on your branch and "
                 f"there is nothing to merge. Only an `--isolation own` child has a branch "
                 f"to fold back.")
-        # THE CHILD'S CAPABILITY, not the caller's. Re-worded, because
+        # THE CHILD'S CAPABILITIES, not the caller's. Re-worded, because
         # `_capability_refusal` speaks about the agent it was asked about and the agent
         # being refused here is not the one reading the message.
-        try:
-            self.require_capability(child, CAP_WRITE_TRACKED)
-        except ValueError as e:
-            store.log_event(self.db, kind="merge_refused", agent=me, child=child,
-                            branch=branch, reason="write-tracked")
-            raise ValueError(
-                f"{child} does not hold `write-tracked`, so its branch is not work sb will "
-                f"fold in: {e} Grant it and re-run if that was wrong, or take what you need "
-                f"from {branch!r} by hand.") from None
+        #
+        # THE CLASS, NOT THE ONE STRING (E4). What is required here is whatever this repo
+        # declares at the `merge` boundary — `write-tracked` as shipped, plus a `deploy` or
+        # a `publish` a repo minted for itself. Same call, same message shape, same log
+        # event: generalizing this cost a loop, which is the claim §2.1 makes about the
+        # substrate being more general than the instance built on it.
+        for cap in self.side_effect_capabilities(BOUNDARY_MERGE):
+            try:
+                self.require_capability(child, cap)
+            except ValueError as e:
+                store.log_event(self.db, kind="merge_refused", agent=me, child=child,
+                                branch=branch, reason=cap)
+                raise ValueError(
+                    f"{child} does not hold `{cap}`, so its branch is not work sb will "
+                    f"fold in: {e} Grant it and re-run if that was wrong, or take what you "
+                    f"need from {branch!r} by hand.") from None
 
         where, into = self._merge_into(me)
         if into == branch:
@@ -5263,6 +5413,78 @@ class Broker:
 
     # -- status ----------------------------------------------------------
 
+    def _side_effect_flags(self, me: str) -> list[str]:
+        """The side-effect caps to FLAG at this agent's `done` — declared at the `done`
+        boundary, not held, and with tracked work actually standing behind them.
+
+        A FLAG, NEVER A REFUSAL, and that asymmetry with `sb merge` is the design. A report
+        that can fail is one an agent starts inventing ways around (the worry
+        `hooks.BLOCK_REASON` already carries), and refusing `done` would leave an agent with
+        no legal move at the exact moment it has finished. So this says, early and to the
+        agent that can still do something about it, what `sb merge` would refuse later.
+
+        ATTRIBUTION NEEDS ISOLATION (§2.1), and that is why a branchless agent is never
+        flagged rather than being flagged silently-wrongly. A `shared` child writes into its
+        LEAD's checkout on the LEAD's branch: those writes are not distinguishable from the
+        lead's own, no `sb merge` is ever run for that child, and nothing here can honestly
+        attribute them. The honest reach of the whole class, stated once: stronger than a
+        norm for an agent that was actually isolated and uses the sanctioned path, and no
+        stronger than today for anyone else.
+
+        EVIDENCE, not suspicion. An isolated researcher that wrote nothing tracked has done
+        nothing to flag, and a flag it gets anyway is one it learns to ignore. So the branch
+        is asked whether it carries tracked work at all — uncommitted tracked changes, or
+        commits its base does not have.
+
+        NEVER RAISES. Every part of this is best-effort around a report that has to go
+        through: no git, no checkout, an unreadable settings table or a workspace row that
+        has gone all answer "nothing to flag".
+        """
+        caps = [c for c in self.side_effect_capabilities(BOUNDARY_DONE)
+                if not self.holds_capability(me, c)]
+        if not caps or not self._has_tracked_work(me):
+            return []
+        return caps
+
+    def _has_tracked_work(self, me: str) -> bool:
+        """Does this agent's OWN branch carry tracked work? False for anyone without one.
+
+        Two questions, either of which is a yes: is anything tracked uncommitted in its
+        checkout (`_merge_blockers`, the same tracked-only reading `sb merge` refuses on),
+        and does its branch hold commits its base does not. The base comes off the workspace
+        row the fork recorded (`workspaces.base_ref`) and falls back to the repo's base
+        branch, because a row written before that column was filled is not a reason to go
+        silent.
+        """
+        branch = self.worktree_branch(me)
+        if not branch:
+            return False
+        row = store.get_agent(self.db, me)
+        where = Path(_column(row, "cwd") or "") if row is not None else Path("")
+        if not str(where):
+            where = Path(self._recorded_path(self._workspace_of(me)) or self.repo)
+        if not Path(where).is_dir():
+            return False
+        if self._merge_blockers(where):
+            return True
+        ws = store.get_workspace(self.db, self._workspace_of(me) or "")
+        recorded = _column(ws, "base_ref") if ws is not None else ""
+        # Three candidates, first one git can resolve wins. The recorded base is the true
+        # answer where a fork wrote one; `origin/main` covers a row that predates the
+        # column; the LOCAL base name covers a checkout with no remote at all, which is
+        # every test repo and some real ones — the same fallback `_merge_into` makes.
+        for base in (recorded, BASE_BRANCH, BASE_BRANCH.partition("/")[2]):
+            if not base:
+                continue
+            out = self._git_at(where, "rev-list", "--count", f"{base}..HEAD")
+            if out.returncode != 0:
+                continue
+            try:
+                return int((out.stdout or "").strip() or 0) > 0
+            except ValueError:
+                return False
+        return False
+
     def done(self, summary: str, *, me: Optional[str] = None) -> list[str]:
         """Report finished. The summary goes to the parent, if there is one.
 
@@ -5324,6 +5546,15 @@ class Broker:
         A genuine second `done` — a follow-up question, answered, then finished again — is
         NOT this case: a real turn boundary passed, so `_revive` put the row back to
         `working` on the way in, and the full path below runs unchanged.
+
+        **THE `done` BOUNDARY OF THE SIDE-EFFECT CLASS (§2.1, E4), and it FLAGS.** An
+        isolated agent that has tracked work on its branch and does not hold the capability
+        this repo declares over it (`write-tracked` as shipped) is told so — in `done_flags`
+        for the CLI and in the log — and its report goes through untouched. The refusal
+        lives at the other boundary, `sb merge`, where there is a caller who can act on it;
+        here there is only an agent that has finished, and a `done` that could fail is one
+        agents learn to route around. A `shared` child is never flagged: its writes are on
+        its lead's branch and nothing can honestly attribute them (`_side_effect_flags`).
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -5348,6 +5579,18 @@ class Broker:
         # agent addressable — see the docstring, and `block` for the same call and the
         # same reason.
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP])
+        # THE `done` BOUNDARY OF THE SIDE-EFFECT CLASS (E4). After the report is recorded
+        # and mailed, never before and never instead: this flags, and a flag that could
+        # cost a report would be a refusal wearing another word. Wrapped because it reaches
+        # git and a settings table, and neither is allowed to end a `done`.
+        try:
+            self.done_flags = self._side_effect_flags(me)
+        except Exception as e:                                    # noqa: BLE001
+            store.log_event(self.db, kind="side_effect_flag_error", agent=me, error=str(e))
+            self.done_flags = []
+        for cap in self.done_flags:
+            store.log_event(self.db, kind="side_effect_unheld", agent=me, capability=cap,
+                            branch=self.worktree_branch(me) or "")
         still_working = self.live_descendants(me)
         if still_working:
             store.log_event(self.db, kind="done_with_live_children", agent=me,
