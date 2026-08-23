@@ -4148,6 +4148,20 @@ class Broker:
             raise ForkFailed(name, self.repo, e) from None
         # WHO MINTED IT, recorded once. `_attach_workspace` cannot know: it is reached by
         # a lookup and by a fork alike, and only the fork has a parent to name.
+        #
+        # THIS WRITE IS ALSO THE WORKTREE COUNT (D4, spec §2.2). Grouping it by
+        # `created_by` is the whole of "open-worktree count per lead"
+        # (`store.open_worktree_counts`), which is why no counter and no new column were
+        # added for it: the fact was already being recorded here.
+        #
+        # TODO(E1 — guidance ledger): past a soft threshold
+        # (`status.WORKTREE_SOFT_THRESHOLD`) a ledger RULE nudges the lead that its
+        # fan-out is holding a lot of worktrees. There is deliberately nothing here to
+        # fire it — E1 is not built, and a refusal or a printed warning invented in its
+        # place would be the hard cap §2.2 rejects, in the very function that would have
+        # to raise it. NOTHING on this path counts, compares or refuses: a 20-way fan-out
+        # forks twenty times and is told nothing, which is the specified behaviour and not
+        # an omission.
         store.record_workspace(self.db, ws["workspace"], ws["path"] or None,
                                branch=ws.get("branch"), base_ref=ws.get("base"),
                                created_by=parent)
