@@ -211,8 +211,18 @@ def _writable_roots(cwd: Optional[Path]) -> list[str]:
     codex has in this mode (there is no `--ask-for-approval` analogue), so every path
     here is one the agent genuinely cannot work without.
 
-    * The STORE — `<shared .git>/agentflow`, which holds the database, the prompt files
-      and the hook settings. An agent in a worktree is not standing anywhere near it.
+    * The shared `.git` — the whole of it, not just the `agentflow` store beneath it.
+      Two things live there and an agent needs both. The STORE (`<shared .git>/agentflow`)
+      holds the database, the prompt files and the hook settings, and an agent in a
+      worktree is not standing anywhere near it. And GIT ITSELF: a forked worktree's own
+      `.git` is a FILE pointing at `<shared .git>/worktrees/<name>/`, and objects and refs
+      are written under `<shared .git>` too — so with only the store writable, `git
+      commit` fails with exit 128 on `index.lock`, and so do `git push` and `gh pr
+      create`. The protocol's closing instruction is *commit your work, then `sb done`*;
+      without this the one thing every worker must do is the one thing it cannot. (Missed
+      by the spike because that checkout was under /tmp, which `workspace-write` grants
+      anyway.) The `agentflow` subdirectory is covered by this entry, so it is not listed
+      separately.
     * The herdr SOCKET's directory. Every `sb` verb that reaches another agent or the
       board goes through the herdr binary, which talks to that socket; a denied write
       there is an agent that can do its work and tell nobody.
@@ -223,7 +233,7 @@ def _writable_roots(cwd: Optional[Path]) -> list[str]:
     roots: list[str] = []
     try:
         from . import store
-        roots.append(str(store.store_dir(cwd)))
+        roots.append(str(store.repo_root(cwd)))
     except Exception:                    # noqa: BLE001 — not in a repo; codex will say so
         pass
     sock = os.environ.get("HERDR_SOCKET_PATH")

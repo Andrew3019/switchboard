@@ -83,8 +83,13 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         # access is off by default in this mode, which is not what `--permission-mode auto`
         # means for a claude agent.
         roots = cfg["sandbox_workspace_write"]["writable_roots"]
-        self.assertTrue(any(r.endswith("agentflow") for r in roots), roots)
+        self.assertTrue(any(Path(r) == store.store_dir(self.repo).parent for r in roots),
+                        roots)
         self.assertTrue(any("herdr" in r for r in roots), roots)
+        # The store is under that entry rather than beside it — see the worktree test
+        # below for the other half of what the shared `.git` has to cover.
+        self.assertTrue(any(store.store_dir(self.repo).is_relative_to(Path(r))
+                            for r in roots), roots)
         self.assertTrue(cfg["sandbox_workspace_write"]["network_access"])
         # The prompt, unflattened. The single-line rule is herdr's, about ARGUMENTS, and
         # nothing on this path is one.
@@ -92,6 +97,35 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         self.assertIn("you are w1", text)
         self.assertIn("call sb done", text)
         self.assertIn("\n", text)
+
+    def test_a_forked_worktree_agent_can_write_where_git_writes(self):
+        """B1, found live: `workspace-write` grants the agent's own worktree, but a forked
+        worktree's `.git` is a FILE pointing at `<shared .git>/worktrees/<name>/`, and
+        refs and objects are written under the shared `.git` too. With only the
+        `agentflow` store granted, a real `git commit` in a forked worktree returned exit
+        128 — `Operation not permitted` creating `index.lock` — and so did `git push` and
+        `gh pr create`. Every codex WORKER was therefore unable to do the one thing the
+        protocol closes on. Pinned on the paths git actually writes, not on a string."""
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "base"],
+                       cwd=self.repo, capture_output=True)
+        wt = Path(self.tmp.name).parent / f"{self.repo.name}-wt"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "wt", str(wt)],
+                       cwd=self.repo, capture_output=True)
+        try:
+            home = self.write(name="w2", worktree=str(wt))
+            roots = [Path(r) for r in
+                     self.config(home)["sandbox_workspace_write"]["writable_roots"]]
+            git_dir = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"],
+                                          cwd=wt, capture_output=True, text=True
+                                          ).stdout.strip()).resolve()
+            objects = store.repo_root(wt) / "objects"
+            for needed in (git_dir, objects):
+                self.assertTrue(any(needed.is_relative_to(r) for r in roots),
+                                f"{needed} not under any of {roots}")
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", str(wt)],
+                           cwd=self.repo, capture_output=True)
 
     def test_auth_is_a_symlink_to_the_one_credential(self):
         """Decided, not incidental (Andrew, 2026-08-22): a copy would be a second
