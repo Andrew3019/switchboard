@@ -2174,6 +2174,12 @@ def last_assistant_texts(path: Path, n: int = 3) -> list[str]:
     would be scanning everything the agent READ as well as what it said — and it lives
     in a module that imports the store, which this one may not (see `open_report_files`).
     Only the `text` parts, which is the prose a human would have seen on screen.
+
+    Two record shapes, told apart per record exactly as `read_transcript` tells them
+    apart: Claude Code's `{"type": "assistant", "message": {...}}` and codex's rollout
+    envelope. Written out here rather than imported, for the module boundary above. A
+    reader that knew only the first found nothing at all in a codex agent's report, so
+    the board's double-`o` silently opened no files for every codex agent.
     """
     try:
         with path.open(errors="replace") as fh:
@@ -2186,23 +2192,64 @@ def last_assistant_texts(path: Path, n: int = 3) -> list[str]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue          # a torn last line on a live session, not a failure
-        if not isinstance(rec, dict) or rec.get("type") != "assistant":
-            continue          # user turns, and the meta records with no role at all
-        message = rec.get("message")
-        # isinstance, like every other field here: this file is not one switchboard
-        # writes, and a `message` that is a string raises where `.get` is assumed.
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
+        if not isinstance(rec, dict):
             continue
-        texts = [part["text"] for part in content
-                 if isinstance(part, dict) and part.get("type") == "text"
-                 and isinstance(part.get("text"), str) and part["text"].strip()]
+        texts = (_codex_assistant_texts(rec) if rec.get("type") == "event_msg"
+                 else _claude_assistant_texts(rec))
         if not texts:
-            continue          # a thinking-only or tool_use-only record
+            continue          # a user turn, a meta record, a thinking-only one
         out.append("\n".join(texts))
         if len(out) >= n:
             break
     return list(reversed(out))
+
+
+def _claude_assistant_texts(rec: dict) -> list[str]:
+    if rec.get("type") != "assistant":
+        return []             # user turns, and the meta records with no role at all
+    message = rec.get("message")
+    # isinstance, like every other field here: this file is not one switchboard
+    # writes, and a `message` that is a string raises where `.get` is assumed.
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+            and isinstance(part.get("text"), str) and part["text"].strip()]
+
+
+def _codex_assistant_texts(rec: dict) -> list[str]:
+    """The assistant prose of one codex rollout record.
+
+    Read off `event_msg` only — the TUI's own item stream, which is what a person
+    watching the pane saw. Codex writes each turn twice, and the other half
+    (`response_item`) would double every line. `agent_message` is `codex exec`'s shape and
+    `item_completed`/`AgentMessage` the TUI's; switchboard only spawns the TUI, but a
+    rollout is a rollout and a reader that answers for one of them silently shows nothing.
+    """
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("type") == "agent_message":
+        text = payload.get("message")
+        return [text] if isinstance(text, str) and text.strip() else []
+    if payload.get("type") != "item_completed":
+        return []
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "AgentMessage":
+        return []
+    content = item.get("content")
+    if isinstance(content, str):
+        return [content] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+    # `text`/`Text` in the item stream, `output_text` in the raw model items — the same
+    # four part names `codex._content_text` reads, and matched case-insensitively for
+    # the same reason: the TUI capitalises where the model items do not.
+    return [str(p["text"]) for p in content
+            if isinstance(p, dict)
+            and str(p.get("type", "")).lower() in ("text", "input_text", "output_text")
+            and isinstance(p.get("text"), str) and p["text"].strip()]
 
 
 def _inspect(name: str) -> Optional[dict]:
