@@ -75,6 +75,16 @@ CAP_FORK = roles_mod.CAP_FORK
 CAP_DISPATCH = roles_mod.CAP_DISPATCH
 CAP_WRITE_TRACKED = roles_mod.CAP_WRITE_TRACKED
 
+# ISOLATION — what a spawn asks for when nothing else has already decided where the child
+# goes. Two values and no third: `own` is a worktree and branch of the child's own,
+# `shared` is a tab in the caller's own space, and `shared` is the default for every role
+# (spec §2.2). It is NOT derived from the capability set in either direction — holding
+# `write-tracked` does not imply isolation, and an isolated agent is not thereby allowed
+# anything. The only capability in it is the gate: `own` requires `fork` ON THE CALLER.
+ISOLATION_OWN = "own"
+ISOLATION_SHARED = "shared"
+ISOLATIONS = (ISOLATION_OWN, ISOLATION_SHARED)
+
 # Config that must follow work into a worktree. Deliberately NOT committed: it is local
 # setup, not source. Worktrees get symlinks to the main checkout's copies, so there is
 # exactly one true file and no per-worktree `sb init`.
@@ -1157,12 +1167,15 @@ class Broker:
         invariant, and it is not a template because a template has no vocabulary for the
         stamp or for the placement `sb start` gives it.
 
-        `fork` IS WITHHELD FROM EVERY OTHER ROW, even a role whose template names it. The
-        fork decision still reads the caller's stamp and only the stamp (`mints_space`), so
-        seeding a nested lead with `fork` would silently turn every one of its spawns into
-        a new workspace. A template naming `fork` is a CEILING — "may be granted isolation"
-        — and the request site that spends it does not exist yet; it arrives with the
-        isolation work, and this line is what it changes.
+        `fork` IS SEEDED LIKE ANY OTHER CAP NOW, to the roles whose template names it —
+        `lead`, of the shipped ones. It used to be subtracted from every non-top row, and
+        D2 removed both reasons at once: the request site that spends it exists
+        (`delegate(isolation="own")`), and holding it no longer turns a lead's every spawn
+        into a new workspace, because rule 2 reads the STAMP and rule 3 defaults to
+        `shared` (`mints_space`, `isolates`). A lead therefore arrives able to isolate a
+        child that asks for it, with its ordinary spawns unchanged — `sb grant fork` before
+        every fan-out was the bureaucracy this set exists to remove. The subtraction lived
+        in `roles.template_capabilities`, which says the same thing at more length.
 
         There is no `start` in this function and there is none anywhere: `sb start` is a
         hardcoded human-only gate in the CLI, and a grantable version of it is how a top
@@ -1207,6 +1220,16 @@ class Broker:
                 f"(today: {', '.join(self._delegating_roles()) or 'none'}). If this task is "
                 f"bigger than one agent, or needs a decision you were not given, say so to "
                 f"your parent with `sb done` rather than growing a tree under yourself."
+            )
+        if cap == CAP_FORK:
+            # The only raise site is `delegate(isolation="own")`: `mints_space` asks the
+            # same question as a predicate and never refuses. So this says what was asked
+            # for and what happens without it, rather than only naming the missing string.
+            return (
+                f"a {role} may not fork: `--isolation own` gives a child a worktree and "
+                f"branch of its own, and that is the `fork` capability, which this agent "
+                f"does not hold. Spawn it shared (the default, in your own checkout), or "
+                f"ask the agent above you for `fork` with `sb grant`."
             )
         return f"a {role} may not {cap}: that is not one of this agent's capabilities."
 
@@ -3676,25 +3699,74 @@ class Broker:
         return bool(_column(row, "is_top")) if row is not None else False
 
     def mints_space(self, agent: str) -> bool:
-        """May this caller's spawn get a space and worktree of its own? The fork rule.
+        """Does this caller's spawn get a space and worktree of its own WITHOUT ASKING?
+        Precedence rule 2, and the fork rule as it has always been.
 
-        A top may, because that is what a top is for. The human may, and an unknown caller
-        may, for the same reason in both cases: neither has a space to lend, and the only
-        alternative to forking is spawning into whatever checkout `sb` happened to run in —
-        which DESIGN-TRUTH rules out in as many words ("It never falls back to Andrew's own
-        checkout").
+        A top does, because that is what a top is for. The human does, and an unknown
+        caller does, for the same reason in both cases: neither has a space to lend, and
+        the only alternative to forking is spawning into whatever checkout `sb` happened
+        to run in — which DESIGN-TRUTH rules out in as many words ("It never falls back to
+        Andrew's own checkout").
 
-        Everybody else may not: their spawn is a tab in their own space, and its whole
-        subtree stays there.
+        Everybody else does not, by default: their spawn is a tab in their own space, and
+        so is that spawn's whole subtree — unless it ASKS, which is rule 3 and D2's whole
+        addition.
 
-        Asked of the capability set now rather than of the stamp directly, and the answer
-        is the same one: `fork` is seeded from `is_top` and from nothing else
-        (`seed_for`), the human and a caller with no row still answer True through the same
-        rowless fail-open the spawn gate uses, and no row anywhere gains `fork` by any
-        other route. The stamp has not moved — it is still what decides — it is just read
-        through the one gate every other rule is read through.
+        **IT IS THE STAMP THAT ANSWERS THIS, and D2 is where that stops being a
+        distinction without a difference.** B1 routed the question through
+        `holds_capability(CAP_FORK)` on the sound ground that the answer was identical:
+        `fork` was seeded from `is_top` and from nothing else, so the cap WAS the stamp
+        spelled differently. D2 gives `fork` a second, weaker meaning — *may this caller
+        ask for an isolated child* (rule 3's gate) — and a `fork` granted to a lead is a
+        grant of exactly that. Read through the cap, this rule would swallow the new one:
+        the only callers permitted to type `--isolation own` would be the callers whose
+        every spawn already forks, rule 3 would be unreachable, and "default `shared`"
+        would be true of nobody who could act on it. So the two questions separate here,
+        each asked where it belongs: the STRUCTURAL one (no space to lend ⇒ fork anyway)
+        of the stamp, and the PERMISSION one (`fork`) at the `own` request site in
+        `delegate`.
+
+        The rowless fail-open is unchanged and still load-bearing for the same reason as
+        the spawn gate's: `sb start` runs against a store that has not caught up, and a
+        caller we hold no row for is a caller with no space to lend.
         """
-        return self.holds_capability(agent, CAP_FORK)
+        if agent == HUMAN:
+            return True                 # a person has no worktree to lend
+        row = store.get_agent(self.db, agent)
+        if row is None:
+            return True                 # unknown provenance is not a checkout to spawn into
+        return bool(_column(row, "is_top"))
+
+    def isolates(self, me: str, *, inherited: bool, isolation: str) -> bool:
+        """Does this spawn get a worktree of its own? THE FORK RULE, as one ordered
+        decision (spec §2.2, three rules in this exact order).
+
+        1. **A NAMED WORKSPACE WINS.** `--workspace <name>`, `sb start`, a workspace
+           lead's placement — `inherited` is False, so nothing below is asked, WHOEVER
+           the caller is. The caller has already said where this agent goes, and forking
+           over that would ignore the instruction.
+        2. **Otherwise `inherited AND mints_space(caller)` ⇒ own**, exactly as before this
+           parameter existed, INCLUDING the `inherited` guard: a caller with no space to
+           lend — the top, the human, a caller we hold no row for — forks its child
+           whatever the child's role or caps, because the only alternative is spawning
+           into whatever checkout `sb` happened to run in.
+        3. **Otherwise the explicit `isolation` parameter, default `shared`.**
+
+        Ordered, and not three independent conditions: rule 1 answers False before rule 2
+        is asked (a top delegating `--workspace api` joins that workspace, it does not
+        fork over it), and rule 2 answers True before rule 3 is asked (a top's spawn forks
+        whether or not `shared` was typed, which is what "kept verbatim" means).
+
+        The `fork` gate for rule 3 is NOT here: it is checked at the request site in
+        `delegate`, on the CALLER, and only when `own` was actually asked for — so a
+        caller that may not isolate is told so, rather than having its request quietly
+        answered False by a predicate.
+        """
+        if not inherited:                       # (1) a named workspace wins
+            return False
+        if self.mints_space(me):                # (2) kept verbatim, `inherited` guard and all
+            return True
+        return isolation == ISOLATION_OWN       # (3) the explicit parameter
 
     def worktree_branch(self, agent: str) -> Optional[str]:
         """The branch of that agent's worktree, or None if it has no worktree."""
@@ -4150,11 +4222,26 @@ class Broker:
         workspace_id: Optional[str] = None,     # "" is "there is none", not "work it out"
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
+        isolation: str = ISOLATION_SHARED,      # own|shared — see `isolates`
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
         is_top: bool = False,           # `sb start` only — see `_top`
     ) -> str:
         me = me or self.whoami()
         self.require_capability(me, CAP_SPAWN)
+        if isolation not in ISOLATIONS:
+            raise ValueError(
+                f"isolation is {' or '.join(ISOLATIONS)}, not {isolation!r}: `own` gives "
+                f"this child a worktree and branch of its own, `shared` (the default) "
+                f"spawns it in your own checkout.")
+        # THE `own` GATE, at the request site and nowhere else. On the CALLER: the
+        # question is whether the agent doing the asking may mint a space at all, which is
+        # what `fork` means once D2 has split it off the stamp (`mints_space`, `isolates`).
+        # Asked before precedence rather than
+        # inside `isolates`, so that a caller who may not isolate hears a refusal instead
+        # of having its request silently answered by a predicate — including on the paths
+        # where rule 1 or rule 2 would have decided anyway.
+        if isolation == ISOLATION_OWN:
+            self.require_capability(me, CAP_FORK)
         r = roles_mod.get(self.roles, role, self.repo)
         # What was TYPED is not necessarily what this agent is: a retired name resolves
         # through `[vocabulary] role_aliases` to the role that replaced it, and `r.name` is
@@ -4178,9 +4265,14 @@ class Broker:
         if branch is None and inherited:
             branch = self.worktree_branch(me)
 
-        # THE FORK RULE. A new space and worktree are forked when the CALLER IS A TOP;
-        # anyone else's spawn is a tab in the caller's own space, and so is that spawn's
-        # whole subtree. Role-agnostic: a researcher that only reads gets its own tree when
+        # THE FORK RULE, now three ordered rules and living in `isolates` — a named
+        # workspace, else the caller's own space-minting, else what this spawn ASKED for.
+        # A new space and worktree are still forked whenever the CALLER IS A TOP, and an
+        # inheriting spawn that asks for nothing is still a tab in the caller's own space,
+        # and so is that spawn's whole subtree. What is new is only that `isolation=own`
+        # can reach the same fork from a caller that is not a top (#163-B) — a `fork`-
+        # holding lead may now mint an isolated child, which is the whole unblock.
+        # Role-agnostic as before: a researcher that only reads gets its own tree when
         # a top spawns it, because "it will not write" is a claim about the future, and the
         # one bare space in the model — the top's, over the human's main checkout — is the
         # one place a wrong claim costs somebody's uncommitted work.
@@ -4205,8 +4297,23 @@ class Broker:
         # agent goes, and forking over that would ignore the instruction.
         #
         # A fork that fails RAISES (`ForkFailed`) rather than returning nothing, so there
-        # is no path from here to "spawned in the parent's checkout after all".
-        if inherited and self.mints_space(me):
+        # is no path from here to "spawned in the parent's checkout after all" — and that
+        # path now has a wider audience, because a non-top asking for `own` reaches it too.
+        #
+        # TODO(E1 — guidance ledger): the usability mitigation for a big shared fan-out is
+        # a guidance-ledger RULE, fired when an agent delegates its Nth `write-tracked`
+        # child in a turn without `isolation=own` ("confirm shared is intended"). It is a
+        # JIT nudge on E1's existing channel, not a wall and not a new mechanism, so there
+        # is deliberately nothing here to fire it: E1 is not built, and a fake nudge
+        # invented here is the mechanism the spec says not to add. Nothing caps or refuses
+        # a fan-out either way (spec §2.2).
+        if isolation == ISOLATION_OWN and not inherited:
+            # Rule 1 already decided, and it decided the other way. Said out loud on the
+            # channel the fork notes use, because a request that was silently outranked is
+            # how a caller comes to believe a child is isolated when it is sharing.
+            print(f"sb: --isolation own ignored for {name}: it was placed in workspace "
+                  f"{ws!r} by name, and a named workspace wins", file=sys.stderr)
+        if self.isolates(me, inherited=inherited, isolation=isolation):
             forked = self._fork_for(name, parent=me)
             ws, branch = forked["workspace"], forked["branch"]
             workspace_id = workspace_id or forked["workspace_id"]

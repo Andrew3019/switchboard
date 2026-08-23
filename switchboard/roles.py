@@ -226,11 +226,22 @@ def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
     kept its own copy of "what a lead normally gets", every row would drift from the truth
     the moment either side moved.
 
-    It is the EFFECTIVE template, not the raw bundle, and the difference is the whole
-    reason this is not `Role.capabilities`: `fork` is withheld from every non-top row
-    (`seed_for` says why), so reading divergence against the raw bundle would draw `lead−`
-    on every lead in the fleet — a marker that fires on everything says nothing. The top
-    takes its fixed set (§2.0) and nothing else.
+    It is the EFFECTIVE template rather than the raw bundle, and the top is the whole of
+    the difference now: a stamped top takes its fixed set (§2.0) and nothing else, whatever
+    its role template says.
+
+    **`fork` USED TO BE SUBTRACTED HERE FROM EVERY NON-TOP ROW, and D2 removed that.** It
+    was withheld because the fork decision read the caller's capability set, so a lead
+    holding `fork` would have had EVERY one of its spawns silently minted a new workspace;
+    the template naming it was a ceiling — "may be granted isolation" — with no request
+    site to spend it at. Both halves are gone: `delegate(isolation="own")` is that site,
+    and the decision reads the `is_top` STAMP again with `shared` as the default for
+    everyone else (`Broker.mints_space`, `Broker.isolates`). So a lead now ARRIVES able to
+    isolate a child that asks for it, and its ordinary spawns are unaffected — which is the
+    point, because needing `sb grant fork` before every fan-out is the bureaucracy the
+    capability set exists to remove. Only a role whose template names `fork` gains anything
+    (of the shipped roles, `lead`); the rest are unchanged because their bundles never
+    named it.
 
     What it deliberately does NOT include is the ∩ with the spawner's passable set. That
     narrowing is exactly what the marker exists to show: a "lead" seeded by a worker comes
@@ -238,4 +249,4 @@ def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
     """
     if is_top:
         return frozenset(TOP_CAPABILITIES)
-    return get(roles, name, repo).capabilities - {CAP_FORK}
+    return get(roles, name, repo).capabilities

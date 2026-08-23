@@ -106,7 +106,11 @@ class IntersectionSeedingTest(Fixture, unittest.TestCase):
         top = self.top()
         self.assertNotIn(CAP_WRITE_TRACKED, self.held(top))
         lead = self.spawn(top, "lead", "l")
-        self.assertEqual(self.held(lead), {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED})
+        # `fork` is in the lead template and reaches the seed since D2 — the fork DECISION
+        # is still the stamp's, so this lead's ordinary spawns are unchanged; what it may
+        # now do is ask, with `delegate(isolation="own")`.
+        self.assertEqual(self.held(lead),
+                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
 
         # The same shape one level down, and the exemption is out of reach.
         inner = self.spawn(top, "dispatcher", "d")     # non-top dispatcher
@@ -122,10 +126,9 @@ class IntersectionSeedingTest(Fixture, unittest.TestCase):
     def test_a_rowless_spawner_bounds_nothing(self):
         """The gate's fail-open, in the shape ∩-seeding needs: intersecting with an empty
         set would cripple every agent spawned against a cold store."""
-        self.assertEqual(set(self.b.seed_for("lead", False, spawner=HUMAN)),
-                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED})
-        self.assertEqual(set(self.b.seed_for("lead", False, spawner="nobody")),
-                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED})
+        full = {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK}   # `fork`: D2
+        self.assertEqual(set(self.b.seed_for("lead", False, spawner=HUMAN)), full)
+        self.assertEqual(set(self.b.seed_for("lead", False, spawner="nobody")), full)
 
 
 class GrantCommandTest(Fixture, unittest.TestCase):
@@ -347,15 +350,23 @@ class TopExemptionTest(Fixture, unittest.TestCase):
         self.assertEqual(self.passable(r), set())
 
     def test_a_non_top_granter_is_unchanged_by_the_exemption(self):
-        """Hold-or-delegable, subtree reach — no widening for anyone below the top."""
+        """Hold-or-delegable, subtree reach — no widening for anyone below the top.
+
+        The granter is a fanning-out WORKER rather than a lead, and only because D2 seeds
+        `fork` to the lead template: a lead now holds every string in the vocabulary, so
+        there is no cap left for it to be refused for lacking. The rule under test is
+        unchanged and so is the shape — a non-top granter, a cap it does not hold, both
+        forms refused."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         w = self.spawn(lead, "worker", "w")
-        self.assertNotIn(CAP_FORK, self.passable(lead))
+        self.b.grant(w, CAP_SPAWN, me=lead)               # a worker that fans out
+        kid = self.spawn(w, "worker", "k")
+        self.assertNotIn(CAP_FORK, self.passable(w))
         for delegable in (False, True):
             with self.subTest(delegable=delegable), self.assertRaises(ValueError):
-                self.b.grant(w, CAP_FORK, delegable=delegable, me=lead)
-        self.assertNotIn(CAP_FORK, self.passable(w))
+                self.b.grant(kid, CAP_FORK, delegable=delegable, me=w)
+        self.assertNotIn(CAP_FORK, self.passable(kid))
 
     def test_the_promote_seeding_chain_composes(self):
         """§2.3 end to end: a top equips a read-only researcher to seed a full lead, while
@@ -369,10 +380,11 @@ class TopExemptionTest(Fixture, unittest.TestCase):
                          {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
         self.assertEqual(self.held(r), {CAP_SPAWN})
         lead = self.spawn(r, "lead", "l")
-        # The full lead template, less `fork` — which C1 withholds from every seed below a
-        # top because `mints_space` still reads the stamp (it returns with the isolation
-        # work, D2). The ∩ itself passes `fork` through: it is in `passable(r)`.
-        self.assertEqual(self.held(lead), {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED})
+        # THE FULL LEAD TEMPLATE, `fork` included — which is what "seeds a full lead" was
+        # always meant to say (obj. 27). It arrives by the ∩ doing its job: `fork` is in
+        # `passable(r)` above, and since D2 it is in the lead template's effective set too.
+        self.assertEqual(self.held(lead),
+                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
 
 
 class RestoreTest(Fixture, unittest.TestCase):
