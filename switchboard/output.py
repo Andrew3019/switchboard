@@ -402,52 +402,77 @@ _CODEX_RECORDS = frozenset({"event_msg", "response_item", "session_meta",
 def _render_codex_record(rec: dict) -> list[str]:
     """One codex rollout record, in the same one-line-per-entry shape as the Claude one.
 
-    Read off `event_msg` rather than off `response_item`, wherever both carry the same
-    thing. Codex writes each turn twice — once as the event stream that drove the TUI and
-    once as the raw model items — and the events are the half that says what a person
-    watching the pane actually saw, which is what this read is for.
+    Read off `event_msg`/`item_completed` wherever possible. Codex writes each turn twice
+    — once as the item stream that drove the TUI and once as the raw model items — and the
+    items are the half that says what a person watching the pane actually saw, which is
+    what this read is for. Verified against a real rollout from a real spawn:
+    `UserMessage`, `AgentMessage`, `CommandExecution`, `FileChange`, `Reasoning`.
 
-    Verified against a real rollout: `user_message`, `agent_message`, `task_started`,
-    `task_complete` and `token_count` events, plus `response_item` function calls and
-    their outputs. Reasoning is dropped for the Claude path's reason — it never reached
-    the terminal either.
+    `Reasoning` is dropped for the Claude path's reason — it never reached the terminal
+    either. Commands and their output are kept for the Claude path's other reason: this is
+    read when something has already gone wrong, and that is usually where the cause is.
+
+    `exec` mode writes a slightly different stream (`user_message`/`agent_message` events
+    rather than `item_completed`), so both are read. Switchboard only ever spawns the TUI;
+    the `exec` shapes are here because a rollout is a rollout and a reader that answers for
+    only one of them is a reader that silently shows nothing.
     """
     payload = rec.get("payload")
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or rec.get("type") != "event_msg":
         return []
     kind = payload.get("type")
-    if rec.get("type") == "event_msg":
-        if kind == "user_message":
-            text = payload.get("message") or ""
-            return [f"user: {_clip(text)}"] if text.strip() else []
-        if kind == "agent_message":
-            text = payload.get("message") or ""
-            return [f"assistant: {_clip(text)}"] if text.strip() else []
-        if kind == "error":
-            return [f"  [error] {_clip(str(payload.get('message') or ''))}"]
+    if kind == "user_message":
+        text = payload.get("message") or ""
+        return [f"user: {_clip(text)}"] if text.strip() else []
+    if kind == "agent_message":
+        text = payload.get("message") or ""
+        return [f"assistant: {_clip(text)}"] if text.strip() else []
+    if kind == "error":
+        return [f"  [error] {_clip(str(payload.get('message') or ''))}"]
+    if kind != "item_completed":
         return []
-    if rec.get("type") != "response_item":
-        return []
-    if kind in ("function_call", "local_shell_call", "custom_tool_call"):
-        name = payload.get("name") or "tool"
-        args = payload.get("arguments")
-        if args is None:
-            args = payload.get("action") or payload.get("input") or {}
-        return [f"assistant: [{name}] "
-                f"{_clip(args if isinstance(args, str) else json.dumps(args, default=str))}"]
-    if kind in ("function_call_output", "local_shell_call_output",
-                "custom_tool_call_output"):
-        out = payload.get("output")
-        # Codex stringifies a tool result as JSON carrying the real text; if it does not
-        # parse, it is already the text.
-        if isinstance(out, str):
-            try:
-                parsed = json.loads(out)
-                out = parsed.get("output", out) if isinstance(parsed, dict) else out
-            except json.JSONDecodeError:
-                pass
-        return [f"  [result] {_clip(_text_of(out))}"]
-    return []
+    return _render_codex_item(payload.get("item") or {})
+
+
+def _render_codex_item(item: dict) -> list[str]:
+    """One entry of the TUI's own item stream."""
+    kind = item.get("type")
+    if kind == "UserMessage":
+        text = _codex_text(item.get("content"))
+        return [f"user: {_clip(text)}"] if text.strip() else []
+    if kind == "AgentMessage":
+        text = _codex_text(item.get("content"))
+        return [f"assistant: {_clip(text)}"] if text.strip() else []
+    if kind == "CommandExecution":
+        cmd = item.get("command")
+        cmd = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd or "")
+        out = [f"assistant: [exec] {_clip(cmd)}"]
+        text = item.get("stdout") or item.get("aggregated_output") or ""
+        if str(text).strip():
+            # Marked `error` on a non-zero exit for the Claude renderer's reason: a failed
+            # tool call is the single most useful line in a transcript being read to find
+            # out why something failed.
+            flag = "error" if item.get("exit_code") else "result"
+            out.append(f"  [{flag}] {_clip(str(text))}")
+        return out
+    if kind == "FileChange":
+        paths = list((item.get("changes") or {}))
+        return [f"assistant: [edit] {_clip(' '.join(paths))}"] if paths else []
+    return []                 # Reasoning, and anything a later codex adds
+
+
+def _codex_text(content: Any) -> str:
+    """The text of a codex content list. Its part `type` is `text`/`Text` in the item
+    stream and `input_text`/`output_text` in the raw model items; all four are read."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        str(p.get("text") or "") for p in content
+        if isinstance(p, dict)
+        and str(p.get("type", "")).lower() in ("text", "input_text", "output_text")
+    )
 
 
 def _text_of(content: Any) -> str:

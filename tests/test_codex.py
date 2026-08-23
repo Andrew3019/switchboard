@@ -165,27 +165,39 @@ class RolloutTest(HomeFixture, unittest.TestCase):
         self.assertEqual(codex.rollout_path("w1", self.SID, self.repo), p)
         self.assertIsNone(codex.rollout_path("w1", "no-such-id", self.repo))
 
+    TUI_PROMPT = {"type": "event_msg",
+                  "payload": {"type": "item_completed",
+                              "item": {"type": "UserMessage",
+                                       "content": [{"type": "text",
+                                                    "text": "do the thing"}]}}}
+    EXEC_PROMPT = {"type": "event_msg",
+                   "payload": {"type": "user_message", "message": "do the thing"}}
+
     def test_a_delivered_task_is_confirmed_from_the_agent_s_own_rollout(self):
-        """The spike found this the expensive way: a codex task that landed on the first
-        send could not be confirmed, so it was re-sent the full three times and done three
-        times over. Idempotent that time; a `git push` would not be."""
-        self.write()
-        p = self.rollout()
-        p.write_text(json.dumps(
-            {"type": "event_msg",
-             "payload": {"type": "user_message", "message": "do the thing"}}) + "\n")
-        self.assertTrue(codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
-        self.assertFalse(codex.task_arrived("w1", "some other task", since=0,
-                                            cwd=self.repo))
+        """The spike found this the expensive way, twice. First there was no codex proof
+        at all, so a task that landed on the first send was re-sent the full three times
+        and done three times over — idempotent that time; a `git push` would not be. Then
+        the proof read only the `exec`-mode record, which the TUI never writes, and the
+        second spike did exactly the same thing again."""
+        for shape in ("TUI_PROMPT", "EXEC_PROMPT"):
+            with self.subTest(shape=shape):
+                self.write()
+                self.rollout().write_text(json.dumps(getattr(self, shape)) + "\n")
+                self.assertTrue(
+                    codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
+                self.assertFalse(
+                    codex.task_arrived("w1", "some other task", since=0, cwd=self.repo))
 
     def test_only_a_submitted_message_counts_as_arrival(self):
         """The same text appears again in the assistant's reply and in any shell command
         that echoes it, and either would confirm a delivery that never happened."""
         self.write()
-        p = self.rollout()
-        p.write_text(json.dumps(
+        self.rollout().write_text(json.dumps(
             {"type": "event_msg",
-             "payload": {"type": "agent_message", "message": "do the thing"}}) + "\n")
+             "payload": {"type": "item_completed",
+                         "item": {"type": "AgentMessage",
+                                  "content": [{"type": "Text",
+                                               "text": "do the thing"}]}}}) + "\n")
         self.assertFalse(codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
 
     def test_a_claude_agent_has_no_rollouts_to_find(self):
@@ -221,21 +233,46 @@ class RolloutRenderTest(unittest.TestCase):
         # The meta record is noise for this purpose, exactly as Claude's summaries are.
         self.assertNotIn("session_meta", text)
 
-    def test_tool_calls_and_their_results_are_kept(self):
-        """Kept for the Claude renderer's reason: this is read when something has already
-        gone wrong, and that is usually where the cause is."""
+    def test_the_tui_s_own_item_stream_is_what_is_read(self):
+        """Records copied from a real spawn. The TUI writes `item_completed` and no
+        `user_message`/`agent_message` event at all — reading only the `exec`-mode shapes
+        is a viewer that shows an empty transcript for every agent switchboard spawns."""
         text = self.render(
-            {"type": "response_item",
-             "payload": {"type": "function_call", "name": "shell",
-                         "arguments": '{"command":["ls"]}'}},
-            {"type": "response_item",
-             "payload": {"type": "function_call_output",
-                         "output": '{"output":"a.txt\\nb.txt"}'}},
+            {"type": "event_msg",
+             "payload": {"type": "item_completed",
+                         "item": {"type": "UserMessage",
+                                  "content": [{"type": "text", "text": "do the thing"}]}}},
+            {"type": "event_msg",
+             "payload": {"type": "item_completed",
+                         "item": {"type": "AgentMessage",
+                                  "content": [{"type": "Text", "text": "done it"}]}}},
         )
-        self.assertIn("[shell]", text)
+        self.assertIn("user: do the thing", text)
+        self.assertIn("assistant: done it", text)
+
+    def test_commands_and_edits_are_kept_and_reasoning_is_not(self):
+        """Kept for the Claude renderer's reason: this is read when something has already
+        gone wrong, and that is usually where the cause is. Reasoning is dropped for its
+        other reason — it never reached the terminal either."""
+        text = self.render(
+            {"type": "event_msg",
+             "payload": {"type": "item_completed",
+                         "item": {"type": "CommandExecution",
+                                  "command": ["/bin/zsh", "-lc", "ls"],
+                                  "stdout": "a.txt", "exit_code": 0}}},
+            {"type": "event_msg",
+             "payload": {"type": "item_completed",
+                         "item": {"type": "FileChange",
+                                  "changes": {"/w/SPIKE.txt": {"type": "add"}}}}},
+            {"type": "event_msg",
+             "payload": {"type": "item_completed",
+                         "item": {"type": "Reasoning", "summary_text": ["thinking"]}}},
+        )
+        self.assertIn("[exec]", text)
         self.assertIn("ls", text)
-        self.assertIn("[result]", text)
-        self.assertIn("a.txt", text)
+        self.assertIn("[result] a.txt", text)
+        self.assertIn("[edit] /w/SPIKE.txt", text)
+        self.assertNotIn("thinking", text)
 
     def test_a_claude_transcript_still_renders_the_claude_way(self):
         """The dispatch is per RECORD, and the two vocabularies share no `type` value —

@@ -71,11 +71,13 @@ HOOK_TIMEOUT = config.setting("codex.hook_timeout")
 HERDR_CONFIG_DIR = config.setting("codex.herdr_config_dir")
 
 # How much of a rollout's tail the delivery proof reads, and the slack between our clock
-# and codex's own timestamps. The same two numbers `output.py` uses for the same read and
-# for the reason given there — text submitted seconds ago is at the END of the file, and
-# this is polled twice a second against a session that may be hours long. Written here
-# rather than imported: `output` reaches `store`, and `store` reaches this module.
-_ARRIVAL_RECORDS = 50
+# and codex's own timestamps. The tail is an order of magnitude longer than `output.py`'s
+# 50 and that is not a copy gone wrong: Claude Code writes roughly one record per message,
+# where codex writes one per tool call, per reasoning step and per token count — a single
+# small task produced 132. The clock slop is the same number for the same reason (two
+# clocks, ours and codex's, not agreeing to the second). Written here rather than imported:
+# `output` reaches `store`, and `store` reaches this module.
+_ARRIVAL_RECORDS = 500
 _CLOCK_SLOP = 5.0
 
 
@@ -432,9 +434,18 @@ def task_arrived(name: str, text: str, *, since: float,
 def _submitted(path: Path, needle: str) -> bool:
     """Does this rollout record `needle` being PUT TO the agent?
 
-    Only the `user_message` event, and that is the whole care taken here: the same text
-    appears again in the assistant's own reasoning and in any shell command that echoes
-    it, and either would confirm a delivery that never happened.
+    Three shapes, because codex records a submitted prompt differently depending on how it
+    is being driven, and reading only one of them is a proof that answers "no" forever.
+    Found the expensive way: the first version read only the `exec`-mode event, and
+    switchboard only ever spawns the TUI, which does not write it.
+
+      - TUI: `event_msg`/`item_completed` carrying an item of type `UserMessage`.
+      - `exec`: `event_msg`/`user_message`.
+      - the raw model stream underneath both: `response_item`/`message` with role `user`.
+
+    The last of those also carries the injected `AGENTS.md` block, which is why the match
+    is on the task TEXT and never on the record's mere existence. The same reasoning rules
+    out the assistant's own messages and any shell command that echoes the text.
     """
     try:
         with path.open(errors="replace") as fh:
@@ -446,12 +457,38 @@ def _submitted(path: Path, needle: str) -> bool:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue                     # a torn last line on a live session
-        payload = rec.get("payload") if isinstance(rec, dict) else None
-        if not isinstance(payload, dict) or payload.get("type") != "user_message":
+        if not isinstance(rec, dict):
             continue
-        if needle in str(payload.get("message") or ""):
+        payload = rec.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        kind, outer = payload.get("type"), rec.get("type")
+        text = ""
+        if outer == "event_msg" and kind == "user_message":
+            text = str(payload.get("message") or "")
+        elif outer == "event_msg" and kind == "item_completed":
+            item = payload.get("item") or {}
+            if item.get("type") == "UserMessage":
+                text = _content_text(item.get("content"))
+        elif outer == "response_item" and kind == "message" and payload.get("role") == "user":
+            text = _content_text(payload.get("content"))
+        if text and needle in text:
             return True
     return False
+
+
+def _content_text(content) -> str:
+    """The text of a codex content list — `text`/`Text` in the item stream,
+    `input_text`/`output_text` in the raw model items."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        str(p.get("text") or "") for p in content
+        if isinstance(p, dict)
+        and str(p.get("type", "")).lower() in ("text", "input_text", "output_text")
+    )
 
 
 def newest_session_id(name: str, cwd: Optional[Path] = None,
