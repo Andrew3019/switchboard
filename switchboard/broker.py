@@ -3449,6 +3449,27 @@ class Broker:
             return out.returncode == 0
         return out.stdout if out.returncode == 0 else ""
 
+    def _git_at(self, path, *args: str):
+        """Run git in a checkout that is NOT necessarily this repo's own directory, and
+        hand back the whole result — code, stdout and stderr.
+
+        `_git` answers questions ("is there such a ref?") in `self.repo` and swallows the
+        rest; `sb merge` does the opposite on both counts. It works in the CALLER's
+        checkout, which is a linked worktree with its own HEAD and its own index, and it
+        needs git's own words: a merge that fails says why, and that sentence is the whole
+        report to the agent that asked for it.
+
+        Never raises. A git that cannot be run at all comes back as a non-zero code with
+        the OS error as its stderr, so every caller has one shape to read.
+        """
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=str(path), capture_output=True, text=True,
+                timeout=SUBPROCESS_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return subprocess.CompletedProcess(args, 1, "", str(e))
+
     def _open_worktree(self, name: str, *, path: Optional[str], branch: str) -> dict:
         """Attach to a checkout that already exists.
 
@@ -4530,6 +4551,235 @@ class Broker:
             raise TaskUndelivered(name, e) from None
         self._capture_session_id(name, cwd=str(where), task=task, since=sent)
         return name
+
+    # -- the return path: folding a finished child's branch back in ------
+
+    def merge(self, child: str, *, me: Optional[str] = None) -> dict:
+        """Fold ONE finished child's branch into the CALLER's own branch (§2.2).
+
+        THE MISSING HALF OF `isolation=own`. A fork gives a child a worktree and a branch;
+        until this verb there was no way back off that branch except pushing it and opening
+        a pull request by hand, which put a human gate in the middle of a lead's own
+        working loop.
+
+        **Incremental, one child at a time.** Merge the three that have finished now and
+        the fourth later, against the result. There is deliberately no batch form: batching
+        made assembly wait for the last child, and the "collect everything, open one PR"
+        shape it replaced is what §9.3's declined partition-by-disjoint-files existed to
+        make safe. One branch is ever being applied, so there is no set to partition and no
+        order to choose.
+
+        **ASSEMBLY, NOT LANDING.** It writes to exactly one branch — the caller's own,
+        already checked out in the caller's own workspace, so there is no scratch clone —
+        and it never pushes, never touches `main`, and opens no pull request. Landing the
+        assembled branch is the second act, it happens once, and it is the step that
+        already exists (`create-pr` -> `change-approval` -> `review` -> `merge`). That is
+        also why this sits OUTSIDE the plans merge gate and bypasses nothing: the gate is a
+        property of a plan STEP (`defaults/plugins/plans/__init__.py:97-113`), nothing in
+        the plugin clears one, and a verb that reaches no push and no PR reaches no gated
+        step. One PR at the end survives for free — every child folds into the same branch,
+        so that branch still lands as one change.
+
+        **`write-tracked` is checked on the CHILD, not the caller.** This is the sb-mediated
+        chokepoint for the side-effect class (§2.1), and the question it asks is whether the
+        agent that PRODUCED the branch was allowed to produce it. Per-child rather than
+        per-batch, which is strictly the better shape: one refused child no longer refuses
+        everybody else's work along with it.
+
+        **A real conflict spawns ONE integrator**, for that one merge, and the merge is left
+        in progress for it to finish in this checkout. At most one integrator is ever
+        resolving into the branch because at most one branch is ever being applied, so "who
+        reconciles two integrators that both touched the lockfile?" has no shape to arise
+        in. The caller carries on with the next child once the integrator is done — against
+        the resolved result.
+        """
+        me = me or self.whoami()
+        row = store.get_agent(self.db, child)
+        if row is None:
+            raise ValueError(
+                f"no agent named {child!r} — `sb merge` names the CHILD whose branch you "
+                f"are folding in, and `sb status` lists yours.")
+        branch = self.worktree_branch(child)
+        if not branch:
+            # A `shared` child worked in the caller's own checkout, on the caller's own
+            # branch: its work is already here, and there is nothing to fold. Said as a
+            # fact rather than raised as a fault — this is the DEFAULT isolation, so it is
+            # the answer most children have, and it is not a mistake to have asked.
+            raise ValueError(
+                f"{child} has no branch of its own — it worked in your checkout "
+                f"(isolation `shared`), so its tracked work is already on your branch and "
+                f"there is nothing to merge. Only an `--isolation own` child has a branch "
+                f"to fold back.")
+        # THE CHILD'S CAPABILITY, not the caller's. Re-worded, because
+        # `_capability_refusal` speaks about the agent it was asked about and the agent
+        # being refused here is not the one reading the message.
+        try:
+            self.require_capability(child, CAP_WRITE_TRACKED)
+        except ValueError as e:
+            store.log_event(self.db, kind="merge_refused", agent=me, child=child,
+                            branch=branch, reason="write-tracked")
+            raise ValueError(
+                f"{child} does not hold `write-tracked`, so its branch is not work sb will "
+                f"fold in: {e} Grant it and re-run if that was wrong, or take what you need "
+                f"from {branch!r} by hand.") from None
+
+        where, into = self._merge_into(me)
+        if into == branch:
+            raise ValueError(
+                f"{child} is on your own branch {into!r} — nothing to merge into itself.")
+        blockers = self._merge_blockers(where)
+        if blockers:
+            # NO STASH, and that is the point of the refusal rather than an omission. A
+            # lead's non-isolated children share this very checkout (DESIGN-TRUTH.md:349),
+            # so what is uncommitted in it is very likely not the caller's, and
+            # stash-and-pop would be taking somebody else's work sideways through a merge.
+            # Names the files, because "commit first" is only actionable if you can see
+            # what you would be committing.
+            store.log_event(self.db, kind="merge_refused", agent=me, child=child,
+                            branch=branch, reason="dirty", files=blockers[:20])
+            raise ValueError(
+                f"your checkout has uncommitted changes, so nothing will be merged into "
+                f"{into!r} on top of them:\n  "
+                + "\n  ".join(blockers[:20])
+                + (f"\n  ... and {len(blockers) - 20} more" if len(blockers) > 20 else "")
+                + f"\nCommit them (or discard them) and run `sb merge {child}` again. sb "
+                  f"does NOT stash: your other children share this checkout, and their "
+                  f"work is not yours to move.")
+
+        before = (self._git_at(where, "rev-parse", "HEAD").stdout or "").strip()
+        proc = self._git_at(where, "merge", "--no-edit", "-m",
+                            f"sb merge {child} ({branch}) into {into}", branch)
+        conflicts = self._conflicted(where)
+        if proc.returncode == 0:
+            after = (self._git_at(where, "rev-parse", "HEAD").stdout or "").strip()
+            status = "merged" if after != before else "up-to-date"
+            store.log_event(self.db, kind="merge", agent=me, child=child, branch=branch,
+                            into=into, status=status, commit=after)
+            return {"child": child, "branch": branch, "into": into, "path": str(where),
+                    "status": status, "conflicts": [], "integrator": None}
+        if not conflicts:
+            # Not a conflict — an unrelated history, a would-be-overwritten untracked file,
+            # a broken repo. Nothing here can be resolved by reading a `<<<<<<<`, so no
+            # integrator is spawned for it; the checkout is put back the way it was found
+            # and git's own sentence is the report.
+            self._git_at(where, "merge", "--abort")
+            store.log_event(self.db, kind="merge_failed", agent=me, child=child,
+                            branch=branch, into=into, error=(proc.stderr or "").strip())
+            raise ValueError(
+                f"git refused to merge {branch!r} into {into!r} and this is not a "
+                f"conflict, so there is nothing for an integrator to resolve — your "
+                f"checkout is unchanged:\n{(proc.stderr or proc.stdout or '').strip()}")
+
+        # A REAL CONFLICT: one integrator, for this one merge. The merge is deliberately
+        # left IN PROGRESS in this checkout — that is the state the resolution happens in,
+        # and aborting it first would throw away the very thing the integrator is for.
+        try:
+            integrator = self.delegate(
+                self._integrator_task(child, branch, into, where, conflicts),
+                role=DEFAULT_ROLE, topic=f"merge {child}", me=me)
+        except Exception as e:
+            # We could not spawn, so nobody is coming to finish it: leave no half-merged
+            # checkout behind for the next command to trip over.
+            self._git_at(where, "merge", "--abort")
+            store.log_event(self.db, kind="merge_conflict", agent=me, child=child,
+                            branch=branch, into=into, files=conflicts[:20],
+                            integrator=None, error=str(e))
+            raise ValueError(
+                f"merging {branch!r} into {into!r} conflicted in "
+                f"{', '.join(conflicts[:20])} and the integrator could not be spawned "
+                f"({e}) — the merge has been aborted and your checkout is unchanged.") \
+                from None
+        store.log_event(self.db, kind="merge_conflict", agent=me, child=child,
+                        branch=branch, into=into, files=conflicts[:20],
+                        integrator=integrator)
+        return {"child": child, "branch": branch, "into": into, "path": str(where),
+                "status": "conflict", "conflicts": conflicts, "integrator": integrator}
+
+    def _merge_into(self, me: str) -> tuple:
+        """(the caller's checkout, the caller's branch) — or a refusal.
+
+        `sb merge` writes to ONE branch and it is the caller's own, so a caller that has no
+        branch of its own has nowhere to put the work and is told so instead of having a
+        branch chosen for it. That refusal is also what keeps the verb off `main`: the two
+        callers with no branch are the human, standing in the primary checkout, and a top
+        orchestrator, whose bare space is laid over that same checkout.
+
+        The store says which branch, and the checkout is asked to CONFIRM it: a row that
+        disagrees with HEAD means somebody has moved the checkout under us, and merging into
+        whatever is checked out there would write to a branch nobody named.
+        """
+        into = self.worktree_branch(me)
+        if not into:
+            raise ValueError(
+                "you have no branch of your own to merge into — `sb merge` folds a child's "
+                "work into the CALLER's branch, and never into main. Run it from the "
+                "workspace whose branch should carry the change (a lead in its own "
+                "worktree), not from a bare space over the main checkout.")
+        local_base = BASE_BRANCH.partition("/")[2] or BASE_BRANCH
+        if into in (BASE_BRANCH, local_base):
+            # Belt and braces: a workspace CAN be named for the base branch (opening `main`
+            # attaches the primary checkout rather than forking it), and that is the one way
+            # a row's own branch is main.
+            raise ValueError(
+                f"your checkout is on {into!r} and `sb merge` never writes to the base "
+                f"branch — assembling work happens on a branch of your own, and landing it "
+                f"is the separate, gated step.")
+        row = store.get_agent(self.db, me)
+        where = Path(_column(row, "cwd") or "") if row is not None else Path("")
+        if not str(where):
+            where = Path(self._recorded_path(self._workspace_of(me)) or self.repo)
+        head = (self._git_at(where, "rev-parse", "--abbrev-ref", "HEAD").stdout or "").strip()
+        if head == "HEAD":                       # detached: no branch name to compare
+            head = ""
+        if head != into:
+            raise ValueError(
+                f"your row says you are on {into!r} but {where} is on "
+                f"{head or 'a detached HEAD'} — nothing was merged. Whatever moved that "
+                f"checkout has to be sorted out first; sb will not pick the branch for you.")
+        return where, into
+
+    def _merge_blockers(self, where) -> list:
+        """What is uncommitted in the caller's checkout, as git prints it.
+
+        TRACKED files only (`--untracked-files=no`), matching `_uncommitted`: a checkout
+        with stray scratch files in it is the normal state of a checkout, and a refusal
+        that fires on every merge is a refusal nobody can act on. Untracked files that a
+        merge would genuinely overwrite are refused by git itself, and that refusal is
+        reported verbatim.
+        """
+        out = self._git_at(where, "status", "--porcelain", "--untracked-files=no")
+        return [ln.rstrip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+
+    def _conflicted(self, where) -> list:
+        """The files git has left with conflict markers — the test for a REAL conflict.
+
+        A non-zero `git merge` is not the same question: it also covers unrelated
+        histories, a dirty index and a repo that is not there, none of which an integrator
+        can resolve by reading the file.
+        """
+        out = self._git_at(where, "diff", "--name-only", "--diff-filter=U")
+        return sorted({ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()})
+
+    def _integrator_task(self, child: str, branch: str, into: str, where,
+                         conflicts: list) -> str:
+        """What the one integrator is told. It is a merge that is ALREADY IN PROGRESS in a
+        checkout it is being spawned into, so the task says where the state is, what is
+        conflicted, and the two things it must not do — because a resolution that pushes or
+        opens a PR turns assembly into landing and steps around the gate this verb is
+        careful to leave standing.
+        """
+        listed = "\n".join(f"  {f}" for f in conflicts[:40])
+        more = f"\n  ... and {len(conflicts) - 40} more" if len(conflicts) > 40 else ""
+        return (
+            f"Resolve a merge conflict. `git merge {branch}` (the branch of the finished "
+            f"agent {child}) into {into} is IN PROGRESS, unfinished, in {where} — that is "
+            f"the checkout you are in. Conflicted files:\n{listed}{more}\n"
+            f"Resolve each one on its merits, keeping both sides' intent; `git add` them "
+            f"and commit the merge. If it genuinely cannot be resolved, `git merge --abort` "
+            f"and say so in your summary — do not invent a resolution. Do NOT push, do NOT "
+            f"open a pull request, and do not touch any branch other than {into}: this is "
+            f"assembly on your parent's own branch, and landing it is a separate step that "
+            f"is not yours.")
 
     def _capture_session_id(self, name: str, *, cwd: str, task: Optional[str],
                             since: float) -> None:

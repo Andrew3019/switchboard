@@ -177,6 +177,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "able to do it itself")
     g.add_argument("--reason", help="why, recorded with your name against the grant")
 
+    # The other half of `--isolation own`: a fork gives a child its own branch, and this
+    # is the way back off it. Assembly, not landing — see `Broker.merge`.
+    mg = cmd(
+        "merge", help="fold a finished child's branch into YOUR branch",
+        description="One child at a time, into the branch you are already on, in your own "
+                    "checkout. Call it as each isolated child finishes: the fourth merges "
+                    "against the result of the first three. It never pushes, never touches "
+                    "main and opens no pull request — landing the assembled branch is the "
+                    "separate step that already exists. It refuses on a dirty checkout and "
+                    "names what is uncommitted rather than stashing, because your other "
+                    "children share that checkout. A real conflict spawns ONE integrator "
+                    "to resolve that merge, and you carry on with the next child once it "
+                    "is done.")
+    mg.add_argument("child", help="the finished child whose branch is folded in")
+
     # The reverse of a grant: per-row rendering says what ONE agent may do, and this says
     # who may do one THING. Not human-only and not subtree-scoped — an audit that stops at
     # the caller's own subtree cannot answer the question anybody asks it (§2.1).
@@ -462,6 +477,9 @@ def _validate(args) -> None:
         args.cap = validate.token(args.cap, "capability")
         if args.reason is not None:
             args.reason = validate.line(args.reason, "--reason")
+
+    elif cmd == "merge":
+        args.child = validate.agent_name(args.child)
 
     elif cmd == "who-holds":
         args.cap = validate.token(args.cap, "capability")
@@ -994,6 +1012,25 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 f"{r['cap']} itself)" if r["delegable"] else f"holds {r['cap']}")
         _emit(args, f"{r['agent']} {what} — for the rest of its life; there is no revoke",
               r)
+        return 0
+
+    if cmd == "merge":
+        r = b.merge(args.child, me=me)
+        if r["status"] == "conflict":
+            # Exit 0 and a description, not a failure: the merge is UNDERWAY, an agent is
+            # resolving it, and the caller's next move is to wait for that agent rather
+            # than to retry the command. A non-zero exit here reads as "nothing happened".
+            text = (f"{r['child']} ({r['branch']}) conflicts with {r['into']} in "
+                    f"{', '.join(r['conflicts'])} — {r['integrator']} is resolving that "
+                    f"merge in your checkout. It is left in progress until they finish; "
+                    f"merge your next child against the result once they report.")
+        elif r["status"] == "up-to-date":
+            text = (f"{r['child']} ({r['branch']}) was already in {r['into']} — nothing "
+                    f"to fold in.")
+        else:
+            text = (f"merged {r['child']} ({r['branch']}) into {r['into']} — your branch "
+                    f"only: nothing pushed, no pull request opened.")
+        _emit(args, text, r)
         return 0
 
     if cmd == "who-holds":

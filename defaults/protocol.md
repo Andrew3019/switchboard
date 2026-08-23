@@ -255,6 +255,11 @@ reports. `--name` is two or three words for the SUBJECT — the agent is named
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,
 because `worker-7` on the board tells the person watching nothing at all.
+An `--isolation own` child comes back with `sb merge <child>`: it folds that one
+child's branch into YOUR branch, in your own checkout, and you run it as each child
+finishes rather than saving them up. It never pushes and never opens a pull request —
+landing the assembled branch is still the separate step. It refuses if your checkout has
+uncommitted changes, and a real conflict spawns one agent to resolve that merge.
 `sb status` lists your children, and `sb cleanup [names]` closes finished
 ones beneath you, plus any whose turn switchboard gave up on — closing costs
 only the pane: session, summary, messages and transcript survive, and
