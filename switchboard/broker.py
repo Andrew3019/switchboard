@@ -745,6 +745,11 @@ class Broker:
         # and reason as `delivery_note`: the CLI has to say it, and `done`'s return value is
         # already the live-children list. A list because a repo may declare more than one.
         self.done_flags: list[str] = []
+        # Who the last `done --preserve-children` handed up (F2). Same shape and reason as
+        # the two above: the CLI has to say whose reporting line just moved and to whom,
+        # and `done`'s return value is already the live-children list — which after a
+        # promote is EMPTY, since the whole point is that nothing is left underneath.
+        self.promoted: list[str] = []
         # What the last `restore` did to that agent's capability set: it comes back on its
         # STORED SEED and any grants it held are gone (§2.1). Same shape and reason as the
         # two above — the operator has to be told, because a narrowing nobody can see is
@@ -1111,10 +1116,27 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="claim_session_failed", agent=name, error=str(e))
 
+    def current_parent(self, name: str) -> Optional[str]:
+        """Who this agent reports to RIGHT NOW — the resolver, broker side (§2.3).
+
+        One line on purpose. `parent` is a mutable column behind a THIN resolver, and the
+        thinness is the design: `hooks._has_live_child` is a second, deliberately
+        broker-independent copy of the same `WHERE parent=?` that cannot route through
+        anything here, so the resolver must stay a plain read of the one column that copy
+        can still ask about raw. See `store.current_parent`.
+
+        Every broker reader that decides something about a live parent link goes through
+        this rather than off an `agents` row fetched earlier in the same call: reading the
+        column at the point of USE is what makes `done` and `cleanup` follow a change
+        instead of a copy of the state before it.
+        """
+        return store.current_parent(self.db, name)
+
     def _resolve(self, who: str, me: str) -> str:
         if who == PARENT:
-            a = store.get_agent(self.db, me)
-            return (a["parent"] if a and a["parent"] else HUMAN)
+            # RESOLVED, not read off a spawn-time row: `sb tell parent` addresses whoever
+            # this agent reports to at the moment it is typed (§2.3, raw reader 1).
+            return self.current_parent(me) or HUMAN
         return who
 
     # -- structure: who may spawn, and who may see whom ------------------
@@ -1686,9 +1708,13 @@ class Broker:
 
         One query rather than a walk per agent: `tree_of` asks this question of every row,
         and doing it per row is a few hundred statements for a readout.
+
+        THE SINGLE STATEMENT IS ALSO THE TORN-READ GUARANTEE (§2.3, raw reader 2). `parent`
+        moves under this reader now, and a per-row walk could draw one half of the board
+        from the tree before a re-parent and the other half from the tree after it. One
+        statement sees one of them. `is_top` comes along raw and unresolved, by design.
         """
-        return {r["name"]: (r["parent"], bool(r["is_top"]))
-                for r in self.db.execute("SELECT name, parent, is_top FROM agents")}
+        return store.current_parentage(self.db)
 
     @staticmethod
     def _root_of(name: str, rows: dict) -> str:
@@ -4061,8 +4087,13 @@ class Broker:
         return None
 
     def _workspace_of(self, me: str) -> Optional[str]:
-        a = store.get_agent(self.db, me) if me != HUMAN else None
-        return a["workspace"] if a else None
+        """The workspace this agent is attached to right now — resolved, not spawn-frozen.
+
+        `store.attached_workspace` IS the workspace half of §2.3's resolver (it landed with
+        workspace-as-a-resource in §2.2, under that name). Going through it rather than
+        re-reading the column here keeps one reader of a pointer that `attach` may move.
+        """
+        return store.attached_workspace(self.db, me) if me != HUMAN else None
 
     def _workspace_id(self, name: Optional[str]) -> str:
         """herdr's id for a workspace we already know by name.
@@ -5485,7 +5516,8 @@ class Broker:
                 return False
         return False
 
-    def done(self, summary: str, *, me: Optional[str] = None) -> list[str]:
+    def done(self, summary: str, *, me: Optional[str] = None,
+             preserve_children: bool = False) -> list[str]:
         """Report finished. The summary goes to the parent, if there is one.
 
         A ROOT agent has no parent and the human has no mailbox, so its summary is not
@@ -5555,30 +5587,97 @@ class Broker:
         here there is only an agent that has finished, and a `done` that could fail is one
         agents learn to route around. A `shared` child is never flagged: its writes are on
         its lead's branch and nothing can honestly attribute them (`_side_effect_flags`).
+
+        **`preserve_children` IS PROMOTE (§2.3, F2) — the only topology op there is.** The
+        agent reports done and, in the SAME transaction, re-homes its live children onto
+        its own parent. They rise one level, the promoter drops out of the chain, and the
+        canonical case is a researcher that discovers the job needs a lead: it spawns one
+        below itself with an ordinary `sb delegate`, hands its findings over as the brief,
+        and finishes with `sb done --preserve-children`. End state
+        `dispatcher -> lead -> workers`, with no lingering proxy row in the reporting chain.
+
+        **One flag on the verb that already exists, not an `sb handoff <lead>`.** The spawn
+        half IS `sb delegate`, unchanged — role, name, brief, isolation, workspace, model —
+        and a combined verb would have to re-expose all of it or quietly drop most of it.
+        The handoff half is not a new message either: the `done` summary above IS the
+        handoff to the parent, the text it already reads and acts on.
+
+        **NO CAPABILITY, and no topology capability string exists at all.** It re-homes
+        YOUR OWN children onto YOUR OWN parent, and those children were already that parent's
+        descendants — `_descendants` is a transitive parent walk — so its `cleanup` scope
+        and its ancestry already reached them. Only the DIRECT pointer changes; nothing
+        enters anybody's authority that was not already inside it, and nobody loses a right
+        against their will (the promoter gives up its own reporting line, deliberately, as
+        part of finishing; the grandparent only gains). That is the exact inversion of the
+        earlier topology primitive this replaced and retired, which TOOK close-and-report
+        authority over a non-consenting third party and had to carry a capability plus an
+        ancestry walk for it. Both authorities keyed off `parent` are pure parent walks
+        with no second source of truth — `cleanup` scopes on `_descendants`, `done` mails
+        the resolved parent — so moving a row UP the same walk can only shrink who may
+        close it and shorten the path its `done` takes.
+
+        **ONE STRUCTURAL REFUSAL: the top may not promote.** Not a capability check — a
+        predicate. The top is the tree's fixed anchor with `parent IS NULL` by
+        construction, and promoting it would set its children's parent to NULL and unhook
+        the fleet from the row `store.live_tops` and `_root_of` resolve against. A
+        PARENTLESS NON-TOP promoter is legal and needs no special case: its children simply
+        inherit `parent IS NULL` and their `done` takes the same root branch its own would.
+
+        **It does not close the promoter, and it does not fight the live-descendants gate —
+        it EMPTIES it.** `cleanup`'s scope is strictly below the caller, so no agent closes
+        its own row and promote does not change that. What changes is that the promoter has
+        no live descendants left, so `live_descendants` stops holding it back and the
+        parent's ordinary sweep takes the row. That gate is exactly what makes a
+        done-with-live-children agent linger today.
+
+        **Two parties are signalled, not three** (§2.1, C4): each re-homed child, because
+        "You report to '{parent}'" is baked into its spawn prompt once and is now stale, and
+        the grandparent, because it gains direct children — new `done` mail and an
+        immediately larger `cleanup` scope. Nobody else: there is no third "old parent", the
+        old parent IS the promoter and it needs no signal about its own call. The
+        grandparent's costs nothing extra — it rides in on the `done` message it is already
+        receiving in the same transaction, and where the grandparent is the human there is
+        no mailbox at all and the promote is named in the line `_surface` already sends.
         """
         me = me or self.whoami()
         if me == HUMAN:
             raise ValueError("`sb done` is for agents")
         a = store.get_agent(self.db, me)
-        if self._reported_done_and_stayed_there(me):
-            # The report STANDS — only its delivery is skipped. Re-asserted rather than
-            # assumed: on a no-hooks session `_revive` has just failed open and put this
-            # row back to `working`, so leaving it alone would end the call with an agent
-            # that has reported done twice and a board that says it is still going.
-            store.set_state(self.db, me, "done")
-            store.log_event(self.db, kind="done_repeated", agent=me,
-                            summary=summary[:EVENT_CLIP])
+        self.promoted = []
+        repeat = self._reported_done_and_stayed_there(me)
+        # RESOLVED HERE, not taken off `a` — the row read at the top of this call may
+        # predate a re-parent, and `done` must mail whoever this agent reports to NOW
+        # (§2.3, raw reader 3). Read ONCE and reused below: the mail, the ring and the
+        # holdback are one decision about one parent, and re-reading per use could split
+        # them across a change. It is also the destination a promote moves the children to,
+        # so promoter and children come out of ONE read of the column.
+        parent = self.current_parent(me) if a else None
+        told: list[str] = []
+        if preserve_children:
+            # THE ONE REFUSAL, and it is a predicate rather than a capability check — see
+            # the docstring. Raised before anything is written.
+            self._refuse_top_promote(me)
+            # ONE TRANSACTION over the topology write, the `done` row it rides on, the
+            # state write and every signal (§2.3, C4). `store.mutation` takes the write
+            # lock up front, so no concurrent `sb` can land between the move and the
+            # message telling the agents it moved.
+            with store.mutation(self.db):
+                self.promoted = self._promote(me, parent)
+                told = self._promote_signals(me, parent, self.promoted,
+                                             rides_on_done=bool(parent) and not repeat)
+                self._record_done(me, summary, parent, repeat=repeat,
+                                  promoted=self.promoted, commit=False)
+        else:
+            self._record_done(me, summary, parent, repeat=repeat, promoted=[],
+                              commit=True)
+        # OUTSIDE the transaction, and it has to be: the doorbell is a herdr subprocess
+        # (see `store.mutation` and `grant`). The signals are already durable — this only
+        # says "now", and it is held, so a promote of ten children is one doorbell each and
+        # not a storm (A1).
+        self._ring_mutation_signals(told, frm=me)
+        if repeat:
             self.done_repeat = True
             return self.live_descendants(me)
-        parent = a["parent"] if a else None
-        if parent:
-            store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",
-                              body=f"[done] {summary}")
-        store.set_state(self.db, me, "done")
-        # NOTHING is reported to herdr here, and that silence is what keeps a finished
-        # agent addressable — see the docstring, and `block` for the same call and the
-        # same reason.
-        store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP])
         # THE `done` BOUNDARY OF THE SIDE-EFFECT CLASS (E4). After the report is recorded
         # and mailed, never before and never instead: this flags, and a flag that could
         # cost a report would be a refusal wearing another word. Wrapped because it reaches
@@ -5621,8 +5720,132 @@ class Broker:
             # was to already be watching. Dismissing it loses nothing, the same way it
             # loses nothing for `block`: the summary is durable in the event log and on the
             # done row, and this only says "now".
-            self._surface(me, f"done — {summary}")
+            # WHERE THE GRANDPARENT IS THE HUMAN, this line IS the promote signal — there
+            # is no mailbox to put one in, and a person who is told only "done" would not
+            # learn that some agents now report straight to them (§2.3, obj. 27).
+            handed = (f" — handed up to you: {', '.join(self.promoted)}"
+                      if self.promoted else "")
+            self._surface(me, f"done — {summary}{handed}")
         return still_working
+
+    def _refuse_top_promote(self, me: str) -> None:
+        """The one refusal a promote has, and it is STRUCTURAL — not a capability check.
+
+        Promote needs no capability at all (see `done`), so this is not a gate with a
+        string behind it: it is the same shape as "the top is never a grant target", one
+        predicate in the generic layer. The top has `parent IS NULL` by construction and is
+        the tree's fixed anchor, so promoting it would set its children's parent to NULL
+        and unhook the fleet from the row `store.live_tops` (`parent IS NULL AND is_top=1`)
+        and `_root_of` resolve against — a second rootless island, and no `sb start` to
+        anchor it.
+
+        Read off the `is_top` STAMP, deliberately, and not off `parent IS NULL`: a parent-
+        less NON-top agent is the human-spawned case, which is legal and does the right
+        thing (its children inherit `parent IS NULL` and surface to the human). Inferring
+        the top from a null parent would refuse exactly that agent.
+        """
+        if self.is_top(me):
+            raise ValueError(
+                "the top dispatcher cannot promote: it has no parent to hand your children "
+                "up to, and giving them none would cut the fleet loose from the root every "
+                "readout resolves against. Report with a plain `sb done` — your children "
+                "keep reporting to you and nothing closes your pane while they run.")
+
+    def _promote(self, me: str, parent: Optional[str]) -> list[str]:
+        """The topology half: move every live child of `me` onto `parent`. -> their names.
+
+        INSIDE the caller's `store.mutation` and nowhere else. The read and the `UPDATE`
+        share one predicate (`store.live_children_of`, `store.promote_children`) and one
+        write lock, which is what makes the set that is signalled exactly the set that
+        moved. The write itself is a SINGLE statement — see `store.promote_children` for
+        why a torn intermediate has no shape to take.
+
+        A promoter with no live children is a no-op that still reports done, not an error:
+        "hand up whatever is still running" is a true statement about nothing, and refusing
+        it would make the flag something an agent has to check before it may use.
+        """
+        moved = [c["name"] for c in store.live_children_of(self.db, me)]
+        store.promote_children(self.db, promoter=me, new_parent=parent, commit=False)
+        store.log_event(self.db, kind="promote", agent=me, children=",".join(moved),
+                        to=parent or "", commit=False)
+        return moved
+
+    def _promote_signals(self, me: str, parent: Optional[str], moved: Sequence[str], *,
+                         rides_on_done: bool) -> list[str]:
+        """TWO PARTIES, not three (§2.1, C4) — every re-homed child, and the grandparent.
+
+        Each child because *"You report to '{parent}'"* is baked into its spawn prompt
+        exactly once (`spawn.identity`, applied at `broker.py:4687`) and is now stale;
+        an agent that believes it still reports to a closed proxy is the silent divergence
+        the signal rule exists to prevent. The plumbing follows on its own — `sb tell
+        parent` resolves live — but the agent's BELIEF does not.
+
+        The grandparent because it gains direct children: new `done` mail and an
+        immediately larger `cleanup` scope. Without it, a person who reads the board and
+        then tells that lead to `cleanup` closes agents they never saw.
+
+        NOBODY ELSE. There is no third "old parent" to tell: the old parent IS the
+        promoter, the agent performing the act, and it needs no news of its own call. So a
+        promote is `1 + N` messages for N children, in one call.
+
+        `rides_on_done` is how the grandparent's costs nothing extra: where a `done` mail
+        is going out in this same transaction, the promote is one more line on it
+        (`_record_done`) rather than a second doorbell, and only the children are written
+        here. A repeat `done` mails nothing, so the grandparent gets its own signal row
+        instead — the count is `1 + N` either way. A ROOT promoter has no grandparent to
+        mail at all; `done`'s `_surface` line carries it (obj. 27).
+        """
+        told = [(who, self._say("notify.promoted_child", who=me,
+                                parent=(f"'{parent}'" if parent else
+                                        "the human who started this run (there is no "
+                                        "agent above you now)")))
+                for who in moved]
+        if moved and parent and not rides_on_done:
+            told.append((parent, self._say("notify.promoted_to_you", who=me,
+                                           children=", ".join(moved))))
+        return self._mutation_signals(told, frm=me)
+
+    def _promote_clause(self, me: str, moved: Sequence[str]) -> str:
+        """The promote, as one line ON the `done` it rides in on. Empty when nothing moved.
+
+        The grandparent's signal (§2.3), and this is why it costs nothing extra: that agent
+        is already being handed this summary in this same transaction, so the news that it
+        now has N more direct children is one more line of a message it will read anyway
+        rather than a second mailbox row and a second doorbell.
+        """
+        if not moved:
+            return ""
+        return "\n" + self._say("notify.promoted_to_you", who=me,
+                                children=", ".join(moved))
+
+    def _record_done(self, me: str, summary: str, parent: Optional[str], *,
+                     repeat: bool, promoted: Sequence[str], commit: bool) -> None:
+        """The `done` rows themselves: the mail, the state write, the event.
+
+        Lifted out of `done` for ONE reason — a promote has to put these in the same
+        transaction as its topology write, and `commit=False` is how they join it. The
+        ordinary path passes `commit=True` and the sequence of writes is byte-for-byte what
+        it was before.
+
+        The REPEAT branch is the same one it always was: the report stands, only its
+        delivery is skipped, and the state is re-asserted rather than assumed because on a
+        no-hooks session `_revive` has just failed open and put this row back to `working`.
+        """
+        if repeat:
+            store.set_state(self.db, me, "done", commit=commit)
+            store.log_event(self.db, kind="done_repeated", agent=me,
+                            summary=summary[:EVENT_CLIP], commit=commit)
+            return
+        if parent:
+            store.put_message(self.db, from_agent=me, to_agent=parent, kind="done",
+                              body=f"[done] {summary}{self._promote_clause(me, promoted)}",
+                              commit=commit)
+        store.set_state(self.db, me, "done", commit=commit)
+        # NOTHING is reported to herdr here, and that silence is what keeps a finished
+        # agent addressable — see the docstring, and `block` for the same call and the
+        # same reason.
+        store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP],
+                        commit=commit)
 
     def _burst_possible(self, parent: str) -> bool:
         """Could this parent be about to hear from a sibling too?
@@ -6689,11 +6912,25 @@ class Broker:
         return [a["name"] for a in self._descendants(name) if a["pane_id"]]
 
     def _descendants(self, name: str) -> list:
+        """Every row beneath this one, by a walk down `parent`.
+
+        THE ONE READER THAT IS NOT A SINGLE STATEMENT (§2.3, raw reader 4), and so the one
+        that needs `read_snapshot`. The walk asks `children_of` once per level; a
+        re-parent committing between two of those questions could move a row out of a
+        branch already visited (it vanishes from the answer) or into one not yet visited
+        (it appears twice) — a subtree assembled from two different trees, which `cleanup`
+        would then act on. Inside one snapshot the whole walk sees the pre-state or the
+        post-state and never a mix.
+
+        The walk itself is UNCHANGED — same order, same rows, same cycle behaviour (a
+        cycle in `parent` does not terminate here; `_leaves_up` says so too).
+        """
         out, frontier = [], [name]
-        while frontier:
-            kids = store.children_of(self.db, frontier.pop())
-            out.extend(kids)
-            frontier.extend(k["name"] for k in kids)
+        with store.read_snapshot(self.db):
+            while frontier:
+                kids = store.children_of(self.db, frontier.pop())
+                out.extend(kids)
+                frontier.extend(k["name"] for k in kids)
         return out
 
     def _restore_tab(self, a, wsid: str, where, *, env: Optional[dict] = None) -> str:
@@ -8302,6 +8539,12 @@ class Broker:
         agent's own session and everything it touches has to stay small enough to fail
         open. Two callers, one SQL line, and a test on each side is cheaper than a shared
         module that exists to hold it.
+
+        NOT ROUTED THROUGH THE RESOLVER either, and for the same reason (§2.3, raw reader
+        5): its whole value is that it asks the question the way the hook asks it. It is
+        torn-safe on its own shape — one statement, one equality read on `parent` — which
+        is exactly the property the resolver is kept thin enough to preserve for the hook's
+        copy as well.
         """
         return self.db.execute(
             "SELECT 1 FROM agents WHERE parent=? AND state IN ('working', 'blocked') "
