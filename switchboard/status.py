@@ -339,6 +339,13 @@ DONE_PREFIX = config.setting("vocabulary.done_prefix")
 # Long enough to say what an agent is doing, short enough not to wrap a terminal.
 TASK_CLIP = config.setting("limits.task_clip")
 
+# How much text a ROLE cell may spend NAMING the capabilities a row diverged by, before it
+# falls back to the bare sign (`AgentStatus.role_cell`). The column is sized to content and
+# never clipped, so this is the only thing standing between one heavily granted agent and a
+# line that wraps every terminal in the fleet. Two capability names' worth: a widening is
+# usually one grant, and the sign — never the names — is the half that must survive.
+ROLE_MARK_MAX = 24
+
 # Whether whole archived subtrees are drawn row by row or collapsed to one line. Read here
 # rather than in each renderer so `sb status` and the panel cannot end up on different
 # defaults — `board.layout` takes this one too. `config.flag`, not `config.setting`,
@@ -486,6 +493,99 @@ class AgentStatus:
     # Defaulted and last, for `turn`'s reason: hand-built rows in tests and snapshots from
     # an older collector both have to construct.
     pane_id: Optional[str] = None
+    # WHAT THIS AGENT MAY DO, and what its role said it would — the three sets the ROLE
+    # column's divergence marker is drawn from (§2.5). `caps_held` is the set
+    # `require_capability` reads, `caps_delegable` is the pass-through half (delegable and
+    # NOT held), `caps_template` is the effective role template
+    # (`roles.template_capabilities`) they are read against.
+    #
+    # `None` means NOT COMPUTED, and it is a third value rather than an empty list on
+    # purpose: an empty `caps_held` is a real answer — a researcher may do nothing — while
+    # a hand-built row in a test, a snapshot published by an older collector, and a
+    # `collect` that could not load the role table all know nothing about capabilities.
+    # Only the third value draws no marker; an empty set draws whatever it diverges by.
+    #
+    # Lists, not sets, and sorted: this row goes out through `as_dict` as JSON and comes
+    # back through `panel.agent_from_dict`, and a set does neither.
+    caps_held: Optional[list] = None
+    caps_delegable: Optional[list] = None
+    caps_template: Optional[list] = None
+    # Whether anything BENEATH this agent diverges — the aggregation §2.5 asks for, so a
+    # lead's own row says "look below me" instead of leaving twenty leaf rows to be
+    # scanned. Computed in `collect` by walking up from each diverged row, the way
+    # `richboard.busy_below` aggregates liveness; False on a row nobody computed it for.
+    diverged_below: bool = False
+
+    @property
+    def caps_diverged(self) -> bool:
+        """Whether this agent's live capabilities differ from its role's template.
+
+        False when nothing was computed (`caps_held is None`): a row we know nothing about
+        must read as an ordinary one, never as a diverged one — a marker that fires on
+        rows nobody measured is a marker people learn to ignore.
+        """
+        if self.caps_held is None or self.caps_template is None:
+            return False
+        return (set(self.caps_held) != set(self.caps_template)
+                or bool(self.caps_delegable))
+
+    @property
+    def role_cell(self) -> str:
+        """The ROLE column's text: the frozen role name, plus what has happened to its
+        capabilities since (§2.5).
+
+        THE ROLE LABEL IS NEVER REWRITTEN — `agents.role` means "which template this row
+        started from" and stays that — so divergence renders ADDITIVELY beside it. A
+        mutable label would make the column unstable; a bare frozen one would be silently
+        wrong about a `spawn`-granted reviewer forever.
+
+        THE MARK IS SIGNED. `reviewer+` and `lead−` are two different pieces of news —
+        "more powerful than its label" and "crippled" — and one undirected mark would
+        collapse them into a bit nobody can act on. A row that is both (granted one cap,
+        ∩-narrowed out of another) carries both signs.
+
+        A DELEGABLE-ONLY cap is drawn distinctly (`researcher →write-tracked`), because
+        "may pass this to its children" must never read as "does this itself" — that
+        confusion is the whole reason the two bits are separate.
+
+        `↓` says the divergence is BELOW this row, not on it. At twenty sibling rows,
+        finding the one granted child by reading twenty leaf rows is not a glance.
+
+        Provenance is deliberately absent: the column carries THAT it diverged and WHICH
+        WAY, and `sb who-holds` carries who and why.
+
+        The named forms are dropped for a bare sign past `ROLE_MARK_MAX`. The column is
+        sized to content and never clipped (`render`), so naming every cap on a heavily
+        granted row would push the rest of the line off a terminal — the sign is the half
+        that must survive, exactly as `richboard.marker_short` keeps the word and drops
+        the reason.
+        """
+        if self.caps_held is None or self.caps_template is None:
+            return self.role
+        held, template = set(self.caps_held), set(self.caps_template)
+        deleg = set(self.caps_delegable or ())
+        signs, named = "", []
+        extra = held - template
+        if extra:
+            mark = _named_mark("+", extra)
+            if mark:
+                named.append(mark)
+            else:
+                signs += "+"
+        if template - held:
+            # Narrowed rows are not named: what a `∩`-seeded lead is MISSING is the whole
+            # template minus what it got, which is longer than the news is worth. The sign
+            # says "read this row's caps"; `sb who-holds` and `sb inspect` say which.
+            signs += "\u2212"
+        if deleg:
+            mark = _named_mark("\u2192", deleg)
+            if mark:
+                named.append(mark)
+            else:
+                signs += "\u2192"
+        if self.diverged_below:
+            named.append("\u2193")
+        return self.role + signs + "".join(" " + n for n in named)
 
     @property
     def blocked(self) -> bool:
@@ -796,6 +896,7 @@ class AgentStatus:
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
             "needs_for", "awaiting_keypress", "pane_id",
+            "caps_held", "caps_delegable", "caps_template", "diverged_below",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -1006,6 +1107,7 @@ def collect(
     mine: Optional[str] = None,
     tree: Optional[Collection[str]] = None,
     reap: bool = True,
+    repo: Optional[Any] = None,
 ) -> Snapshot:
     """The whole readout: one herdr call, one pass over the store.
 
@@ -1025,6 +1127,13 @@ def collect(
     All four keep the ancestors of whatever survives, or the indentation would lie about
     who reports to whom. `mine` and `tree` bound that: neither re-adds anything from
     outside the caller's scope.
+
+    `repo` is the checkout whose role definitions the ROLE column's divergence marker is
+    read against (`roles.template_capabilities`). `None` resolves the shipped roles alone,
+    which is right for a caller outside a repo and wrong-but-harmless inside one: a repo
+    that redefined a role's bundle would have its own rows measured against the shipped
+    template, so the marker is drawn from a baseline the spawn did not use. Every caller
+    that has a repo passes it; the default is for tests and for a reader with no checkout.
 
     `reap=False` computes every flag exactly as before but writes nothing: the drift is
     still rendered, it is just not recorded (see `_record_gone`). It is for a caller that
@@ -1061,6 +1170,11 @@ def collect(
     awaiting_reply = _awaiting_reply(db)
     why = _block_reasons(db)
     summaries = _last_summaries(db)
+
+    # THE CAPABILITY SIDE OF EVERY ROW, in two reads for the whole fleet rather than two
+    # per agent: this runs on every draw of a board that redraws every two seconds.
+    caps = store.all_capabilities(db)
+    templates = _templates(rows, repo)
 
     ordered = _tree(rows)
     # Whether this store can remember an absence at all. A store an older `sb` last stamped
@@ -1280,6 +1394,10 @@ def collect(
             # pane has moved carries a stale id and matches nothing, which is the harmless
             # end of this field's only use — see the field's own note.
             pane_id=row["pane_id"] or None,
+            # THE THREE CAPABILITY SETS, or None where this store cannot say (a row older
+            # than the substrate, a role table that would not load). See `role_cell` for
+            # what is drawn from them, and `_capability_sets` for why NULL is not empty.
+            **_capability_sets(row, caps, templates),
         ))
 
     # Every row is built before this and none is changed by it except in the one field it
@@ -1287,6 +1405,13 @@ def collect(
     # to know who to ask about — and it asks about nobody on a fleet where nothing is
     # stalled, which is the normal case and the reason this is affordable at all.
     _mark_awaiting_keypress(h if consulted else None, agents, now)
+
+    # THE LEAD-ROW AGGREGATE (§2.5). A divergence three rows down is still divergence the
+    # lead answering for that subtree has to know about, and at 20+ siblings finding it by
+    # reading every leaf is not a glance.
+    below = _diverged_below(agents)
+    for a in agents:
+        a.diverged_below = a.name in below
 
     # Guarded on `consulted`, and that guard is the whole safety of it: without herdr's
     # side every row looks gone, and this would reap the table on a hiccup.
@@ -1314,6 +1439,93 @@ def collect(
     hidden = len(agents) - len(kept)
 
     return Snapshot(now=now, agents=kept, herdr_error=herdr_error, hidden=hidden)
+
+
+def _col(row, name: str, default=None):
+    """A column that may not be there. Same defensive read the rest of this file makes
+    inline (`turn`, `absent_since`): a reader cannot migrate a store, and a store older
+    than a column must degrade rather than raise on a `sb status`.
+    """
+    try:
+        return row[name]
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
+def _templates(rows, repo) -> Optional[dict]:
+    """`(role, is_top) -> effective template`, for every distinct pair in the fleet.
+
+    Memoised over the pair rather than over the row, because a fleet of forty agents runs
+    on four or five roles and `roles.get` resolves aliases and settings each time it is
+    asked.
+
+    Returns None — "no answer for anybody" — when the role table will not load at all. A
+    readout must never fail because a repo's `roles.toml` has a typo in it: every row then
+    carries `caps_* = None` and draws its plain role name, which is exactly what `sb
+    status` did before this existed.
+    """
+    from . import roles as roles_mod            # local: status.py must stay importable alone
+    try:
+        table = roles_mod.load(repo)
+    except Exception:                           # noqa: BLE001 — a readout never fails on config
+        return None
+    out: dict = {}
+    for row in rows:
+        key = (row["role"], bool(_col(row, "is_top")))
+        if key not in out:
+            try:
+                out[key] = sorted(roles_mod.template_capabilities(table, key[0], key[1], repo))
+            except Exception:                   # noqa: BLE001 — same reason, one role at a time
+                out[key] = None
+    return out
+
+
+def _capability_sets(row, caps: dict, templates: Optional[dict]) -> dict:
+    """The three `AgentStatus` capability fields for one row, or all-None where the store
+    cannot say.
+
+    ALL-NONE IN TWO CASES, and both mean "nothing is known" rather than "nothing is held":
+    a row whose `seed_capabilities` is NULL predates the substrate and has no capability
+    rows either (`Broker._held_of` derives its set at the gate, and a derived set is by
+    construction its template — there is nothing to diverge), and a fleet whose role table
+    would not load has no baseline to read anything against.
+
+    Everything else reads the table: `held` is what `require_capability` answers to, and
+    `delegable` is the pass-through half, kept apart for the reason `--delegable` exists.
+    """
+    try:
+        seeded = row["seed_capabilities"] is not None
+    except (IndexError, KeyError, TypeError):
+        seeded = False                          # a store older than the column
+    template = (templates or {}).get((row["role"], bool(_col(row, "is_top"))))
+    if not seeded or template is None:
+        return {}
+    held, deleg = caps.get(row["name"], (set(), set()))
+    return {"caps_held": sorted(held), "caps_delegable": sorted(deleg),
+            "caps_template": list(template)}
+
+
+def _diverged_below(agents: list[AgentStatus]) -> set:
+    """Every agent with at least one DIVERGED agent somewhere beneath it.
+
+    Walks up from each diverged row rather than down from each candidate — one pass over
+    the fleet, no recursion to blow up on a deep tree — and survives the two shapes of
+    broken data a live snapshot can hold, for the reasons `richboard.busy_below` gives:
+    a parent naming a row that is not in the snapshot ends the walk, and a cycle is stopped
+    by `seen`, which starts holding the agent itself so nothing is ever its own descendant.
+    """
+    by_name = {a.name: a for a in agents}
+    out: set = set()
+    for a in agents:
+        if not a.caps_diverged:
+            continue
+        seen = {a.name}
+        up = by_name.get(a.parent) if a.parent else None
+        while up is not None and up.name not in seen:
+            seen.add(up.name)
+            out.add(up.name)
+            up = by_name.get(up.parent) if up.parent else None
+    return out
 
 
 def stamp_needs_for(snap: Snapshot, since: dict[str, int]) -> dict[str, int]:
@@ -1906,6 +2118,16 @@ def _subtree(agents: list[AgentStatus], root: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _named_mark(sign: str, caps: Collection[str]) -> str:
+    """`+spawn`, `→write-tracked` — or "" when naming them would cost more width than the
+    news is worth, which tells `role_cell` to draw the bare sign instead.
+
+    One function for both signs so the budget cannot come to differ between them.
+    """
+    mark = sign + ",".join(sorted(caps))
+    return mark if len(mark) <= ROLE_MARK_MAX else ""
+
+
 def fmt_age(seconds: int) -> str:
     """Two significant units, never more — this is scanned, not measured."""
     if seconds < 60:
@@ -2207,7 +2429,10 @@ def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
     # Defaults rather than `max(x, *seq)`: with every root archived, `rows` is a single
     # collapsed row and there is no agent left to measure a ROLE or a WORKSPACE against.
     w_name = max([len("AGENT")] + [len(x) for x in labels])
-    w_role = max([len("ROLE")] + [len(r.role) for r in rows if not isinstance(r, Collapsed)])
+    # `role_cell`, not `role`: the column is sized to CONTENT and never clipped, so the
+    # divergence marker widens the column rather than being cut off it (§2.5).
+    w_role = max([len("ROLE")]
+                 + [len(r.role_cell) for r in rows if not isinstance(r, Collapsed)])
     w_ws = max([len("WORKSPACE")]
                + [len(r.workspace or "-") for r in rows if not isinstance(r, Collapsed)])
 
@@ -2218,7 +2443,7 @@ def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
             lines.append(label)     # no columns: it is not an agent and must not read as one
             continue
         lines.append(
-            f"{label:<{w_name}}  {a.role:<{w_role}}  {a.display_state:<8}  {_herdr_cell(a):<7}  "
+            f"{label:<{w_name}}  {a.role_cell:<{w_role}}  {a.display_state:<8}  {_herdr_cell(a):<7}  "
             f"{(str(a.unread) if a.unread else '-'):>4}  {fmt_age(a.age):>6}  "
             f"{fmt_age(a.idle):>6}  {(a.workspace or '-'):<{w_ws}}{_flags(a)}"
         )
@@ -2528,6 +2753,7 @@ def inspect(
     lines: int = DEFAULT_LINES,
     events: int = DEFAULT_EVENTS,
     now: Optional[int] = None,
+    repo: Optional[Any] = None,
 ) -> Detail:
     """Everything about one agent. Raises KeyError if there is no such agent."""
     from . import output as output_mod
@@ -2537,7 +2763,7 @@ def inspect(
     if row is None:
         raise KeyError(f"no such agent: {name}")
 
-    snap = collect(db, h, now=now)
+    snap = collect(db, h, now=now, repo=repo)
     agent = next((a for a in snap.agents if a.name == name), None)
     if agent is None:                       # _tree drops nothing, so this cannot normally happen
         raise KeyError(f"no such agent: {name}")

@@ -1023,6 +1023,9 @@ class IsolationTest(Sandbox):
         # A capability handed to an agent below the caller: one store write, no spawn and
         # no plugin code — the same level as the rest of the fleet's own bookkeeping.
         "grant": ["w1", "spawn"],
+        # The reverse query: two store reads and no spawn, so it must not be able to reach
+        # plugin code either.
+        "who-holds": ["spawn"],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],
         # Its reconciler trigger, and level 0 for the same reason: it runs unattended on a

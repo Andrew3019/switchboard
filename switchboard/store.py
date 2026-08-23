@@ -1264,6 +1264,45 @@ def capability_rows(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
         "SELECT * FROM capabilities WHERE agent=? ORDER BY cap", (name,)).fetchall()
 
 
+def capability_holders(db: sqlite3.Connection, cap: str) -> list[sqlite3.Row]:
+    """Every row for ONE capability, project-wide, provenance and all — `sb who-holds`.
+
+    ONE SCAN over the capability table, and that is the point of it rather than an
+    optimisation: the alternative is asking every agent in the fleet what it holds, which
+    is a query per row and an answer that still cannot say "who can `fork` project-wide?"
+    without the caller assembling it. It is also TREE-SHAPE INDEPENDENT — it reads no
+    parent column — so a promote cannot invalidate the audit.
+
+    The table carries one row per (agent, cap), so the scan is over a set the size of the
+    fleet's capability grants; the join back onto `agents` is the caller's, because it is
+    what decides which rows are worth naming (see `Broker.who_holds`).
+    """
+    return db.execute(
+        "SELECT * FROM capabilities WHERE cap=? ORDER BY agent", (cap,)).fetchall()
+
+
+def all_capabilities(db: sqlite3.Connection) -> dict[str, tuple[set, set]]:
+    """Every agent's (held, delegable-only) sets, in one scan. The readout's read.
+
+    `status.collect` needs this for the WHOLE fleet on every draw, and asking
+    `held_capabilities` per row would be a query per agent on a board that redraws every
+    two seconds. The split is the same one the two decision-time readers make — held is
+    `held=1`, passable is every row — kept here as the two sets rather than as flags, so a
+    renderer cannot accidentally read "may pass it down" as "may do it".
+    """
+    out: dict[str, tuple[set, set]] = {}
+    for r in db.execute("SELECT agent, cap, held, delegable FROM capabilities"):
+        held, deleg = out.setdefault(r["agent"], (set(), set()))
+        if r["held"]:
+            held.add(r["cap"])
+        elif r["delegable"]:
+            # DELEGABLE-ONLY, and the `elif` is what makes it that: a cap granted both ways
+            # is held, and rendering it as a pass-through would tell the watcher this agent
+            # cannot do the thing it can in fact do (§2.1 — the two bits are independent).
+            deleg.add(r["cap"])
+    return out
+
+
 def drop_agent(db: sqlite3.Connection, name: str) -> None:
     """Remove a row. Only ever used to undo a claim whose spawn then failed — otherwise
     an agent that never started would hold its name against every later attempt.

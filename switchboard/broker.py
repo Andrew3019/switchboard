@@ -1175,9 +1175,12 @@ class Broker:
         and the cold-store bootstrap, for the gate's own fail-open reason. Intersecting
         with an empty set there would cripple every agent spawned against a fresh store.
         """
+        # THE TEMPLATE, from the one function that defines it — `status` renders
+        # divergence against the same call, and a second copy of "what a lead normally
+        # gets" is how the seed and the marker would come to disagree.
+        bundle = roles_mod.template_capabilities(self.roles, role, is_top, self.repo)
         if is_top:
-            return sorted(roles_mod.TOP_CAPABILITIES)
-        bundle = roles_mod.get(self.roles, role, self.repo).capabilities - {CAP_FORK}
+            return sorted(bundle)
         if spawner is None or self.is_top(spawner):
             return sorted(bundle)
         passable = self.passable_for(spawner)
@@ -1354,6 +1357,67 @@ class Broker:
                         granted_by=me, delegable=delegable, reason=reason)
         return {"agent": target, "cap": cap, "delegable": delegable,
                 "granted_by": me, "reason": reason}
+
+    def who_holds(self, cap: str) -> list[dict]:
+        """Who holds `cap`, project-wide. `sb who-holds`.
+
+        THE REVERSE QUERY, and it ships with the grant model rather than as later polish:
+        per-row rendering answers "what may this agent do?" and can never answer "who can
+        `fork` project-wide?" — the question somebody asks after a divergence marker
+        (§2.5) has told them a grant happened somewhere. One indexed scan over the
+        capability rows plus one over `agents`, and no tree walk at all: the audit does not
+        depend on tree shape, so a promote (F2) cannot invalidate it — which is what makes
+        it the residual audit the grant model's grant-TIME subtree check leans on.
+
+        HELD and DELEGABLE-ONLY come back apart, for the reason `--delegable` exists: a
+        pass-through holder is not somebody who can do the thing, and an audit that mixed
+        them would read as a list of writers when half of them cannot write.
+
+        A row whose `seed_capabilities` is NULL predates the substrate and has no
+        capability rows at all; its set is DERIVED at the gate (`_held_of`), so it is
+        derived here too and marked as such. Leaving it out would make the audit quietly
+        wrong on exactly the old rows nobody has looked at.
+
+        Unknown capability strings are refused rather than answered "nobody", for
+        `grant`'s reason: a typo that returns an empty list reads as an all-clear.
+        """
+        if cap not in self.known_capabilities():
+            raise ValueError(
+                f"'{cap}' is not a capability. The ones that exist: "
+                f"{', '.join(sorted(self.known_capabilities()))}.")
+        rows = {a["name"]: a for a in
+                self.db.execute("SELECT * FROM agents ORDER BY name")}
+        out = []
+        for r in store.capability_holders(self.db, cap):
+            a = rows.get(r["agent"])
+            if a is None:
+                continue                    # a capability row outliving its agent
+            out.append({
+                "agent": r["agent"],
+                "role": a["role"],
+                "state": a["state"],
+                # `held` is the bit `require_capability` reads; `delegable` is the bit
+                # ∩-seeding reads. Both, because they are independent (§2.1 obj 20).
+                "held": bool(r["held"]),
+                "delegable": bool(r["delegable"]),
+                "granted_by": _column(r, "granted_by") or None,
+                "reason": _column(r, "reason") or None,
+                "derived": False,
+            })
+        for name, a in rows.items():
+            # NOT `_column`, which collapses NULL to "": "" is a row seeded with NOTHING
+            # and NULL is a row nobody seeded, and only the second derives (`_held_of`).
+            try:
+                seeded = a["seed_capabilities"] is not None
+            except (IndexError, KeyError, TypeError):
+                seeded = False
+            if seeded or name in {o["agent"] for o in out}:
+                continue
+            if cap in self._held_of(a):
+                out.append({"agent": name, "role": a["role"], "state": a["state"],
+                            "held": True, "delegable": False, "granted_by": None,
+                            "reason": None, "derived": True})
+        return sorted(out, key=lambda o: o["agent"])
 
     def _template_caps(self) -> set:
         """Every capability named by any role template — what the top may endow.

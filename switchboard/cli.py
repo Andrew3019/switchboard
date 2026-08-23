@@ -170,6 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "able to do it itself")
     g.add_argument("--reason", help="why, recorded with your name against the grant")
 
+    # The reverse of a grant: per-row rendering says what ONE agent may do, and this says
+    # who may do one THING. Not human-only and not subtree-scoped — an audit that stops at
+    # the caller's own subtree cannot answer the question anybody asks it (§2.1).
+    wh = cmd("who-holds", help="list every agent holding a capability, project-wide",
+             description="The reverse capability query. One scan over the capability "
+                         "rows, so it does not depend on the tree's shape and a promote "
+                         "cannot invalidate it. Says who may DO the thing and, apart, who "
+                         "may only pass it DOWN — and who granted it.")
+    wh.add_argument("cap", metavar="CAPABILITY", help="the capability string")
+
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
     t.add_argument("message")
@@ -446,6 +456,9 @@ def _validate(args) -> None:
         if args.reason is not None:
             args.reason = validate.line(args.reason, "--reason")
 
+    elif cmd == "who-holds":
+        args.cap = validate.token(args.cap, "capability")
+
     elif cmd == "tell":
         args.who = validate.targets(args.who)
         # An interrupt's text travels INLINE — it is the prompt herdr sends, and herdr
@@ -639,6 +652,33 @@ def _scope(b: Broker, me: str, mine: bool) -> dict:
     return {"tree": b.tree_of(me), "mine": me if mine else None}
 
 
+def _who_holds_text(cap: str, holders: list) -> str:
+    """`sb who-holds` as lines. Held first, pass-through after, and never mixed.
+
+    The order is the answer to the question, not a preference: somebody asking who can
+    `write-tracked` is asking who can write, and a list that interleaved the agents that
+    may only hand it down would read as a longer list of writers. Provenance sits on the
+    line because it is what the divergence marker deliberately does NOT carry (§2.5) —
+    the column says a row diverged, this says who did it and why.
+    """
+    if not holders:
+        return f"nobody holds {cap}"
+    lines = []
+    for kind, word in (("held", "holds"), ("delegable", "may pass down")):
+        rows = [h for h in holders
+                if (h["held"] if kind == "held" else not h["held"] and h["delegable"])]
+        if not rows:
+            continue
+        lines.append(f"{word} {cap}:")
+        for h in rows:
+            how = ("from its role (a row older than the capability table)" if h["derived"]
+                   else f"granted by {h['granted_by']}" if h["granted_by"]
+                   else "seeded at spawn")
+            why = f" — {h['reason']}" if h["reason"] else ""
+            lines.append(f"  {h['agent']}  ({h['role']}, {h['state']})  {how}{why}")
+    return "\n".join(lines)
+
+
 def _degraded(deficit: list[str], cmd: str) -> str:
     """Why this one command cannot run while the rest of `sb` still can.
 
@@ -744,7 +784,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         # the process boundary that licenses it: the method keeps `reap=False` for any
         # caller that is not this one.
         try:
-            snap = status_mod.collect(db, h, reap=True)
+            snap = status_mod.collect(db, h, reap=True, repo=repo)
             pinged = b.reconcile(snap=snap)
         except Exception as e:                   # noqa: BLE001 — best effort, always
             store.log_event(db, kind="reconcile_failed", error=str(e))
@@ -949,6 +989,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
               r)
         return 0
 
+    if cmd == "who-holds":
+        holders = b.who_holds(args.cap)
+        _emit(args, _who_holds_text(args.cap, holders),
+              {"cap": args.cap, "holders": holders})
+        return 0
+
     if cmd == "tell":
         ids = b.tell(args.who, args.message, me=me,
                      needs_reply=args.needs_reply, mode=args.mode)
@@ -1083,7 +1129,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the human sees everything. `--mine` still means the caller's own subtree, which
         # is narrower — the flag asks for less, and cannot ask for more.
         snap = status_mod.collect(db, h, live_only=args.live, needs_me=args.needs_me,
-                                  **_scope(b, me, args.mine))
+                                  # THIS repo's role definitions: the ROLE column reads
+                                  # divergence against the same templates the spawn seeded
+                                  # from, and a repo that redefined a bundle must not have
+                                  # its rows measured against the shipped one.
+                                  repo=b.repo, **_scope(b, me, args.mine))
         # None, not False: the flag can only ever turn collapse OFF, so with no flag the
         # answer comes from `display.show_archived` rather than from here.
         _emit(args, status_mod.render(snap, show_archived=True if args.archived else None),
@@ -1275,7 +1325,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # Refused across the tree boundary before anything is read: `inspect` is the
         # widest read in the CLI (task, transcript, events) and takes a bare name.
         b.require_same_tree(me, args.name)
-        d = status_mod.inspect(db, h, args.name, lines=args.n, events=args.events)
+        d = status_mod.inspect(db, h, args.name, lines=args.n, events=args.events,
+                               repo=b.repo)
         _emit(args, status_mod.render_detail(d), d.as_dict())
         return 0
 
