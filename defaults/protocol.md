@@ -197,9 +197,9 @@ until a child has actually finished on a branch of its own — so it is now a ro
 DELETED here rather than duplicated, which is the whole of the subtractive claim: a rule in
 both places is paid for twice and drifts apart. What did NOT move is anything an agent must
 know from turn one — identity, who reads it, why `sb block` exists — because guidance
-arrives at the turn it applies to and turn one is too late to learn who you are. The
-delegate paragraph above keeps `--isolation own` itself: choosing it is a decision the
-parent makes when it spawns, not a reminder waiting for a later state.
+arrives at the turn it applies to and turn one is too late to learn who you are. `--isolation
+own` is itself taught by a ledger rule (`isolation-at-the-spawn`) fired on `delegate` for
+agents that hold `fork`, at the one turn the choice exists — not carried in the spawn prompt.
 
 `sb presets` is named here, not just in the orchestrator role, because DESIGN-TRUTH says
 this must be known to ALL sessions and only orchestrators were told. Three verbs in one
