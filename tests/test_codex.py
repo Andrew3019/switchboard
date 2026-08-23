@@ -75,6 +75,16 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         self.assertIn(str(self.repo.resolve()), cfg["projects"])
         self.assertEqual(cfg["projects"][str(self.repo.resolve())]["trust_level"],
                          "trusted")
+        # What `workspace-write` alone does not cover, both found by running a real agent:
+        # the store is under the SHARED `.git`, which a worktree agent is not standing
+        # anywhere near, and the herdr socket is under the human's config dir — without
+        # them `sb done` cannot write and every herdr call fails PermissionDenied. Network
+        # access is off by default in this mode, which is not what `--permission-mode auto`
+        # means for a claude agent.
+        roots = cfg["sandbox_workspace_write"]["writable_roots"]
+        self.assertTrue(any(r.endswith("agentflow") for r in roots), roots)
+        self.assertTrue(any("herdr" in r for r in roots), roots)
+        self.assertTrue(cfg["sandbox_workspace_write"]["network_access"])
         # The prompt, unflattened. The single-line rule is herdr's, about ARGUMENTS, and
         # nothing on this path is one.
         text = (home / "AGENTS.md").read_text()
@@ -154,6 +164,29 @@ class RolloutTest(HomeFixture, unittest.TestCase):
         self.assertEqual(codex.newest_session_id("w1", self.repo), self.SID)
         self.assertEqual(codex.rollout_path("w1", self.SID, self.repo), p)
         self.assertIsNone(codex.rollout_path("w1", "no-such-id", self.repo))
+
+    def test_a_delivered_task_is_confirmed_from_the_agent_s_own_rollout(self):
+        """The spike found this the expensive way: a codex task that landed on the first
+        send could not be confirmed, so it was re-sent the full three times and done three
+        times over. Idempotent that time; a `git push` would not be."""
+        self.write()
+        p = self.rollout()
+        p.write_text(json.dumps(
+            {"type": "event_msg",
+             "payload": {"type": "user_message", "message": "do the thing"}}) + "\n")
+        self.assertTrue(codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
+        self.assertFalse(codex.task_arrived("w1", "some other task", since=0,
+                                            cwd=self.repo))
+
+    def test_only_a_submitted_message_counts_as_arrival(self):
+        """The same text appears again in the assistant's reply and in any shell command
+        that echoes it, and either would confirm a delivery that never happened."""
+        self.write()
+        p = self.rollout()
+        p.write_text(json.dumps(
+            {"type": "event_msg",
+             "payload": {"type": "agent_message", "message": "do the thing"}}) + "\n")
+        self.assertFalse(codex.task_arrived("w1", "do the thing", since=0, cwd=self.repo))
 
     def test_a_claude_agent_has_no_rollouts_to_find(self):
         self.assertIsNone(codex.newest_session_id("w1", self.repo))

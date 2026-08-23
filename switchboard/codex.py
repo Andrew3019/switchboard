@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections import deque
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -67,6 +68,15 @@ AUTH_FILE = config.setting("codex.auth_file")
 SANDBOX_MODE = config.setting("codex.sandbox_mode")
 APPROVAL_POLICY = config.setting("codex.approval_policy")
 HOOK_TIMEOUT = config.setting("codex.hook_timeout")
+HERDR_CONFIG_DIR = config.setting("codex.herdr_config_dir")
+
+# How much of a rollout's tail the delivery proof reads, and the slack between our clock
+# and codex's own timestamps. The same two numbers `output.py` uses for the same read and
+# for the reason given there — text submitted seconds ago is at the END of the file, and
+# this is polled twice a second against a session that may be hours long. Written here
+# rather than imported: `output` reaches `store`, and `store` reaches this module.
+_ARRIVAL_RECORDS = 50
+_CLOCK_SLOP = 5.0
 
 
 class CodexHomeError(RuntimeError):
@@ -132,7 +142,7 @@ def write_home(
     # context with no protocol at all, which is worse than not restoring it.
     if any(p and p.strip() for p in prompts):
         _write(d / "AGENTS.md", _agents_md(prompts), name)
-    _write(d / "config.toml", _config_toml(worktree, model, effort, hooks), name)
+    _write(d / "config.toml", _config_toml(worktree, model, effort, hooks, cwd), name)
     _link_auth(d)
     return d
 
@@ -182,8 +192,36 @@ def _agents_md(prompts: Sequence[str]) -> str:
     return "\n\n".join(p.strip() for p in prompts if p and p.strip()) + "\n"
 
 
+def _writable_roots(cwd: Optional[Path]) -> list[str]:
+    """The directories outside its own worktree a codex agent must be able to write to.
+
+    Two, and no more than two. Narrow on purpose: the sandbox is the only risk control
+    codex has in this mode (there is no `--ask-for-approval` analogue), so every path
+    here is one the agent genuinely cannot work without.
+
+    * The STORE — `<shared .git>/agentflow`, which holds the database, the prompt files
+      and the hook settings. An agent in a worktree is not standing anywhere near it.
+    * The herdr SOCKET's directory. Every `sb` verb that reaches another agent or the
+      board goes through the herdr binary, which talks to that socket; a denied write
+      there is an agent that can do its work and tell nobody.
+
+    Read from the environment where herdr itself put it, falling back to the documented
+    default — the same reasoning as every other fact about the binary on your PATH.
+    """
+    roots: list[str] = []
+    try:
+        from . import store
+        roots.append(str(store.store_dir(cwd)))
+    except Exception:                    # noqa: BLE001 — not in a repo; codex will say so
+        pass
+    sock = os.environ.get("HERDR_SOCKET_PATH")
+    roots.append(str(Path(sock).expanduser().parent if sock
+                     else Path(HERDR_CONFIG_DIR).expanduser()))
+    return roots
+
+
 def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional[str],
-                 hooks: Mapping[str, str]) -> str:
+                 hooks: Mapping[str, str], cwd: Optional[Path]) -> str:
     """The one file that carries everything switchboard sets per agent for Claude Code as
     flags. Every key here parses under `--strict-config` against codex-cli 0.147.0.
 
@@ -212,6 +250,30 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
     lines += [
         f"sandbox_mode = {_s(SANDBOX_MODE)}",
         f"approval_policy = {_s(APPROVAL_POLICY)}",
+        "",
+        # WHAT `workspace-write` DOES NOT COVER, and both gaps were found by running a
+        # real codex agent rather than by reading (the spike, 2026-08-22).
+        #
+        # `writable_roots` — an agent's own worktree is not where switchboard's state is.
+        # The store, the prompt files and the hook settings all live under the SHARED
+        # `.git`, which for a worktree agent is a different directory entirely, and the
+        # herdr socket is under the human's config dir. Without these, `sb done` cannot
+        # write the store and every herdr call an agent makes fails `PermissionDenied` —
+        # observed live: the report landed only because that spike's checkout happened to
+        # be under /tmp, and `pane report-agent-session` and `notification show` failed
+        # anyway. So an agent can neither be seen nor ring anyone.
+        #
+        # `network_access` — off by default in this mode, which is not what
+        # `--permission-mode auto` means for a claude agent: no `git fetch`, no `git
+        # push`, no `gh pr create`. Work that ships has a default shape and it needs the
+        # network.
+        #
+        # Both are inside the settled sandbox choice rather than a widening of it: the
+        # decision was "workspace-write, no approval prompts, matching Claude's auto
+        # posture", and without these two an agent cannot do the job that posture assumes.
+        "[sandbox_workspace_write]",
+        "writable_roots = [" + ", ".join(_s(r) for r in _writable_roots(cwd)) + "]",
+        "network_access = true",
         "",
     ]
     if worktree:
@@ -332,6 +394,64 @@ def rollout_path(name: str, session_id: str, cwd: Optional[Path] = None) -> Opti
     for p in d.rglob(f"rollout-*-{session_id}.jsonl"):
         return p
     return None
+
+
+def task_arrived(name: str, text: str, *, since: float,
+                 cwd: Optional[Path] = None) -> bool:
+    """Has `text` actually been submitted to this agent? — the codex half of the proof.
+
+    `output.task_arrived` answers this for a claude agent by scanning the transcript
+    bucket for its cwd, and answers "no" forever for a codex one, whose transcripts are
+    somewhere else entirely. Found by the spike: a task that landed on the first send and
+    was done in seconds could not be confirmed, so it was re-sent the full three times and
+    the agent did it three times over. Idempotent that time; a `git push` would not be.
+
+    Simpler than the claude scan, because the ambiguity it guards against does not exist
+    here: `delegate` shares one cwd between a parent and all its children, so THERE the
+    only thing that tells siblings apart is the text. A codex agent's rollouts are under a
+    home nothing else writes to, so anything found is this agent's — and the text is still
+    what is matched, because a rollout exists from the moment the session starts, whether
+    or not the prompt reached it.
+    """
+    d = sessions_dir(name, cwd)
+    needle = (text or "").strip()
+    if d is None or not needle:
+        return False
+    floor = since - _CLOCK_SLOP
+    for p in d.rglob("rollout-*.jsonl"):
+        try:
+            if p.stat().st_mtime < floor:
+                continue                 # untouched since the send: cheap to skip unread
+        except OSError:
+            continue
+        if _submitted(p, needle):
+            return True
+    return False
+
+
+def _submitted(path: Path, needle: str) -> bool:
+    """Does this rollout record `needle` being PUT TO the agent?
+
+    Only the `user_message` event, and that is the whole care taken here: the same text
+    appears again in the assistant's own reasoning and in any shell command that echoes
+    it, and either would confirm a delivery that never happened.
+    """
+    try:
+        with path.open(errors="replace") as fh:
+            tail = deque(fh, maxlen=_ARRIVAL_RECORDS)
+    except OSError:
+        return False
+    for line in tail:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue                     # a torn last line on a live session
+        payload = rec.get("payload") if isinstance(rec, dict) else None
+        if not isinstance(payload, dict) or payload.get("type") != "user_message":
+            continue
+        if needle in str(payload.get("message") or ""):
+            return True
+    return False
 
 
 def newest_session_id(name: str, cwd: Optional[Path] = None,

@@ -4283,9 +4283,17 @@ class Broker:
         # a hair of it — well inside `task_arrived`'s clock slop.
         sent = time.time()
         try:
+            # The proof is the child's own record of the text, whichever provider wrote
+            # it. Without the codex branch a codex task that landed on the first send
+            # cannot be confirmed at all, so it is re-sent the full three times and done
+            # three times over — found by the spike, and idempotent only by luck that
+            # time.
             self.h.deliver(
                 name, task,
-                proof=lambda since: output.task_arrived(str(where), task, since=since),
+                proof=lambda since: (
+                    codex_mod.task_arrived(name, task, since=since, cwd=self.repo)
+                    if codex_mod.is_codex_agent(name, self.repo)
+                    else output.task_arrived(str(where), task, since=since)),
             )
         except HerdrError as e:
             # UNCONFIRMED IS NOT FAILED. The proof is the child's own transcript and the

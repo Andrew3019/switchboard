@@ -705,3 +705,8 @@ approval_policy = "never"
 # settings file uses, and well over the gate's own cost (one sqlite read) — a timeout is a
 # non-blocking failure, so this only ever fails open.
 hook_timeout = 10
+
+# Where herdr keeps its socket, when the pane's own `HERDR_SOCKET_PATH` does not say.
+# A codex agent's sandbox has to be able to write to it or every `sb` verb that reaches
+# another agent — or the board — fails `PermissionDenied` while the work itself succeeds.
+herdr_config_dir = "~/.config/herdr"
