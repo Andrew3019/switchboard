@@ -1565,9 +1565,11 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn("the good one", " ".join(sections[0][1]))
 
 
-# The seam sweeps below used to run every height in `range(6, 30)`, which cost 33s of
-# pure CPU for 384 renders per test and dominated the suite. The class of bug they exist
-# to catch is an off-by-one in window arithmetic, and an off-by-one shows at a boundary:
+# The seam sweeps below used to run every height in `range(6, 30)`, 384 renders per test
+# — around 1.8s of CPU, and among the slowest things in the file. (A 33s figure was
+# measured at one point; that was contention from other work on the machine, not the
+# sweeps.) The class of bug they exist to catch is an off-by-one in window arithmetic,
+# and an off-by-one shows at a boundary:
 # the smallest pane a board will draw, the first heights either side of the point where
 # the tree stops fitting in it, and a pane far larger than its content. Everything between
 # those is the same arithmetic with different numbers. Checked rather than assumed: three

@@ -132,6 +132,11 @@ class PlansSandbox(ShippedSandbox):
         importer of it, and the discriminator is the resolved path of argv[0] — so the
         plugin still calls `_sb()`, still gets None when there is no build, still spends
         its `_Budget`, and a test that puts a DIFFERENT `sb` on that path gets a real fork.
+
+        One known divergence: `as_agent()` patches `Broker.whoami` on this process, so the
+        nested `cli.main` resolves to that agent, where a real fork would have resolved to
+        HUMAN and scoped a caller-sensitive command (`sb status`) differently. The real-fork
+        boundary test is what covers the argv the plugin builds against a real caller.
         """
         real_run = subprocess.run
 
@@ -164,7 +169,13 @@ class PlansSandbox(ShippedSandbox):
     def _sb_in_process(self, argv, cwd) -> subprocess.CompletedProcess:
         """One `sb <argv>` through `cli.main`, wearing the `CompletedProcess` the caller
         expects. Every failure is a non-zero exit and never an exception, because that is
-        what the caller would have seen from a real fork of a build that crashed."""
+        what the caller would have seen from a real fork of a build that crashed.
+
+        Two deliberate simplifications, unpinned by any assertion: `timeout=` and `stdin=`
+        are dropped rather than honoured, and ANY `cli.main` exception becomes exit 1 (which
+        the plugin renders as `unknown`) rather than the distinct failure a real fork would
+        give. Benign as things stand — of the ~305 calls this answers, ~300 exit 0 and none
+        depend on a timeout — but a test that needs either would want a real fork instead."""
         out, err, here = io.StringIO(), io.StringIO(), Path.cwd()
         if cwd:
             os.chdir(cwd)
