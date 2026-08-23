@@ -380,6 +380,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import textwrap
@@ -573,6 +574,11 @@ def register(reg):
                       help="render that one plan as markdown, for posting where a human "
                            "reads it — a PR comment. Walked, not templated: it survives "
                            "the schema changing")])
+    reg.command(
+        "comment", comment, audience="both",
+        help="create or update one plan's marked PR comment by its exact numeric id",
+        args=[reg.arg("plan", help="the plan to post, e.g. p-1"),
+              reg.arg("--pr", help="the pull request number, required")])
     reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
         args=[reg.arg("id", help="a plan id, e.g. p-1")])
@@ -1109,6 +1115,133 @@ def show(ctx, args) -> Result:
         return bad
     md = bool(getattr(args, "markdown", False))
     return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md)
+
+
+def comment(ctx, args) -> Result:
+    """Create or update this plan's one durable pull-request comment.
+
+    Identity belongs in the body because the local store may move and the command may be
+    retried. The marker is an exact, otherwise invisible line scoped to the canonical long
+    plan id. Once found, the write is against GitHub's numeric issue-comment id — never
+    against the current actor's latest comment. More than one match is refused because no
+    ordering rule can say which duplicate is authoritative without risking another comment.
+
+    The marker is added here rather than in `_comment`: `show --markdown` is a human-facing
+    rendering with an existing contract, while this command owns the external identity.
+    """
+    pr = str(getattr(args, "pr", None) or "").strip()
+    if not re.fullmatch(r"[1-9]\d*", pr):
+        return _needs("--pr", "a pull request number is required, e.g. `--pr 181`")
+
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    lib, bad = _lib([plan])
+    if bad:
+        return bad
+
+    # An issue and a pull request share GitHub's comments API. Resolve through the pulls
+    # endpoint first so `--pr 123` cannot silently post onto ordinary issue 123.
+    pull_endpoint = f"repos/{{owner}}/{{repo}}/pulls/{pr}"
+    _, bad = _github(ctx, [pull_endpoint])
+    if bad:
+        return bad
+
+    # The plan id scopes identity; the persisted random nonce makes that identity
+    # unclaimable by a comment planted before the first upsert. After creation the marker
+    # is visible in the comment source, but a copied duplicate only makes the next call
+    # refuse its multiple exact matches — it never authorizes an overwrite.
+    nonce = plan.get("pr_comment_nonce")
+    if nonce is None:
+        nonce = secrets.token_urlsafe(18)
+        plan["pr_comment_nonce"] = nonce
+        _write(ctx.state_dir, doc, seal)
+    elif not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{24}", nonce):
+        why = f"{plan['id']} has an invalid PR comment nonce; refusing to replace it"
+        return Result(ok=False, human=why, data={"error": why, "plan": plan["id"]})
+
+    number = _num(_PLAN_ID, plan.get("id"))
+    marker = f"<!-- switchboard-plan: plan-{number}:{nonce} -->"
+    rendered = _plan_result(
+        _viewed(_shown(plan, lib), _Live(ctx), tokens=True), markdown=True).human
+    body = f"{rendered.rstrip()}\n\n{marker}\n"
+    endpoint = f"repos/{{owner}}/{{repo}}/issues/{pr}/comments"
+
+    listed, bad = _github(ctx, ["--paginate", "--slurp", endpoint])
+    if bad:
+        return bad
+    try:
+        pages = json.loads(listed.stdout or "[]")
+        if pages and all(isinstance(page, list) for page in pages):
+            comments = [item for page in pages for item in page]
+        elif isinstance(pages, list):
+            comments = pages
+        else:
+            raise ValueError("comment listing is not a list")
+    except (json.JSONDecodeError, ValueError) as e:
+        why = f"GitHub returned an unreadable PR comment listing: {e}"
+        return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+
+    matches = [row for row in comments
+               if isinstance(row, dict)
+               and marker in str(row.get("body") or "").splitlines()]
+    if len(matches) > 1:
+        ids = ", ".join(str(row.get("id") or "?") for row in matches)
+        why = (f"refusing to guess: PR {pr} has {len(matches)} comments with the exact "
+               f"{marker} marker ({ids})")
+        return Result(ok=False, human=why,
+                      data={"error": why, "pr": int(pr), "plan": plan["id"],
+                            "comment_ids": [row.get("id") for row in matches]})
+
+    if matches:
+        comment_id = matches[0].get("id")
+        if not isinstance(comment_id, int) or comment_id <= 0:
+            why = f"GitHub returned a marked comment without a numeric id on PR {pr}"
+            return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+        action = "updated"
+        target = f"repos/{{owner}}/{{repo}}/issues/comments/{comment_id}"
+        changed, bad = _github(ctx, ["--method", "PATCH", target, "--input", "-"],
+                               body=body)
+    else:
+        action = "created"
+        changed, bad = _github(ctx, ["--method", "POST", endpoint, "--input", "-"],
+                               body=body)
+    if bad:
+        return bad
+    try:
+        comment_id = json.loads(changed.stdout or "{}").get("id")
+    except (json.JSONDecodeError, AttributeError):
+        comment_id = None
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        why = f"GitHub {action} the plan comment but returned no numeric comment id"
+        return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+    long_id = f"plan-{number}"
+    return Result(human=f"{action} {long_id} comment {comment_id} on PR {pr}",
+                  data={"action": action, "plan": plan["id"], "pr": int(pr),
+                        "comment_id": comment_id, "marker": marker})
+
+
+def _github(ctx, argv: list[str], *, body: Optional[str] = None):
+    """One bounded `gh api` call, returned as `(process, refusal)`.
+
+    JSON goes through stdin so a full plan is neither shell-expanded nor exposed as an
+    argument. The endpoint uses gh's repository placeholders and therefore remains scoped
+    to the checkout the plan belongs to.
+    """
+    try:
+        got = subprocess.run(["gh", "api", *argv], cwd=str(_here(ctx)),
+                             input=json.dumps({"body": body}) if body is not None else None,
+                             stdin=subprocess.DEVNULL if body is None else None,
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        why = f"could not reach GitHub through gh: {e}"
+        return None, Result(ok=False, human=why, data={"error": why})
+    if got.returncode:
+        detail = (got.stderr or got.stdout or f"exit {got.returncode}").strip()
+        why = f"gh api failed: {_flat(detail)}"
+        return got, Result(ok=False, human=why, data={"error": why})
+    return got, None
 
 
 def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:
@@ -4151,33 +4284,27 @@ def _step_lines(steps: list) -> list[str]:
     return out
 
 
-# Resolved onto the view for the code to read and for NO RENDERING TO PRINT. `anchor` is
-# the only one: a step's name, display and command are resolved for a reader, and this is
-# resolved for `_wrong`, which has to know where a step runs to tell an obligation left out
-# of the order from one the anchors ordered the other way, and which is handed a resolved
-# plan and never the catalogue.
+# Machinery the code needs and a human-facing markdown rendering does not. `anchor` is
+# resolved onto a step for `_wrong`; `pr_comment_nonce` is persisted on a plan so a retry
+# can recover the same external identity. Both remain in `--json`, the machine rendering.
 #
-# Kept out of both renderings by two different means, because they are two different
-# mechanisms. The terminal draws only what it does not already know how to draw, so this
-# joins `_DRAWN`. The markdown is WALKED and knows no field names at all — which is the
-# whole point of it — so nothing in that renderer could be taught to skip a key without
-# taking that property away; what happens instead is that the field is dropped from the
-# copy being dumped (`_dumped`), one call above it. `--json` carries it either way, since
-# that rendering is the record and a machine reader is who this field is for.
-_MACHINERY = frozenset({"anchor"})
+# Kept out of markdown by dropping these fields from the copy being dumped (`_dumped`),
+# one call above it. The underlying record and `--json` remain untouched.
+_MACHINERY = frozenset({"anchor", "pr_comment_nonce"})
 
 
 def _dumped(shown: dict) -> dict:
     """A resolved plan with the machinery taken back out, for the rendering a HUMAN reads.
 
     `show --markdown` is what `create-pr` posts onto the pull request, so what is in it is
-    what whoever turns up reads. `anchor: pr` under a step means nothing to that reader and
-    is not a fact about the job — it is how this file decided where to put the step, which
-    it did weeks earlier. Dropped from the copy rather than skipped by the renderer: see
-    `_MACHINERY`. A copy, so `data` is untouched and `--json` still means what it meant.
+    what whoever turns up reads. `anchor: pr` under a step and a plan's external-comment
+    nonce are operational details, not facts about the job. Dropped from the copy rather
+    than skipped by the renderer: see `_MACHINERY`. A copy, so `data` is untouched and
+    `--json` still means what it meant.
     """
-    return dict(shown, steps=[{k: v for k, v in s.items() if k not in _MACHINERY}
-                              for s in (shown.get("steps") or ())])
+    return dict({k: v for k, v in shown.items() if k not in _MACHINERY},
+                steps=[{k: v for k, v in s.items() if k not in _MACHINERY}
+                       for s in (shown.get("steps") or ())])
 
 
 # -- the plan as markdown ------------------------------------------------------
