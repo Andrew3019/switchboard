@@ -1414,6 +1414,42 @@ class CatalogueTest(PlansSandbox):
         """The steps as STORED, not as rendered — the difference is the whole subject."""
         return next(p for p in self._doc()["plans"] if p["id"] == plan)["steps"]
 
+    @contextlib.contextmanager
+    def github_comments(self):
+        """A PR's issue comments behind the real `gh api` argv the plugin builds.
+
+        This fakes GitHub, not sb or herdr: every plans command still crosses the normal
+        plugin dispatch and rendering path. The list response has the nested shape
+        `gh api --paginate --slurp` emits, while POST and PATCH consume the JSON stdin the
+        production command sends and return GitHub's numeric issue-comment id.
+        """
+        comments: list[dict] = []
+        next_id = 100
+        real_run = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            nonlocal next_id
+            if list(argv[:2]) != ["gh", "api"]:
+                return real_run(argv, *args, **kwargs)
+            if "--paginate" in argv:
+                stdout = json.dumps([comments])
+            else:
+                body = json.loads(kwargs["input"])["body"]
+                method = argv[argv.index("--method") + 1]
+                if method == "POST":
+                    row = {"id": next_id, "body": body}
+                    next_id += 1
+                    comments.append(row)
+                else:
+                    cid = int(str(argv[argv.index("--method") + 2]).rsplit("/", 1)[-1])
+                    row = next(row for row in comments if row["id"] == cid)
+                    row["body"] = body
+                stdout = json.dumps(row)
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        with mock.patch("subprocess.run", side_effect=run):
+            yield comments
+
     # -- a named step is a link ------------------------------------------------
 
     def test_a_named_step_links_to_its_definition_rather_than_copying_it(self):
@@ -2013,22 +2049,56 @@ class CatalogueTest(PlansSandbox):
 
     def test_the_two_shipped_pr_steps_carry_the_command_that_posts_the_plan(self):
         """The pair the field was added for: `create-pr` posts the plan as a comment and
-        `merge` rewrites THAT comment rather than adding a second one, and both commands
-        are on the steps with obvious placeholders. Pinned because the two are a pair — a
-        `merge` that lost `--edit-last` would post a second rendering of the same plan and
-        leave whoever reads the PR working out which one is current."""
+        `merge` calls the same exact-marker upsert rather than targeting an actor's latest
+        comment. Both commands stay on the steps with obvious placeholders."""
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "create-pr")
         self.data("plugin", "plans", "name-step", "p-1", "merge")
 
         shown = self.ok("plugin", "plans", "show", "p-1")
-        self.assertIn('cmd   gh pr comment <PR> --body '
-                      '"$(sb plugin plans show <PLAN> --markdown)"', shown)
-        self.assertIn('cmd   gh pr comment <PR> --edit-last --body '
-                      '"$(sb plugin plans show <PLAN> --markdown)"', shown)
+        self.assertEqual(shown.count("cmd   sb plugin plans comment <PLAN> --pr <PR>"), 2)
+        self.assertNotIn("--edit-last", shown)
         # And the library prints it under the definition read in full, beside the prose.
-        self.assertIn("command     gh pr comment <PR> --edit-last",
+        self.assertIn("command     sb plugin plans comment <PLAN> --pr <PR>",
                       self.ok("plugin", "plans", "library", "merge"))
+
+    def test_comment_updates_the_marked_id_and_leaves_a_later_comment_unchanged(self):
+        """The PR-181 sequence: the same actor writes something after the plan comment.
+
+        Updating the actor's latest comment destroyed that intervening note. The marker
+        lookup must PATCH the first comment's numeric id and leave the later body byte for
+        byte unchanged, regardless of ordering or authorship.
+        """
+        self.data(*_create("a job", "write it"))
+        marker = "<!-- switchboard-plan: plan-1 -->"
+        with self.github_comments() as comments:
+            made = self.data("plugin", "plans", "comment", "p-1", "--pr", "181")
+            self.assertEqual(made["action"], "created")
+            self.assertIn(marker, comments[0]["body"].splitlines())
+            old_plan_body = comments[0]["body"]
+
+            later_body = "## Human review\n\nLeave this comment exactly as written.\n"
+            comments.append({"id": 999, "body": later_body})
+            self.ok("plugin", "plans", "tick", "p-1/step-1")
+            changed = self.data("plugin", "plans", "comment", "plan-1", "--pr", "181")
+
+        self.assertEqual(changed["action"], "updated")
+        self.assertEqual(changed["comment_id"], made["comment_id"])
+        self.assertNotEqual(comments[0]["body"], old_plan_body)
+        self.assertEqual(comments[1]["body"], later_body)
+
+    def test_comment_upsert_is_idempotent_and_keeps_one_exact_plan_marker(self):
+        """A retry updates the one marked object; it never adds another plan rendering."""
+        self.data(*_create("a job", "write it"))
+        marker = "<!-- switchboard-plan: plan-1 -->"
+        with self.github_comments() as comments:
+            first = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
+            second = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
+
+        marked = [row for row in comments if marker in row["body"].splitlines()]
+        self.assertEqual(len(marked), 1)
+        self.assertEqual(second["action"], "updated")
+        self.assertEqual(second["comment_id"], first["comment_id"])
 
     # -- where a named step runs, which is not what it obliges ------------------
 

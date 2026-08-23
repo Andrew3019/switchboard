@@ -574,6 +574,11 @@ def register(reg):
                            "reads it — a PR comment. Walked, not templated: it survives "
                            "the schema changing")])
     reg.command(
+        "comment", comment, audience="both",
+        help="create or update one plan's marked PR comment by its exact numeric id",
+        args=[reg.arg("plan", help="the plan to post, e.g. p-1"),
+              reg.arg("--pr", help="the pull request number, required")])
+    reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
         args=[reg.arg("id", help="a plan id, e.g. p-1")])
     reg.command(
@@ -1109,6 +1114,113 @@ def show(ctx, args) -> Result:
         return bad
     md = bool(getattr(args, "markdown", False))
     return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md)
+
+
+def comment(ctx, args) -> Result:
+    """Create or update this plan's one durable pull-request comment.
+
+    Identity belongs in the body because the local store may move and the command may be
+    retried. The marker is an exact, otherwise invisible line scoped to the canonical long
+    plan id. Once found, the write is against GitHub's numeric issue-comment id — never
+    against the current actor's latest comment. More than one match is refused because no
+    ordering rule can say which duplicate is authoritative without risking another comment.
+
+    The marker is added here rather than in `_comment`: `show --markdown` is a human-facing
+    rendering with an existing contract, while this command owns the external identity.
+    """
+    pr = str(getattr(args, "pr", None) or "").strip()
+    if not re.fullmatch(r"[1-9]\d*", pr):
+        return _needs("--pr", "a pull request number is required, e.g. `--pr 181`")
+
+    doc, _ = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    lib, bad = _lib([plan])
+    if bad:
+        return bad
+
+    number = _num(_PLAN_ID, plan.get("id"))
+    marker = f"<!-- switchboard-plan: plan-{number} -->"
+    rendered = _plan_result(
+        _viewed(_shown(plan, lib), _Live(ctx), tokens=True), markdown=True).human
+    body = f"{rendered.rstrip()}\n\n{marker}\n"
+    endpoint = f"repos/{{owner}}/{{repo}}/issues/{pr}/comments"
+
+    listed, bad = _github(ctx, ["--paginate", "--slurp", endpoint])
+    if bad:
+        return bad
+    try:
+        pages = json.loads(listed.stdout or "[]")
+        if pages and all(isinstance(page, list) for page in pages):
+            comments = [item for page in pages for item in page]
+        elif isinstance(pages, list):
+            comments = pages
+        else:
+            raise ValueError("comment listing is not a list")
+    except (json.JSONDecodeError, ValueError) as e:
+        why = f"GitHub returned an unreadable PR comment listing: {e}"
+        return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+
+    matches = [row for row in comments
+               if isinstance(row, dict)
+               and marker in str(row.get("body") or "").splitlines()]
+    if len(matches) > 1:
+        ids = ", ".join(str(row.get("id") or "?") for row in matches)
+        why = (f"refusing to guess: PR {pr} has {len(matches)} comments with the exact "
+               f"{marker} marker ({ids})")
+        return Result(ok=False, human=why,
+                      data={"error": why, "pr": int(pr), "plan": plan["id"],
+                            "comment_ids": [row.get("id") for row in matches]})
+
+    if matches:
+        comment_id = matches[0].get("id")
+        if not isinstance(comment_id, int) or comment_id <= 0:
+            why = f"GitHub returned a marked comment without a numeric id on PR {pr}"
+            return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+        action = "updated"
+        target = f"repos/{{owner}}/{{repo}}/issues/comments/{comment_id}"
+        changed, bad = _github(ctx, ["--method", "PATCH", target, "--input", "-"],
+                               body=body)
+    else:
+        action = "created"
+        changed, bad = _github(ctx, ["--method", "POST", endpoint, "--input", "-"],
+                               body=body)
+    if bad:
+        return bad
+    try:
+        comment_id = json.loads(changed.stdout or "{}").get("id")
+    except (json.JSONDecodeError, AttributeError):
+        comment_id = None
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        why = f"GitHub {action} the plan comment but returned no numeric comment id"
+        return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+    long_id = f"plan-{number}"
+    return Result(human=f"{action} {long_id} comment {comment_id} on PR {pr}",
+                  data={"action": action, "plan": plan["id"], "pr": int(pr),
+                        "comment_id": comment_id, "marker": marker})
+
+
+def _github(ctx, argv: list[str], *, body: Optional[str] = None):
+    """One bounded `gh api` call, returned as `(process, refusal)`.
+
+    JSON goes through stdin so a full plan is neither shell-expanded nor exposed as an
+    argument. The endpoint uses gh's repository placeholders and therefore remains scoped
+    to the checkout the plan belongs to.
+    """
+    try:
+        got = subprocess.run(["gh", "api", *argv], cwd=str(_here(ctx)),
+                             input=json.dumps({"body": body}) if body is not None else None,
+                             stdin=subprocess.DEVNULL if body is None else None,
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        why = f"could not reach GitHub through gh: {e}"
+        return None, Result(ok=False, human=why, data={"error": why})
+    if got.returncode:
+        detail = (got.stderr or got.stdout or f"exit {got.returncode}").strip()
+        why = f"gh api failed: {_flat(detail)}"
+        return got, Result(ok=False, human=why, data={"error": why})
+    return got, None
 
 
 def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:

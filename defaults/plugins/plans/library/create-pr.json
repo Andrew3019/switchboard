@@ -2,7 +2,7 @@
   "name": "open the pull request and post the plan on it",
   "display": "open PR",
   "anchor": "pr",
-  "command": "gh pr comment <PR> --body \"$(sb plugin plans show <PLAN> --markdown)\"",
+  "command": "sb plugin plans comment <PLAN> --pr <PR>",
   "obliges": [
     "change-approval"
   ],
