@@ -232,11 +232,21 @@ RING_CLOSED = ("ring_confirmed", "ring_unconfirmed")
 # The store stamps `created_at` in whole seconds (`store.now`), so the comparison has
 # one-second granularity; a holdback smaller than a couple of seconds would be noise.
 RING_HOLDBACK = 5
+# The message kind every state mutation writes to the agents it affects (§2.1, C4): a
+# grant to its recipient, and — when D1 and F2 land on the same mechanism — a workspace
+# re-attach to the agent, a promote to each re-homed child and the grandparent. Its own
+# kind, so that the two properties it needs are structural rather than a filter somebody
+# has to remember: the envelope digest reads `done` rows and can therefore never merge a
+# state change into a count, and the tuple below is what makes its doorbell coalesce.
+#
+# It is NOT a third carve-out. A mutation signal is exempt from the DIGEST only; it rides
+# the idle-ring holdback like everything else in the held class (§2.4).
+SIGNAL = "signal"
 # The message kinds whose doorbell may be held back and coalesced — the "held ring class".
 # One class, not a `done`-only special case: a child finishing (`done`) and a child dying
 # (`failed`, written by `status._record_gone`) are the same news to a parent, arrive in
-# the same fan-out bursts, and later mutation rings (grant / promote / re-attach) join
-# this tuple rather than growing a second mechanism.
+# the same fan-out bursts, and mutation rings (`signal` — grant now, promote and re-attach
+# when D1/F2 land) join this tuple rather than growing a second mechanism.
 #
 # What is NOT here is the point. `tell` and `ask` are direct mail — somebody wrote to this
 # agent on purpose, and delaying that would be a new latency for the sake of a burst that
@@ -245,7 +255,7 @@ RING_HOLDBACK = 5
 # `--interrupt` is `mode=INTERRUPT`, which never reaches the holdback because it never
 # reaches the when-idle branch. Neither is exempted by being missing from a kind list;
 # both are exempt because they are not this shape of thing.
-HELD_RING_KINDS = ("done", "failed")
+HELD_RING_KINDS = ("done", "failed", SIGNAL)
 # The event `_ring` writes when it holds a doorbell back on the IDLE path, and the one
 # thing `_burst_still_arriving` reads to know a burst is in progress. A kind of its own
 # rather than a `reason=` on `ring_deferred` because it is queried, not just read by a
@@ -1175,9 +1185,12 @@ class Broker:
         and the cold-store bootstrap, for the gate's own fail-open reason. Intersecting
         with an empty set there would cripple every agent spawned against a fresh store.
         """
+        # THE TEMPLATE, from the one function that defines it — `status` renders
+        # divergence against the same call, and a second copy of "what a lead normally
+        # gets" is how the seed and the marker would come to disagree.
+        bundle = roles_mod.template_capabilities(self.roles, role, is_top, self.repo)
         if is_top:
-            return sorted(roles_mod.TOP_CAPABILITIES)
-        bundle = roles_mod.get(self.roles, role, self.repo).capabilities - {CAP_FORK}
+            return sorted(bundle)
         if spawner is None or self.is_top(spawner):
             return sorted(bundle)
         passable = self.passable_for(spawner)
@@ -1345,15 +1358,94 @@ class Broker:
                     f"you do not hold {cap} yourself, so it can only be passed THROUGH "
                     f"{target} to what it spawns: use `--delegable`. A capability nobody "
                     f"in the chain holds is not one this agent can be handed to use.")
-        store.grant_capability(self.db, target, cap, delegable=delegable,
-                               granted_by=me, reason=reason)
-        # PROVENANCE. The row carries `granted_by` and `reason`; the event log carries the
-        # same facts in the order they happened, which is what a person reads after a
-        # promote has moved the agent somewhere the row alone no longer explains.
-        store.log_event(self.db, kind="grant", agent=target, cap=cap,
-                        granted_by=me, delegable=delegable, reason=reason)
+        # THE GRANT AND THE SIGNAL ARE ONE TRANSACTION (§2.1, C4). The recipient's rights
+        # just changed, and a grant that committed while the message telling it about that
+        # was lost is the silent divergence the signal exists to prevent: an agent holding
+        # a capability it does not know it has does not use it, and the lead that granted
+        # it has no way to tell. So the capability row, the provenance event and the
+        # recipient's mail land together, or none of them do.
+        with store.mutation(self.db):
+            store.grant_capability(self.db, target, cap, delegable=delegable,
+                                   granted_by=me, reason=reason, commit=False)
+            # PROVENANCE. The row carries `granted_by` and `reason`; the event log carries
+            # the same facts in the order they happened, which is what a person reads
+            # after a promote has moved the agent somewhere the row alone no longer
+            # explains.
+            store.log_event(self.db, kind="grant", agent=target, cap=cap,
+                            granted_by=me, delegable=delegable, reason=reason,
+                            commit=False)
+            told = self._mutation_signals(
+                [(target, self._say("notify.granted", cap=cap, granter=me,
+                                    use=self._say("notify.granted_delegable" if delegable
+                                                  else "notify.granted_held", cap=cap),
+                                    why=(f' Reason given: "{reason}".' if reason else "")))],
+                frm=me)
+        # OUTSIDE the transaction, and it has to be: the doorbell is a herdr subprocess.
+        # The message is already durable either way — this only says "now".
+        self._ring_mutation_signals(told, frm=me)
         return {"agent": target, "cap": cap, "delegable": delegable,
                 "granted_by": me, "reason": reason}
+
+    def who_holds(self, cap: str) -> list[dict]:
+        """Who holds `cap`, project-wide. `sb who-holds`.
+
+        THE REVERSE QUERY, and it ships with the grant model rather than as later polish:
+        per-row rendering answers "what may this agent do?" and can never answer "who can
+        `fork` project-wide?" — the question somebody asks after a divergence marker
+        (§2.5) has told them a grant happened somewhere. One indexed scan over the
+        capability rows plus one over `agents`, and no tree walk at all: the audit does not
+        depend on tree shape, so a promote (F2) cannot invalidate it — which is what makes
+        it the residual audit the grant model's grant-TIME subtree check leans on.
+
+        HELD and DELEGABLE-ONLY come back apart, for the reason `--delegable` exists: a
+        pass-through holder is not somebody who can do the thing, and an audit that mixed
+        them would read as a list of writers when half of them cannot write.
+
+        A row whose `seed_capabilities` is NULL predates the substrate and has no
+        capability rows at all; its set is DERIVED at the gate (`_held_of`), so it is
+        derived here too and marked as such. Leaving it out would make the audit quietly
+        wrong on exactly the old rows nobody has looked at.
+
+        Unknown capability strings are refused rather than answered "nobody", for
+        `grant`'s reason: a typo that returns an empty list reads as an all-clear.
+        """
+        if cap not in self.known_capabilities():
+            raise ValueError(
+                f"'{cap}' is not a capability. The ones that exist: "
+                f"{', '.join(sorted(self.known_capabilities()))}.")
+        rows = {a["name"]: a for a in
+                self.db.execute("SELECT * FROM agents ORDER BY name")}
+        out = []
+        for r in store.capability_holders(self.db, cap):
+            a = rows.get(r["agent"])
+            if a is None:
+                continue                    # a capability row outliving its agent
+            out.append({
+                "agent": r["agent"],
+                "role": a["role"],
+                "state": a["state"],
+                # `held` is the bit `require_capability` reads; `delegable` is the bit
+                # ∩-seeding reads. Both, because they are independent (§2.1 obj 20).
+                "held": bool(r["held"]),
+                "delegable": bool(r["delegable"]),
+                "granted_by": _column(r, "granted_by") or None,
+                "reason": _column(r, "reason") or None,
+                "derived": False,
+            })
+        for name, a in rows.items():
+            # NOT `_column`, which collapses NULL to "": "" is a row seeded with NOTHING
+            # and NULL is a row nobody seeded, and only the second derives (`_held_of`).
+            try:
+                seeded = a["seed_capabilities"] is not None
+            except (IndexError, KeyError, TypeError):
+                seeded = False
+            if seeded or name in {o["agent"] for o in out}:
+                continue
+            if cap in self._held_of(a):
+                out.append({"agent": name, "role": a["role"], "state": a["state"],
+                            "held": True, "delegable": False, "granted_by": None,
+                            "reason": None, "derived": True})
+        return sorted(out, key=lambda o: o["agent"])
 
     def _template_caps(self) -> set:
         """Every capability named by any role template — what the top may endow.
@@ -6747,6 +6839,59 @@ class Broker:
             store.mark_undeliverable(self.db, m["id"])
             store.log_event(self.db, kind="mail_cleared", agent=who,
                             sender=m["from_agent"], body=m["body"][:EVENT_CLIP])
+
+    def _mutation_signals(self, told: Sequence[tuple[str, str]], *, frm: str) -> list[str]:
+        """One message per affected party, written INSIDE the caller's mutation (§2.1, C4).
+
+        The rule this implements is generic and this is the whole of the mechanism: every
+        state mutation tells the agents it affects, one `put_message` each, in the
+        mutation's OWN transaction. `grant` is the caller wired here; D1's workspace
+        re-attach (tells the agent) and F2's promote (tells each re-homed child AND the
+        grandparent) are the same call with a different list. A mutation that committed
+        without its signal is exactly the silent divergence the rule exists to prevent —
+        an agent whose rights or place changed and that was never told — so the rows go
+        down together or not at all (`store.mutation`).
+
+        `told` is `(recipient, body)` pairs, so a mutation affecting several parties says
+        a DIFFERENT thing to each: a promote does not tell a re-homed child what it tells
+        the grandparent. Returns the recipients, which is what the ring needs afterwards.
+
+        **It writes rows and rings nothing.** The doorbell is a herdr subprocess and
+        cannot be in the transaction — see `store.mutation`'s note and
+        `_ring_mutation_signals`, which the caller runs once the commit has happened.
+        """
+        for who, body in told:
+            store.put_message(self.db, from_agent=frm, to_agent=who, kind=SIGNAL,
+                              body=body, commit=False)
+        return [who for who, _ in told]
+
+    def _ring_mutation_signals(self, who: Sequence[str], *, frm: str) -> None:
+        """The doorbell for signals ALREADY COMMITTED — after the transaction, never in it.
+
+        `hold=True`: a mutation ring is in the held class (`HELD_RING_KINDS`) and rides
+        A1's idle-ring holdback, which is the §2.4 rule stated for this channel — a
+        promote of ten children pinging eleven parties, or several grants landing in one
+        breath, is #168 on a different wire. What coalesces is the DOORBELL; every signal
+        is whole in the mailbox and `sb inbox` reads them all.
+
+        Held UNCONDITIONALLY, where `done` asks `_burst_possible` first. The reason is
+        that `done`'s question — is a sibling still live to report? — has no counterpart
+        here: nothing in the store says whether a second grant is being typed, and a
+        capability change is not something the recipient is spinning turn-by-turn waiting
+        on, so the few seconds a held doorbell costs buys the burst case for a latency
+        nobody is watching. The wait is the ordinary one: the next `sb` command anybody in
+        the fleet runs fires it, the collector's `sb flush` is the backstop, and on a
+        quiet unwatched fleet it is a LATE doorbell and never a lost one — the message is
+        committed whole and `sb inbox` has it regardless.
+
+        The carve-outs are untouched and this path cannot reintroduce a hold on either:
+        `block` writes no message row at all, and `--interrupt` is `mode=INTERRUPT`, which
+        never reaches the when-idle branch the holdback lives on. Both stay exempt by
+        shape, not by a filter this method would have to remember.
+        """
+        for target in who:
+            self._ring(target, f"{tag(frm)} {self._say('notify.mail')}",
+                       mode=WHEN_IDLE, hold=True)
 
     def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
               answer: bool = False, repair: bool = True, hold: bool = False) -> bool:

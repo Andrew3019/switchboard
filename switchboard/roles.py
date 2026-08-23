@@ -214,3 +214,28 @@ def get(roles: dict[str, Role], name: str, repo: Optional[Path] = None) -> Role:
     base = roles.get(fallback) or Role(fallback)
     return Role(name=name, model=base.model, prompt=base.prompt,
                 capabilities=base.capabilities, tiers=base.tiers)
+
+
+def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
+                          repo: Optional[Path] = None) -> frozenset:
+    """THE BASELINE a live capability set is read against — what an agent of this role
+    would be seeded with by a spawner that bounded it by nothing.
+
+    One function because two callers must not disagree about it: `Broker.seed_for` writes
+    the seed from it, and `status.collect` renders divergence against it. If the renderer
+    kept its own copy of "what a lead normally gets", every row would drift from the truth
+    the moment either side moved.
+
+    It is the EFFECTIVE template, not the raw bundle, and the difference is the whole
+    reason this is not `Role.capabilities`: `fork` is withheld from every non-top row
+    (`seed_for` says why), so reading divergence against the raw bundle would draw `lead−`
+    on every lead in the fleet — a marker that fires on everything says nothing. The top
+    takes its fixed set (§2.0) and nothing else.
+
+    What it deliberately does NOT include is the ∩ with the spawner's passable set. That
+    narrowing is exactly what the marker exists to show: a "lead" seeded by a worker comes
+    out short of this, and the row says so.
+    """
+    if is_top:
+        return frozenset(TOP_CAPABILITIES)
+    return get(roles, name, repo).capabilities - {CAP_FORK}
