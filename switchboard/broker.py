@@ -3251,6 +3251,29 @@ class Broker:
         found = self._worktrees()
         return found[0]["path"] if found else None
 
+    def _worktree_cwd(self) -> str:
+        """Which repo a worktree call names — always this repo's PRIMARY checkout.
+
+        NOT `self.repo`: that is `Path.cwd()` taken at `__init__` (see there), i.e.
+        wherever the CALLING process happened to be standing. herdr's `create_worktree`
+        and `open_worktree` require `--cwd` to name the repo's PRIMARY workspace
+        (`herdr.py`'s "By path is the only way to reach a repo's PRIMARY checkout"), and a
+        linked worktree is refused outright: `[linked_worktree_source] New and open
+        worktree actions start from the repo parent workspace.` So passing `self.repo`
+        worked only for a caller standing in the primary checkout — in practice the top
+        orchestrator alone — and every lead one level or more down, which sits in a linked
+        worktree of its own, could not fork an isolated child at all. That contradicts
+        "any agent can get its own worktree for a job, not just the top", and it is the
+        only thing this changes: WHERE the worktree is created FROM, never who may have
+        one or what it is forked off.
+
+        `_primary_checkout` answers correctly from any worktree of the repo — the primary
+        is the first entry `git worktree list` gives, wherever it is run. Falling back to
+        `self.repo` when git will not answer at all is the old behaviour, and it is the
+        right answer in the case that used to be the only working one.
+        """
+        return self._primary_checkout() or str(self.repo)
+
     # -- the retiring mark ------------------------------------------------------------
 
     def _claim(self, name: str, me: str) -> None:
@@ -3552,7 +3575,7 @@ class Broker:
                     # still fetch at the same time and only queue for the git write.
                     with self._fork_lock():
                         r = self._call_adapter("create_worktree", branch, base=forked_from,
-                                               cwd=str(self.repo))
+                                               cwd=self._worktree_cwd())
                 else:
                     r = self._open_worktree(name, path=known, branch=branch)
                     forked_from, fallback = None, None
@@ -3754,9 +3777,10 @@ class Broker:
         # gave their own workspace — observed: opening `main` renamed "switchboard" to
         # "main". `already_open` tells us which case we are in.
         if path:
-            r = self._call_adapter("open_worktree", path=path, cwd=str(self.repo))
+            r = self._call_adapter("open_worktree", path=path, cwd=self._worktree_cwd())
         else:
-            r = self._call_adapter("open_worktree", branch=branch, cwd=str(self.repo))
+            r = self._call_adapter("open_worktree", branch=branch,
+                                   cwd=self._worktree_cwd())
         if r and not r.get("already_open"):
             wsid = (r.get("workspace") or {}).get("workspace_id") or r.get("workspace_id")
             if wsid:

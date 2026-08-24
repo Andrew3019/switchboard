@@ -17,6 +17,7 @@ built; there is nothing here to test and a stub comment at the fork rule says so
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -24,7 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import store  # noqa: E402
-from switchboard.broker import CAP_FORK, HUMAN  # noqa: E402
+from switchboard.broker import CAP_FORK, HUMAN, Broker  # noqa: E402
+from switchboard.herdr import HerdrError  # noqa: E402
 
 from test_workspace import Fixture  # noqa: E402
 
@@ -248,6 +250,87 @@ class ZeroRegressionTest(_Isolation, unittest.TestCase):
         with self.assertRaises(ForkFailed):
             self.b.delegate("t", topic="w", role="worker", me=lead, isolation="own")
         self.assertIsNone(store.get_agent(self.db, "worker-w"))
+
+
+class NonPrimaryCallerTest(_Isolation, unittest.TestCase):
+    """WHERE the worktree is created FROM — the half of `--isolation own` a live
+    shakedown found broken (`.switchboard/notes/qa-shakedown-live-fleet.md` §2).
+
+    herdr's `create_worktree`/`open_worktree` take `--cwd` to name WHICH REPO, and it
+    must be that repo's PRIMARY checkout: a linked worktree is refused outright with
+    `[linked_worktree_source] New and open worktree actions start from the repo parent
+    workspace.` The broker used to pass `self.repo`, which is `Path.cwd()` — the calling
+    process's own directory. A lead sitting in its own linked worktree (every lead below
+    the top) therefore could not fork an isolated child at all, which contradicts "any
+    agent can get its own worktree for a job, not just the top". These pin the cwd, not
+    the isolation decision: nothing here changes WHO forks or what they fork off.
+    """
+
+    def _linked(self) -> tuple[Path, Path]:
+        """A real repo plus a linked worktree of it — `git worktree list` is the only
+        thing that can tell one from the other, so the repo has to be real."""
+        main = self._git_repo()
+        wt = self.repo / "lead-checkout"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "lead-checkout", str(wt)],
+                       cwd=main, capture_output=True)
+        return main.resolve(), wt.resolve()
+
+    def _cwds(self) -> list[str]:
+        """Record the `--cwd` of every fork, without teaching the fake anything: the
+        existing adapter is wrapped, exactly as the other tests here override it."""
+        real, seen = self.h.create_worktree, []
+
+        def recording(branch, **kw):
+            seen.append(kw.get("cwd"))
+            return real(branch, **kw)
+
+        self.h.create_worktree = recording
+        return seen
+
+    def test_a_lead_in_its_own_worktree_forks_from_the_primary_checkout(self):
+        """The repro. The lead's own process stands in a linked worktree; the fork must
+        still name the repo's primary checkout. Before the fix this was the linked
+        worktree's path, which is the value herdr refuses."""
+        main, wt = self._linked()
+        lead = self._lead_with_fork(self._root())
+        theirs = Broker(self.db, self.h, repo=wt)      # the lead's OWN process
+        seen = self._cwds()
+        kid = theirs.delegate("t", topic="child", role="worker", me=lead,
+                              isolation="own")
+        self.assertTrue(self._forked(kid))
+        self.assertEqual([Path(c).resolve() for c in seen], [main])
+
+    def test_a_herdr_that_refuses_a_linked_source_now_spawns_the_child(self):
+        """The failure as herdr actually delivers it — the refusal from the shakedown,
+        raised by a stand-in that checks the cwd the way herdr does. Before the fix this
+        came back as `ForkFailed` and no child at all."""
+        main, wt = self._linked()
+        lead = self._lead_with_fork(self._root())
+        real = self.h.create_worktree
+
+        def strict(branch, **kw):
+            if Path(kw.get("cwd") or "").resolve() != main:
+                raise HerdrError("linked_worktree_source",
+                                 "New and open worktree actions start from the repo "
+                                 "parent workspace.")
+            return real(branch, **kw)
+
+        self.h.create_worktree = strict
+        theirs = Broker(self.db, self.h, repo=wt)
+        kid = theirs.delegate("t", topic="child", role="worker", me=lead,
+                              isolation="own")
+        self.assertTrue(self._forked(kid))
+        self.assertEqual(store.get_agent(self.db, kid)["branch"], kid)
+
+    def test_the_primary_checkout_caller_is_unchanged(self):
+        """No regression to the one case that always worked: a caller already standing in
+        the primary checkout still names it."""
+        main = self._git_repo().resolve()
+        lead = self._lead_with_fork(self._root())
+        theirs = Broker(self.db, self.h, repo=main)
+        seen = self._cwds()
+        theirs.delegate("t", topic="child", role="worker", me=lead, isolation="own")
+        self.assertEqual([Path(c).resolve() for c in seen], [main])
 
 
 if __name__ == "__main__":
