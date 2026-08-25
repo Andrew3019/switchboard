@@ -67,25 +67,30 @@ class Scanning(unittest.TestCase):
         finally:
             live.CWD_SCAN = keep
 
-    @unittest.skipUnless(sys.platform == "darwin", "macOS lsof — see the note below")
     @unittest.skipUnless(shutil.which("lsof"), "lsof is what this check is built on")
     def test_the_real_scan_finds_this_process_in_its_own_directory(self):
         """Run in anger, not simulated: the invocation itself, on this machine, against a
         directory something is genuinely sitting in.
 
-        macOS only, and not because the test is fussy. `lsof -F pcn` emits a four-line
-        group there (`p`/`c`/`fcwd`/`n`) and a three-line group on Linux, which `_parse`
-        rejects wholesale — so on Linux `scan` answers "could not tell" for every process
-        that exists and the gate degrades to permanently blind. That is a fact about
-        `live.CWD_SCAN`, not about this test; switchboard targets the machine herdr and
-        tmux run on, so the shape is right where it is used. Skipping here rather than
-        loosening the parser keeps the real invocation covered where it is real, and this
-        note is the record that Linux support would start with the parser.
+        `live.CWD_SCAN` asks for the fd field explicitly (`-F pcnf`): lsof >= 4.94
+        stopped emitting the `f` line unless asked, and with it the strict four-line
+        group (`p`/`c`/`fcwd`/`n`) holds on lsof 4.93 and earlier as well as on the lsof
+        >= 4.94 that Ubuntu 24.04 and Debian 12 ship — so the real invocation runs on
+        Linux too. CI's ubuntu-latest runners carry exactly the affected version, which
+        is why this test now proves the fix where it bit.
         """
         here = str(Path.cwd())
         found = live.processes_in(here)
         self.assertIsNotNone(found, "lsof answered, so this must not be 'cannot tell'")
         self.assertTrue(any(p.pid == os.getpid() for p in found))
+
+    def test_the_scan_asks_for_the_fd_field_explicitly(self):
+        """The regression that would turn CI red on lsof >= 4.94 but stay green locally
+        on lsof 4.93: without `f` in the `-F` argument, `_parse`'s strict four-line group
+        never matches there and the teardown gate degrades to permanently blind (issue
+        #172)."""
+        flag = live.CWD_SCAN[live.CWD_SCAN.index("-F") + 1]
+        self.assertIn("f", flag)
 
 
 class Containment(unittest.TestCase):

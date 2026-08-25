@@ -51,14 +51,16 @@ SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 # than open files; `+D <path>` is the expensive recursive scan of what has a directory's
 # CONTENTS open, which is a different question. `-a` ANDs the selection criteria, a no-op
 # with one criterion and the thing that stops a second one silently becoming an OR. `-F
-# pcn` is the machine-readable form: pid, command, name.
+# pcnf` is the machine-readable form: pid, command, name, and the fd field. The `f` is
+# explicit because lsof >= 4.94 stopped emitting the fd line unless asked for it, and
+# `_parse` is strict about the four-line group.
 #
 # Deliberately unfiltered and whole-machine. Scoping with `-p` to exclude the caller's own
 # tree exits 1 with empty output when the list matches nothing, which is indistinguishable
 # from a real failure — and this is the one check that must not have an ambiguous shape in
 # it. Exclusion happens in the parser, by pid. The cost of asking for everything was
 # measured: 0.23s, 0.07s, 0.06s over 328 processes.
-CWD_SCAN = ("lsof", "-a", "-d", "cwd", "-F", "pcn")
+CWD_SCAN = ("lsof", "-a", "-d", "cwd", "-F", "pcnf")
 
 
 class Proc(NamedTuple):
