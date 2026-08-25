@@ -1337,6 +1337,25 @@ class StepsTest(PlansSandbox):
                                       "--why", "the change is a typo", "--json"))
         self.assertEqual([s["id"] for s in released["data"]["next"]], ["step-2"])
 
+    def test_a_progress_word_too_long_for_its_column_still_keeps_a_gap(self):
+        """`step-4   waiting on Andrewget the intended change approved` was the render.
+
+        `progress` is an OPEN vocabulary — a hand-edit is where a word like this comes
+        from, and `waiting on Andrew` is sixteen characters against a ten-wide column — so
+        the column pads a short value and could do nothing at all about a long one, and the
+        state ran straight into the step name with nothing between them. Same defect the
+        library key column already had, and the same fix: two spaces are the floor.
+
+        Both halves are asserted, because either alone would let the other back: a long
+        word keeps its gap, and a short one still starts the name where it always did."""
+        self.plan("design", "build")
+        self.edit_step("s-1", progress="waiting on Andrew")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+
+        self.assertIn("waiting on Andrew  design", shown)
+        self.assertNotIn("waiting on Andrewdesign", shown)
+        self.assertIn("open      build", shown)
+
     def test_an_edge_is_a_field_and_show_renders_what_the_file_says(self):
         """Fan-out and join, stored as data. Nothing traverses these, waits on them or
         orders anything by them — a join waits because the lead does not start it. So the
@@ -1952,8 +1971,13 @@ class CatalogueTest(PlansSandbox):
         full = self.ok("plugin", "plans", "library", "change-approval")
         self.assertIn("obliges     review", full)
         self.assertIn("never omitted", full)
-        self.assertIn("IN YOUR OWN CHAT", full)          # the `about`, wrapped and printed
-        self.assertIn("Scope & Objectives", full)
+        # The `about`, wrapped and printed. Read back with the wrapping flattened, because
+        # what is asserted is that the prose is THERE — a phrase that lands across a line
+        # break the next sentence added to the definition moves is not a fact about the
+        # catalogue, and pinning it made an edit to the prose look like a broken renderer.
+        flat = " ".join(full.split())
+        self.assertIn("IN YOUR OWN CHAT", flat)
+        self.assertIn("Scope & Objectives", flat)
 
     def test_change_approval_declares_its_gate_in_prose_and_never_in_the_field(self):
         """The done-gate trap, pinned on the step that would spring it. A gate on a step
@@ -1964,7 +1988,12 @@ class CatalogueTest(PlansSandbox):
         The way out is the one `merge` already takes: the gate lives in the definition's
         prose, where the agent that has to block reads it, and the field stays null. What
         is asserted is both halves — no `gate` in the shipped JSON, and a ticked approval
-        step validating clean — because either alone would let the other come back."""
+        step validating clean — because either alone would let the other come back.
+
+        Both halves are about the DEFINITION and about MINT. The definition now asks the
+        plan writer to author a gate of their own on the step, and to empty it as they tick
+        — see the test below — which is a sentence about this job written by hand, and is
+        the opposite of a definition shipping one for every plan alike."""
         spec = json.loads((self.catalogue("library") / "change-approval.json").read_text())
         self.assertNotIn("gate", spec)
         self.assertIn("sb block", spec["about"])
@@ -1973,6 +2002,33 @@ class CatalogueTest(PlansSandbox):
         self.data("plugin", "plans", "name-step", "p-1", "change-approval")
         self.assertIsNone(self.steps()[0]["gate"])
         self.ok("plugin", "plans", "tick", "s-1", "--reason", "he approved it")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_change_approval_asks_for_a_gate_and_for_emptying_it_at_the_tick(self):
+        """The instruction and the thing that makes it safe to follow, in one test.
+
+        Nothing minted a gate onto an approval step and nothing asked for one, so whether a
+        plan structurally held the change for a human was planner-by-planner — two of four
+        eval plans shipped without it. The definition asks for it now. It has to ask for
+        the emptying in the same breath: this step's lifecycle is gate, answered, TICKED,
+        and a gate left on a done step is a defect, so an instruction that stopped at
+        "write the gate" would have painted every landing plan red from the approval on.
+
+        Both clauses are asserted through the CLI the plan writer reads them from, and the
+        red-then-clean pair below is why the second clause exists."""
+        about = self.ok("plugin", "plans", "library", "change-approval")
+        flat = " ".join(about.split())
+        self.assertIn("`gate` field is where that sentence goes", flat)
+        self.assertIn("EMPTY THE `gate` FIELD as you tick", flat)
+
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "change-approval")
+        self.edit_step("s-1", gate="Andrew approves the change contract for this job.")
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "he approved it")
+        self.assertIn("already done", self.ok("plugin", "plans", "validate", "p-1"))
+
+        # And the emptying the definition asks for is what clears it.
+        self.edit_step("s-1", gate=None)
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
 
     def test_a_definition_that_both_composes_and_obliges_is_refused(self):
