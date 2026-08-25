@@ -4575,7 +4575,7 @@ class Broker:
 
     def delegate(
         self,
-        task: str,
+        task: Optional[str] = None,     # omitted = spawn now, task arrives by message
         *,
         role: str = DEFAULT_ROLE,
         as_prompt: Optional[str] = None,
@@ -4595,6 +4595,20 @@ class Broker:
     ) -> str:
         me = me or self.whoami()
         self.require_capability(me, CAP_SPAWN)
+        # A TASKLESS SPAWN IS AN IDLING CHILD, not a refusal (#145). A parent that is about
+        # to be handed the real context — the human said "spawn it, I will tell it" — has
+        # only a topic to type, and while `task` was required it typed the topic AS the
+        # task; the child then read a bare topic label as an instruction and started
+        # executing it before the context arrived. So the placeholder path `sb start`
+        # already had is opened to `delegate` too: the child spawns holding an instruction
+        # to wait, and `awaiting_task` keeps that row out of STALLED until the first
+        # message clears it (`store.put_message`).
+        #
+        # Guarded on `task` being empty rather than applied unconditionally, because
+        # `_top` computes its own placeholder and passes `awaiting_task=True` alongside a
+        # non-empty `task` — running `_first_task` over that would answer False and undo it.
+        if not (task and task.strip()):
+            task, awaiting_task = self._first_task("spawn.delegate_task", None)
         if isolation not in ISOLATIONS:
             raise ValueError(
                 f"isolation is {' or '.join(ISOLATIONS)}, not {isolation!r}: `own` gives "

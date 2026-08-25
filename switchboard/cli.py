@@ -132,7 +132,16 @@ def build_parser() -> argparse.ArgumentParser:
     cmd("reconcile", hidden=True)
 
     d = cmd("delegate", help="spawn a child agent to do a task")
-    d.add_argument("task")
+    # OPTIONAL, and that is the whole of #145. A parent whose real context is still coming
+    # — the human said "spawn it, I will tell it what to do" — used to have nothing but the
+    # topic to put here, so it put the topic, and the child executed a bare topic label as
+    # if it were the instruction. Omitting it spawns the child holding `spawn.delegate_task`
+    # instead: an instruction to wait for the message, and a row `status` excuses from
+    # STALLED while it does (`Broker.delegate`, `agents.awaiting_task`).
+    d.add_argument("task", nargs="?",
+                   help="what the child is to do. Omit it ONLY when the real task is "
+                        "coming next as a message — the child spawns idle and waits "
+                        "for it instead of guessing from its --name")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
     d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
@@ -480,7 +489,11 @@ def _validate(args) -> None:
             args.model = validate.token(args.model, "--model")
 
     elif cmd == "delegate":
-        args.task = validate.line(args.task, "task")
+        # None is a taskless spawn and is legal (#145) — the broker substitutes the
+        # placeholder that tells the child to wait. Only a task that was actually typed is
+        # checked, the same shape the `start` branch above already has for the same reason.
+        if args.task is not None:
+            args.task = validate.line(args.task, "task")
         # Not slugified here: the role is also a lookup key into roles.toml, and a role
         # nobody defined is legal (roles.get falls back to worker). Only the composed agent
         # name has to satisfy herdr, and `Broker._compose_name` slugs it there.
