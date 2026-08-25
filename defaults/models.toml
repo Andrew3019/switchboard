@@ -127,6 +127,43 @@ model    = "gpt-5.6-sol"
 effort   = "medium"
 
 
+# -- the deepseek tiers --------------------------------------------------------
+#
+# The same codex BINARY as the two tiers above, pointed at a different API. `provider` is
+# still `codex` because that is what herdr starts; `codex_provider` is the new part, and
+# it names a `[codex.<name>]` section of `defaults/settings.toml` — the endpoint, the
+# wire protocol and the environment variable holding the key all live there, so a machine
+# that needs different ones changes config rather than code. `switchboard/codex.py` turns
+# that section into the `[model_providers.deepseek]` block of the agent's private
+# config.toml and selects it with `model_provider = "deepseek"`.
+#
+# ANY DeepSeek model works — the tier is where the slug is named, so adding one is adding
+# a tier, in your own `models.toml` and with no code change:
+#
+#     [tiers.deepseek-pro]
+#     provider       = "codex"
+#     codex_provider = "deepseek"
+#     model          = "deepseek-v4-pro"
+#     effort         = "high"
+#
+# Two things a spawn on these tiers needs that switchboard does not supply: `DEEPSEEK_API_KEY`
+# exported where the agent's pane can see it, and codex-cli 0.144.0 or newer (the minimum
+# DeepSeek's own model catalog declares for the v4 slugs).
+
+[tiers.deepseek]
+# A PINNED ID, for the reason the codex tiers above give at more length: there is no alias
+# vocabulary to use instead. `deepseek-v4-flash` is the cheap one and the reason this tier
+# is shipped rather than left to config — simple work, cheaply (Andrew, 2026-08-25).
+#
+# `low`, where the two gpt tiers say `medium`, and NOT as a further economy: DeepSeek's own
+# model catalog lists `low | high | max` for every v4 model and no `medium` at all, so
+# medium here would name a level the model does not have. Their default is `high`; this
+# tier exists to be cheap, so it takes the bottom of the three.
+provider       = "codex"
+codex_provider = "deepseek"
+model          = "deepseek-v4-flash"
+effort         = "low"
+
 # -- what the code can actually do ---------------------------------------------
 #
 # These two are facts about the backends switchboard has, not preferences, so a repo does

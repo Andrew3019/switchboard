@@ -171,6 +171,62 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path.readlink(link), src)
 
+    def test_an_alternate_provider_reaches_a_different_api_on_the_same_binary(self):
+        """VERIFIED LIVE, codex-cli 0.149.1 against DeepSeek: this exact file (plus the
+        key in `DEEPSEEK_API_KEY`) started `codex exec`, which reported `provider:
+        deepseek`, `model: deepseek-v4-flash`, and answered the prompt. What the test can
+        pin is the file; the run is what says the file means anything.
+
+        The plain-codex half is the regression guard and is why it is in the same test: a
+        tier that names no alternate provider must produce the file it always did, with
+        neither key in it."""
+        home = self.write(model="deepseek-v4-flash", effort="low",
+                          model_provider="deepseek")
+        cfg = self.config(home)
+        self.assertEqual(cfg["model"], "deepseek-v4-flash")
+        self.assertEqual(cfg["model_provider"], "deepseek")
+        block = cfg["model_providers"]["deepseek"]
+        # The strings, from DeepSeek's own setup script rather than a guide — `chat` and
+        # `deepseek-chat` are the dead combination, and their script rewrites the former.
+        self.assertEqual(block["base_url"], "https://api.deepseek.com/")
+        self.assertEqual(block["wire_api"], "responses")
+        self.assertEqual(block["env_key"], "DEEPSEEK_API_KEY")
+        # No `auth.json`: the provider brings its own key, and the human's ChatGPT
+        # credential on this path cost 71,648 tokens against 10,364 for the same prompt.
+        self.assertFalse((home / "auth.json").exists())
+
+        plain = self.config(self.write(name="w3"))
+        self.assertNotIn("model_provider", plain)
+        self.assertNotIn("model_providers", plain)
+
+    def test_a_repo_can_point_an_alternate_provider_somewhere_else(self):
+        """Why the endpoint is settings and not Python. The base_url and the name of the
+        environment variable holding the key are exactly what differs between one machine
+        and the next — a proxy, a second account, a self-hosted gateway — so both layer
+        like every other setting, PER KEY: overriding the URL leaves the wire protocol
+        alone rather than emptying the block."""
+        sw = self.repo / ".switchboard"
+        sw.mkdir(exist_ok=True)
+        (sw / "settings.toml").write_text(
+            '[codex.deepseek.provider]\n'
+            'base_url = "https://gateway.internal/deepseek/"\n'
+            'env_key  = "OUR_DEEPSEEK_KEY"\n')
+        cfg = self.config(self.write(model="deepseek-v4-pro", effort="high",
+                                     model_provider="deepseek"))
+        block = cfg["model_providers"]["deepseek"]
+        self.assertEqual(block["base_url"], "https://gateway.internal/deepseek/")
+        self.assertEqual(block["env_key"], "OUR_DEEPSEEK_KEY")
+        self.assertEqual(block["wire_api"], "responses")     # merged, not replaced
+        self.assertEqual(cfg["model"], "deepseek-v4-pro")    # any model, from the tier
+
+    def test_a_provider_with_no_settings_section_fails_loudly(self):
+        """The failure this replaces is a `model_provider` naming a provider codex was
+        never given a block for — an unrecognisable startup error, in a pane nobody is
+        watching, from a file the agent is told not to edit."""
+        with self.assertRaises(codex.CodexHomeError) as cm:
+            self.write(model="x", model_provider="nosuchthing")
+        self.assertIn("codex.nosuchthing.provider", str(cm.exception))
+
     def test_the_hooks_block_wires_the_events_it_is_given(self):
         home = self.write(hooks={"Stop": "/bin/gate --db /x", "UserPromptSubmit": "/bin/a"})
         cfg = self.config(home)

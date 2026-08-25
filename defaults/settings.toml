@@ -791,6 +791,68 @@ hook_timeout = 10
 # another agent — or the board — fails `PermissionDenied` while the work itself succeeds.
 herdr_config_dir = "~/.config/herdr"
 
+# -- alternate model providers -------------------------------------------------
+#
+# The `codex` BINARY speaks to more than one API, and a tier that names
+# `codex_provider = "<name>"` (see `defaults/models.toml`) routes its agent through the
+# `[codex.<name>]` section here. Two tables, and the generated per-agent config.toml is
+# where you can see what each becomes:
+#
+#     [codex.<name>.provider]   ->  the `[model_providers.<name>]` block
+#     [codex.<name>.options]    ->  top-level keys, beside `model_provider = "<name>"`
+#
+# Nothing below is written in Python, and that is the point of it being here: the endpoint
+# and the name of the environment variable holding the key are exactly the bits that
+# differ between one machine and the next, so a repo or a user may override any of them.
+# Add a provider of your own by adding `[codex.<yours>.provider]` and a tier naming it —
+# codex reserves the ids `openai`, `ollama` and `lmstudio`, and everything else is free.
+
+[codex.deepseek.provider]
+# Taken from DeepSeek's OWN Codex setup script (v1.2.0, read 2026-08-25 from
+# https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.sh) rather than from a guide,
+# because these strings have already changed once and the guides have not caught up: the
+# older `wire_api = "chat"` against `deepseek-chat` is dead, and that script now REWRITES
+# `"chat"` to `"responses"` in any config it finds, with the note that "chat" prevents
+# Codex from starting in this version.
+name     = "deepseek"
+base_url = "https://api.deepseek.com/"   # the bare endpoint — no `/v1`, no `/responses`
+wire_api = "responses"
+
+# The environment variable codex reads the key out of. An agent's pane inherits it from
+# whatever exported it (`~/.bashrc`), so switchboard neither holds it nor passes it.
+# `env_key`, and deliberately NOT DeepSeek's own `experimental_bearer_token = "sk-..."`:
+# switchboard writes one config.toml per agent per spawn, so a literal key would be a
+# credential on disk in as many copies as there are agents.
+env_key  = "DEEPSEEK_API_KEY"
+
+[codex.deepseek.options]
+# EMPTY ON PURPOSE, and the two keys that are not here are the interesting part. DeepSeek's
+# script writes `preferred_auth_method = "apikey"` and `forced_login_method = "api"` to stop
+# codex reaching for a ChatGPT credential instead of the API key. Both were tried live
+# against codex-cli 0.149.1 and neither can be shipped:
+#
+#   * `preferred_auth_method` is not a config field this version has. Switchboard spawns
+#     with `--strict-config` (see `codex.agent_args` for why), so writing it would fail
+#     every deepseek spawn at startup — "unknown configuration field".
+#   * `forced_login_method = "api"` parses, but the run it produces prints "API key login
+#     is required, but ChatGPT is currently being used. Logging out." and exits without
+#     doing the turn.
+#
+# Neither is needed, because switchboard solves the same problem one level up: a home
+# routed at an alternate provider gets NO `auth.json` symlink at all (`codex._link_auth`),
+# so there is no ChatGPT credential there to prefer. Verified end to end — `codex exec`
+# reached DeepSeek and answered.
+#
+# What this table IS for: any other top-level codex key this provider wants. The one worth
+# knowing about is `model_catalog_json`. Without it codex warns "Model metadata for
+# `deepseek-v4-flash` not found. Defaulting to fallback metadata; this can degrade
+# performance and cause issues" — the turn still works, it just runs on codex's guesses.
+# DeepSeek's setup script writes the catalog that fixes it; switchboard does not generate
+# it. If you have run their script, point codex at what it wrote (verified: the key parses
+# under `--strict-config` and the warning goes away):
+#
+#     model_catalog_json = "~/.codex/models.json"
+
 
 [config]
 # THE SELF-TUNING VOCABULARY (spec §2.4, unit E3). What `sb configure` will accept, what
