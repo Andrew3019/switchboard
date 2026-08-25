@@ -753,6 +753,75 @@ WHO WRITES TO IT
   A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
   it does not plan, own, tick or read one.
 
+SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
+
+  A planner-managed plan runs three agents, and the shape of the workflow is who spawns
+  whom. The LEAD — the worktree's owner — spawns BOTH the planner and the main agent, so
+  they are SIBLINGS under one durable parent. The planner is the fragile agent: it writes
+  the plan, hands off, and then stays open and inactive for the plan's life. Nesting it as
+  the main agent's parent would put that fragile agent in a load-bearing slot, and its death
+  would orphan the main and the completion handshake — which is exactly what happened once.
+  Siblings under a durable lead cost only an advisor when the planner dies, never the
+  structure. `sb plugin plans planner` is the planner's own instruction; this section is the
+  lead's side.
+
+  BEFORE PLANNING, SEED THE PLANNER. Spawn a fresh strong `researcher` and grant it held
+  `spawn`, so it can put up its own plan reviewer, and held `fork` only where an isolated
+  helper is actually foreseen. NEVER grant it held `write-tracked`: a planner reads and does
+  not write tracked files, and its own writes — the plan file (under `.git/agentflow`, via
+  `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither of them tracked.
+  The `reviewer` role it spawns carries no capabilities of its own.
+
+    - WHY THE SEED IS SMALL, and this is the sibling payoff. Under a nested topology the
+      planner also had to be handed `write-tracked` and everything else DELEGABLE-ONLY,
+      purely so it could pass those on when it spawned the main. Siblings delete that: the
+      lead spawns the main itself and seeds it directly, so nothing load-bearing routes
+      through the fragile agent. A delegable-only grant to a planner is now only ever about
+      the planner's OWN helpers.
+
+  SEEDING IS TWO VERBS, and neither is a flag on the other. `sb delegate --role <role>` sets
+  the child's ROLE TEMPLATE, which is the seed narrowed by the template/intersection rule;
+  `sb grant <agent> <cap>` adds anything beyond that template. There is no `delegate --grant`.
+  So "the lead seeds the main directly" is `sb delegate --role …` PLUS `sb grant …`. A
+  capability the lead cannot supply is a precondition — record it and resolve it before the
+  spawn, not at it. The chosen main role still narrows its seed by the same
+  template/intersection rule.
+
+  WHERE THE PLAN LIVES. In the one workspace the lead, the planner and the main all share —
+  the lead's. The lead spawns the main there by default. An isolated main uses the same
+  repo-state plan by qualified id (`p-<n>/step-<n>`) while the plan stays attached to that
+  workspace.
+
+  THE HANDOFF HAS TWO HALVES, because `sb delegate` only ever makes the caller's OWN child.
+
+    - The planner writes the main's brief, states the capability seed, and `sb tell parent`
+      "ready" — then stays open and inactive. It does not `sb done` and it does not spawn.
+    - The lead spawns the main as its own child — the planner's sibling — and grants the seed
+      directly.
+
+  The brief the planner writes carries the plan id, the files in and out of scope, THE
+  PLANNER'S EXACT AGENT NAME, the ownership boundary and the completion handshake; the
+  planner's instruction is the worked example for it, and the exact name is the load-bearing
+  item — under sibling it is the one address the main cannot derive.
+
+  OWNERSHIP, ON A PLANNER-MANAGED PLAN, is the split under UNLESS THE PLAN NAMES A PLANNER
+  above: the planner owns the SHAPE, the main owns EXECUTION STATE and records local
+  adjustments as notes. Material deltas go to the planner BY NAME (`sb tell <planner>`),
+  never to `parent`, which is the lead; local adjustments stay with the main.
+
+  THE COMPLETION HANDSHAKE, AND ITS FALLBACK. Before its final `done` the main sends its
+  completion candidate to the planner by name with `--needs-reply`, then ends its turn. The
+  planner checks it against the termination condition and either returns missing work or
+  clears the main to finish. But the planner may be GONE — an inactive planner once died
+  silently after handoff — and a message to a dead sibling is accepted and silently written
+  off, so the main has to notice for itself. On ANY wake with no reply the main re-checks the
+  tree (`sb status`): planner alive and slow, wait again; planner gone, route the candidate to
+  `parent` — the lead, which is structural, always live, and holds the plan file with the
+  contract and the criteria. With the planner unrecoverable the plan reverts to the ordinary
+  rule above: the worktree's owner writes the shape, recorded as a plan note. `sb restore` is
+  NOT on this path — it is what failed before, and a recovery that starts with the thing that
+  broke is not one. The same route covers a material delta to a dead planner.
+
 WHAT TO BUILD IT FROM
 
   Look before inventing — you are not expected to know what already exists:

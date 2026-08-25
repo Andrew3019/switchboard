@@ -186,28 +186,84 @@ APPROVAL
 
 HANDOFF, AND THE `done` YOU DO NOT CALL
 
-  Write the main agent a focused brief, spawn it, and hand over execution. Then STOP: you
-  do not call `sb done` after handoff. You stay open and inactive for the life of the plan
-  — that is what makes the same planner, with the original reasoning still in its context,
-  available to revise the plan later.
+  You do NOT spawn the main agent. `sb delegate` only ever makes the CALLER's own child, so
+  a main you spawned would be YOUR child — and you are the fragile agent this design keeps
+  out of a load-bearing parent slot. The main has to be your SIBLING, under the same durable
+  parent, and only that shared parent can make it. So the handoff has two halves:
 
-  Inactive means inactive. You are woken by the main agent, and until it reaches you there
-  is nothing for you to do.
+    - YOUR half. Write the main a focused brief (below) and state the capability seed it
+      needs, then `sb tell parent` — "ready: spawn the main with this brief and this seed."
+      Then STOP. You do not call `sb done` and you do not spawn.
+    - THE PARENT's half. It spawns the main as its own child — your sibling — and grants the
+      seed directly. The guide's planner-spawn section is the parent's side of this, and it
+      is where the capability seed is worked out.
+
+  Then you stay open and inactive for the life of the plan — you do not call `sb done` after
+  handoff. That is what makes the same planner, with the original reasoning still in its
+  context, available to revise the plan later.
+
+  Inactive means inactive. You are woken by the main agent (by your name) or by your parent,
+  and until one of them reaches you there is nothing for you to do.
+
+  THE BRIEF is a worked example you are writing for the main, and this instruction is a
+  worked example for it. Make it carry, as a named list, at minimum:
+
+    - the job in a sentence, and the plan id;
+    - the files in scope and the files out of scope;
+    - YOUR EXACT AGENT NAME. Under the sibling topology this is the one address the main
+      cannot derive — `sb tell parent` reaches the lead, not you — and every delta and the
+      completion candidate come back to you by that name;
+    - the ownership boundary below: what shape is yours, what execution state is the main's;
+    - what counts as a material delta versus a local adjustment;
+    - the completion handshake and its fallback (see FINISHING).
 
 REPLANNING
 
-  The main agent handles local adjustments itself and sends you a delta only when new
-  evidence materially invalidates the contract — scope, risk or execution strategy. Ordinary
-  implementation detail is not a delta.
+  The main agent handles local adjustments itself and sends you a delta — BY YOUR NAME —
+  only when new evidence materially invalidates the contract: scope, risk or execution
+  strategy. Ordinary implementation detail is not a delta.
 
   When one arrives: reread the current catalogue, the approved plan and the referenced
   evidence; revise the affected contract and the downstream steps; run review again if the
   revised planning risk warrants it; take the material change back through Andrew at the
-  same approval step, with `tries` bumped. The main agent resumes when that lands.
+  same approval step, with `tries` bumped. The SAME main agent resumes when that lands — a
+  delta reshapes the plan, never the agent running it.
 
-FINISHING
+  If you are gone when a delta is raised it cannot reach you, and the fallback below sends
+  it to the parent instead: the worktree's owner takes over the shape from there.
 
-  Before its final `done`, the main agent sends you a completion candidate and asks for a
-  reply. Check it against the plan's termination condition and the success criteria: either
-  return the work that is still missing, or clear it to finish. Its final report is what
-  wakes you to close.
+FINISHING, AND THE FALLBACK FOR WHEN YOU ARE GONE
+
+  YOUR SIDE. Before its final `done`, the main agent sends you a completion candidate — by
+  your name, with `--needs-reply` — and ends its turn. Check it against the plan's
+  termination condition and the success criteria: either return the work that is still
+  missing, or clear it to finish. Its final report is what wakes you to close.
+
+  THE MAIN's SIDE, WHICH YOU WRITE INTO ITS BRIEF, because you may not be alive to receive
+  the candidate. In Unit 3 an inactive planner died silently after handoff and the handshake
+  had nowhere to go. The sibling topology makes the recovery structural, but DETECTION stays
+  the main's own job — a message to a dead sibling is accepted and silently written off, and
+  the sender is never told. So the brief tells the main, in order:
+
+    1. Send the completion candidate to you by name with `--needs-reply`, then end the turn.
+       Close any helper first: a parent with a live child is exempt from the stall ping, so
+       a main still holding a helper open will not be woken to notice anything.
+    2. Woken with no reply, RE-CHECK THE TREE (`sb status`) — check on any wake, do not wait
+       for a ping. You alive and merely slow → end the turn again. You gone → rung 3. (The
+       moment you are collected the main's excused wait ends and switchboard stalls-and-pings
+       it, so this wake arrives on its own.)
+    3. You gone → `sb tell parent "<candidate>" --needs-reply`. That is the lead: structural,
+       always live, no name to look up and nothing that can be stale. The plan file outlives
+       you and carries the contract, the criteria and the termination condition, so the lead
+       can check them without your context.
+    4. With you unrecoverable, the plan reverts to the guide's ordinary rule — the worktree's
+       owner writes the shape for the rest of the job. Record the handover as a plan `note`;
+       do not rewrite the plan's `planner` field, and add no field and no verb.
+
+  The same route covers a MATERIAL DELTA, not just completion: a delta to a dead planner is
+  lost just as silently, and rungs 2–4 are identical.
+
+  `sb restore` IS DELIBERATELY NOT ON THIS PATH. It was the step that failed in Unit 3, and
+  a recovery whose first move is the thing that already broke is not one. Restoring you
+  remains something a human may choose; nothing in the procedure depends on it. Say that in
+  the brief, with the reason, or the next reader helpfully adds it back.
