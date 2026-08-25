@@ -195,16 +195,11 @@ the isolated case named 2026-08-23
 **How many spaces and agents are alive at once is fine as it is right now.** — confirmed
 2026-08-09
 
-**There should not be too many hard guidelines and rules.** The reconciler catching the
-general case is worth more than a rule for each one — e.g. a reply that was asked for and
-never came surfaces through the idle state, and pinging either agent or a parent is
-enough for them to notice and chase it. — confirmed 2026-08-09
-
-**A reconciler runs on a loop — maybe the same loop `sb board` runs on.** If an agent is
-idle and neither blocked nor done, it pings that agent to say it should probably report
-done or blocked, unless it is awaiting instructions. The ping goes to the agent itself
-rather than to its parent, because the agent has more context on what its true status
-is. That is how we avoid stale idle agents. — confirmed 2026-08-09
+**There should not be too many hard guidelines and rules.** Catching the general case is
+worth more than a rule for each one — e.g. a reply that was asked for and never came
+surfaces through the idle state, which is enough for it to be noticed and chased. —
+confirmed 2026-08-09, the reconciler's ping dropped out of it 2026-08-25 with the entry
+under Explicitly rejected
 
 **Agents should avoid blocking unless it is really needed** — a genuine, big,
 behaviour-changing design question; being blocked on running some command; being
@@ -828,6 +823,18 @@ decisions; this is the list of what no longer exists.*
 
 **The human inbox — 100% removed.** It is confusing, and Andrew cannot see the messages.
 — confirmed 2026-08-09
+
+**The reconciler's nudge to an agent that went quiet.** A loop pinged every agent whose
+turn had ended without `sb done` or `sb block`, telling it to report one or the other. It
+fired five times in the fleet's entire history and never once changed an outcome. Three of
+the five still have transcripts: one was pre-empted by real mail and never read at all, one
+bought a redundant re-check of work that was already running, and one added a caveat to a
+brief while leaving the agent's own state exactly where it was. A stall still surfaces — on the board, in `sb status --needs-me`, in DRIFT —
+and stays there for a person to act on; nothing speaks to the agent about it any more. What
+stays: the Stop hook, which catches the ordinary silent finish at the moment it happens,
+and the loop itself, which still confirms a dead pane and tells its parent. — confirmed
+2026-08-25, superseding the 2026-08-09 rule that a reconciler pings an idle agent that is
+neither blocked nor done
 
 **`sb ask`.** No agent waits on another agent. — confirmed 2026-08-09
 

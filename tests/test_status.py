@@ -94,8 +94,8 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(a.herdr_state, "idle")
 
     def test_a_lead_waiting_on_a_live_child_is_idle_but_not_stalled(self):
-        """The exemption the stop gate and the reconciler already apply, read one step
-        earlier so the board agrees with them: an orchestrator that ended its turn because
+        """The exemption the stop gate already applies, read one step earlier so the
+        board agrees with it: an orchestrator that ended its turn because
         the protocol told it to and is waiting to be poked is idle WITH a reason. It goes
         back to stalled the moment nothing of its own is running."""
         store.create_agent(self.db, name="lead", role="lead", session_id="s1")
@@ -396,9 +396,9 @@ class StatusTest(unittest.TestCase):
     # -- the floor under a stall, and the question that excuses one ---------
     #
     # `stalled` had no duration term in it at all: the `Stop` hook writes `turn='idle'` at
-    # the end of every turn, so an ordinary worker was stalled at ZERO seconds — pinged and
-    # put in front of a person in the instant it finished speaking. Two answers, and these
-    # pin both. Neither touches the reconciler, which still pings exactly the stalled set.
+    # the end of every turn, so an ordinary worker was stalled at ZERO seconds — put in
+    # front of a person in the instant it finished speaking. Two answers, and these pin
+    # both.
 
     def test_a_turn_that_just_ended_is_not_a_stall_yet(self):
         """The zero-second stall, and what ends it. Both halves in one, because the floor
@@ -617,8 +617,8 @@ class StatusTest(unittest.TestCase):
         """The half that matters most: a block is SUPPOSED to sit there until a human
         answers. Its pane is the only thing that separates the two, so an agent herdr still
         lists is never gone however long it waits — and never stalled either, which is what
-        would put the reconciler's "your turn ended without a report" in front of an agent
-        that stopped on purpose."""
+        would put "its turn ended without a report" on the board about an agent that
+        stopped on purpose."""
         store.create_agent(self.db, name="lead", role="lead", session_id="s1")
         store.create_agent(self.db, name="w1", role="worker", parent="lead",
                            session_id="s2")
@@ -1605,6 +1605,66 @@ class ReconcileReapsTest(unittest.TestCase):
         for _ in range(3):
             self.run_sb("flush")
         self.assertEqual(self.state_of("w1"), "working")
+
+
+class ReconcileDoesNotNudgeTest(unittest.TestCase):
+    """The nudge is gone, and this is what says so.
+
+    `sb reconcile` used to end with `Broker.reconcile`, which prompted every agent whose
+    turn had ended without `sb done` or `sb block`. DESIGN-TRUTH now rules out "The
+    reconciler's nudge to an agent that went quiet." — it fired five times in the fleet's
+    whole history and never once changed an outcome. What is left is the reap, which this fleet gives
+    nothing to do — one live, idle, silent agent, no mail, no dead pane. Before the removal
+    that agent was the nudge's exact target; now nothing in the fleet speaks to it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(cmd, cwd=self.repo, capture_output=True)
+
+        db = store.connect(self.repo)
+        # `session_id` is what says it has taken a turn at all, and the backdate is what
+        # makes its silence mean something (`STALL_GRACE`, `STALLED_FLOOR`).
+        store.create_agent(db, name="quiet", role="worker", session_id="s0",
+                           task="rewrite the parser")
+        db.execute("UPDATE agents SET created_at = ?", (store.now() - 3600,))
+        db.commit()
+        db.close()
+
+        cwd = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, cwd)
+        self.herdr = self.Recorder([alive("quiet", "idle")])
+        self.enterContext(mock.patch.object(cli_mod, "Herdr",
+                                            lambda *a, **k: self.herdr))
+
+    class Recorder(FakeHerdr):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.prompts = []
+
+        def prompt(self, who, text):
+            self.prompts.append((who, text))
+
+    def test_a_stalled_agent_is_told_nothing(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli_mod.main(["reconcile"]), 0, err.getvalue())
+        self.assertEqual(self.herdr.prompts, [])
+
+        db = store.connect(self.repo)
+        self.addCleanup(db.close)
+        # It IS stalled — the readouts still name it, which is where a stall now ends.
+        snap = status.collect(db, self.herdr, reap=False)
+        self.assertTrue({a.name for a in snap.agents if a.stalled} == {"quiet"})
+        self.assertEqual([e for e in db.execute(
+            "SELECT kind FROM events WHERE kind LIKE 'reconcile_ping%'")], [])
 
 
 class ArchivedTest(unittest.TestCase):

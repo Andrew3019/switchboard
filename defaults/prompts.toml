@@ -178,16 +178,6 @@ needs_reply = "[reply needed] The sender, {who}, is waiting for a reply to this 
 #   {name} the preset             {text} its text, already flattened
 preset = "[preset: {name}] You applied this to your own session — it is part of your instructions from here on, not something to reply to. {text}"
 
-# The reconciler (`Broker.reconcile`). Sent to an agent whose turn ended without a report,
-# and sent to the agent itself rather than its parent, because it is the one that knows
-# what its true status is (DESIGN-TRUTH).
-#
-# It names both verbs and a third way out, because the agent that gets this has already
-# ended a turn believing it was finished: told only to report done, an agent with work
-# left would report done. It also says the nudge comes once, for the reason the stop
-# hook's block reason says the same — an agent that genuinely has nothing to report should
-# not spiral trying to satisfy it.
-#   {idle} how long it has been idle, already formatted ("4m")
 # A capability grant, told to the agent that received it (`sb grant`, §2.1). Written in
 # the grant's own transaction, so this message exists exactly when the capability row does.
 #
@@ -245,5 +235,3 @@ promoted_child = "[you report somewhere else now] {who} has finished and handed 
 #   {who} the agent that promoted (whose summary this line sits under)
 #   {children} the re-homed agents, comma-separated
 promoted_to_you = "[promote] {who} handed its children up to you before finishing: {children} — reporting to you DIRECTLY from now on. Their summaries come to you, `sb cleanup` under you now reaches them, and they are still in the panes and checkouts they were already in — nothing moved but the reporting line."
-
-stalled = "[sb] Your turn ended {idle} ago without a report, so nothing in the fleet knows where you are. If you are finished, run `sb done \"<summary>\"`; if you are stuck or need a person, run `sb block \"<why>\"`; if you are neither, carry on with your task — this is asked once, not repeatedly."

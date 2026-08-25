@@ -990,11 +990,11 @@ class TheDoorbellTrigger(PanelTest):
 
 
 class TheReconcilerTrigger(PanelTest):
-    """T3 — the second trigger on the same loop (3.5).
+    """T3 — the second trigger on the same loop.
 
     Same subject as the doorbell's tests above: WHEN a process is spawned, never what it
-    then decides. Who is pinged, who is exempt and how often is `Broker.reconcile`'s, and
-    that is tested where the store is (`tests/test_broker.py`).
+    then decides. What a run does is `cli.main`'s reap, and that is tested where the store
+    is (`tests/test_status.py::ReconcileReapsTest`).
     """
 
     def setUp(self):
@@ -1025,66 +1025,55 @@ class TheReconcilerTrigger(PanelTest):
             a.gone = True
         return snap
 
-    def test_a_death_spawns_sb_reconcile_with_nobody_stalled(self):
+    def test_a_death_spawns_sb_reconcile(self):
         """`sb reconcile` is the one unattended path that reaps (`cli.main`), so a dead
-        agent has to be able to start one — otherwise the reaping waits behind a stalled
-        agent that may not exist, and a dead child is recorded only when a person runs
-        `sb status`.
+        agent has to be able to start one — otherwise a dead child is recorded only when a
+        person runs `sb status`.
 
-        Gone names are deliberately NOT held in the `reconciled` memory the way a stall is:
-        this work list empties itself the moment the row is written `failed`, and the
-        repeat inside `GONE_CONFIRM_GRACE` is the debounce — a second reap-capable reading
-        a minute after the first is what confirms the absence at all.
-        """
-        state = collector.State(pid=1, started_at=0.0)
-
-        self.assertTrue(collector.run_reconciler(self._gone("w1"), state, None))
-        self.assertEqual(self.sb_runs(), [["/bin/sb", "reconcile"]])
-        self.assertEqual(state.reconciled, [])          # not remembered, unlike a stall
-
-        state.last_reconcile -= collector.RECONCILE_GAP + 1
-        self.assertTrue(collector.run_reconciler(self._gone("w1"), state, None))
-        self.assertEqual(len(self.sb_runs()), 2)
-
-        # And once the death is recorded the row is `failed`, so it is no longer gone and
-        # the trigger goes quiet on its own.
-        state.last_reconcile -= collector.RECONCILE_SWEEP
-        self.assertFalse(collector.run_reconciler(a_snapshot("w1"), state, None))
-        self.assertEqual(len(self.sb_runs()), 2)
-
-    def test_a_stall_spawns_sb_reconcile_once_and_a_new_name_within_one_cycle(self):
-        """Three facts, one run of the trigger, because they are one behaviour.
-
-        A stall does not clear itself the way delivered mail does — the same name is
-        stalled on every tick for as long as it lasts — so without the set the trigger
-        would spawn a process every two seconds for it. A name that goes stalled *after*
-        that must still be seen on the next tick, which is the pass this item is held to.
+        Gone names are deliberately not deduped: this work list empties itself the moment
+        the row is written `failed`, and the repeat inside `GONE_CONFIRM_GRACE` is the
+        debounce — a second reap-capable reading a minute after the first is what confirms
+        the absence at all.
         """
         from switchboard import cli
         state = collector.State(pid=1, started_at=0.0)
 
-        self.assertTrue(collector.run_reconciler(self._stalled("w1"), state, None))
+        self.assertTrue(collector.run_reconciler(self._gone("w1"), state, None))
         self.assertEqual(self.sb_runs(), [["/bin/sb", "reconcile"]])
         self.assertEqual((state.reconciles, state.reconcile_error), (1, None))
         # Spawned by name, so a rename would fail silently in a thread nobody watches.
         self.assertEqual(cli.build_parser().parse_args(["reconcile"]).cmd, "reconcile")
 
-        for _ in range(3):                                        # the same stall, again
-            state.last_reconcile -= collector.RECONCILE_GAP + 1   # the floor is not it
+        state.last_reconcile -= collector.RECONCILE_GAP + 1
+        self.assertTrue(collector.run_reconciler(self._gone("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 2)
+
+    def test_a_stall_spawns_nothing_and_the_sweep_still_runs(self):
+        """DESIGN-TRUTH rules out "The reconciler's nudge to an agent that went quiet.",
+        so a stalled agent is no longer a reason to spawn anything at all — it used to be the trigger's whole
+        first half, and an unattended stall cost one process every `RECONCILE_SWEEP` for
+        the rest of the day.
+
+        What is left fires on a death and otherwise on the timer, which is the backstop for
+        a death this collector never saw.
+        """
+        state = collector.State(pid=1, started_at=0.0)
+
+        # The first tick sweeps whatever the fleet looks like: this collector has never
+        # read the store, so it has no idea what happened before it started.
+        self.assertTrue(collector.run_reconciler(a_snapshot("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 1)
+
+        # From there a stall is not a reason to spawn anything, however long it lasts.
+        for _ in range(3):
+            state.last_reconcile -= collector.RECONCILE_GAP + 1
             self.assertFalse(collector.run_reconciler(self._stalled("w1"), state, None))
         self.assertEqual(len(self.sb_runs()), 1)
 
-        state.last_reconcile -= collector.RECONCILE_SWEEP         # the sweep is
-        self.assertTrue(collector.run_reconciler(self._stalled("w1"), state, None))
-
-        state.last_reconcile -= collector.RECONCILE_GAP + 1       # and a NEW stalled name
-        self.assertTrue(collector.run_reconciler(self._stalled("w1", "w2"), state, None))
-        self.assertEqual(len(self.sb_runs()), 3)
-
-        # A fleet with nobody stalled costs nothing at all.
+        # The timer still is, and it is the only thing left that fires on a quiet fleet.
         state.last_reconcile -= collector.RECONCILE_SWEEP
-        self.assertFalse(collector.run_reconciler(a_snapshot("w1"), state, None))
-        self.assertEqual(len(self.sb_runs()), 3)
+        self.assertTrue(collector.run_reconciler(self._stalled("w1"), state, None))
+        self.assertEqual(len(self.sb_runs()), 2)
 
 
 class WhichSbTheDoorbellRuns(PanelTest):
