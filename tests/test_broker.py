@@ -2608,6 +2608,23 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"], 0)
 
+    def test_telling_a_name_nothing_knows_is_refused_before_the_doorbell(self):
+        """A typo used to be delivered TO NOBODY, at the cost of a herdr call.
+
+        `_resolve` passes an unknown name straight through and `same_tree` deliberately
+        declines to refuse it, so `tell` wrote a durable row addressed to a name that has
+        never existed and then rang `agent prompt` for it. On a machine without herdr that
+        subprocess raised `FileNotFoundError` — not a `HerdrError` — straight out of `sb`
+        as a traceback, which is how it turned up: red CI on every platform.
+        """
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        with self.assertRaises(KeyError) as cm:
+            self.b.tell(["nobdy"], "hi", me="kid")
+        self.assertIn("no such agent: nobdy", str(cm.exception))
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"], 0)
+        self.assertEqual(self.h.prompts, [])
+
     def test_a_root_agents_tell_to_parent_is_refused_too(self):
         """`parent` resolves to the human for a root agent, and the human has no mailbox."""
         store.create_agent(self.db, name="root", role="lead", pane_id="w1:p1")

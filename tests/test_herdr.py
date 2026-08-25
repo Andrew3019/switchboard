@@ -101,6 +101,21 @@ class ErrorTest(unittest.TestCase):
         fake = FakeHerdr(subprocess.CompletedProcess([], 0, "", ""))
         Herdr("herdr", runner=fake).report_state("w1:p9", "w1", "blocked", 1, verify=False)
 
+    def test_a_binary_that_is_not_there_is_a_herdr_error_not_a_traceback(self):
+        """`self.binary` falls back to a path that need not exist, so this is the state of
+        every machine with no herdr installed — CI runners included. `FileNotFoundError`
+        is an OSError and passes clean through every `except HerdrError` in the broker,
+        which is how one `sb tell` took the whole command down with a traceback."""
+        def missing(argv, *, timeout=None):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        seen = []
+        h = Herdr("/nope/herdr", runner=missing, on_event=lambda **kw: seen.append(kw))
+        with self.assertRaises(HerdrError) as cm:
+            h.prompt("w1", "hi")
+        self.assertEqual(cm.exception.code, "not_installed")
+        self.assertIn("/nope/herdr", cm.exception.message)
+        self.assertEqual(len(seen), 1)          # a call that could not run is still logged
+
     def test_every_call_is_logged_even_on_failure(self):
         seen = []
         h = Herdr("herdr", runner=FakeHerdr(err("x")), on_event=lambda **kw: seen.append(kw))

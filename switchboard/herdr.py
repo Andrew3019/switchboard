@@ -287,9 +287,26 @@ class Herdr:
         is not herdr saying no — it is herdr saying nothing, forever, while `sb` waits.
         `subprocess.run` kills the child on timeout, so the process is gone by the time
         this raises; what the caller loses is only whatever herdr had not yet reported.
+
+        A binary that is not THERE is the same class of failure and now comes out the same
+        way. `self.binary` falls back to `~/.local/bin/herdr` when nothing is on PATH, so
+        on a machine with no herdr every call in this module used to raise a bare
+        `FileNotFoundError` — an OSError, not a `HerdrError` — straight past every `except
+        HerdrError` in the broker and out of `sb` as a traceback. `check()` already has the
+        word for it, so this raises the code it would have: `not_installed`.
         """
         try:
             return self._run(argv, timeout=timeout)
+        except OSError as e:                       # missing, not executable, no such dir
+            what = " ".join(argv[1:]) or self.binary
+            if self._on_event:
+                self._on_event(kind="herdr", argv=what, ms=0, rc=-1, out="", err=str(e))
+            raise HerdrError(
+                "not_installed",
+                f"could not run `{self.binary}` ({e.strerror or e}) — herdr is not "
+                f"installed where sb looks for it, so `herdr {what}` never ran",
+                argv,
+            ) from None
         except subprocess.TimeoutExpired:
             what = " ".join(argv[1:]) or self.binary
             if self._on_event:

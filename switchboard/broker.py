@@ -5444,6 +5444,16 @@ class Broker:
                     "Use `sb block \"<why>\"` if you need an answer, or `sb done "
                     "\"<summary>\"` to report what you did."
                 )
+            # A name nothing knows is a typo, and it is refused HERE — the "whatever
+            # handled an unknown name" that `same_tree` assumes exists downstream of it,
+            # and which for `tell` never did. Unrefused, the typo wrote a durable row
+            # addressed to nobody and then rang a doorbell for it: `_ring` -> `h.prompt`,
+            # a herdr subprocess for an agent herdr has never heard of, and the row left
+            # undelivered for `flush_pending` to re-ring on every `sb` command anybody
+            # runs, for ever. Same words and same shape as `grant`'s refusal, because it
+            # is the same mistake.
+            if store.get_agent(self.db, t) is None:
+                raise KeyError(f"no such agent: {t}")
             # The tree boundary. Checked after `_resolve`, so `parent` cannot smuggle a
             # name past it, and before anything is written: a refused message must leave
             # no row, or the recipient's tree gains a message from outside it that only
