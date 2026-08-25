@@ -95,6 +95,20 @@ class ParseSgrTest(unittest.TestCase):
         self.assertTrue(board.is_left_click(events[0]))
         self.assertEqual(rest, "")
 
+    def test_an_arrow_key_arrives_now_and_not_on_the_next_keypress(self):
+        """A cursor key IS an escape sequence, and the leftover rule used to hold
+        everything from the last ESC onwards for the next read. So `↑` did nothing until
+        the human pressed something else, and then did two things at once."""
+        events, rest = board.parse_sgr("\033[A")
+        self.assertEqual(rest, "")
+        self.assertEqual(board.arrows(events[0]), ["up"])
+        # And the thing that rule was written for still holds: half a mouse report is
+        # held, because the next read is what completes it.
+        self.assertEqual(board.parse_sgr("\033[<0;12"), ([], "\033[<0;12"))
+        for partial in ("\033", "\033[", "\033[<"):
+            with self.subTest(partial=partial):
+                self.assertEqual(board.parse_sgr(partial), ([], partial))
+
     def test_keystrokes_survive_alongside_mouse_events(self):
         events, _ = board.parse_sgr("q\033[<0;1;1M")
         self.assertEqual(events[0]["raw"], "q")
@@ -1633,10 +1647,11 @@ class SeamWindowTest(unittest.TestCase):
     def test_a_section_never_pushes_the_frame_past_the_bottom_of_the_pane(self):
         """The same sweep for the other placement, which has its own arithmetic.
 
-        A section is sized before the tree is windowed and is the FIRST thing to give its
-        lines back, so the two things that could go wrong are opposite: a frame taller
-        than the pane, and a board that spent its last line on a heading instead of an
-        agent. Both are checked here, at every height a pane can be.
+        A section gets a SHARE of the pane rather than the tree's leftovers
+        (`board.split_panels`), and gives it all back on a pane too short to hold both, so
+        the two things that could go wrong are opposite: a frame taller than the pane, and
+        a board that spent its last line on a heading instead of an agent. Both are
+        checked here, at every height a pane can be.
 
         Where `rich` is not installed the plain half is the whole test, exactly as in the
         sweep above — see `HAVE_RICH` at the top of the file.
@@ -1704,6 +1719,209 @@ class SeamWindowTest(unittest.TestCase):
                     + (1 if last < len(costs) else 0)
                 with self.subTest(room=room, top=top):
                     self.assertLessEqual(spent, room)
+
+
+class PanelSplitTest(unittest.TestCase):
+    """Two panels, one pane: the tree's floor and the section's own scroll.
+
+    The board used to size a plugin's section first and give the tree what was left, which
+    on a worktree carrying a dozen plans left ONE agent row — and cut the plans off at the
+    bottom of the pane anyway, so the squeeze bought nobody anything. What is pinned here
+    is the deal that replaced it: the tree keeps a floor, the section takes a share and
+    scrolls inside it, and a wheel can tell which of the two it is over.
+    """
+
+    def deep(self, n):
+        """A plugin section `n` lines tall — `SeamWindowTest.deep`, and the same shape."""
+        return mock.patch.object(
+            board, "section_extras",
+            return_value=[("PLANS", [f"plan line {i}" for i in range(n)])] if n else [])
+
+    FLEET = snap(agent("top"), agent("alpha", depth=1, parent="top"),
+                 agent("beta", depth=1, parent="top"))
+
+    def drawn(self, rows):
+        """Every line as plain text, with the owner that would answer a click on it."""
+        return [(board._ANSI.sub("", str(t)), o) for t, o in rows]
+
+    def test_the_tree_keeps_its_floor_however_much_a_plugin_has_to_say(self):
+        """Three agents and forty lines of plans: the AGENTS panel is still ten lines, and
+        the plans get the rest rather than the whole pane."""
+        room, section = board.split_panels(30, 3, 40)
+        self.assertEqual(room, board.MIN_AGENTS)
+        self.assertEqual(section, 30 - board.MIN_AGENTS)
+        # And a fleet bigger than the floor is not held down to it: twenty-five agents
+        # against three lines of plans is 25/3, not half each. What neither panel asked
+        # for stays slack — blank is blank wherever it is drawn.
+        self.assertEqual(board.split_panels(30, 25, 3), (25, 3))
+
+    def test_a_pane_too_short_for_both_hands_the_section_back_whole(self):
+        """Half a flowchart is not a smaller picture, and a heading over nothing is not a
+        section. Below the floor plus `SECTION_MIN` there is nothing to divide."""
+        for avail in range(1, board.MIN_AGENTS + board.SECTION_MIN):
+            with self.subTest(avail=avail):
+                self.assertEqual(board.split_panels(avail, 3, 40), (avail, 0))
+        self.assertEqual(board.split_panels(board.MIN_AGENTS + board.SECTION_MIN, 3, 40),
+                         (board.MIN_AGENTS, board.SECTION_MIN))
+
+    def test_the_section_window_clamps_to_the_last_full_screenful(self):
+        """Scrolled past the end, the panel is still full — and it pays for the lines that
+        say there is more, so what it draws plus those never exceeds the room."""
+        n, room = 40, 10
+        for top in (0, 1, 7, 999):
+            first, last = board.section_window(n, top, room)
+            spent = (last - first) + (1 if first else 0) + (1 if last < n else 0)
+            with self.subTest(top=top):
+                self.assertLessEqual(spent, room)
+                self.assertEqual(spent, room)         # a full panel, never a ragged one
+        self.assertEqual(board.section_window(n, 999, room)[1], n)
+        self.assertEqual(board.section_window(4, 999, room), (0, 4))   # it all fits
+
+    def test_each_panel_scrolls_without_moving_the_other(self):
+        """THE WHOLE POINT. A wheel over the plans moves the plans and leaves the tree
+        exactly where it was, and a wheel over the tree does the reverse. Both renderers,
+        because a human on a machine without `rich` is reading the same fleet."""
+        for name, draw in (("plain", board.layout),
+                           *((("rich", richboard.layout),) if HAVE_RICH else ())):
+            with self.subTest(renderer=name), self.deep(40):
+                at_top = self.drawn(draw(self.FLEET, top=0, height=30, width=100, msg=""))
+                moved = self.drawn(draw(self.FLEET, top=0, height=30, width=100, msg="",
+                                        section_top=8))
+                tree = [t for t, o in at_top if o and o is not board.SECTION_ZONE]
+                self.assertEqual(
+                    tree, [t for t, o in moved if o and o is not board.SECTION_ZONE],
+                    "scrolling the plans moved the tree")
+                before = [t for t, o in at_top if o is board.SECTION_ZONE]
+                after = [t for t, o in moved if o is board.SECTION_ZONE]
+                self.assertTrue(before and after)
+                self.assertNotEqual(before, after, "the plans did not scroll")
+                self.assertTrue(any("above" in t for t in after),
+                                "a scrolled section does not say what is above it")
+
+    def test_a_section_line_carries_the_section_and_a_click_on_it_still_misses(self):
+        """The owner is what tells a wheel which panel it is over — and it is FALSE, so
+        every caller that asks `if a` for an agent sees exactly what it saw before."""
+        with self.deep(40):
+            rows = board.layout(self.FLEET, top=0, height=30, width=100, msg="")
+        section = [i for i, (_, o) in enumerate(rows, 1) if o is board.SECTION_ZONE]
+        self.assertTrue(section)
+        for i in section:
+            self.assertIs(board.agent_at(rows, i), board.SECTION_ZONE)
+            self.assertFalse(board.agent_at(rows, i))       # `focus` is never called on it
+
+
+class ArrowKeysTest(unittest.TestCase):
+    """The second highlight and what RETURN does with it.
+
+    UP and DOWN move a mark down the tree, RETURN acts on the row it is over, and the mark
+    stands for `CURSOR_HOLD` seconds. What is pinned here is the walk and the decode: the
+    highlight's two COLOURS are `tests/test_richboard.py`'s, which is where the look of a
+    row is pinned.
+    """
+
+    FLEET = snap(agent("top"), agent("alpha", depth=1, parent="top"),
+                 agent("beta", depth=1, parent="top"))
+
+    def rows(self, **kw):
+        return board.layout(self.FLEET, top=0, height=24, width=100, msg="", **kw)
+
+    def names(self, s=None):
+        """The tree's display rows, which is what the cursor walks."""
+        return [a.name for a in status.board_rows((s or self.FLEET).agents,
+                                                  show_archived=False)]
+
+    def test_a_held_key_is_read_as_many_presses_and_not_as_one(self):
+        """One `os.read` can carry a key several times over; a board that acted on one of
+        them would crawl behind the finger holding it down."""
+        [ev], _ = board.parse_sgr("\033[B\033[B\033[A")
+        self.assertEqual(board.arrows(ev), ["down", "down", "up"])
+        # Application mode sends `ESC O A` for the same key. The board never asks for
+        # either mode, so it reads both.
+        [alt], _ = board.parse_sgr("\033OD")
+        self.assertEqual(board.arrows(alt), ["left"])
+        [ret], _ = board.parse_sgr("\r")
+        self.assertTrue(board.entered(ret))
+        self.assertFalse(board.entered(ev))
+
+    def test_the_cursor_walks_the_tree_and_stops_at_the_ends(self):
+        names = self.names()
+        self.assertEqual(board.step_cursor(names, None, 1), "top")
+        self.assertEqual(board.step_cursor(names, "top", 1), "alpha")
+        self.assertEqual(board.step_cursor(names, "alpha", -1), "top")
+        # No wrapping: one keypress may not move the pane the whole way across a fleet.
+        self.assertEqual(board.step_cursor(names, "top", -1), "top")
+        self.assertEqual(board.step_cursor(names, "beta", 1), "beta")
+        # A name that is no longer in the tree starts over from the end the key came from.
+        self.assertEqual(board.step_cursor(names, "gone-agent", 1), "top")
+        self.assertEqual(board.step_cursor(names, "gone-agent", -1), "beta")
+        self.assertIsNone(board.step_cursor([], None, 1))
+
+    def test_it_walks_rows_the_window_is_too_short_to_draw(self):
+        """The cursor walks the TREE and the window follows it. Walking only what is drawn
+        would stop the cursor at the bottom of the pane while the tree scrolled under it —
+        `main` reads "this row is not drawn" as "scroll", and needs a row to read it of."""
+        s = snap(agent("top"), *[agent(f"k{i}", depth=1, parent="top") for i in range(9)])
+        short = board.layout(s, top=0, height=board.CHROME + 4, width=100, msg="")
+        drawn = board.drawn_names(short)
+        self.assertNotIn("k8", drawn)                    # the window really is too short
+        walk, seen = [], None
+        for _ in range(10):
+            seen = board.step_cursor(self.names(s), seen, 1)
+            walk.append(seen)
+        self.assertEqual(walk[-1], "k8")
+        self.assertEqual(len(set(walk)), 10)             # every row, once, in order
+
+    def test_the_cursor_is_drawn_where_a_renderer_without_backgrounds_can_show_it(self):
+        """RETURN acts on this mark, so a board that cannot draw a wash still has to say
+        where it is — a `▸` in the column the other renderer draws its gutter in, which
+        costs no width and moves no name."""
+        plain = [board._ANSI.sub("", t) for t, _ in self.rows(cursor="beta")]
+        marked = [x for x in plain if x.startswith("\u25b8")]
+        self.assertEqual(len(marked), 1)
+        self.assertIn("beta", marked[0])
+        # And the row is the same width as it was without it.
+        was = {len(x) for x in (board._ANSI.sub("", t) for t, _ in self.rows())
+               if "beta" in x}
+        self.assertEqual({len(marked[0])}, was)
+
+
+class PanTest(unittest.TestCase):
+    """LEFT and RIGHT, which move a plugin's text and nothing else."""
+
+    WIDE = "step-1 ──▶ step-2 ──▶ step-3 ──▶ step-4 ──▶ step-5 ──▶ step-6 ──▶ step-7"
+
+    def test_columns_go_and_colour_stays(self):
+        """A plugin may colour its own words (`_colour_only`), so a pan cannot be a slice:
+        cutting the string would drop the sequence that opened the colour still in force,
+        or cut one in half."""
+        self.assertEqual(board.pan_columns("\033[32mgreen\033[0m tail", 6),
+                         "\033[32m\033[0mtail")
+        self.assertEqual(board.pan_columns("abcdef", 2), "cdef")
+        self.assertEqual(board.pan_columns("abc", 0), "abc")
+        self.assertEqual(board.pan_columns("abc", 99), "")
+        # Columns, not characters: a wide glyph costs two.
+        self.assertEqual(board.pan_columns("日本語", 2), "本語")
+
+    def test_a_pan_moves_the_plugin_s_text_and_leaves_the_tree_alone(self):
+        """Both renderers, because the tail that gets cut off is cut off on both."""
+        s = snap(agent("solo"))
+        section = mock.patch.object(board, "section_extras",
+                                    return_value=[("PLANS", [self.WIDE])])
+        for name, draw in (("plain", board.layout),
+                           *((("rich", richboard.layout),) if HAVE_RICH else ())):
+            with self.subTest(renderer=name), section:
+                def lines(pan):
+                    return [board._ANSI.sub("", str(t)) for t, _ in
+                            draw(s, top=0, height=24, width=60, msg="", pan=pan)]
+                before, after = lines(0), lines(24)
+                self.assertTrue(any("step-1" in x for x in before))
+                self.assertFalse(any("step-7" in x for x in before), "nothing was cut off")
+                self.assertTrue(any("step-7" in x for x in after), "the tail never arrived")
+                # The agent row and the heading do not move: a name panned off the screen
+                # would be fixing a problem the names do not have, and a panel whose own
+                # name has scrolled away is a panel you cannot identify.
+                self.assertEqual([x for x in before if "solo" in x or "PLANS" in x],
+                                 [x for x in after if "solo" in x or "PLANS" in x])
 
 
 class SeamPathsTest(unittest.TestCase):

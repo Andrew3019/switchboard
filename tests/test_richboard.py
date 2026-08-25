@@ -63,9 +63,11 @@ STATS = {"turns_last_hour": 47, "spawns_last_hour": 6, "messages_last_hour": 3,
          "processes": 9, "cpu_cores": 10, "proc_age": 1.0}
 
 
-def frame(s, *, top=0, height=20, width=80, msg="", note_text="", here=None, stats=None):
+def frame(s, *, top=0, height=20, width=80, msg="", note_text="", here=None, stats=None,
+          cursor=None):
     rows = richboard.layout(s, top=top, height=height, width=width, msg=msg,
-                            note_text=note_text, show_archived=False, here=here, stats=stats)
+                            note_text=note_text, show_archived=False, here=here,
+                            stats=stats, cursor=cursor)
     assert rows is not None, "the rich renderer declined this frame"
     return rows
 
@@ -207,7 +209,7 @@ class FooterTest(unittest.TestCase):
         # They used to: the separator was built into the piece, and `board._clip` flattens
         # whitespace, so it never reached the screen — "40s oldclick a row to focus it".
         line = self._footer_line(note_text="snapshot is 40s old")
-        self.assertIn("snapshot is 40s old · click a row to focus it", line)
+        self.assertIn("snapshot is 40s old · " + board.KEYS.split(" · ")[0], line)
 
     def test_a_narrow_footer_still_fits_its_pane_exactly(self):
         # The no-wrap invariant: the separator is width like anything else, and a pane too
@@ -534,3 +536,30 @@ class HighlightTest(unittest.TestCase):
         # 2 columns of border and 2 of padding — the width `_bar` fills, so the mark ends
         # where the header and NEEDS YOU bars end and the panel stays rectangular.
         self.assertEqual(sorted(n for n, _ in owned), ["alpha", "gamma", "gamma", "top"])
+
+    def _colours(self, text: str) -> set:
+        """The background colours this line is drawn on."""
+        return {m for m in re.findall(r"48;5;\d+|48;2;[\d;]+", text)}
+
+    def test_the_arrow_key_cursor_is_a_second_mark_in_a_second_colour(self):
+        """Two highlights answering two questions — where the human's pane is, and which
+        row RETURN would act on — must not be the same colour, or they are one mark that
+        moved. Both reach the end of the row, for this class's reason."""
+        width = 72
+        rows = frame(self.FLEET, width=width, height=16, here="alpha", cursor="gamma")
+        washed = {o.name: self._washed(t) for t, o in rows if o is not None and
+                  self._washed(t)}
+        self.assertEqual(washed, {"alpha": width - 4, "gamma": width - 4})
+        seen = {o.name: self._colours(t) for t, o in rows
+                if o is not None and self._washed(t)}
+        self.assertTrue(seen["alpha"] and seen["gamma"])
+        self.assertNotEqual(seen["alpha"], seen["gamma"])
+
+    def test_the_cursor_outranks_you_are_here_on_one_row(self):
+        """One row cannot carry two backgrounds. The one a keypress is about to act on is
+        the one that shows."""
+        rows = frame(self.FLEET, width=72, height=16, here="gamma", cursor="gamma")
+        lit = [self._colours(t) for t, o in rows if o is not None and self._washed(t)]
+        alone = frame(self.FLEET, width=72, height=16, cursor="gamma")
+        want = [self._colours(t) for t, o in alone if o is not None and self._washed(t)]
+        self.assertEqual(lit, want)
