@@ -301,6 +301,45 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.started[0]["model_args"],
                          ["--model", "opus", "--effort", "high"])
 
+    def test_a_codex_tier_is_inherited_by_a_child_that_names_none(self):
+        """A DeepSeek agent's whole subtree runs on DeepSeek, without anyone retyping it.
+
+        The caller's own `--model` is on its row (`agents.tier`); a spawn that names no
+        tier of its own takes it, and records it again — which is what carries the pin to
+        the grandchildren.
+        """
+        # A real repo, because a codex spawn writes its `CODEX_HOME` under the store dir
+        # and the store dir is found from the shared `.git` — the one thing this spawn
+        # needs from disk that a claude one does not.
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.repo,
+                       capture_output=True)
+        store.create_agent(self.db, name="ds", role="lead", tier="deepseek",
+                           cwd=str(self.repo))
+        name = self.b.delegate("t", topic="t", role="worker", me="ds")
+        self.assertEqual(self.h.started[0]["provider"], "codex")
+        self.assertEqual(self.h.started[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(store.get_agent(self.db, name)["tier"], "deepseek")
+
+    def test_a_claude_tier_is_not_inherited(self):
+        """Only `codex_provider` tiers are sticky. A claude tier says which model to think
+        with, and a child still gets its own role's — the behaviour before the codex tiers
+        existed, deliberately unchanged."""
+        store.create_agent(self.db, name="boss", role="lead", tier="strong",
+                           cwd=str(self.repo))
+        name = self.b.delegate("t", topic="t", role="researcher", me="boss")
+        self.assertEqual(self.h.started[0]["model_args"],
+                         ["--model", "sonnet", "--effort", "medium"])   # researcher's own
+        self.assertIsNone(store.get_agent(self.db, name)["tier"])
+
+    def test_an_explicit_model_beats_an_inherited_codex_tier(self):
+        """Inheritance is a default, not an override: what the caller TYPED still wins."""
+        store.create_agent(self.db, name="ds", role="lead", tier="deepseek",
+                           cwd=str(self.repo))
+        name = self.b.delegate("t", topic="t", role="worker", model="strong", me="ds")
+        self.assertEqual(self.h.started[0]["model_args"],
+                         ["--model", "opus", "--effort", "high"])
+        self.assertEqual(store.get_agent(self.db, name)["tier"], "strong")
+
     def test_a_spawn_names_its_agent_in_its_pane_s_environment(self):
         """`SB_AGENT` for EVERY agent, whatever the provider, and before `agent start`
         types the provider's command line into that shell.
