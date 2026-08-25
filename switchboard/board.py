@@ -2854,9 +2854,18 @@ def main() -> int:
         snap, note_text, stats = refresh(sup)
         where.tick()
         here = where.name(snap.agents)
-        rows = draw(snap, top, msg, note_text, show_archived, here, stats,
-                    openable=reports.tick(here), section_top=section_top,
-                    cursor=cursor, pan=pan)
+        def paint():
+            """This board, as it now stands. THE ONLY PLACE THE FRAME IS DRAWN.
+
+            A closure over the loop's own variables rather than nine arguments repeated
+            at three call sites: the arrow keys added a third, and a call site that
+            forgets one of them is a board that draws yesterday's cursor.
+            """
+            return draw(snap, top, msg, note_text, show_archived, here, stats,
+                        openable=reports.tick(here), section_top=section_top,
+                        cursor=cursor, pan=pan)
+
+        rows = paint()
         last = time.time()
 
         while True:
@@ -2893,13 +2902,30 @@ def main() -> int:
                                 [a.name for a in status_mod.board_rows(
                                     snap.agents, show_archived=show_archived)],
                                 cursor, step)
-                            if moved is not None and moved not in drawn_names(rows):
-                                # The cursor walked off the window: bring the window with
-                                # it. One row at a time and in the direction the key went,
-                                # so a held-down arrow scrolls the tree at the speed it
-                                # walks it.
-                                top = scroll(top, step)
                             cursor, cursor_at = moved, time.monotonic()
+                            # The cursor walked off the window: bring the window with it,
+                            # in the direction the key went, UNTIL THE ROW IS ON SCREEN.
+                            # Not one row per press: a window that has something above it
+                            # and something below it spends two of its lines saying so, so
+                            # a fixed step of one never catches a cursor that has just
+                            # crossed the edge — it trails it forever, one row down.
+                            #
+                            # REDRAWN INSIDE THE LOOP, and that is the part that is not
+                            # optional. One terminal read carries a whole burst of a
+                            # held-down key, so without this every press in the burst
+                            # would ask the same stale frame whether the row it landed on
+                            # is drawn, and the walk would outrun the window.
+                            #
+                            # Terminates: `top` strictly changes every turn and `scroll`
+                            # bounds it, and a `top` that will not move is the other way
+                            # out. Costs a frame per turn, which is what the board draws
+                            # twice a second anyway.
+                            while moved is not None and moved not in drawn_names(rows):
+                                was = top
+                                top = scroll(top, step)
+                                if top == was:
+                                    break
+                                rows = paint()
                         if entered(ev) and cursor:
                             # EXACTLY WHAT A CLICK ON THAT ROW DOES, and it says so with
                             # the same status line. The cursor is spent by it: the offer
@@ -2984,9 +3010,7 @@ def main() -> int:
                 # agent that is restored, renamed away, or dropped from the snapshot stops
                 # or starts being highlighted on the next frame, with no subprocess in it.
                 here = where.name(snap.agents)
-                rows = draw(snap, top, msg, note_text, show_archived, here, stats,
-                            openable=reports.tick(here), section_top=section_top,
-                            cursor=cursor, pan=pan)
+                rows = paint()
                 dirty[0] = False
     except KeyboardInterrupt:
         pass
