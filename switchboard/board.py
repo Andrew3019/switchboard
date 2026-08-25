@@ -1404,12 +1404,13 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # and what it does not need goes to the section, which scrolls inside whatever it got
     # rather than running off the bottom of the pane.
     capacity, section_room = split_panels(height - CHROME, sum(costs), len(section))
-    # WHO GIVES LINES BACK FIRST, on a pane too short for all of it: the plugin section,
-    # then the fleet's numbers, and the tree never. A section under the tree is the most
-    # decorative thing on this screen and the only one a human can get in full with one
-    # command; the board is the tree, and a board with no agent row on it has stopped
-    # being the thing anybody opened. `split_panels` makes the first of those calls; the
-    # numbers are this renderer's own, and are still charged in `CHROME` until they go.
+    # AND THEN THE NUMBERS, on a pane too short even for what came back from that. The
+    # section has already given its lines up by here — `split_panels` hands them over
+    # whole on a pane that cannot hold a tree and a section at once — so what is left to
+    # give is the fleet's statistics, and after them nothing: the board is the tree, and a
+    # board with no agent row on it has stopped being the thing anybody opened. The
+    # numbers are still charged in `CHROME` until they go, which is why this adds them
+    # back rather than subtracting them.
     if capacity < 1:
         capacity += len(top_lines)
         top_lines = []
