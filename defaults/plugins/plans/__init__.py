@@ -390,6 +390,14 @@ from typing import Any, Optional
 
 from switchboard.plugins import Result
 
+
+# This file, rather than a parallel Python structure, is the single contract for the
+# advisory strategy a step may carry. The validator below deliberately understands only
+# the small vocabulary used by this schema; it is not a general JSON Schema engine.
+_STRATEGY_SCHEMA = json.loads(
+    (Path(__file__).resolve().parent / "strategy.schema.json").read_text(encoding="utf-8")
+)
+
 API = 1
 VERSION = "1.0.0"
 SCOPE = "repo"
@@ -2779,6 +2787,10 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
     waited = {_num(_STEP_ID, d) for s in here_steps for d in (s.get("deps") or ())}
     for step in here_steps:
         sid = str(step.get("id") or "?")
+        if "strategy" in step:
+            out.extend((sid, problem)
+                       for problem in _schema_problems(step["strategy"], _STRATEGY_SCHEMA,
+                                                       "strategy"))
         # THE EDGE THAT NAMES NOTHING, which was `dep`'s one refusal and is now the file's.
         # An edge whose target is not in this plan renders as a wait nobody is ever
         # released from, and a self-edge as a step waiting for itself; neither is a shape,
@@ -2834,6 +2846,48 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
                                  "a row on a board is a line. Write it to a file and point "
                                  "the checkpoint at the file."))
                 break
+    return out
+
+
+def _schema_problems(value: Any, schema: dict, path: str) -> list[str]:
+    """Validate the tiny JSON Schema subset used by ``strategy.schema.json``.
+
+    Problems describe representation only. In particular, nothing here interprets an
+    advisory value or decides whether an agent followed it, and callers never rewrite the
+    value while reporting what is wrong with it.
+    """
+    expected = schema.get("type")
+    matches = ((expected == "object" and isinstance(value, dict))
+               or (expected == "string" and isinstance(value, str))
+               or (expected == "array" and isinstance(value, list)))
+    if expected and not matches:
+        return [f"{path} must be {expected}, not {type(value).__name__}"]
+
+    out: list[str] = []
+    if expected == "object":
+        properties = schema.get("properties") or {}
+        if schema.get("additionalProperties") is False:
+            out.extend(f"{path}.{key} is not a recognized strategy field"
+                       for key in value if key not in properties)
+        for key, child in properties.items():
+            if key in value:
+                out.extend(_schema_problems(value[key], child, f"{path}.{key}"))
+    elif expected == "array":
+        item_schema = schema.get("items")
+        if item_schema:
+            for index, item in enumerate(value):
+                out.extend(_schema_problems(item, item_schema, f"{path}[{index}]"))
+        if schema.get("uniqueItems") and any(
+                value[index] in value[:index] for index in range(len(value))):
+            out.append(f"{path} must contain unique items")
+    elif expected == "string":
+        minimum = schema.get("minLength")
+        if minimum is not None and len(value) < minimum:
+            out.append(f"{path} must contain at least {minimum} character"
+                       f"{'s' if minimum != 1 else ''}")
+        pattern = schema.get("pattern")
+        if pattern is not None and re.search(pattern, value) is None:
+            out.append(f"{path} does not match {pattern}")
     return out
 
 
@@ -4197,7 +4251,36 @@ def _full(p: dict) -> str:
 # `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
 _DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
                     "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
-                    "checkpoints", "command", "root", "anchor"})
+                    "checkpoints", "command", "root", "anchor", "strategy"})
+
+
+def _strategy_lines(value: Any, indent: int = 0) -> list[str]:
+    """A small nested terminal view of strategy; JSON remains the lossless rendering."""
+    pad = "  " * indent
+    if isinstance(value, dict):
+        if not value:
+            return [f"{pad}{{}}"]
+        out = []
+        for key, child in value.items():
+            label = _flat(key)
+            if isinstance(child, (dict, list)):
+                out.append(f"{pad}{label}")
+                out.extend(_strategy_lines(child, indent + 1))
+            else:
+                out.append(f"{pad}{label}  {_flat(child)}")
+        return out
+    if isinstance(value, list):
+        if not value:
+            return [f"{pad}[]"]
+        out = []
+        for child in value:
+            if isinstance(child, (dict, list)):
+                out.append(f"{pad}-")
+                out.extend(_strategy_lines(child, indent + 1))
+            else:
+                out.append(f"{pad}- {_flat(child)}")
+        return out
+    return [f"{pad}{_flat(value)}"]
 
 
 def _step_lines(steps: list) -> list[str]:
@@ -4277,6 +4360,9 @@ def _step_lines(steps: list) -> list[str]:
             # fired commands would be the evaluator this design does not have. The
             # placeholders in it are the owner's to fill in.
             out.append(f"    cmd   {_flat(s['command'])}")
+        if "strategy" in s:
+            out.append("    strategy")
+            out.extend(f"      {line}" for line in _strategy_lines(s["strategy"]))
         out.extend(f"    ref   {_flat(c.get('ref'))}"
                    for c in (_rec(x, "ref") for x in (s.get("checkpoints") or ())))
         out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by') or '—')}, "

@@ -993,6 +993,53 @@ class StepsTest(PlansSandbox):
     def actions(self, plan: str = "p-1") -> list[str]:
         return [e["action"] for e in self.data("plugin", "plans", "changelog", plan)]
 
+    # -- advisory strategy -----------------------------------------------------
+
+    def test_a_complete_strategy_round_trips_and_renders_as_a_nested_block(self):
+        strategy = {
+            "continuity": "main agent continues",
+            "orchestration": "single-agent implementation with a fresh reviewer afterward",
+            "model": "standard for implementation; strong and fresh for review",
+            "resources": {"skills": ["github"], "presets": [], "tools": ["pytest"]},
+            "isolation": "shared unless parallel tracked writes become useful",
+            "budget": {"context": "about half of one main-agent context",
+                       "passes": "one implementation and one correction pass"},
+            "verification": "focused evidence during work; one final suite",
+            "replan_if": "scope expands or the approach becomes ambiguous",
+            "brief": ".switchboard/briefs/p-42/implementation.md",
+        }
+        self.plan("write it")
+        self.edit_step("step-1", strategy=strategy)
+
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual(shown["steps"][0]["strategy"], strategy)
+        rendered = self.ok("plugin", "plans", "show", "p-1")
+        for expected in ("strategy", "continuity  main agent continues", "resources",
+                         "skills", "- github", "budget", "context  about half"):
+            self.assertIn(expected, rendered)
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_a_step_without_strategy_keeps_the_existing_render_and_validates_cleanly(self):
+        self.plan("write it")
+        rendered = self.ok("plugin", "plans", "show", "p-1")
+        self.assertNotIn("strategy", rendered)
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_invalid_strategy_warns_without_refusing_or_discarding_it(self):
+        strategy = {"continuity": ["not text"], "invented": "preserve me"}
+        self.plan("write it")
+        self.edit_step("step-1", strategy=strategy)
+
+        code, warning, _ = self.sb("plugin", "plans", "validate", "p-1")
+        self.assertEqual(code, 0)
+        self.assertIn("strategy.continuity must be string", warning)
+        self.assertIn("strategy.invented is not a recognized strategy field", warning)
+        said = self.data("plugin", "plans", "validate", "p-1")
+        self.assertFalse(said["ok"])
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")
+                         ["steps"][0]["strategy"], strategy)
+        self.assertEqual(self.step("step-1")["strategy"], strategy)
+
     # -- an owner, and tick ----------------------------------------------------
 
     def test_an_owner_is_a_field_and_tick_is_the_verb_beside_it(self):
