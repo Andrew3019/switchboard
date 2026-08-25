@@ -1551,6 +1551,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # is about. It is a hidden verb a person types, not something an agent reads.
         for h in d["held"]:
             text += f"\n  kept {h['name']}: {h['reason']}"
+        if d["forgotten"]:
+            # Counted rather than named. A swept worktree is a deletion somebody may want
+            # to argue with; a forgotten row is bookkeeping for something that already
+            # stopped existing, and 111 names would bury the two lines above that matter.
+            verb = "would forget" if args.dry_run else "forgot"
+            text += f"\n  {verb} {len(d['forgotten'])} retired row(s)"
         text += f"\n({d['looked']} workspace(s) looked at)"
         _emit(args, text, d)
         return 0

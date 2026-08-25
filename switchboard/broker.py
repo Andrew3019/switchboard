@@ -6953,13 +6953,15 @@ class Broker:
         automatic, and each one was a `sb workspace close <name>` somebody typed by hand
         (#77).
 
-        Two kinds stay out, and both are choices rather than oversights. A **bare** space
-        is an orchestrator laid over somebody else's checkout: closing it deletes nothing
-        and retires a dispatcher's space out from under a sweep aimed at agents, which is
-        the exemption `_close_empty_spaces` already keeps and this keeps with it. A
-        **retired** row is already closed — nothing in switchboard deletes a workspace row,
-        so retired is where every swept row ends up and there is nowhere further for one
-        to go.
+        A **bare** space stays out, and that is a choice rather than an oversight: it is an
+        orchestrator laid over somebody else's checkout, so closing it deletes nothing and
+        retires a dispatcher's space out from under a sweep aimed at agents — the
+        exemption `_close_empty_spaces` already keeps, and this keeps it too.
+
+        A **retired** row is not a candidate for closing either, because it is already
+        closed. It is a candidate for being DELETED, which is a separate pass at the end:
+        see `_forget_retired`, and note that it takes the workspace's agent rows with it
+        because deleting the row alone resurrects the name as `absent`.
 
         A refusal is never raised. A sweep looks at the whole fleet, most of it is held
         back by something ordinary, and one space that will not close is not a reason to
@@ -6970,8 +6972,8 @@ class Broker:
         """
         now = time.time() if now is None else now
         me = self.whoami()
-        out: dict = {"swept": [], "held": [], "dry_run": dry_run, "at": int(now),
-                     "looked": 0}
+        out: dict = {"swept": [], "held": [], "forgotten": [], "dry_run": dry_run,
+                     "at": int(now), "looked": 0}
         gap = store.workspace_fill_gap(self.db)
         if gap:
             # The same refusal `workspace_close` opens with, made once instead of per
@@ -7016,10 +7018,93 @@ class Broker:
                 out["swept"].append(name)
             else:
                 out["held"].append({"name": name, "reason": why, **facts})
+        # Last, and after the loop rather than inside it: a row this sweep just retired is
+        # a row this sweep may forget, and doing it in one pass at the end means the tick
+        # that deletes a worktree also takes its bookkeeping, instead of leaving it for a
+        # tick half an hour later.
+        out["forgotten"] = self._forget_retired(me=me, dry_run=dry_run)
         if not dry_run:
             store.log_event(self.db, kind="sweep", swept=",".join(out["swept"]) or None,
-                            looked=out["looked"], held=len(out["held"]))
+                            looked=out["looked"], held=len(out["held"]),
+                            forgotten=len(out["forgotten"]))
         return out
+
+    def _forget_retired(self, *, me: str, dry_run: bool) -> list[str]:
+        """Delete the retired rows, and the agent rows that would resurrect them.
+
+        The third of #77's open questions, decided by Andrew on 2026-08-25: retired rows
+        are deleted outright rather than filtered out of the listing. Retirement was
+        designed as a record of end-of-life and not a tombstone, and for a workspace
+        somebody reopens that is right — but nothing had ever deleted a `workspaces` row,
+        so "not a tombstone" and "permanent" had become the same thing. 111 of the 277
+        rows in the census were retired and no command could remove one.
+
+        **The agent rows go with the workspace row, and that pairing is the whole of why
+        this is correct.** `workspace_list` is a UNION of three sources and the retired row
+        is what SUPPRESSES the `agents`-derived reading of the same name; deleting it
+        alone brings the name straight back as `absent`, pointing at the deleted checkout,
+        and the sweep then holds it every tick on "no workspace called 'x' is recorded".
+        Measured in an isolated clone before this was written, which is also why the
+        deletion lives here and not in `store.forget_workspace`.
+
+        What that costs, stated plainly: `sb restore` for those agents, and their rows in
+        `sb inspect`. The bar it clears is that a RETIRED workspace's checkout is already
+        deleted, so there was nowhere for `sb restore` to put one back even before this.
+        Mail and events are untouched — history, not state, and a forgotten agent's message
+        to a live one belongs to the live one's record.
+
+        Three gates, and the last two are the ones a shorter version would have missed:
+
+        - the workspace is retired, which is what says its life is over;
+        - every agent row filed under it is FINISHED. An unfinished row is a live claim,
+          and a retired workspace holding one is drift for a person to look at, not
+          something to delete underneath them;
+        - no unfinished agent ANYWHERE names one of them as its parent. A lead in a
+          retired workspace can have a child still working in a different one, and
+          deleting the lead's row would leave that child's `parent` pointing at nothing —
+          `sb done` and `sb tell parent` route through exactly that column.
+        """
+        forgotten = []
+        for row in store.all_workspaces(self.db):
+            name = row["name"]
+            if not row["retired_at"]:
+                continue
+            if self._unfinished_in(name, exclude=me):
+                continue                       # a live claim on a workspace that ended
+            kin = [r["name"] for r in self.db.execute(
+                "SELECT name FROM agents WHERE workspace=?", (name,)).fetchall()]
+            if me in kin:
+                # The caller's own row, which the gate above excuses the way every gate in
+                # this command excuses it — so without this the excusal would carry
+                # straight through into deleting the row of the agent doing the sweeping.
+                continue
+            if kin and self._has_unfinished_child(kin):
+                continue                       # a child of theirs is still working
+            forgotten.append(name)
+            if dry_run:
+                continue
+            for agent in kin:
+                store.drop_agent(self.db, agent)
+            store.forget_workspace(self.db, name)
+            store.log_event(self.db, kind="workspace_forgotten", workspace=name,
+                            closed=",".join(kin) or None)
+        return forgotten
+
+    def _has_unfinished_child(self, parents: Sequence[str]) -> bool:
+        """Is any agent still working under one of these, from outside the set itself?
+
+        `_forget_retired`'s third gate. Scoped to UNFINISHED children because that is what
+        the `parent` column is load-bearing for — routing `sb done` and `sb tell parent` —
+        and a finished child never routes anywhere again. `NOT IN parents` because the set
+        is being deleted whole: one member's row naming another's is not a reason to keep
+        either.
+        """
+        marks = ",".join("?" * len(parents))
+        return self.db.execute(
+            f"SELECT 1 FROM agents WHERE parent IN ({marks}) AND name NOT IN ({marks}) "
+            f"AND state NOT IN {FINISHED} LIMIT 1",
+            (*parents, *parents),
+        ).fetchone() is not None
 
     def _sweepable_gone(self, w: dict, *, me: str) -> tuple[Optional[str], dict]:
         """None if this already-gone checkout's row may be tidied away, else what holds it.

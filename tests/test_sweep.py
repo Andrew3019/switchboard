@@ -313,14 +313,18 @@ class GoneRowsTest(SweepHarness, unittest.TestCase):
 
     def test_a_row_whose_directory_is_gone_is_swept_and_taken_off_the_books(self):
         """Not a dry run: what was missing was the bookkeeping, so the bookkeeping is
-        what this asserts — the registration gone, the branch gone, the row retired."""
+        what this asserts — the registration gone, and the row gone with it.
+
+        One tick does both halves. The close retires the row and `_forget_retired` deletes
+        it at the end of the same sweep, so a row that reaches here does not linger as
+        `retired` waiting for a tick half an hour later.
+        """
         path = self.gone("stale")
         out = self.b.sweep()
         self.assertEqual(out["swept"], ["stale"])
+        self.assertEqual(out["forgotten"], ["stale"])
         self.assertNotIn(path, [wt["path"] for wt in self.b._worktrees()])
-        row = store.get_workspace(self.db, "stale")
-        self.assertTrue(row["retired_at"])
-        self.assertIsNone(row["checkout"])
+        self.assertIsNone(store.get_workspace(self.db, "stale"))
 
     def test_an_unfinished_row_under_the_gone_path_still_holds_it(self):
         """The one rule that survives the directory: a deleted checkout does not retract
@@ -343,3 +347,59 @@ class GoneRowsTest(SweepHarness, unittest.TestCase):
         self.assertEqual(out["swept"], [])
         self.assertEqual(out["held"], [])
         self.assertEqual(out["looked"], 0)
+
+
+class ForgetRetiredTest(SweepHarness, unittest.TestCase):
+    """Retired rows are deleted outright (Andrew, 2026-08-25), and the agent rows filed
+    under them go too.
+
+    That pairing is the test worth having. `workspace_list` is a union of three sources
+    and the retired row is what SUPPRESSES the `agents`-derived reading of the same name,
+    so deleting the row on its own brings the workspace back as `absent` — pointing at the
+    checkout that was deleted, and held by the sweep every tick on "no workspace called
+    'x' is recorded". Measured in a clone before any of this was written.
+    """
+
+    def retired(self, name: str, *, state: str = "done", parent: Optional[str] = None):
+        """A workspace that has been through a close, with one agent row still filed."""
+        path = str(self.root / "wt" / name)
+        store.record_workspace(self.db, name, path)
+        self.row(f"w-{name}", workspace=name, branch=name, cwd=path, state=state)
+        if parent is not None:
+            self.db.execute("UPDATE agents SET parent=? WHERE name=?",
+                            (parent, f"w-{name}"))
+            self.db.commit()
+        store.retire_workspace(self.db, name)
+
+    def names(self) -> set:
+        return {w["name"] for w in self.b.workspace_list()["workspaces"]}
+
+    def test_a_retired_row_and_its_agent_rows_go_together(self):
+        """Together, or the name comes back as `absent` off the agent rows — which is the
+        whole reason the deletion is not just a DELETE on one table."""
+        self.retired("old")
+        self.assertIn("old", self.names())
+        out = self.b.sweep()
+        self.assertEqual(out["forgotten"], ["old"])
+        self.assertIsNone(store.get_workspace(self.db, "old"))
+        self.assertIsNone(store.get_agent(self.db, "w-old"))
+        self.assertNotIn("old", self.names())          # gone from the listing for good
+
+    def test_an_unfinished_row_in_a_retired_workspace_keeps_it(self):
+        """Drift for a person to look at, not something to delete underneath them."""
+        self.retired("old", state="working")
+        out = self.b.sweep()
+        self.assertEqual(out["forgotten"], [])
+        self.assertIsNotNone(store.get_workspace(self.db, "old"))
+
+    def test_a_child_still_working_elsewhere_keeps_its_parents_row(self):
+        """`sb done` and `sb tell parent` route through `agents.parent`, so deleting a
+        lead whose child is still going would leave that child pointing at nothing."""
+        self.retired("old")
+        self.row("kid", workspace="other", cwd=str(self.root / "wt" / "other"),
+                 state="working")
+        self.db.execute("UPDATE agents SET parent='w-old' WHERE name='kid'")
+        self.db.commit()
+        out = self.b.sweep()
+        self.assertEqual(out["forgotten"], [])
+        self.assertIsNotNone(store.get_agent(self.db, "w-old"))

@@ -1593,8 +1593,14 @@ def set_config(db: sqlite3.Connection, name: str, setting: str, value) -> None:
 
 
 def drop_agent(db: sqlite3.Connection, name: str) -> None:
-    """Remove a row. Only ever used to undo a claim whose spawn then failed — otherwise
-    an agent that never started would hold its name against every later attempt.
+    """Remove a row, and everything else keyed on the name.
+
+    Two callers, and they mean different things by it. `Broker._release_name` undoes a
+    claim whose spawn then failed — otherwise an agent that never started would hold its
+    name against every later attempt. `Broker._forget_retired` means the other thing: this
+    agent's workspace has been retired and deleted, so the row is the last trace of
+    something that no longer exists anywhere (#77). Both want the same deletion, and both
+    want the satellite rows below to go with it.
 
     The capability rows go with it. They are keyed on the NAME, and the name is about to be
     handed to a different agent — leaving them would let the next holder of it inherit a
@@ -2139,6 +2145,34 @@ def retire_workspace(db: sqlite3.Connection, name: str) -> None:
         "retiring_at=NULL WHERE name=?",
         (now(), name),
     )
+    db.commit()
+
+
+def forget_workspace(db: sqlite3.Connection, name: str) -> None:
+    """Delete a retired workspace's row outright. The one DELETE this table has.
+
+    Retirement was designed as a record of end-of-life and not a tombstone, and for a
+    workspace that is reopened that is exactly right. What it was never designed to be is
+    PERMANENT, and permanent is what it became: 111 of the 277 rows in the 2026-08-16
+    census were retired, nothing in the codebase had ever deleted a `workspaces` row, and
+    `sb workspace list` printed every one of them forever (#77).
+
+    The caller is `Broker._forget_retired`, and it deletes the workspace's agent rows in
+    the same breath. That pairing is the whole correctness argument and is not optional:
+    `workspace_list` is a UNION of three sources, and the retired row is what SUPPRESSES
+    the `agents`-derived reading of the same name. Delete the row on its own and
+    `_recorded_path` answers from the agent rows instead, pointing at the checkout that
+    was deleted — so the name comes straight back as `absent`, indistinguishable from real
+    work still to clean up, and the sweep then holds it forever on "no workspace called
+    'x' is recorded". That was measured in an isolated clone before this was written, and
+    it is why this function is not safe to call by itself.
+
+    `messages` and `events` are deliberately left alone. Neither is keyed on this table,
+    both are history rather than state, and a message from a forgotten agent to a live one
+    is part of the LIVE one's record — see the `capabilities` comment in the schema for
+    the same rule stated from the other side.
+    """
+    db.execute("DELETE FROM workspaces WHERE name=?", (name,))
     db.commit()
 
 
