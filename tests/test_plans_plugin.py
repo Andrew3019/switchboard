@@ -3545,19 +3545,38 @@ class PlannerPackageTest(PlansSandbox):
 
     def test_the_catalogues_capabilities_are_the_vocabulary_grant_accepts(self):
         """One vocabulary, not two. The plugin assembles this list itself — it holds no
-        broker — so the pin is equality against a real one, including a capability this
-        repo minted for itself, which is exactly what a second hardcoded list would miss."""
+        broker — so the pin is equality against a real one.
+
+        BOTH REPO-MINTED SOURCES ARE IN THE FIXTURE, because equality against the shipped
+        four would hold for a list somebody typed out once and would prove nothing: a
+        capability this repo declared at a side-effect boundary (`deploy`), and one named
+        only by a role template (`release`). Those are the two branches
+        `known_capabilities` unions in beyond the constant, and a catalogue missing either
+        would advertise a different set from the one `sb grant` accepts — the second of
+        them being the whole reason a role file can mint vocabulary at all."""
         (self.sw / "settings.toml").write_text(
             f'[paths]\nuser_state = "{self.user_state}"\n\n'
             f'[capabilities.side_effects]\ndeploy = ["merge"]\n')
+        (self.defaults / "roles" / "releaser.md").write_text(
+            '+++\nmodel = "cheap"\ncapabilities = ["release"]\n+++\nYou cut releases.\n')
         db = store.connect(self.repo)
         broker = cli.Broker(db, FakeHerdr(self.repo / "worktrees"), repo=self.repo)
         try:
             self.assertEqual(self.catalog()["capabilities"],
                              sorted(broker.known_capabilities()))
+            # Named rather than inferred from the equality above: a bug that dropped BOTH
+            # branches from both sides would still be equal, and equal to the wrong thing.
+            self.assertIn("deploy", broker.known_capabilities())
+            self.assertIn("release", broker.known_capabilities())
         finally:
             db.close()
-        self.assertIn("deploy", self.catalog()["capabilities"])
+        got = self.catalog()["capabilities"]
+        self.assertIn("deploy", got)
+        self.assertIn("release", got)
+        # And the role that minted it says the same thing in the other section, which is
+        # what a planner reads before it recommends the grant.
+        self.assertEqual([r["capabilities"] for r in self.catalog()["roles"]
+                          if r["name"] == "releaser"], [["release"]])
 
     def test_one_broken_definition_costs_its_own_category_and_nothing_else(self):
         """A catalogue is the last thing that should stop being generated because one JSON
