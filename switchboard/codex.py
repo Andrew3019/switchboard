@@ -15,7 +15,8 @@ private per-agent directory gives one place for all of it:
     <store>/codex-homes/<agent>/
         AGENTS.md     the composed sb prompt, read as standing instructions EVERY turn
         config.toml   model, reasoning effort, sandbox, hooks, and directory trust
-        auth.json     a SYMLINK to the real credential (see `_link_auth`)
+        auth.json     a SYMLINK to the real credential — absent when the tier names
+                      an alternate API, which brings its own key (see `_link_auth`)
         sessions/     where codex then writes this agent's rollout transcripts
 
 This is the same move `herdr.write_prompt_file` already makes for Claude Code — compose
@@ -47,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -70,6 +72,14 @@ SANDBOX_MODE = config.setting("codex.sandbox_mode")
 APPROVAL_POLICY = config.setting("codex.approval_policy")
 HOOK_TIMEOUT = config.setting("codex.hook_timeout")
 HERDR_CONFIG_DIR = config.setting("codex.herdr_config_dir")
+
+# A codex SUB-PROVIDER name — `deepseek`, and whatever a user adds beside it. It arrives
+# from a tier's `codex_provider` and is then used twice unescaped: as half of the dotted
+# settings path `codex.<name>`, and as a TOML table key in the file this module writes.
+# Checked for the reason `home_path` checks an agent name — neither of those is a place to
+# find out the string was something else. No dot, because the settings lookup splits on
+# one and a name carrying it would ask for a section nobody wrote.
+PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 # Claude's configured footer leads with model/context/cost, keeps both account windows,
 # then identifies the checkout. Codex cannot run a status-line command or draw multiple
@@ -139,6 +149,7 @@ def write_home(
     worktree: Optional[str],
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    model_provider: Optional[str] = None,
     hooks: Mapping[str, str] = (),      # event name -> shell command line
     cwd: Optional[Path] = None,
 ) -> Path:
@@ -150,6 +161,9 @@ def write_home(
 
     `sessions/` is deliberately NOT cleared — that is where codex has already written
     this agent's transcripts, and they are what `sb inspect` and `sb restore` read.
+
+    `model_provider` is the tier's `codex_provider`, and None for every tier that does not
+    set one. It says the binary is the same and the API is not — see `_provider_settings`.
     """
     d = home_path(name, cwd)
     try:
@@ -164,8 +178,9 @@ def write_home(
     # context with no protocol at all, which is worse than not restoring it.
     if any(p and p.strip() for p in prompts):
         _write(d / "AGENTS.md", _agents_md(prompts), name)
-    _write(d / "config.toml", _config_toml(worktree, model, effort, hooks, cwd), name)
-    _link_auth(d)
+    _write(d / "config.toml",
+           _config_toml(worktree, model, effort, model_provider, hooks, cwd), name)
+    _link_auth(d, model_provider)
     return d
 
 
@@ -293,8 +308,45 @@ def _writable_roots(cwd: Optional[Path]) -> list[str]:
     return list(dict.fromkeys(roots))
 
 
+def _provider_settings(name: str, cwd: Optional[Path]) -> tuple[dict, dict]:
+    """The `[codex.<name>]` settings section, split the two ways the generated file needs.
+
+    THE WHOLE OF WHAT MAKES AN ALTERNATE API WORK, and none of it is written here. Codex
+    drives more than one backend: `[model_providers.<name>]` defines an endpoint and
+    `model_provider = "<name>"` selects it. What that endpoint IS — the URL, the wire
+    protocol, the environment variable holding the key — is the part that differs between
+    machines, so it lives in `defaults/settings.toml` where a user or a repo can override
+    it, and this only reads it back. Returns `(provider, options)`: the provider table
+    becomes the block, the options become top-level keys beside the selection.
+
+    Loud when the section is missing, in this module's usual style. The alternative is a
+    `model_provider` naming a provider codex was never given, which fails at the far end
+    as an unrecognisable startup error in a pane nobody is watching.
+    """
+    if not PROVIDER_NAME.fullmatch(name or ""):
+        raise CodexHomeError(
+            f"refusing to route codex through {name!r}: not a provider name")
+    section = config.setting(f"codex.{name}", None, repo=cwd) or {}
+    if not isinstance(section, dict):
+        # `[codex]` has scalar keys of its own (`sandbox_mode`, `hook_timeout`), so a
+        # provider named after one of them resolves to a str/int here. Named, because the
+        # alternative is a bare `AttributeError` from the `.get` below.
+        raise CodexHomeError(
+            f"a tier asks codex for the '{name}' provider, but `codex.{name}` in "
+            f"settings.toml is a plain value, not a provider section")
+    provider = section.get("provider")
+    if not isinstance(provider, dict) or not provider:
+        raise CodexHomeError(
+            f"a tier asks codex for the '{name}' provider, but no "
+            f"[codex.{name}.provider] section says where it is — see the [codex] section "
+            f"of settings.toml, where the shipped one is documented"
+        )
+    return provider, dict(section.get("options") or {})
+
+
 def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional[str],
-                 hooks: Mapping[str, str], cwd: Optional[Path]) -> str:
+                 model_provider: Optional[str], hooks: Mapping[str, str],
+                 cwd: Optional[Path]) -> str:
     """The one file that carries everything switchboard sets per agent for Claude Code as
     flags. Every key here parses under `--strict-config` against codex-cli 0.147.0.
 
@@ -304,6 +356,11 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
     control is the sandbox alone (`codex exec` has no `--ask-for-approval` at all). So
     this is workspace-write with approvals off — an agent that stops for a human who is
     not watching is not safer, it is stalled — and the sandbox is what bounds it.
+
+    `model_provider` and the `[model_providers.<name>]` block are how a tier reaches an
+    API that is not OpenAI's while still being the codex binary — absent, and this file is
+    byte-for-byte what it has always been. `_provider_settings` is where the values come
+    from and why they are config rather than code.
 
     `[projects."<worktree>"] trust_level` pre-seeds the directory-trust answer. A private
     CODEX_HOME has never seen this checkout, so without it the TUI opens on its trust
@@ -316,10 +373,21 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         "# Not a file to edit: `switchboard/codex.py` is where these values come from.",
         "",
     ]
+    provider, options = (_provider_settings(model_provider, cwd) if model_provider
+                         else ({}, {}))
     if model:
         lines.append(f"model = {_s(model)}")
     if effort:
         lines.append(f"model_reasoning_effort = {_s(effort)}")
+    if model_provider:
+        # Up here rather than beside the block below because TOML has no top level after
+        # its first `[header]`: everything from `[sandbox_workspace_write]` on belongs to
+        # a section, and the selection and its options are session-wide keys.
+        lines.append(f"model_provider = {_s(model_provider)}")
+        # Keys quoted as well as values: an unquoted key containing a dot is a DOTTED key
+        # in TOML, which puts the setting in a table nobody asked for rather than beside
+        # the selection. Same `_s` the inline-table branch of `_v` already uses.
+        lines += [f"{_s(k)} = {_v(v)}" for k, v in options.items()]
     lines += [
         f"sandbox_mode = {_s(SANDBOX_MODE)}",
         f"approval_policy = {_s(APPROVAL_POLICY)}",
@@ -360,6 +428,10 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         # its cwd, and a worktree reached through a symlinked /tmp is not the same string.
         lines += [f"[projects.{_s(str(Path(worktree).resolve()))}]",
                   'trust_level = "trusted"', ""]
+    if model_provider:
+        lines += [f"[model_providers.{model_provider}]"]
+        lines += [f"{_s(k)} = {_v(v)}" for k, v in provider.items()]
+        lines += [""]
     lines += ["[tui]",
               "status_line = [" + ", ".join(_s(item) for item in STATUS_LINE) + "]", ""]
     for event, command in dict(hooks).items():
@@ -375,6 +447,26 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
     return "\n".join(lines)
 
 
+def _v(value) -> str:
+    """A TOML scalar for a value that came out of a settings file, whatever type it is.
+
+    Strings are almost all of it and go through `_s`, but a bool must not: `"true"` is a
+    string in TOML and every non-empty string is truthy, which is the same trap
+    `config.flag` exists for. Tables and arrays are rendered inline because codex has
+    provider keys of both shapes (`http_headers`, `query_params`) and a settings file may
+    reasonably carry one.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{_s(k)} = {_v(x)}" for k, x in value.items()) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_v(x) for x in value) + "]"
+    return _s(value)
+
+
 def _s(value: str) -> str:
     """A TOML basic string. `json.dumps` is exactly right for this and is not a shortcut:
     TOML basic strings are JSON strings for every escape either format defines, and the
@@ -383,7 +475,7 @@ def _s(value: str) -> str:
     return json.dumps(str(value))
 
 
-def _link_auth(home: Path) -> None:
+def _link_auth(home: Path, model_provider: Optional[str] = None) -> None:
     """Point the private home at the real credential — a SYMLINK, never a copy.
 
     A private CODEX_HOME with no `auth.json` 401s on every request (verified: repeated
@@ -393,15 +485,27 @@ def _link_auth(home: Path) -> None:
     The symlink has one owner, and re-login is picked up by every agent at once
     (Andrew, 2026-08-22).
 
-    Best-effort: a missing source is not a reason to fail the spawn here, because the
-    failure it would prevent is one codex reports far better itself. `os.symlink` cannot
-    replace an existing link, so it is removed first — the target may have moved.
+    NOT FOR AN ALTERNATE PROVIDER, which is the one case where the human's ChatGPT
+    credential is not merely useless but actively wrong: the provider block names an
+    `env_key` and the key is in the agent's environment, so the credential here is a
+    second answer to a question that already has one. Measured, same prompt, codex-cli
+    0.149.1 against DeepSeek: with the symlink the run spent 71,648 tokens and repeated
+    `failed to refresh available models` at ERROR the whole way through — codex goes to
+    the provider's `/models` endpoint on that path and cannot read what comes back —
+    against 10,364 tokens and a clean run without it. Removed rather than skipped, because
+    a name is reused across spawns and a link left from a previous life of this agent
+    would be the same bug with nothing in this function to say so.
+
+    Best-effort either way: a missing source is not a reason to fail the spawn here,
+    because the failure it would prevent is one codex reports far better itself.
+    `os.symlink` cannot replace an existing link, so it is removed first — the target may
+    have moved.
     """
     link = home / "auth.json"
     try:
-        source = Path(AUTH_FILE).expanduser()
         link.unlink(missing_ok=True)
-        os.symlink(source, link)
+        if not model_provider:
+            os.symlink(Path(AUTH_FILE).expanduser(), link)
     except OSError:
         pass
 

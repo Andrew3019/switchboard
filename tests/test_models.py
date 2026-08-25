@@ -157,6 +157,30 @@ class ModelsTest(unittest.TestCase):
                 self.assertEqual((spec.provider, spec.model, spec.effort),
                                  ("codex", model, "medium"))
 
+    def test_the_deepseek_tier_points_the_same_binary_at_another_api(self):
+        """`provider` is the BINARY and stays `codex` — which is what keeps the tier past
+        the wired-providers gate — while `codex_provider` says which API that binary is
+        pointed at. `Herdr._codex_args` hands the marker to `codex.write_home`, which is
+        the only thing in the tree that knows what to do with it.
+
+        `low`, where the two gpt tiers say `medium`, and not as a further economy:
+        DeepSeek's own model catalog lists `low | high | max` for every v4 model and no
+        `medium` at all, so `medium` here would name a level the model does not have."""
+        spec = self.load().resolve("deepseek")
+        self.assertEqual((spec.provider, spec.codex_provider), ("codex", "deepseek"))
+        self.assertEqual((spec.model, spec.effort), ("deepseek-v4-flash", "low"))
+        self.assertEqual(spec.cli_args(), [])   # still no claude flags: still codex
+
+    def test_any_model_of_an_alternate_provider_is_a_tier_and_not_a_code_change(self):
+        """The marker is a general field, not a shipped special case, and this is what
+        that buys: a slug switchboard has never heard of is four lines in your own
+        models.toml."""
+        self.write_repo('[tiers.mine]\nprovider = "codex"\n'
+                        'codex_provider = "deepseek"\nmodel = "deepseek-v4-pro"\n')
+        spec = self.load().resolve("mine")
+        self.assertEqual((spec.codex_provider, spec.model),
+                         ("deepseek", "deepseek-v4-pro"))
+
     # -- bad config -------------------------------------------------------
 
     def test_an_unknown_effort_level_is_rejected(self):

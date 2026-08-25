@@ -644,6 +644,7 @@ class Herdr:
             worktree=str(cwd) if cwd else None,
             model=getattr(spec, "model", None),
             effort=getattr(spec, "effort", None),
+            model_provider=getattr(spec, "codex_provider", None),
             hooks=hooks.codex_hook_commands(cwd),
             cwd=cwd,
         )

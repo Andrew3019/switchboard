@@ -100,7 +100,7 @@ def _default_provider() -> str:
 
 # The fields a tier table may set. Anything else is a typo, and saying so beats resolving
 # to a spec that quietly ignores it.
-TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args"})
+TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args", "codex_provider"})
 
 # Per-user, between the shipped tiers and the repo's — what `strong` means on YOUR machine.
 ENV_GLOBAL_CONFIG = "SWITCHBOARD_MODELS_CONFIG"
@@ -132,6 +132,20 @@ class ModelSpec:
     model: Optional[str] = None      # None = let the provider CLI pick its own default
     effort: Optional[str] = None     # None = inherit whatever the provider CLI defaults to
     extra_args: tuple[str, ...] = ()
+
+    # An optional SUB-provider, for a binary that speaks to more than one API. `provider`
+    # stays the binary switchboard starts — a deepseek tier is still `codex`, and still
+    # goes down the codex path — and this names a `[codex.<name>]` section of the settings
+    # file holding the endpoint, the wire protocol and the environment variable with the
+    # key. `switchboard/codex.py` is the only reader; it turns that section into the
+    # `[model_providers.<name>]` block of the agent's private config.toml. None means the
+    # binary's own API, which is every tier that predates the field.
+    #
+    # Named for the one provider it applies to rather than something general like
+    # `endpoint`, because it IS codex-specific: it is the name of a codex config key, and
+    # a claude tier that set it would be silently ignored. `defaults/models.toml` is where
+    # a person meets it.
+    codex_provider: Optional[str] = None
 
     # The providers whose per-agent settings travel as CLI FLAGS. Everything else delivers
     # them some other way and must get an empty list here rather than Claude Code's flag
@@ -223,6 +237,7 @@ def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
         model=cfg.get("model"),
         effort=effort,
         extra_args=tuple(cfg.get("extra_args") or ()),
+        codex_provider=cfg.get("codex_provider"),
     )
 
 

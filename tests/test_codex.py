@@ -171,6 +171,89 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path.readlink(link), src)
 
+    def test_an_alternate_provider_reaches_a_different_api_on_the_same_binary(self):
+        """VERIFIED LIVE, codex-cli 0.149.1 against DeepSeek: this exact file (plus the
+        key in `DEEPSEEK_API_KEY`) started `codex exec`, which reported `provider:
+        deepseek`, `model: deepseek-v4-flash`, and answered the prompt. What the test can
+        pin is the file; the run is what says the file means anything.
+
+        The plain-codex half is the regression guard and is why it is in the same test: a
+        tier that names no alternate provider must produce the file it always did, with
+        neither key in it."""
+        home = self.write(model="deepseek-v4-flash", effort="low",
+                          model_provider="deepseek")
+        cfg = self.config(home)
+        self.assertEqual(cfg["model"], "deepseek-v4-flash")
+        self.assertEqual(cfg["model_provider"], "deepseek")
+        block = cfg["model_providers"]["deepseek"]
+        # The strings, from DeepSeek's own setup script rather than a guide — `chat` and
+        # `deepseek-chat` are the dead combination, and their script rewrites the former.
+        self.assertEqual(block["base_url"], "https://api.deepseek.com/")
+        self.assertEqual(block["wire_api"], "responses")
+        self.assertEqual(block["env_key"], "DEEPSEEK_API_KEY")
+        # No `auth.json`: the provider brings its own key, and the human's ChatGPT
+        # credential on this path cost 71,648 tokens against 10,364 for the same prompt.
+        self.assertFalse((home / "auth.json").exists())
+
+        plain = self.config(self.write(name="w3"))
+        self.assertNotIn("model_provider", plain)
+        self.assertNotIn("model_providers", plain)
+
+    def test_a_repo_can_point_an_alternate_provider_somewhere_else(self):
+        """Why the endpoint is settings and not Python. The base_url and the name of the
+        environment variable holding the key are exactly what differs between one machine
+        and the next — a proxy, a second account, a self-hosted gateway — so both layer
+        like every other setting, PER KEY: overriding the URL leaves the wire protocol
+        alone rather than emptying the block."""
+        sw = self.repo / ".switchboard"
+        sw.mkdir(exist_ok=True)
+        (sw / "settings.toml").write_text(
+            '[codex.deepseek.provider]\n'
+            'base_url = "https://gateway.internal/deepseek/"\n'
+            'env_key  = "OUR_DEEPSEEK_KEY"\n')
+        cfg = self.config(self.write(model="deepseek-v4-pro", effort="high",
+                                     model_provider="deepseek"))
+        block = cfg["model_providers"]["deepseek"]
+        self.assertEqual(block["base_url"], "https://gateway.internal/deepseek/")
+        self.assertEqual(block["env_key"], "OUR_DEEPSEEK_KEY")
+        self.assertEqual(block["wire_api"], "responses")     # merged, not replaced
+        self.assertEqual(cfg["model"], "deepseek-v4-pro")    # any model, from the tier
+
+    def test_a_provider_with_no_settings_section_fails_loudly(self):
+        """The failure this replaces is a `model_provider` naming a provider codex was
+        never given a block for — an unrecognisable startup error, in a pane nobody is
+        watching, from a file the agent is told not to edit."""
+        with self.assertRaises(codex.CodexHomeError) as cm:
+            self.write(model="x", model_provider="nosuchthing")
+        self.assertIn("codex.nosuchthing.provider", str(cm.exception))
+
+    def test_a_provider_named_after_a_plain_codex_key_fails_by_name(self):
+        """`[codex]` carries scalars of its own — `sandbox_mode`, `hook_timeout` — so a
+        provider name that collides with one resolves to a str/int here, and the same
+        `.get` that reads a section off a dict raised a bare `AttributeError` for it. The
+        provider is named either way; only the message is under test."""
+        with self.assertRaises(codex.CodexHomeError) as cm:
+            self.write(model="x", model_provider="sandbox_mode")
+        self.assertIn("sandbox_mode", str(cm.exception))
+
+    def test_a_settings_key_with_a_dot_in_it_stays_one_key(self):
+        """Keys are emitted quoted, not just values. Unquoted, `a.b = 1` is a DOTTED key:
+        TOML reads it as table `a` with member `b`, so a header the settings file never
+        asked for appears and the setting is not where codex looks for it. Contrived
+        naming, but `http_headers`-adjacent keys and vendor options are where it would
+        turn up."""
+        sw = self.repo / ".switchboard"
+        sw.mkdir(exist_ok=True)
+        (sw / "settings.toml").write_text(
+            '[codex.deepseek.provider]\n'
+            '"x.y" = "in-the-block"\n'
+            '[codex.deepseek.options]\n'
+            '"p.q" = "beside-the-selection"\n')
+        cfg = self.config(self.write(model="m", model_provider="deepseek"))
+        self.assertEqual(cfg["model_providers"]["deepseek"]["x.y"], "in-the-block")
+        self.assertEqual(cfg["p.q"], "beside-the-selection")
+        self.assertNotIn("p", cfg)
+
     def test_the_hooks_block_wires_the_events_it_is_given(self):
         home = self.write(hooks={"Stop": "/bin/gate --db /x", "UserPromptSubmit": "/bin/a"})
         cfg = self.config(home)
@@ -407,6 +490,26 @@ class CodexSpawnTest(unittest.TestCase):
         argv = self.start(self.spec(), resume="01a0-thread-id")
         self.assertIn("resume 01a0-thread-id", argv)
         self.assertNotIn("--resume", argv)
+
+    def test_a_deepseek_tier_reaches_the_written_config_as_its_provider(self):
+        """THE JOIN, and the only one: `_codex_args` forwarding `spec.codex_provider` into
+        `codex.write_home` is all that connects a resolved tier to the generated file.
+        Both ends were already covered — models.py puts `codex_provider` on the spec,
+        codex.py writes a provider block when handed one — and dropping the line between
+        them left every one of those tests green while a `deepseek` agent spawned against
+        OpenAI. So this drives the real path from the shipped tier to the file on disk.
+
+        `global_config` points at a path that does not exist, the same guard test_models
+        uses: a real ~/.config/switchboard/models.toml must not decide this.
+        """
+        spec = models.load(self.repo, global_config=self.repo / "nope.toml"
+                           ).resolve("deepseek")
+        self.start(spec)
+        cfg = tomllib.loads(
+            (codex.home_path("w1", self.repo) / "config.toml").read_text())
+        self.assertEqual(cfg["model_provider"], "deepseek")
+        self.assertIn("deepseek", cfg["model_providers"])
+        self.assertEqual(cfg["model"], "deepseek-v4-flash")
 
     def test_a_claude_spawn_is_untouched_by_any_of_it(self):
         """The other half of a seam is that the existing side does not move."""
