@@ -48,6 +48,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -2599,6 +2600,41 @@ def _editor_said(e: subprocess.CalledProcessError) -> str:
             else f"{_EDITOR} exited {e.returncode}")
 
 
+def _board_command() -> str:
+    """The line the board pane runs — with this checkout on `PYTHONPATH`.
+
+    `-m` puts the pane's own cwd at the front of `sys.path`, and in a switchboard
+    worktree that was the whole of the import: the pane stands in a checkout that HAS
+    a `switchboard/` package. In ANY OTHER REPO it does not, and the pane's python
+    exited on `No module named 'switchboard'` before it could draw a frame. It is an
+    `exec`, so the shell went with it and the split closed again — every agent spawned
+    in a non-switchboard repo therefore came up with no board and nothing on screen
+    saying why. Reproduced by running this command in a fresh `git init` directory.
+
+    Same fix, same reason and same shape as `panel.ensure_collector`'s: `switchboard`
+    is not installed anywhere — `bin/sb` puts the checkout on `sys.path` itself — so a
+    `-m` child with a different cwd cannot import it.
+
+    THIS checkout, not the main one. The board beside an agent should be drawn by the
+    build whose `sb` opened it, the same rule the pane's PATH pin follows
+    (`Broker._ready_pane`); `panel.canonical_checkout` deliberately answers otherwise
+    for the COLLECTOR, and that difference is deliberate too — one fleet-wide answer
+    for the numbers, this pane's own code for this pane's frame.
+
+    cwd still wins over `PYTHONPATH` under `-m`, so a pane standing in a switchboard
+    worktree draws that worktree's copy exactly as it did before this existed.
+
+    Quoted, because both paths come from the environment and this text reaches a
+    shell. Nothing agent-authored is in it — see `Herdr.prompt_pane`, which takes
+    fixed commands only.
+    """
+    own = Path(__file__).resolve().parent.parent
+    existing = os.environ.get("PYTHONPATH")
+    pythonpath = f"{own}{os.pathsep}{existing}" if existing else str(own)
+    return (f"exec env PYTHONPATH={shlex.quote(pythonpath)} "
+            f"{shlex.quote(sys.executable)} -m switchboard.board")
+
+
 def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:
     """Split `pane_id` and run the board in the new pane. -> new pane id, or None.
 
@@ -2620,7 +2656,8 @@ def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:
 
     Launches `sys.executable -m switchboard.board` rather than `sb board`, so it
     does not depend on `sb` being on PATH in that pane, and cannot trip the
-    human-only gate on the way in.
+    human-only gate on the way in. `_board_command` is what makes that line
+    importable from a pane standing anywhere.
     """
     from .herdr import HerdrError
 
@@ -2629,7 +2666,7 @@ def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:
     except (HerdrError, OSError):
         return None
     try:
-        h.prompt_pane(pane, f"exec {sys.executable} -m switchboard.board")
+        h.prompt_pane(pane, _board_command())
     except (HerdrError, OSError):
         try:
             h.close_pane(pane)          # a bare shell pane is worse than no pane

@@ -747,7 +747,32 @@ class Herdr:
                timeout_ms: int, attempts: int) -> Agent:
         """The `agent start` call itself, retried. Provider-agnostic by construction —
         what differs between providers is entirely in `agent_args`, which is why the
-        retry loop is shared rather than written once per branch."""
+        retry loop is shared rather than written once per branch.
+
+        `agent_name_taken` IS NOT RETRIED, because it is the one failure a retry can
+        only ever repeat — and, far more often, one this loop caused itself. herdr
+        returns from `agent start` when the agent owns the terminal AND is
+        interactive-ready, and it registers the name at the first of those. So an
+        attempt that gets as far as launching the CLI and then fails to see it settle —
+        a Claude Code sitting on its workspace-trust dialog in a directory it has never
+        been run in, which is every first spawn in a fresh repo — leaves a live agent
+        under this name behind. Attempts two and three can then say nothing but
+        `agent_name_taken`, and that is what the caller was shown: a brand-new name
+        reported as already used, on its first ever use.
+
+        Reported by Andrew, 2026-08-25, first `sb start` in a fresh non-switchboard
+        repo, `status=Blocked` on the very pane we had just asked for.
+
+        The name being taken BY THE AGENT IN OUR OWN PANE is therefore proof that our
+        own earlier attempt started it — nothing else could have put it there — and the
+        agent is returned instead of failed. It may still be sitting on that dialog, and
+        that is `deliver`'s problem, which is the one thing in this file equipped for it
+        (a rescue keypress, then proof from the agent's own transcript).
+
+        Anybody ELSE'S name gets the error straight back on the spot: a stranger holding
+        it will still be holding it in two seconds, so the retries only delay a verdict
+        the caller has to act on, and the message they delay is the accurate one.
+        """
         last: Optional[HerdrError] = None
         for attempt in range(attempts):
             try:
@@ -763,6 +788,13 @@ class Herdr:
                 return Agent.from_json(r.get("agent", {}))
             except HerdrError as e:
                 last = e
+                if e.code == "agent_name_taken":
+                    # `_peek` never raises, so a herdr that cannot answer leaves `mine`
+                    # None and the name-taken error is raised as herdr reported it.
+                    mine = self._peek(name)
+                    if mine is not None and mine.pane_id == pane_id:
+                        return mine
+                    raise
                 self._sleep(SPAWN_BACKOFF * (attempt + 1))
         raise HerdrError("spawn_failed", f"after {attempts} attempts: {last}", [name, pane_id])
 

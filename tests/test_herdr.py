@@ -254,6 +254,31 @@ class SpawnTest(unittest.TestCase):
             h.start_agent("w1", "w1:p9", attempts=3)
         self.assertEqual(cm.exception.code, "spawn_failed")
 
+    def test_a_name_taken_by_our_own_pane_is_the_agent_we_started(self):
+        """Andrew, 2026-08-25: a first-ever `sb start` in a fresh repo answered
+        `agent_name_taken` for a brand-new name. The first attempt had registered the
+        agent and then failed to see it settle — the trust dialog — so the retries could
+        say nothing else. The agent in OUR pane is ours."""
+        fake = FakeHerdr(err("timeout"),
+                         err("agent_name_taken", "already used"),
+                         ok({"agents": [AGENT_JSON]}))
+        h = Herdr("herdr", runner=fake, sleep=lambda _: None)
+        a = h.start_agent("w1", "w1:p9", attempts=3)
+        self.assertEqual(a.pane_id, "w1:p9")
+        self.assertEqual(len(fake.calls), 3)          # start, start, agent list
+
+    def test_a_name_taken_by_a_stranger_is_raised_at_once(self):
+        """A name somebody else holds is still held two seconds later, so the retries
+        only delay the accurate message."""
+        elsewhere = {**AGENT_JSON, "pane_id": "w7:p1"}
+        fake = FakeHerdr(err("agent_name_taken", "already used"),
+                         ok({"agents": [elsewhere]}))
+        h = Herdr("herdr", runner=fake, sleep=lambda _: None)
+        with self.assertRaises(HerdrError) as cm:
+            h.start_agent("w1", "w1:p9", attempts=3)
+        self.assertEqual(cm.exception.code, "agent_name_taken")
+        self.assertEqual(len(fake.calls), 2)          # no second `agent start`
+
 
 class DeliverTest(unittest.TestCase):
     """`deliver` — a prompt that is confirmed to have been taken, or raises.
