@@ -1633,10 +1633,11 @@ class SeamWindowTest(unittest.TestCase):
     def test_a_section_never_pushes_the_frame_past_the_bottom_of_the_pane(self):
         """The same sweep for the other placement, which has its own arithmetic.
 
-        A section is sized before the tree is windowed and is the FIRST thing to give its
-        lines back, so the two things that could go wrong are opposite: a frame taller
-        than the pane, and a board that spent its last line on a heading instead of an
-        agent. Both are checked here, at every height a pane can be.
+        A section gets a SHARE of the pane rather than the tree's leftovers
+        (`board.split_panels`), and gives it all back on a pane too short to hold both, so
+        the two things that could go wrong are opposite: a frame taller than the pane, and
+        a board that spent its last line on a heading instead of an agent. Both are
+        checked here, at every height a pane can be.
 
         Where `rich` is not installed the plain half is the whole test, exactly as in the
         sweep above — see `HAVE_RICH` at the top of the file.
@@ -1704,6 +1705,95 @@ class SeamWindowTest(unittest.TestCase):
                     + (1 if last < len(costs) else 0)
                 with self.subTest(room=room, top=top):
                     self.assertLessEqual(spent, room)
+
+
+class PanelSplitTest(unittest.TestCase):
+    """Two panels, one pane: the tree's floor and the section's own scroll.
+
+    The board used to size a plugin's section first and give the tree what was left, which
+    on a worktree carrying a dozen plans left ONE agent row — and cut the plans off at the
+    bottom of the pane anyway, so the squeeze bought nobody anything. What is pinned here
+    is the deal that replaced it: the tree keeps a floor, the section takes a share and
+    scrolls inside it, and a wheel can tell which of the two it is over.
+    """
+
+    def deep(self, n):
+        """A plugin section `n` lines tall — `SeamWindowTest.deep`, and the same shape."""
+        return mock.patch.object(
+            board, "section_extras",
+            return_value=[("PLANS", [f"plan line {i}" for i in range(n)])] if n else [])
+
+    FLEET = snap(agent("top"), agent("alpha", depth=1, parent="top"),
+                 agent("beta", depth=1, parent="top"))
+
+    def drawn(self, rows):
+        """Every line as plain text, with the owner that would answer a click on it."""
+        return [(board._ANSI.sub("", str(t)), o) for t, o in rows]
+
+    def test_the_tree_keeps_its_floor_however_much_a_plugin_has_to_say(self):
+        """Three agents and forty lines of plans: the AGENTS panel is still ten lines, and
+        the plans get the rest rather than the whole pane."""
+        room, section = board.split_panels(30, 3, 40)
+        self.assertEqual(room, board.MIN_AGENTS)
+        self.assertEqual(section, 30 - board.MIN_AGENTS)
+        # And a fleet bigger than the floor is not held down to it: twenty-five agents
+        # against three lines of plans is 25/3, not half each. What neither panel asked
+        # for stays slack — blank is blank wherever it is drawn.
+        self.assertEqual(board.split_panels(30, 25, 3), (25, 3))
+
+    def test_a_pane_too_short_for_both_hands_the_section_back_whole(self):
+        """Half a flowchart is not a smaller picture, and a heading over nothing is not a
+        section. Below the floor plus `SECTION_MIN` there is nothing to divide."""
+        for avail in range(1, board.MIN_AGENTS + board.SECTION_MIN):
+            with self.subTest(avail=avail):
+                self.assertEqual(board.split_panels(avail, 3, 40), (avail, 0))
+        self.assertEqual(board.split_panels(board.MIN_AGENTS + board.SECTION_MIN, 3, 40),
+                         (board.MIN_AGENTS, board.SECTION_MIN))
+
+    def test_the_section_window_clamps_to_the_last_full_screenful(self):
+        """Scrolled past the end, the panel is still full — and it pays for the lines that
+        say there is more, so what it draws plus those never exceeds the room."""
+        n, room = 40, 10
+        for top in (0, 1, 7, 999):
+            first, last = board.section_window(n, top, room)
+            spent = (last - first) + (1 if first else 0) + (1 if last < n else 0)
+            with self.subTest(top=top):
+                self.assertLessEqual(spent, room)
+                self.assertEqual(spent, room)         # a full panel, never a ragged one
+        self.assertEqual(board.section_window(n, 999, room)[1], n)
+        self.assertEqual(board.section_window(4, 999, room), (0, 4))   # it all fits
+
+    def test_each_panel_scrolls_without_moving_the_other(self):
+        """THE WHOLE POINT. A wheel over the plans moves the plans and leaves the tree
+        exactly where it was, and a wheel over the tree does the reverse. Both renderers,
+        because a human on a machine without `rich` is reading the same fleet."""
+        for name, draw in (("plain", board.layout),
+                           *((("rich", richboard.layout),) if HAVE_RICH else ())):
+            with self.subTest(renderer=name), self.deep(40):
+                at_top = self.drawn(draw(self.FLEET, top=0, height=30, width=100, msg=""))
+                moved = self.drawn(draw(self.FLEET, top=0, height=30, width=100, msg="",
+                                        section_top=8))
+                tree = [t for t, o in at_top if o and o is not board.SECTION_ZONE]
+                self.assertEqual(
+                    tree, [t for t, o in moved if o and o is not board.SECTION_ZONE],
+                    "scrolling the plans moved the tree")
+                before = [t for t, o in at_top if o is board.SECTION_ZONE]
+                after = [t for t, o in moved if o is board.SECTION_ZONE]
+                self.assertTrue(before and after)
+                self.assertNotEqual(before, after, "the plans did not scroll")
+                self.assertTrue(any("above" in t for t in after),
+                                "a scrolled section does not say what is above it")
+
+    def test_a_section_line_carries_the_section_and_a_click_on_it_still_misses(self):
+        """The owner is what tells a wheel which panel it is over — and it is FALSE, so
+        every caller that asks `if a` for an agent sees exactly what it saw before."""
+        with self.deep(40):
+            rows = board.layout(self.FLEET, top=0, height=30, width=100, msg="")
+        section = [i for i, (_, o) in enumerate(rows, 1) if o is board.SECTION_ZONE]
+        self.assertTrue(section)
+        for i in section:
+            self.assertIs(board.agent_at(rows, i), board.SECTION_ZONE)
+            self.assertFalse(board.agent_at(rows, i))       # `focus` is never called on it
 
 
 class SeamPathsTest(unittest.TestCase):

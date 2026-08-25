@@ -638,6 +638,21 @@ needs_settle = 30.0
 # does not read this.
 board_chrome = 8
 
+# The fewest lines the AGENTS panel is ever drawn in, however much a plugin has to say
+# under it. TEN, and the point of it is that the tree does not change size when something
+# else on the board does: before this, a worktree carrying a dozen plans took the pane off
+# the tree a line at a time until the tree was one row tall — and the plans were cut off
+# anyway, so the squeeze bought nobody anything. Each panel now gets its own share of the
+# pane and scrolls inside it. See `board.split_panels`.
+#
+# A FLOOR AND NOT A HEIGHT: thirty agents still get thirty rows when the pane has them,
+# and three agents get ten with seven of them blank — which is what stops the section
+# under the tree moving every time an agent finishes.
+#
+# Given up only when the pane cannot hold it and a section at once, and then it is the
+# section that goes: the board is the tree.
+board_min_agents = 10
+
 # Draw the archived agents too, instead of only what is still running. An agent is
 # archived when herdr no longer has its pane and it is past the spawn grace — see
 # `status.AgentStatus.archived`.

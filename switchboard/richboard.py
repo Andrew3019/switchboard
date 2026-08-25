@@ -509,7 +509,8 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
            here: Optional[str] = None, stats: Optional[dict] = None,
-           openable=None) -> Optional[list[tuple[str, Optional[object]]]]:
+           openable=None, section_top: int = 0
+           ) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
     Returns None when it cannot honour that contract: `rich` is absent, the pane is too
@@ -534,6 +535,14 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     a plain dict, `{}` or None when there are none yet. Drawn as the head's middle section
     (`_stats_block`); what it SAYS is `board.stats_rows`, shared with the plain renderer so
     the two boards cannot come to report different numbers.
+
+    `section_top` is `top` for the OTHER panel — whatever a plugin draws under the tree.
+    Two offsets because there are two panels, each scrolling inside its own share of the
+    pane: `board.split_panels` divides the pane and `board.section_window` windows the
+    lower half of it, and both are shared with the plain renderer for `stats_rows`'s
+    reason. A section line is owned by `board.SECTION_ZONE`, which is what tells a wheel
+    which of the two it is over — and is false, so every caller that asks `if a` for an
+    agent still sees none there.
     """
     if not available() or width < MIN_WIDTH or height < MIN_HEIGHT:
         return None
@@ -583,7 +592,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # Sized here with the other fixed blocks because it is what the body has to share the
     # pane with, and it carries its own blank line above so that the padding travels with
     # the section rather than being remembered separately where it is drawn.
-    below = _plugin_sections(rows, inner)
+    section = _plugin_sections(rows, inner)
+    # What a plugin draws under each worktree GROUP, which is part of the tree and not of
+    # the section. Read once — the hooks go to disk — and used twice: for what the tree
+    # would cost in full, which is what it bids with, and for the blocks themselves.
+    raw_extras = board.group_extras(rows)
+    want = len(rows) + sum(len(e) for e in raw_extras)
     bar = True                                   # is the AGENTS section header drawn?
     head_lines = 2 + len(stats_block)
     gap_min = 1 if needs else 0
@@ -593,32 +607,36 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # overflows — and cost them intermittently, since the hint comes and goes with what
     # the highlighted agent has written. A line about a keystroke may not push agents
     # under the fold.
-    room = capacity - head_lines - 1 - len(needs) - gap_min - len(below)   # head, footer
-    if room < 1 and below:
-        # FIRST TO GIVE ITS LINES BACK, before the numbers and long before the tree. A
-        # plugin's section is the most decorative thing on this board and the only one a
-        # human can get in full with one command; what he opened the board for is the
-        # tree. All of it at once rather than a line at a time: half a flowchart is not a
-        # smaller picture, it is a wrong one.
-        room += len(below)
-        below = []
+    #
+    # THE PANE IS DIVIDED RATHER THAN SPENT IN ORDER — see `board.split_panels`, shared
+    # with the plain renderer. The section used to be sized first and the tree given the
+    # remainder, which took a board with a dozen plans on it down to one agent row and cut
+    # the plans off anyway. Each panel now has a share and scrolls inside it, and the tree
+    # has a floor (`board.MIN_AGENTS`) that a section cannot take it below.
+    def split() -> tuple[int, int]:
+        return board.split_panels(capacity - head_lines - 1 - len(needs) - gap_min,
+                                  want, len(section))
+
+    room, section_room = split()
     if room < 1 and stats_block:
         # THE NUMBERS GO BEFORE THE SUMMONS DOES. A pane this short has room for the
         # board's real work and nothing else, and NEEDS YOU is the section a human is
         # looking for — so the stats block gives its lines back here, above the line that
-        # would otherwise start shortening that list.
+        # would otherwise start shortening that list. The plugin's section has already
+        # given all of its lines back by now: `split_panels` hands them over whole on any
+        # pane that cannot hold a tree and a section at once, for the reason stated there.
         head_lines -= len(stats_block)
-        room += len(stats_block)
         stats_block = []
+        room, section_room = split()
     if room < 1 and needs:
         # Too short even for one agent row: give the NEEDS YOU list back a line at a time,
         # its bar last — a count with no names still says somebody is waiting.
         keep = max(1, len(needs) + room - 1)
         needs = needs[:keep]
-        room = capacity - head_lines - 1 - len(needs) - gap_min
+        room, section_room = split()
         if room < 1:                                        # still none: the section goes
             needs, gap_min = [], 0
-            room = capacity - head_lines - 1
+            room, section_room = split()
 
     # WHICH ROWS ARE ON SCREEN, decided before the head is drawn because on the shortest
     # pane the head is what decides it. A section header over no agents at all is the one
@@ -636,15 +654,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # lines are what it is cut against — so that no single row can be taller than the
     # window and starve the tree of the screen. `room` only ever grows below, so a cap
     # measured against it here stays a cap.
-    extras = [e[:max(0, room - 3)] for e in board.group_extras(rows)]
+    extras = [e[:max(0, room - 3)] for e in raw_extras]
     costs = [1 + len(e) for e in extras]
     first, last = _window(len(rows), max(0, top), max(0, room), costs)
-    if rows and first == last and below:
+    if rows and first == last and section_room:
         # No agent fits, and a plugin's section is holding lines the tree needs. Handed
-        # back before the numbers are, for the reason stated where `below` is sized — and
+        # back before the numbers are, for the reason stated where the split is made — and
         # unconditionally, without checking whether it buys a row, because a section
         # drawn over an empty tree is the one arrangement this board has no use for.
-        room, below = room + len(below), []
+        room, section_room = room + section_room, 0
+        extras = [e[:max(0, room - 3)] for e in raw_extras]
+        costs = [1 + len(e) for e in extras]
         first, last = _window(len(rows), max(0, top), max(0, room), costs)
     if rows and first == last:
         n = len(stats_block)
@@ -724,15 +744,39 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # and all the slack goes in ONE run between them. The blank line above NEEDS YOU is
     # that run's last line rather than a line added on top of it, so it is exactly one
     # when the board is full and the slack when it is not, and never multiplies.
-    # Plugin sections, under the whole tree and above the slack. Owned by NOBODY — a click
-    # on a plan is a miss, exactly as a click on a statistic is — and already carrying
-    # their own blank line above, so there is nothing to remember here about padding.
+    #
+    # THE AGENTS PANEL IS `room` LINES WHETHER OR NOT THE TREE FILLS THEM, and the padding
+    # that makes it so is spent here — but only when there is a section to hold off. With
+    # nothing under the tree these lines and the slack below are the same blank run, and
+    # spending them here would take them off the `oo` hint instead. What it buys is a
+    # section that stays where it was between frames rather than walking up the pane every
+    # time an agent finishes.
+    pad = max(0, room - drawn) if section_room else 0
+    for _ in range(pad):
+        emit(Text(""))
+    # The plugin sections, windowed into the share of the pane they were given: the two
+    # scroll lines are theirs to spend, exactly as the tree spends its own. Owned by
+    # `board.SECTION_ZONE` — a click on a plan is still a miss, because that sentinel is
+    # false and every caller asks `if a`, and a WHEEL over one now scrolls the section
+    # rather than the tree. Already carrying their own blank line above, so there is
+    # nothing to remember here about padding.
+    below: list[Any] = []
+    if section_room > 0:
+        first_s, last_s = board.section_window(len(section), max(0, section_top),
+                                               section_room)
+        if first_s:
+            below.append(Text(_clip(f"  ↑ {first_s} above", inner), style=DIM,
+                              no_wrap=True, overflow="crop"))
+        below.extend(section[first_s:last_s])
+        if last_s < len(section):
+            below.append(Text(_clip(f"  + {len(section) - last_s} more below", inner),
+                              style=DIM, no_wrap=True, overflow="crop"))
     for line in below:
-        emit(line)
+        emit(line, board.SECTION_ZONE)
     # What is actually left once the tree has been drawn, and the hint is paid for out
     # of it or not at all: it goes when taking its lines would eat the blank line NEEDS
     # YOU is entitled to, or push the footer off the pane.
-    slack = capacity - head_lines - drawn - len(below) - len(needs) - 1
+    slack = capacity - head_lines - drawn - pad - len(below) - len(needs) - 1
     if hint and slack - len(hint) < gap_min:
         hint = []
     gap = max(gap_min, slack - len(hint))

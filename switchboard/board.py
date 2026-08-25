@@ -83,6 +83,13 @@ CHROME = config.setting("display.board_chrome")      # header, STATS, two stats 
                                                      # blank, AGENTS, tail, hints — the
                                                      # lines of this renderer that are
                                                      # not agent rows
+MIN_AGENTS = config.setting("display.board_min_agents")   # the AGENTS panel's floor, in
+                                                          # lines — see `split_panels`
+# The fewest lines a plugin section is worth drawing in: its own blank, its heading, one
+# line of what it has to say, and the `+ N more below` that admits to the rest. Below this
+# a section is a heading over nothing, so it gives its lines back instead — which is what
+# `split_panels` spends it on, and the only place it is read.
+SECTION_MIN = 4
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
 _EDITOR = config.setting("editor.command")   # `[editor]`, and see `open_report_files`
 
@@ -1054,10 +1061,103 @@ def _stats_line(label: str, pieces: list[str], width: int) -> str:
     return _c(" " + _pad(label, STATS_LABEL_W) + "  ", DIM) + body
 
 
+class _SectionZone:
+    """The owner every plugin-section line carries, so a scroll knows which panel it is in.
+
+    FALSY ON PURPOSE, and that is the whole trick. Owners are recorded line by line as a
+    frame is built (`layout.emit`) and read back by `agent_at`, whose callers ask `if a`
+    before touching `a.name` — so a sentinel that is false answers "no agent here" to every
+    one of them without a single caller learning that sections exist. What DOES ask is the
+    wheel, which compares against this object by identity and scrolls the section instead
+    of the tree (`board.main`).
+
+    One object for every plugin's section, not one per plugin: what a wheel over PLANS and
+    a wheel over some future section mean is the same thing, which is "not the tree".
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:                   # only ever seen in a test failure
+        return "<section>"
+
+
+SECTION_ZONE = _SectionZone()
+
+
+def split_panels(avail: int, want_agents: int, n_section: int) -> tuple[int, int]:
+    """How many lines the tree gets and how many the plugin sections do: `(agents, section)`.
+
+    THE ONE PLACE THE PANE IS DIVIDED, shared by both renderers so they cannot come to
+    give the same fleet two different shapes. `avail` is what is left once the head, the
+    footer and NEEDS YOU have been paid for; `want_agents` is what the whole tree would
+    cost in lines; `n_section` is how many lines the sections would take in full.
+
+    What it is for. A section used to be sized FIRST and the tree given the remainder, so a
+    worktree carrying a dozen plans took the tree down to one row — and the section was cut
+    off at the bottom of the pane anyway, so the squeeze bought nobody anything. Each panel
+    now gets a share and scrolls inside it (`section_window`, and `top` for the tree).
+
+    The rules, in order:
+
+    - Everything that fits is drawn. Only a pane too small for both divides anything.
+    - The tree never goes below `MIN_AGENTS` lines while there is a section on the board,
+      whatever the section wants. Below that the section is not competing with a tree, it
+      is competing with the board's reason to exist.
+    - A pane that cannot hold `MIN_AGENTS` AND a section worth drawing (`SECTION_MIN`) has
+      no room to divide: the section gives its lines back whole and the tree takes the
+      pane. Half a flowchart is not a smaller picture, it is a wrong one.
+    - Contended, they split it: each panel takes what it wants up to half the pane, and
+      whatever the other did not need goes back to the one still short. So thirty agents
+      and three lines of plans is 30/3 and not 25/3, and thirty agents against forty lines
+      of plans is an even half each.
+
+    Pure, so it is asked wherever it is needed rather than threaded through anything.
+    """
+    if n_section <= 0 or avail <= 0:
+        return avail, 0
+    if avail - min(n_section, SECTION_MIN) < MIN_AGENTS:
+        return avail, 0
+    want = max(MIN_AGENTS, want_agents)
+    room = min(want, max(MIN_AGENTS, avail // 2))
+    section = min(n_section, avail - room)
+    return min(want, avail - section), section
+
+
+def section_window(n: int, top: int, room: int) -> tuple[int, int]:
+    """Which plugin-section lines are on screen: `[first, last)`, `first` the clamped top.
+
+    `room` is every line the section panel has, the two scroll lines included: one for
+    `↑ N above` when there is something above and one for `+ N more below` when there is
+    something below, charged here rather than discovered afterwards — `richboard._window`
+    charges for the tree's the same way, and for the same reason.
+
+    Section lines are lines and not rows: a section is a blank, a heading and whatever the
+    plugin drew, and nothing here knows which is which. So a window can open in the middle
+    of a flowchart, exactly as a scrolled terminal does, rather than being snapped to a
+    section boundary the caller would then have to define.
+
+    `top` is clamped to the first line of the last full screenful, so scrolling to the
+    bottom lands on a full panel rather than on one line with blank space under it.
+    """
+    if room <= 0 or n <= 0:
+        return 0, 0
+    if n <= room:
+        return 0, n
+    first = max(0, min(top, n - (room - 1)))     # the last screenful still spends a line
+    last = first + room - (1 if first else 0)    # on `↑ N above`, and this one does not
+    if last < n:
+        last -= 1                                # and this one spends one on the rest
+    return first, min(last, n)
+
+
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
            here: Optional[str] = None, stats: Optional[dict] = None,
-           openable=None) -> list[tuple[str, Optional[object]]]:
+           openable=None, section_top: int = 0
+           ) -> list[tuple[str, Optional[object]]]:
     """Build the whole screen as (text, agent) pairs — one per line, in order.
 
     The agent a row belongs to is carried BY the row rather than recomputed from
@@ -1101,6 +1201,14 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     scroll past rows that are not drawn and the `+N more below` count would
     contradict the screen. Everything here — the slice, the clamp, the tail —
     counts what is actually on screen.
+
+    `section_top` is that same offset for the panel UNDER the tree — whatever a plugin
+    draws as a section of its own. Two offsets because there are two panels: a wheel over
+    the plans scrolls the plans and a wheel over the tree scrolls the tree, which is the
+    only reading of "scroll" that still works once neither of them fits. `split_panels`
+    divides the pane between the two and `section_window` windows the lower one, both
+    shared with the panelled renderer so the two boards cannot come to disagree about the
+    shape of the same fleet.
 
     Returns at most `height` lines.
     """
@@ -1146,22 +1254,9 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # board, sits under its own heading, and is drawn at the shallow indent every other
     # section's body uses. Undimmed also means a plugin's own colours land at full
     # strength, which is the point of having let them through the seam at all.
-    below: list[str] = []
+    section: list[str] = []
     for title, lines in section_extras(agents):
-        below.extend([""] + [_c(" " + title, DIM)] + ["  " + x for x in lines])
-    capacity = height - CHROME - len(below)
-    # WHO GIVES LINES BACK FIRST, on a pane too short for all of it: the plugin section,
-    # then the fleet's numbers, and the tree never. A section under the tree is the most
-    # decorative thing on this screen and the only one a human can get in full with one
-    # command; the board is the tree, and a board with no agent row on it has stopped
-    # being the thing anybody opened.
-    if capacity < 1:
-        capacity += len(below)
-        below = []
-    if capacity < 1:
-        capacity += len(top_lines)
-        top_lines = []
-    capacity = max(1, capacity)
+        section.extend([""] + [_c(" " + title, DIM)] + ["  " + x for x in lines])
     # How many SCREEN LINES each display row costs: its own, plus the break above it if
     # it opens a first-level group. Everything that windows or counts below reads this
     # rather than assuming one line each, the failure otherwise being a row pushed off
@@ -1173,6 +1268,32 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # below reads `costs`, which is why a variable-height block needed no new arithmetic.
     extras = group_extras(agents)
     costs = [(2 if b else 1) + len(extras[i]) for i, b in enumerate(breaks)]
+    # THE PANE, DIVIDED — see `split_panels`, which is shared with the panelled renderer.
+    # The tree keeps a floor of its own however much a plugin has to say (`MIN_AGENTS`),
+    # and what it does not need goes to the section, which scrolls inside whatever it got
+    # rather than running off the bottom of the pane.
+    capacity, section_room = split_panels(height - CHROME, sum(costs), len(section))
+    # WHO GIVES LINES BACK FIRST, on a pane too short for all of it: the plugin section,
+    # then the fleet's numbers, and the tree never. A section under the tree is the most
+    # decorative thing on this screen and the only one a human can get in full with one
+    # command; the board is the tree, and a board with no agent row on it has stopped
+    # being the thing anybody opened. `split_panels` makes the first of those calls; the
+    # numbers are this renderer's own, and are still charged in `CHROME` until they go.
+    if capacity < 1:
+        capacity += len(top_lines)
+        top_lines = []
+    capacity = max(1, capacity)
+    # The section's own window, and the two lines it spends on saying there is more. Built
+    # here and not where it is drawn, because the padding under the tree is measured off
+    # what it comes to: the AGENTS panel is `capacity` lines whether or not the tree fills
+    # them, which is what stops the section moving up the pane as agents finish.
+    first_s, last_s = section_window(len(section), max(0, section_top), section_room)
+    below: list[str] = []
+    if first_s:
+        below.append(_c(f"  ↑ {first_s} above", DIM))
+    below.extend(section[first_s:last_s])
+    if last_s < len(section):
+        below.append(_c(f"  + {len(section) - last_s} more below", DIM))
     top = max(0, min(top, _max_top(costs, capacity)))
     window: list[tuple[object, bool, list[str]]] = []   # (row, break above it, its block)
     used = 0
@@ -1238,6 +1359,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     if not agents:
         why = note_text or "nothing running — sb start"
         emit(_c(f"  ({why})", DIM))
+        used = 1                                 # what the panel's padding is measured off
     else:
         # Defaults, not `max(seq)`: a window can hold no agent row at all — a
         # plugin's block hanging under a group whose rows are all above the window
@@ -1283,11 +1405,22 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
             for extra in block:
                 emit(_c(_block_line(extra), DIM))
 
-    # Plugin sections, under the whole tree and owned by NOBODY — a click on a plan is a
-    # miss, exactly as a click on a statistic is. Already carrying their own blank line
-    # above (see `below`), so there is nothing to remember here about padding.
+    # THE AGENTS PANEL IS `capacity` LINES WHETHER OR NOT THE TREE FILLS THEM. Padded out
+    # here, and only when there is a section to hold off: with nothing under the tree these
+    # lines and the slack below are the same blank run, and spending them here would take
+    # the `oo` hint's lines instead. What the padding buys is a section that sits in the
+    # same place from one frame to the next rather than walking up the pane every time an
+    # agent finishes.
+    if below:
+        for _ in range(max(0, capacity - used)):
+            emit("")
+    # Plugin sections, under the whole tree and owned by the SECTION — never by an agent,
+    # so a click on a plan is still a miss (`agent_at`'s callers ask `if a`, and the
+    # sentinel is false), and a wheel over one scrolls the section rather than the tree.
+    # Already carrying their own blank line above (see `section`), so there is nothing to
+    # remember here about padding.
     for line in below:
-        emit(line)
+        emit(line, SECTION_ZONE)
 
     # The `oo`/`ww` hint, above the footer and only when there is something to open —
     # see `hint_lines`. It takes its lines out of the slack rather than off the tree, and
@@ -1349,9 +1482,14 @@ def agent_at(rows, row: int):
     """Screen row (1-based) -> whatever is drawn there, or None.
 
     An agent, or None for chrome — a header line, a break between groups, a
-    plugin's block. Every row that carries an owner carries an agent, because the
+    plugin's block. Every row that carries an AGENT carries a real one, because the
     board draws no stand-in rows (`status.board_rows`), so the caller reads a
-    `.name` off whatever comes back that is not None.
+    `.name` off whatever comes back that is truthy.
+
+    Truthy, not "not None": a plugin section's line comes back as `SECTION_ZONE`,
+    which is false, so a caller asking `if a` sees no agent there exactly as it did
+    before the sections had an owner at all. The wheel is the one caller that asks
+    which sentinel it is, because that is the question "which panel am I over".
     """
     i = row - 1
     if i < 0 or i >= len(rows):
@@ -2374,7 +2512,7 @@ def _size() -> tuple[int, int]:
 
 def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
            show_archived: bool, here: Optional[str] = None,
-           stats: Optional[dict] = None, openable=None
+           stats: Optional[dict] = None, openable=None, section_top: int = 0
            ) -> list[tuple[str, Optional[object]]]:
     """One frame, from whichever renderer can draw it. THE SEAM, and all of it.
 
@@ -2401,21 +2539,21 @@ def _frame(snap, *, top: int, height: int, width: int, msg: str, note_text: str,
 
     rows = richboard.layout(snap, top=top, height=height, width=width, msg=msg,
                             note_text=note_text, show_archived=show_archived, here=here,
-                            stats=stats, openable=openable)
+                            stats=stats, openable=openable, section_top=section_top)
     if rows is not None:
         return rows
     return layout(snap, top=top, height=height, width=width, msg=msg,
                   note_text=note_text, show_archived=show_archived, here=here,
-                  stats=stats, openable=openable)
+                  stats=stats, openable=openable, section_top=section_top)
 
 
 def draw(snap, top: int, msg: str, note_text: str, show_archived: bool,
          here: Optional[str] = None, stats: Optional[dict] = None,
-         openable=None) -> list:
+         openable=None, section_top: int = 0) -> list:
     height, width = _size()
     rows = _frame(snap, top=top, height=height, width=width, msg=msg,
                   note_text=note_text, show_archived=show_archived, here=here,
-                  stats=stats, openable=openable)
+                  stats=stats, openable=openable, section_top=section_top)
     out = ["\033[H\033[2J"]
     out.append("\r\n".join(text for text, _ in rows))
     sys.stdout.write("".join(out))
@@ -2514,7 +2652,10 @@ def main() -> int:
     # toggle that outlives the pane is a setting — which is exactly what the
     # setting it starts from is for. `layout` clamps `top` every call, so the row
     # count changing under the toggle needs nothing here.
-    top, msg, buf = 0, "", ""
+    # TWO scroll offsets, because there are two panels: the tree, and whatever a plugin
+    # draws under it. A wheel scrolls the one it is over (`SECTION_ZONE`), so a long list
+    # of plans is read by scrolling the plans rather than by the plans eating the tree.
+    top, section_top, msg, buf = 0, 0, "", ""
     # When `o` and `w` were last pressed on their own, on the monotonic clock. One float
     # each is the whole double-press state: a single `o` is not a command, so nothing
     # happens until a second one lands inside `DOUBLE_PRESS` — see `double_press_run`,
@@ -2545,7 +2686,7 @@ def main() -> int:
         where.tick()
         here = where.name(snap.agents)
         rows = draw(snap, top, msg, note_text, show_archived, here, stats,
-                    openable=reports.tick(here))
+                    openable=reports.tick(here), section_top=section_top)
         last = time.time()
 
         while True:
@@ -2595,7 +2736,14 @@ def main() -> int:
                         continue
                     step = wheel(ev)
                     if step:
-                        top = max(0, top + step * 3)
+                        # WHICH PANEL THE POINTER IS OVER, asked of the frame that is on
+                        # screen rather than computed from a row number: the owner was
+                        # recorded as the line was drawn, which is the same answer a click
+                        # gets and cannot drift from what the human is looking at.
+                        if agent_at(rows, ev["row"]) is SECTION_ZONE:
+                            section_top = max(0, section_top + step * 3)
+                        else:
+                            top = max(0, top + step * 3)
                         dirty[0] = True
                         continue
                     if is_left_click(ev):
@@ -2632,7 +2780,7 @@ def main() -> int:
                 # or starts being highlighted on the next frame, with no subprocess in it.
                 here = where.name(snap.agents)
                 rows = draw(snap, top, msg, note_text, show_archived, here, stats,
-                            openable=reports.tick(here))
+                            openable=reports.tick(here), section_top=section_top)
                 dirty[0] = False
     except KeyboardInterrupt:
         pass
