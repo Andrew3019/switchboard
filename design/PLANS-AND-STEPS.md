@@ -216,10 +216,17 @@ change and a large one.
 **A preset may exist only for steps to name**, rather than being offered to spawns at
 all — Change Approval's bullet format is one.
 
-**The agent is the interpreter.** There is no compiler and no schema to satisfy: a step
-carries whatever fields are useful and an agent reads them. Inputs if it wants inputs, a
-field saying `vibe = bad` if that is what conveys it. None of that needs specifying in
-advance, and specifying it is how this turns into a workflow engine.
+**The agent is the interpreter.** There is no compiler, and — `strategy` aside — no schema
+to satisfy: a step carries whatever fields are useful and an agent reads them. Inputs if it
+wants inputs, a field saying `vibe = bad` if that is what conveys it. None of that needs
+specifying in advance, and specifying it is how this turns into a workflow engine.
+
+**One field is shaped, and it is advice.** A step's `strategy` — its recommended
+orchestration — has its field names and value types fixed by
+`defaults/plugins/plans/strategy.schema.json`, and `validate` reports what does not match
+while keeping whatever it found. What is pinned is the REPRESENTATION of a recommendation:
+nothing reads a strategy and acts on it, and no check asks whether an agent followed one.
+Every other field on a step stays open.
 
 **A step may carry a command**, which may live in a script shipped alongside it. How it gets
 called is settled when it comes up. The agent owning the step is what

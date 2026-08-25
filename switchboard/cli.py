@@ -344,6 +344,15 @@ def build_parser() -> argparse.ArgumentParser:
     # the only place a resolved model name is ever printed — a tier is opaque by design,
     # so without this the only way to learn what one maps to is to read three config files.
     cmd("models", help="show the resolved model tiers for this repo")
+    # The other two answers to that same question, and the two halves of what a spawn is
+    # bounded by: `roles` is the profile `--role` names — tier, capability template,
+    # config ceiling and prompt — and `capabilities` is the vocabulary `sb grant` accepts
+    # here. Both are read off THIS repo's layers rather than a list written down anywhere
+    # (C12), which is the only way they stay true for a repo that adds a role or mints a
+    # capability of its own. Read-only, no plugin import: safe for an agent mid-turn.
+    rl = cmd("roles", help="list this repo's roles, or show one in full")
+    rl.add_argument("name", nargs="?", help="show this role instead of listing")
+    cmd("capabilities", help="the capability vocabulary this repo grants against")
     cmd("init", help="pin this repo for switchboard (writes no CLAUDE.md)")
     doc = cmd("doctor", help="check herdr, version, and integration conflicts")
     # The way out of the one deadlock the store can get into: a schema change that is not
@@ -542,6 +551,13 @@ def _validate(args) -> None:
 
     elif cmd == "who-holds":
         args.cap = validate.token(args.cap, "capability")
+
+    elif cmd == "roles":
+        # The same check `delegate --role` gets, because it is the same string looked up in
+        # the same table: a name one accepts and the other rejects would be two answers to
+        # one question. Not `token` — a role name is a lookup key, not a slug.
+        if args.name is not None:
+            args.name = validate.line(args.name, "role", max_len=validate.MAX_TOKEN)
 
     elif cmd == "tell":
         args.who = validate.targets(args.who)
@@ -1486,6 +1502,60 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             lines.append(f"  {n:12}{s.provider:10}{shown}")
         _emit(args, "\n".join(lines),
               {"default_provider": tiers.default_provider, "tiers": out})
+        return 0
+
+    if cmd == "roles":
+        defined = roles_mod.load(b.repo)
+        if args.name:
+            if args.name not in defined:
+                # `presets`' refusal, deliberately word for word: the caller is about to
+                # type `--role` and got the name slightly wrong, and the list is short.
+                # NOT resolved through `roles.get` — that falls back for any name at all,
+                # so a typo would print the fallback role's prompt under the typo's name.
+                known = ", ".join(sorted(defined)) or "none"
+                print(f"sb: no role '{args.name}' (have: {known})", file=sys.stderr)
+                return 1
+            role = defined[args.name]
+            # Both read off the functions the SEEDER and the gate read them off, rather
+            # than off the Role's raw fields: a readout keeping its own copy of "what a
+            # lead gets" is how a listing comes to disagree with what a spawn hands out.
+            #
+            # `is_top=False` because a role is not a placement. The top's fixed set (§2.0)
+            # belongs to the `is_top` stamp, not to `dispatcher` the template, and printing
+            # it here would say a role grants something no `--role dispatcher` spawn gets.
+            caps = sorted(roles_mod.template_capabilities(
+                defined, role.name, is_top=False, repo=b.repo))
+            # The EFFECTIVE ceiling — this role's overrides over `[config.settings]` — for
+            # the same reason: `sb configure` refuses against this, and the role's bare
+            # override alone would show a ceiling nobody is actually held to.
+            ceiling = roles_mod.template_ceiling(defined, role.name, repo=b.repo)
+            pad = "\n" + " " * 18
+            lines = [role.name,
+                     f"  {'tier':16}{role.model}",
+                     f"  {'capabilities':16}{', '.join(caps) or '(none)'}",
+                     f"  {'config ceiling':16}" + (
+                         pad.join(f"{k} = {v}" for k, v in sorted(ceiling.items()))
+                         or "(none)"),
+                     "  prompt:",
+                     role.prompt.rstrip("\n") or "  (none)"]
+            _emit(args, "\n".join(lines),
+                  {"name": role.name, "model": role.model, "capabilities": caps,
+                   "config_ceiling": ceiling, "prompt": role.prompt})
+            return 0
+        _emit(args, "\n".join(f"  {n:16}{defined[n].model}" for n in sorted(defined))
+              or "(none)", {"roles": sorted(defined)})
+        return 0
+
+    if cmd == "capabilities":
+        # The broker's vocabulary and not `roles.CAPABILITIES`: what this repo will GRANT
+        # is the shipped set plus whatever its own templates and side-effect table name,
+        # minus `start`, and answering from the constant would advertise a different set
+        # from the one `sb grant` accepts.
+        vocab = sorted(b.known_capabilities())
+        # An OBJECT, like every other listing here (`{"presets": ...}`, `{"tiers": ...}`,
+        # `{"roles": ...}`): a bare array is one shape a reader has to special-case, and
+        # nothing about this listing is different enough to earn it.
+        _emit(args, "\n".join(f"  {c}" for c in vocab), {"capabilities": vocab})
         return 0
 
     if cmd == "cleanup":

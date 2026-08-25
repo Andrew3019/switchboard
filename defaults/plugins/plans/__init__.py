@@ -34,7 +34,7 @@ The records
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
 writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here is an enum
 and a lead that wants `progress: waiting on Andrew` gets it without a release. The design
-says the agent is the interpreter and there is no schema to satisfy, so a step carrying a
+says the agent is the interpreter and a step's fields are OPEN, so a step carrying a
 field this file has never heard of is a feature and not corruption — `_step()` fills in the
 fields the design names and leaves everything else alone, and EVERY RENDERING SHOWS IT:
 `--json` and `--markdown` because neither knows a schema, and the terminal view because
@@ -42,6 +42,13 @@ fields the design names and leaves everything else alone, and EVERY RENDERING SH
 one, that being what a line holds; a list or an object is left to `--json`, which is the
 shape that can carry one. A promise kept in two renderings out of three was one the third
 made a liar of.
+
+ONE FIELD IS SHAPED, AND IT IS ADVISORY. `strategy` — a step's recommended orchestration —
+has its field names and value types fixed by `strategy.schema.json` and checked by
+`validate`, which WARNS and preserves whatever it found. That is not the exception to the
+paragraph above so much as the proof of it: what is pinned is the REPRESENTATION of a
+recommendation, and nothing here reads a strategy and acts, enforces one, or asks whether
+an agent followed it. Every other field on a step is as open as it ever was.
 
 Moving a step
 -------------
@@ -388,7 +395,22 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from switchboard import config as config_mod
+from switchboard import models as models_mod
+from switchboard import plugins as plugins_mod
+from switchboard import presets as presets_mod
+from switchboard import roles as roles_mod
 from switchboard.plugins import Result
+
+# THE VOCABULARY IS READ FROM THE MODULES THAT OWN IT, never re-listed here and never
+# shelled out for. `catalog` is a digest of what this repo has right now — roles, tiers,
+# presets, enabled plugins, capabilities — and every one of those five already has exactly
+# one definition in sb. A plugin that shipped its own copy of any of them would be an
+# inventory going stale against the thing it describes, which is the one failure the whole
+# generated-catalogue design exists to avoid; a plugin that ran `sb roles --json` in a
+# subprocess would pay a Python interpreter per category to be told the same thing. None of
+# these five imports reaches the store, herdr or the network: they read config off disk,
+# which is what a read-only listing is.
 
 
 # This file, rather than a parallel Python structure, is the single contract for the
@@ -556,6 +578,14 @@ def register(reg):
         help="how plan-making is done — when a plan exists, who writes to it, what to "
              "build it from, and how to edit one")
     reg.command(
+        "planner", planner, audience="both",
+        help="the plan writer's own instruction — read it on your first turn if you were "
+             "spawned to write a plan")
+    reg.command(
+        "catalog", catalog, audience="both",
+        help="the vocabulary this repo has right now — roles, model tiers, presets, "
+             "enabled plugins, capabilities, the step library and the templates")
+    reg.command(
         "create", create, audience="both",
         help="start a plan on this worktree, empty or with its steps already in it",
         args=[reg.arg("title", repeat=True, help="what this plan is for"),
@@ -568,6 +598,10 @@ def register(reg):
                       help="a library step by name, e.g. review; repeat for more, and "
                            "each lands where its definition says it runs"),
               reg.arg("--note", repeat=True, help="a note on the plan; repeat for more"),
+              reg.arg("--planner", flag=True,
+                      help="you are this plan's plan writer: records you in the plan's "
+                           "`planner` field, which makes the SHAPE of the plan yours "
+                           "rather than the worktree owner's"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "list", ls, audience="both", help="the plans on this worktree",
@@ -697,6 +731,20 @@ WHO WRITES TO IT
   The owner makes every edit to the SHAPE of the plan — steps, order, owners, gates, deps.
   A child that wants one ASKS, with `sb tell parent`, and does not edit the file. One
   writer is what makes editing this file by hand safe, and it is the only thing that does.
+
+  UNLESS THE PLAN NAMES A PLANNER, which is the one thing that moves that writer. A plan
+  carrying a `planner` field was written by a plan writer, and THAT agent is the sole shape
+  writer for the life of the plan, whoever owns the worktree: scope, success criteria, the
+  decomposition, cross-step deps, `strategy`, the verification strategy and the termination
+  condition are all its own. What the main agent owns on such a plan is execution state —
+  progress, notes, evidence, checkpoints, outputs, and the ticks — and it records a local
+  adaptation as a note rather than by reshaping the plan. Anything material goes back to
+  the planner with `sb tell`, and it revises the plan itself.
+
+  A plan with no `planner` is the ordinary case and the rule above it is the whole of it.
+  The field is written by `create --planner`, which records the calling agent; the plan
+  writer's own instruction is `sb plugin plans planner`, and the vocabulary it plans
+  against is `sb plugin plans catalog`.
 
   TICKING IS NOT THAT. Any agent ticks the step it did, and is trusted to tick only that
   one. An agent that reports back without ticking leaves the tick to the lead, who does it
@@ -860,6 +908,16 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
                  not dump: an approved change contract and a review's result are what it
                  is for, and the definitions needing one say so in their own `about`.
                  Multi-line; replaced and never appended when a step is redone.
+    strategy     the recommended way to run this step, written by whoever shaped the
+                 plan — a plan writer where there is one. A sparse object: `continuity`,
+                 `orchestration`, `model`, `resources` (`skills`, `presets`, `tools`),
+                 `isolation`, `budget` (`context`, `passes`), `verification`, `replan_if`,
+                 and `brief`, all optional. It is the ONE field here whose names and types
+                 are fixed — `strategy.schema.json` is the contract and `validate` reports
+                 what does not match it — and it is ADVISORY: nothing reads a strategy and
+                 acts on it, and no check here asks whether anybody followed one. Missing
+                 means use your judgement; departing from one you were given needs no
+                 permission, and only a consequential departure is worth a note.
     display      required on every step, and `deps` on every step but the first — see
                  above. The minting verbs refuse a step without a board name.
 
@@ -870,10 +928,12 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   still walked off the record rather than off a schema. A definition's `command` is not on
   the record at all — it is resolved out of the library every time the step is drawn.
 
-  A FIELD THIS LIST HAS NEVER HEARD OF IS ALLOWED. There is no schema to satisfy: put what
-  the job needs on the step, and `show`, `--json` and the PR comment all print it — a
-  scalar gets its own line under the step in the terminal, and anything with a shape to it
-  is left to `--json`, which is the rendering that can carry one.
+  A FIELD THIS LIST HAS NEVER HEARD OF IS ALLOWED. Apart from `strategy` above there is no
+  schema to satisfy: put what the job needs on the step, and `show`, `--json` and the PR
+  comment all print it — a scalar gets its own line under the step in the terminal, and
+  anything with a shape to it is left to `--json`, which is the rendering that can carry
+  one. What `validate` says about a `strategy` is the same kind of thing it says about a
+  missing board name: a defect reported, never a refusal, and never data thrown away.
 
   Three verbs are worth typing rather than editing, being frequent, small and usable by
   the agent that did the work rather than only by the plan's owner — `tick <step>` when a
@@ -917,6 +977,307 @@ def guide(ctx, args) -> Result:
     return Result(human=GUIDE.rstrip("\n"), data={"guide": GUIDE})
 
 
+# -- the planner package -------------------------------------------------------
+#
+# THREE THINGS A PLAN WRITER READS, and only the first is new prose. `planner` is the
+# instruction it reads once, on its first turn; `guide` is how a plan is made, read at the
+# start of every planning pass; `catalog` is the vocabulary it may name, generated from the
+# repo rather than written down anywhere. The split is the same one the guide and the
+# spawn trigger already make: what is read once, when a job comes up, is not paid for on
+# every spawn — `planner.md` is NOT in `agent.md` and nothing carries it.
+#
+# All three live in the plugin so that deleting the plugin takes every planner-specific
+# surface with it. What is left is the generic `researcher` role, which is all a plan
+# writer is made of, and plan data already in the repo, which goes inert.
+
+# The instruction's own file. A file rather than a Python string, unlike `GUIDE`, because
+# it is the length of a role prompt and is edited far more like one: the comment block at
+# its top is for whoever edits it and is dropped on the way out (`config.prose`), exactly
+# as `sb presets <name>` drops a preset's.
+PLANNER = "planner.md"
+
+
+def planner(ctx, args) -> Result:
+    """Print the plan writer's instruction. Reads one file, writes nothing.
+
+    A verb rather than a preset for `guide`'s reason: a preset survives the plugin being
+    deleted and this text names commands that would then not dispatch. Read on the
+    planner's FIRST TURN and carried on no spawn — a planner-specific instruction stapled
+    to every agent in the fleet would be paying, forever, for the jobs that have no plan
+    writer.
+    """
+    path = Path(__file__).resolve().parent / PLANNER
+    text = config_mod.read_text(path)
+    if text is None:
+        # Said with the path, like every other unreadable file here. An empty answer would
+        # leave a planner believing it had read its instruction and found nothing in it.
+        why = (f"{path} is not readable, so there is no planner instruction to print. "
+               f"Restore the file or reinstall the plugin.")
+        return Result(ok=False, human=why, data={"error": why})
+    body = config_mod.prose(text).rstrip("\n")
+    return Result(human=body, data={"planner": body, "path": str(path)})
+
+
+def catalog(ctx, args) -> Result:
+    """The vocabulary of this repo, right now: what a plan may name and nothing else.
+
+    GENERATED, NEVER MAINTAINED. Every category here is read from the module that owns it
+    at the moment the command runs, so a role added this morning is in it and a tier
+    deleted this afternoon is not. That is the whole point of the command: a planner
+    recommending a model, a preset, a capability or a step definition has to be naming
+    something that exists, and the alternative to generating the list is a hardcoded
+    inventory that is wrong the week after it is written.
+
+    A DIGEST AND NOT THE DETAIL. Each section prints names and the one or two facts that
+    tell them apart, plus the command that reads one in full — a role's prompt, a preset's
+    prose, a definition's `about`. Dumping all of it would be most of a context window
+    spent before the planning starts.
+
+    IT COVERS SB-MANAGED VOCABULARY ONLY. Skills and tools come from the session an agent
+    runs in and sb does not know them; the planner's own session already lists its own. So
+    the closing line of the human rendering says so rather than leaving the omission to be
+    discovered — a planner that read this as the whole inventory would invent tool names,
+    which is the one failure this command exists to prevent.
+
+    EVERY SECTION DEGRADES ON ITS OWN (`_section`). A broken `models.toml` or one
+    unparseable file in `library/` costs that section and is reported in `problems`; it
+    does not take the catalogue down. A planner with six categories and a named gap can
+    still plan and knows what it is missing; a planner with a traceback has nothing.
+    """
+    repo = Path(ctx.worktree)
+    problems: list[str] = []
+    data = {
+        "roles": _section("roles", problems, lambda: _cat_roles(repo), []),
+        "models": _section("models", problems, lambda: _cat_models(repo),
+                           {"default_provider": None, "tiers": []}),
+        "presets": _section("presets", problems, lambda: _cat_presets(repo),
+                            {"available": [], "every_agent": [], "roles": {}}),
+        "plugins": _section("plugins", problems, lambda: _cat_plugins(repo), []),
+        "capabilities": _section("capabilities", problems, lambda: _cat_caps(repo), []),
+        "library": _section("the step library", problems, lambda: _cat_defs(_lib), []),
+        "templates": _section("the templates", problems, lambda: _cat_defs(_kept), []),
+    }
+    data["problems"] = problems
+    return Result(human=_catalog_lines(data), data=data)
+
+
+def _section(what: str, problems: list[str], produce, empty):
+    """One category, or an empty one and a line saying which is missing and why.
+
+    `Exception` on purpose, and it is the one place in this file that is that wide: this
+    reads five config layers and two directories through modules that raise several
+    unrelated error types, and the failure mode being bought off is a planner starting its
+    job with a traceback instead of a catalogue. The reason is never swallowed — it goes in
+    `problems`, which both renderings print.
+    """
+    try:
+        return produce()
+    except Exception as e:                       # noqa: BLE001 — see above
+        problems.append(f"{what} could not be read: {_flat(e)}")
+        return empty
+
+
+def _cat_roles(repo: Path) -> list[dict]:
+    """Every role this repo has, merged — shipped, then its own. `switchboard/roles.py`.
+
+    The tier and the capability template are what a planner chooses between; the prompt is
+    the detail, and `sb roles <name>` is where it is read.
+
+    BOTH READ OFF THE RESOLVERS the seeder and the config gate read them off —
+    `template_capabilities` and `template_ceiling` — rather than off a Role's raw fields,
+    which is the same rule `sb roles` keeps and for the same reason: a listing holding its
+    own idea of "what a lead gets" is how two readouts of one fact come to disagree. Not
+    `is_top`, because a role is not a placement: the top's fixed set belongs to the stamp,
+    and printing it against `dispatcher` would advertise something no `--role dispatcher`
+    spawn is seeded with.
+
+    `config_ceiling` travels in `--json` and not in the digest: how far an agent may tune
+    itself matters to about one plan in fifty and is a column in the way for the rest.
+    """
+    got = roles_mod.load(repo)
+    return [{"name": name,
+             "model": role.model,
+             "capabilities": sorted(roles_mod.template_capabilities(
+                 got, name, is_top=False, repo=repo)),
+             "config_ceiling": roles_mod.template_ceiling(got, name, repo=repo)}
+            for name, role in sorted(got.items())]
+
+
+def _cat_models(repo: Path) -> dict:
+    """The resolved tier table. What `sb models` prints, minus the CLI flags.
+
+    A tier NAME is what a plan may recommend — `strong`, `cheap` — and the resolved model
+    behind it is what says whether two tiers differ by anything a plan should care about.
+    `cli_args()` is deliberately not called: an unwired provider is a spawn-time problem
+    and `sb models` is where it is reported, and calling it here would make a listing raise
+    over a tier nobody in this plan was going to name.
+    """
+    tiers = models_mod.load(repo)
+    out = []
+    for name in tiers.names():
+        spec = tiers.resolve(name)
+        out.append({"name": name, "provider": spec.provider, "model": spec.model,
+                    "effort": spec.effort})
+    return {"default_provider": tiers.default_provider, "tiers": out}
+
+
+def _cat_presets(repo: Path) -> dict:
+    """The presets and who already carries them. `switchboard/presets.py`.
+
+    Both halves matter to a plan: a preset a step should name, and what a spawn of that
+    role is bound to already — recommending a preset every agent carries anyway is advice
+    that costs a line and buys nothing. The binding lists are verbatim, `@<plugin>` entries
+    included, because that is what a spawn actually resolves and this listing does not get
+    to tidy the record.
+    """
+    every, per_role = presets_mod.bindings(repo)
+    return {"available": sorted(presets_mod.available(repo)),
+            "every_agent": list(every),
+            "roles": {role: list(names) for role, names in sorted(per_role.items())}}
+
+
+def _cat_plugins(repo: Path) -> list[str]:
+    """The plugins whose verbs dispatch in this repo. Enabled, not available.
+
+    Available-but-disabled is exactly the trap this command exists to close: a plan
+    recommending `sb plugin todo add` in a repo that never enabled `todo` reads as a
+    checked decision and is a command that refuses.
+    """
+    return list(plugins_mod.enabled(repo))
+
+
+def _cat_caps(repo: Path) -> list[str]:
+    """Every capability string this repo has a meaning for — what `sb grant` will accept.
+
+    THE DEFINITION IS `Broker.known_capabilities`, and this is the same three parts in the
+    same order: the shipped vocabulary, plus every capability this repo's own role
+    templates name, plus the side-effect capabilities it declares, minus `start` — which is
+    a hardcoded human-only gate and must never become grantable. Getting any of those wrong
+    would be a planner recommending a grant that refuses, or missing one a repo minted for
+    itself.
+
+    IT IS THE SAME PARTS RATHER THAN THE SAME CALL, and that is a deliberate trade. A
+    plugin holds no `Broker` — no store handle and no herdr, by design — and the ways to
+    reach that method from here were a subprocess per category or a stand-in object bound
+    to three of its private helpers, which is a coupling that breaks silently the day one
+    of them moves. So the vocabulary is assembled from the module that owns each part, and
+    `test_plans_plugin` pins this list equal to a real broker's: the day the two definitions
+    diverge, a test says so.
+
+    A repo whose side-effect table will not parse gets the rest of the vocabulary rather
+    than none of it, which is the broker's own behaviour at the same point.
+    """
+    got = roles_mod.load(repo)
+    template = set().union(*(r.capabilities for r in got.values())) if got else set()
+    try:
+        declared = set(roles_mod.side_effect_capabilities(repo))
+    except config_mod.ConfigError:
+        declared = set()
+    return sorted((set(roles_mod.CAPABILITIES) | template | declared) - {"start"})
+
+
+def _cat_defs(loader) -> list[dict]:
+    """`library/` or `templates/` as a listing: what each is called and what it is.
+
+    Through the same `_lib`/`_kept` the verbs use, so a file this plugin refuses to resolve
+    is refused here too rather than half-read — and turned back into an exception so that
+    `_section` reports it as one broken category instead of a refused command. A catalogue
+    is the last thing that should stop being generated because one JSON file has a comma
+    in the wrong place.
+    """
+    got, bad = loader()
+    if bad:
+        raise _BadDef(bad.human)
+    out = []
+    for key, spec in got.items():
+        spec = spec if isinstance(spec, dict) else {}
+        out.append({"name": key,
+                    "display": str(spec.get("display") or "").strip(),
+                    "about": str(spec.get("name") or spec.get("title") or "").strip(),
+                    "anchor": str(spec.get("anchor") or "").strip()})
+    return out
+
+
+# The command that reads one entry of a category in full, printed beside the heading.
+# Every planner recommendation is meant to be made off the detail rather than off this
+# digest, and a listing that does not say where the detail is, is one nobody goes past.
+_CATALOG_READ = {
+    "roles": "sb roles <name>",
+    "models": "sb models",
+    "presets": "sb presets <name>",
+    "plugins": "sb plugin <name> --help",
+    "capabilities": "sb capabilities",
+    "library": "sb plugin plans library <name>",
+    "templates": "sb plugin plans template list",
+}
+
+
+def _catalog_lines(data: dict) -> str:
+    """The digest a planner scans. `--json` is the rendering a machine reads.
+
+    One section per category, in the order a plan is actually written in — who the agent
+    is, what it runs on, what it carries, what it may do, then the steps that already
+    exist. Empty sections are drawn rather than dropped: "this repo has no templates" is an
+    answer, and a section that vanished would read as one the command forgot.
+    """
+    out = ["The vocabulary this repo has right now — generated from the repo at this",
+           "moment, never a list anybody maintains. The names are exact: use them as they",
+           "are spelled here, and read one in full with the command beside its heading."]
+    for key in ("roles", "models", "presets", "plugins", "capabilities", "library",
+                "templates"):
+        out.append("")
+        out.append(f"{_col(key, 16)}{_CATALOG_READ[key]}")
+        out.extend(f"  {line}" for line in _catalog_rows(key, data.get(key)))
+    out.append("")
+    # THE HALF THIS COMMAND CANNOT SEE, said here rather than left to be discovered. sb
+    # knows nothing about the skills and tools a session exposes, so a planner reading this
+    # as the whole inventory would invent tool names — which is the one failure the
+    # generated catalogue exists to prevent.
+    out.append("Skills and tools are NOT here. They come from the session an agent runs "
+               "in rather than")
+    out.append("from sb, and your own session already lists yours. Name a tool for another "
+               "runtime")
+    out.append("only when you know that inventory; otherwise describe the capability the "
+               "step needs")
+    out.append("and leave the choice to the agent doing it.")
+    if data.get("problems"):
+        out.append("")
+        out.extend(f"! {p}" for p in data["problems"])
+    return "\n".join(out)
+
+
+def _catalog_rows(key: str, value: Any) -> list[str]:
+    """One category's rows. Each is a name and the least that tells it from its neighbour."""
+    if key == "roles":
+        return [f"{_col(_flat(r['name']), 14)}{_col(_flat(r['model']), 10)}"
+                f"{', '.join(_flat(c) for c in r['capabilities']) or '(no capabilities)'}"
+                for r in value or ()] or ["(none)"]
+    if key == "models":
+        rows = [f"{_col(_flat(t['name']), 14)}{_col(_flat(t['provider']), 10)}"
+                f"{_col(_flat(t['model'] or '(the provider default)'), 26)}"
+                f"{('effort ' + _flat(t['effort'])) if t.get('effort') else ''}".rstrip()
+                for t in (value or {}).get("tiers") or ()]
+        provider = (value or {}).get("default_provider")
+        return (rows or ["(none)"]) + ([f"default provider: {_flat(provider)}"]
+                                       if provider else [])
+    if key == "presets":
+        every = set((value or {}).get("every_agent") or ())
+        roles = (value or {}).get("roles") or {}
+        rows = []
+        for name in (value or {}).get("available") or ():
+            using = [r for r, names in roles.items() if name in names]
+            tag = ("[every agent]" if name in every
+                   else f"[{', '.join(_flat(r) for r in using)}]" if using
+                   else "[named by a step, bound to nobody]")
+            rows.append(f"{_col(_flat(name), 16)}{tag}")
+        return rows or ["(none)"]
+    if key in ("plugins", "capabilities"):
+        return [", ".join(_flat(x) for x in value or ())] if value else ["(none)"]
+    return [f"{_key_col(_flat(d['name']))}{_flat(d['about'] or d['display'] or '')}"
+            + (f"  [runs at {_flat(d['anchor'])}]" if d.get("anchor") else "")
+            for d in value or ()] or ["(none)"]
+
+
 def create(ctx, args) -> Result:
     """A plan on this worktree, with as many of its steps as are known already.
 
@@ -942,6 +1303,15 @@ def create(ctx, args) -> Result:
     which name ids that do not exist until this command has minted them. Those stay
     edits to the file, which is now the cheap half of making a plan rather than the
     expensive one.
+
+    `--planner` IS A CLAIM AND NOT AN ASSIGNMENT, which is why it takes no value. The
+    field says who owns the SHAPE of this plan for its life (`GUIDE`), so the only name
+    that can go in it honestly is the caller's own: a name typed for somebody else is a
+    claim about an agent that may not exist, made by an agent that is not it. A plan
+    writer sets it on itself as it creates the plan; anybody setting one up by hand writes
+    the field into the file, which is what every other field on a plan is done by anyway.
+    Absent — the ordinary case, and every plan made before this flag existed — the
+    worktree-owner rule applies unchanged.
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
     display = str(args.display or "").strip()
@@ -958,6 +1328,13 @@ def create(ctx, args) -> Result:
             "a plan", "It owns the board's whole header line, so it is longer than a "
             "step's and is a display version of the title rather than an abbreviation: "
             "`--display \"fix red CI: rich assertions on main\"`.")
+    if getattr(args, "planner", False) and not ctx.agent:
+        # Refused rather than filed under `human`, because the field names the agent a
+        # later delta and a later approval go back to, and there is no such agent here.
+        why = ("--planner records the CALLING AGENT as this plan's plan writer, and sb "
+               "resolved this caller to a human. Create the plan as the planner, or write "
+               "`\"planner\": \"<agent>\"` into the plan file, which is one field.")
+        return Result(ok=False, human=why, data={"error": why})
     steps = []
     for raw in given:
         short, name = _authored(raw)
@@ -996,6 +1373,12 @@ def create(ctx, args) -> Result:
                 "next_step": 1, "steps": [], "changelog": [],
                 "notes": [_note(n, who) for n in notes],
                 "created_by": who, "created_at": int(time.time())}
+        if getattr(args, "planner", False):
+            # ABSENT AND NOT NULL when there is no planner. A plan carrying `planner: null`
+            # would render a field on every plan in the repo to say that nearly all of them
+            # have no plan writer, and `_some` already treats the two as the same absence
+            # everywhere else in this file.
+            plan["planner"] = who
         doc["next_plan"] += 1
         # CHAINED IN THE ORDER GIVEN, because the order they were typed in IS an order: a
         # lead writing `--step a --step b --step c` has just said what comes after what,
@@ -1022,6 +1405,11 @@ def create(ctx, args) -> Result:
 
         made = ", ".join(s["id"] for s in plan["steps"])
         detail = f"{_count(plan['steps'])} ({made})" if made else "empty"
+        if plan.get("planner"):
+            # In the append-only record as well as in the field: who owns a plan's shape is
+            # the kind of thing somebody reads a changelog to find out, and the field alone
+            # says who owns it NOW rather than that it was claimed at the plan's first act.
+            detail += f"; planner-managed by {_flat(plan['planner'])}"
         if how == UNAVAILABLE:
             # In the append-only record as well as in the field, because this is the one
             # thing about a plan that was never true of the job and cannot be re-derived
@@ -4234,6 +4622,13 @@ def _full(p: dict) -> str:
         lines.append(f"  board       {_flat(p['display'])}")
     lines += [f"  workspace   {_where(p)}",
               f"  checkout    {_flat(p.get('checkout') or '—')}"]
+    if p.get("planner"):
+        # WHO MAY RESHAPE THIS PLAN, on the plan and not buried in `--json`: with a planner
+        # the shape belongs to that agent instead of to the worktree's owner, and an agent
+        # about to edit a step's deps is exactly who has to be told. Drawn only when it is
+        # there, like the condition above — a plan with no planner is the ordinary case and
+        # has nothing to say about one.
+        lines.append(f"  planner     {_flat(p['planner'])} — the plan's shape is theirs")
     if p.get("condition"):
         lines.append(f"  condition   {_condition(p)}")
     lines.append(f"  created     {_when(p.get('created_at'))} "
