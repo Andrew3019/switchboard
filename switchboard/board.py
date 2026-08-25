@@ -229,30 +229,32 @@ def entered(ev: dict) -> bool:
     return ev["button"] is None and ("\r" in ev["raw"] or "\n" in ev["raw"])
 
 
-def step_cursor(rows, name: Optional[str], delta: int) -> Optional[str]:
-    """The agent one row up or down from `name`, among the ones this frame drew.
+def step_cursor(names: list[str], name: Optional[str], delta: int) -> Optional[str]:
+    """The agent one row up or down from `name`, in a list of display rows.
 
-    ASKED OF THE FRAME ON SCREEN, not of the snapshot, for `agent_at`'s reason: the owner
-    of every line was recorded as that line was built, so walking them is walking exactly
-    what the human is looking at. A frame with no agent row on it — the whole tree
-    scrolled past, or nothing running — has nowhere to put a cursor and says so.
+    THE CURSOR WALKS THE TREE AND THE WINDOW FOLLOWS IT, which is why this takes the whole
+    tree's names (`status.board_rows`) rather than the frame's: an arrow held down at the
+    bottom of a window would otherwise stop at whatever the last drawn row happened to be,
+    and the board would scroll under a cursor that had stopped moving. `main` scrolls when
+    the answer is a row this frame did not draw.
 
-    First occurrence wins, because an agent can be drawn twice: once as its own row and
-    once in NEEDS YOU. Two stops on one agent would make the key feel stuck.
+    A tree with no rows at all — nothing running — has nowhere to put a cursor and says
+    so. A cursor already at either end stays there: a walk that wrapped round would move
+    the pane the whole way across the fleet on one keypress.
 
-    A cursor already at the end of the frame stays there, and `main` reads that stillness
-    as "scroll instead" — which is what makes a held-down arrow walk off the bottom of a
-    window into the rows below it.
+    A `name` that is no longer in the tree — archived, renamed, finished — starts over
+    from the end the key came from, which is where a human expects the FIRST press to land.
     """
-    seen: list[str] = []
-    for _, owner in rows:
-        if owner and owner is not SECTION_ZONE and owner.name not in seen:
-            seen.append(owner.name)
-    if not seen:
+    if not names:
         return None
-    if name not in seen:
-        return seen[0] if delta > 0 else seen[-1]
-    return seen[max(0, min(len(seen) - 1, seen.index(name) + delta))]
+    if name not in names:
+        return names[0] if delta > 0 else names[-1]
+    return names[max(0, min(len(names) - 1, names.index(name) + delta))]
+
+
+def drawn_names(rows) -> set:
+    """Every agent this frame actually drew a row for. See `step_cursor`."""
+    return {o.name for _, o in rows if o and o is not SECTION_ZONE}
 
 
 def pan_columns(text: str, cols: int) -> str:
@@ -2887,13 +2889,15 @@ def main() -> int:
                                                                else -1))
                                 continue
                             step = 1 if key == "down" else -1
-                            moved = step_cursor(rows, cursor, step)
-                            if moved == cursor and cursor is not None:
-                                # Already at the end of what is drawn: scroll the tree
-                                # instead and let the next press land on the row that
-                                # brings. A held-down arrow then walks off the bottom of
-                                # the window into the rows below it, which is what a
-                                # person means by holding it down.
+                            moved = step_cursor(
+                                [a.name for a in status_mod.board_rows(
+                                    snap.agents, show_archived=show_archived)],
+                                cursor, step)
+                            if moved is not None and moved not in drawn_names(rows):
+                                # The cursor walked off the window: bring the window with
+                                # it. One row at a time and in the direction the key went,
+                                # so a held-down arrow scrolls the tree at the speed it
+                                # walks it.
                                 top = scroll(top, step)
                             cursor, cursor_at = moved, time.monotonic()
                         if entered(ev) and cursor:

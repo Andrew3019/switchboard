@@ -1825,6 +1825,11 @@ class ArrowKeysTest(unittest.TestCase):
     def rows(self, **kw):
         return board.layout(self.FLEET, top=0, height=24, width=100, msg="", **kw)
 
+    def names(self, s=None):
+        """The tree's display rows, which is what the cursor walks."""
+        return [a.name for a in status.board_rows((s or self.FLEET).agents,
+                                                  show_archived=False)]
+
     def test_a_held_key_is_read_as_many_presses_and_not_as_one(self):
         """One `os.read` can carry a key several times over; a board that acted on one of
         them would crawl behind the finger holding it down."""
@@ -1838,30 +1843,33 @@ class ArrowKeysTest(unittest.TestCase):
         self.assertTrue(board.entered(ret))
         self.assertFalse(board.entered(ev))
 
-    def test_the_cursor_walks_the_rows_this_frame_drew_and_stops_at_the_ends(self):
-        rows = self.rows()
-        self.assertEqual(board.step_cursor(rows, None, 1), "top")
-        self.assertEqual(board.step_cursor(rows, "top", 1), "alpha")
-        self.assertEqual(board.step_cursor(rows, "alpha", -1), "top")
-        # Standing still at the end is the signal `main` reads as "scroll instead", so it
-        # has to be a stillness and not a wrap.
-        self.assertEqual(board.step_cursor(rows, "top", -1), "top")
-        self.assertEqual(board.step_cursor(rows, "beta", 1), "beta")
-        # A name that is no longer drawn — archived, renamed, finished — starts over.
-        self.assertEqual(board.step_cursor(rows, "gone-agent", 1), "top")
-        self.assertIsNone(board.step_cursor([("chrome", None)], None, 1))
+    def test_the_cursor_walks_the_tree_and_stops_at_the_ends(self):
+        names = self.names()
+        self.assertEqual(board.step_cursor(names, None, 1), "top")
+        self.assertEqual(board.step_cursor(names, "top", 1), "alpha")
+        self.assertEqual(board.step_cursor(names, "alpha", -1), "top")
+        # No wrapping: one keypress may not move the pane the whole way across a fleet.
+        self.assertEqual(board.step_cursor(names, "top", -1), "top")
+        self.assertEqual(board.step_cursor(names, "beta", 1), "beta")
+        # A name that is no longer in the tree starts over from the end the key came from.
+        self.assertEqual(board.step_cursor(names, "gone-agent", 1), "top")
+        self.assertEqual(board.step_cursor(names, "gone-agent", -1), "beta")
+        self.assertIsNone(board.step_cursor([], None, 1))
 
-    def test_an_agent_drawn_twice_is_one_stop_and_not_two(self):
-        """A blocked agent is drawn as its own row AND in NEEDS YOU. Two stops on one
-        agent would make the key feel stuck."""
-        s = snap(agent("top"), agent("stuck", depth=1, parent="top", state="blocked",
-                                     blocked_why="which branch?"))
-        rows = board.layout(s, top=0, height=24, width=100, msg="")
+    def test_it_walks_rows_the_window_is_too_short_to_draw(self):
+        """The cursor walks the TREE and the window follows it. Walking only what is drawn
+        would stop the cursor at the bottom of the pane while the tree scrolled under it —
+        `main` reads "this row is not drawn" as "scroll", and needs a row to read it of."""
+        s = snap(agent("top"), *[agent(f"k{i}", depth=1, parent="top") for i in range(9)])
+        short = board.layout(s, top=0, height=board.CHROME + 4, width=100, msg="")
+        drawn = board.drawn_names(short)
+        self.assertNotIn("k8", drawn)                    # the window really is too short
         walk, seen = [], None
-        for _ in range(4):
-            seen = board.step_cursor(rows, seen, 1)
+        for _ in range(10):
+            seen = board.step_cursor(self.names(s), seen, 1)
             walk.append(seen)
-        self.assertEqual(walk, ["top", "stuck", "stuck", "stuck"])
+        self.assertEqual(walk[-1], "k8")
+        self.assertEqual(len(set(walk)), 10)             # every row, once, in order
 
     def test_the_cursor_is_drawn_where_a_renderer_without_backgrounds_can_show_it(self):
         """RETURN acts on this mark, so a board that cannot draw a wash still has to say
