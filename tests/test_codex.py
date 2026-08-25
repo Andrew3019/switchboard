@@ -227,6 +227,33 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
             self.write(model="x", model_provider="nosuchthing")
         self.assertIn("codex.nosuchthing.provider", str(cm.exception))
 
+    def test_a_provider_named_after_a_plain_codex_key_fails_by_name(self):
+        """`[codex]` carries scalars of its own — `sandbox_mode`, `hook_timeout` — so a
+        provider name that collides with one resolves to a str/int here, and the same
+        `.get` that reads a section off a dict raised a bare `AttributeError` for it. The
+        provider is named either way; only the message is under test."""
+        with self.assertRaises(codex.CodexHomeError) as cm:
+            self.write(model="x", model_provider="sandbox_mode")
+        self.assertIn("sandbox_mode", str(cm.exception))
+
+    def test_a_settings_key_with_a_dot_in_it_stays_one_key(self):
+        """Keys are emitted quoted, not just values. Unquoted, `a.b = 1` is a DOTTED key:
+        TOML reads it as table `a` with member `b`, so a header the settings file never
+        asked for appears and the setting is not where codex looks for it. Contrived
+        naming, but `http_headers`-adjacent keys and vendor options are where it would
+        turn up."""
+        sw = self.repo / ".switchboard"
+        sw.mkdir(exist_ok=True)
+        (sw / "settings.toml").write_text(
+            '[codex.deepseek.provider]\n'
+            '"x.y" = "in-the-block"\n'
+            '[codex.deepseek.options]\n'
+            '"p.q" = "beside-the-selection"\n')
+        cfg = self.config(self.write(model="m", model_provider="deepseek"))
+        self.assertEqual(cfg["model_providers"]["deepseek"]["x.y"], "in-the-block")
+        self.assertEqual(cfg["p.q"], "beside-the-selection")
+        self.assertNotIn("p", cfg)
+
     def test_the_hooks_block_wires_the_events_it_is_given(self):
         home = self.write(hooks={"Stop": "/bin/gate --db /x", "UserPromptSubmit": "/bin/a"})
         cfg = self.config(home)
@@ -463,6 +490,26 @@ class CodexSpawnTest(unittest.TestCase):
         argv = self.start(self.spec(), resume="01a0-thread-id")
         self.assertIn("resume 01a0-thread-id", argv)
         self.assertNotIn("--resume", argv)
+
+    def test_a_deepseek_tier_reaches_the_written_config_as_its_provider(self):
+        """THE JOIN, and the only one: `_codex_args` forwarding `spec.codex_provider` into
+        `codex.write_home` is all that connects a resolved tier to the generated file.
+        Both ends were already covered — models.py puts `codex_provider` on the spec,
+        codex.py writes a provider block when handed one — and dropping the line between
+        them left every one of those tests green while a `deepseek` agent spawned against
+        OpenAI. So this drives the real path from the shipped tier to the file on disk.
+
+        `global_config` points at a path that does not exist, the same guard test_models
+        uses: a real ~/.config/switchboard/models.toml must not decide this.
+        """
+        spec = models.load(self.repo, global_config=self.repo / "nope.toml"
+                           ).resolve("deepseek")
+        self.start(spec)
+        cfg = tomllib.loads(
+            (codex.home_path("w1", self.repo) / "config.toml").read_text())
+        self.assertEqual(cfg["model_provider"], "deepseek")
+        self.assertIn("deepseek", cfg["model_providers"])
+        self.assertEqual(cfg["model"], "deepseek-v4-flash")
 
     def test_a_claude_spawn_is_untouched_by_any_of_it(self):
         """The other half of a seam is that the existing side does not move."""

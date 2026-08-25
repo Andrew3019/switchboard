@@ -327,6 +327,13 @@ def _provider_settings(name: str, cwd: Optional[Path]) -> tuple[dict, dict]:
         raise CodexHomeError(
             f"refusing to route codex through {name!r}: not a provider name")
     section = config.setting(f"codex.{name}", None, repo=cwd) or {}
+    if not isinstance(section, dict):
+        # `[codex]` has scalar keys of its own (`sandbox_mode`, `hook_timeout`), so a
+        # provider named after one of them resolves to a str/int here. Named, because the
+        # alternative is a bare `AttributeError` from the `.get` below.
+        raise CodexHomeError(
+            f"a tier asks codex for the '{name}' provider, but `codex.{name}` in "
+            f"settings.toml is a plain value, not a provider section")
     provider = section.get("provider")
     if not isinstance(provider, dict) or not provider:
         raise CodexHomeError(
@@ -377,7 +384,10 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         # its first `[header]`: everything from `[sandbox_workspace_write]` on belongs to
         # a section, and the selection and its options are session-wide keys.
         lines.append(f"model_provider = {_s(model_provider)}")
-        lines += [f"{k} = {_v(v)}" for k, v in options.items()]
+        # Keys quoted as well as values: an unquoted key containing a dot is a DOTTED key
+        # in TOML, which puts the setting in a table nobody asked for rather than beside
+        # the selection. Same `_s` the inline-table branch of `_v` already uses.
+        lines += [f"{_s(k)} = {_v(v)}" for k, v in options.items()]
     lines += [
         f"sandbox_mode = {_s(SANDBOX_MODE)}",
         f"approval_policy = {_s(APPROVAL_POLICY)}",
@@ -420,7 +430,7 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
                   'trust_level = "trusted"', ""]
     if model_provider:
         lines += [f"[model_providers.{model_provider}]"]
-        lines += [f"{k} = {_v(v)}" for k, v in provider.items()]
+        lines += [f"{_s(k)} = {_v(v)}" for k, v in provider.items()]
         lines += [""]
     lines += ["[tui]",
               "status_line = [" + ", ".join(_s(item) for item in STATUS_LINE) + "]", ""]
