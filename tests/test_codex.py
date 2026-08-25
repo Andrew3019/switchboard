@@ -211,6 +211,54 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
                 codex.home_path(bad, self.repo)
 
 
+class PrivateTmpTest(HomeFixture, unittest.TestCase):
+    """A home under codex's own temp dir gets a TMPDIR that is not.
+
+    What these pin is the SHAPE, and the shape is all the code decides. The behaviour
+    behind it belongs to codex and was proved live instead (codex-cli 0.149.1, bug
+    `2026-08-25-134902`): a per-agent `CODEX_HOME` under /tmp made codex decline to lay
+    down `codex-linux-sandbox`, and every command in that agent died with `bwrap: execvp
+    codex-linux-sandbox: No such file or directory`; the same home with `TMPDIR` pointed
+    inside it ran the same command fine. No test here can fail that way — nothing in the
+    suite runs bwrap — so a regression that drops the variable is caught by its absence
+    and not by the failure it causes.
+
+    The fixture's repo is a `tempfile.TemporaryDirectory`, so it IS under /tmp: these
+    agents are exactly the case being fixed.
+    """
+
+    def test_a_home_inside_codex_s_temp_dir_gets_a_tmpdir_of_its_own(self):
+        home = self.write()
+        tmp = codex.private_tmp(home)
+        self.assertIsNotNone(tmp)
+        self.assertTrue(tmp.is_dir(), "must exist before the spawn: codex adds $TMPDIR "
+                                      "to the writable roots and bwrap needs the source")
+        self.assertEqual(codex.spawn_env("w1", home)["TMPDIR"], str(tmp))
+        # The whole point: codex refuses when the home is UNDER the temp dir, so the
+        # temp dir must not be one of the home's ancestors. Inside it cannot be.
+        self.assertNotIn(tmp, home.parents)
+
+    def test_a_home_anywhere_else_keeps_the_tmpdir_it_inherited(self):
+        """None in the normal case, deliberately: pointing TMPDIR into the store would
+        put every temp file any tool writes on the repo's disk."""
+        elsewhere = Path("/opt/repo/.git/agentflow/codex-homes/w1")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TMPDIR", None)
+            self.assertIsNone(codex.private_tmp(elsewhere))
+            self.assertNotIn("TMPDIR", codex.spawn_env("w1", elsewhere))
+
+    def test_an_inherited_tmpdir_counts_as_the_temp_dir_too(self):
+        """Codex reads `$TMPDIR` first and only falls back to /tmp, so a store under a
+        TMPDIR that is not /tmp provokes the same refusal. The same home is left alone
+        without it, which is what makes this about the variable and not the path."""
+        home = Path("/opt/scratch/codex-homes/w1")
+        with mock.patch.dict(os.environ, {"TMPDIR": "/opt/scratch"}):
+            self.assertEqual(codex.private_tmp(home), home / codex.AGENT_TMP_DIRNAME)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TMPDIR", None)
+            self.assertIsNone(codex.private_tmp(home))
+
+
 class RolloutTest(HomeFixture, unittest.TestCase):
     SID = "01a02c19-22e8-7641-b219-cae9025f4f06"
 
