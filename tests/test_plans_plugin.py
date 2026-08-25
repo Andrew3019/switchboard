@@ -3608,6 +3608,42 @@ class PlannerPackageTest(PlansSandbox):
         # Reads one file and writes nothing: no state file exists after it runs.
         self.assertEqual(self._files(), [])
 
+    def test_the_planner_instruction_carries_the_sibling_handoff_and_fallback(self):
+        """Unit 4's lifecycle, on the planner's side of it. The handoff FLIPPED — the planner
+        no longer spawns the main; it hands the brief and the seed to its parent, which
+        spawns the sibling — so the two claims that would have been true under the nested
+        model (the planner spawns; deltas go to `parent`) must be the sibling ones instead.
+        The fallback ladder is the net-new part and the reason the unit is more than
+        documentation: it is what the planner writes into the main's brief so a dead planner
+        does not strand the completion handshake, as one did in Unit 3.
+
+        Asserted on the printed text as one whitespace-joined run, like the guide tests: the
+        claims are what matter, not where a reflow puts the line breaks."""
+        said = " ".join(self.ok("plugin", "plans", "planner").split())
+        for expected in (
+                # The flip: the planner does not spawn, and the handoff is in two halves
+                # because `sb delegate` only makes the caller's own child.
+                "You do NOT spawn the main agent.",
+                "the handoff has two halves",
+                # The handoff tell carries --needs-reply, and it is what keeps a childless
+                # sibling planner cleanly open instead of STALLED by the stop gate.
+                '"ready: spawn the main with this brief and this seed" --needs-reply',
+                "`--needs-reply` IS WHAT KEEPS YOU CLEANLY OPEN",
+                # The one address the sibling main cannot derive.
+                "YOUR EXACT AGENT NAME",
+                # Delta routing is by the planner's name now, not `tell parent`.
+                "sends you a delta — BY YOUR NAME",
+                # The fallback ladder: detect on any wake, route to parent, then owner rule.
+                "RE-CHECK THE TREE",
+                "That is the lead: structural, always live",
+                "the worktree's owner writes the shape for the rest of the job",
+                # The deliberate exclusion, kept with its reason so it is not re-added.
+                "`sb restore` IS DELIBERATELY NOT ON THIS PATH"):
+            self.assertIn(expected, said)
+        # The nested-model claims are gone: the planner does not spawn the main, and a delta
+        # is not routed to `parent` while the planner is alive.
+        self.assertNotIn("Write the main agent a focused brief, spawn it", said)
+
     def test_the_catalogue_is_generated_from_this_repo_and_not_from_a_list(self):
         """Every category, keyed, and each one holding what this sandbox actually has —
         including a role and a template written into it by this test, which a hardcoded
@@ -3739,6 +3775,35 @@ class PlannerPackageTest(PlansSandbox):
                 "it is ADVISORY: nothing reads a strategy and acts on it",
                 "Apart from `strategy` above there is no schema to satisfy"):
             self.assertIn(expected, said)
+
+    def test_the_guide_carries_the_planner_spawn_and_sibling_lifecycle(self):
+        """Unit 4's lifecycle at the LEAD's altitude — the side read by whoever spawns a
+        planner. Three things the guide has to get right, because the whole unit turns on
+        them: the capability seed the planner is given (held `spawn`, `fork` when foreseen,
+        and NEVER `write-tracked`), that seeding the main is two verbs and not a flag on one,
+        and that the completion handshake has a structural fallback to `parent` when the
+        planner is gone — with `sb restore` kept off that path on purpose.
+
+        Matched against the printed block as one whitespace-joined run, like the guide tests
+        above: the claims are what is pinned, not the line breaks."""
+        said = " ".join(self.ok("plugin", "plans", "guide").split())
+        for expected in (
+                "SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT",
+                "spawns BOTH the planner and the main agent",
+                # The seed, and the one grant it must never carry.
+                "NEVER grant it held `write-tracked`",
+                # Seeding is two verbs; there is no combined flag.
+                "There is no `delegate --grant`",
+                "PLUS `sb grant",
+                # The two-halves handoff, its --needs-reply, and where deltas go.
+                "THE HANDOFF HAS TWO HALVES",
+                '`sb tell parent "ready" --needs-reply`',
+                "Material deltas go to the planner BY NAME",
+                # The structural fallback, and the route deliberately left off it.
+                "route the candidate to `parent`",
+                "`sb restore` is NOT on this path"):
+            self.assertIn(expected, said)
+
 
 class GateTest(PlansSandbox):
     """The two gates: what the plugin represents, and everything it deliberately does not.

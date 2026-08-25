@@ -150,25 +150,33 @@ become an execution engine.
 1. The investigator returns a tidied problem brief to the task's owning parent.
 2. The parent records a trivial-work skip or spawns a fresh strong-model `researcher` whose task says
    to run `sb plugin plans planner` first, then read the problem brief.
-3. Before planning, the parent grants the plan writer held `spawn`, held `fork` when available, and
-   all capabilities it can pass as delegable-only. The planner never holds `write-tracked`.
+3. Before planning, the parent grants the plan writer held `spawn` (for its own plan reviewer) and
+   held `fork` when an isolated helper is foreseen. The planner never holds `write-tracked`, and it
+   is granted nothing delegable-only: under the sibling model the parent seeds the main agent
+   directly, so no capability is passed through the fragile planner.
 4. It defines the job-level contract and decomposes the work into steps.
 5. For each step, it compares viable approaches and records the recommended continuity, model,
    orchestration, tools, depth, verification, and handoff. The main agent is the default.
 6. A fresh agent reviews the plan when planning risk warrants it.
 7. Andrew approves or rejects every non-trivial plan. Rejection returns the work to planning and
    increments `tries`.
-8. The plan writer creates a focused brief for a fresh main agent and hands off execution, then
-   remains open but inactive.
+8. The plan writer creates a focused brief for a fresh main agent, states its capability seed, tells
+   its parent it is ready, and remains open but inactive. The parent — not the planner — then spawns
+   the main as its own child, the planner's sibling, and grants the seed directly. `sb delegate` only
+   ever makes the caller's own child, which is why the handoff has two halves.
 9. The main agent performs most steps and uses the plan's delegation recommendations unless new
    evidence justifies adapting them.
 10. The main agent maintains execution state and handles local adjustments. When new evidence
-   materially invalidates the contract, it sends the planner a delta.
+   materially invalidates the contract, it sends the planner a delta by name — its own parent is the
+   lead, not the planner. If the planner is gone, the delta routes to the parent instead, and the
+   worktree's owner takes over the shape.
 11. The same plan writer revises the affected contract and downstream steps, then returns material
     changes through review and Andrew approval.
 12. Before final `done`, the main agent sends the planner a completion candidate with
     `--needs-reply`. The planner checks the termination condition, returns missing work or clears the
-    main agent to finish, then closes after the main agent's final report.
+    main agent to finish, then closes after the main agent's final report. If the planner has died,
+    the main detects the unanswered handshake on its next wake and routes the candidate to the parent,
+    which is the lead.
 
 No automatic evaluator or permanent orchestrator is added. The plugin represents the plan; the main
 agent runs it.
@@ -209,7 +217,8 @@ Small, linear plans go directly to Andrew.
 The main agent maintains execution state. It may update progress, notes, evidence, checkpoints, and
 outputs. It records local adaptations in notes rather than reshaping the plan.
 
-The plan writer is the sole shape writer for a planner-managed plan. It owns scope, success criteria,
+The plan writer is the sole shape writer for a planner-managed plan — until the fallback hands the
+shape back to the worktree's owner when the planner is gone. It owns scope, success criteria,
 decomposition, cross-step dependencies, strategy, verification strategy, and termination. It
 remains open in a waiting state so it can revise the plan without losing the original rationale.
 
@@ -462,28 +471,40 @@ and focused plans-plugin tests. Do not edit `change-approval.json` or `review.js
 for material replanning.
 
 - Add the plugin-owned planner-spawn and handoff procedures to the guide.
-- Before planning, grant the strong `researcher` held `spawn`, held `fork` when available, and every
-  capability the spawner can pass as delegable-only. Never grant held `write-tracked`.
-- The chosen main role still narrows its seed by the existing template/intersection rule. If a
-  required capability or isolated handoff is unavailable, record that precondition and resolve it
-  before handoff.
+- Before planning, grant the strong `researcher` held `spawn` (for its own plan reviewer) and held
+  `fork` when an isolated helper is foreseen. Never grant held `write-tracked`, and grant nothing
+  delegable-only: the spawner seeds the main agent directly rather than passing capabilities through
+  the fragile planner.
+- Seeding the main is two verbs — `sb delegate --role` sets the role template, `sb grant` adds
+  anything beyond it — and the chosen main role still narrows its seed by the existing
+  template/intersection rule. If a required capability or isolated handoff is unavailable, record that
+  precondition and resolve it before handoff.
 - Define the planner-to-main brief and the main/planner ownership boundary.
-- Create the plan in the planner's workspace. Spawn the main there by default; an isolated main uses
-  the same repo-state plan by qualified id while the plan remains attached to the planner workspace.
-- Keep the main agent as the planner's child across implementation, testing, fixes, and integration.
-- Let current live-child behaviour keep the inactive planner open.
-- Route material deltas through `sb tell parent`; keep local adjustments with the main agent.
+- Create the plan in the workspace the lead, the planner and the main share. The lead spawns the main
+  there by default; an isolated main uses the same repo-state plan by qualified id while the plan
+  remains attached to that workspace.
+- The planner and the main agent are SIBLINGS under the shared lead; the lead spawns the main and it
+  stays the lead's child across implementation, testing, fixes, and integration. `sb delegate` only
+  makes the caller's own child, so a sibling can only come from the shared parent.
+- Keep the inactive planner open with an unanswered `--needs-reply` on its handoff to the parent: as
+  a sibling it has no live child to waive the stop gate, so the outstanding question is what excuses
+  its idle row instead of leaving it STALLED.
+- Route material deltas to the planner by name; keep local adjustments with the main agent. If the
+  planner is gone, the delta and the completion candidate route to the parent (the lead), and the
+  worktree's owner takes over the shape.
 - Replan and reapprove with the same planner and main agent.
 - Before final `done`, the main sends a completion candidate with `--needs-reply`. The planner either
-  returns missing work or clears it to finish; the final `done` then wakes the planner to close.
+  returns missing work or clears it to finish; the final `done` then wakes the planner to close. If
+  the planner has died, the main detects the unanswered handshake and routes the candidate to the
+  parent.
 
-**Done when:** one live run proves handoff, capability narrowing, parent relationship, inactive
-planner, local adjustment, completion handshake, and final closure. A second run introduces a
-material delta and proves replanning, reapproval, and same-main continuation. Save each run's plan,
-briefs, messages, status snapshots, and model metadata.
+**Done when:** one live run proves handoff, capability narrowing, the sibling relationship, inactive
+planner, local adjustment, completion handshake, final closure, and the fallback with the planner
+actually gone. A second run introduces a material delta and proves replanning, reapproval, and
+same-main continuation. Save each run's plan, briefs, messages, status snapshots, and model metadata.
 
-**Files:** the plugin planner instruction and guide. Existing capability seeding, live-child waiting,
-messages, and completion notification provide the mechanics; add no lifecycle engine.
+**Files:** the plugin planner instruction and guide. Existing capability seeding, the awaiting-reply
+stop-gate waiver, messages, and completion notification provide the mechanics; add no lifecycle engine.
 
 ### Unit 5 — development inspection and evaluation
 
