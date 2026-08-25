@@ -1861,6 +1861,11 @@ def open_report_files(name: Optional[str]) -> str:
         return f"{name}: {_EDITOR} is not executable"
     except subprocess.TimeoutExpired:
         return f"{name}: {_EDITOR} timed out"
+    except subprocess.CalledProcessError as e:
+        # The editor RAN and refused. BEFORE the clause below, which would catch it —
+        # this is the one failure whose reason is both actionable and already written
+        # for us, so it gets the line rather than a generic "failed".
+        return f"{name}: {_editor_said(e)}"
     except (OSError, subprocess.SubprocessError) as e:
         # Everything else the exec can fail with — a fork that runs out of memory, a
         # bad interpreter line. A setting must not be able to end the board.
@@ -1905,6 +1910,8 @@ def open_worktree(name: Optional[str]) -> str:
         return f"{name}: {_EDITOR} is not executable"
     except subprocess.TimeoutExpired:
         return f"{name}: {_EDITOR} timed out"
+    except subprocess.CalledProcessError as e:
+        return f"{name}: {_editor_said(e)}"      # see `open_report_files`
     except (OSError, subprocess.SubprocessError) as e:
         return f"{name}: {_EDITOR} failed: {status_mod.clip(str(e), 40)}"
     return f"→ {name}: opened worktree"
@@ -2278,9 +2285,43 @@ def _inspect(name: str) -> Optional[dict]:
     return d if isinstance(d, dict) else None
 
 
+# `cursor` and `code` are not always the editor CLI, and on WSL they are usually not.
+# Both names go through a shim — `resources/app/bin/cursor`, the remote-WSL extension,
+# then `~/.cursor-server/.../remote-cli/cursor` — whose last step `exec`s the Cursor
+# AGENT CLI whenever `~/.local/bin/cursor-agent` exists, which it installs itself the
+# first time it looks. That is a different program: it reads `<folder>` as a PROMPT,
+# opens no window, and exits asking to be logged in. `<folder>` is the whole of what
+# `ww` runs, so on such a machine `ww` opened nothing, ever. This is the shim's own
+# way back to the editor CLI, and it is a name no other editor reads, so it costs
+# nothing to send always.
+_EDITOR_ENV = {"CURSOR_CLI_BLOCK_CURSOR_AGENT": "true"}
+
+
 def _editor(*args: str) -> None:
-    subprocess.run([_EDITOR, *args], capture_output=True, text=True,
-                   timeout=_SUBPROCESS_TIMEOUT)
+    """Run the editor CLI. Raises `CalledProcessError` when it RAN and refused.
+
+    `check=True` is the whole of what this board was blind to. Without it every
+    non-zero exit — an unrecognised flag, a binary that wants a login, the wrong
+    program behind the name — came back indistinguishable from an open that worked,
+    and both actions said "opened" over a desktop where nothing had happened. A
+    keypress that lies is worse than one that fails.
+    """
+    subprocess.run([_EDITOR, *args], capture_output=True, text=True, check=True,
+                   timeout=_SUBPROCESS_TIMEOUT, env={**os.environ, **_EDITOR_ENV})
+
+
+def _editor_said(e: subprocess.CalledProcessError) -> str:
+    """The editor's own words for a refusal, for the status bar.
+
+    Its first line of output rather than `str(e)`: "Command '[...]' returned non-zero
+    exit status 1" spends the whole line on the argv and never says why, and why is
+    the only part worth a line — "unknown option '-r'" and "Authentication required"
+    are each one glance from the fix.
+    """
+    said = [ln.strip() for ln
+            in ((e.stderr or "") + "\n" + (e.stdout or "")).splitlines() if ln.strip()]
+    return (f"{_EDITOR}: {status_mod.clip(said[0], 60)}" if said
+            else f"{_EDITOR} exited {e.returncode}")
 
 
 def open_beside(h, pane_id: str, *, cwd: str) -> Optional[str]:

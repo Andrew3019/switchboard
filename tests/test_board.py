@@ -1948,6 +1948,19 @@ class LastAssistantTextsTest(unittest.TestCase):
         self.assertEqual(got, ["said once"])
 
 
+def fake_editor(where: Path, body: str) -> Path:
+    """A REAL executable to stand in for the editor. No mock of `subprocess`.
+
+    Production's failure is a program that runs and exits non-zero, so the thing under
+    test is the exit code of a live child — which a `Mock` cannot have. `body` is shell
+    run with the editor's arguments in `"$@"`.
+    """
+    cmd = where / "cursor"
+    cmd.write_text("#!/bin/sh\n" + body + "\n")
+    cmd.chmod(0o755)
+    return cmd
+
+
 class OpenReportFilesTest(unittest.TestCase):
     """The failure paths, which are the ones that matter: this runs inside the event
     loop, and anything that escapes it takes the board down — permanently, if the cause
@@ -2016,6 +2029,16 @@ class OpenReportFilesTest(unittest.TestCase):
              mock.patch.object(board, "_EDITOR", "no-such-editor-xyz"):
             self.assertEqual(board.open_report_files("w1"),
                              "w1: no-such-editor-xyz not on PATH")
+
+    def test_an_editor_that_refuses_the_call_is_not_reported_as_an_open(self):
+        """The live failure on WSL: `cursor` is the Cursor AGENT CLI there, which has
+        no `-r`, so the call exited 1 and the board said "opened 1 file(s)" anyway."""
+        cmd = fake_editor(self.tmp, "echo \"error: unknown option '-r'\" >&2; exit 1")
+        with mock.patch.object(board, "_inspect",
+                               lambda n: self.detail(self.named())), \
+             mock.patch.object(board, "_EDITOR", str(cmd)):
+            self.assertEqual(board.open_report_files("w1"),
+                             f"w1: {cmd}: error: unknown option '-r'")
 
     def test_no_highlighted_agent_is_a_line_not_an_open(self):
         self.assertEqual(board.open_report_files(None),
@@ -2124,6 +2147,27 @@ class OpenWorktreeTest(unittest.TestCase):
                  side_effect=subprocess.TimeoutExpired("cursor", 1))), \
              mock.patch.object(board, "_EDITOR", "cursor"):
             self.assertEqual(board.open_worktree("w1"), "w1: cursor timed out")
+
+    def test_an_editor_that_refuses_the_folder_is_not_reported_as_an_open(self):
+        """`ww`'s live failure, and the reason it looked like nothing was wrong: the
+        Cursor AGENT CLI reads `<folder>` as a prompt, opens no window and exits 1
+        wanting a login — and the board said "opened worktree" over an empty desktop."""
+        cmd = fake_editor(self.tmp, "echo 'Error: Authentication required.' >&2; exit 1")
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", str(cmd)):
+            self.assertEqual(board.open_worktree("w1"),
+                             f"w1: {cmd}: Error: Authentication required.")
+
+    def test_the_editor_child_is_told_not_to_become_the_cursor_agent_cli(self):
+        """The other half: the shim only hands `cursor` to the agent CLI while this is
+        unset, so an editor that exits 0 has to be the EDITOR that exited 0."""
+        seen = self.tmp / "env"
+        cmd = fake_editor(
+            self.tmp, f'printf "%s" "$CURSOR_CLI_BLOCK_CURSOR_AGENT" > {seen}')
+        with mock.patch.object(board, "_inspect", lambda n: self.detail()), \
+             mock.patch.object(board, "_EDITOR", str(cmd)):
+            self.assertEqual(board.open_worktree("w1"), "→ w1: opened worktree")
+        self.assertEqual(seen.read_text(), "true")
 
 
 class OpenTickTest(unittest.TestCase):
