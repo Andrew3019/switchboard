@@ -443,6 +443,99 @@ class PaneIdentityTest(CloseHarness, unittest.TestCase):
         self.assertNotIn(path, self.registered())
 
 
+class RootPaneTest(CloseHarness, unittest.TestCase):
+    """The pane herdr made with the workspace, which no agent row has ever claimed.
+
+    `worktree open` and `workspace create` each hand back a root pane, and switchboard
+    files a row against it only if a spawn moves in. Re-resolving a closed workspace by
+    name opens one nobody ever sits in — and its shell's cwd is the checkout, so every
+    gate that reads the process table refused the deletion on that shell, through
+    `sb workspace close` and through `sb cleanup` alike. The panes were closed; the pane
+    the workspace was OPENED with never was.
+    """
+
+    def pane(self, pane: str, cwd: str, *, shell: int = None):
+        """A pane herdr knows about that nothing in our store claims. `shell` is the pid
+        herdr reports for it, which it gives only for a pane sitting idle."""
+        self.h.panes.add(pane)
+        self.h.pane_cwds[pane] = cwd
+        if shell:
+            self.h.pane_shells[pane] = shell
+
+    def shell_in(self, pane: str, path: str, pid: int = 54892):
+        """The pane's own shell: in the directory while the pane is, gone once it is not.
+
+        Which is the whole loop — the gate reads the process table, the shell is in it
+        because the pane is open, and nothing was ever going to close that pane.
+        """
+        proc = live.Proc(pid, "zsh", path)
+        live.scan = lambda *a, **kw: [proc] if pane in self.h.panes else []
+        self.b._parents = lambda: {os.getpid(): os.getppid(), os.getppid(): 1, 1: 0,
+                                   pid: 1}
+
+    def test_the_root_pane_is_closed_and_the_checkout_it_was_holding_is_deleted(self):
+        path = self.space()
+        self.pane("w1:p1", path, shell=54892)
+        self.shell_in("w1:p1", path)
+        r = self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(self.h.closed, ["w1:p1"])
+        self.assertEqual(r["worktree"], "removed")
+        self.assertNotIn(path, self.registered())
+
+    def test_a_pane_herdr_will_not_call_idle_still_holds_the_checkout(self):
+        """The exemption is for a shell that exists because the pane does, and nothing
+        else. herdr answers `pane process-info` with a pid only when the foreground is the
+        shell itself, so a pane with an editor in it has none to discount — and the
+        process in the directory is then somebody's work, refused as it always was."""
+        path = self.space()
+        self.pane("w1:p1", path)                      # no shell pid: not idle
+        self.shell_in("w1:p1", path)
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("zsh (54892)", str(e.exception))
+        self.assertEqual(self.h.closed, [])           # and the refusal cost no panes
+        self.assertIn(path, self.registered())
+
+    def test_a_pane_somebody_is_in_is_a_refusal_and_not_a_close(self):
+        """Unclaimed is not the same as ours. The proof is `_close_target`'s no-identity
+        case — only a pane herdr says is EMPTY — the same one `_close_board` closes on."""
+        path = self.space()
+        self.pane("w1:p1", path, shell=54892)
+        self.h.live["stranger"] = Agent(name="stranger", pane_id="w1:p1",
+                                        terminal_id="term_stranger")
+        with self.assertRaises(ValueError) as e:
+            self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("stranger", str(e.exception))
+        self.assertEqual(self.h.closed, [])
+        self.assertIn(path, self.registered())
+
+    def test_the_pane_the_caller_typed_in_is_never_one_of_them(self):
+        """An agent closing the workspace it works in runs from a pane in that checkout,
+        and closing it would end the command that is doing the closing."""
+        path = self.space()
+        self.pane("w1:p1", path, shell=54892)
+        os.environ["HERDR_PANE_ID"] = "w1:p1"
+        self.addCleanup(os.environ.pop, "HERDR_PANE_ID", None)
+        self.b.workspace_close("api", me=HUMAN)
+        self.assertEqual(self.h.closed, [])
+        self.assertIn("w1:p1", self.h.panes)
+
+    def test_cleanup_reaches_the_same_pane_through_the_space_sweep(self):
+        """The second report. `_close_empty_spaces` decides whether a space is worth the
+        destructive command (`_space_ready`), and that decision reads the process table
+        too — so the root pane held the space back one level ABOVE the close, and the
+        agents went while the spaces stayed."""
+        path = self.space()
+        self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
+        self.pane("w1:p1", path, shell=54892)
+        self.shell_in("w1:p1", path)
+        closed = self.b.cleanup(me=HUMAN)
+        self.assertEqual(list(closed), ["api-lead"])
+        self.assertEqual(closed.spaces, ["api"])
+        self.assertEqual(sorted(self.h.closed), ["w1:p1", "w9:p1"])
+        self.assertNotIn(path, self.registered())
+
+
 class SettleTest(CloseHarness, unittest.TestCase):
     """The re-confirmation waits for the panes it just closed, and waits for nothing else.
 

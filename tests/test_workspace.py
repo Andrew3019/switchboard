@@ -63,6 +63,8 @@ class FakeHerdr:
         self.split_cwds: list[str] = []                  # where each split pane landed
         self.pane_prompts: list[tuple[str, str]] = []    # what was typed into a raw pane
         self.panes: set[str] = set()                     # every pane believed to exist
+        self.pane_cwds: dict[str, str] = {}              # and where herdr says each is
+        self.pane_shells: dict[str, int] = {}            # an idle pane's own shell pid
         self._n = 0
         self.lock = threading.Lock()
 
@@ -74,6 +76,9 @@ class FakeHerdr:
             self.checkouts[path] = {"id": f"w{self._n}", "branch": branch, "path": path,
                                     "root_pane": f"w{self._n}:p1"}
             self.panes.add(f"w{self._n}:p1")
+            # A root pane's cwd IS the checkout, which is the whole of why teardown has to
+            # take it: the shell in it holds the directory open (#134).
+            self.pane_cwds[f"w{self._n}:p1"] = path
         return self.checkouts[path]
 
     @staticmethod
@@ -158,6 +163,7 @@ class FakeHerdr:
         self.tabs.append((workspace or "", cwd or ""))
         self.tab_panes.append(pane)
         self.panes.add(pane)
+        self.pane_cwds[pane] = cwd or ""
         return pane
 
     def close_pane(self, pane):
@@ -165,6 +171,8 @@ class FakeHerdr:
         # would let a test claim a pane was closed while every reader still saw it.
         self.closed.append(pane)
         self.panes.discard(pane)
+        self.pane_cwds.pop(pane, None)
+        self.pane_shells.pop(pane, None)
 
     def split_pane(self, pane, *, direction="right", ratio=0.66, cwd=None, focus=False,
                    env=None):
@@ -176,10 +184,24 @@ class FakeHerdr:
         self.splits.append((pane, direction, ratio))
         self.split_cwds.append(cwd or "")
         self.panes.add(new)
+        self.pane_cwds[new] = cwd or ""
         return new
 
     def pane_ids(self):
         return set(self.panes)
+
+    def pane_list(self):
+        """`herdr pane list`, trimmed to the keys teardown reads. A pane whose cwd no
+        test set reads as a pane sitting nowhere in particular, which is what a directory
+        gate should make of one."""
+        return [{"pane_id": p, "cwd": self.pane_cwds.get(p, "")}
+                for p in sorted(self.panes)]
+
+    def pane_shell(self, pane):
+        """`herdr pane process-info`, trimmed to the one thing teardown reads: the pid of
+        an IDLE pane's shell, and None for a pane with anything else in the foreground.
+        A pane no test gave a shell to has none to discount."""
+        return self.pane_shells.get(pane)
 
     def prompt_pane(self, pane, text):
         self.pane_prompts.append((pane, text))
