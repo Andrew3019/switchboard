@@ -19,9 +19,11 @@
 #
 # WHAT THIS DOES NOT COVER. There is no herdr and no tmux on the runner, so nothing here
 # exercises a real pane, a real agent or a real fleet — those are proven by hand, in an
-# isolated clone, as the house rules describe. One test skips on Linux (`live`'s real
-# `lsof` invocation, whose output shape is BSD's) and the macOS leg is what keeps it
-# covered. Everything else runs: a green matrix is the whole suite, not a page of skips.
+# isolated clone, as the house rules describe. The live check's real `lsof` invocation
+# used to skip on Linux because its output shape was BSD's; the invocation now asks for
+# the fd field explicitly, so the real scan runs on Linux too (ubuntu-latest ships lsof
+# >= 4.94, the affected version) and the macOS leg covers it there as well. Everything
+# else runs: a green matrix is the whole suite, not a page of skips.
 name: tests
 
 on:
