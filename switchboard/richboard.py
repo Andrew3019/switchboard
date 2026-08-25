@@ -132,6 +132,19 @@ DIM = "dim"
 # the board. Lifting it on the one lit row changes nothing that row SAYS.
 HIGHLIGHT_STYLE = "not dim on grey30"
 
+# The OTHER highlight: the row the arrow keys are over, which RETURN acts on. A different
+# colour because it answers a different question — grey says "your pane is here", this
+# says "this is the one you are about to pick" — and two marks in one colour would read as
+# one mark that moved.
+#
+# PURPLE, because it is the only hue this board has not already spent: green is working,
+# red is trouble, yellow is a summons, cyan is a workspace, blue is the panel itself and
+# steel blue is `done`. A wash a human has not seen before says something new has
+# happened, which is exactly what it means. `purple4` is dark enough to leave every one of
+# those foregrounds readable on top of it, which is the rule the grey was picked under
+# too, and `not dim` is here for the same reason it is there.
+CURSOR_STYLE = "not dim on purple4"
+
 # A workspace holding one visible agent. A middle dot, not a bullet: `●` is already the
 # healthy-agent glyph and `•` beside it would read as a second status glyph.
 LONE_MARK = "·"
@@ -509,8 +522,8 @@ def gutter_column(rows: list[Any]) -> list[Optional[tuple[str, int]]]:
 def layout(snap, *, top: int, height: int, width: int, msg: str,
            note_text: str = "", show_archived: Optional[bool] = None,
            here: Optional[str] = None, stats: Optional[dict] = None,
-           openable=None, section_top: int = 0
-           ) -> Optional[list[tuple[str, Optional[object]]]]:
+           openable=None, section_top: int = 0, cursor: Optional[str] = None,
+           pan: int = 0) -> Optional[list[tuple[str, Optional[object]]]]:
     """The whole screen as (text, owner) pairs — `board.layout`'s contract, drawn richly.
 
     Returns None when it cannot honour that contract: `rich` is absent, the pane is too
@@ -543,6 +556,16 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     reason. A section line is owned by `board.SECTION_ZONE`, which is what tells a wheel
     which of the two it is over — and is false, so every caller that asks `if a` for an
     agent still sees none there.
+
+    `cursor` is the SECOND highlight: the agent the arrow keys are over, or None. `here`
+    says where the human's own pane is and is always drawn; this one says where their
+    attention is, comes and goes with the keys (`board.CURSOR_HOLD`), and is what RETURN
+    acts on. Two marks, two colours, and this one wins where they land on the same row —
+    a highlight nobody can act on may not hide the one they can.
+
+    `pan` is how many columns LEFT and RIGHT have moved a PLUGIN's text. Only a plugin's,
+    and not its headings: see `board.layout`, which makes the same call for the same
+    reasons and is where they are written down.
     """
     if not available() or width < MIN_WIDTH or height < MIN_HEIGHT:
         return None
@@ -592,7 +615,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # Sized here with the other fixed blocks because it is what the body has to share the
     # pane with, and it carries its own blank line above so that the padding travels with
     # the section rather than being remembered separately where it is drawn.
-    section = _plugin_sections(rows, inner)
+    section = _plugin_sections(rows, inner, pan)
     # What a plugin draws under each worktree GROUP, which is part of the tree and not of
     # the section. Read once — the hooks go to disk — and used twice: for what the tree
     # would cost in full, which is what it bids with, and for the blocks themselves.
@@ -711,7 +734,8 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
         w_name, w_state, show_age, left = _row_budget(rows[first:last], inner)
         for i in range(first, last):
             on = here is not None and rows[i].name == here
-            emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on),
+            emit(_row(rows[i], marks[i], inner, w_name, w_state, show_age, left, lit=on,
+                      picked=cursor is not None and rows[i].name == cursor),
                  rows[i])
             drawn += 1
             # The worktree group's block, under the last row of the group. Dim, clipped
@@ -729,8 +753,8 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
                 # `_clipw`'s rule still holds and is why nothing here flattens whitespace:
                 # a block is columns a plugin lined up on purpose, and `board._clip` would
                 # collapse the runs of spaces that ARE those columns.
-                block = Text.from_ansi(board._block_line(extra), style=DIM,
-                                       no_wrap=True, overflow="crop")
+                block = Text.from_ansi(board._block_line(board.pan_columns(extra, pan)),
+                                       style=DIM, no_wrap=True, overflow="crop")
                 block.truncate(inner, overflow="crop")
                 emit(block)
                 drawn += 1
@@ -889,8 +913,8 @@ def _gutter(line, label: str, mark: Optional[tuple[str, int]], indent_cols: int,
         line.append(label, style=style)
 
 
-def _wash(line, inner: int) -> None:
-    """Mark this line as the agent beside this board: a background across the WHOLE row.
+def _wash(line, inner: int, style: str = HIGHLIGHT_STYLE) -> None:
+    """Mark this line: a background across the WHOLE row, in one of the two highlights.
 
     PADDED FIRST, and that is the whole of why this is not one call. A row is drawn to
     whatever it has to say and then stops — nothing pads it, because until now nothing
@@ -908,11 +932,11 @@ def _wash(line, inner: int) -> None:
     the foregrounds carry meaning as before and only the background and the dimming change.
     """
     line.pad_right(max(0, inner - _vlen(line.plain)))
-    line.stylize(HIGHLIGHT_STYLE)
+    line.stylize(style)
 
 
 def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state: int,
-         show_age: bool, left_used: int, lit: bool = False):
+         show_age: bool, left_used: int, lit: bool = False, picked: bool = False):
     """One agent's line — the whole of it, because an agent is one line."""
     from rich.text import Text
 
@@ -957,7 +981,12 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
         line.append("  " + _clip(text, room), style="bold red" if doomed else "yellow")
     elif _excuse(row):
         line.append("  " + _clip(_excuse(row), room), style=DIM)
-    if lit:
+    # THE CURSOR OUTRANKS "YOU ARE HERE" where they land on the same row. One row cannot
+    # carry two backgrounds, and of the two this is the one a keypress is about to act on
+    # — the other says something that is true a second later either way.
+    if picked:
+        _wash(line, inner, CURSOR_STYLE)
+    elif lit:
         _wash(line, inner)
     return line
 
@@ -1002,7 +1031,7 @@ def _stats_block(stats: Optional[dict], inner: int):
     return out
 
 
-def _plugin_sections(rows: list[Any], inner: int) -> list[Any]:
+def _plugin_sections(rows: list[Any], inner: int, pan: int = 0) -> list[Any]:
     """Every plugin section as rich lines: a blank, a bar, and the plugin's own lines.
 
     A BAR IN `SECTION_STYLE`, like `STATS`, `AGENTS` and `NEEDS YOU`, because that is what
@@ -1030,7 +1059,11 @@ def _plugin_sections(rows: list[Any], inner: int) -> list[Any]:
             # `_clipw`'s rule: a plugin's spaces are columns it lined up on purpose, so
             # nothing here flattens whitespace. Truncated by rich rather than by a string
             # clip so the colour spans survive the cut.
-            line = Text.from_ansi("  " + text, no_wrap=True, overflow="crop")
+            # `pan` drops columns off the FRONT of the plugin's own text and leaves the
+            # heading and the indent where they are — see `board.pan_columns`, and
+            # `board.layout` for why only a plugin's lines move.
+            line = Text.from_ansi("  " + board.pan_columns(text, pan),
+                                  no_wrap=True, overflow="crop")
             line.truncate(inner, overflow="crop")
             out.append(line)
     return out
@@ -1085,9 +1118,7 @@ def _footer(inner: int, msg: str, note_text: str):
 
     foot = Text(no_wrap=True, overflow="crop")
     used = 0
-    bits = [b for b in (note_text, msg,
-                        "click a row to focus it · scroll to pan · a archived · q quits")
-            if b]
+    bits = [b for b in (note_text, msg, board.KEYS) if b]
     for b in bits:
         gap = _vlen(SEP) if used else 0
         room = inner - used - gap

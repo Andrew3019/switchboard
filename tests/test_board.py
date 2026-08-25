@@ -95,6 +95,20 @@ class ParseSgrTest(unittest.TestCase):
         self.assertTrue(board.is_left_click(events[0]))
         self.assertEqual(rest, "")
 
+    def test_an_arrow_key_arrives_now_and_not_on_the_next_keypress(self):
+        """A cursor key IS an escape sequence, and the leftover rule used to hold
+        everything from the last ESC onwards for the next read. So `↑` did nothing until
+        the human pressed something else, and then did two things at once."""
+        events, rest = board.parse_sgr("\033[A")
+        self.assertEqual(rest, "")
+        self.assertEqual(board.arrows(events[0]), ["up"])
+        # And the thing that rule was written for still holds: half a mouse report is
+        # held, because the next read is what completes it.
+        self.assertEqual(board.parse_sgr("\033[<0;12"), ([], "\033[<0;12"))
+        for partial in ("\033", "\033[", "\033[<"):
+            with self.subTest(partial=partial):
+                self.assertEqual(board.parse_sgr(partial), ([], partial))
+
     def test_keystrokes_survive_alongside_mouse_events(self):
         events, _ = board.parse_sgr("q\033[<0;1;1M")
         self.assertEqual(events[0]["raw"], "q")
@@ -1794,6 +1808,112 @@ class PanelSplitTest(unittest.TestCase):
         for i in section:
             self.assertIs(board.agent_at(rows, i), board.SECTION_ZONE)
             self.assertFalse(board.agent_at(rows, i))       # `focus` is never called on it
+
+
+class ArrowKeysTest(unittest.TestCase):
+    """The second highlight and what RETURN does with it.
+
+    UP and DOWN move a mark down the tree, RETURN acts on the row it is over, and the mark
+    stands for `CURSOR_HOLD` seconds. What is pinned here is the walk and the decode: the
+    highlight's two COLOURS are `tests/test_richboard.py`'s, which is where the look of a
+    row is pinned.
+    """
+
+    FLEET = snap(agent("top"), agent("alpha", depth=1, parent="top"),
+                 agent("beta", depth=1, parent="top"))
+
+    def rows(self, **kw):
+        return board.layout(self.FLEET, top=0, height=24, width=100, msg="", **kw)
+
+    def test_a_held_key_is_read_as_many_presses_and_not_as_one(self):
+        """One `os.read` can carry a key several times over; a board that acted on one of
+        them would crawl behind the finger holding it down."""
+        [ev], _ = board.parse_sgr("\033[B\033[B\033[A")
+        self.assertEqual(board.arrows(ev), ["down", "down", "up"])
+        # Application mode sends `ESC O A` for the same key. The board never asks for
+        # either mode, so it reads both.
+        [alt], _ = board.parse_sgr("\033OD")
+        self.assertEqual(board.arrows(alt), ["left"])
+        [ret], _ = board.parse_sgr("\r")
+        self.assertTrue(board.entered(ret))
+        self.assertFalse(board.entered(ev))
+
+    def test_the_cursor_walks_the_rows_this_frame_drew_and_stops_at_the_ends(self):
+        rows = self.rows()
+        self.assertEqual(board.step_cursor(rows, None, 1), "top")
+        self.assertEqual(board.step_cursor(rows, "top", 1), "alpha")
+        self.assertEqual(board.step_cursor(rows, "alpha", -1), "top")
+        # Standing still at the end is the signal `main` reads as "scroll instead", so it
+        # has to be a stillness and not a wrap.
+        self.assertEqual(board.step_cursor(rows, "top", -1), "top")
+        self.assertEqual(board.step_cursor(rows, "beta", 1), "beta")
+        # A name that is no longer drawn — archived, renamed, finished — starts over.
+        self.assertEqual(board.step_cursor(rows, "gone-agent", 1), "top")
+        self.assertIsNone(board.step_cursor([("chrome", None)], None, 1))
+
+    def test_an_agent_drawn_twice_is_one_stop_and_not_two(self):
+        """A blocked agent is drawn as its own row AND in NEEDS YOU. Two stops on one
+        agent would make the key feel stuck."""
+        s = snap(agent("top"), agent("stuck", depth=1, parent="top", state="blocked",
+                                     blocked_why="which branch?"))
+        rows = board.layout(s, top=0, height=24, width=100, msg="")
+        walk, seen = [], None
+        for _ in range(4):
+            seen = board.step_cursor(rows, seen, 1)
+            walk.append(seen)
+        self.assertEqual(walk, ["top", "stuck", "stuck", "stuck"])
+
+    def test_the_cursor_is_drawn_where_a_renderer_without_backgrounds_can_show_it(self):
+        """RETURN acts on this mark, so a board that cannot draw a wash still has to say
+        where it is — a `▸` in the column the other renderer draws its gutter in, which
+        costs no width and moves no name."""
+        plain = [board._ANSI.sub("", t) for t, _ in self.rows(cursor="beta")]
+        marked = [x for x in plain if x.startswith("\u25b8")]
+        self.assertEqual(len(marked), 1)
+        self.assertIn("beta", marked[0])
+        # And the row is the same width as it was without it.
+        was = {len(x) for x in (board._ANSI.sub("", t) for t, _ in self.rows())
+               if "beta" in x}
+        self.assertEqual({len(marked[0])}, was)
+
+
+class PanTest(unittest.TestCase):
+    """LEFT and RIGHT, which move a plugin's text and nothing else."""
+
+    WIDE = "step-1 ──▶ step-2 ──▶ step-3 ──▶ step-4 ──▶ step-5 ──▶ step-6 ──▶ step-7"
+
+    def test_columns_go_and_colour_stays(self):
+        """A plugin may colour its own words (`_colour_only`), so a pan cannot be a slice:
+        cutting the string would drop the sequence that opened the colour still in force,
+        or cut one in half."""
+        self.assertEqual(board.pan_columns("\033[32mgreen\033[0m tail", 6),
+                         "\033[32m\033[0mtail")
+        self.assertEqual(board.pan_columns("abcdef", 2), "cdef")
+        self.assertEqual(board.pan_columns("abc", 0), "abc")
+        self.assertEqual(board.pan_columns("abc", 99), "")
+        # Columns, not characters: a wide glyph costs two.
+        self.assertEqual(board.pan_columns("日本語", 2), "本語")
+
+    def test_a_pan_moves_the_plugin_s_text_and_leaves_the_tree_alone(self):
+        """Both renderers, because the tail that gets cut off is cut off on both."""
+        s = snap(agent("solo"))
+        section = mock.patch.object(board, "section_extras",
+                                    return_value=[("PLANS", [self.WIDE])])
+        for name, draw in (("plain", board.layout),
+                           *((("rich", richboard.layout),) if HAVE_RICH else ())):
+            with self.subTest(renderer=name), section:
+                def lines(pan):
+                    return [board._ANSI.sub("", str(t)) for t, _ in
+                            draw(s, top=0, height=24, width=60, msg="", pan=pan)]
+                before, after = lines(0), lines(24)
+                self.assertTrue(any("step-1" in x for x in before))
+                self.assertFalse(any("step-7" in x for x in before), "nothing was cut off")
+                self.assertTrue(any("step-7" in x for x in after), "the tail never arrived")
+                # The agent row and the heading do not move: a name panned off the screen
+                # would be fixing a problem the names do not have, and a panel whose own
+                # name has scrolled away is a panel you cannot identify.
+                self.assertEqual([x for x in before if "solo" in x or "PLANS" in x],
+                                 [x for x in after if "solo" in x or "PLANS" in x])
 
 
 class SeamPathsTest(unittest.TestCase):
