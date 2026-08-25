@@ -172,3 +172,30 @@ id = "hand-children-up-when-you-step-out"
 when = [{fact = "live_children", op = ">=", value = 1}]
 repeat = "once"
 text = "You have children still working. Finishing normally is fine — they keep running and their summaries reach you. But if you are stepping OUT of the chain rather than integrating them — you spawned somebody to carry the work on and your own part is over — `sb done --preserve-children` hands your live children up to your own parent instead of leaving them under an agent that has finished. They keep their panes, checkouts and work, and your summary is the hand-off note their new parent reads."
+
+
+# THE TASKLESS SPAWN (#145). `sb delegate` takes no task now, and a child spawned without one
+# holds `prompts.toml`'s `spawn.delegate_task` — an instruction to wait — instead of work.
+# The failure it answers: a dispatcher was told "spawn it, you give it more context", had a
+# required task argument and only a topic to put in it, so it passed the topic; the child read
+# `inspect agent plan creation efficiency` as its instruction and started inspecting before
+# any context arrived. Nothing was broken and nothing refused it — the parent had no way to
+# say "not yet", so it said something that looked like a task.
+#
+# KEYED ON THE COMMAND, like `isolation-at-the-spawn` beside it and for the same reason: this
+# is a choice that exists at the moment of spawning and at no other turn. It fires after the
+# spawn rather than before it, which is what a `command` row is — the agents this matters to
+# are the ones that spawn repeatedly, and for them the first delegate is the cheap one to get
+# wrong. `holds = ["spawn"]` keeps it off everything that cannot delegate at all, and `once`
+# keeps it to one telling: what is being said is that omitting the argument is legal, which
+# stays true for the rest of the agent's life.
+#
+# The text names the CASE and not just the flag, because the default is the right one nearly
+# always — a spawn with the whole task in it is what delegation is — and a rule read as
+# "prefer spawning empty" would produce idle children waiting for context nobody owes them.
+[[rule]]
+id = "spawn-idle-when-the-task-is-still-coming"
+command = "delegate"
+holds = ["spawn"]
+repeat = "once"
+text = "`sb delegate` takes the task as an argument, and that is right whenever you have the task. When you do NOT — somebody said they would give this agent its context themselves, or you are spawning ahead of a brief you are still waiting on — omit the argument entirely: `sb delegate --role lead --name <topic>` spawns the child holding an instruction to wait, and it stays out of STALLED until your first `sb tell` reaches it. Never pass a bare topic label as the task; a child reads whatever you pass as the whole of its instruction and starts on it."

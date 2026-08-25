@@ -102,6 +102,18 @@ overwriting somebody's work is not recoverable from a summary.
 # stale on an edit like that one.
 start_task = "Await my instructions."
 
+# The same thing for a DELEGATED child: `sb delegate` with no task at all. A parent that is
+# about to be handed the real context — by the human, or by a child it is still waiting on —
+# spawns the agent now and says what to do next, and the child must not invent a task out of
+# its own `--name` in the meantime (#145). So this is an instruction to STOP too, and it
+# names the channel the real one will arrive on, which is the one difference from a top's: a
+# top is told by the person typing into its pane, a child is told by a message.
+#
+# Reworded freely, here or in a repo's own prompts.toml, on the same terms as `start_task`:
+# the `agents.awaiting_task` flag that keeps this row out of STALLED comes from
+# `Broker._first_task` seeing no task passed, never from comparing this text back.
+delegate_task = "Await further instructions. Do NOT start work, and do not invent a task from your name — the real one is coming as a message. Run `sb inbox` when you are told you have mail."
+
 
 [notify]
 

@@ -3201,11 +3201,56 @@ class BrokerTest(unittest.TestCase):
         self.b.tell([name], "merge PR 41", me=HUMAN)
         self.assertEqual(store.get_agent(self.db, name)["awaiting_task"], 0)
 
-    def test_a_delegated_worker_is_never_marked_as_waiting(self):
-        """`delegate` always carries real work, so the default must be the ordinary one —
-        a stuck worker nobody is warned about is what this flag must not be able to cause."""
+    def test_a_delegated_worker_given_a_task_is_never_marked_as_waiting(self):
+        """A `delegate` that carries real work must produce the ordinary row — a stuck
+        worker nobody is warned about is what this flag must not be able to cause. The
+        taskless spawn below is the one exception, and it is asked for explicitly."""
         self.b.delegate("fix the parser", role="worker", name="w9", me="orch")
         self.assertEqual(store.get_agent(self.db, "w9")["awaiting_task"], 0)
+
+    # -- the taskless delegate (#145) -------------------------------------
+    #
+    # A parent whose real context is still coming — "spawn it, I will tell it what to do"
+    # — used to have a required task argument and only a topic to put in it, so it passed
+    # the topic and the child executed a bare topic label as its instruction.
+
+    def test_a_delegate_with_no_task_spawns_a_child_that_waits(self):
+        name = self.b.delegate(role="lead", name="l9", me="orch")
+        row = store.get_agent(self.db, name)
+        self.assertEqual(row["awaiting_task"], 1)
+        self.assertIn("Await further instructions", row["task"])
+        # And the placeholder is what was actually delivered to the pane, not just what
+        # the row says: a child told nothing at all would sit on an empty prompt.
+        self.assertIn("Await further instructions", self.h.prompts[-1][1])
+
+    def test_a_blank_task_is_the_same_as_no_task(self):
+        """Whitespace is what an agent produces when it means "nothing yet" and is trying
+        to satisfy a required argument. It must not become the child's instruction."""
+        name = self.b.delegate("   ", role="worker", name="w8", me="orch")
+        self.assertEqual(store.get_agent(self.db, name)["awaiting_task"], 1)
+
+    def test_rewording_the_delegate_placeholder_does_not_strand_the_flag(self):
+        """Same rule as the orchestrator's placeholder above: the flag comes from whether
+        a task was passed, never from comparing the text back, so a repo may reword it."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "prompts.toml").write_text(
+            '[spawn]\ndelegate_task = "Sit tight."\n')
+        b = Broker(self.db, self.h, repo=self.repo)
+        b.focus = lambda *a, **k: None
+        name = b.delegate(role="worker", name="w7", me="orch")
+        row = store.get_agent(self.db, name)
+        self.assertEqual(row["task"], "Sit tight.")
+        self.assertEqual(row["awaiting_task"], 1)
+
+    def test_the_cli_accepts_a_delegate_with_no_task_at_all(self):
+        """The argument is optional at the parser too, and the validator lets None past —
+        without both, the mechanism above is unreachable from the command an agent types.
+        """
+        from switchboard.cli import build_parser, _validate
+        args = build_parser().parse_args(["delegate", "--role", "lead", "--name", "x"])
+        self.assertIsNone(args.task)
+        _validate(args)
+        self.assertIsNone(args.task)
 
     def test_rewording_the_placeholder_prompt_does_not_strand_the_flag(self):
         """Nothing compares the placeholder's TEXT — the flag comes from whether a task
