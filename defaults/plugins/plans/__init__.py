@@ -1855,8 +1855,9 @@ def _written(plan: dict, entry: dict, step: dict) -> None:
 
     `notes` are the one shape converted rather than copied, exactly as a template's own
     plan-level notes are: a note is `{text, by, at}` and a template author writes the
-    sentence. A list of bare strings copied through would render as a crash rather than as
-    a note.
+    sentence. A list of bare strings copied through still renders — `_rec` reads a bare
+    one as its own text — but it renders with no author, and a template's author is known
+    here and worth recording.
     """
     who = str(plan.get("created_by") or "human")
     for k, v in entry.items():
@@ -2187,6 +2188,21 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
 
 def _note(text: str, who: str) -> dict:
     return {"text": text, "by": who, "at": int(time.time())}
+
+
+def _rec(item: Any, key: str) -> dict:
+    """A stored note or checkpoint as the record every renderer here reads it as.
+
+    Hand-editing the file IS the interface, and a hand writes the value itself —
+    `"notes": ["the brief is stale"]` rather than the `{text, by, at}` a verb appends. So
+    the bare value is read as the field it plainly is, with no author and no time.
+    `_check` refuses those lists for not being LISTS, because every verb here appends to
+    one, but it does not police what is inside: a wrong record costs one rendering, and
+    refusing the whole file over it would lose the lead the ninety-nine steps that are
+    fine. Falls back rather than fails, exactly as `_wrong` already reads a bare
+    checkpoint and as `_step_lines` reads a field this file has never heard of.
+    """
+    return item if isinstance(item, dict) else {key: item}
 
 
 # -- the library and the templates ---------------------------------------------
@@ -4165,9 +4181,9 @@ def _full(p: dict) -> str:
     if p.get("notes"):
         lines.append("")
         lines.append("  notes")
-        lines.extend(f"    {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
+        lines.extend(f"    {_flat(n.get('text'))}  ({_flat(n.get('by') or '—')}, "
                      f"{_when(n.get('at'))})"
-                     for n in p["notes"])
+                     for n in (_rec(x, "text") for x in p["notes"]))
     lines.append("")
     lines.append("  changelog")
     lines.extend(f"    {_entry(e)}" for e in (p.get("changelog") or ()))
@@ -4261,10 +4277,11 @@ def _step_lines(steps: list) -> list[str]:
             # fired commands would be the evaluator this design does not have. The
             # placeholders in it are the owner's to fill in.
             out.append(f"    cmd   {_flat(s['command'])}")
-        out.extend(f"    ref   {_flat(c.get('ref'))}" for c in (s.get("checkpoints") or ()))
-        out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by'))}, "
+        out.extend(f"    ref   {_flat(c.get('ref'))}"
+                   for c in (_rec(x, "ref") for x in (s.get("checkpoints") or ())))
+        out.extend(f"    note  {_flat(n.get('text'))}  ({_flat(n.get('by') or '—')}, "
                    f"{_when(n.get('at'))})"
-                   for n in (s.get("notes") or ()))
+                   for n in (_rec(x, "text") for x in (s.get("notes") or ())))
         # EVERYTHING ELSE THE STEP CARRIES, last, one line each. This template knows every
         # field above by name, so before this a field nobody here had heard of rendered in
         # `--json` and in `--markdown` and was silently invisible in the terminal — while

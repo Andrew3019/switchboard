@@ -1142,6 +1142,37 @@ class StepsTest(PlansSandbox):
         self.ok("plugin", "plans", "tick", "s-1")
         self.assertEqual(self.step("s-1")["progress"], "done")
 
+    def test_a_hand_written_note_or_checkpoint_is_read_as_the_value_it_plainly_is(self):
+        """A verb appends `{text, by, at}`; a hand types the sentence. Both arrive, because
+        hand-editing the file IS the interface — so a bare string is rendered as the note
+        it obviously is, with no author and no time, rather than crashing every rendering
+        of the plan that carries it. `_check` refuses those lists for not being LISTS and
+        does not police what is inside one: a wrong record costs one rendering, and
+        refusing the file over it would lose the lead the steps that are fine."""
+        self.plan("write it")
+        self.edit_step("s-1", notes=["the parser was the hard part"],
+                       checkpoints=["notes/the-brief.md"])
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("note  the parser was the hard part", shown)
+        self.assertIn("ref   notes/the-brief.md", shown)
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+        # Still a plan a verb can move: the fallback is a rendering and not a repair.
+        self.ok("plugin", "plans", "tick", "s-1")
+
+    def test_a_bare_plan_level_note_renders_too(self):
+        """The plan's own notes are the same shape and the same hand, so they get the same
+        fallback — pinned separately because they are a second call site and a fix that
+        reached only the step would leave `show` crashing on the plan."""
+        self.plan("write it")
+        doc = self._doc()
+        doc["plans"][0]["notes"] = ["this job was mostly reading"]
+        self._save(doc)
+
+        self.assertIn("this job was mostly reading",
+                      self.ok("plugin", "plans", "show", "p-1"))
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
     # -- rework, add-step, dep -------------------------------------------------
 
     def test_rework_is_a_count_on_the_step_and_never_an_edge(self):
