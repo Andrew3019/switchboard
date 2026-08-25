@@ -4808,7 +4808,10 @@ def _step_lines(steps: list) -> list[str]:
         # Nine, because an id is `step-<n>` now and `s-<n>` on a plan made before that:
         # the column has to hold the longer spelling or the progress beside it runs into
         # it, which is a rendering nobody can scan.
-        bits = [f"{_flat(s.get('id', '?')):<9}{_flat(s.get('progress', '?')):<10}"
+        # `progress` is an open vocabulary, so a value can be longer than its column;
+        # `_col` keeps a gap either way, where a bare `:<10` glued `waiting on Andrew`
+        # straight onto the step name beside it.
+        bits = [f"{_flat(s.get('id', '?')):<9}{_col(_flat(s.get('progress', '?')), 10)}"
                 f"{_flat(s.get('name') or '')}"]
         if s.get("display"):
             # The label the board draws for this step, beside the sentence it stands for —
