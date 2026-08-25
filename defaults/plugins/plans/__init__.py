@@ -2861,13 +2861,16 @@ def _schema_problems(value: Any, schema: dict, path: str) -> list[str]:
                or (expected == "string" and isinstance(value, str))
                or (expected == "array" and isinstance(value, list)))
     if expected and not matches:
-        return [f"{path} must be {expected}, not {type(value).__name__}"]
+        article = "an" if expected in ("object", "array") else "a"
+        return [f"{path} must be {expected}, not {type(value).__name__} — replace it "
+                f"with {article} {expected} value or remove it"]
 
     out: list[str] = []
     if expected == "object":
         properties = schema.get("properties") or {}
         if schema.get("additionalProperties") is False:
-            out.extend(f"{path}.{key} is not a recognized strategy field"
+            out.extend(f"{path}.{key} is not a recognized strategy field — remove it or "
+                       f"use a field named in the strategy schema"
                        for key in value if key not in properties)
         for key, child in properties.items():
             if key in value:
@@ -2879,15 +2882,21 @@ def _schema_problems(value: Any, schema: dict, path: str) -> list[str]:
                 out.extend(_schema_problems(item, item_schema, f"{path}[{index}]"))
         if schema.get("uniqueItems") and any(
                 value[index] in value[:index] for index in range(len(value))):
-            out.append(f"{path} must contain unique items")
+            out.append(f"{path} must contain unique items — remove or replace duplicates")
     elif expected == "string":
         minimum = schema.get("minLength")
         if minimum is not None and len(value) < minimum:
             out.append(f"{path} must contain at least {minimum} character"
-                       f"{'s' if minimum != 1 else ''}")
+                       f"{'s' if minimum != 1 else ''} — replace it with a long enough "
+                       f"string or remove it")
         pattern = schema.get("pattern")
-        if pattern is not None and re.search(pattern, value) is None:
-            out.append(f"{path} does not match {pattern}")
+        # JSON Schema patterns use ECMA-262, whose `$` means the true end of the string;
+        # Python also lets it match just before a final newline. This schema subset does
+        # not translate regex dialects generally, but it must preserve that anchor rule.
+        true_end_pattern = re.sub(r"(?<!\\)\$", r"\\Z", pattern) if pattern else pattern
+        if pattern is not None and re.search(true_end_pattern, value) is None:
+            out.append(f"{path} does not match {pattern} — replace it with a matching "
+                       f"string or remove it")
     return out
 
 

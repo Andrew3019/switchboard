@@ -1033,12 +1033,35 @@ class StepsTest(PlansSandbox):
         code, warning, _ = self.sb("plugin", "plans", "validate", "p-1")
         self.assertEqual(code, 0)
         self.assertIn("strategy.continuity must be string", warning)
+        self.assertIn("replace it with a string value or remove it", warning)
         self.assertIn("strategy.invented is not a recognized strategy field", warning)
+        self.assertIn("remove it or use a field named in the strategy schema", warning)
         said = self.data("plugin", "plans", "validate", "p-1")
         self.assertFalse(said["ok"])
         self.assertEqual(self.data("plugin", "plans", "show", "p-1")
                          ["steps"][0]["strategy"], strategy)
         self.assertEqual(self.step("step-1")["strategy"], strategy)
+
+    def test_nested_strategy_schema_keywords_warn_without_discarding_data(self):
+        strategy = {"resources": {"skills": ["", "a", "a"]}, "brief": "x\ny"}
+        self.plan("write it")
+        self.edit_step("step-1", strategy=strategy)
+
+        code, warning, _ = self.sb("plugin", "plans", "validate", "p-1")
+        self.assertEqual(code, 0)
+        self.assertIn("strategy.resources.skills[0] must contain at least 1 character",
+                      warning)
+        self.assertIn("strategy.resources.skills must contain unique items", warning)
+        self.assertIn("strategy.brief does not match", warning)
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")
+                         ["steps"][0]["strategy"], strategy)
+
+        self.edit_step("step-1", strategy={"brief": "path.md\n"})
+        self.assertIn("strategy.brief does not match",
+                      self.ok("plugin", "plans", "validate", "p-1"))
+
+        self.edit_step("step-1", strategy={"brief": "path.md"})
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
 
     # -- an owner, and tick ----------------------------------------------------
 
