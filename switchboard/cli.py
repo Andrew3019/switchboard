@@ -1527,7 +1527,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # is about. It is a hidden verb a person types, not something an agent reads.
         for h in d["held"]:
             text += f"\n  kept {h['name']}: {h['reason']}"
-        text += f"\n({d['looked']} worktree(s) looked at)"
+        text += f"\n({d['looked']} workspace(s) looked at)"
         _emit(args, text, d)
         return 0
 
