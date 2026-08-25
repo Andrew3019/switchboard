@@ -1020,6 +1020,10 @@ class IsolationTest(Sandbox):
         "tell": ["w1", "hi"], "inbox": [], "block": ["why"], "log": [], "cleanup": [],
         "inspect": ["w1"], "init": [],
         "restore": ["w1"], "board": [], "models": [],
+        # `models`' two siblings: config reads and nothing else — no store write, no spawn,
+        # and deliberately no plugin import, because both are vocabulary listings an agent
+        # runs mid-turn to find out what `--role` and `sb grant` will accept.
+        "roles": [], "capabilities": [],
         # A capability handed to an agent below the caller: one store write, no spawn and
         # no plugin code — the same level as the rest of the fleet's own bookkeeping.
         "grant": ["w1", "spawn"],
