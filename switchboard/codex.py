@@ -71,6 +71,21 @@ APPROVAL_POLICY = config.setting("codex.approval_policy")
 HOOK_TIMEOUT = config.setting("codex.hook_timeout")
 HERDR_CONFIG_DIR = config.setting("codex.herdr_config_dir")
 
+# Claude's configured footer leads with model/context/cost, keeps both account windows,
+# then identifies the checkout. Codex cannot run a status-line command or draw multiple
+# footer rows, so use its native equivalents in that order; unavailable values (notably
+# estimated cost on subscription auth) are omitted by Codex itself. The native renderer
+# owns the separators, colours, truncation, and responsive layout.
+STATUS_LINE = (
+    "model-with-reasoning",
+    "context-used",
+    "estimated-thread-cost",
+    "five-hour-limit",
+    "weekly-limit",
+    "current-dir",
+    "git-branch",
+)
+
 # The slack between our clock and codex's own timestamps — two clocks not agreeing to the
 # second. Written here rather than imported: `output` reaches `store`, and `store` reaches
 # this module.
@@ -345,6 +360,8 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         # its cwd, and a worktree reached through a symlinked /tmp is not the same string.
         lines += [f"[projects.{_s(str(Path(worktree).resolve()))}]",
                   'trust_level = "trusted"', ""]
+    lines += ["[tui]",
+              "status_line = [" + ", ".join(_s(item) for item in STATUS_LINE) + "]", ""]
     for event, command in dict(hooks).items():
         # The array-of-matcher-groups shape, same as Claude Code's settings.json hooks
         # block. `matcher = "*"` because every turn of an agent we spawned is ours.

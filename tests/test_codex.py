@@ -71,6 +71,7 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
         self.assertEqual(cfg["model_reasoning_effort"], "medium")
         self.assertEqual(cfg["sandbox_mode"], "workspace-write")
         self.assertEqual(cfg["approval_policy"], "never")
+        self.assertEqual(cfg["tui"]["status_line"], list(codex.STATUS_LINE))
         # Trust is keyed by the RESOLVED absolute path — codex matches on the path it
         # computes for its own cwd, and a checkout reached through a symlinked /tmp is a
         # different string.
