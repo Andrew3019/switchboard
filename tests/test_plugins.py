@@ -1046,7 +1046,7 @@ class IsolationTest(Sandbox):
         "configure": [],
         # The collector's doorbell trigger: a flush with nothing after it.
         "flush": [],
-        # Its reconciler trigger, and level 0 for the same reason: it runs unattended on a
+        # Its reaping trigger, and level 0 for the same reason: it runs unattended on a
         # timer, so it must not be able to reach plugin code.
         "reconcile": [],
         # The board's half-hourly worktree sweep, and level 0 for that same reason — it is

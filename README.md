@@ -146,8 +146,8 @@ says which:
   collector has no import that could reach a write, and a test checks that.
 - **Turn edges as hooks.** Whether an agent is *working right now* was originally inferred
   from spinner glyphs in the terminal title. A cosmetic upstream change to those glyphs
-  made every pane on the machine read as idle, which broke held delivery, made the
-  reconciler interrupt agents mid-tool-call, and made the board lie. switchboard now
+  made every pane on the machine read as idle, which broke held delivery and made the
+  board lie. switchboard now
   records the fact itself at the two edges of a turn, via Claude Code's own hooks.
 - **A Stop gate.** Agents finished turns without reporting, four times in one day, and
   their work stayed invisible. Ending a turn nobody reported is now refused mechanically

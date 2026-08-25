@@ -123,14 +123,13 @@ DOORBELL_TIMEOUT = 30.0
 # Checking every tick would buy two seconds instead of forty and read the whole package
 # thirty times a minute for it.
 SOURCE_CHECK_GAP = 45.0
-# The floor between two reconciler runs, in seconds, and the period at which a stall that
-# is still there is looked at again. Two numbers because the trigger has two reasons to
-# fire: a name that has newly gone stalled (the pass this item is held to — pinged within
-# one cycle), and a sweep for the stall that has been there a while, which exists only so
-# that an agent which woke, acted and stalled again is eventually seen even though the
-# stalled SET never changed. The per-agent "once per stall" rule lives in
-# `Broker.reconcile` where the store is; these two only decide how often a process is
-# spawned to ask it.
+# The floor between two reconciler runs, in seconds, and the period at which the fleet is
+# swept whether or not anything looks wrong. Two numbers because the trigger has two
+# reasons to fire: a pane that has gone (dealt with within one cycle, so a dead child is
+# mail rather than archaeology), and a periodic sweep that runs anyway — the backstop for
+# a death this collector never saw, a replacement collector started after the fact, or a
+# reading of herdr that failed the first time. What a run actually does lives in `cli.main`
+# where the store is; these two only decide how often a process is spawned to do it.
 RECONCILE_GAP = 10.0
 RECONCILE_SWEEP = 600.0
 # The floor between two attempts at the fleet-stats cold call, in seconds. Not a tunable,
@@ -179,14 +178,11 @@ class State:
     source_signature: Optional[str] = None
     last_source_check: Optional[float] = None
     # The reconciler, counted like the doorbell and beside it because it is the same shape:
-    # a trigger that spawns `sb`. `reconciled` is the set of stalled names the last run was
-    # spawned for — a list rather than a set only because this dataclass is published as
-    # JSON — and it is what makes a stall that nobody attends to cost one process every
-    # `RECONCILE_SWEEP` instead of one every tick.
+    # a trigger that spawns `sb`. `RECONCILE_GAP` is what keeps a fleet with a dead pane in
+    # it to one process every ten seconds rather than one every tick.
     reconciles: int = 0
     last_reconcile: Optional[float] = None
     reconcile_error: Optional[str] = None
-    reconciled: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -344,8 +340,9 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     makes, and duplicating any of them here would be a second opinion in a second process.
 
     It does not look at stalled agents, does not correct a state, and pings nobody. An
-    agent that is idle without having reported is a different problem with a different
-    answer (the reconciler, phase 3.5), and a half of it built here would be thrown away.
+    agent that is idle without having reported is a different problem, and one nothing
+    acts on: it shows on the board and in `--needs-me`, and DESIGN-TRUTH rules out "The
+    reconciler's nudge to an agent that went quiet."
 
     `undelivered` and not `unread`: an agent that read its own inbox needs no doorbell,
     and the snapshot's `undelivered` is derived from the same pair `flush_pending` chases
@@ -386,52 +383,39 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
 
 
 def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
-    """Run `sb reconcile` so an agent that went quiet — or died — is dealt with.
+    """Run `sb reconcile` so an agent that died is confirmed dead and its parent told.
     -> whether one started.
 
     The doorbell's twin, deliberately built to the same rule: this asks one question of the
-    snapshot it already has — is anybody stalled? — and if so spawns one `sb` command,
-    which decides everything else. Who is exempt, who has already been pinged, and what a
-    ping says are `Broker.reconcile`'s, running in a process on current code, for the
-    reason the module note gives: this one is version-stale on purpose and must not be the
-    place a rule lives (the four-hour doorbell incident was exactly that mistake).
+    snapshot it already has — has any pane gone? — and if so spawns one `sb` command, which
+    decides everything else. What a reap does, and what a death is worth telling anyone
+    about, is `cli.main`'s and `status.collect`'s, running in a process on current code, for
+    the reason the module note gives: this one is version-stale on purpose and must not be
+    the place a rule lives (the four-hour doorbell incident was exactly that mistake).
 
-    **Two triggers, and the second is why this is not just `DOORBELL_GAP` again.** Mail
-    stops being pending once it is delivered, so the doorbell's work list empties itself; a
-    stall does not. An agent that goes quiet and is never attended to stays `stalled` on
-    every tick for the rest of the day, and a plain gap would spawn a process for it every
-    ten seconds — the cost `ring_doorbell` designs out for blocked agents by keeping them
-    out of the work list entirely. So the trigger fires on a stalled name this collector
-    has not already spawned for, and otherwise only every `RECONCILE_SWEEP`. The sweep is
-    not decoration: an agent that wakes on its ping, acts, and stalls again is the same
-    name in the same set, and the sweep is the only thing that looks at it again.
+    **Two triggers.** A gone name fires it on the doorbell's rule — that work list empties
+    itself, because `_record_gone` writes `failed` and `gone` reads `state in REAPABLE`, so
+    the row drops out of the set for good. Gone names are deliberately NOT deduped by name:
+    the repeat is bounded by `GONE_CONFIRM_GRACE` and is not waste but the debounce itself,
+    which needs a second reap-capable reading a minute after the first to confirm the
+    absence at all. Deduping would suppress precisely that second reading.
 
-    In-process memory, like `last_doorbell`: a replacement collector re-spawning once for
-    a stall it did not see happen costs one process, and `Broker.reconcile`'s own once-per-
-    stall rule is what stops that becoming a second ping.
+    The `RECONCILE_SWEEP` timer fires it whether or not anything looks wrong, and it is the
+    backstop: a collector that started after a death, or one whose reading of herdr failed
+    when it happened, would otherwise never spawn the one process that can write the row.
 
-    **A death fires it too, and on the doorbell's rule rather than the stall's.** `sb
-    reconcile` is the one unattended path that reaps (`cli.main` says why there and not in
-    `flush`), so an agent whose pane has gone has to be able to *start* one — otherwise the
-    reaping sits behind a stalled agent that may not exist, and a dead child is recorded
-    only when a person runs `sb status`. Gone names are deliberately kept OUT of the
-    `reconciled` memory: unlike a stall, this work list empties itself, exactly as the
-    doorbell's does. `_record_gone` writes `failed`, `gone` reads `state in REAPABLE`, and
-    the row drops out of the set for good — so the repeat is bounded by
-    `GONE_CONFIRM_GRACE` and is not waste but the debounce itself, which needs a second
-    reap-capable reading a minute after the first to confirm the absence at all. Deduping
-    them by name would suppress precisely that second reading and leave the death confirmed
-    only on the ten-minute sweep.
+    In-process memory, like `last_doorbell`: a replacement collector re-sweeping once costs
+    one process, and the reap is idempotent.
+
+    This trigger used to carry a second job — spawning `sb reconcile` for a STALLED agent,
+    so the reconciler could nudge it. DESIGN-TRUTH now rules out "The reconciler's nudge to
+    an agent that went quiet.", and with that went the `reconciled` memory that kept an
+    unattended stall from costing a process every tick.
     """
     now = panel.now()
-    stalled = sorted(a.name for a in snap.agents if a.stalled)
     gone = sorted(a.name for a in snap.agents if a.gone)
-    state.reconciled = [n for n in state.reconciled if n in stalled]
-    if not stalled and not gone:
-        return False
-    fresh = [n for n in stalled if n not in state.reconciled] + gone
     due = state.last_reconcile is None or now - state.last_reconcile >= RECONCILE_SWEEP
-    if not fresh and not due:
+    if not gone and not due:
         return False
     if state.last_reconcile is not None and now - state.last_reconcile < RECONCILE_GAP:
         return False
@@ -442,7 +426,6 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
         return False
     state.last_reconcile = now
     state.reconciles += 1
-    state.reconciled = stalled
     threading.Thread(target=_run_sb, args=(sb, "reconcile", db_path, state, "reconcile"),
                      daemon=True).start()
     return True
@@ -635,10 +618,9 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         # Not cleared on success: `sb doctor` wants the most recent error even on a
         # collector that has recovered, and `errors` is what says whether it is current.
         ring_doorbell(snap, state, db_path)
-        # The second trigger on the same loop, which is where DESIGN-TRUTH puts it
-        # ("maybe the same loop `sb board` runs on"). Independent of the first: a stalled
-        # agent usually has no mail pending, so a shared gate would mean each mechanism
-        # only ran when the other had work.
+        # The second trigger on the same loop. Independent of the first: a fleet with a
+        # dead pane in it usually has no mail pending, so a shared gate would mean each
+        # mechanism only ran when the other had work.
         run_reconciler(snap, state, db_path)
 
     state.wrote_at = at

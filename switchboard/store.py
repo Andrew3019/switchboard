@@ -1749,8 +1749,7 @@ def known_workspace(db: sqlite3.Connection, workspace: str) -> bool:
 # — because one of the six raw read sites CANNOT route through anything the broker owns.
 #
 # `hooks._has_live_child` is that site. The Stop hook runs in a process that must not
-# import `broker` and must fail open, so its SQL is a deliberate second copy of the same
-# `WHERE parent=?` (see `Broker._has_live_child`, which says so from the other side). A
+# import `broker` and must fail open, so its SQL is a deliberate raw `WHERE parent=?`. A
 # resolver with any thickness at all — a join, an ancestry walk, a cache, a derived
 # fallback — would make that copy WRONG the moment `parent` moved, and there is no place
 # to fix it that the hook is allowed to reach. So the resolver bottoms out in the one
@@ -1869,8 +1868,8 @@ def promote_children(db: sqlite3.Connection, *, promoter: str,
     The first `UPDATE agents SET parent` this codebase has ever had, and it is one
     statement on purpose. A torn intermediate is not merely prevented by the write lock —
     it has **no shape to take**: every reader of this column is a plain equality read
-    (`current_parent`, `current_parentage`, `children_of`, `Broker._has_live_child`,
-    `hooks._has_live_child`) and so observes the pre-state or the post-state, and the one
+    (`current_parent`, `current_parentage`, `children_of`, `hooks._has_live_child`)
+    and so observes the pre-state or the post-state, and the one
     multi-statement walk over it (`Broker._descendants`) holds a `read_snapshot`. NO ROW IS
     CREATED and no row is deleted; a set of pointers moves up one level.
 

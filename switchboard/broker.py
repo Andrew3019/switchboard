@@ -133,14 +133,6 @@ DEFAULT_ROLE = config.setting("vocabulary.default_role")
 # readouts use, so "finished" cannot come to mean two different things in two files.
 FINISHED = tuple(config.setting("states.finished"))
 
-# The floor between two reconciler pings to the SAME agent, in seconds. Not a tunable, for
-# `collector.DOORBELL_GAP`'s reason: it is the one number deciding how much a stall that
-# will not resolve costs the agent living it. The rule above it is already "once per
-# stall" — this only catches the agent that wakes on the ping, runs one `sb` command and
-# stops again, which reads as new activity every cycle and would otherwise be nagged at
-# the collector's tick rate for as long as it kept doing it.
-REPING_GAP = 600
-
 # How far back `restore_sweep` calls a death RECENT, in seconds. This is what makes the
 # sweep need no argument: it means "whatever went down just now and has not been dealt
 # with", never "everything that has ever failed" — resurrecting a week of ordinary crashed
@@ -6404,16 +6396,15 @@ class Broker:
               edge is the agent having come back, and the verdict is spent. NULL alone is
               NOT the test (it is also every row no hook ever fired for), which is why the
               event has to be there too.
-            - `turn_forgotten` in the log, read like `_last_pings` reads `reconcile_ping`:
-              out of the append-only log rather than a new column to migrate onto every
-              existing store. Bounded the same way, and a row whose verdict has fallen off
-              the end of that window is simply refused — the failure is a refusal, and
+            - `turn_forgotten` in the log, read out of the append-only log rather than a
+              new column to migrate onto every existing store. Bounded the same way, and
+              a row whose verdict has fallen off the end of that window is simply refused — the failure is a refusal, and
               `--force` is still there.
 
             Then one live re-check: `_busy`. The three reads above are the store's memory
             of a decision taken up to a whole `turn_doubt_grace` ago, and the act here is
-            destructive rather than a ping — `_nudge` re-asks `_busy` before something as
-            small as a prompt, for the smaller version of this reason. With `turn` NULL
+            destructive rather than a prompt: `_ring` re-asks `_busy` before something as
+            small as a doorbell, for the smaller version of this reason. With `turn` NULL
             `_busy` is herdr's own reading of the pane, so an agent that came back without
             its hooks writing is still seen. It fails open on an unreachable herdr, so it
             is a veto and not a guarantee.
@@ -7603,9 +7594,9 @@ class Broker:
 
         **Selection, and why not `absent_since` alone.** `absent_since` is a debounce
         value, not a record: `status._record_gone` clears it the moment the absence is
-        confirmed (`state='failed'`, `ended_at` set) and the collector's own `reconcile`
-        confirms it unattended within about a minute. By the time a person notices a
-        restart and types a command, most of the cohort has already self-confirmed and
+        confirmed (`state='failed'`, `ended_at` set) and the collector's own reaping sweep
+        (`sb reconcile`) confirms it unattended within about a minute. By the time a
+        person notices a restart and types a command, most of the cohort has already self-confirmed and
         `absent_since` is back to NULL — selecting on it alone finds an empty fleet and
         reports "nothing to restore" about a board full of dead panes. So it is the union
         of both halves: rows still mid-debounce, and rows already confirmed gone within
@@ -7691,7 +7682,8 @@ class Broker:
 
         Two halves, unioned, because the cohort is racing the collector: a row is either
         still inside its absence debounce (`absent_since` set, no `ended_at` yet) or has
-        already been confirmed gone by `reconcile` (`state='failed'`, `ended_at` set).
+        already been confirmed gone by the reaping sweep (`state='failed'`, `ended_at`
+        set).
         Which half a given row is in depends only on how long ago the crash was and when
         the collector last ticked — a distinction the person typing the command has no
         way to know and no reason to care about.
@@ -7974,10 +7966,9 @@ class Broker:
         OUR signal first (`agents.turn`, written by the hooks in `hooks.py` at the two
         edges of a turn), herdr's screen reading only where we have none. This is the
         single most load-bearing consumer of it: `_ring` holds a when-idle doorbell back
-        on this answer, and `_nudge` refuses to ping on it. When herdr's busy detector
-        went dark for every Claude pane on the machine, both of those inverted — held mail
-        was delivered into turns that were still running, and the reconciler told working
-        agents their turn had ended.
+        on this answer. When herdr's busy detector went dark for every Claude pane on the
+        machine, that inverted — held mail was delivered into turns that were still
+        running.
 
         Unknown still reads as not busy, and only the *unknown* case does: the doorbell
         this gates is held back for a busy agent, and holding it back on a hunch is how
@@ -8797,133 +8788,19 @@ class Broker:
         except HerdrError as e:
             store.log_event(self.db, kind="notify_failed", agent=who, error=str(e))
 
-    # -- the reconciler ---------------------------------------------------
-
-    def reconcile(self, *, snap=None) -> list[str]:
-        """Ping every agent whose turn ended without a report. -> the names pinged.
-
-        The acting half of a detection that was already exact. `AgentStatus.stalled` is
-        `True` for an agent whose row is `working`, that herdr says is alive and idle, and
-        that is not still holding its placeholder task — i.e. its turn ended and it said
-        nothing. The board has shown that for as long as there has been a board; nothing
-        has ever told the agent.
-
-        **The ping goes to the agent, never to its parent** —
-        DESIGN-TRUTH: "The ping goes to the agent itself rather than to its parent":
-        the agent is the only party that knows whether it is finished, stuck, or simply
-        wrong about having finished, and a parent told "your child went quiet" can only
-        ask it the same question this asks directly.
-
-        **Three exemptions, and no more than three.** Blocked and finished agents are not
-        `stalled` at all — `states.running` is `working` alone — so they cost nothing here.
-        `awaiting_task` is DESIGN-TRUTH's own exemption ("unless it is awaiting
-        instructions") and `status.collect` has already applied it. The third is the stop
-        hook's (`hooks.stop_gate`): a parent with a live child was told by the protocol to
-        end its turn and wait for the poke, and pinging it would push it to report over
-        work still running. It is logged rather than skipped silently, for the reason the
-        hook logs it — it is the one exemption that could hide a real silent finish.
-
-        **The re-ping rule: once per stall.** A reconciler that nags every cycle is worse
-        than none, so a second ping needs the agent to have DONE something since the last
-        one — `status`'s own `last_activity`, which counts its `sb` calls, the mail it sent
-        and the mail it read — meaning it woke, acted, and stalled again. `REPING_GAP` is
-        the backstop underneath that for the pathological case: an agent that wakes on the
-        ping, runs one `sb` command and stops again would otherwise qualify every cycle.
-        A stall nobody attends to is therefore pinged exactly once, and stays on the board,
-        in `--needs-me` and in the DRIFT block, which is where a stall that survives being
-        told about it belongs.
-
-        **Not `_ring`.** The doorbell marks the whole mailbox delivered
-        (`store.mark_delivered`), which is right for a ring that says "you have mail" and
-        wrong for anything else: this nudge names no mail, so marking mail announced would
-        lose that announcement for good. `_ring`'s two guards are still the right guards,
-        so they are applied here and only they.
-        """
-        from . import status as status_mod
-
-        snap = snap or status_mod.collect(self.db, self.h, reap=False)
-        pinged: list[str] = []
-        last = self._last_pings()
-        for a in snap.agents:
-            if not a.stalled:
-                continue
-            if self._has_live_child(a.name):
-                store.log_event(self.db, kind="reconcile_waived", reason="live_children",
-                                target=a.name)
-                continue
-            when = last.get(a.name)
-            if when is not None and not (a.last_activity > when
-                                         and store.now() - when >= REPING_GAP):
-                continue
-            if self._nudge(a.name, self._say("notify.stalled", idle=fmt_age(a.idle))):
-                pinged.append(a.name)
-        return pinged
-
-    def _nudge(self, who: str, text: str) -> bool:
-        """One reconciler ping. -> whether it landed. Never raises.
-
-        `_ring`'s guards without `_ring`'s bookkeeping (see `reconcile`). Re-asking them is
-        not redundancy: the snapshot is a few milliseconds old, and an agent that has
-        started a turn since it was taken must not be pinged at all. `agent prompt` queues
-        at the tool-call boundary rather than interleaving, so the ping would not cut its
-        work short — but it would still arrive, and telling a working agent that its turn
-        ended without a report is false at the moment it reads it.
-
-        The event is logged against NO agent, with the target in its payload, and that is
-        deliberate: `status._last_activity` counts every event that names an agent, so
-        logging this against the target would reset the idle clock on exactly the silent
-        agent the mechanism exists to spot — the failure that function's docstring warns
-        about for arriving mail. It is also what the re-ping rule reads, so an idle clock
-        reset by the ping would make the rule read its own footprint as activity.
-        """
-        if self._busy(who) or self._is_blocked(who):
-            return False
-        try:
-            self.h.prompt(who, text)
-        except HerdrError as e:
-            store.log_event(self.db, kind="reconcile_failed", error=str(e), target=who)
-            return False
-        store.log_event(self.db, kind="reconcile_ping", target=who)
-        return True
-
-    def _last_pings(self) -> dict[str, int]:
-        """When each agent was last pinged. Read out of the event log, not a column.
-
-        A column would be a second place to keep a fact the log already holds, and it would
-        have to be migrated onto every existing store; the log is append-only and already
-        the thing `sb log` reads when somebody asks why an agent was spoken to.
-
-        Bounded rather than open-ended: the rule only ever needs the most recent ping per
-        agent, and a fleet accumulates one of these per stall, so the newest few hundred
-        cover every agent that could still be alive.
-        """
-        out: dict[str, int] = {}
-        rows = self.db.execute(
-            "SELECT payload, created_at FROM events WHERE kind='reconcile_ping' "
-            "ORDER BY id DESC LIMIT 500").fetchall()
-        for r in rows:
-            try:
-                who = json.loads(r["payload"] or "{}").get("target")
-            except json.JSONDecodeError:
-                continue
-            if who and who not in out:
-                out[who] = r["created_at"]
-        return out
+    # -- reaping and the turn log -----------------------------------------
 
     def _turns_forgotten(self) -> set[str]:
         """Every agent whose turn edge `status._forget_turn` threw away. -> their names.
 
-        Read out of the event log for `_last_pings`' reasons, and it is the same query in
-        the same shape: a column would be a second home for a fact the log already keeps,
-        and it would have to be migrated onto every store that exists. `turn_forgotten` is
-        logged against NO agent with the name in the payload — deliberately, so that
-        recording a stall does not reset the idle clock of the silent agent it is about
-        (`_forget_turn`) — so the name comes out of the payload, exactly as `reconcile_ping`'s
-        target does.
+        Read out of the event log rather than kept in a column: a column would be a second
+        home for a fact the log already holds, and it would have to be migrated onto every
+        store that exists. `turn_forgotten` is logged against NO agent with the name in the
+        payload — deliberately, so that recording a stall does not reset the idle clock of
+        the silent agent it is about (`_forget_turn`).
 
-        Bounded for the same reason too, and rarer than a ping: one per stall repaired,
-        against one per stall pinged. A verdict old enough to have fallen off the end of
-        the window reads as absent, so the gate that consults this refuses — a stale read
+        Bounded rather than open-ended, and rare: one per stall repaired. A verdict old
+        enough to have fallen off the end of the window reads as absent, so the gate that consults this refuses — a stale read
         costs a refusal, never a close, and `--force` is still the way through.
 
         A name in here is NOT on its own the fact `cleanup` acts on: the verdict is spent
@@ -8942,25 +8819,6 @@ class Broker:
             if who:
                 out.add(who)
         return out
-
-    def _has_live_child(self, name: str) -> bool:
-        """The stop hook's exemption, asked the same way it asks it (`hooks._has_live_child`).
-
-        Not shared as one function, and that is a judgement rather than an oversight: the
-        hook runs in a process that must not import `broker` — it is a Stop hook on the
-        agent's own session and everything it touches has to stay small enough to fail
-        open. Two callers, one SQL line, and a test on each side is cheaper than a shared
-        module that exists to hold it.
-
-        NOT ROUTED THROUGH THE RESOLVER either, and for the same reason (§2.3, raw reader
-        5): its whole value is that it asks the question the way the hook asks it. It is
-        torn-safe on its own shape — one statement, one equality read on `parent` — which
-        is exactly the property the resolver is kept thin enough to preserve for the hook's
-        copy as well.
-        """
-        return self.db.execute(
-            "SELECT 1 FROM agents WHERE parent=? AND state IN ('working', 'blocked') "
-            "AND ended_at IS NULL LIMIT 1", (name,)).fetchone() is not None
 
     # There is no `_push_state` here, and its absence is load-bearing. Every state we
     # ever reported to herdr — `working` on an unblock, `blocked` on a block, `idle` on a

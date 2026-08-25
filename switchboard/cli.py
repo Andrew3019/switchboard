@@ -125,10 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
     cmd("flush", hidden=True)
 
     # Hidden for the same reason, and the same shape: the verb the collector's loop runs so
-    # that an agent whose turn ended without `sb done` or `sb block` is told so. The
-    # decision lives in `Broker.reconcile`, running here in a short-lived process on current
-    # code, because the loop that triggers it is version-stale by design (collector module
-    # note). An agent has no use for it and is not taught it.
+    # that an agent whose pane has gone is confirmed dead and its parent told, without
+    # waiting for a person to open the board. It is `status.collect(reap=True)` and nothing
+    # else, running here in a short-lived process on current code, because the loop that
+    # triggers it is version-stale by design (collector module note). It once carried a
+    # second job — a nudge to an agent whose turn ended without a report — which
+    # DESIGN-TRUTH now rules out ("The reconciler's nudge to an agent that went quiet.").
+    # An agent has no use for this and is not taught it.
     cmd("reconcile", hidden=True)
 
     d = cmd("delegate", help="spawn a child agent to do a task")
@@ -986,33 +989,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         #
         # **`reap=True`, and this is the only unattended path that reaps.** `collect`'s
         # writes end a dead agent's turn and ping its parent (`status._record_gone`), and
-        # until now `sb status` was the only caller that passed `reap=True` — so how soon a
-        # parent learned its child had died depended on somebody happening to look at the
-        # board. With the failure now arriving as mail, that latency is the difference
+        # otherwise `sb status` is the only caller that passes `reap=True` — so how soon a
+        # parent learned its child had died would depend on somebody happening to look at
+        # the board. With the failure arriving as mail, that latency is the difference
         # between a notification and archaeology.
         #
         # Here rather than in `flush`, which is the other unattended path and the tempting
         # one: `flush_pending` runs at the top of EVERY `sb` command and is free when the
         # mailbox is quiet — it asks herdr nothing at all unless something is pending — so
         # putting a `collect` in it would buy an `agent list` subprocess for every `sb log`,
-        # `sb tell` and `sb inbox` in the fleet. `reconcile` already collects a whole
-        # snapshot, already runs on the collector's timer, and is already the verb for "this
-        # agent's turn ended and nothing told anyone" — a death is that same sentence with a
-        # pane missing. It is also short-lived and running current code, which is the
-        # condition `collect` documents for reaping at all.
-        #
-        # Collected here rather than inside `Broker.reconcile` so the write stays visible at
-        # the process boundary that licenses it: the method keeps `reap=False` for any
-        # caller that is not this one.
+        # `sb tell` and `sb inbox` in the fleet. This verb already runs on the collector's
+        # timer, and is short-lived and running current code, which is the condition
+        # `collect` documents for reaping at all.
         try:
             snap = status_mod.collect(db, h, reap=True, repo=repo)
-            pinged = b.reconcile(snap=snap)
         except Exception as e:                   # noqa: BLE001 — best effort, always
             store.log_event(db, kind="reconcile_failed", error=str(e))
             print(f"sb: reconcile: {e}", file=sys.stderr)
             return 1
-        _emit(args, f"pinged {', '.join(pinged)}" if pinged else "pinged nobody",
-              {"pinged": pinged})
+        # The names this pass READ as gone, not the names it wrote: the first reading of
+        # an absence is still inside `GONE_CONFIRM_GRACE` and records nothing, and the
+        # second one a minute later is what confirms it (`status._confirmed_gone`).
+        gone = sorted(a.name for a in snap.agents if a.gone)
+        _emit(args, f"gone: {', '.join(gone)}" if gone else "nobody gone", {"gone": gone})
         return 0
 
     try:

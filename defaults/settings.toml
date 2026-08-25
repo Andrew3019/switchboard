@@ -375,15 +375,15 @@ gone_confirm_grace = 60.0
 # How long an unexcused idle agent must STAY idle before that idleness is read as a stall
 # (`status.STALLED_FLOOR`). The floor under `stalled`, which until now had no duration term
 # in it at all: the `Stop` hook writes `turn='idle'` at the end of every turn, so an
-# ordinary worker that ends a turn was stalled at ZERO seconds — pinged by the reconciler
-# and put in front of a person in the same instant, including the agent that ran
-# `sb tell --needs-reply` and ended its turn to wait exactly as the protocol tells it to.
+# ordinary worker that ends a turn was stalled at ZERO seconds — put in front of a person
+# in the same instant, including the agent that ran `sb tell --needs-reply` and ended its
+# turn to wait exactly as the protocol tells it to.
 #
 # Three seconds, and small on purpose. This is not the debounce and must not grow into one:
 # `display.needs_settle` is the 30 s window that decides when a BOARD summons a human, and
 # it is sized against the long tail of turn gaps and spawns. This is the floor under
-# everything that acts on a stall WITHOUT that debounce — the reconciler's ping,
-# `sb status --needs-me`, `--json`, DRIFT — and its whole job is to stop zero. Measured
+# everything that acts on a stall WITHOUT that debounce — `sb status --needs-me`,
+# `--json`, DRIFT — and its whole job is to stop zero. Measured
 # against the same store the debounce was sized from: `turn_end` to the next `turn_start`
 # was under 3 s for 2.1% of 523 resumed turns, so this alone clears the sharpest edge of
 # the flicker, and the 30 s window covers the rest of it on the one readout that has a
@@ -627,8 +627,8 @@ board_refresh = 0.5
 # one frame" was written when a frame was two seconds, and at 0.5 s a frame count would
 # mean a quarter of what it meant then. What it costs is that a genuinely stuck agent is
 # summoned 30 s late, which is nothing next to how long a person takes to look; the row
-# itself still says `idle` all along, and nothing that ACTS on a stall — the reconciler,
-# `--needs-me`, DRIFT — is debounced by this. It only decides when to summon a human.
+# itself still says `idle` all along, and nothing that ACTS on a stall — `--needs-me`,
+# DRIFT — is debounced by this. It only decides when to summon a human.
 needs_settle = 30.0
 
 # Board rows that are not agents, in the plain renderer — the header, the `STATS` label,

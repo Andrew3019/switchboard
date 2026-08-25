@@ -251,8 +251,8 @@ directory is ever deleted: `doctor` prints the `rm -rf` and the human runs it or
 
 It also prints one line about the **panel**: whether the snapshot every pane is drawing
 is fresh, read off the counters the collector already writes into its snapshot file
-(`panel.doctor_line`), so it costs no store write. It does not display the reconciler's
-counters.
+(`panel.doctor_line`), so it costs no store write. It does not display the reaping
+trigger's counters.
 - Entry point: `cli.py` `doctor` branch → `Herdr.check` / `store.reset` /
   `_doctor_plugins` → `plugins.load_all`/`plugins.orphans`/`presets.deprecations`
 - Status: working. The store has no migration system by design, and the hash is only a
@@ -573,9 +573,13 @@ depend on somebody typing a command:
 - `sb flush` is the doorbell tick with nothing after it. Every `sb` invocation flushes
   before it dispatches; this is that and only that, so mail held back while its target was
   mid-turn gets announced on a timer.
-- `sb reconcile` runs `Broker.reconcile` in a short-lived process on current code. It
-  never raises out to the caller — a failure on an unattended timer is a line in the event
-  log, not a traceback nobody reads.
+- `sb reconcile` is `status.collect(reap=True)` in a short-lived process on current code:
+  it confirms a pane that has gone, writes the row `failed` and mails the parent, so a
+  dead child is a notification rather than archaeology. It never raises out to the caller —
+  a failure on an unattended timer is a line in the event log, not a traceback nobody
+  reads. It used to carry a second job, the reconciler's nudge; that is removed
+  (DESIGN-TRUTH, "Explicitly rejected" — "The reconciler's nudge to an agent that went
+  quiet.").
 - Entry point: `cli.py:591-607`. Both are load level 0.
 
 ## Not verbs, but load-bearing
@@ -634,11 +638,11 @@ agent as though it were part of its task.
 
 It exists because the old answer was herdr's, and herdr infers a running turn by matching
 Claude's spinner glyphs in the terminal title: Claude Code 2.1.228 changed the glyphs, every
-pane on the machine read idle, and hold-until-free delivery, the reconciler and the board
-all broke at once. So `status` reads our signal where it has one and herdr's where it does
+pane on the machine read idle, and hold-until-free delivery and the board both broke at
+once. So `status` reads our signal where it has one and herdr's where it does
 not — with exactly one herdr reading still outranking ours, `alive is False`, because no
 turn can be running in a pane that is not there. Neither hook logs its event against the
-agent, so a turn edge cannot reset the idle clock the reconciler reads.
+agent, so a turn edge cannot reset the idle clock `stalled` reads.
 
 A `working` edge that was never closed — a session killed mid-turn — is **doubted and then
 dropped**, never timed out: `TURN_STALE_GRACE` (30 min, set clear of the p99 of 20.6 min a
@@ -657,22 +661,19 @@ one of those and a genuinely ended turn produces neither
   real tool calls in this repo outran the old 72-second grace. The edges cost about 74 ms
   once per turn and need no timeout at all.
 
-### The reconciler — one ping to an agent that went quiet
-`Broker.reconcile` (`broker.py:4380`), triggered by the collector every `RECONCILE_GAP`
-seconds and swept every `RECONCILE_SWEEP`. It pings every agent `status` already calls
-`stalled` — row says `working`, the agent is alive, its turn is over, and it is not still
-awaiting its task —
-with `[notify] stalled`: your turn ended without a report, run `sb done` or `sb block`, and
-this is asked once.
+### The reaping sweep — a dead pane becomes a message to the parent
+`sb reconcile` (`cli.py`), triggered by the collector when a pane has gone and otherwise
+every `RECONCILE_SWEEP` seconds. It is the only unattended caller of
+`status.collect(reap=True)`: `_record_gone` writes the row `failed`, ends its turn and
+mails its parent, and `GONE_CONFIRM_GRACE` means a death takes two readings a minute apart
+to confirm — so a herdr hiccup cannot reap the table.
 
-**The ping goes to the agent, never to its parent**: the agent is the only party that knows
-whether it is finished, stuck, or wrong about having finished. Three exemptions, and no
-more: blocked and finished agents are never `stalled` at all, `awaiting_task` is exempt,
-and a parent with a live child is waived (logged) for the Stop gate's reason. **Once per
-stall**: a second ping needs the agent to have done something since the last one, with
-`REPING_GAP` (600 s) underneath as a backstop. It deliberately does not use `_ring` —
-that marks the whole mailbox announced, which would lose an announcement this nudge never
-made — and it logs against no agent, so the ping cannot reset the idle clock it reads.
+It once had a second half, **the reconciler's nudge**: one ping to every agent `status`
+calls `stalled`, saying its turn ended without a report. That is removed — it fired five
+times in the fleet's whole history and never once changed an outcome (DESIGN-TRUTH,
+"Explicitly rejected" — "The reconciler's nudge to an agent that went quiet."). A stall is
+still named, on the board, in `sb status --needs-me` and in DRIFT; nothing speaks to the
+agent about it.
 
 ### The panel — one collector, many renderers
 `switchboard/panel.py` (renderer half) and `switchboard/collector.py` (collecting half).
@@ -699,7 +700,7 @@ somebody has to keep defending — checked statically and at runtime by
   hours of held mail.
 - **It cannot become a daemon nobody owns.** Renderers stamp `panel/demand` as they draw,
   and it exits once nothing has looked for `[panel] collector_idle_exit` seconds.
-- It is also what rings the doorbell and what triggers the reconciler, and it does both by
+- It is also what rings the doorbell and what triggers the reaping sweep, and it does both by
   **spawning `sb`** — this checkout's `bin/sb`, not whatever the pane's PATH resolves — so
   the write is made by code running now and the collector keeps its two invariants.
 - A failing tick keeps the last good snapshot, bumps `errors`, and leaves `collected_at`
@@ -1012,9 +1013,10 @@ The flags that went with them are gone too: `--keep`, `--ephemeral`, `--include-
   `output.py` is called directly by `inspect`.
 - **`sb models` vs `sb presets`**: deliberately kept as two separate answers to "what
   vocabulary does this repo have."
-- **The Stop gate vs the reconciler**: the hook prevents the ordinary silent finish at the
-  moment it happens; the reconciler names the agent that stayed silent anyway. Each fires
-  once, and each waives a parent with live children.
+- **The Stop gate vs the board**: the hook prevents the ordinary silent finish at the
+  moment it happens; the readouts name the agent that stayed silent anyway (STALLED, in
+  `--needs-me`, in DRIFT). The hook fires once per agent until it reports, and waives a
+  parent with live children.
 
 ## Known issues
 Bugs against switchboard go to the `report-bug` plugin — `sb plugin report-bug file …`,

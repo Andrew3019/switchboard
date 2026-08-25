@@ -15,8 +15,8 @@ primary here. herdr's reading is the fallback for a row that has no signal yet, 
 corroboration for the one thing our signal cannot see — see `AgentStatus.signal_drift`.
 That order is not a preference: herdr infers a running turn by matching Claude's spinner
 glyphs in the terminal title, and when Claude Code 2.1.228 changed those glyphs every pane
-on the machine read idle, so this file called every working agent STALLED and the
-reconciler pinged them mid-tool-call.
+on the machine read idle, so this file called every working agent STALLED and put the
+whole fleet in front of a person as needing them.
 
 That agent finished its turn and never called `sb done`. It happens constantly and
 silently — nothing errors, nothing logs, the pane just goes quiet — and every readout
@@ -134,9 +134,9 @@ FINISHED = tuple(config.setting("states.finished"))
 #     REAPABLE  "could this row still be alive?"    → contradicted by NO pane.
 #
 # A blocked agent is legitimately not working. It stopped to ask a person and stays stopped
-# until answered, so everything `RUNNING` gates — `stalled`, the reconciler's ping,
-# `display_state`, `turn_doubted` — must keep leaving it alone; putting `blocked` in that
-# list would ping every blocked agent in the fleet with "your turn ended without a report".
+# until answered, so everything `RUNNING` gates — `stalled`, `display_state`,
+# `turn_doubted` — must keep leaving it alone; putting `blocked` in that list would put
+# every blocked agent in the fleet on the board as a silent finish.
 # What `REAPABLE` gates is only `gone`, which needs `alive is False`: herdr answered and does
 # not have the pane. A blocked agent that is merely waiting is in that list like any other,
 # so it is untouched by this; one whose pane died is not, and before this it was the one
@@ -251,10 +251,9 @@ SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 # watches continuously and it is read-only by design, so the fact is never written down.
 # The one durable trace an agent leaves of having run is its `session_id`, claimed on its
 # first `sb` call — after which "idle" really does mean a turn that started and ended.
-# Before it, `idle` and `not started yet` are the same reading, and the reconciler pinged a
-# freshly delegated agent two seconds after its `delegate` event on the strength of it —
-# a nudge that says "your turn ended without a report" to an agent whose turn has not
-# begun.
+# Before it, `idle` and `not started yet` are the same reading, and a freshly delegated
+# agent read STALLED two seconds after its `delegate` event on the strength of it — the
+# board saying "its turn ended without a report" about an agent whose turn has not begun.
 #
 # Sized as the delivery's OWN worst case, and derived from it rather than restated for the
 # reason `_SPAWN_WORST_CASE` is: nothing should be able to say "the agent never started"
@@ -268,9 +267,8 @@ SPAWN_GRACE = _SPAWN_WORST_CASE + SPAWN_SLACK
 # rather than from its creation — a slow `agent start` can put a minute between the claim
 # and the task, and it is the task that starts the clock that matters.
 #
-# Erring long costs a genuinely silent agent one window before the reconciler speaks, which
-# the stop hook has already spoken to and the board shows regardless; erring short is the
-# false nudge this exists to end.
+# Erring long costs a genuinely silent agent one window before the board says so, which
+# the stop hook has already spoken to; erring short is the false alarm this exists to end.
 STALL_GRACE = (
     DELIVER_ATTEMPTS * (DELIVER_TIMEOUT_MS / 1000)
     + SPAWN_BACKOFF * (DELIVER_ATTEMPTS * (DELIVER_ATTEMPTS + 1) / 2)
@@ -325,7 +323,7 @@ TURN_DOUBT_GRACE = config.setting("timeouts.turn_doubt_grace")
 # NOT a second debounce, and the distinction is the whole reason it is three seconds and not
 # thirty. `NEEDS_SETTLE` gates one thing — when a BOARD draws a summons — and everything
 # that ACTS on a stall is deliberately outside it (`display.needs_settle` says so in as many
-# words): the reconciler's ping, `--needs-me`, `--json`, DRIFT. Those paths had nothing at
+# words): `--needs-me`, `--json`, DRIFT. Those paths had nothing at
 # all under them, and this is what they now have. On the board the two are consecutive
 # rather than alternative, which costs a real stall three seconds on top of thirty; see
 # `collect` for why that is the honest arrangement and not a stack of two debounces.
@@ -720,8 +718,8 @@ class AgentStatus:
 
         THE FAILURE MODE THE ACTIVITY SIGNAL INTRODUCES, named rather than left silent. A
         session that crashes, is killed, or is `/exit`ed mid-turn never fires `Stop`, so
-        `agents.turn` says `working` for good: no doorbell will ever be released to it, the
-        reconciler will never ping it, and `sb cleanup` cannot reach a row that is not
+        `agents.turn` says `working` for good: no doorbell will ever be released to it, no
+        readout will ever call it stalled, and `sb cleanup` cannot reach a row that is not
         finished. Nothing in the fleet moves it. That is a strictly worse silence than the
         one this signal fixed, unless something independent notices — so this is herdr
         earning its keep as the cross-check (requirement 2 of the brief): it watches the
@@ -769,7 +767,7 @@ class AgentStatus:
         silent — `store.set_turn` swallows a locked database, `hooks.run` catches
         everything, and the `Stop` entry has a 10-second timeout that fails open — and the
         row it leaves behind is worse than anything this signal fixed: `stalled` is false so
-        the reconciler never pings it, `gone` is false because the pane is alive,
+        no readout ever names it, `gone` is false because the pane is alive,
         `signal_drift` is false because herdr answers `idle` rather than `unknown`, and
         `sb cleanup` refuses a row that has not reported an end. Its `--when-idle` mail is
         held for good. Constructed live and confirmed to behave exactly that way.
@@ -908,8 +906,8 @@ class AgentStatus:
         """Has this row's summons held long enough that a board should draw it?
 
         A debounce and NOT a new predicate: `stalled`, `at_prompt` and `needs_human` are
-        untouched, and so is everything that acts on them — the reconciler still pings, the
-        stop gate still gates, `--needs-me` still lists. What this gates is one thing, the
+        untouched, and so is everything that acts on them — the stop gate still gates,
+        `--needs-me` still lists. What this gates is one thing, the
         SUMMONS: whether a human is called over to a row whose trouble may not outlive the
         frame it is drawn in.
 
@@ -1271,11 +1269,9 @@ def collect(
     # Calling that STALLED — on the board, in `--needs-me`, in DRIFT — says something false
     # about the one agent shape the design most expects to see idle.
     #
-    # The stop gate and the reconciler already exempt the same rows themselves
-    # (`hooks.stop_gate`, `broker.reconcile`) and are deliberately left alone: their copies
-    # of this test now agree with the flag instead of correcting it. One consequence worth
-    # knowing — `reconcile`'s `reconcile_waived` event no longer fires, because the rows it
-    # waived no longer arrive as stalled.
+    # The stop gate already exempts the same rows itself (`hooks.stop_gate`) and is
+    # deliberately left alone: its copy of this test now agrees with the flag instead of
+    # correcting it.
     live_parent = {row["parent"] for row in rows
                    if row["parent"] and row["state"] in ("working", "blocked")
                    and row["ended_at"] is None}
@@ -1372,13 +1368,13 @@ def collect(
         # anyway — no turn edge has ever been recorded here — and every predicate below
         # falls back to herdr for it.
         turn = row["turn"] if "turn" in row.keys() else None
-        # Whether this agent's turn is OVER. The one question `stalled` and the reconciler
-        # actually ask, answered by our own signal where we have one and by herdr where we
-        # do not. Before the signal existed this line WAS the whole of it, and it is the
-        # line that broke: herdr infers a running turn from Claude's spinner glyphs in the
-        # terminal title, Claude Code 2.1.228 changed them, and every pane on the machine
-        # read idle — so every working agent was stalled, was pinged mid-tool-call, and
-        # had its held mail delivered into the turn it was still running.
+        # Whether this agent's turn is OVER. The one question `stalled` actually asks,
+        # answered by our own signal where we have one and by herdr where we do not. Before
+        # the signal existed this line WAS the whole of it, and it is the line that broke:
+        # herdr infers a running turn from Claude's spinner glyphs in the terminal title,
+        # Claude Code 2.1.228 changed them, and every pane on the machine read idle — so
+        # every working agent was stalled, and had its held mail delivered into the turn it
+        # was still running.
         turn_over = (turn == TURN_IDLE) if turn is not None else (
             bool(alive) and hstate in IDLE_LIKE)
         # The three exemptions, as one answer instead of three `not`s. `stalled` is
@@ -1760,12 +1756,12 @@ def _forget_turn(db: sqlite3.Connection, names: list[str]) -> None:
     agent's to finish (C9).
 
     What it buys is everything the wedge took away, and none of it is new machinery: with
-    the edge gone the row is `idle` to the readouts, so it is STALLED and the reconciler
-    pings it; `_busy` reads herdr again, so its held mail is rung; and an agent that is
-    genuinely at its prompt answers that ping, reports, and is sweepable like any other.
+    the edge gone the row is `idle` to the readouts, so it is STALLED and visible as one;
+    `_busy` reads herdr again, so its held mail is rung; and an agent that is genuinely at
+    its prompt is woken by that mail, reports, and is sweepable like any other.
     A permanent wedge becomes a delay of TURN_STALE_GRACE + TURN_DOUBT_GRACE.
 
-    Logged against NO agent with the target in the payload, for `Broker._nudge`'s reason:
+    Logged against NO agent with the target in the payload, for `hooks._turn_edge`'s reason:
     `_last_activity` counts every event that names an agent, and stamping this one on the
     row would reset the idle clock of exactly the silent agent it was just written about —
     both hiding the staleness from the next reading and delaying the stall it exists to
@@ -1993,8 +1989,8 @@ def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
     events table after being excluded from the messages half of it. Measured on `main-7`:
     nine deferrals in a day, six less than thirty minutes apart, which is what kept
     `turn_doubted` (30 min of quiet) from ever doubting a stale `working` edge and so kept
-    `_forget_turn` from ever repairing it. `stalled` and the reconciler read the same
-    clock, so a held message was resetting the idle clock of the agent it was held for.
+    `_forget_turn` from ever repairing it. `stalled` reads this clock, so a held message
+    was resetting the idle clock of the agent it was held for.
     """
     seen: dict[str, int] = {}
     kinds = ",".join("?" * len(DONE_TO_THE_AGENT))
@@ -2033,8 +2029,7 @@ def _awaiting_reply(db: sqlite3.Connection) -> set[str]:
       later question supersedes an answered earlier one, so a row is excused by its most
       recent unanswered question and by nothing else.
     - the recipient is still open. An agent whose `sb done` has landed will never answer,
-      and waiting on it is a stall like any other — the row goes back to STALLED and the
-      reconciler pings it.
+      and waiting on it is a stall like any other — the row goes back to STALLED.
     - the question is still deliverable. `undeliverable_at` is set when the recipient's
       turn ended with no pane left to open (`store`), which is the same sentence one step
       earlier: nothing is coming.

@@ -68,8 +68,8 @@ class StopGateTest(unittest.TestCase):
         """The cap the flag above cannot keep, and the defect it was found by.
 
         `stop_hook_active` is scoped to ONE stop-chain — one user prompt. A ring, a `tell`
-        or the reconciler's own nudge starts a fresh chain with the flag false, and the
-        gate blocked the same agent a second time twelve seconds later. The store is what
+        or a person typing starts a fresh chain with the flag false, and the gate blocked
+        the same agent a second time twelve seconds later. The store is what
         outlives a chain, so one block
         per agent until it says something is asked of the event log.
         """
@@ -168,8 +168,8 @@ class ActivitySignalTest(unittest.TestCase):
 
         A blocked stop is not the end of a turn: the agent is handed `BLOCK_REASON` and
         keeps going in the same turn, and `UserPromptSubmit` does not fire again for it.
-        Marking idle there would hand its held mail over mid-turn and have the reconciler
-        ask a working agent why its turn ended.
+        Marking idle there would hand its held mail over mid-turn and put a working agent
+        on the board as one whose turn ended without a report.
         """
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         self.start()
@@ -202,11 +202,11 @@ class ActivitySignalTest(unittest.TestCase):
         self.assertIsNone(self.turn())
 
     def test_the_edges_do_not_reset_the_idle_clock(self):
-        """Logged against no agent, with the target in the payload — `Broker._nudge`'s
-        rule and for its reason. `status._last_activity` counts every event that NAMES an
-        agent, and the reconciler's ping IS a prompt, so an edge logged against the agent
-        would let the reconciler read its own footprint as the agent having done
-        something and nag forever."""
+        """Logged against no agent, with the target in the payload.
+        `status._last_activity` counts every event that NAMES an agent, and the idle clock
+        it keeps is what says an agent has gone quiet at all — so an edge logged against
+        the agent would let anything reading that clock see its own footprint as the agent
+        having done something."""
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         self.start()
         rows = self.db.execute(

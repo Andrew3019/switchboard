@@ -11,7 +11,7 @@ The properties, one test each:
 * the ONE reader that is a multi-statement walk (`_descendants`) sees the pre-state or the
   post-state and never a torn mix of both — with a control that shows the walk really does
   tear without its snapshot, so the guard is pinned to a hazard rather than a hope;
-* `hooks._has_live_child` stays a raw, broker-independent, fail-open copy — the reason the
+* `hooks._has_live_child` stays a raw, broker-independent, fail-open read — the reason the
   resolver has to stay thin in the first place.
 """
 
@@ -28,7 +28,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import broker as broker_mod  # noqa: E402
 from switchboard import hooks  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import HUMAN  # noqa: E402
@@ -169,8 +168,11 @@ class StopHookStaysRawTest(Fixture, unittest.TestCase):
     """Raw reader 6 — `hooks._has_live_child`, and why the resolver has to stay thin.
 
     The Stop hook runs in a process that must not import `broker` and must fail open, so
-    its `WHERE parent=?` is a deliberate second copy. It is NOT routed through the
-    resolver, and these tests are what stops a later hand routing it there.
+    its `WHERE parent=?` is deliberately raw. It is NOT routed through the resolver, and
+    these tests are what stops a later hand routing it there. The broker once kept a second
+    copy of the same SQL for the reconciler's exemption; DESIGN-TRUTH now rules out "The
+    reconciler's nudge to an agent that went quiet." and that copy went with it, which
+    leaves the hook's read as the only one.
     """
 
     def test_the_hook_module_does_not_import_the_broker(self):
@@ -185,14 +187,15 @@ class StopHookStaysRawTest(Fixture, unittest.TestCase):
         self.assertNotIn("broker", imported)
         self.assertFalse([m for m in imported if m.endswith("broker")])
 
-    def test_the_two_copies_of_the_parent_sql_still_say_the_same_thing(self):
+    def test_the_hooks_copy_of_the_parent_sql_stays_a_plain_equality_read(self):
         def sql(fn) -> str:
             src = inspect.getsource(fn)
             body = "".join(re.findall(r'"([^"]*)"', src.split("db.execute(", 1)[1]))
             return " ".join(body.split())
-        self.assertEqual(sql(hooks._has_live_child),
-                         sql(broker_mod.Broker._has_live_child))
         self.assertIn("WHERE parent=?", sql(hooks._has_live_child))
+        # One statement, no join, no ancestry walk — the property the resolver's thinness
+        # exists to preserve.
+        self.assertNotIn("JOIN", sql(hooks._has_live_child).upper())
 
     def test_the_raw_copy_follows_a_re_parent_on_its_own(self):
         store.create_agent(self.db, name="top", role="dispatcher", is_top=True)
@@ -204,8 +207,6 @@ class StopHookStaysRawTest(Fixture, unittest.TestCase):
         _reparent(self.repo / "state.db", "kid", "top")
         self.assertFalse(hooks._has_live_child(self.db, "proxy"))
         self.assertTrue(hooks._has_live_child(self.db, "top"))
-        # and the broker's own copy agrees, without either asking the other
-        self.assertTrue(self.b._has_live_child("top"))
 
     def test_the_gate_still_fails_open_if_that_read_raises(self):
         store.create_agent(self.db, name="kid", role="worker", session_id="s1")

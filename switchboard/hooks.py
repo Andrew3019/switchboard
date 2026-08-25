@@ -10,8 +10,7 @@ two edges. Switchboard had no signal of its own for that: it asked herdr, which 
 by matching Claude's spinner glyphs in the terminal title, and Claude Code 2.1.228 changed
 those glyphs — so herdr reported idle for every pane on this machine, including agents
 provably mid-tool-call. One cosmetic change upstream took
-out hold-until-free delivery, made the reconciler ping working agents, and made the board
-lie. So we record the fact ourselves:
+out hold-until-free delivery and made the board lie. So we record the fact ourselves:
 
     UserPromptSubmit  ->  agents.turn = 'working'      a turn began
     Stop              ->  agents.turn = 'idle'         a turn ended
@@ -129,7 +128,7 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
             "hooks": {
                 # The turn-STARTED edge. One firing per turn, ~74 ms, nothing per tool
                 # call. No matcher: every prompt an agent is given starts a turn, whether
-                # it came from a doorbell, a `tell`, the reconciler or a person typing.
+                # it came from a doorbell, a `tell` or a person typing.
                 "UserPromptSubmit": [
                     {
                         "hooks": [
@@ -318,8 +317,8 @@ def _awaiting_reply(db: sqlite3.Connection, name: str) -> bool:
       one step earlier: nothing is coming.
 
     When any of those stops holding, the excuse ends and the agent is a silent finish like
-    any other — the reconciler carries it from there, which is why this may excuse a turn
-    without bound in time.
+    any other — it shows as STALLED on the board and in `--needs-me` from there, which is
+    why this may excuse a turn without bound in time.
 
     `>=` on the timestamps for `status._awaiting_reply`'s reason: they are whole seconds,
     and a reply written in the same second as the question would otherwise never count.
@@ -343,17 +342,17 @@ def _already_nudged(db: sqlite3.Connection, name: str) -> bool:
     THE CAP, and the reason it lives here rather than in `stop_hook_active`. That flag is
     real and it arrives — measured twice, on the second stop of a chain the gate itself
     caused — but it is scoped to ONE stop-chain, and a chain is one user prompt. Anything
-    that pokes the agent starts a new one: a doorbell ring, a `tell`, the reconciler's own
-    nudge. Reproduced in an isolated clone: an agent was blocked, allowed through on its
+    that pokes the agent starts a new one: a doorbell ring, a `tell`, a person typing.
+    Reproduced in an isolated clone: an agent was blocked, allowed through on its
     second stop with `stop_hook_active: true`, then told one thing and blocked again on the
     next stop with the flag false and a new `prompt_id`. Two blocks, one agent, nothing
     wrong with the flag — the cap was simply never the property the design claimed.
 
     So the cap is asked of the store, which outlives every chain: the newest of this
     agent's block/report events. `stop_gate_blocked` on top means we nudged it and it has
-    said nothing since, so it is nudged no further — the reconciler is what carries a
-    silent agent from there, and `BLOCK_REASON` promises exactly this ("you will only be
-    stopped once"), which until now it could not keep.
+    said nothing since, so it is nudged no further — a silent agent from there on is the
+    board's to show and nobody's to chase, and `BLOCK_REASON` promises exactly this ("you
+    will only be stopped once"), which until now it could not keep.
 
     A report resets it, and that is the intended re-arm rather than a leak: an agent that
     called `sb done` and is then spoken to in its pane is `working` again, and its next
@@ -380,13 +379,13 @@ def mark_turn(payload: dict, db: sqlite3.Connection, turn: str) -> Optional[str]
     per-spawn settings file is that no session of the human's is ever touched.
 
     The event is logged against NO agent, with the target in its payload, and that is the
-    same deliberate choice `Broker._nudge` and `stop_gate`'s cap make for the same reason:
+    same deliberate choice `stop_gate`'s cap makes for the same reason:
     `status._last_activity` counts every event that NAMES an agent, so logging a turn edge
-    against the agent would reset its idle clock. It would do it on the reconciler's own
-    ping, too — the ping is a prompt, the prompt starts a turn, the turn logs an event —
-    which is exactly how a "ping once per stall" rule comes to read its own footprint as
-    the agent having done something and nags forever. The STATE lives in the column; the
-    log is history.
+    against the agent would reset its idle clock — and the idle clock is what says an agent
+    has gone quiet at all. Anything that pokes an agent is a prompt, the prompt starts a
+    turn, and the turn logs an event, so a mechanism that wrote its own footprint here
+    would read it back as the agent having done something. The STATE lives in the column;
+    the log is history.
     """
     a = _agent_row(db, payload)
     if a is None:
@@ -408,13 +407,12 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
     second end through. At most one stop per stop-chain.
 
     **`_already_nudged` last, and it is the real cap.** A stop-chain is one user prompt,
-    so the flag above caps nothing an agent is poked through — a ring, a `tell`, the
-    reconciler's own nudge each start a fresh chain with the flag false, which is how one
-    agent came to be blocked twice twelve seconds apart. The store remembers instead: one
-    block per agent until it reports something. A nudged agent that still will not report
-    is then 3.5's problem — the reconciler names a stalled agent afterwards, which is the
-    right division: the hook prevents the ordinary case, it does not fight the pathological
-    one.
+    so the flag above caps nothing an agent is poked through — a ring, a `tell`, a person
+    typing each start a fresh chain with the flag false, which is how one agent came to be
+    blocked twice twelve seconds apart. The store remembers instead: one block per agent
+    until it reports something. A nudged agent that still will not report is then the
+    board's problem — it reads STALLED and stays there — which is the right division: the
+    hook prevents the ordinary case, it does not fight the pathological one.
 
     **An unresolvable caller ends its turn.** Not one of ours, or one we cannot name yet.
 
@@ -449,10 +447,10 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
         store.log_event(db, kind="stop_gate_waived", agent=a["name"], reason="live_children")
         return None
     if _already_nudged(db, a["name"]):
-        # Logged against NO agent, with the target in the payload, for the reconciler's
-        # reason (`Broker._nudge`): `status._last_activity` counts every event that names
-        # an agent, so writing this against the target would reset the idle clock on the
-        # silent agent this hand-off exists to pass on.
+        # Logged against NO agent, with the target in the payload, for `_turn_edge`'s
+        # reason: `status._last_activity` counts every event that names an agent, so
+        # writing this against the target would reset the idle clock on the silent agent
+        # this hand-off exists to pass on.
         store.log_event(db, kind="stop_gate_capped", target=a["name"])
         return None
     store.log_event(db, kind="stop_gate_blocked", agent=a["name"])
@@ -492,9 +490,8 @@ def run(stdin_text: str, db_path: Optional[Path] = None) -> dict[str, Any]:
     The agent is handed `BLOCK_REASON` and keeps going — same session, same turn, more
     tool calls — and `UserPromptSubmit` does NOT fire again for it, because nothing new was
     submitted. Marking idle there would say a working agent is free, which is precisely the
-    lie this signal was built to stop telling: its mail would be delivered mid-turn, the
-    reconciler would ping it to ask why its turn ended, and the board would show it idle
-    while it worked. When that continued turn finally does end, this runs again with
+    lie this signal was built to stop telling: its mail would be delivered mid-turn and
+    the board would show it idle while it worked. When that continued turn finally does end, this runs again with
     `stop_hook_active` set, the gate returns None, and the mark is written then.
 
     A hook that cannot open the store writes nothing and blocks nothing. The signal then
