@@ -333,6 +333,11 @@ class BrokerTest(unittest.TestCase):
 
     def test_an_explicit_model_beats_an_inherited_codex_tier(self):
         """Inheritance is a default, not an override: what the caller TYPED still wins."""
+        # A real repo for the same reason the inheritance test above gives: if this ever
+        # regresses into a codex spawn, the failure should be the assertion below and not
+        # a `not inside a git repo` from the `CODEX_HOME` the spawn would then need.
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.repo,
+                       capture_output=True)
         store.create_agent(self.db, name="ds", role="lead", tier="deepseek",
                            cwd=str(self.repo))
         name = self.b.delegate("t", topic="t", role="worker", model="strong", me="ds")

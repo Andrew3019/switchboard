@@ -4833,15 +4833,20 @@ class Broker:
         # which is what a caller means for its whole subtree when it asks for it.
         # `codex_provider` being set is the only bit in the data model that tells those two
         # apart, so it is the bit this reads — never the string "deepseek", so a second
-        # codex-provider tier inherits without touching this.
+        # codex-provider tier inherits without touching this. It is read together with
+        # `provider`, because `codex_provider` is accepted on any tier and ignored off
+        # codex: a hand-written `provider = "claude"` tier that also sets it is a claude
+        # tier, and must not go sticky on the strength of a key nothing reads.
         #
         # `agents.tier` is the caller's own `--model` override, the same column and the
         # same read `restore` does, and the child records what it inherited (`tier=model`
         # at the claim below) — which is what carries the pin past the first generation.
         if model is None:
             mine = _column(store.get_agent(self.db, me), "tier")
-            if mine and r.spec(mine).codex_provider:
-                model = mine
+            if mine:
+                mine_spec = r.spec(mine)
+                if mine_spec.provider == codex_mod.PROVIDER and mine_spec.codex_provider:
+                    model = mine
 
         # RESOLVED BEFORE ANY PANE EXISTS, which is earlier than it looks like it needs to
         # be and is the whole of the pane-environment problem. herdr fixes a pane's
