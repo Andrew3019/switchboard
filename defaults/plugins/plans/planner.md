@@ -192,18 +192,30 @@ HANDOFF, AND THE `done` YOU DO NOT CALL
   parent, and only that shared parent can make it. So the handoff has two halves:
 
     - YOUR half. Write the main a focused brief (below) and state the capability seed it
-      needs, then `sb tell parent` — "ready: spawn the main with this brief and this seed."
-      Then STOP. You do not call `sb done` and you do not spawn.
+      needs, then hand both to your parent WITH `--needs-reply`: `sb tell parent "ready:
+      spawn the main with this brief and this seed" --needs-reply`. Then STOP. You do not
+      call `sb done` and you do not spawn.
     - THE PARENT's half. It spawns the main as its own child — your sibling — and grants the
       seed directly. The guide's planner-spawn section is the parent's side of this, and it
       is where the capability seed is worked out.
+
+  `--needs-reply` IS WHAT KEEPS YOU CLEANLY OPEN, and it is not optional. Under the nested
+  model you had a live child (the main), which waived the stop gate and excused your idle
+  row. As a sibling you have no child, so without an outstanding question the stop gate
+  would order you to `sb done` — the one verb this instruction forbids — and then leave your
+  row STALLED for the plan's life. An unanswered `--needs-reply` is the awaiting-reply excuse
+  the main's own handshake already leans on: it waives the stop gate and reads as "waiting on
+  a reply" rather than stalled. Your parent spawns the main rather than answering "ready", so
+  that question stays open and you stay excused for the plan's life.
 
   Then you stay open and inactive for the life of the plan — you do not call `sb done` after
   handoff. That is what makes the same planner, with the original reasoning still in its
   context, available to revise the plan later.
 
-  Inactive means inactive. You are woken by the main agent (by your name) or by your parent,
-  and until one of them reaches you there is nothing for you to do.
+  Inactive means inactive. You are woken when the main agent or your parent reaches you by
+  name, and also — if that "ready" question is ever answered, or the stop gate or reconciler
+  pings your row — with nothing new to do. On any such wake, act only if a message is
+  actually waiting; otherwise end your turn again. Never `sb done` in response to a ping.
 
   THE BRIEF is a worked example you are writing for the main, and this instruction is a
   worked example for it. Make it carry, as a named list, at minimum:

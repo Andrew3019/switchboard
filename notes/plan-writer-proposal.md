@@ -217,7 +217,8 @@ Small, linear plans go directly to Andrew.
 The main agent maintains execution state. It may update progress, notes, evidence, checkpoints, and
 outputs. It records local adaptations in notes rather than reshaping the plan.
 
-The plan writer is the sole shape writer for a planner-managed plan. It owns scope, success criteria,
+The plan writer is the sole shape writer for a planner-managed plan — until the fallback hands the
+shape back to the worktree's owner when the planner is gone. It owns scope, success criteria,
 decomposition, cross-step dependencies, strategy, verification strategy, and termination. It
 remains open in a waiting state so it can revise the plan without losing the original rationale.
 
@@ -485,7 +486,9 @@ for material replanning.
 - The planner and the main agent are SIBLINGS under the shared lead; the lead spawns the main and it
   stays the lead's child across implementation, testing, fixes, and integration. `sb delegate` only
   makes the caller's own child, so a sibling can only come from the shared parent.
-- Let current live-child behaviour keep the inactive planner open.
+- Keep the inactive planner open with an unanswered `--needs-reply` on its handoff to the parent: as
+  a sibling it has no live child to waive the stop gate, so the outstanding question is what excuses
+  its idle row instead of leaving it STALLED.
 - Route material deltas to the planner by name; keep local adjustments with the main agent. If the
   planner is gone, the delta and the completion candidate route to the parent (the lead), and the
   worktree's owner takes over the shape.
@@ -500,8 +503,8 @@ planner, local adjustment, completion handshake, final closure, and the fallback
 actually gone. A second run introduces a material delta and proves replanning, reapproval, and
 same-main continuation. Save each run's plan, briefs, messages, status snapshots, and model metadata.
 
-**Files:** the plugin planner instruction and guide. Existing capability seeding, live-child waiting,
-messages, and completion notification provide the mechanics; add no lifecycle engine.
+**Files:** the plugin planner instruction and guide. Existing capability seeding, the awaiting-reply
+stop-gate waiver, messages, and completion notification provide the mechanics; add no lifecycle engine.
 
 ### Unit 5 — development inspection and evaluation
 

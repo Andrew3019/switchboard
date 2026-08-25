@@ -734,7 +734,9 @@ WHO WRITES TO IT
 
   UNLESS THE PLAN NAMES A PLANNER, which is the one thing that moves that writer. A plan
   carrying a `planner` field was written by a plan writer, and THAT agent is the sole shape
-  writer for the life of the plan, whoever owns the worktree: scope, success criteria, the
+  writer for the life of the plan, whoever owns the worktree — until the fallback under
+  SPAWNING A PLANNER takes over, the one case where a gone planner hands the shape back to
+  the worktree's owner: scope, success criteria, the
   decomposition, cross-step deps, `strategy`, the verification strategy and the termination
   condition are all its own. What the main agent owns on such a plan is execution state —
   progress, notes, evidence, checkpoints, outputs, and the ticks — and it records a local
@@ -755,7 +757,8 @@ WHO WRITES TO IT
 
 SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
 
-  A planner-managed plan runs three agents, and the shape of the workflow is who spawns
+  A planner-managed plan runs three long-lived agents — the planner may put up its own
+  short-lived reviewers besides — and the shape of the workflow is who spawns
   whom. The LEAD — the worktree's owner — spawns BOTH the planner and the main agent, so
   they are SIBLINGS under one durable parent. The planner is the fragile agent: it writes
   the plan, hands off, and then stays open and inactive for the plan's life. Nesting it as
@@ -768,8 +771,9 @@ SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
   BEFORE PLANNING, SEED THE PLANNER. Spawn a fresh strong `researcher` and grant it held
   `spawn`, so it can put up its own plan reviewer, and held `fork` only where an isolated
   helper is actually foreseen. NEVER grant it held `write-tracked`: a planner reads and does
-  not write tracked files, and its own writes — the plan file (under `.git/agentflow`, via
-  `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither of them tracked.
+  not write tracked files, and its own writes — the plan file (under the git common dir's
+  `agentflow/`, via `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither
+  of them tracked.
   The `reviewer` role it spawns carries no capabilities of its own.
 
     - WHY THE SEED IS SMALL, and this is the sibling payoff. Under a nested topology the
@@ -794,8 +798,12 @@ SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
 
   THE HANDOFF HAS TWO HALVES, because `sb delegate` only ever makes the caller's OWN child.
 
-    - The planner writes the main's brief, states the capability seed, and `sb tell parent`
-      "ready" — then stays open and inactive. It does not `sb done` and it does not spawn.
+    - The planner writes the main's brief, states the capability seed, and `sb tell parent
+      "ready" --needs-reply` — then stays open and inactive. It does not `sb done` and it
+      does not spawn. The `--needs-reply` is load-bearing: with no live child to waive the
+      stop gate, an unanswered question is what keeps the planner cleanly open rather than
+      STALLED (planner.md says why). The lead spawns the main rather than answering "ready",
+      so that question stays open for the plan's life.
     - The lead spawns the main as its own child — the planner's sibling — and grants the seed
       directly.
 
@@ -809,8 +817,10 @@ SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
   adjustments as notes. Material deltas go to the planner BY NAME (`sb tell <planner>`),
   never to `parent`, which is the lead; local adjustments stay with the main.
 
-  THE COMPLETION HANDSHAKE, AND ITS FALLBACK. Before its final `done` the main sends its
-  completion candidate to the planner by name with `--needs-reply`, then ends its turn. The
+  THE COMPLETION HANDSHAKE, AND ITS FALLBACK. Before its final `done` the main closes any
+  helper of its own — a parent with a live child is exempt from the stall ping, so a main
+  still holding one open would never be woken to notice the planner is gone — then sends its
+  completion candidate to the planner by name with `--needs-reply`, and ends its turn. The
   planner checks it against the termination condition and either returns missing work or
   clears the main to finish. But the planner may be GONE — an inactive planner once died
   silently after handoff — and a message to a dead sibling is accepted and silently written

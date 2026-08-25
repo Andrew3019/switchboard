@@ -3625,6 +3625,10 @@ class PlannerPackageTest(PlansSandbox):
                 # because `sb delegate` only makes the caller's own child.
                 "You do NOT spawn the main agent.",
                 "the handoff has two halves",
+                # The handoff tell carries --needs-reply, and it is what keeps a childless
+                # sibling planner cleanly open instead of STALLED by the stop gate.
+                '"ready: spawn the main with this brief and this seed" --needs-reply',
+                "`--needs-reply` IS WHAT KEEPS YOU CLEANLY OPEN",
                 # The one address the sibling main cannot derive.
                 "YOUR EXACT AGENT NAME",
                 # Delta routing is by the planner's name now, not `tell parent`.
@@ -3634,7 +3638,7 @@ class PlannerPackageTest(PlansSandbox):
                 "That is the lead: structural, always live",
                 "the worktree's owner writes the shape for the rest of the job",
                 # The deliberate exclusion, kept with its reason so it is not re-added.
-                "`sb restore` IS DELIBERATELY NOT ON THIS PATH",):
+                "`sb restore` IS DELIBERATELY NOT ON THIS PATH"):
             self.assertIn(expected, said)
         # The nested-model claims are gone: the planner does not spawn the main, and a delta
         # is not routed to `parent` while the planner is alive.
@@ -3791,13 +3795,15 @@ class PlannerPackageTest(PlansSandbox):
                 # Seeding is two verbs; there is no combined flag.
                 "There is no `delegate --grant`",
                 "PLUS `sb grant",
-                # The two-halves handoff and where deltas go.
+                # The two-halves handoff, its --needs-reply, and where deltas go.
                 "THE HANDOFF HAS TWO HALVES",
+                '`sb tell parent "ready" --needs-reply`',
                 "Material deltas go to the planner BY NAME",
                 # The structural fallback, and the route deliberately left off it.
                 "route the candidate to `parent`",
-                "`sb restore` is NOT on this path",):
+                "`sb restore` is NOT on this path"):
             self.assertIn(expected, said)
+
 
 class GateTest(PlansSandbox):
     """The two gates: what the plugin represents, and everything it deliberately does not.
