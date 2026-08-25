@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -213,10 +214,21 @@ class PathsWithoutGit(unittest.TestCase):
             self.assertTrue(str(paths.snapshot).endswith("panel/snapshot.json"))
 
     def test_not_a_repo_says_so_rather_than_guessing(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
+        """Nothing above it holds a `.git`, so there is no answer and none is guessed.
+
+        Asked of a name directly under `/`, and deliberately NOT of a `tempfile`
+        directory. The walk goes all the way up, and the system temp directory belongs to
+        nobody: one `git init` typed in the wrong shell leaves a `/tmp/.git` behind, and
+        from then on every temp directory really IS inside a repo — `git rev-parse` says
+        so too, so this failed for being right rather than for being wrong. Under
+        `pytest -n auto` that arrives as a flake, because whether the stray directory is
+        there has nothing to do with this test. A name under `/` has two ancestors, both
+        of them ours to reason about.
+        """
+        nowhere = Path("/") / f"not-a-repo-{uuid.uuid4().hex}"
+        self.assertFalse(nowhere.exists())      # the premise, stated rather than assumed
         with self.assertRaises(RuntimeError):
-            panel.git_common_dir(Path(tmp.name))
+            panel.git_common_dir(nowhere)
 
 
 # ---------------------------------------------------------------------------

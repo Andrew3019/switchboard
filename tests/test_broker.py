@@ -476,15 +476,33 @@ class BrokerTest(unittest.TestCase):
             self.assertTrue(proof(now - 1))
 
     def _transcript(self, home: Path, cwd: str, session_id: str, text: str) -> Path:
-        """A Claude Code transcript for `session_id`, holding `text` as a submitted turn."""
+        """A Claude Code transcript for `session_id`, holding `text` as a submitted turn.
+
+        Stamped AHEAD of now — the record's own timestamp and the file's mtime with it.
+        In life the child writes this record AFTER the send, so the scan's floor is always
+        behind it; a fixture written before `delegate` is only inside the window while the
+        machine gets from here to `delegate`'s own `time.time()` within
+        `output._CLOCK_SLOP`. That is five seconds, and a `pytest -n auto` box hands them
+        out — measured at 0.2 s idle and 1.8 s under load on twenty cores, so it is the
+        machine that decides, which is what made these tests flaky. Past the floor the
+        scan reads nothing, the row keeps a null session, and the failure says `None !=
+        'sess-first'` about a clock rather than about the wiring.
+
+        Whether a turn OLDER than the send is refused is `test_output`'s subject and stays
+        there entirely — `test_the_same_words_in_an_older_turn_are_not_this_delivery` and
+        `test_a_transcript_untouched_since_the_send_is_not_read_at_all`. What these tests
+        are about is which transcript the captured id comes from.
+        """
+        at = time.time() + 3600      # an hour: no stall between here and the send crosses it
         d = home / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"{session_id}.jsonl"
         p.write_text(json.dumps({
             "type": "user",
             "message": {"role": "user", "content": text},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.fromtimestamp(at, tz=timezone.utc).isoformat(),
         }) + "\n")
+        os.utime(p, (at, at))
         return p
 
     def test_a_spawn_records_the_session_before_the_agent_runs_anything(self):
