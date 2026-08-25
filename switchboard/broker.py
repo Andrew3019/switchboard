@@ -41,7 +41,7 @@ import sys
 import time
 import re
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Collection, Iterable, Optional, Sequence
 
 from . import codex as codex_mod
 from . import config
@@ -2939,6 +2939,12 @@ class Broker:
                         confirm: bool) -> dict:
         """The destructive one: check, then stop, then re-confirm, then delete.
 
+        The workspace's own root pane comes down in the stop step with everything else
+        (`_spare_panes`, `_close_spare_panes`). What the check does about it is the only
+        thing that changed: an idle shell that exists purely because of a pane this command
+        is about to close no longer counts as something running in the directory, so the
+        gate stops refusing on the pane it was never asked to keep.
+
         The ordering is a rule, not an implementation detail. An earlier design read
         "stop, then check", and that closed the workspace's panes BEFORE evaluating the
         gate — so a refusal left the panes closed, the command reporting failure and
@@ -2978,7 +2984,12 @@ class Broker:
                 f"gate rather "
                 f"than something git is left to catch after the panes are closed."
             )
-        self._gate(name, checkout, me=me)
+        # Named before the gate and closed long after it: the panes in this checkout that
+        # nobody is in and no row claims (`_spare_panes`). Their shells are the processes
+        # the gate used to refuse on, and this is where it stops counting them — nothing
+        # is closed any earlier for it.
+        spare = self._spare_panes(name, checkout)
+        self._gate(name, checkout, me=me, ignore={p for _, p in spare if p})
         self._inventory_gate(name, checkout, confirm=confirm)
         # Before the deregistration, because git's registry is one of the two things that
         # can name the branch and the deregistration takes the entry out of it.
@@ -2986,6 +2997,7 @@ class Broker:
         self._claim(name, me)
         try:
             closed = self._stop_panes(name, me=me)
+            self._close_spare_panes(name, checkout, spare)
             # What authorises the deletion: the panes are down, so this is the answer for
             # the directory as it is about to be destroyed rather than as it was. The
             # settle is the one difference from the first evaluation, and it buys the
@@ -3074,7 +3086,8 @@ class Broker:
 
     # -- the gate ---------------------------------------------------------------------
 
-    def _gate(self, name: str, checkout: str, *, me: str, settle: float = 0.0) -> None:
+    def _gate(self, name: str, checkout: str, *, me: str, settle: float = 0.0,
+              ignore: Collection[int] = ()) -> None:
         """Is anything still in that directory, or still filed under that name? Asked of
         our records AND of the machine.
 
@@ -3111,15 +3124,24 @@ class Broker:
         the wait expires is live, whoever started it, and the deletion is refused on it —
         excluding the panes we closed would delete a directory around a process that is
         demonstrably still in it, which is the one thing this whole gate is for.
+
+        `ignore` is the FIRST evaluation's, and never the re-confirmation's, and it is not
+        the same idea wearing a different hat. It carries the shells of panes the caller
+        has established it is entitled to close and has not closed yet (`_spare_panes`) —
+        idle shells, proved idle by herdr, that exist for no reason but the pane. Counting
+        those refused the workspace its own root pane forever (#134). The re-confirmation
+        passes nothing, so the same shells have to be really gone before anything is
+        deleted; this only stops the cheap answer being "no" on the strength of something
+        the expensive one is about to remove.
         """
         self._records_gate(name, checkout, me=me)
         self._filed_gate(name, me=me)
-        found = self._live_under(checkout)
+        found = self._live_under(checkout, ignore=ignore)
         if found and settle:
             deadline = time.monotonic() + settle
             while found and time.monotonic() < deadline:
                 time.sleep(TEARDOWN_SETTLE_POLL)
-                found = self._live_under(checkout)
+                found = self._live_under(checkout, ignore=ignore)
         if found is None:
             raise ValueError(
                 f"cannot close {name!r}: this machine could not be asked what is running "
@@ -3240,12 +3262,17 @@ class Broker:
             (name,),
         ).fetchall() if r["name"] != exclude]
 
-    def _live_under(self, checkout: str) -> Optional[list]:
+    def _live_under(self, checkout: str,
+                    *, ignore: Collection[int] = ()) -> Optional[list]:
         """What is running in that directory that is not us. **None** is "could not tell".
 
         The caller is excluded and has to be: an agent told to close the workspace it
         works in runs the command from a shell whose cwd is under the checkout, so both
         halves of the gate would otherwise see it and refuse.
+
+        `ignore` is the caller's own additional exclusion, empty everywhere but the first
+        of `_gate`'s two evaluations — see there for what may go in it and why the second
+        one never gets any.
 
         Exclusion is by pid on the parsed output rather than by narrowing the scan — a
         `-p` list that matches nothing exits 1 with empty output, which is
@@ -3261,6 +3288,8 @@ class Broker:
         found = live.processes_in(checkout)
         if not found:
             return found                       # None, or an empty answer nobody is in
+        if ignore:
+            found = [p for p in found if p.pid not in ignore]
         mine = os.getpid()
         parents = self._parents()
         if parents is None:
@@ -3551,6 +3580,112 @@ class Broker:
             store.update_agent(self.db, a["name"], pane_id=None)
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=False)
             closed.append(a["name"])
+        return closed
+
+    def _spare_panes(self, name: str, checkout: str) -> list[tuple[str, Optional[int]]]:
+        """The panes sitting in this checkout that no agent row claims and nobody is in.
+
+        The set teardown never had a name for, and the whole of #134. A workspace's ROOT
+        pane is herdr's — `worktree open` and `workspace create` each hand one back — and
+        switchboard files an agent row against it only when a spawn moves in. Re-resolve a
+        closed workspace by name (`_workspace_id` -> `_attach_workspace(create=False)`), or
+        restore into one, and herdr opens a fresh space whose root pane nobody ever sits
+        in. `_stop_panes` walks agent rows, so it never saw that pane; the shell in it has
+        its cwd in the checkout; and every gate that reads the process table then refused
+        the deletion on that shell, for good. Both filed reports are that loop — one
+        through `sb workspace close`, one through `sb cleanup` and the sweep, which reach
+        the same directory through `_space_ready` and `_close_empty_spaces`.
+
+        Returned rather than closed, with the shell's pid beside each one, because the two
+        callers want different halves of the same fact and the rule that decides the set
+        must not be written twice. `_close_checkout` closes them, inside the destructive
+        window where every other pane is closed. Both it and `_space_ready` first hand the
+        pids to `_gate`, which is what stops a gate refusing on a process that exists only
+        because of a pane this command is about to take. That is why the ordering survives
+        this fix intact: nothing is closed before a check, and the check simply stops
+        counting what the close accounts for.
+
+        Three things bound the set, and each answers a different way of not being ours:
+
+        - **its cwd is the checkout that was named** — `cwd` and not `foreground_cwd`,
+          because the question is which checkout the pane was MADE in, not where its shell
+          has since wandered. A pane made elsewhere that has cd'd in is somebody else's, it
+          holds the directory open, and the gate refuses on it;
+        - **no agent row claims it** — every row's, not only this workspace's: a pane a row
+          claims is that row's business, `_stop_panes` takes this workspace's own, and a
+          live stranger's is what `_records_gate` and the gate refuse on;
+        - **herdr says nobody is in it** — `_close_target`'s no-identity case, the same
+          proof `_close_board` closes a board on. A pane that cannot be proved free is a
+          refusal, exactly as it is in `_stop_panes`, and never a skip.
+
+        The caller is excluded by the pane it is SITTING IN (`HERDR_PANE_ID`, injected into
+        every pane herdr makes) rather than by name, because the caller here can be the
+        human, who has no name to exclude and a pane like anybody else. An agent caller is
+        covered twice over — its row claims its pane.
+
+        A pid of None is a pane whose shell we could not prove idle, or could not ask
+        about (`Herdr.pane_shell`). It stays in the set — it is still ours to close — but
+        nothing is discounted for it, so the gate goes on refusing on whatever is in there
+        until it stops. Unknown is not empty, and a herdr that will not list its panes at
+        all is a refusal in that same voice.
+        """
+        try:
+            panes = self.h.pane_list()
+        except HerdrError as e:
+            raise ValueError(
+                f"cannot close {name!r}: herdr would not say which panes are open ({e}), "
+                f"and unknown is not empty — nothing is closed and nothing is deleted"
+            ) from None
+        claimed = {r["pane_id"] for r in self.db.execute(
+            "SELECT pane_id FROM agents WHERE pane_id IS NOT NULL").fetchall()}
+        here = os.environ.get("HERDR_PANE_ID", "")
+        spare = []
+        for p in panes:
+            pane = p["pane_id"]
+            if pane == here or pane in claimed:
+                continue
+            if not live.is_under(p.get("cwd") or "", checkout):
+                continue
+            target, wrong = self._close_target({"pane_id": pane, "terminal_id": None})
+            if wrong is not None:
+                store.log_event(self.db, kind="workspace_pane_refused", workspace=name,
+                                pane=pane, error=wrong)
+                raise ValueError(
+                    f"cannot close {name!r}: pane {pane} sits in {checkout} and cannot be "
+                    f"confirmed as this workspace's own — {wrong}. Nothing is closed and "
+                    f"nothing is deleted"
+                )
+            spare.append((target or pane, self.h.pane_shell(target or pane)))
+        return spare
+
+    def _close_spare_panes(self, name: str, checkout: str,
+                           spare: Sequence[tuple[str, Optional[int]]]) -> list[str]:
+        """Take the panes `_spare_panes` named. Step 2's other half.
+
+        Beside `_stop_panes` and under the same rules: a pane herdr no longer has is this
+        close having HAPPENED, and a pane herdr will not close is a refusal, because an
+        unconfirmed pane in a directory about to be deleted is the whole reason confirming
+        them stopped is a step rather than a hope.
+        """
+        closed = []
+        for pane, _pid in spare:
+            try:
+                self.h.close_pane(pane)
+            except HerdrError as e:
+                if e.code != "pane_not_found":
+                    store.log_event(self.db, kind="workspace_pane_failed",
+                                    workspace=name, pane=pane, error=str(e))
+                    raise ValueError(
+                        f"cannot close {name!r}: pane {pane} in {checkout} would not "
+                        f"close ({e}), so nothing here is confirmed stopped — nothing is "
+                        f"deleted"
+                    ) from None
+                store.log_event(self.db, kind="workspace_pane_gone", workspace=name,
+                                pane=pane)
+                continue
+            store.log_event(self.db, kind="workspace_pane_closed", workspace=name,
+                            pane=pane)
+            closed.append(pane)
         return closed
 
     def _deregister(self, checkout: str) -> str:
@@ -6776,7 +6911,12 @@ class Broker:
             self._records_gate(name, checkout, me=me)
             self._filed_gate(name, me=me)
             self._inventory_gate(name, checkout, confirm=False)
-            self._gate(name, checkout, me=me)
+            # The close this is deciding whether to spend WILL take these panes, so a
+            # sweep that counted their idle shells would hold every space back on the
+            # strength of the one thing the close removes — which is exactly how
+            # `sb cleanup` came to close the agents and leave the spaces (#134).
+            spare = self._spare_panes(name, checkout)
+            self._gate(name, checkout, me=me, ignore={p for _, p in spare if p})
         except ValueError as e:
             return str(e)
         return None

@@ -470,12 +470,62 @@ class Herdr:
             raise HerdrError("no_pane", f"pane split returned no pane id: {r}")
         return pane
 
+    def pane_list(self) -> list[dict]:
+        """Every live pane as herdr describes it — `pane_id`, `workspace_id`, `cwd`, and
+        an `agent` key when herdr has one bound to it.
+
+        `pane_ids` is this trimmed to the ids, and for a while that was all anybody asked
+        for. Teardown needs the rest of the row: a workspace's own root pane carries no
+        agent row of ours — `worktree open` and `workspace create` make one, nothing files
+        it — so the `cwd` herdr reports is the only thing that says which checkout the
+        pane is sitting in, and sitting in it is what keeps the checkout undeletable.
+
+        A malformed entry is dropped rather than raised on: every caller asks this "which
+        of these are mine", never "is herdr well".
+        """
+        r = self._call("pane", "list")
+        panes = r.get("panes")
+        if not isinstance(panes, list):
+            return []
+        return [p for p in panes if isinstance(p, dict) and p.get("pane_id")]
+
     def pane_ids(self) -> set[str]:
         """Every live pane id. Lets `_open_board` tell a closed board pane from a
         live one, so `sb start` returns you to one board rather than stacking a new
         one on every run."""
-        r = self._call("pane", "list")
-        return {p["pane_id"] for p in r.get("panes", []) if p.get("pane_id")}
+        return {p["pane_id"] for p in self.pane_list()}
+
+    def pane_shell(self, pane_id: str) -> Optional[int]:
+        """This pane's own shell pid — and **None** unless the shell is all that is in it.
+
+        The join teardown had no way to make. A directory gate reads the process table and
+        a pane list carries no pid, so the shell of a pane switchboard is entitled to close
+        looked exactly like a stranger's editor, and held the checkout against every
+        attempt to delete it. `pane process-info` is the only thing on either side that
+        names both: `shell_pid` and the pane id together (verified against herdr 0.8.2).
+
+        None whenever anything ELSE is in the foreground, and that restriction is the
+        whole safety of it: a pane running `vim` is a pane somebody is working in, its
+        process is in the directory on its own account, and no caller may be told to
+        discount it. Only an idle shell — nothing in the foreground, or nothing but the
+        shell itself — is a process that exists purely because the pane does.
+
+        None too when herdr will not answer or answers a shape this does not recognise. The
+        caller then has no pid to discount and the gate counts the process as it always
+        did, which is the direction that refuses.
+        """
+        try:
+            r = self._call("pane", "process-info", "--pane", pane_id)
+        except HerdrError:
+            return None
+        info = r.get("process_info") or {}
+        shell = info.get("shell_pid")
+        if not isinstance(shell, int):
+            return None
+        fg = info.get("foreground_processes") or []
+        if any(p.get("pid") != shell for p in fg if isinstance(p, dict)):
+            return None
+        return shell
 
     def close_pane(self, pane_id: str) -> None:
         self._call("pane", "close", pane_id)
