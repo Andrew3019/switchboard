@@ -2899,5 +2899,33 @@ class CoalescedPressTest(unittest.TestCase):
         self.assertEqual(board.double_press_run(0.0, 5, 1000.0), (True, 1000.0))
 
 
+class BoardCommandTest(unittest.TestCase):
+    """The line `open_beside` types into the split pane.
+
+    THE BUG: in any repo that is not a switchboard checkout, the pane's cwd holds no
+    `switchboard/` package, `-m` could not import one, and the `exec`'d python died
+    before the first frame — taking the pane's shell with it. Every agent in a
+    non-switchboard repo came up with no board (Andrew, 2026-08-25).
+    """
+
+    def test_the_command_carries_this_checkout(self):
+        own = str(Path(board.__file__).resolve().parent.parent)
+        self.assertIn(own, board._board_command())
+        self.assertIn("-m switchboard.board", board._board_command())
+
+    def test_it_runs_from_a_directory_that_is_not_a_checkout(self):
+        """The whole bug, end to end and in the shell that runs it: `board.main`
+        answers "stdin is not a tty" only if the module IMPORTED. Before the fix this
+        was `No module named 'switchboard'` from a directory with no `switchboard/`
+        in it, which is every non-switchboard repo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run(["sh", "-c", board._board_command()], cwd=tmp,
+                               capture_output=True, text=True, timeout=60,
+                               stdin=subprocess.DEVNULL)
+            self.assertNotIn("No module named", p.stderr)
+            self.assertIn("not a tty", p.stderr)
+            self.assertEqual(p.returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
