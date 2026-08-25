@@ -740,6 +740,12 @@ class Broker:
         # above: the CLI has to tell the caller what happened, and the return value of
         # `done` is already the live-children list. Read by `cli` right after the call.
         self.done_repeat = False
+        # Set by `done` when the call was a RESTORE REPLAY — the old summary, word for
+        # word, on the first turn back from a restore (#148). Same shape and reason as
+        # `done_repeat` above, and a separate flag because the two need different words:
+        # a repeat is an agent saying something twice, a replay is an agent that has not
+        # yet noticed it was given something new.
+        self.done_replay = False
         # The side-effect capabilities this agent's `done` FLAGGED (E4) — declared at the
         # `done` boundary, not held, and with tracked work standing behind them. Same shape
         # and reason as `delivery_note`: the CLI has to say it, and `done`'s return value is
@@ -1071,6 +1077,61 @@ class Broker:
             # A store too degraded to answer must not swallow a report — that is the one
             # message in the protocol a parent is waiting on. Same direction as everywhere
             # else the log cannot be read: the verb does its work.
+            return False
+
+    def _replayed_done_after_restore(self, name: str, summary: str) -> bool:
+        """Is this `sb done` the old one, replayed on the first turn back from a restore?
+
+        The narrow companion to `_reported_done_and_stayed_there`, and it exists because
+        that guard cannot see this case by construction. The repeat guard asks "was there a
+        turn boundary after the report" — and here there was: the agent reported, its turn
+        ended, it was closed, it was restored, and something (an `sb tell` with new work,
+        typically) poked it into a fresh turn. Every signal the repeat guard reads says
+        this is new work. What arrives is the OLD summary: a resumed session carries the
+        finished report in its context, and the first thing the agent does on being poked
+        is act it out again, before it has read the mail that was the point of restoring it.
+        The parent then holds a `[done]` that landed AFTER it handed over new work, with no
+        way to tell it from a real completion (#148).
+
+        THREE CONDITIONS, all of them, and the conjunction is the whole safety of this:
+
+        * the summary is **byte-identical** to the last one this agent reported. Different
+          words are a different report, always, and are delivered untouched. Identical text
+          is by definition not news to a parent that already holds it.
+        * a `restore` happened after that report — this is a resumed session, not an agent
+          that simply said the same thing twice in one life.
+        * **no turn of this agent's has ended since that restore.** So it is the FIRST turn
+          back, which is the only turn the replay can happen on. An agent that has already
+          worked a turn since coming back and then reports is reporting deliberately, even
+          if the words happen to match, and nothing here touches it.
+
+        The residual cost, stated rather than hidden: an agent restored, given new work,
+        and finishing it inside its first turn back with a summary word-for-word identical
+        to its previous one has that report recorded and not mailed. Its parent holds that
+        exact sentence already, the CLI tells the agent plainly what happened, and one
+        different word delivers it. That is a far cheaper wrong direction than the one this
+        replaces, which is a parent believing work it handed over a second ago is finished.
+        """
+        try:
+            row = self.db.execute(
+                "SELECT id, json_extract(payload,'$.summary') AS summary FROM events "
+                "WHERE agent=? AND kind='done' ORDER BY id DESC LIMIT 1",
+                (name,)).fetchone()
+            if row is None or row["summary"] is None:
+                return False
+            # The event log clips what it stores, so the live summary is clipped the same
+            # way before they are compared — otherwise a long report never matches itself.
+            if row["summary"] != summary[:EVENT_CLIP]:
+                return False
+            restored = self.db.execute(
+                "SELECT id FROM events WHERE id>? AND agent=? AND kind='restore' "
+                "ORDER BY id DESC LIMIT 1", (row["id"], name)).fetchone()
+            if restored is None:
+                return False
+            return not self._turn_ended_after(name, restored["id"])
+        except sqlite3.OperationalError:
+            # Same direction as every other unreadable-log path around `done`: a store too
+            # degraded to answer must not swallow a report.
             return False
 
     def _claim_session(self, name: str) -> None:
@@ -5604,6 +5665,15 @@ class Broker:
         NOT this case: a real turn boundary passed, so `_revive` put the row back to
         `working` on the way in, and the full path below runs unchanged.
 
+        **A RESTORE REPLAY IS RECORDED THE SAME WAY, and the guard above cannot see it**
+        (#148). A restored agent poked with new work acts out the finished report its
+        resumed context ends with, before it has read the mail it was restored for — and
+        every signal the repeat guard reads (a turn ended, then another began) says that is
+        new work. `_replayed_done_after_restore` asks the second question: same words, a
+        restore since, and still the first turn back. It logs `done_replayed`, mails
+        nothing, rings nobody, and — unlike a repeat — leaves the row `working`, because
+        the work it was handed has not been done.
+
         **THE `done` BOUNDARY OF THE SIDE-EFFECT CLASS (§2.1, E4), and it FLAGS.** An
         isolated agent that has tracked work on its branch and does not hold the capability
         this repo declares over it (`write-tracked` as shipped) is told so — in `done_flags`
@@ -5670,6 +5740,13 @@ class Broker:
         a = store.get_agent(self.db, me)
         self.promoted = []
         repeat = self._reported_done_and_stayed_there(me)
+        # THE RESTORE REPLAY (#148), and it is a SECOND question, not a widening of the
+        # first: the repeat guard has just said "a turn boundary passed, so this is new
+        # work", which for a resumed session is exactly the wrong reading of the one turn
+        # that carries the old report back. See `_replayed_done_after_restore` for the
+        # three conditions. Both flags mean the same thing to everything below — the report
+        # is RECORDED and not delivered — and they differ only in what the caller is told.
+        replay = not repeat and self._replayed_done_after_restore(me, summary)
         # RESOLVED HERE, not taken off `a` — the row read at the top of this call may
         # predate a re-parent, and `done` must mail whoever this agent reports to NOW
         # (§2.3, raw reader 3). Read ONCE and reused below: the mail, the ring and the
@@ -5688,20 +5765,22 @@ class Broker:
             # message telling the agents it moved.
             with store.mutation(self.db):
                 self.promoted = self._promote(me, parent)
-                told = self._promote_signals(me, parent, self.promoted,
-                                             rides_on_done=bool(parent) and not repeat)
-                self._record_done(me, summary, parent, repeat=repeat,
+                told = self._promote_signals(
+                    me, parent, self.promoted,
+                    rides_on_done=bool(parent) and not repeat and not replay)
+                self._record_done(me, summary, parent, repeat=repeat, replay=replay,
                                   promoted=self.promoted, commit=False)
         else:
-            self._record_done(me, summary, parent, repeat=repeat, promoted=[],
-                              commit=True)
+            self._record_done(me, summary, parent, repeat=repeat, replay=replay,
+                              promoted=[], commit=True)
         # OUTSIDE the transaction, and it has to be: the doorbell is a herdr subprocess
         # (see `store.mutation` and `grant`). The signals are already durable — this only
         # says "now", and it is held, so a promote of ten children is one doorbell each and
         # not a storm (A1).
         self._ring_mutation_signals(told, frm=me)
-        if repeat:
-            self.done_repeat = True
+        if repeat or replay:
+            self.done_repeat = repeat
+            self.done_replay = replay
             return self.live_descendants(me)
         # THE `done` BOUNDARY OF THE SIDE-EFFECT CLASS (E4). After the report is recorded
         # and mailed, never before and never instead: this flags, and a flag that could
@@ -5844,7 +5923,8 @@ class Broker:
                                 children=", ".join(moved))
 
     def _record_done(self, me: str, summary: str, parent: Optional[str], *,
-                     repeat: bool, promoted: Sequence[str], commit: bool) -> None:
+                     repeat: bool, promoted: Sequence[str], commit: bool,
+                     replay: bool = False) -> None:
         """The `done` rows themselves: the mail, the state write, the event.
 
         Lifted out of `done` for ONE reason — a promote has to put these in the same
@@ -5856,6 +5936,16 @@ class Broker:
         delivery is skipped, and the state is re-asserted rather than assumed because on a
         no-hooks session `_revive` has just failed open and put this row back to `working`.
         """
+        if replay:
+            # NO STATE WRITE, and that is the one place this parts company with a repeat
+            # (#148). A repeat re-asserts `done` because the row really is done; a replay
+            # arrives at an agent that has been restored and handed NEW work, and writing
+            # `done` there would put the same lie the parent was told onto the board and
+            # let the `Stop` gate wave the turn through with the new work untouched. The
+            # row is `working`, because it is.
+            store.log_event(self.db, kind="done_replayed", agent=me,
+                            summary=summary[:EVENT_CLIP], commit=commit)
+            return
         if repeat:
             store.set_state(self.db, me, "done", commit=commit)
             store.log_event(self.db, kind="done_repeated", agent=me,

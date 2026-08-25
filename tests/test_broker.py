@@ -899,6 +899,93 @@ class BrokerTest(unittest.TestCase):
                          ["[done] counted 144",
                           "[done] and the second thing is done too"])
 
+    def test_the_old_summary_replayed_on_the_first_turn_back_from_a_restore_is_held(self):
+        """#148. Restore, hand over new work, and the resumed agent acts out the report
+        its context ends with before it has read the mail. Every signal the repeat guard
+        reads says this is new work — a turn ended, another began — so that guard passes
+        it, and the parent holds a `[done]` that landed one second after it delegated.
+
+        The full sequence is driven, `restore` included: it is the event the second guard
+        turns on, and stubbing it would test the query rather than the path.
+        """
+        from switchboard import hooks
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="sess-kid", cwd=str(self.repo))
+        p = {"session_id": "sess-kid"}
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+        self.b.done("counted 144, the parser is fine", me="kid")
+        hooks.mark_turn(p, self.db, store.TURN_IDLE)      # that turn really ended
+        self.b.restore("kid")                             # closed, then brought back
+        store.put_message(self.db, from_agent="orch", to_agent="kid", kind="tell",
+                          body="now count the other one")
+        self.h.prompts.clear()
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)   # the poke: its first turn back
+
+        self.restart_sb().done("counted 144, the parser is fine", me="kid")
+
+        self.assertTrue(self.b.done_replay)
+        self.assertFalse(self.b.done_repeat)              # not the same agent saying it twice
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] counted 144, the parser is fine"])
+        self.assertEqual(self.h.prompts, [])              # and the parent is not rung again
+        kinds = [e["kind"] for e in store.recent_events(self.db, agent="kid")]
+        self.assertEqual(kinds.count("done"), 1)
+        self.assertIn("done_replayed", kinds)             # kept, not dropped
+        # The row still says working, which a repeat's does not: this agent was handed new
+        # work and has not done it, and a `done` on the board would be the same lie.
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "working")
+
+    def test_a_restored_agents_report_on_the_new_work_reaches_its_parent(self):
+        """The half the guard must not break, and the common one: the restored agent reads
+        its mail, does the work, and reports it in its own words. Different words, so
+        nothing here applies — one restore does not make an agent's next report suspect.
+        """
+        from switchboard import hooks
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="sess-kid", cwd=str(self.repo))
+        p = {"session_id": "sess-kid"}
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+        self.b.done("counted 144, the parser is fine", me="kid")
+        hooks.mark_turn(p, self.db, store.TURN_IDLE)
+        self.b.restore("kid")
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+
+        self.restart_sb().done("counted the other one too: 89", me="kid")
+
+        self.assertFalse(self.b.done_replay)
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] counted 144, the parser is fine",
+                          "[done] counted the other one too: 89"])
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
+
+    def test_matching_words_after_a_full_turn_back_from_a_restore_still_reach_the_parent(self):
+        """The third condition, and the one that keeps the guard to the single turn a
+        replay can happen on. An agent that has already worked a whole turn since coming
+        back is not acting out its old context any more — if it reports the same sentence
+        then, it means it, and the report goes through.
+        """
+        from switchboard import hooks
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="sess-kid", cwd=str(self.repo))
+        p = {"session_id": "sess-kid"}
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+        self.b.done("counted 144, the parser is fine", me="kid")
+        hooks.mark_turn(p, self.db, store.TURN_IDLE)
+        self.b.restore("kid")
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)   # a whole turn back...
+        hooks.mark_turn(p, self.db, store.TURN_IDLE)      # ...that ended
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+
+        self.restart_sb().done("counted 144, the parser is fine", me="kid")
+
+        self.assertFalse(self.b.done_replay)
+        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+                         ["[done] counted 144, the parser is fine",
+                          "[done] counted 144, the parser is fine"])
+
     def test_block_reports_no_state_to_herdr_at_all(self):
         """The one thing that makes a block answerable.
 

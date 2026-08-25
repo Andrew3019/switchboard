@@ -1321,6 +1321,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             "done — still working underneath you: " + ", ".join(still)
             + ". Their summaries will reach you here, and nothing will close your pane "
               "while they run.")
+        if b.done_replay:
+            # Not a failure either, and for the same reason — but the words have to differ
+            # from the repeat's. This agent has not said the same thing twice; it has been
+            # restored and handed new work, and has reported on the old work without
+            # noticing. So it is pointed at the mail, and told its row still says working.
+            note = ("not sent — that is word for word the summary you already reported, "
+                    "and you have been restored and given new work since. It is in the log, "
+                    "your parent still has the first report, and your row still says you "
+                    "are working. Read `sb inbox` for what you were given, do that work, "
+                    "and report it in your own words.")
         if b.done_repeat:
             # Not a failure — exit 0, and the text says what was and was not done. An
             # agent told only "already done" reaches for a way to make it stick; an agent
@@ -1350,7 +1360,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 f"to your parent — they can `sb grant` it if that was wrong."
                 for cap in b.done_flags))
         _emit(args, note, {"agent": me, "live_children": still,
-                           "repeat": b.done_repeat, "flagged": b.done_flags,
+                           "repeat": b.done_repeat, "replay": b.done_replay,
+                           "flagged": b.done_flags,
                            "promoted": b.promoted})
         return 0
 
