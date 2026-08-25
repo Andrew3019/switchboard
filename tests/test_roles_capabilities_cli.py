@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import cli, roles as roles_mod  # noqa: E402
+from switchboard import broker as broker_mod, cli, roles as roles_mod  # noqa: E402
 
 
 class ListingSandbox(unittest.TestCase):
@@ -92,9 +92,20 @@ class RolesListingTest(ListingSandbox):
 
 
 class CapabilitiesListingTest(ListingSandbox):
+    def vocabulary(self) -> list[str]:
+        """What `sb grant` will accept here, asked of the broker itself.
+
+        `roles.CAPABILITIES` is the wrong thing to assert against even though it is what
+        the shipped set happens to be: the vocabulary is open (C12), so a constant here
+        would pin yesterday's answer and pass while the command drifted off it.
+
+        Neither the store nor herdr is touched by `known_capabilities` — it is three
+        config reads over `self.repo` — so this stands one up with neither.
+        """
+        return sorted(broker_mod.Broker(None, None, repo=self.repo).known_capabilities())
+
     def test_it_prints_the_sorted_vocabulary(self):
-        self.assertEqual(self.data("capabilities"),
-                         sorted(roles_mod.CAPABILITIES))
+        self.assertEqual(self.data("capabilities")["capabilities"], self.vocabulary())
 
     def test_a_capability_this_repo_mints_is_in_it(self):
         """Read off the broker's vocabulary rather than off `roles.CAPABILITIES`: a repo
@@ -103,4 +114,6 @@ class CapabilitiesListingTest(ListingSandbox):
         that command is held to."""
         (self.sw / "settings.toml").write_text(
             '[capabilities.side_effects]\ndeploy = ["merge"]\n')
-        self.assertIn("deploy", self.data("capabilities"))
+        self.assertNotIn("deploy", roles_mod.CAPABILITIES)   # not shipped: this repo's own
+        self.assertEqual(self.data("capabilities")["capabilities"], self.vocabulary())
+        self.assertIn("deploy", self.vocabulary())

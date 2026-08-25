@@ -1552,7 +1552,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # minus `start`, and answering from the constant would advertise a different set
         # from the one `sb grant` accepts.
         vocab = sorted(b.known_capabilities())
-        _emit(args, "\n".join(f"  {c}" for c in vocab), vocab)
+        # An OBJECT, like every other listing here (`{"presets": ...}`, `{"tiers": ...}`,
+        # `{"roles": ...}`): a bare array is one shape a reader has to special-case, and
+        # nothing about this listing is different enough to earn it.
+        _emit(args, "\n".join(f"  {c}" for c in vocab), {"capabilities": vocab})
         return 0
 
     if cmd == "cleanup":
