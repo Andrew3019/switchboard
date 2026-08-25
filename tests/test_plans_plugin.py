@@ -1502,7 +1502,7 @@ class CatalogueTest(PlansSandbox):
     `show` prints.
 
     The shipped catalogue is deliberately almost bare — `change-approval`, `create-pr`,
-    `merge`, `merge-human-review`, `review`, one template —
+    `merge`, `merge-human-review`, `plan-review`, `review`, one template —
     so most of these write their own definitions into the sandbox's `defaults/`, which is
     also the honest way to test a catalogue whose contents PR9 is supposed to grow.
 
@@ -2574,6 +2574,97 @@ class CatalogueTest(PlansSandbox):
         self.assertTrue(by_def["sign-off"]["root"], "which is now the plan's real start")
         self.assertNotIn("incomplete", made, f"no door fires on what it made: {made}")
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    # -- the optional plan review, wired by hand --------------------------------
+
+    def test_plan_review_shares_the_approvals_band_and_nothing_brings_it(self):
+        """The two halves of what `plan-review` IS, asserted on the shipped files.
+
+        SAME BAND as `change-approval`, because a review of the plan runs before the plan
+        is approved and both are design work — which is also why the edge between them is
+        not drawn, and the test below is about that. And OPTIONAL in the strict sense:
+        nothing in the shipped library composes it and nothing obliges it, so it reaches a
+        plan only because somebody named it. That is the property the whole step rests on —
+        an obligation would put a reviewer on every bounded job, which is the process this
+        design exists to remove — and it is a property of the CATALOGUE rather than of any
+        one definition, so it is read off all of them.
+        """
+        lib = {f.stem: json.loads(f.read_text())
+               for f in self.catalogue("library").glob("*.json")}
+        self.assertEqual(lib["plan-review"]["anchor"], lib["change-approval"]["anchor"])
+        self.assertEqual(lib["plan-review"]["anchor"], "design")
+
+        self.assertNotIn("obliges", lib["plan-review"], "it obliges nothing")
+        self.assertNotIn("steps", lib["plan-review"], "and composes nothing")
+        for key, spec in lib.items():
+            self.assertNotIn("plan-review", spec.get("obliges") or [], key)
+            self.assertNotIn("plan-review", spec.get("steps") or [], key)
+
+        # So the landing shape nobody asked to review arrives without one.
+        made = self.data("plugin", "plans", "create", "ship it", "--display", "ship it",
+                         "--step", "impl = write it", "--lib", "create-pr", "--lib", "merge")
+        self.assertNotIn("plan-review", [s.get("def") for s in made["steps"]])
+
+    def test_the_hand_wired_plan_review_comes_before_the_approval_and_validates(self):
+        """What a planner has to type, and that the graph it leaves is clean.
+
+        `_place` looks at STRICTLY LOWER bands, so two `design` steps are both minted as
+        marked starts with nothing between them: naming `plan-review` beside the approval
+        does not order the two, and this asserts that first because it is the whole reason
+        the wiring is manual. The planner then writes ONE edit — the review's id into
+        `change-approval.deps`, and that step's `root` to false, since `_wrong` reports a
+        step that carries a start mark and a dep — and what comes out is a plan where the
+        approval waits on the review and `validate` finds nothing to say.
+        """
+        made = self.data("plugin", "plans", "create", "ship it", "--display", "ship it",
+                         "--step", "impl = write it", "--lib", "plan-review",
+                         "--lib", "create-pr", "--lib", "merge")
+        by_def = {s["def"]: s for s in made["steps"] if s.get("def")}
+        review, approval = by_def["plan-review"], by_def["change-approval"]
+        self.assertEqual((review["deps"], review["root"]), ([], True))
+        self.assertEqual((approval["deps"], approval["root"]), ([], True),
+                         "the anchors draw no edge inside a band, so neither is ordered")
+
+        self.edit_step(approval["id"], deps=[review["id"]], root=False)
+
+        stored = {s.get("def"): s for s in self.steps()}
+        self.assertEqual(stored["change-approval"]["deps"], [review["id"]],
+                         "the approval now waits on the plan review")
+        self.assertTrue(stored["plan-review"]["root"], "which is the plan's real start")
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_the_optional_plan_review_leaves_the_anchor_spine_alone(self):
+        """Adding a definition in an existing band adds no band, and this pins that the
+        way the spine is pinned everywhere else: the tuple, and the refusal that quotes it.
+
+        The spine is what every anchored definition is ordered by, so a new one arriving
+        with a band of its own would silently re-place every plan in the repo. `plan-review`
+        reuses `design` precisely so it cannot, and the shape of a plan that never names it
+        is unchanged — same steps, same edges, same marked root.
+        """
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        self.assertEqual(_plans()._ANCHORS,
+                         ("design", "build", "review", "pr", "pre-merge", "merge"))
+
+        self.ok(*_create("a job", "write it"))
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "plan-review",
+                               "--json")
+        self.assertEqual(code, 0, out)
+        self.define("groundwork", name="do the groundwork", anchor="plan-review")
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "groundwork", "--json")
+        self.assertEqual(code, 1, "a definition's key is not a band")
+        self.assertIn("design, build, review, pr, pre-merge, merge",
+                      json.loads(out)["data"]["error"])
+
+        # And the shipped landing shape, which names no plan review, is the graph it was.
+        made = self.data("plugin", "plans", "create", "B", "--display", "B",
+                         "--step", "impl = build it", "--lib", "create-pr", "--lib", "merge")
+        by_def = {s["def"]: s for s in made["steps"] if s.get("def")}
+        impl = next(s for s in made["steps"] if not s.get("def"))
+        self.assertTrue(by_def["change-approval"]["root"])
+        self.assertEqual(by_def["review"]["deps"], [impl["id"]])
+        self.assertEqual(sorted(by_def["create-pr"]["deps"]),
+                         sorted([by_def["review"]["id"], by_def["change-approval"]["id"]]))
 
     def test_create_lib_refuses_before_it_writes_anything(self):
         """The guards on the new flag, which are the ones `name-step` already had.

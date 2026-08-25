@@ -790,10 +790,39 @@ WHAT TO BUILD IT FROM
 
   A definition carries its own account of how that step is run — what it obliges, what it
   gates, what finishing it means. Read it there. Nothing about any particular step is
-  repeated here, so that nothing here can be out of date about one.
+  repeated here, so that nothing here can be out of date about one. The one exception is
+  the section below, and it is an exception for a reason: an EDGE between two definitions
+  belongs to neither of them, so no definition can be the only place it is written down.
 
   Then re-plan on what you now know, rather than executing a split you decided before you
   knew anything.
+
+TWO STEPS IN ONE BAND GET NO EDGE, AND `plan-review` IS WHERE YOU MEET THAT
+
+  An anchor places a step after the band BELOW it and never beside it, so two definitions
+  sharing a band are both minted as marked starts with nothing between them. Where that
+  order matters, the edge is yours to write.
+
+  `plan-review` is the case in the shipped library, and it is OPTIONAL in the strict
+  sense: nothing composes it and nothing obliges it, so it is in a plan because whoever
+  shaped the plan — the plan writer, where there is one — decided the planning risk earned
+  a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach, a plan
+  crossing subsystems, several agents or handoffs, verification that is expensive or
+  incomplete, a large blast radius. A small linear plan does not get one and goes straight
+  to Andrew at `change-approval`, which is the shape most jobs are.
+
+  WHEN IT IS IN THE PLAN, wire it in the same edit that adds it: the `plan-review` step's
+  id goes in `change-approval`'s `deps`, and that step's `root` goes to false. It shares
+  the `design` band with the approval, so neither half is drawn for you — and a step
+  carrying a start mark AND a dep is a defect `validate` reports, which is why the two go
+  together. Left unwired, the plan reads as one whose approval can be reached without the
+  review.
+
+  The reviewer reports to the planner and touches neither the plan nor the approval; the
+  planner resolves the findings, puts a compact result in the step's `output` and ticks it.
+  A rejection at the approval goes back to that same planner, with `tries` bumped and the
+  approval reopened, and the review runs again only where the revised planning risk earns
+  it. The definition is the detail — `sb plugin plans library plan-review`.
 
 EVERY STEP HAS A BOARD NAME AND A DEP
 

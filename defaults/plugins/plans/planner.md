@@ -145,6 +145,11 @@ REVIEW, WHEN THE PLANNING RISK EARNS IT
   proposed, when verification is expensive or incomplete, or when failure would have a
   large blast radius. Small, linear plans go straight to Andrew.
 
+  IT IS `plan-review` IN THE LIBRARY, and it is OPTIONAL in the strict sense: nothing
+  composes it and nothing obliges it, so it is in a plan because you named it and for no
+  other reason. Not naming it is a decision, not an omission — the failure this design
+  exists to fix is bounded work given an hour of process.
+
   A reviewer checks that every success criterion is covered, that steps have coherent
   dependencies and handoffs, that the main agent has kept the work that does not need
   separating, that the models, tools, skills and capabilities you named exist, that the
@@ -152,7 +157,20 @@ REVIEW, WHEN THE PLANNING RISK EARNS IT
   checks exact names against the catalogue and leaves qualitative advice alone.
 
   The reviewer reports problems to you. It does not approve the plan and does not redesign
-  it. You resolve the findings, then go to Andrew.
+  it. You resolve the findings, put a compact result in the `plan-review` step's `output` —
+  the findings and what you did about each, a line apiece — tick it, then go to Andrew.
+
+  WIRE IT YOURSELF WHEN YOU NAME IT. `plan-review` and `change-approval` share the `design`
+  band, and an anchor places a step only after a band BELOW it, so both are minted as
+  marked starts with no edge between them. In the plan file, in one edit: put the
+  `plan-review` step's id in the approval step's `deps`, and set that step's `root` to
+  false. A marked root carrying a dep is a defect `validate` reports, and leaving the edge
+  out is a plan whose approval can be reached without the review.
+
+  ON A REJECTION the work comes back to YOU, at that same approval step, under the rule
+  below — redo the design, bump `tries`, reopen the step, block again. Run this review a
+  second time only where the revised planning risk earns it; a contract Andrew rejected
+  over its wording does not.
 
 APPROVAL
 
