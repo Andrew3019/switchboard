@@ -161,6 +161,15 @@ step's `def` and `strategy.resources.presets` — and the positions where this r
 idiom puts a catalogue name in prose: `--role x`, `--model x`, held `x`, "the `x` tier",
 and the `sb` subcommands that take a catalogue name as their argument.
 
+Those positions are read in **every string the plan holds**, not in a list of fields: the
+strategy, the approval step's contract, each step's name, `why` and `output`, the notes and
+the title. It reports the exact path of every hit, so a finding can be traced in one look.
+
+One known noise source, since it will happen: prose *about* the check trips the check.
+A note that writes "the `x` tier" as a placeholder is reported as a tier the catalogue does
+not have, which is what the rule says and is not what the writer meant. Read the path,
+dismiss it, move on.
+
 `strategy.model` is read for tiers it mentions and is never failed on. The planner is told
 that qualitative advice — "strong and fresh for review" — is free text and does not come
 from the catalogue, so a word in that field is not a name anybody claimed exists.

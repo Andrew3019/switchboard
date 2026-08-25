@@ -21,10 +21,10 @@ READ ONLY, STRUCTURALLY
 
 `SB_READS` holds every argv this file will ever hand a subprocess, as a constant. Each is a
 read: `plugin plans planner`, `plugin plans guide`, `plugin plans catalog --json`, `models
---json`, `inspect <agent> --json` and `plugin plans show <plan> --json`. Two of them carry a
-NAME hole, `{agent}` and `{plan}`, and `_argv` fills exactly those two and nothing else — a
-caller cannot reach the verb words, because they are never taken from an argument. A test
-pins that.
+--json`, `presets <name>`, `inspect <agent> --json` and `plugin plans show <plan> --json`.
+Three of them carry a NAME hole — `{agent}`, `{plan}`, `{preset}` — and `_argv` fills
+exactly those and nothing else: a caller cannot reach the verb words, because they are never
+taken from an argument. A test pins that.
 
 WHAT THE CHECK OWNS, AND WHAT IT DOES NOT
 -----------------------------------------
@@ -43,10 +43,14 @@ the idiom is unambiguous instead: `--model x`, and "the `x` tier".
 
 PROSE is not enumerable, so the check reads only the POSITIONS where the repo's own idiom
 puts a catalogue name — `--role x`, `--model x`, `held x`, "the `x` preset", and the handful
-of `sb` subcommands that take a catalogue name as their argument. That catches the realistic
-invention and it is not complete. A name invented in free prose outside those positions is
-the judge's to spot, and `RUBRIC.md` says so rather than leaving the reader to assume the
-mechanical check covered it.
+of `sb` subcommands that take a catalogue name as their argument. Those positions are read
+in EVERY string the plan holds and not in a list of fields: the strategy, the approval
+step's contract, each step's name, `why` and `output`, the notes, the title. A field list
+drifts from that claim the moment the record grows a field; a walk cannot.
+
+It still catches the realistic invention rather than all of it. A name invented in free
+prose outside those positions is the judge's to spot, and `RUBRIC.md` says so rather than
+leaving the reader to assume the mechanical check covered it.
 
 `strategy.resources.skills` and `.tools` are reported and never checked. The catalogue says
 in as many words that skills and tools are not in it — they come from the session an agent
@@ -72,6 +76,7 @@ SB_READS: dict[str, tuple[str, ...]] = {
     "catalog": ("plugin", "plans", "catalog", "--json"),
     "models": ("models", "--json"),
     "inspect": ("inspect", "{agent}", "--json"),
+    "preset": ("presets", "{preset}"),
     "plan": ("plugin", "plans", "show", "{plan}", "--json"),
 }
 
@@ -86,17 +91,20 @@ SELF_REPORT = ("skills and tools are a marked SESSION SELF-REPORT: no sb command
 # Where the repo's own prose puts a catalogue name. Precision over recall on purpose: a
 # pattern that fired on ordinary words would bury the real findings in noise, and the
 # judge covers the residual.
+# Every capture opens with a LETTER. Without that guard `[\w.\-]+` matches a flag, and a
+# plan quoting `sb roles --json` came back reporting `--json` as an invented role — a clean
+# plan failed by the check that exists to say it is clean.
 PROSE = (
     (r"--role\s+`?([A-Za-z][\w.\-]*)", "roles"),
     (r"--model\s+`?([A-Za-z][\w.\-]*)", "models"),
-    (r"--with\s+`?(@?[\w.\-]+)", "presets"),
-    (r"\bsb\s+presets\s+`?([\w.\-]+)", "presets"),
-    (r"\bsb\s+roles\s+`?([\w.\-]+)", "roles"),
-    (r"\bsb\s+plugin\s+plans\s+library\s+`?([\w.\-]+)", "library"),
-    (r"\bsb\s+plugin\s+plans\s+template\s+use\s+`?([\w.\-]+)", "templates"),
-    (r"\bsb\s+grant\s+\S+\s+`?([\w.\-]+)", "capabilities"),
-    (r"\b(?:held|delegable)\s+`([\w.\-]+)`", "capabilities"),
-    (r"`([\w.\-]+)`\s+(?:role|preset|tier|template)\b", None),
+    (r"--with\s+`?(@?[A-Za-z][\w.\-]*)", "presets"),
+    (r"\bsb\s+presets\s+`?([A-Za-z][\w.\-]*)", "presets"),
+    (r"\bsb\s+roles\s+`?([A-Za-z][\w.\-]*)", "roles"),
+    (r"\bsb\s+plugin\s+plans\s+library\s+`?([A-Za-z][\w.\-]*)", "library"),
+    (r"\bsb\s+plugin\s+plans\s+template\s+use\s+`?([A-Za-z][\w.\-]*)", "templates"),
+    (r"\bsb\s+grant\s+\S+\s+`?([A-Za-z][\w.\-]*)", "capabilities"),
+    (r"\b(?:held|delegable)\s+`([A-Za-z][\w.\-]*)`", "capabilities"),
+    (r"`([A-Za-z][\w.\-]*)`\s+(?:role|preset|tier|template)\b", None),
 )
 
 # `strategy.model` is free text BY INSTRUCTION — the planner is told that qualitative advice
@@ -207,17 +215,24 @@ def _known(known: dict[str, set[str]], name: str, category: Optional[str]) -> Op
 # -- the grounding check -------------------------------------------------------
 
 
-def _prose_of(step: dict) -> Iterable[tuple[str, str]]:
-    """Every free-text field on a step, as (where, text)."""
-    s = step.get("strategy") or {}
-    for field in ("continuity", "orchestration", "model", "isolation", "verification",
-                  "replan_if"):
-        if isinstance(s.get(field), str):
-            yield f"strategy.{field}", s[field]
-    budget = s.get("budget") or {}
-    for field in ("context", "passes"):
-        if isinstance(budget.get(field), str):
-            yield f"strategy.budget.{field}", budget[field]
+def _prose_of(node: Any, path: str = "") -> Iterable[tuple[str, str]]:
+    """Every string anywhere under `node`, as (where, text).
+
+    A WALK RATHER THAN A FIELD LIST, and that is the fix for a real gap. While this read the
+    `strategy` fields by name it missed the approval step's contract, the step's own name,
+    `why`, `output` and the notes — so a plan naming an invented role inside its contract
+    came back clean, and the docstring above claimed the check covered `--role x` wherever
+    it appears. Enumerating fields means the code and the claim drift apart every time the
+    record grows a field; walking means they cannot.
+    """
+    if isinstance(node, str):
+        yield path.lstrip("."), node
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            yield from _prose_of(v, f"{path}.{k}")
+    elif isinstance(node, (list, tuple)):
+        for i, v in enumerate(node):
+            yield from _prose_of(v, f"{path}[{i}]")
 
 
 def _claims(pl: dict, known: dict[str, set[str]]) -> list[dict]:
@@ -254,9 +269,17 @@ def _claims(pl: dict, known: dict[str, set[str]]) -> list[dict]:
             if word in known["models"]:
                 add(f"{sid}.strategy.model", word, "models", "mention")
         for where, text in _prose_of(step):
+            if where in ("def", "id", "display"):
+                continue        # structured slots, read exactly above
             for pattern, category in PROSE:
                 for hit in re.finditer(pattern, text):
                     add(f"{sid}.{where}", hit.group(1), category, "prose")
+    # The plan's own strings as well — title, display, notes. The steps are walked above and
+    # are skipped here so nothing is read twice.
+    for where, text in _prose_of({k: v for k, v in pl.items() if k != "steps"}):
+        for pattern, category in PROSE:
+            for hit in re.finditer(pattern, text):
+                add(where, hit.group(1), category, "prose")
     return found
 
 
@@ -326,6 +349,7 @@ def manifest(agent: str, sb: str = "sb", *, brief: Optional[str] = None,
     cat_text = _run(sb, "catalog")
     cat = _payload(cat_text)
     row = _payload(_run(sb, "inspect", agent=agent))
+    presets = _bound_presets(cat, row.get("role"))
     out: dict[str, Any] = {
         "agent": {
             "name": row.get("name"), "role": row.get("role"),
@@ -340,12 +364,26 @@ def manifest(agent: str, sb: str = "sb", *, brief: Optional[str] = None,
             "task": row.get("task"),
         },
         "instruction": {
-            "planner": _digest(_run(sb, "planner")),
-            "guide": _digest(_run(sb, "guide")),
+            "planner": dict(_digest(_run(sb, "planner")),
+                            command="sb plugin plans planner"),
+            "guide": dict(_digest(_run(sb, "guide")), command="sb plugin plans guide"),
+            # The preset fragments bound to this agent are part of the instruction it
+            # actually ran on, and `sb presets <name>` is a read — so they are digested
+            # here rather than left to the skills-and-tools exemption, which they do not
+            # qualify for. The `@plugin` fragments are named and not digested: `sb presets`
+            # does not resolve them, and there is no other read-only command that does.
+            "presets": {name: dict(_digest(_run(sb, "preset", preset=name)),
+                                   command=f"sb presets {name}")
+                        for name in presets["files"]},
+            "plugin_fragments": presets["plugins"],
+            "plugin_fragments_note": ("bound to every agent; `sb presets` does not resolve "
+                                      "an @name and no other read-only command does, so "
+                                      "these are recorded by name only"),
         },
-        "catalogue": dict(_digest(cat_text),
+        "catalogue": dict(_digest(cat_text), command="sb plugin plans catalog --json",
                           **{k: sorted(v) for k, v in names(cat).items()}),
         "models": _payload(_run(sb, "models")),
+        "models_command": "sb models --json",
         "brief": None,
         "skills_and_tools": {"source": "session self-report", "reported": skills,
                              "note": SELF_REPORT},
@@ -354,6 +392,19 @@ def manifest(agent: str, sb: str = "sb", *, brief: Optional[str] = None,
         text = _read_file(brief)
         out["brief"] = dict(_digest(text), path=brief)
     return out
+
+
+def _bound_presets(cat: dict, role: Optional[str]) -> dict:
+    """The presets bound to an agent of `role`, split into readable files and @fragments."""
+    p = cat.get("presets") or {}
+    bound = list(p.get("every_agent") or []) + list((p.get("roles") or {}).get(role) or [])
+    seen, files, plugins = set(), [], []
+    for name in bound:
+        if name in seen:
+            continue
+        seen.add(name)
+        (plugins if name.startswith("@") else files).append(name)
+    return {"files": files, "plugins": plugins}
 
 
 def manifest_report(m: dict) -> str:
@@ -368,13 +419,26 @@ def manifest_report(m: dict) -> str:
           f"  tier        {a['tier_requested_at_spawn'] or '(not recorded)'} — "
           f"{a['tier_note']}", ""]
     L += [f"  planner instruction  {i['planner']['sha256'][:16]}  "
-          f"{i['planner']['lines']} lines",
-          f"  guide                {i['guide']['sha256'][:16]}  {i['guide']['lines']} lines",
-          f"  catalogue            {c['sha256'][:16]}  {c['chars']} chars of json"]
+          f"{i['planner']['lines']} lines    {i['planner']['command']}",
+          f"  guide                {i['guide']['sha256'][:16]}  {i['guide']['lines']} lines"
+          f"    {i['guide']['command']}",
+          f"  catalogue            {c['sha256'][:16]}  {c['chars']} chars"
+          f"    {c['command']}"]
+    for name, d in i["presets"].items():
+        L.append(f"  preset {name:<14}{d['sha256'][:16]}  {d['lines']} lines"
+                 f"    {d['command']}")
+    L.append(f"  plugin fragments     {', '.join(i['plugin_fragments']) or '(none)'}"
+             f"  — {i['plugin_fragments_note']}")
     if m["brief"]:
         L.append(f"  brief                {m['brief']['sha256'][:16]}  {m['brief']['path']}")
     else:
         L.append("  brief                (not given to this run)")
+    tiers = (m["models"] or {}).get("tiers") or {}
+    L += ["", f"  model tiers ({m['models_command']}), "
+              f"default provider {(m['models'] or {}).get('default_provider')}:"]
+    for name, t in sorted(tiers.items()):
+        L.append(f"    {name:<14}{t.get('provider')}  {t.get('model') or '(provider default)'}"
+                 f"  effort {t.get('effort') or '-'}")
     L += ["", "  catalogue names:"]
     for cat in ("roles", "models", "presets", "plugins", "capabilities", "library",
                 "templates"):
@@ -390,13 +454,16 @@ def manifest_report(m: dict) -> str:
 
 def main(argv: Optional[list[str]] = None) -> int:
     # `--sb` and `--json` are on a shared parent so they read the same either side of the
-    # subcommand. Typing them after it is what everybody does, and argparse puts a
-    # top-level flag before it only.
+    # subcommand. `SUPPRESS` is what makes that true rather than nearly true: with an
+    # ordinary default, argparse applies the SUBPARSER's default after the top-level parse
+    # and silently reverts a flag typed before the verb. That failure is the worst one this
+    # file has — `--sb ./bin/sb` reverting to `sb` reads the LIVE store from inside a clone,
+    # quietly, which is the exact thing the runbook exists to prevent.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--sb", default="sb",
+    common.add_argument("--sb", default=argparse.SUPPRESS,
                         help="the sb to run. INSIDE A CLONE THIS IS `./bin/sb`: a clone's "
                              "sb run from outside it writes to the live store")
-    common.add_argument("--json", action="store_true")
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p = argparse.ArgumentParser(
         parents=[common],
         description="the mechanical half of the planner evaluation pass — development only")
@@ -414,13 +481,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     c.add_argument("--catalog-json", help="captured `catalog --json` instead of a live store")
 
     a = p.parse_args(argv)
+    # SUPPRESS means the attribute is absent when the flag was never typed, on either side.
+    sb, as_json = getattr(a, "sb", "sb"), getattr(a, "json", False)
     if a.cmd == "manifest":
-        r = manifest(a.agent, a.sb, brief=a.brief, tier=a.tier, skills=a.skills)
-        print(json.dumps(r, indent=2) if a.json else manifest_report(r))
+        r = manifest(a.agent, sb, brief=a.brief, tier=a.tier, skills=a.skills)
+        print(json.dumps(r, indent=2) if as_json else manifest_report(r))
         return 0
-    r = check(plan(a.plan, a.sb, source=a.plan_json),
-              catalogue(a.sb, source=a.catalog_json))
-    print(json.dumps(r, indent=2) if a.json else check_report(r))
+    r = check(plan(a.plan, sb, source=a.plan_json),
+              catalogue(sb, source=a.catalog_json))
+    print(json.dumps(r, indent=2) if as_json else check_report(r))
     return 0 if r["ok"] else 1
 
 

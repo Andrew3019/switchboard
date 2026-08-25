@@ -47,3 +47,16 @@ whose approval can be reached without the review.
 **Not met** when `plan-review` is absent. The brief hands the planner three unresolved
 design questions, a concurrency risk and a migration path that must keep working; that is
 the described trigger almost word for word.
+
+## Known confound, found in the first live run
+
+The brief's handed-over half ends "If you put up a plan reviewer of your own, that is yours
+to decide". Case 3 is the case whose expected signal is that `plan-review` is **named**, and
+case 1 — whose signal is its **absence** — carries no comparable sentence. The one case that
+raises the idea in its brief is the one that expects it, and 1-against-3 is the central
+contrast of the whole pass.
+
+As with case 2 the bias runs against the observed result: the planner did not name
+`plan-review` even with the idea in front of it, so the `not met` is if anything stronger
+than the case deserves. Take the sentence out before a run where a `met` here would be the
+finding.

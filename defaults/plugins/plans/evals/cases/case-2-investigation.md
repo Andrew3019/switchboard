@@ -37,3 +37,13 @@ proportionate plan for this brief is still a failure: the brief is not a job hea
 change, and planning it is the error.
 
 Check `sb plugin plans list --all` in the clone rather than taking the planner's word.
+
+## Known confound, found in the first live run
+
+The brief's recorded departure pre-assigns a contract path — "if you reach a
+`change-approval` step, write the two sections to ...". That sentence cues planning in the
+one case whose expected signal is **declining to plan**.
+
+It cuts against the observed result rather than for it: the planner declined anyway. So it
+weakens nothing about a `met` here, and it would weaken a `not met`. Reword it before a run
+whose result you would want to lean on in the other direction.

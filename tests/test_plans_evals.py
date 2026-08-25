@@ -5,11 +5,16 @@ Pinning decisions, not buying confidence. Most of this pass is prose (`SKILL.md`
 real plan writer plans proportionally is not a thing a test can answer. What is pinned here
 is the small mechanical half and the one structural property of the committed cases:
 
-1. The harness only ever reads. Its six argvs are a constant, every one of them a read, and
-   the two that take a name take ONLY a name — no caller can reach the verb words.
+1. The harness only ever reads. Its seven argvs are a constant, every one of them a read,
+   and the three that take a name take ONLY a name — no caller can reach the verb words.
+   And `--sb` means the same thing either side of the subcommand: the version that silently
+   reverted it to `sb` read the LIVE store from inside a clone, which is the exact failure
+   the runbook exists to prevent.
 2. The grounding check finds an invented catalogue name and clears a plan that has none,
    and it lists skills and tools rather than failing them, because the catalogue says in as
-   many words that skills and tools are not in it.
+   many words that skills and tools are not in it. It reads EVERY string the plan holds and
+   not a list of fields — the approval step's contract, the notes, the title — because a
+   field list drifts from the coverage the docstring claims and a walk cannot.
 3. Every case file keeps its expected signal OUT of the half that is handed to a planner. A
    planner that can read the answer makes the evaluation self-certifying, which is the
    failure mode the whole pass is exposed to, and it is one line of a file away at any time.
@@ -29,10 +34,13 @@ question the check's own docstring concedes and the rubric hands to the judge.
 from __future__ import annotations
 
 import importlib.util
+import io
 import re
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 EVALS = ROOT / "defaults" / "plugins" / "plans" / "evals"
@@ -90,7 +98,7 @@ class ReadOnlyTest(unittest.TestCase):
 
     READS = {("plugin", "plans", "planner"), ("plugin", "plans", "guide"),
              ("plugin", "plans", "catalog", "--json"), ("models", "--json"),
-             ("inspect", "{agent}", "--json"),
+             ("presets", "{preset}"), ("inspect", "{agent}", "--json"),
              ("plugin", "plans", "show", "{plan}", "--json")}
 
     def test_every_argv_is_a_read_and_the_verbs_are_constants(self):
@@ -99,13 +107,27 @@ class ReadOnlyTest(unittest.TestCase):
         # `note` to this table, or parameterises a verb word, this is the line that says no.
         self.assertEqual(set(h.SB_READS.values()), self.READS)
         for key in h.SB_READS:
-            holes = {"agent": "some-agent", "plan": "p-9"}
+            holes = {"agent": "some-agent", "plan": "p-9", "preset": "house-rules"}
             argv = h._argv(key, **holes)
             filled = [w for w in argv if w in holes.values()]
             self.assertLessEqual(len(filled), 1, f"{key} takes more than a name")
             # Everything that is not the name came from the constant, in order.
             self.assertEqual([w for w in argv if w not in holes.values()],
                              [w for w in h.SB_READS[key] if not w.startswith("{")])
+
+    def test_sb_means_the_same_thing_on_either_side_of_the_subcommand(self):
+        # The flag that silently reverted. `--sb ./bin/sb check p-1` reverting to `sb` is a
+        # read of the LIVE store from inside a clone, quietly, and the runbook's whole first
+        # rule is that a clone's sb is the only sb a clone run may use.
+        seen = []
+        with mock.patch.object(h, "plan", lambda pid, sb, source=None: seen.append(sb) or
+                               GROUNDED), \
+             mock.patch.object(h, "catalogue", lambda sb, source=None: CATALOG), \
+             redirect_stdout(io.StringIO()):
+            h.main(["--sb", "./bin/sb", "check", "p-1"])
+            h.main(["check", "p-1", "--sb", "./bin/sb"])
+            h.main(["check", "p-1"])
+        self.assertEqual(seen, ["./bin/sb", "./bin/sb", "sb"])
 
     def test_a_missing_name_is_refused_rather_than_guessed(self):
         # A hole left unfilled would otherwise reach the shell as the literal `{plan}`,
@@ -135,6 +157,20 @@ class GroundingTest(unittest.TestCase):
         self.assertLessEqual({("plan-review", "library"), ("evidence", "presets"),
                               ("worker", "roles"), ("spawn", "capabilities"),
                               ("strong", "models")}, found)
+
+    def test_it_reads_the_contract_and_the_notes_and_not_just_the_strategy(self):
+        # The gap that let a plan invent a role inside its approval contract and come back
+        # clean. The check's own docstring claims it reads `--role x` wherever it appears,
+        # so the walk is what makes that claim true rather than nearly true.
+        pl = {"id": "p-3", "title": "names in every other place a plan keeps them",
+              "steps": [{"id": "step-1", "def": "change-approval",
+                         "why": "reopened for `--model turbo`",
+                         "contract": {"scope": ["seeded `--role verifier`, held `telepathy`"]},
+                         "notes": [{"text": "with the `paranoid` preset"}]}]}
+        r = h.check(pl, CATALOG)
+        self.assertFalse(r["ok"])
+        self.assertEqual({c["name"] for c in r["ungrounded"]},
+                         {"turbo", "verifier", "telepathy", "paranoid"})
 
     def test_skills_and_tools_are_listed_and_never_failed(self):
         # The catalogue does not carry them — they come from the session an agent runs in —
