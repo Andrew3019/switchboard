@@ -72,13 +72,24 @@ Everything below is one worked path. Adapt the paths; do not adapt the order.
 
 ### 1. The clone
 
+Clone the **worktree you are standing in**, not the git common dir: a worktree clone lands
+already on the branch, which makes the checkout a no-op rather than a guess.
+
 ```
-git clone <this repo> /tmp/plan-evals && cd /tmp/plan-evals
-git checkout <the branch under evaluation>
+git clone "$(git rev-parse --show-toplevel)" /tmp/plan-evals && cd /tmp/plan-evals
+git checkout <the branch under evaluation>       # a no-op if you cloned a worktree
+mkdir -p .switchboard/evals                      # nothing else creates it, and step 3 writes here
 ```
 
 From here on, every `sb` in this section is that clone's `./bin/sb`, run from inside the
 clone.
+
+**The clone's catalogue is not this checkout's catalogue.** Repo-local config under
+`.switchboard/` is gitignored, so a role, preset or tier defined there does not clone — one
+recorded pass had seven roles live and six in the clone. Read
+`./bin/sb plugin plans catalog` in the clone and compare before you believe a grounding
+report: checking a plan against a *larger* vocabulary than its planner saw is exactly how an
+invented name passes.
 
 ### 2. The trust precondition, and why it is here
 
@@ -87,20 +98,25 @@ workspace-trust dialog and never starts work. `sb` pre-seeds that trust for `cod
 for `claude`. So before spawning anything, add the clone's absolute path to `~/.claude.json`
 under `projects` with `"hasTrustDialogAccepted": true`:
 
+Back it up first and keep the write short. That file is a live global config every running
+Claude session writes to, so a read-modify-write can clobber somebody else's write; and
+dumping it without `indent` collapses a pretty-printed config to one line.
+
 ```
-python3 - <<'PY'
-import json, pathlib
-p = pathlib.Path.home() / ".claude.json"
-d = json.loads(p.read_text())
-d.setdefault("projects", {}).setdefault("/tmp/plan-evals", {})["hasTrustDialogAccepted"] = True
-p.write_text(json.dumps(d))
-PY
+cp ~/.claude.json ~/.claude.json.evals-backup
+python3 -c 'import json,pathlib;p=pathlib.Path.home()/".claude.json";d=json.loads(p.read_text());d.setdefault("projects",{}).setdefault("/tmp/plan-evals",{})["hasTrustDialogAccepted"]=True;p.write_text(json.dumps(d,indent=2))'
 ```
 
 **Verify one agent actually starts before you spawn the rest.** If it does not, stop: the
 alternative is running the eval planners on a tier no real plan writer is spawned on, and
 that evaluates something nobody runs. That is a decision for whoever owns the plan, not a
 workaround to reach for.
+
+**Whether this step is load-bearing is not settled, and that is worth knowing before you
+debug it.** Agents do not run in the clone directory: they run in a herdr worktree at
+`/root/.herdr/worktrees/<clone-basename>/<workspace>`, a path this step never touches. In
+two recorded passes claude agents started fine with only the clone path trusted. Do it
+anyway — it costs a line — and if one does hang on the dialog, trust the worktree path too.
 
 ### 3. The agents
 
@@ -114,9 +130,22 @@ and the granting — which is the guide's own shape anyway, since a planner is s
 lead that owns the worktree.
 
 ```
-./bin/sb delegate "<hold and follow instructions>" --role lead --model strong --name eval run
-./bin/sb tell lead-eval-run "spawn <n> planners: sb delegate ... --role researcher --model strong --name <case topic>; then sb grant <each> spawn"
+./bin/sb delegate "<hold and follow instructions>" --role lead --model strong --name "eval run 0825"
+./bin/sb tell lead-eval-run-0825 "spawn <n> planners with ./bin/sb delegate, --role researcher --model strong, one --name per case; then ./bin/sb grant <each> spawn"
 ```
+
+**Quote every `--name`.** It takes one argument, and `--name eval run` is refused outright
+with `unrecognized arguments: run`.
+
+**Never reuse a topic from a previous pass.** `sb` allocates the name against the clone's
+own store, which is empty, while herdr enforces names machine-wide — so a second pass is
+refused with `agent_name_taken` pointing at a worktree you thought was gone. Date-stamp the
+topic, or read `herdr agent list` first.
+
+**Poll `./bin/sb status` to learn a planner has finished; there is no other route.** A human
+has no inbox, `sb board` refuses outside a tty, and a planner's `sb tell parent` reaches the
+throwaway lead rather than you. Watch the row go idle, then read the file it was told to
+write.
 
 Hand each planner its case brief by **path**, and hand over the `Brief` section only.
 Never the whole case file. The split is a heading, so cutting it is one command:
@@ -142,12 +171,24 @@ run. So each case brief departs from that, on purpose and in writing:
 Watch for one that blocks anyway — that is itself worth recording — and clear it by telling
 it to carry on.
 
+**The departure costs you two things, and neither is optional to know about.** A planner
+told to stop rather than to `sb done` ends its turn *stalled*, and `sb cleanup` will not
+close a stalled agent — see the teardown. And the approval step is never ticked, so anything
+a case expects to see *reopened* cannot be observed at all. Case 5's `progress` condition is
+the one that hits, and its file says so.
+
 ### 5. The manifest and the grounding check
 
 ```
-python3 <this directory>/harness.py manifest <agent> --sb ./bin/sb --brief <path>
-python3 <this directory>/harness.py check <plan-id>  --sb ./bin/sb
+python3 <this directory>/harness.py manifest <agent> --sb ./bin/sb \
+        --brief <path> --tier strong --skills "<what the agent reported>"
+python3 <this directory>/harness.py check <plan-id> --sb ./bin/sb
 ```
+
+**`--tier` is not optional in practice.** The model seed is half of what this pass exists to
+check, and no read-only `sb` command reports an agent's tier back — so without it the
+manifest reads `tier (not recorded)` and the run has not captured the thing it set out to.
+`--skills` is the same story for the self-report below.
 
 `harness.py` runs read-only `sb` commands and nothing else; the argv list is a constant in
 the file. `manifest` records what the agent was given; `check` reports every catalogue name
@@ -197,9 +238,18 @@ pass has.
 ### 7. Teardown
 
 ```
-./bin/sb cleanup
-./bin/sb workspace close <each workspace the run created>
+./bin/sb status                                          # read it: every agent, every workspace
+./bin/sb cleanup <the lead> --force
+./bin/sb workspace close <each workspace the run created> --yes
 ```
+
+**`cleanup` on its own will refuse every planner, and this is the step that leaves litter.**
+The case briefs tell planners to *stop*, not to `sb done`, so each one ends stalled and
+plain `cleanup` answers `refused …: working, not finished — it has not reported an end`.
+`--force` on the lead takes the subtree with it. `workspace close` wants `--yes` when
+nothing is standing there to confirm. An operator who runs the two bare commands, reads no
+error, and walks away leaves five live agents and a worktree behind — it has happened, and
+the next pass's spawn is what discovers it.
 
 **Close only the workspaces the run created, by name.** A clone inherits the name of the
 workspace it was cloned from, so the clone's own workspace table has a row named after the
@@ -211,8 +261,9 @@ Never `herdr workspace close` directly. On a repo's primary checkout it closes e
 herdr workspace sharing that repo's `.git`, and it has taken a whole live fleet down. Never
 an unscoped `pkill` either.
 
-Then check the spaces UI is clear. An eval agent left running is the most expensive kind of
-litter this pass can leave.
+Then check `herdr agent list` and the spaces UI, and delete the clone and the
+`~/.claude.json` backup. An eval agent left running is the most expensive kind of litter
+this pass can leave, and it is invisible from the live fleet's own store.
 
 ## Reading the result
 

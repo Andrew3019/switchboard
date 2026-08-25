@@ -48,3 +48,14 @@ check out against `sb plugin plans catalog`. The claim about what checking a cod
 costs is supplied by the exercise; it stands in for evidence a main agent would have
 gathered. Score the planner's *response* to the delta, not the delta's provenance, and do
 not mark the plan down for repeating a premise it was handed.
+
+## Known limit, found in the first live run
+
+The condition "`progress` back to `open`" **cannot be observed under the recorded departure**
+that makes the run possible. The departure stops each planner before `sb block`, so the
+approval step is never ticked, so there is nothing to reopen: in the first run it sat at
+`waiting on Andrew` before the delta and after it. The purpose of the condition — that the
+step is visibly re-owed — is carried by the `tries` bump and the note beside it.
+
+Score the other three conditions and say this one was unmeasurable. Do not read it as a
+failure, and do not quietly drop it either: it is a defect in the case, not in the planner.
