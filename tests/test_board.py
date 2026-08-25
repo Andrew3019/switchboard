@@ -23,6 +23,7 @@ import threading
 import time
 import tty
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -951,6 +952,36 @@ def a_plugin(root: Path, name: str, *, draws: bool = True, hook: str = HOOK_PY) 
     return d
 
 
+def forget_plugins() -> None:
+    """Both process globals `board_hooks` writes: its cache, and the modules it imported.
+
+    The cache half is this file's business. The MODULE half is other files': the board
+    imports a plugin package as `sb_plugin_<name>` and leaves it in `sys.modules`, and
+    `tests/test_plugins.py`'s isolation tests assert that NO `sb_plugin_*` module is there
+    at all — that assertion is the whole meaning of "delegate never imports plugin code",
+    so it is about the process and not about one test. Under `pytest -n auto` those tests
+    share a worker with these, and a plugin left imported here failed one of them for a
+    reason that lives in this file. Clearing it in `setUp` was not enough: what matters is
+    what is left behind AFTER the last test here runs.
+    """
+    board._HOOKS.clear()
+    for name in [m for m in sys.modules if m.startswith(board._MODULE_PREFIX)]:
+        del sys.modules[name]
+
+
+def tearDownModule() -> None:
+    """Leave the process as this file found it, for whatever pytest runs next in it.
+
+    The per-class cleanups below cover the classes that reach for a plugin ON PURPOSE.
+    This covers the ones that do not: several of the window and layout sweeps call
+    `board.layout` against THIS repo, which ships `plans` enabled, so drawing a frame
+    imports it. Under `pytest -n auto` a worker interleaves files, and what is left in
+    `sys.modules` here is what `tests/test_plugins.py` finds when it asserts nobody
+    imported a plugin.
+    """
+    forget_plugins()
+
+
 def a_plugin_repo(tmp: Path, *, enabled: str, plugins: dict) -> Path:
     """A checkout with a `.git` directory, an enablement file, and plugins of its own.
 
@@ -991,10 +1022,8 @@ class PluginSeamTest(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {"PR8_MARK": str(self.mark)})
         patch.start()
         self.addCleanup(patch.stop)
-        board._HOOKS.clear()
-        self.addCleanup(board._HOOKS.clear)
-        for name in [m for m in sys.modules if m.startswith(board._MODULE_PREFIX)]:
-            del sys.modules[name]
+        forget_plugins()
+        self.addCleanup(forget_plugins)
 
     def test_a_disabled_plugin_is_not_asked_and_is_never_imported(self):
         """`enabled` is read out of config — files, no subprocess — and a name that is not
@@ -1120,8 +1149,8 @@ class SeamOffIsTodaysBoardTest(unittest.TestCase):
     SNAP = None
 
     def setUp(self):
-        board._HOOKS.clear()
-        self.addCleanup(board._HOOKS.clear)
+        forget_plugins()
+        self.addCleanup(forget_plugins)
         self.snap = snap(agent("top"), agent("kid", depth=1, parent="top"),
                          agent("other", workspace="web"))
 
@@ -1161,8 +1190,8 @@ class PlanBlockTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        board._HOOKS.clear()
-        self.addCleanup(board._HOOKS.clear)
+        forget_plugins()
+        self.addCleanup(forget_plugins)
         self.repo = self.tmp / "repo"
         (self.repo / ".git").mkdir(parents=True)
         (self.repo / ".switchboard").mkdir()
@@ -1945,8 +1974,8 @@ class SeamPathsTest(unittest.TestCase):
         # `plans` is shipped and not the repo's, and it has a state directory here, so it
         # is found through the OTHER root — which is the half a one-root glob would miss.
         (repo / ".git" / "agentflow" / "plugins" / "plans").mkdir(parents=True)
-        board._HOOKS.clear()
-        self.addCleanup(board._HOOKS.clear)
+        forget_plugins()
+        self.addCleanup(forget_plugins)
         with mock.patch.dict(os.environ, {"PR8_MARK": str(tmp / "m")}):
             found = {n for n, _, _, _ in board.board_hooks(repo)}
         self.assertLessEqual(found, set(plugins.available(repo)))
@@ -1991,8 +2020,18 @@ class SeamPathsTest(unittest.TestCase):
         never = want.parent / "never-run"
         self.assertEqual(board._state_dir(repo, "never-run", "repo"), never)
         self.assertFalse(never.exists())
-        # No repo, no path to name.
-        self.assertIsNone(board._state_dir(tmp / "not-a-repo", "plans", "repo"))
+        # No repo, no path to name — asked of a name directly under `/`, and deliberately
+        # NOT of one under `tmp`. `git_common_dir` walks every ancestor, and the system
+        # temp directory belongs to nobody: one `git init` typed in the wrong shell leaves
+        # a `/tmp/.git` behind, and from then on every temp directory really IS inside a
+        # repo, so this failed for being right rather than for being wrong. Under
+        # `pytest -n auto` that arrives as a flake, because whether the stray directory is
+        # there has nothing to do with this test. A name under `/` has two ancestors, both
+        # of them ours to reason about. Same shape as `tests/test_panel.py`'s
+        # `PathsWithoutGit.test_not_a_repo_says_so_rather_than_guessing`.
+        nowhere = Path("/") / f"not-a-repo-{uuid.uuid4().hex}"
+        self.assertFalse(nowhere.exists())      # the premise, stated rather than assumed
+        self.assertIsNone(board._state_dir(nowhere, "plans", "repo"))
 
 
 class ReportFilesTest(unittest.TestCase):

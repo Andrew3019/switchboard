@@ -155,6 +155,16 @@ class Sandbox(unittest.TestCase):
         self.sw = self.repo / ".switchboard"
         self.sw.mkdir()
 
+        # Before AND after. The topology assertion this file is built on — no
+        # `sb_plugin_*` in `sys.modules` — is a fact about the PROCESS, so anything that
+        # imported a plugin earlier in this worker answers it instead of the test does.
+        # Under `pytest -n auto` that is a real neighbour: `tests/test_board.py` drives
+        # `board_hooks`, which imports plugin packages, and tests from the two files share
+        # a worker. Clearing here makes the assertion mean what it says it means — this
+        # test imported no plugin code — whatever ran before it. Nothing depends on a
+        # plugin module surviving between tests: `plugins._import` never consults
+        # `sys.modules`, it re-imports and overwrites.
+        self._forget_plugin_modules()
         self.addCleanup(self._forget_plugin_modules)
 
     def _unship(self) -> None:
