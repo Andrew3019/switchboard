@@ -25,6 +25,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -536,6 +537,38 @@ class RootPaneTest(CloseHarness, unittest.TestCase):
         self.assertNotIn(path, self.registered())
 
 
+class SettleClock:
+    """The clock the settle loop reads, so that the loop's own arithmetic is what ends it.
+
+    Stands in for `broker`'s `time` and delegates everything it is not asked about to the
+    real module — the close path reads `time.time()` for its rows, and only the settle's
+    poll should be a fiction. `sleep` costs nothing and advances the clock by exactly what
+    it was asked to sleep for, which is the passage of time the loop is claiming anyway.
+
+    `ticks` is a hang detector rather than a measurement. A poll-until-clear — the thing
+    `test_the_wait_is_bounded` exists to catch — never leaves the loop, and against a fake
+    clock it would spin forever rather than fail. Running out of ticks turns that into a
+    failure that names itself, immediately.
+    """
+
+    def __init__(self, ticks: int) -> None:
+        self.now = 0.0
+        self.ticks = ticks
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.ticks -= 1
+        if self.ticks < 0:
+            raise AssertionError(
+                "the settle is still polling: the wait is not bounded by its deadline")
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class SettleTest(CloseHarness, unittest.TestCase):
     """The re-confirmation waits for the panes it just closed, and waits for nothing else.
 
@@ -596,15 +629,35 @@ class SettleTest(CloseHarness, unittest.TestCase):
 
     def test_the_wait_is_bounded(self):
         """It is a bounded wait and not a poll-until-clear: a directory somebody really is
-        working in must reach the refusal, not hang the command until they stop."""
+        working in must reach the refusal, not hang the command until they stop.
+
+        Asked of the loop's OWN clock and not of the wall. The wall-clock version of this
+        — `assertLess(time.monotonic() - start, 5)` around the whole command — was a
+        statement about the machine rather than about the wait: the settle is 0.3 s and
+        everything else `workspace_close` does here measured 0.17 s idle, so the other
+        4.5 s were headroom, and a `pytest -n auto` box hands that out to whatever else it
+        is running. It flaked there, for a reason that has nothing to do with boundedness.
+
+        Here every poll advances a clock of ours by the poll interval and sleeps for
+        nothing, so the deadline arithmetic is the only thing that can end the loop, and
+        what is pinned is the claim itself: the wait stops within a poll of the settle it
+        was given, having actually waited.
+        """
         path = self.space()
         self.agent("api-lead", workspace="api", cwd=path, pane="w9:p1")
         self.arrives_during_the_stop_step(live.Proc(4242, "vim", path))
-        broker.TEARDOWN_SETTLE = 0.3
-        start = time.monotonic()
-        with self.assertRaises(ValueError):
-            self.b.workspace_close("api", me=HUMAN)
-        self.assertLess(time.monotonic() - start, 5)
+        broker.TEARDOWN_SETTLE, broker.TEARDOWN_SETTLE_POLL = 0.3, 0.01
+        clock = SettleClock(ticks=200)      # this settle allows 30; finite is the point
+        with mock.patch.object(broker, "time", clock):
+            with self.assertRaises(ValueError) as e:
+                self.b.workspace_close("api", me=HUMAN)
+        self.assertIn("vim", str(e.exception))
+        self.assertGreater(clock.now, 0)    # it waited...
+        # ...and it stopped. One poll of slack because the last one may begin an instant
+        # before the deadline; the second because thirty additions of 0.01 do not sum to
+        # exactly 0.3.
+        self.assertLessEqual(clock.now, broker.TEARDOWN_SETTLE
+                             + 2 * broker.TEARDOWN_SETTLE_POLL)
 
 
 class BranchTest(CloseHarness, unittest.TestCase):
