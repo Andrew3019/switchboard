@@ -13,6 +13,7 @@ fake.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import time
 import unittest
@@ -288,3 +289,57 @@ class SweptSetTest(SweepHarness, unittest.TestCase):
         out = self.b.sweep(dry_run=True)
         self.assertEqual(out["swept"], [])
         self.assertIn("unknown is not empty", self.held(out)["opaque"])
+
+
+class GoneRowsTest(SweepHarness, unittest.TestCase):
+    """A stale workspace has two shapes, and the sweep only ever had one of them.
+
+    92 of the 277 rows in the 2026-08-16 census were `absent` — the row and its branch
+    outlived the directory — and the sweep's first line skipped every verdict that was
+    not `ok`. So the cheapest case in the whole store, the one with nothing left to
+    decide, was the one case nothing automatic could reach: each was a `sb workspace
+    close <name>` somebody typed by hand (#77).
+    """
+
+    def gone(self, name: str, *, commit: bool = False) -> str:
+        """A real linked checkout, recorded, then deleted out from under the record."""
+        path = self.worktree(name, commit=commit)
+        store.record_workspace(self.db, name, path)
+        shutil.rmtree(path)
+        return path
+
+    def held(self, out: dict) -> dict:
+        return {h["name"]: h["reason"] for h in out["held"]}
+
+    def test_a_row_whose_directory_is_gone_is_swept_and_taken_off_the_books(self):
+        """Not a dry run: what was missing was the bookkeeping, so the bookkeeping is
+        what this asserts — the registration gone, the branch gone, the row retired."""
+        path = self.gone("stale")
+        out = self.b.sweep()
+        self.assertEqual(out["swept"], ["stale"])
+        self.assertNotIn(path, [wt["path"] for wt in self.b._worktrees()])
+        row = store.get_workspace(self.db, "stale")
+        self.assertTrue(row["retired_at"])
+        self.assertIsNone(row["checkout"])
+
+    def test_an_unfinished_row_under_the_gone_path_still_holds_it(self):
+        """The one rule that survives the directory: a deleted checkout does not retract
+        a claim that somebody is working under it."""
+        path = self.gone("stale")
+        self.row("w-stale", workspace="stale", branch="stale", cwd=path, state="working")
+        out = self.b.sweep()
+        self.assertEqual(out["swept"], [])
+        self.assertIn("still recorded as working", self.held(out)["stale"])
+        self.assertIsNone(store.get_workspace(self.db, "stale")["retired_at"])
+
+    def test_bare_and_retired_rows_are_still_never_looked_at(self):
+        """Both exemptions are choices. Closing a bare space would retire an
+        orchestrator's space out from under a sweep aimed at agents; a retired row is
+        already closed, and nothing in switchboard deletes a workspace row."""
+        store.record_workspace(self.db, "orchestrator", None)
+        store.record_workspace(self.db, "done-already", str(self.root / "wt" / "old"))
+        store.retire_workspace(self.db, "done-already")
+        out = self.b.sweep()
+        self.assertEqual(out["swept"], [])
+        self.assertEqual(out["held"], [])
+        self.assertEqual(out["looked"], 0)

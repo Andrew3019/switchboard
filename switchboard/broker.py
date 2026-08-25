@@ -6670,7 +6670,7 @@ class Broker:
     # -- the automatic sweep -------------------------------------------------------------
 
     def sweep(self, *, dry_run: bool = False, now: Optional[float] = None) -> dict:
-        """Delete every worktree that has nothing left to lose. Runs unattended.
+        """Close every workspace that has nothing left to lose. Runs unattended.
 
         The trigger is `sb board`, twice an hour on the system clock — see
         `switchboard/sweep.py`, which holds the schedule, the lock that keeps twenty
@@ -6689,6 +6689,23 @@ class Broker:
         read cheapest-first and stopping at the first thing that holds. The first two are
         the gate's own answers, taken from the listing rather than re-asked, so the whole
         machine is scanned once for a sweep rather than once per space.
+
+        Two kinds of row are candidates, because a stale workspace has two shapes and the
+        first version of this only had one. A checkout that is THERE takes the policy
+        above. A checkout that is ABSENT — the row and its branch outlived the directory —
+        takes `_sweepable_gone`, which is the records gate and nothing else, because every
+        question the policy asks is a question about a directory. 92 of the 277 rows in
+        the 2026-08-16 census were absent, none of them was reachable by anything
+        automatic, and each one was a `sb workspace close <name>` somebody typed by hand
+        (#77).
+
+        Two kinds stay out, and both are choices rather than oversights. A **bare** space
+        is an orchestrator laid over somebody else's checkout: closing it deletes nothing
+        and retires a dispatcher's space out from under a sweep aimed at agents, which is
+        the exemption `_close_empty_spaces` already keeps and this keeps with it. A
+        **retired** row is already closed — nothing in switchboard deletes a workspace row,
+        so retired is where every swept row ends up and there is nowhere further for one
+        to go.
 
         A refusal is never raised. A sweep looks at the whole fleet, most of it is held
         back by something ordinary, and one space that will not close is not a reason to
@@ -6724,14 +6741,17 @@ class Broker:
         my_names, my_dirs = self._my_spaces(me)
         for w in self.workspace_list()["workspaces"]:
             name, checkout = w["name"], w["checkout"]
-            if w["verdict"] != store.CHECKOUT_OK:
-                continue                       # bare, retired, already gone, unreadable
+            if w["verdict"] not in (store.CHECKOUT_OK, store.CHECKOUT_ABSENT):
+                continue                       # bare, retired, unreadable
             if _same_dir(checkout, primary):
                 continue                       # the repository's own working tree
             if name in my_names or any(live.is_under(d, checkout) for d in my_dirs):
                 continue                       # never the space the sweep is standing in
             out["looked"] += 1
-            why, facts = self._sweepable(w, git=git, base=base, me=me, now=now)
+            if w["verdict"] == store.CHECKOUT_ABSENT:
+                why, facts = self._sweepable_gone(w, me=me)
+            else:
+                why, facts = self._sweepable(w, git=git, base=base, me=me, now=now)
             if why is None and not dry_run:
                 try:
                     self.workspace_close(name, me=me,
@@ -6746,6 +6766,34 @@ class Broker:
             store.log_event(self.db, kind="sweep", swept=",".join(out["swept"]) or None,
                             looked=out["looked"], held=len(out["held"]))
         return out
+
+    def _sweepable_gone(self, w: dict, *, me: str) -> tuple[Optional[str], dict]:
+        """None if this already-gone checkout's row may be tidied away, else what holds it.
+
+        `_space_ready`'s absent branch, said in the sweep's own two-value shape. Nothing
+        is at that path, so nothing there can be lost, and every question `_sweepable`
+        asks is a question about a directory: what is live in it, what is dirty in it,
+        what its ignored files weigh. Asked of a path that is not there they do not answer
+        "empty", they answer "unknown" — which is why routing an absent row through
+        `_sweepable` would have held every one of them forever on "git would not say what
+        is in it".
+
+        The records gate is the one rule that still applies, for `_close_gone`'s reason:
+        an unfinished agent row under that path is a claim that somebody is still working
+        there, and a deleted directory does not retract it.
+
+        The branch is deliberately not asked about. `_finish` deletes it with `git branch
+        -d`, which refuses an unmerged one, so the commits on a branch nothing merged
+        survive this untouched — the same bargain `sweep` documents for a worktree it
+        deletes, and the reason an absent row needs no landing check of its own.
+        """
+        name, checkout = w["name"], w["checkout"]
+        facts: dict = {"checkout": checkout, "branch": w["branch"], "gone": True}
+        try:
+            self._records_gate(name, checkout, me=me)
+        except ValueError as e:
+            return str(e), facts
+        return None, facts
 
     def _sweepable(self, w: dict, *, git, base: str, me: str,
                    now: float) -> tuple[Optional[str], dict]:
