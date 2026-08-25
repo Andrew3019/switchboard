@@ -668,13 +668,15 @@ by the dispatcher sweeping on its own judgement — what changes is that the dis
 carries that decision out. It closes children when Andrew tells it to, and when a child
 reports its task fully done it may ask him to approve closing it. The plans plugin can
 override that ask: where a plan is running, its merge gate is the one approval and cleanup
-follows it, so a finished child is not a separate ask. The automatic worktree
-sweep is not an exception to that and not a judgement anybody is making: it closes whole
-workspaces rather than agents, it only reaches one where every agent has already finished,
-and an agent still working or blocked holds its worktree open. — confirmed 2026-08-09,
-the dispatcher half 2026-08-15, superseding the 2026-08-14 wording that left closing
-below a dispatcher entirely off it; the sweep's place in it 2026-08-16; the plans plugin's
-merge-gate override of the separate close-approval 2026-08-17
+follows it, so a finished child is not a separate ask. The automatic worktree sweep is not
+an exception to that and not a judgement anybody is making: it closes whole workspaces
+rather than agents, it only reaches one where every agent has already finished, and an
+agent still working or blocked holds its worktree open. The agent rows under a workspace
+it takes go with the workspace, which is that same whole-workspace act and not a decision
+about any agent. — confirmed 2026-08-09, the dispatcher half 2026-08-15, superseding the
+2026-08-14 wording that left closing below a dispatcher entirely off it; the sweep's place
+in it 2026-08-16 and its agent rows 2026-08-25; the plans plugin's merge-gate override of
+the separate close-approval 2026-08-17
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 parent, which then decides whether to close it. It always uses the **when idle**
@@ -699,17 +701,20 @@ branch pushed and never fetched back still counts. Docs-only is decided by path 
 anywhere, or anything under `notes/`, `design/`, `learnings/`, `research/` — never by
 reading what a change really is. Every unknown holds: a git that will not answer is not
 evidence that there is nothing to lose. Exactly one board sweeps per tick, and no board
-running means no sweep, which is the accepted cost of having no daemon. Every deletion is
-`sb workspace close`'s, gates and all; the repository's own checkout and the space the
-sweep is standing in are never candidates; and the gate answering "is anything live in
-there" counts any process of Andrew's own sitting in the directory, agent or not, which is
-deliberately left as it is. Ignored content does not hold a worktree back from a sweep the
-way it holds back a close typed by hand — every worktree here carries `__pycache__` and
-the like, so refusing on those would not be a conservative sweep but no sweep at all —
-while work git can see holds one open unconditionally. Everything held back is named with
-the reason, every half hour, and that list is the half of this a person reads. `sb sweep`
-is the same run typed by hand, and it is the human's: an agent asking for it is refused. —
-confirmed 2026-08-16
+running means no sweep, which is the accepted cost of having no daemon. Every worktree
+deletion is `sb workspace close`'s, gates and all; the repository's own checkout and the
+space the sweep is standing in are never candidates; and the gate answering "is anything
+live in there" counts any process of Andrew's own sitting in the directory, agent or not,
+which is deliberately left as it is. Ignored content does not hold a worktree back from a
+sweep the way it holds back a close typed by hand — every worktree here carries
+`__pycache__` and the like, so refusing on those would not be a conservative sweep but no
+sweep at all — while work git can see holds one open unconditionally. The sweep takes rows
+as well as directories: a workspace row whose checkout is already gone is swept too, and a
+retired row is deleted outright along with the agent rows filed under it — what that costs
+is under `sb restore` below. Everything held back is named with the reason, every half
+hour, and that list is the half of this a person reads. `sb sweep` is the same run typed
+by hand, and it is the human's: an agent asking for it is refused. — confirmed 2026-08-16,
+the rows 2026-08-25
 
 **`sb status` is for agents; `sb board` is Andrew's view of the tree.** A soft
 convention about what each is for, not an enforced gate. — confirmed 2026-08-09, soft
@@ -772,8 +777,10 @@ it, and so now does the sweep, with nobody typing anything — both accepted: th
 the recovery path for the work, not restore. What the sweep costs is bounded by the rules
 it deletes under, since it only ever reaches a worktree whose commits are on origin or are
 docs-only, and a swept branch's ref is deleted with `git branch -d`, which refuses an
-unmerged one. So a sweep costs a checkout and its restore, never a commit. — confirmed
-2026-08-09, the sweep 2026-08-16
+unmerged one. The agent rows under a swept workspace go with the workspace, so their
+`sb restore` and their `sb inspect` history go with it too. So a sweep costs a checkout,
+its restore, and that history — never a commit. — confirmed 2026-08-09, the sweep 2026-08-16,
+the agent rows 2026-08-25
 
 **`sb inbox --peek` stays, and it must be clear that once a message is read it will not
 be brought up again.** — confirmed 2026-08-09
