@@ -425,10 +425,20 @@ class NeedsYouTest(unittest.TestCase):
     def test_a_blocked_grandchild_hides_the_idle_top_and_is_itself_listed(self):
         # Both halves in one: the blocked agent is still summoned — nothing under it can
         # answer its question — and its idle ancestors are not, because it IS live work.
+        #
+        # Two idle ancestors, and each needs a FINISHED row directly under it for the same
+        # reason `mid` is finished in the working-descendant case above: `collect` excuses
+        # any parent whose own direct child is still open (`live_parent`), so a stalled row
+        # sitting straight on top of an open one is a row the collector cannot produce.
+        # `bridge` and `relay` are the agents that reported while work of their own carried
+        # on beneath them — which is what puts a live `kid` two generations under each of
+        # the rows this test is about.
         names = self._names(
             agent("lead", stalled=True, turn="idle", idle=900),
-            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900),
-            agent("kid", depth=2, parent="mid", state="blocked", turn="idle",
+            agent("bridge", depth=1, parent="lead", state="done", turn="idle"),
+            agent("mid", depth=2, parent="bridge", stalled=True, turn="idle", idle=900),
+            agent("relay", depth=3, parent="mid", state="done", turn="idle"),
+            agent("kid", depth=4, parent="relay", state="blocked", turn="idle",
                   blocked_why="which branch?"),
         )
         self.assertEqual(names, ["kid"])
@@ -454,13 +464,19 @@ class NeedsYouTest(unittest.TestCase):
         out of RUNNING for a couple of seconds between two turns — and without
         `still_going` reading that as work in flight, that one gap summons Andrew to two
         rows he can do nothing about, and then withdraws them.
+
+        `bridge` and `relay` are there for the reason they are in the blocked-grandchild
+        case: an idle ancestor is only producible above a child that has FINISHED, so each
+        of the two rows under test carries a reported agent whose own work ran on.
         """
         settled = int(status.NEEDS_SETTLE)
         names = self._names(
             agent("lead", stalled=True, turn="idle", idle=900, needs_for=settled),
-            agent("mid", depth=1, parent="lead", stalled=True, turn="idle", idle=900,
+            agent("bridge", depth=1, parent="lead", state="done", turn="idle"),
+            agent("mid", depth=2, parent="bridge", stalled=True, turn="idle", idle=900,
                   needs_for=settled),
-            agent("kid", depth=2, parent="mid", stalled=True, turn="idle", idle=2,
+            agent("relay", depth=3, parent="mid", state="done", turn="idle"),
+            agent("kid", depth=4, parent="relay", stalled=True, turn="idle", idle=2,
                   herdr_state="idle", needs_for=2),
         )
         self.assertEqual(names, [])
