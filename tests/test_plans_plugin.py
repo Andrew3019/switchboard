@@ -3478,6 +3478,158 @@ class TriggerTest(PlansSandbox):
         self.assertNotEqual(code, 0)
 
 
+class PlannerPackageTest(PlansSandbox):
+    """The plan writer's three reads and the field that says a plan has one.
+
+    A plan writer is a `researcher` plus what this plugin owns: `planner`, the instruction
+    it reads on its first turn; `catalog`, the vocabulary it may name; and the plan-level
+    `planner` field, which moves the shape of one plan off the worktree's owner and onto
+    the agent that wrote it. The properties worth pinning are that the catalogue is
+    GENERATED — it says what this repo has, not what someone once wrote down — that it
+    survives one broken file in it, and that the capability vocabulary in it is the same
+    vocabulary `sb grant` accepts rather than a second list that will drift.
+
+    Unproven here, and not provable at this level: that a real planner reads any of this,
+    plans proportionally, or invents no names. That is the workflow question the whole
+    design rests on, and Unit 5's development evaluation is where it is answered.
+    """
+
+    def catalog(self) -> dict:
+        return self.data("plugin", "plans", "catalog")
+
+    def test_the_planner_instruction_is_printed_and_carries_no_editor_notes(self):
+        """What the planner reads on its first turn: what it is, what it does not do, and
+        the two commands it goes on to run. Asserted on the printed text rather than on the
+        file, because the file has a maintainer's comment block at the top that a planner
+        must never be handed — `sb presets <name>` drops one the same way."""
+        out = self.ok("plugin", "plans", "planner")
+        for expected in ("You are the plan writer for one job.",
+                         "sb plugin plans catalog",
+                         "sb plugin plans guide",
+                         "THIS REPLACES THE FINDINGS NOTE",
+                         "you do not call `sb done`",
+                         "STRATEGY IS ADVISORY AND NEVER ENFORCEMENT",
+                         "--planner"):
+            self.assertIn(expected, " ".join(out.split()))
+        self.assertNotIn("<!--", out)
+        self.assertEqual(json.loads(self.ok("plugin", "plans", "planner", "--json"))
+                         ["data"]["planner"].strip(), out.strip())
+        # Reads one file and writes nothing: no state file exists after it runs.
+        self.assertEqual(self._files(), [])
+
+    def test_the_catalogue_is_generated_from_this_repo_and_not_from_a_list(self):
+        """Every category, keyed, and each one holding what this sandbox actually has —
+        including a role and a template written into it by this test, which a hardcoded
+        inventory could not know about."""
+        (self.defaults / "roles" / "archivist.md").write_text(
+            '+++\nmodel = "cheap"\ncapabilities = ["spawn"]\n+++\nYou file things.\n')
+        self.define("triage", name="work out what is wrong", anchor="design")
+
+        got = self.catalog()
+        self.assertEqual(sorted(got), ["capabilities", "library", "models", "plugins",
+                                       "presets", "problems", "roles", "templates"])
+        self.assertEqual(got["problems"], [])
+        roles = {r["name"]: r for r in got["roles"]}
+        self.assertEqual(roles["archivist"]["model"], "cheap")
+        self.assertEqual(roles["archivist"]["capabilities"], ["spawn"])
+        self.assertIn("researcher", roles)
+        self.assertIn("strong", [t["name"] for t in got["models"]["tiers"]])
+        self.assertIn("design-gate", got["presets"]["available"])
+        self.assertIn("plans", got["plugins"])
+        self.assertIn("triage", [d["name"] for d in got["library"]])
+        self.assertIn("change-approval", [d["name"] for d in got["library"]])
+        # The human digest is a digest and says where the detail is read.
+        shown = " ".join(self.ok("plugin", "plans", "catalog").split())
+        self.assertIn("sb plugin plans library <name>", shown)
+        self.assertIn("Skills and tools are NOT here", shown)
+
+    def test_the_catalogues_capabilities_are_the_vocabulary_grant_accepts(self):
+        """One vocabulary, not two. The plugin assembles this list itself — it holds no
+        broker — so the pin is equality against a real one, including a capability this
+        repo minted for itself, which is exactly what a second hardcoded list would miss."""
+        (self.sw / "settings.toml").write_text(
+            f'[paths]\nuser_state = "{self.user_state}"\n\n'
+            f'[capabilities.side_effects]\ndeploy = ["merge"]\n')
+        db = store.connect(self.repo)
+        broker = cli.Broker(db, FakeHerdr(self.repo / "worktrees"), repo=self.repo)
+        try:
+            self.assertEqual(self.catalog()["capabilities"],
+                             sorted(broker.known_capabilities()))
+        finally:
+            db.close()
+        self.assertIn("deploy", self.catalog()["capabilities"])
+
+    def test_one_broken_definition_costs_its_own_category_and_nothing_else(self):
+        """A catalogue is the last thing that should stop being generated because one JSON
+        file has a comma in the wrong place: the planner gets the other six categories and
+        a line naming the file to fix."""
+        d = self.catalogue("library")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "wrecked.json").write_text("{not json")
+
+        code, out, _ = self.sb("plugin", "plans", "catalog")
+        self.assertEqual(code, 0)
+        got = self.catalog()
+        self.assertEqual(got["library"], [])
+        self.assertEqual(len(got["problems"]), 1)
+        self.assertIn("the step library could not be read", got["problems"][0])
+        self.assertIn("wrecked.json", got["problems"][0])
+        self.assertIn("wrecked.json", out)
+        # The categories that had nothing to do with that file are all still there.
+        self.assertTrue(got["roles"] and got["capabilities"] and got["templates"])
+
+    def test_a_planner_creating_a_plan_records_itself_as_its_shape_writer(self):
+        """`--planner` is a claim the caller makes about itself, so what lands in the field
+        is the calling agent — in the file, in the changelog, and on the rendered plan."""
+        self.as_agent("researcher-plan-writer")
+        self.ok(*_create("ship the thing", "impl write it"), "--planner")
+
+        plan = self._doc()["plans"][0]
+        self.assertEqual(plan["planner"], "researcher-plan-writer")
+        self.assertIn("planner-managed by researcher-plan-writer",
+                      self.ok("plugin", "plans", "changelog", "p-1"))
+        self.assertIn("planner     researcher-plan-writer",
+                      self.ok("plugin", "plans", "show", "p-1"))
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_a_plan_made_without_the_flag_carries_no_planner_at_all(self):
+        """Absent, not null: the worktree-owner rule is what every ordinary plan keeps, and
+        a field on every plan in the repo saying it has no plan writer is noise."""
+        self.as_agent("lead-one")
+        self.ok(*_create("ship the thing", "impl write it"))
+        self.assertNotIn("planner", self._doc()["plans"][0])
+        self.assertNotIn("planner", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_human_cannot_claim_to_be_a_plans_planner(self):
+        """The field names the agent a later delta and a later approval go back to, and
+        there is no such agent when a person is typing. Refused, with the one field to
+        write by hand instead — and nothing is created."""
+        code, _, err = self.sb(*_create("ship the thing"), "--planner")
+        self.assertNotEqual(code, 0)
+        self.assertIn("resolved this caller to a human", err)
+        self.assertEqual(self._files(), [])
+
+    def test_the_guide_says_who_writes_a_planner_managed_plan_and_what_strategy_is(self):
+        """The two claims Unit 2 reconciled, asserted on the printed guide. The first is
+        the ownership move — a plan with a planner has one shape writer and it is not the
+        worktree's owner. The second is the delta Unit 1 left: `strategy` IS schema-checked,
+        every other field is not, and neither fact makes it enforcement."""
+        said = " ".join(self.ok("plugin", "plans", "guide").split())
+        for expected in (
+                # Ownership, both halves: the planner where there is one, the worktree's
+                # owner where there is not.
+                "The worktree's owner: the lead, or the sole worker where there is no lead",
+                "UNLESS THE PLAN NAMES A PLANNER",
+                "THAT agent is the sole shape writer for the life of the plan",
+                "A plan with no `planner` is the ordinary case",
+                "sb plugin plans planner",
+                "sb plugin plans catalog",
+                # The strategy field: shaped, checked, and still only advice.
+                "`strategy.schema.json` is the contract",
+                "it is ADVISORY: nothing reads a strategy and acts on it",
+                "Apart from `strategy` above there is no schema to satisfy"):
+            self.assertIn(expected, said)
+
 class GateTest(PlansSandbox):
     """The two gates: what the plugin represents, and everything it deliberately does not.
 
