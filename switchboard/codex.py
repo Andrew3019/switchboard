@@ -65,6 +65,10 @@ PROVIDER = "codex"
 # `~/.codex`, and shared by every worktree of the repo.
 HOMES_DIRNAME = "codex-homes"
 
+# A private TMPDIR inside the home, used only when the home would otherwise sit under
+# codex's own temp dir. See `private_tmp` for what that is for.
+AGENT_TMP_DIRNAME = "agent-tmp"
+
 # `[codex]` in defaults/settings.toml — facts about the binary on your PATH, so changing
 # one is a claim about that binary rather than a preference.
 AUTH_FILE = config.setting("codex.auth_file")
@@ -125,6 +129,67 @@ def home_path(name: str, cwd: Optional[Path] = None) -> Path:
     return store.store_dir(cwd) / HOMES_DIRNAME / name      # off this module's import
 
 
+def private_tmp(home: Path) -> Optional[Path]:
+    """A TMPDIR of the agent's own, or None when the inherited one is already fine.
+
+    Codex REFUSES to extract its own helper binaries when `CODEX_HOME` sits under the
+    directory `std::env::temp_dir()` returns — `$TMPDIR`, or `/tmp` when that is unset.
+    It says so once, on stderr, and then carries on:
+
+        WARNING: proceeding, even though we could not create PATH aliases:
+        Refusing to create helper binaries under temporary dir "/tmp"
+
+    Those aliases are the ONLY copy of `codex-linux-sandbox` there is. Codex ships one
+    binary that changes behaviour by argv[0], and the sandbox helper is a symlink to it
+    laid down in `$CODEX_HOME/tmp/arg0/codex-arg0XXXXXX/` and put on PATH. Without them
+    every sandboxed command dies before it starts, with a message that reads like a
+    broken install rather than a refusal:
+
+        bwrap: execvp codex-linux-sandbox: No such file or directory
+
+    That is EVERY command, `sb done` and `sb block` among them, so the agent cannot even
+    say what happened. Found live, 2026-08-25, against codex-cli 0.149.1 (bug report
+    `2026-08-25-134902`): a QA agent cloned this repo into its scratch directory under
+    /tmp, which put the store — and so every per-agent home under it — inside /tmp.
+
+    The switchboard side of that is not a choice we can drop: a codex home belongs beside
+    the rest of the store, and where the store is is where the repo is. So give codex a
+    temp dir that is NOT an ancestor of the home instead, and let it extract as usual.
+
+    Returns None in the normal case, which is deliberate: a codex agent's TMPDIR is
+    otherwise whatever the human's shell says, and pointing it into the store would put
+    every temp file any tool writes on the repo's disk — under DrvFs on this machine,
+    which is the slow one. Only the checkout that provokes the refusal pays for it.
+
+    Both `/tmp` and an inherited `$TMPDIR` are checked, because the value codex reads is
+    the pane shell's and this runs in switchboard's process — the two are normally the
+    same, and when they are not, the cost of answering yes too often is one directory.
+
+    An `$TMPDIR` that is PRESENT but EMPTY is the one case with no root to compare
+    against: Rust's `std::env::temp_dir()` reads `var_os`, so `TMPDIR=` is `Some("")` and
+    not "unset", and codex then refuses the aliases for every home wherever it sits and
+    panics on the empty path. Any non-empty value cures it, so that home gets one
+    whatever its path — which is why the question is presence and not truthiness.
+    """
+    roots = {Path("/tmp")}
+    if "TMPDIR" in os.environ:
+        inherited = os.environ["TMPDIR"]
+        if not inherited:
+            return home / AGENT_TMP_DIRNAME      # empty: broken for every home, see above
+        roots.add(Path(inherited))
+    try:
+        resolved = home.resolve()
+    except OSError:                      # a symlink loop; unresolvable is not under /tmp
+        return None
+    for root in roots:
+        try:
+            resolved.relative_to(Path(root).expanduser().resolve())
+        except (ValueError, OSError):
+            continue
+        return home / AGENT_TMP_DIRNAME
+    return None
+
+
 def is_codex_agent(name: str, cwd: Optional[Path] = None) -> bool:
     """Was this agent spawned onto codex? Asked of the directory, not of the tier.
 
@@ -170,6 +235,20 @@ def write_home(
         d.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise CodexHomeError(f"could not create {name}'s codex home at {d}: {e}") from e
+
+    # Created here rather than left to first use, because a `$TMPDIR` that is not there
+    # when codex starts is FATAL — it panics resolving its own synthetic mount registry
+    # temp dir (`linux-sandbox/src/linux_run_main.rs`: "failed to resolve synthetic mount
+    # registry temp directory ...: No such file or directory"). Watched happen on 0.149.1,
+    # in read-only sandbox mode as much as workspace-write: it is the directory codex
+    # wants for itself, not a writable root that failed to bind.
+    tmp = private_tmp(d)
+    if tmp is not None:
+        try:
+            tmp.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise CodexHomeError(
+                f"could not create {name}'s private TMPDIR at {tmp}: {e}") from e
 
     # NO prompts means "leave the standing instructions alone", which is what a RESTORE
     # is: it composes none, because Claude Code's `--resume` brings the whole session back
@@ -546,8 +625,22 @@ def spawn_env(name: str, home: Path) -> dict[str, str]:
     env var could be prefixed onto it. `herdr tab create --env` / `pane split --env` /
     `workspace create --env` all take it, and it survives into the subprocesses codex's
     own shell tool runs — which is where every `sb` verb an agent types actually runs.
+
+    `TMPDIR` joins it only for a home that would otherwise sit inside codex's own temp
+    dir, where codex silently declines to lay down the sandbox helper and every command
+    the agent runs dies in bwrap. `private_tmp` is the whole of that story.
+
+    The pane is created carrying that value BEFORE the directory exists — the broker
+    computes a pane's environment at creation and `write_home` makes the directory later
+    — so the ordering is load-bearing rather than incidental: codex panics on a `$TMPDIR`
+    that is not there, and what keeps it from meeting one is that `write_home` always
+    runs before `agent start` types `codex` into the shell, on spawn and restore alike.
     """
-    return {"CODEX_HOME": str(home), "SB_AGENT": name}
+    env = {"CODEX_HOME": str(home), "SB_AGENT": name}
+    tmp = private_tmp(home)
+    if tmp is not None:
+        env["TMPDIR"] = str(tmp)
+    return env
 
 
 # -- reading back -------------------------------------------------------------

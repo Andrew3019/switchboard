@@ -294,6 +294,101 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
                 codex.home_path(bad, self.repo)
 
 
+class PrivateTmpTest(HomeFixture, unittest.TestCase):
+    """A home under codex's own temp dir gets a TMPDIR that is not.
+
+    What these pin is the SHAPE, and the shape is all the code decides. The behaviour
+    behind it belongs to codex and was proved live instead (codex-cli 0.149.1, bug
+    `2026-08-25-134902`): a per-agent `CODEX_HOME` under /tmp made codex decline to lay
+    down `codex-linux-sandbox`, and every command in that agent died with `bwrap: execvp
+    codex-linux-sandbox: No such file or directory`; the same home with `TMPDIR` pointed
+    inside it ran the same command fine. No test here can fail that way — nothing in the
+    suite runs bwrap — so a regression that drops the variable is caught by its absence
+    and not by the failure it causes.
+
+    The fixture's repo is a `tempfile.TemporaryDirectory`, so it IS under /tmp: these
+    agents are exactly the case being fixed.
+    """
+
+    def test_a_home_inside_codex_s_temp_dir_gets_a_tmpdir_of_its_own(self):
+        home = self.write()
+        tmp = codex.private_tmp(home)
+        self.assertIsNotNone(tmp)
+        self.assertTrue(tmp.is_dir(), "must exist before the spawn: codex panics "
+                                      "resolving a $TMPDIR that is not there")
+        self.assertEqual(codex.spawn_env("w1", home)["TMPDIR"], str(tmp))
+        # The whole point: codex refuses when the home is UNDER the temp dir, so the
+        # temp dir must not be one of the home's ancestors. Inside it cannot be.
+        self.assertNotIn(tmp, home.parents)
+
+    def test_a_home_anywhere_else_keeps_the_tmpdir_it_inherited(self):
+        """None in the normal case, deliberately: pointing TMPDIR into the store would
+        put every temp file any tool writes on the repo's disk."""
+        elsewhere = Path("/opt/repo/.git/agentflow/codex-homes/w1")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TMPDIR", None)
+            self.assertIsNone(codex.private_tmp(elsewhere))
+            self.assertNotIn("TMPDIR", codex.spawn_env("w1", elsewhere))
+
+    def test_an_inherited_tmpdir_counts_as_the_temp_dir_too(self):
+        """Codex reads `$TMPDIR` first and only falls back to /tmp, so a store under a
+        TMPDIR that is not /tmp provokes the same refusal. The same home is left alone
+        without it, which is what makes this about the variable and not the path."""
+        home = Path("/opt/scratch/codex-homes/w1")
+        with mock.patch.dict(os.environ, {"TMPDIR": "/opt/scratch"}):
+            self.assertEqual(codex.private_tmp(home), home / codex.AGENT_TMP_DIRNAME)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TMPDIR", None)
+            self.assertIsNone(codex.private_tmp(home))
+
+    def test_an_empty_tmpdir_is_a_temp_dir_too_and_breaks_every_home(self):
+        """`TMPDIR=` is not "unset": Rust reads `var_os`, so `std::env::temp_dir()` gets
+        `Some("")` and codex refuses the aliases for a home ANYWHERE, then panics on the
+        empty path. Any non-empty value cures it, so this is the one case where a home
+        nowhere near /tmp still wants a tmp dir of its own."""
+        elsewhere = Path("/opt/repo/.git/agentflow/codex-homes/w1")
+        with mock.patch.dict(os.environ, {"TMPDIR": ""}):
+            self.assertEqual(codex.private_tmp(elsewhere),
+                             elsewhere / codex.AGENT_TMP_DIRNAME)
+            self.assertEqual(codex.spawn_env("w1", elsewhere)["TMPDIR"],
+                             str(elsewhere / codex.AGENT_TMP_DIRNAME))
+
+    def test_a_home_anywhere_else_has_nothing_made_for_it_on_disk(self):
+        """The other tests ask `private_tmp` and `spawn_env`; this one asks the disk,
+        because the cost of getting it wrong is a directory appearing inside every
+        production codex home. The fixture's repo is under /tmp and so cannot BE the
+        elsewhere case, so `private_tmp` is stubbed to the None it returns there."""
+        with mock.patch.object(codex, "private_tmp", return_value=None):
+            home = self.write()
+        self.assertFalse((home / codex.AGENT_TMP_DIRNAME).exists())
+
+
+class BrokerSpawnEnvTest(unittest.TestCase):
+    """`TMPDIR` is a codex thing, and the gate that keeps it one is in the broker.
+
+    Claude Code has no such refusal — it is the same repo under the same /tmp, and the
+    variable would be redirecting the temp files of a provider that never asked.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()      # under /tmp: the case that fires
+        self.repo = _git_repo(Path(self.tmp.name))
+        self.db = store.connect(path=self.repo / "state.db")
+        self.b = Broker(self.db, FakeHerdrAPI(), repo=self.repo)
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def test_only_a_codex_spec_is_given_a_tmpdir(self):
+        codex_env = self.b._spawn_env("w1", models.ModelSpec(
+            tier="gpt-5.5", provider="codex", model="gpt-5.5", effort="medium"))
+        self.assertIn("TMPDIR", codex_env)            # the repo really is under /tmp
+        claude_env = self.b._spawn_env("w1", models.ModelSpec(
+            tier="strong", provider="claude", model="opus", effort="high"))
+        self.assertNotIn("TMPDIR", claude_env)
+        self.assertNotIn("CODEX_HOME", claude_env)
+
+
 class RolloutTest(HomeFixture, unittest.TestCase):
     SID = "01a02c19-22e8-7641-b219-cae9025f4f06"
 
