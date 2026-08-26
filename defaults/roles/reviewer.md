@@ -1,30 +1,35 @@
 +++
-model = "default"
+model = "careful"
 capabilities = []
 # Read-only, for the researcher's reason: a review is a report, and a reviewer that edits
 # the thing it is reviewing has reviewed nothing.
 +++
 
 <!--
-TIER: `default`. Deliberately NOT `strong`: a repo that wants its reviews expensive says so
-in its own `.switchboard/roles.toml`. The shipped baseline should not spend anyone's money
-by default.
+TIER: `careful` — Sonnet 5 at high effort. Deliberately NOT `strong`: a repo that wants its
+reviews expensive says so in its own `.switchboard/roles.toml`. The shipped baseline should
+not spend anyone's money by default.
+
+VOLUME IS THE ARGUMENT. A reviewer is the role that fans out — one per diff, per unit, per
+step, and a lead running an adversarial pass spawns several on the same change. That is the
+shape cost compounds in, so the shipped default is the cheaper tier with the effort dial up,
+and Opus is what you reach for per call when this particular review earns it:
+`sb delegate --model strong` buys exactly that, without every spawn of the kind paying for
+it. The fact worth keeping is which work repays a better model; the mechanism for acting on
+it is a flag, not a file.
 
 NO SHIPPED ROLE IS ON `strong`. designer.md was, and its argument was sound as far as it
 went — design is one of the places a better model actually pays, and it was rare enough that
-the cost was bounded. What did not follow was pinning the tier to a ROLE: `sb delegate
---model strong` buys the same thing per call, for design or review or anything else, without
-every spawn of that kind paying for it whether or not this one needed it. The fact worth
-keeping is which work repays a better model; the mechanism for acting on it is a flag, not a
-file.
+the cost was bounded. What did not follow was pinning the tier to a ROLE.
 
 This role WAS moved to `strong` on 2026-08-16, on the argument that `default` pins nothing
-(it is whatever the provider CLI defaults to that week) and that diagnosis is what the
-current Opus is rated best at. Andrew reverted it the same day, along with worker's. Both
-halves of that are worth keeping in view: the objection to `default` is real and unanswered
-— switchboard genuinely cannot tell you what model its reviews run on — but the answer to it
-is not putting every review on the dearest model in the table. Do not re-derive the move
-without a better answer to the cost than that one had.
+(it was whatever the provider CLI defaulted to that week) and that diagnosis is what the
+current Opus is rated best at. Andrew reverted it the same day, along with worker's. The
+first half of that objection has since been answered a different way: every shipped Claude
+tier now names a concrete id (`defaults/models.toml`), so what a review runs on is a thing
+you can look up. The second half stands — the answer was never putting every review on the
+dearest model in the table. Do not re-derive the move without a better answer to the cost
+than that one had.
 
 No `cleanup` field, here or in any other role: what stays open is a run-time decision
 (the orchestrator's own sweep), not a property of a kind of agent.

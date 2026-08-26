@@ -22,15 +22,19 @@ provider = "claude"
 # -- the shipped tiers ---------------------------------------------------------
 #
 # Small on purpose: this only has to be good enough that switchboard works with no config
-# file at all. Four of the six shipped roles name a tier here; `reviewer` and `worker` are
-# deliberately on `default` and the note in each says why. See `notes/model-selection.md`
-# for the role-by-role reasoning and what it costs.
+# file at all. Seven shipped roles: five name a claude tier other than `default`, `worker`
+# is on `default` — a pinned choice now like any other, no longer an unmade one — and
+# `builder` is on `gpt-5.6-sol` in the codex section below, the one role on a non-claude
+# provider. See `notes/model-selection.md` for the role-by-role reasoning and what it costs.
 #
-# ALIASES, never pinned ids. `claude --help` documents --model as taking "an alias for the
-# latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
+# PINNED IDS on the Claude tiers. `claude --help` documents --model as taking "an alias for
+# the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
 # follows the current model of its class and keeps working as models churn; a pinned id
-# fails outright the day it is retired or your plan loses access to it. `prose` is the one
-# exception and says at its own definition why it earns it.
+# fails outright the day it is retired or your plan loses access to it. `default`, `cheap`,
+# `careful`, `strong` and `prose` name concrete versioned ids and accept that cost
+# knowingly — see `prose` at its own definition for the argument. Alias passthrough stays
+# available as the escape hatch: hand one straight to the resolver, or name one in a tier
+# of your own.
 
 # No tier uses haiku. `--permission-mode auto` is MODEL-DEPENDENT: it runs a classifier
 # that decides what still needs approval, and haiku's is far more conservative. Verified
@@ -52,13 +56,16 @@ provider = "claude"
 # Read this before using `--model cheap` expecting the old behaviour: it is now sonnet at
 # medium effort everywhere, not just for researchers.
 provider = "claude"
-model    = "sonnet"
+model    = "claude-sonnet-5"
 effort   = "medium"
 
 [tiers.default]
-# No model and no effort: whatever the provider CLI itself defaults to. Deliberately not a
-# pinned choice — the CLI's own default is the best-maintained answer to that question.
+# Pins the current flagship, and no effort — the CLI's own level. `default` is the tier a
+# role names when it has no reason to want anything else, and what that resolves to should
+# be a thing you can look up rather than whatever the `opus` alias moved to this week.
+# `standard` below is where "defer to the provider CLI" still lives.
 provider = "claude"
+model    = "claude-opus-5"
 
 [tiers.standard]
 # The older name for `default`. Still honoured so config written against it keeps working.
@@ -70,12 +77,12 @@ provider = "claude"
 # consumer: running the checks and telling a real defect from your own bad invocation.
 # Same price per token as `cheap`; the difference is how long it thinks.
 provider = "claude"
-model    = "sonnet"
+model    = "claude-sonnet-5"
 effort   = "high"
 
 [tiers.strong]
 provider = "claude"
-model    = "opus"
+model    = "claude-opus-5"
 effort   = "high"
 
 # No tier pins `xhigh`. A `deep` tier here did — opus at xhigh, for workers — and lasted a
@@ -84,10 +91,10 @@ effort   = "high"
 # if someone has a reason, it just is not what a shipped tier hands every spawn of a kind.
 
 [tiers.prose]
-# THE ONE TIER THAT PINS AN ID, against the rule three paragraphs up. It exists because the
-# choice it encodes is not "the current Opus" — it is *that* Opus, and an alias cannot say
-# so. Leads write the prose Andrew reads, and the output style of the model the `opus` alias
-# currently points at is the thing being avoided (`notes/model-selection.md`: the verbosity,
+# THE ONE TIER THAT PINS AN OLDER ID. The others pin the current generation; this pins the
+# PREVIOUS flagship, and deliberately. The choice it encodes is not "the current Opus" — it
+# is *that* Opus. Leads write the prose Andrew reads, and the output style of the model
+# `strong` now names is the thing being avoided (`notes/model-selection.md`: the verbosity,
 # hedging and apology loops the community named within a week of launch). Same price as
 # `strong`, so this is a behaviour choice and never a cost one.
 #
@@ -102,9 +109,9 @@ effort   = "medium"
 
 # -- the codex tiers -----------------------------------------------------------
 #
-# PINNED IDS, against the alias rule above, and not by choice: codex has no alias
-# vocabulary at all. `codex debug models` reports slugs and nothing else, so a tier here
-# names one — which carries the same cost `prose` accepts and says so about: the day a
+# PINNED IDS, and not by choice as the Claude tiers are: codex has no alias vocabulary at
+# all. `codex debug models` reports slugs and nothing else, so a tier here
+# names one — which carries the same cost the Claude tiers accept and say so about: the day a
 # slug is retired, spawns on this tier fail outright. That is the correct failure. It asks
 # the question again rather than sliding silently onto a different model.
 #

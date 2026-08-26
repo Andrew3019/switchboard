@@ -901,7 +901,9 @@ class ModelsListingTest(unittest.TestCase):
         self.assertNotIn("(provider default)", line)
 
     def test_a_tier_that_really_defers_still_says_so(self):
-        self.assertIn("(provider default)", _models_line("default"))
+        # `standard`, not `default`: `default` pins an id now, and `standard` is the tier
+        # that still means "whatever the provider CLI picks".
+        self.assertIn("(provider default)", _models_line("standard"))
 
 
 def _models_line(tier: str) -> str:
