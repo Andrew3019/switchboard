@@ -861,11 +861,16 @@ WHAT TO BUILD IT FROM
   ended with when it was named. Name them together, or fix the edge in the file
   afterwards, which is one field.
 
-  NAME THE OUTERMOST STEP AND WHAT IT OBLIGES ARRIVES WITH IT — the two flags above land
-  seven steps, because `create-pr` obliges the change approval, which obliges the review,
-  and `merge` obliges the human-review list. Naming those as well gets you a SECOND copy of
-  each: nothing is ever deduplicated, since two merges are two diffs and therefore two
-  reviews. Read `library` first and name the ones nothing else brings.
+  NAME EVERY OUTERMOST STEP, AND WHAT EACH OBLIGES ARRIVES WITH IT — the library has THREE
+  steps nothing else brings, `create-pr`, `merge` and `plan-review`, and naming one never
+  brings another. The two flags above land seven steps, because `create-pr` obliges the
+  change approval, which obliges the review, and `merge` obliges the human-review list.
+  `create-pr` on its own lands three of those and the plan ends at the open PR, which is
+  right for a job that ends there — and nothing downstream can tell that plan from one
+  which meant to land and lost its merge, so the naming is where it has to be got right.
+  Naming an obliged step as well gets you a SECOND copy of it: nothing is ever
+  deduplicated, since two merges are two diffs and therefore two reviews. Read `library`
+  first and name the ones nothing else brings.
 
   A definition carries its own account of how that step is run — what it obliges, what it
   gates, what finishing it means. Read it there. Nothing about any particular step is
@@ -882,11 +887,11 @@ TWO STEPS IN ONE BAND GET NO EDGE, AND `plan-review` IS WHERE YOU MEET THAT
   sharing a band are both minted as marked starts with nothing between them. Where that
   order matters, the edge is yours to write.
 
-  `plan-review` is the case in the shipped library, and it is OPTIONAL in the strict
-  sense: nothing composes it and nothing obliges it, so it is in a plan because whoever
-  shaped the plan — the plan writer, where there is one — decided the planning risk earned
-  a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach, a plan
-  crossing subsystems, several agents or handoffs, verification that is expensive or
+  `plan-review` is the case in the shipped library, and it is OPTIONAL: like `create-pr`
+  and `merge`, nothing composes it and nothing obliges it, so it is in a plan because
+  whoever shaped the plan — the plan writer, where there is one — decided the planning risk
+  earned a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach,
+  a plan crossing subsystems, several agents or handoffs, verification that is expensive or
   incomplete, a large blast radius. A small linear plan does not get one and goes straight
   to Andrew at `change-approval`, which is the shape most jobs are.
 
@@ -1051,6 +1056,15 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   plugin plans show <step>` is that same view of one step asked for on purpose — the step,
   its command, and how its definition says it is done. `sb plugin plans --help` lists the
   rest.
+
+  DEPS SAY WHEN A STEP RUNS, NOT WHEN IT MAY. Running one ahead of its deps is allowed and
+  is sometimes the right call — a slow external check worth queueing early, a machine that
+  is briefly awake — and nothing refuses it or warns on it. What the early start does not
+  change is that IT IS STILL THE WHOLE STEP: everything the definition says that step does
+  still applies, and none of it is excused by having begun before its turn. Where a half of
+  it genuinely cannot be finished yet, `note` that half as outstanding and say what it
+  waits on — a note saying only what you did reads as a decision, and a step half-done and
+  described as a decision is one nobody downstream knows to finish.
 
   HOW A STEP IS ADDRESSED, since every one of those takes one. Each plan numbers its own
   steps from `step-1`, so `step-3` on its own resolves while exactly one plan holds that
