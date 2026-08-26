@@ -51,28 +51,33 @@ class ModelsTest(unittest.TestCase):
         self.assertIn("default", t)
         self.assertIn("strong", t)
 
-    def test_shipped_tiers_use_aliases_not_pinned_ids(self):
-        """A pinned id fails the day the model is retired or the plan lacks access.
+    def test_shipped_claude_tiers_pin_concrete_ids(self):
+        """Shipped Claude tiers pin concrete ids; `standard` is the one that still defers.
 
-        `prose` is the one deliberate exception — it pins the PREVIOUS flagship for its
-        output style, which no alias can name — so this asserts the rule AND that the
-        exception stays a single documented one rather than a habit.
+        The invariant is knowability: an alias silently follows whatever its class points at
+        this week, so a tier left floating means nobody can say what their agents ran on.
+        `standard` is the deliberate exception — it is the name for "whatever the provider
+        CLI defaults to" and is useless if it pins anything.
+
+        What this catches is a tier accidentally left on an alias, which is why the pinned
+        set is asserted whole rather than tier by tier.
         """
         t = self.load()
-        self.assertEqual(t.resolve("cheap").model, "sonnet")
-        self.assertEqual(t.resolve("strong").model, "opus")
-        pinned = [n for n in t.names()
-                  if (t.resolve(n).model or "").startswith("claude-")]
-        self.assertEqual(pinned, ["prose"])
+        self.assertEqual(t.resolve("cheap").model, "claude-sonnet-5")
+        self.assertEqual(t.resolve("strong").model, "claude-opus-5")
+        pinned = {n for n in t.names()
+                  if (t.resolve(n).model or "").startswith("claude-")}
+        self.assertEqual(pinned, {"cheap", "careful", "strong", "default", "prose"})
+        self.assertIsNone(t.resolve("standard").model)
 
     # -- what the spawn layer gets ---------------------------------------
 
     def test_cli_args_carry_model_and_effort(self):
         """--model and --effort are both real claude flags; see models.py for the citation."""
         self.assertEqual(
-            self.load().resolve("cheap").cli_args(), ["--model", "sonnet", "--effort", "medium"])
+            self.load().resolve("cheap").cli_args(), ["--model", "claude-sonnet-5", "--effort", "medium"])
         self.assertEqual(
-            self.load().resolve("strong").cli_args(), ["--model", "opus", "--effort", "high"])
+            self.load().resolve("strong").cli_args(), ["--model", "claude-opus-5", "--effort", "high"])
 
     def test_caller_never_branches_on_provider(self):
         """The spec answers 'what flags', not 'which provider' — that is the whole point."""
@@ -115,7 +120,7 @@ class ModelsTest(unittest.TestCase):
         self.write_repo('[tiers.strong]\neffort = "max"\n')
         spec = self.load().resolve("strong")
         self.assertEqual(spec.effort, "max")
-        self.assertEqual(spec.model, "opus")
+        self.assertEqual(spec.model, "claude-opus-5")
 
     # -- provider ---------------------------------------------------------
 
@@ -305,16 +310,16 @@ class CliSurfaceTest(unittest.TestCase):
     def test_models_verb_reports_resolved_flags(self):
         d = self._models_json()
         self.assertEqual(d["tiers"]["cheap"]["cli_args"],
-                         ["--model", "sonnet", "--effort", "medium"])
-        # `default` defers to the provider CLI, so it resolves to no flags at all.
-        self.assertEqual(d["tiers"]["default"]["cli_args"], [])
+                         ["--model", "claude-sonnet-5", "--effort", "medium"])
+        # `default` pins a model but no effort, so it resolves to the one flag.
+        self.assertEqual(d["tiers"]["default"]["cli_args"], ["--model", "claude-opus-5"])
 
     def test_models_verb_sees_repo_overrides(self):
         (self.repo / ".switchboard" / "models.toml").write_text(
             '[tiers.strong]\neffort = "max"\n')
         d = self._models_json()
         self.assertEqual(d["tiers"]["strong"]["cli_args"],
-                         ["--model", "opus", "--effort", "max"])
+                         ["--model", "claude-opus-5", "--effort", "max"])
 
     def test_models_verb_reports_an_unspawnable_tier_instead_of_dying(self):
         """A provider with no backend is legal config; the listing still has to render."""

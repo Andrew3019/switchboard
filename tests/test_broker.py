@@ -293,13 +293,13 @@ class BrokerTest(unittest.TestCase):
         """
         self.b.delegate("t", topic="t", role="researcher", me="orch")   # cheap
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "sonnet", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5", "--effort", "medium"])
 
     def test_an_explicit_model_is_a_tier_name_too(self):
         """`--model strong` must be resolved, not handed to the CLI as a model id."""
         self.b.delegate("t", topic="t", role="worker", model="strong", me="orch")
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "opus", "--effort", "high"])
+                         ["--model", "claude-opus-5", "--effort", "high"])
 
     def test_a_codex_tier_is_inherited_by_a_child_that_names_none(self):
         """A DeepSeek agent's whole subtree runs on DeepSeek, without anyone retyping it.
@@ -328,7 +328,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo))
         name = self.b.delegate("t", topic="t", role="researcher", me="boss")
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "sonnet", "--effort", "medium"])   # researcher's own
+                         ["--model", "claude-sonnet-5", "--effort", "medium"])   # researcher's own
         self.assertIsNone(store.get_agent(self.db, name)["tier"])
 
     def test_an_explicit_model_beats_an_inherited_codex_tier(self):
@@ -342,7 +342,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo))
         name = self.b.delegate("t", topic="t", role="worker", model="strong", me="ds")
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "opus", "--effort", "high"])
+                         ["--model", "claude-opus-5", "--effort", "high"])
         self.assertEqual(store.get_agent(self.db, name)["tier"], "strong")
 
     def test_a_spawn_names_its_agent_in_its_pane_s_environment(self):
@@ -3228,7 +3228,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo), pane_id="w1:p1")
         self.b.restore("kid")
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "sonnet", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5", "--effort", "medium"])
 
     def test_restore_comes_back_on_the_tier_it_was_spawned_with(self):
         """Restore brings back the SAME agent, not a fresh one of its role. `--model`
@@ -3238,7 +3238,7 @@ class BrokerTest(unittest.TestCase):
         self.h.started.clear()
         self.b.restore(name)
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "opus", "--effort", "high"])   # not researcher's
+                         ["--model", "claude-opus-5", "--effort", "high"])   # not researcher's
 
     def test_a_row_with_no_recorded_tier_restores_on_its_roles_tier(self):
         """NULL means no override was given — which is what every row written before the
@@ -3248,7 +3248,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(store.get_agent(self.db, "kid")["tier"])
         self.b.restore("kid")
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "sonnet", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5", "--effort", "medium"])
 
     def test_restore_without_a_session_is_an_error(self):
         store.create_agent(self.db, name="kid", role="worker")

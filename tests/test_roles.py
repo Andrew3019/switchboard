@@ -427,28 +427,45 @@ class RolesTest(unittest.TestCase):
     def test_every_shipped_role_pins_the_tier_the_table_chose(self):
         """The table in `notes/model-selection.md`, in the form the spawn layer sees it.
 
-        Four roles, not six: `reviewer` and `worker` were moved off `default` by that pass
-        and Andrew moved them back the same day, so they are deliberately absent here rather
-        than asserted to be empty — the tier a role does NOT pin is that role file's
-        statement to make, and reviewer.md and worker.md make it.
+        Every shipped role now, where this was four: `reviewer` has a tier of its own,
+        `worker`'s `default` stopped being an unmade choice once every shipped Claude tier
+        pinned a concrete id, and `builder` arrived on a codex tier.
+
+        Asserted as (provider, model, effort) and not as CLI flags, because a tier can name
+        a provider whose flags are not Claude's — codex takes none, so `cli_args()` is []
+        for `builder` by design and would make "pins gpt-5.6-sol" and "pins nothing" the
+        same assertion. The flags are still checked underneath, on one tier of each
+        provider, since that is what the spawn layer appends.
 
         Pinned as a DECISION, not as behaviour.
         """
         r = roles.load(self.repo)
         want = {
-            "dispatcher": ["--model", "sonnet", "--effort", "medium"],
-            "researcher": ["--model", "sonnet", "--effort", "medium"],
-            "qa":         ["--model", "sonnet", "--effort", "high"],
-            "lead":       ["--model", "claude-opus-4-8", "--effort", "medium"],
+            "dispatcher": ("claude", "claude-opus-4-8", "medium"),
+            "lead":       ("claude", "claude-opus-4-8", "medium"),
+            "researcher": ("claude", "claude-sonnet-5", "medium"),
+            "qa":         ("claude", "claude-sonnet-5", "high"),
+            "reviewer":   ("claude", "claude-sonnet-5", "high"),
+            "worker":     ("claude", "claude-opus-5",   None),
+            "builder":    ("codex",  "gpt-5.6-sol",     "medium"),
         }
-        got = {name: roles.get(r, name).spec().cli_args() for name in want}
+        got = {}
+        for name in want:
+            spec = roles.get(r, name).spec()
+            got[name] = (spec.provider, spec.model, spec.effort)
         self.assertEqual(got, want)
+
+        self.assertEqual(roles.get(r, "qa").spec().cli_args(),
+                         ["--model", "claude-sonnet-5", "--effort", "high"])
+        self.assertEqual(roles.get(r, "worker").spec().cli_args(),
+                         ["--model", "claude-opus-5"])
+        self.assertEqual(roles.get(r, "builder").spec().cli_args(), [])
 
     def test_an_override_replaces_the_roles_tier(self):
         """`sb delegate --model <tier>` picks another tier, not another mechanism."""
         r = roles.load(self.repo)
         spec = roles.get(r, "researcher").spec("strong")     # the role's own tier is cheap
-        self.assertEqual(spec.cli_args(), ["--model", "opus", "--effort", "high"])
+        self.assertEqual(spec.cli_args(), ["--model", "claude-opus-5", "--effort", "high"])
 
     def test_a_role_never_hands_out_a_bare_model_id(self):
         """model_id() is gone: it dropped effort, and every caller of it was a bug."""
