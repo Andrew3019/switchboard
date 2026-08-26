@@ -3860,6 +3860,51 @@ class PlannerPackageTest(PlansSandbox):
                 "`sb restore` is NOT on this path"):
             self.assertIn(expected, said)
 
+    def test_the_guide_names_every_library_root_and_the_library_still_agrees(self):
+        """Bug 2026-08-26-143005 defect 1: a singular heading over a library with more than
+        one unobliged root. Naming `create-pr` alone dropped the merge and its human-review
+        list, and the plan was well-formed, so nothing downstream could tell that truncation
+        from a job that genuinely ended at the PR.
+
+        The roots are DERIVED from the shipped library here rather than typed, because the
+        guide now names them and a named list is a list that can go stale: add a definition
+        nothing obliges, or make one of these three obliged by another, and this fails
+        instead of the guide quietly becoming wrong again."""
+        lib = json.loads(self.ok("plugin", "plans", "library", "--json"))["data"]
+        obliged = {name for d in lib.values() for name in (d.get("obliges") or ())}
+        roots = sorted(set(lib) - obliged)
+        self.assertEqual(roots, ["create-pr", "merge", "plan-review"])
+
+        said = " ".join(self.ok("plugin", "plans", "guide").split())
+        # The heading is plural, and the roots are named at the moment of composing.
+        self.assertIn("NAME EVERY OUTERMOST STEP", said)
+        self.assertIn("the library has THREE steps nothing else brings", said)
+        for root in roots:
+            self.assertIn(f"`{root}`", said)
+        # And the silence is named: a truncated plan is a legal plan.
+        self.assertIn("naming one never brings another", said)
+
+    def test_the_pr_comment_reads_as_a_live_render_rather_than_something_that_waits(self):
+        """Bug 2026-08-26-143005 defect 2. `change-approval` says the approved text goes in
+        `output` "because that is what the PR comment dumps" — true, causal, and one clause
+        from "and only then tick", which is a real ordering constraint. Read temporally it
+        says the comment waits for the approval, and an agent opened a PR carrying no plan.
+
+        Both halves are pinned. `create-pr` has to say the comment renders the plan as it
+        stands and is re-run at merge; `change-approval` has to KEEP its sentence, since it
+        is the only thing saying why `output` must hold the full text. Deleting that sentence
+        would pass a test that only checked the first half."""
+        lib = json.loads(self.ok("plugin", "plans", "library", "--json"))["data"]
+
+        pr = " ".join(lib["create-pr"]["about"].split())
+        self.assertIn("renders the plan AS IT STANDS AT THAT MOMENT", pr)
+        self.assertIn("waits for nothing: no step has to be finished first", pr)
+        self.assertIn("`merge` re-runs this same command later", pr)
+        self.assertIn("never that the comment waits for it", pr)
+
+        approval = " ".join(lib["change-approval"]["about"].split())
+        self.assertIn("because that is what the PR comment dumps", approval)
+
 
 class GateTest(PlansSandbox):
     """The two gates: what the plugin represents, and everything it deliberately does not.
