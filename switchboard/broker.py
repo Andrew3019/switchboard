@@ -9,8 +9,9 @@ Everything here obeys one rule: the agent states an intent, the tooling does the
 Some verbs look like duplicates of each other and are not. The distinctions are
 load-bearing, so they are written down where the code is rather than argued about again:
 
-- **`tell`'s three delivery modes.** `tell` writes a message and rings a doorbell that
-  carries no payload. *next-turn*, the default, rings straight away: the prompt QUEUES and
+- **`tell`'s three delivery modes.** `tell` writes a durable message and, when it fits a
+  safe single prompt, carries that tagged payload directly. Otherwise it rings a mailbox
+  doorbell. *next-turn*, the default, sends straight away: the prompt QUEUES and
   the agent's own system delivers it at the next point the model can act, so nothing is
   cancelled and nothing waits. *when-idle* holds the ring until the target's turn has
   ended. *interrupt* cancels the turn with `esc` and puts the instruction itself on the
@@ -189,8 +190,7 @@ def tag(sender: str) -> str:
     arrives in the pane looking exactly like Andrew's own typing, and an agent that cannot
     tell them apart cannot weigh them —
     DESIGN-TRUTH: "Every sb message is prefixed so it is clearly an sb message".
-    And *who is this from?*, which the doorbell could not answer at all before:
-    it carries no payload, so an agent
+    And *who is this from?*, which the old bare doorbell could not answer at all: an agent
     read "You have mail" with no idea whether its parent had redirected it or a sibling had
     said hello, and had to spend the turn on `sb inbox` to find out.
 
@@ -238,12 +238,13 @@ RING_SCAN = 8
 # then raised; counting it too would spend two of `RING_REPAIRS` on one attempt.
 RING_OPEN = "ring_sent"
 RING_TRY = "ring_repaired"
-RING_CLOSED = ("ring_confirmed", "ring_unconfirmed")
+RING_FALLBACK_CLAIM = "ring_fallback_claimed"
+RING_CLOSED = ("ring_confirmed", "ring_unconfirmed", RING_FALLBACK_CLAIM)
 # How long a coalescible doorbell is held back before it is allowed to ring, in seconds.
 # A burst of sibling `done`s used to ring an idle parent once EACH — five children
 # finishing inside a second put five doorbells in one pane, and every one of them said the
-# same thing, because the doorbell carries no payload. The holdback is the quiet period
-# that turns that burst into one ring: while `done` rows for a recipient keep arriving,
+# same thing, because each was only a mailbox notice. The holdback is the quiet period
+# that turns that burst into one delivery: while `done` rows for a recipient keep arriving,
 # nothing rings; once the newest of them is this old, `flush_pending` rings once and names
 # every sender in it.
 #
@@ -5804,6 +5805,93 @@ class Broker:
         """
         return store.unread_for(self.db, me or self.whoami(), mark=not peek)
 
+    def waiting(self, *, mode: str = "background", cohort: Iterable[str] = (),
+                me: Optional[str] = None) -> dict:
+        """Record an intentional end-of-turn wait without blocking a person.
+
+        A background wait has no Switchboard wake condition: the provider or background
+        task will produce the next turn. ``any`` and ``all`` snapshot live direct children
+        now, so an old result or an unrelated agent cannot satisfy a later wait.
+        """
+        me = me or self.whoami()
+        if me == HUMAN or store.get_agent(self.db, me) is None:
+            raise ValueError("`sb waiting` is for an agent ending its own turn")
+        if mode not in ("background", "any", "all"):
+            raise ValueError(f"no such wait mode: {mode}")
+        members: list[str] = []
+        if mode != "background":
+            requested = list(cohort)
+            if requested:
+                members = [self._resolve(name, me) for name in requested]
+            else:
+                members = [r["name"] for r in store.children_of(self.db, me)
+                           if r["state"] not in FINISHED and r["ended_at"] is None]
+            if not members:
+                raise ValueError(f"`sb waiting --{mode}` needs at least one live child")
+            if len(set(members)) != len(members):
+                raise ValueError("a waiting cohort cannot name the same child twice")
+            for name in members:
+                child = store.get_agent(self.db, name)
+                if child is None or child["parent"] != me:
+                    raise ValueError(f"{name} is not a direct child of {me}")
+                if child["state"] in FINISHED or child["ended_at"] is not None:
+                    raise ValueError(f"{name} is already finished; declare a live cohort")
+        elif list(cohort):
+            raise ValueError("plain `sb waiting` takes no cohort; use --any or --all")
+        store.set_wait(self.db, me, mode, members)
+        store.log_event(self.db, kind="waiting", agent=me, mode=mode, cohort=members)
+        return {"mode": mode, "cohort": members}
+
+    def _wait_ready(self, who: str, mine: Sequence[sqlite3.Row]) -> tuple[bool, Optional[dict]]:
+        """Whether pending mail causally satisfies this agent's explicit wait."""
+        wait = store.wait_for(self.db, who)
+        if wait is None:
+            return True, None
+        causal = [m for m in mine if m["id"] > wait["after_id"]]
+        # A direct instruction supersedes every kind of wait, but the intent is cleared
+        # only after the prompt actually lands. While a when-idle delivery is still held,
+        # the stop hook must continue to recognize the turn as intentionally waiting.
+        if any(m["kind"] in ("ask", "tell") for m in causal):
+            return True, wait
+        if wait["mode"] == "background":
+            return any(m["kind"] != SIGNAL for m in causal), wait
+        cohort = set(wait["cohort"])
+        results = {m["from_agent"] for m in causal
+                   if m["kind"] in ("done", "failed") and m["from_agent"] in cohort}
+        if wait["mode"] == "any":
+            return bool(results), wait
+        terminal = set()
+        for name in cohort:
+            row = store.get_agent(self.db, name)
+            if row is not None and (row["state"] in FINISHED or row["ended_at"] is not None):
+                terminal.add(name)
+        return bool(cohort) and terminal == cohort and bool(results), wait
+
+    def _inline_mail(self, who: str,
+                     mine: Sequence[sqlite3.Row]) -> tuple[Optional[str], list[int]]:
+        """Return a safe, complete inline mailbox payload, or the ordinary doorbell."""
+        if not mine or any(m["kind"] not in ("ask", "tell", "done", "failed") for m in mine):
+            return None, []
+        # One unproved inline payload per recipient. A newer ring would supersede the
+        # older ring in `_last_ring`, losing the exact ids that still need confirmation.
+        # The fallback notice safely covers both old and new unread rows instead.
+        if self.db.execute(
+                "SELECT 1 FROM messages WHERE to_agent=? AND read_at IS NULL "
+                "AND delivered_at IS NOT NULL LIMIT 1", (who,)).fetchone():
+            return None, []
+        lines = []
+        for m in mine:
+            line = f"{tag(m['from_agent'])} {m['body']}"
+            if m["needs_reply"]:
+                line += " " + self._say("notify.needs_reply", who=m["from_agent"])
+            lines.append(line)
+        text = " ".join(lines)
+        try:
+            text = validate.line(text, "inline mail", max_len=validate.MAX_PROMPT)
+        except validate.Invalid:
+            return None, []
+        return text, [int(m["id"]) for m in mine]
+
     def apply_preset(self, name: str, *, me: Optional[str] = None) -> int:
         """Paste a preset into the caller's own session — `sb presets <name> --apply`.
 
@@ -6111,8 +6199,14 @@ class Broker:
                 self._record_done(me, summary, parent, repeat=repeat, replay=replay,
                                   promoted=self.promoted, commit=False)
         else:
-            self._record_done(me, summary, parent, repeat=repeat, replay=replay,
-                              promoted=[], commit=True)
+            # The result row and terminal child state are one causal event. A cohort wait
+            # takes the same write lock while snapshotting live children and its message
+            # watermark; without this transaction it can land between these statements,
+            # include the child as live, exclude its just-written result as old, and wait
+            # forever for a second completion that will never come.
+            with store.mutation(self.db):
+                self._record_done(me, summary, parent, repeat=repeat, replay=replay,
+                                  promoted=[], commit=False)
         # OUTSIDE the transaction, and it has to be: the doorbell is a herdr subprocess
         # (see `store.mutation` and `grant`). The signals are already durable — this only
         # says "now", and it is held, so a promote of ten children is one doorbell each and
@@ -7914,9 +8008,9 @@ class Broker:
         Private, and no longer a verb of its own: interrupting is a delivery mode of
         `tell` (DESIGN-TRUTH.md's rejected list). It stays a separate method because it
         shares nothing with the other two modes below the first line — the doorbell
-        carries no payload and is allowed to wait, this cancels the turn with `esc` and
-        puts the instruction itself on the wire, because a queued interrupt is not an
-        interrupt: the work you are trying to stop would finish first.
+        may fall back to a mailbox notice and is allowed to wait, this cancels the turn
+        with `esc` and puts the instruction itself on the wire, because a queued interrupt
+        is not an interrupt: the work you are trying to stop would finish first.
 
         The message still goes in the store, and once delivery is confirmed it is marked
         read — and delivery here means PROVED, by the agent's own transcript, not by
@@ -8390,6 +8484,9 @@ class Broker:
             a = store.get_agent(self.db, who)
             path = store.transcript_path(a) if a is not None else None
             if path is None:
+                if ring["inline_ids"]:
+                    self._fallback_inline(who, ring, reason="no_transcript")
+                    continue
                 # No session file to read, so there is no evidence either way — and "we
                 # cannot see" is not "it did not arrive". Re-sending on blindness would be a
                 # standing tax on every message to such an agent rather than a repair, so
@@ -8399,11 +8496,16 @@ class Broker:
                                 reason="no_transcript", repairs=ring["tries"])
                 continue
             if output.submitted_since(path, ring["text"], since=ring["at"]):
+                if ring["inline_ids"]:
+                    store.mark_messages_collected(self.db, ring["inline_ids"])
                 store.log_event(self.db, kind="ring_confirmed", agent=who,
                                 after=now - ring["at"], repairs=ring["tries"])
                 continue
             if not ring["repair"]:
-                # `apply_preset` — the ring whose text IS the payload. See its call site.
+                if ring["inline_ids"]:
+                    self._fallback_inline(who, ring, reason="payload_unconfirmed")
+                    continue
+                # `apply_preset` — the other ring whose text IS the payload. See its call site.
                 store.log_event(self.db, kind="ring_unconfirmed", agent=who,
                                 reason="payload", repairs=ring["tries"])
                 continue
@@ -8424,6 +8526,58 @@ class Broker:
             except HerdrError as e:
                 store.log_event(self.db, kind="ring_repair_failed", agent=who,
                                 attempt=attempt, error=str(e))
+
+    def _fallback_inline(self, who: str, ring: dict, *, reason: str) -> bool:
+        """Replace an unproved inline payload with a repairable inbox doorbell."""
+        if self._is_blocked(who):
+            return False
+        rows = [store.get_message(self.db, mid) for mid in ring["inline_ids"]]
+        senders = ", ".join(dict.fromkeys(
+            row["from_agent"] for row in rows if row is not None)) or "switchboard"
+        text = f"{tag(senders)} {self._say('notify.mail')}"
+        if not self._claim_inline_fallback(who, ring, reason=reason, text=text):
+            return False
+        try:
+            # Next-turn is safe for a mailbox notice and preserves the original tell's
+            # non-blocking behavior. Unlike the payload, this may be repaired verbatim.
+            self.h.prompt(who, text)
+        except HerdrError as e:
+            store.log_event(self.db, kind="ring_fallback_failed", agent=who,
+                            error=str(e), reason=reason)
+        return True
+
+    def _claim_inline_fallback(self, who: str, ring: dict, *,
+                               reason: str, text: str) -> bool:
+        """Atomically close the payload cycle and open its repairable fallback."""
+        claimed = False
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            holes = ",".join("?" * len(RING_CLOSED))
+            settled = self.db.execute(
+                f"SELECT 1 FROM events WHERE agent=? AND id>? "
+                f"AND kind IN ({holes}) LIMIT 1",
+                (who, ring["id"], *RING_CLOSED),
+            ).fetchone()
+            if settled is None:
+                self.db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (who, RING_FALLBACK_CLAIM,
+                     json.dumps({"reason": reason, "ring": ring["id"]}), store.now()),
+                )
+                # Durable before the external prompt: if this process exits after its
+                # claim, the ordinary capped repair path still sees an open doorbell.
+                self.db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (who, RING_OPEN,
+                     json.dumps({"text": text, "repair": True, "inline_ids": []}),
+                     store.now()),
+                )
+                claimed = True
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return claimed
 
     def _claim_repair(self, who: str, ring: dict, now: int) -> Optional[int]:
         """Take the next repair slot for this ring, or None if there is not one to take.
@@ -8522,7 +8676,8 @@ class Broker:
             payload = json.loads(r["payload"]) if r["payload"] else {}
             return {"id": r["id"], "at": r["created_at"], "last": last, "tries": tries,
                     "text": payload.get("text") or "",
-                    "repair": bool(payload.get("repair"))}
+                    "repair": bool(payload.get("repair")),
+                    "inline_ids": list(payload.get("inline_ids") or ())}
         return None
 
     def _pane_still_listed(self, who: str) -> bool:
@@ -8670,7 +8825,7 @@ class Broker:
 
     def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
               answer: bool = False, repair: bool = True, hold: bool = False) -> bool:
-        """The doorbell. Carries no payload — the message is in the store.
+        """Deliver pending mail inline when safe, or ring its durable inbox.
 
         `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`), and the
         only thing it decides here is what to do about a target that is mid-turn:
@@ -8744,6 +8899,17 @@ class Broker:
         force = mode == INTERRUPT
         if who == HUMAN:
             return False
+        pending = store.unseen_for(self.db, who)
+        wait_ready, wait = self._wait_ready(who, pending)
+        if not force and not answer and wait is not None and not wait_ready:
+            store.log_event(self.db, kind="ring_held", agent=who,
+                            reason="waiting", mode=wait["mode"])
+            return False
+        # A satisfied cohort wait is itself the coalescing boundary. In particular,
+        # ``--any`` wakes for the first declared result and ``--all`` wakes for the last;
+        # neither should then pay the generic sibling-burst holdback too.
+        if wait is not None and wait_ready:
+            hold = False
         if self._finished_and_unreachable(who):
             # Nobody is there to hear it: the turn ended and the name no longer binds, so
             # the call can only fail. The guard lives HERE and not at `tell`/`interrupt`
@@ -8797,6 +8963,14 @@ class Broker:
             return False
         if answer:
             self._unblock_if_needed(who)
+        inline_ids: list[int] = []
+        if mode != INTERRUPT:
+            inline, inline_ids = self._inline_mail(who, pending)
+            if inline is not None:
+                text = inline
+                # This prompt carries instructions/results rather than a disposable
+                # doorbell. A blind confirmation retry could execute it twice.
+                repair = False
         try:
             if mode == INTERRUPT:
                 self._deliver_interrupt(who, text)
@@ -8819,8 +8993,17 @@ class Broker:
             # send again, and a prefix is no good as the second of those. Doorbells are one
             # short line; the only long one is a preset, which is recorded for the first
             # reason and re-sent for neither.
-            store.log_event(self.db, kind="ring_sent", agent=who, text=text, repair=repair)
+            store.log_event(self.db, kind="ring_sent", agent=who, text=text, repair=repair,
+                            inline_ids=inline_ids)
+        # An inline payload is announced but not yet proved read. The off-turn confirmer
+        # marks these exact ids collected after transcript proof; if proof fails it sends
+        # the ordinary inbox notice instead. Marking them read here would silently discard
+        # an instruction when the terminal accepted the paste but dropped Enter.
         store.mark_delivered(self.db, who)
+        if wait is not None and wait_ready:
+            store.clear_wait(self.db, who)
+            store.log_event(self.db, kind="waiting_woke", agent=who,
+                            mode=wait["mode"], cohort=wait["cohort"])
         return True
 
     def _deliver_interrupt(self, who: str, text: str) -> None:

@@ -261,8 +261,11 @@ open the pull request, and put its URL in your summary. Where a plan is running,
 its merge gate is the authority on pushing and merging; where none is, your
 parent's instruction is.
 To delegate: `sb delegate "<task>" --role <role> --name <topic>` spawns a child that
-runs independently; do NOT wait for it, end your turn and you will be poked when it
-reports. `--name` is two or three words for the SUBJECT — the agent is named
+runs independently. End your turn rather than polling: `sb waiting --all` wakes once
+the current live-child cohort has finished, and `--any` wakes on its first result; name
+a subset after either flag when that is the cohort you mean. Plain `sb waiting` records
+that provider-native or other background work is still running, with no Switchboard
+cohort to watch. `--name` is two or three words for the SUBJECT — the agent is named
 `<role>-<topic>` from it, so leave the role out, and that name is also its workspace
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,

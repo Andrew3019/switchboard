@@ -3681,10 +3681,10 @@ class PlannerPackageTest(PlansSandbox):
                 # because `sb delegate` only makes the caller's own child.
                 "You do NOT spawn the main agent.",
                 "the handoff has two halves",
-                # The handoff tell carries --needs-reply, and it is what keeps a childless
-                # sibling planner cleanly open instead of STALLED by the stop gate.
-                '"ready: spawn the main with this brief and this seed" --needs-reply',
-                "`--needs-reply` IS WHAT KEEPS YOU CLEANLY OPEN",
+                # The planner now records a real background wait instead of manufacturing
+                # an unanswered question to stay open.
+                '"ready: spawn the main with this brief and this seed"',
+                "`sb waiting` IS WHAT KEEPS YOU CLEANLY OPEN",
                 # The one address the sibling main cannot derive.
                 "YOUR EXACT AGENT NAME",
                 # Delta routing is by the planner's name now, not `tell parent`.

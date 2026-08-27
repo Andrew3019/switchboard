@@ -262,6 +262,16 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("--peek", action="store_true",
                     help="do not mark as read (safe for polling)")
 
+    wt = cmd("waiting", help="end this turn while background work is still running")
+    wt.add_argument("agents", nargs="*", metavar="CHILD",
+                    help="live direct-child cohort; omit to snapshot every live child")
+    wm = wt.add_mutually_exclusive_group()
+    wm.add_argument("--any", dest="wait_mode", action="store_const", const="any",
+                    help="wake when any declared live child finishes")
+    wm.add_argument("--all", dest="wait_mode", action="store_const", const="all",
+                    help="wake once the whole declared live-child cohort finishes")
+    wt.set_defaults(wait_mode="background")
+
     dn = cmd(
         "done", help="you have finished",
         # PROMOTE, said where the caller looks before it types the flag. The two things
@@ -598,6 +608,9 @@ def _validate(args) -> None:
             args.message = validate.line(args.message, "message")
         else:
             args.message = validate.text(args.message, "message")
+
+    elif cmd == "waiting":
+        args.agents = [validate.agent_name(name) for name in args.agents]
 
     elif cmd == "done":
         # herdr carries the summary as `report-agent --message`, so one line.
@@ -1364,6 +1377,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                                                     who=m["from_agent"]))
         _emit(args, "\n".join(lines),
               {"messages": [dict(m) for m in msgs]})
+        return 0
+
+    if cmd == "waiting":
+        result = b.waiting(mode=args.wait_mode, cohort=args.agents, me=me)
+        if result["mode"] == "background":
+            text = "waiting for background work"
+        else:
+            text = (f"waiting for {result['mode']} of: "
+                    + ", ".join(result["cohort"]))
+        _emit(args, text, result)
         return 0
 
     if cmd == "done":

@@ -213,6 +213,14 @@ CREATE TABLE agents (
                                       -- message it receives (`put_message`). The default is
                                       -- 0, which is also what rows predating the column
                                       -- read as: an ordinary agent, stalled-eligible.
+    wait_mode     TEXT,               -- NULL | background | any | all. An explicit
+                                      -- `sb waiting`, distinct from a human block and
+                                      -- from the implicit live-child idle excuse.
+    wait_cohort   TEXT,               -- JSON snapshot of live direct children for an
+                                      -- any/all wait. NULL for a background wait.
+    wait_started_at INTEGER,          -- when this wait intent replaced the previous one.
+    wait_after_id INTEGER,            -- highest message id already present when the wait
+                                      -- was declared; only later mail can satisfy it.
     absent_since  INTEGER,            -- epoch of the FIRST reading that found herdr no
                                       -- longer listing this agent, cleared the moment it
                                       -- is listed again. One absent reading is a hiccup;
@@ -2456,6 +2464,15 @@ def unseen(db: sqlite3.Connection, *, exclude: Iterable[str] = ()) -> list[sqlit
     return _pending(db, exclude=exclude, unread_only=True)
 
 
+def unseen_for(db: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    """Unannounced, unread mail for one recipient, oldest first."""
+    return db.execute(
+        "SELECT * FROM messages WHERE to_agent=? AND delivered_at IS NULL "
+        "AND read_at IS NULL ORDER BY id",
+        (name,),
+    ).fetchall()
+
+
 def _pending(
     db: sqlite3.Connection, *, exclude: Iterable[str], unread_only: bool = False
 ) -> list[sqlite3.Row]:
@@ -2485,6 +2502,22 @@ def mark_collected(db: sqlite3.Connection, mid: int) -> None:
         (now(), now(), mid),
     )
     db.commit()
+
+
+def mark_messages_collected(db: sqlite3.Connection, ids: Iterable[int]) -> int:
+    """Mark the exact messages carried inline as both announced and read."""
+    mids = list(ids)
+    if not mids:
+        return 0
+    holes = ",".join("?" * len(mids))
+    stamp = now()
+    cur = db.execute(
+        f"UPDATE messages SET read_at=COALESCE(read_at, ?), "
+        f"delivered_at=COALESCE(delivered_at, ?) WHERE id IN ({holes})",
+        (stamp, stamp, *mids),
+    )
+    db.commit()
+    return cur.rowcount
 
 
 def mark_unannounceable(db: sqlite3.Connection, mid: int) -> None:
@@ -2544,6 +2577,61 @@ def mark_delivered(db: sqlite3.Connection, to_agent: str) -> int:
     )
     db.commit()
     return cur.rowcount
+
+
+def set_wait(db: sqlite3.Connection, name: str, mode: str,
+             cohort: Optional[Iterable[str]] = None) -> None:
+    if mode not in ("background", "any", "all"):
+        raise ValueError(f"bad wait mode: {mode}")
+    cohort_names = list(cohort or ())
+    members = None if mode == "background" else json.dumps(cohort_names)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        # Recheck under the same write lock as the message watermark. A child that
+        # finishes between the broker's validation and this snapshot must make the wait
+        # fail, not become an old result the new wait can never observe.
+        for child_name in cohort_names:
+            child = db.execute(
+                "SELECT parent, state, ended_at FROM agents WHERE name=?",
+                (child_name,),
+            ).fetchone()
+            if (child is None or child["parent"] != name
+                    or child["state"] not in LIVE_STATES or child["ended_at"] is not None):
+                raise ValueError(f"{child_name} is no longer a live direct child of {name}")
+        watermark = db.execute("SELECT COALESCE(MAX(id), 0) n FROM messages").fetchone()["n"]
+        db.execute(
+            "UPDATE agents SET wait_mode=?, wait_cohort=?, wait_started_at=?, "
+            "wait_after_id=? WHERE name=?",
+            (mode, members, now(), watermark, name),
+        )
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def clear_wait(db: sqlite3.Connection, name: str, *, commit: bool = True) -> None:
+    db.execute(
+        "UPDATE agents SET wait_mode=NULL, wait_cohort=NULL, wait_started_at=NULL, "
+        "wait_after_id=NULL "
+        "WHERE name=?",
+        (name,),
+    )
+    if commit:
+        db.commit()
+
+
+def wait_for(db: sqlite3.Connection, name: str) -> Optional[dict]:
+    row = get_agent(db, name)
+    if row is None or "wait_mode" not in row.keys() or not row["wait_mode"]:
+        return None
+    try:
+        cohort = json.loads(row["wait_cohort"]) if row["wait_cohort"] else []
+    except (TypeError, ValueError):
+        cohort = []
+    return {"mode": row["wait_mode"], "cohort": cohort,
+            "started_at": row["wait_started_at"],
+            "after_id": row["wait_after_id"] or 0}
 
 
 def get_message(db: sqlite3.Connection, mid: int) -> Optional[sqlite3.Row]:

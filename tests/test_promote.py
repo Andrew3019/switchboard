@@ -58,7 +58,8 @@ class PromoteFixture(Fixture):
                            pane_id="w1:p3")
 
     def mail(self, who: str) -> list:
-        return list(store.unread_for(self.db, who, mark=False))
+        return list(self.db.execute(
+            "SELECT * FROM messages WHERE to_agent=? ORDER BY id", (who,)).fetchall())
 
 
 class TheCommandTest(PromoteFixture, unittest.TestCase):

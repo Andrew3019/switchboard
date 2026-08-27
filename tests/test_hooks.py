@@ -101,6 +101,17 @@ class StopGateTest(unittest.TestCase):
                           body="which one?", needs_reply=True)
         self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
 
+    def test_an_explicit_background_wait_ends_without_the_stop_hook(self):
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        store.set_wait(self.db, "w1", "background")
+        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
+
+    def test_a_new_provider_turn_spends_the_previous_wait(self):
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        store.set_wait(self.db, "w1", "background")
+        hooks.mark_turn(self.payload(), self.db, store.TURN_WORKING)
+        self.assertIsNone(store.wait_for(self.db, "w1"))
+
     def test_the_answer_ends_the_excuse(self):
         """Any message back from whoever was asked, and the next silent end is a silence
         like any other — nothing here excuses a row for the rest of its life."""

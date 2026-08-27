@@ -111,7 +111,7 @@ start_task = "Await my instructions."
 # Reworded freely, here or in a repo's own prompts.toml, on the same terms as `start_task`:
 # the `agents.awaiting_task` flag that keeps this row out of STALLED comes from
 # `Broker._first_task` seeing no task passed, never from comparing this text back.
-delegate_task = "Await further instructions. Do NOT start work, and do not invent a task from your name — the real one is coming as a message. Run `sb inbox` when you are told you have mail."
+delegate_task = "Await further instructions. Do NOT start work, and do not invent a task from your name — the real one is coming as a tagged message. If Switchboard can only send a mail notice, run `sb inbox` to read it."
 
 
 [notify]
@@ -121,20 +121,21 @@ delegate_task = "Await further instructions. Do NOT start work, and do not inven
 # and so that `sb inbox`, which is not a prompt at all, can spell it the same way. Do not
 # write a sender into these strings; it is already there.
 
-# The doorbell carries no payload — the message itself is in the store, and telling an
-# agent to go and read it is what keeps a message off the wire and out of the pane.
+# Fallback for a payload that cannot safely travel in one provider prompt (large,
+# multiline, mixed with held signals). Ordinary short mail is sent directly, still backed
+# by its durable store row, so the recipient does not pay another turn to fetch it.
 mail = "You have mail. Run: sb inbox"
 
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
 #
-# It fires once per child, and a parent that fans out five of them is woken five times. Read
-# as a bare summons, each wake looked like a cue to speak, so parents dripped one message per
-# arrival instead of waiting for the cohort. The second sentence removes the implied
-# obligation without adding payload — the message itself still lives in the store, which is
-# the whole point of a doorbell. How to handle a cohort is the orchestrator role's business,
-# not the doorbell's; this only stops the doorbell from arguing with it.
-child_done = "A child finished. Run: sb inbox. Waking is not a reason to report — if other children are still running, wait for them."
+# It used to fire once per child, and a parent that fanned out five of them was woken five
+# times. Read as a bare summons, each wake looked like a cue to speak, so parents dripped
+# one message per arrival instead of waiting for the cohort. The second sentence removes
+# the implied obligation without adding payload — the message itself still lives in the
+# store, which is the whole point of a doorbell. How to handle a cohort is the orchestrator
+# role's business, not the doorbell's; this only stops the doorbell from arguing with it.
+child_done = "A child finished. Run: sb inbox. Waking is not a reason to report — use `sb waiting --all` when the whole live cohort is what you need."
 
 # `sb tell --interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
 # running, so it has to say plainly that the previous instruction is void.
@@ -148,8 +149,8 @@ child_done = "A child finished. Run: sb inbox. Waking is not a reason to report 
 #   {text} what the sender typed
 interrupt = "[INTERRUPT — stop now] The instruction you were following is cancelled; do not resume it. Do this instead: {text} — if stopping has left something half-done, say so with `sb block` before you go on."
 
-# `sb tell --needs-reply`. Appended to that message in the recipient's `sb inbox` output —
-# not to the doorbell, which deliberately carries no payload.
+# `sb tell --needs-reply`. Appended to the direct payload or, on fallback, to that
+# message in the recipient's `sb inbox` output.
 #
 # The whole of the feature is this sentence: the sender is waiting for an answer and is
 # NOT blocked waiting for it, so the recipient owes a reply at some point but owes it

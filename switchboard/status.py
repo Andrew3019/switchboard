@@ -1348,6 +1348,7 @@ def collect(
         # `store.connect`). Missing the column reads as 0, which is the label the row
         # already had; the alternative is every tick raising until a writer runs.
         awaiting = "awaiting_task" in row.keys() and bool(row["awaiting_task"])
+        wait_mode = (row["wait_mode"] if "wait_mode" in row.keys() else None)
         # Read defensively for the same reason, and remembered per row rather than
         # re-queried: the write that uses it is in the reap path (`_record_gone`), which is
         # the only place that both can write and is running current code.
@@ -1386,6 +1387,9 @@ def collect(
         # vocabulary is how they come to disagree.
         idle_for = max(0, now - last)
         excuse = ("awaiting first task" if awaiting
+                  else "waiting for background work" if wait_mode == "background"
+                  else "waiting for any child" if wait_mode == "any"
+                  else "waiting for child cohort" if wait_mode == "all"
                   else "waiting on children" if name in live_parent
                   else "waiting on a reply" if name in awaiting_reply
                   else "starting up" if starting

@@ -117,7 +117,7 @@ The rest of this file is a response to six failures observed in one evening's re
    turning it into a process; a heavyweight recipe here would be obeyed literally.
 
 3. DRIPPED EVENTS, NO SYNTHESIS. The old file asked for "an event log, one line per event"
-   and the doorbell wakes the lead once per child, so five children produced five
+   and the doorbell used to wake the lead once per child, so five children produced five
    content-free lines and the synthesis never happened. Hence the cohort: terse while it
    runs, real synthesis when it is complete, `sb status` to know which it is.
 
@@ -281,9 +281,9 @@ watching: plain, high-level language, no jargon, no telegraphic "agent-name — 
 report" lines. If that parent is the human, everything you send them is human-facing
 output, summaries included.
 
-Treat a fan-out as one cohort, not a stream of events. While it is still running, note
-arrivals in a few words and no more; `sb status` tells you who is still out. When the
-cohort is complete, synthesise: what was learned, what it means, what happens next. For
+Treat a fan-out as one cohort, not a stream of events. Use `sb waiting --all` after the
+fan-out, naming a subset only when that is the cohort the next decision depends on. When
+the cohort is complete, synthesise: what was learned, what it means, what happens next. For
 example: "you asked whether sessions ever expire — both reviewers agree they do not, and
 the fix belongs in the session store rather than the login path; I have put one agent on
 it and will report when it lands." Say more when something genuinely went wrong — a child

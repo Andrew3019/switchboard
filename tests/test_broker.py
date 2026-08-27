@@ -228,6 +228,11 @@ class BrokerTest(unittest.TestCase):
         self.b = Broker(self.db, self.h, repo=self.repo)
         return self.b
 
+    def message_bodies(self, who):
+        """Durable record, including mail already carried inline and marked read."""
+        return [r["body"] for r in self.db.execute(
+            "SELECT body FROM messages WHERE to_agent=? ORDER BY id", (who,)).fetchall()]
+
     # -- identity --------------------------------------------------------
 
     def test_whoami_is_human_outside_a_pane(self):
@@ -823,12 +828,14 @@ class BrokerTest(unittest.TestCase):
 
     # -- messaging -------------------------------------------------------
 
-    def test_tell_rings_the_doorbell_without_the_payload(self):
+    def test_short_tell_delivers_the_tagged_payload_without_an_inbox_turn(self):
         store.create_agent(self.db, name="a", role="lead")
         store.create_agent(self.db, name="b", role="worker", parent="a")
         self.b.tell(["b"], "the actual secret payload", me="a")
         self.assertEqual(len(self.h.prompts), 1)
-        self.assertNotIn("secret payload", self.h.prompts[0][1])  # payload stays in the store
+        self.assertEqual(self.h.prompts[0][1],
+                         "[sb: from a] the actual secret payload")
+        self.assertEqual(self.message_bodies("b"), ["the actual secret payload"])
 
     def test_the_flag_is_spelled_needs_reply_on_sb_tell(self):
         """The one thing an agent types. `sb tell w "..." --needs-reply` is the spelling
@@ -839,6 +846,15 @@ class BrokerTest(unittest.TestCase):
             build_parser().parse_args(["tell", "w", "hi", "--needs-reply"]).needs_reply)
         self.assertFalse(build_parser().parse_args(["tell", "w", "hi"]).needs_reply)
 
+    def test_waiting_parses_plain_any_and_all_without_an_extra_mode(self):
+        from switchboard.cli import build_parser
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["waiting"]).wait_mode, "background")
+        any_wait = parser.parse_args(["waiting", "--any", "one", "two"])
+        self.assertEqual((any_wait.wait_mode, any_wait.agents),
+                         ("any", ["one", "two"]))
+        self.assertEqual(parser.parse_args(["waiting", "--all"]).wait_mode, "all")
+
     def test_needs_reply_is_recorded_and_still_nobody_waits(self):
         """The flag is a claim on the RECIPIENT, and on nothing else.
         DESIGN-TRUTH: "No agent ever waits on another agent." So `--needs-reply` must leave
@@ -848,41 +864,107 @@ class BrokerTest(unittest.TestCase):
         (mid,) = self.b.tell(["b"], "what did you find?", me="a", needs_reply=True)
         self.assertEqual(store.get_message(self.db, mid)["needs_reply"], 1)
         self.assertEqual(len(self.h.prompts), 1)          # rung once, like any tell
-        self.assertNotIn("what did you find?", self.h.prompts[0][1])
+        self.assertIn("what did you find?", self.h.prompts[0][1])
+        self.assertIn("[reply needed]", self.h.prompts[0][1])
 
-    def test_the_recipients_inbox_is_where_the_reply_prompt_actually_lands(self):
-        """The doorbell carries no payload, so `sb inbox` is the only text this can reach
-        an agent through — and a plain tell must not carry it, or the prompt means
-        nothing."""
-        import argparse, contextlib, io
-        from switchboard import cli
+    def test_multiline_mail_uses_the_durable_inbox_fallback(self):
+        store.create_agent(self.db, name="a", role="lead")
+        store.create_agent(self.db, name="b", role="worker", parent="a")
+        (mid,) = self.b.tell(["b"], "first\nsecond", me="a")
+        self.assertIn("Run: sb inbox", self.h.prompts[0][1])
+        self.assertIsNone(store.get_message(self.db, mid)["read_at"])
+
+    def test_waiting_all_wakes_once_for_the_declared_live_cohort(self):
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        for name in ("one", "two"):
+            store.create_agent(self.db, name=name, role="worker", parent="lead",
+                               pane_id=f"w1:{name}")
+        self.b.waiting(mode="all", me="lead")
+        self.b.done("first", me="one")
+        self.assertEqual(self.h.prompts, [])
+        self.b.done("second", me="two")
+        self.assertEqual(len(self.h.prompts), 1)
+        self.assertIn("[done] first", self.h.prompts[0][1])
+        self.assertIn("[done] second", self.h.prompts[0][1])
+        self.assertIsNone(store.wait_for(self.db, "lead"))
+
+    def test_waiting_any_wakes_on_the_first_declared_result(self):
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        for name in ("one", "two"):
+            store.create_agent(self.db, name=name, role="worker", parent="lead")
+        self.b.waiting(mode="any", me="lead")
+        self.b.done("first", me="one")
+        self.assertEqual(len(self.h.prompts), 1)
+        self.assertIn("[done] first", self.h.prompts[0][1])
+        self.assertIsNone(store.wait_for(self.db, "lead"))
+
+    def test_unrelated_completion_does_not_satisfy_a_declared_wait(self):
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="wanted", role="worker", parent="lead")
+        store.create_agent(self.db, name="other", role="worker", parent="lead")
+        self.b.waiting(mode="all", cohort=["wanted"], me="lead")
+        self.b.done("other", me="other")
+        self.assertEqual(self.h.prompts, [])
+        self.assertEqual(store.wait_for(self.db, "lead")["cohort"], ["wanted"])
+        self.b.done("wanted", me="wanted")
+        self.assertEqual(len(self.h.prompts), 1)
+
+    def test_a_completion_that_predates_the_wait_cannot_wake_it(self):
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead")
+        store.put_message(self.db, from_agent="kid", to_agent="lead", kind="done",
+                          body="[done] old run")
+        self.b.waiting(mode="any", me="lead")
+        self.assertEqual(self.b.flush_pending(), [])
+        self.assertEqual(self.h.prompts, [])
+        self.b.done("new run", me="kid")
+        self.assertEqual(len(self.h.prompts), 1)
+        self.assertIn("new run", self.h.prompts[0][1])
+
+    def test_an_ordinary_instruction_supersedes_a_cohort_wait(self):
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead")
+        self.b.waiting(mode="all", me="lead")
+        self.b.tell(["lead"], "change course", me=HUMAN)
+        self.assertIsNone(store.wait_for(self.db, "lead"))
+        self.assertIn("change course", self.h.prompts[-1][1])
+
+    def test_a_held_instruction_keeps_the_wait_valid_until_delivery(self):
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1")
+        store.set_wait(self.db, "lead", "background")
+        self.h.states_by_name = {"lead": "working"}
+        self.b.tell(["lead"], "next task", me=HUMAN, mode=WHEN_IDLE)
+        self.assertIsNotNone(store.wait_for(self.db, "lead"))
+        self.h.states_by_name = {"lead": "idle"}
+        self.b._alive_cache = None
+        self.assertEqual(self.b.flush_pending(), ["lead"])
+        self.assertIsNone(store.wait_for(self.db, "lead"))
+
+    def test_the_reply_prompt_lands_inline_only_on_the_message_that_needs_it(self):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
         self.b.tell(["kid"], "which branch?", me="orch", needs_reply=True)
         self.b.tell(["kid"], "fyi, no answer wanted", me="orch")
-        args = argparse.Namespace(cmd="inbox", json=False, peek=False)
-        buf = io.StringIO()
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}, clear=True), \
-                contextlib.redirect_stdout(buf):
-            self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
-        out = buf.getvalue()
-        self.assertIn("The sender, orch, is waiting for a reply", out)
-        self.assertIn("sb tell orch", out)                # it says HOW to answer
-        self.assertEqual(out.count("waiting for a reply"), 1)   # not the plain tell too
+        first, second = [text for _, text in self.h.prompts]
+        self.assertIn("The sender, orch, is waiting for a reply", first)
+        self.assertIn("sb tell orch", first)
+        self.assertNotIn("waiting for a reply", second)
 
     def test_parent_resolves(self):
         store.create_agent(self.db, name="kid", role="worker", parent="mum")
         store.create_agent(self.db, name="mum", role="lead")
         self.b.tell(["parent"], "hi", me="kid")
-        self.assertEqual(store.unread_for(self.db, "mum")[0]["body"], "hi")
+        self.assertEqual(self.message_bodies("mum"), ["hi"])
+        self.assertIn("[sb: from kid] hi", self.h.prompts[-1][1])
 
     def test_done_notifies_the_parent_so_it_need_not_poll(self):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         self.b.done("computed 144", me="kid")
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
-        self.assertIn("[done] computed 144", store.unread_for(self.db, "orch")[0]["body"])
+        self.assertIn("[done] computed 144", self.h.prompts[-1][1])
+        self.assertEqual(self.message_bodies("orch"), ["[done] computed 144"])
         self.assertTrue(any(n == "orch" for n, _ in self.h.prompts))
 
     def test_a_root_agents_summary_is_recorded_without_being_mailed(self):
@@ -906,8 +988,8 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         self.b.done("counted 144", me="kid")
-        [m] = store.unread_for(self.db, "orch", mark=False)
-        self.assertIn("[done] counted 144", m["body"])
+        self.assertEqual(self.message_bodies("orch"), ["[done] counted 144"])
+        self.assertIn("[done] counted 144", self.h.prompts[-1][1])
 
     def test_a_finished_agent_can_still_be_reached_on_an_evicting_herdr(self):
         """The follow-up question, against a herdr that behaves the way the real one does.
@@ -970,7 +1052,7 @@ class BrokerTest(unittest.TestCase):
         self.assertTrue(self.b.done_repeat)
         # the report stands: the row says done even though `_revive` revived it on the way
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+        self.assertEqual(self.message_bodies("orch"),
                          ["[done] counted 144, the parser is fine"])
         self.assertEqual(self.h.prompts, [])              # the parent is not rung twice
         kinds = [e["kind"] for e in store.recent_events(self.db, agent="kid")]
@@ -999,7 +1081,7 @@ class BrokerTest(unittest.TestCase):
         self.restart_sb().done("and the second thing is done too", me="kid")
 
         self.assertFalse(self.b.done_repeat)
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+        self.assertEqual(self.message_bodies("orch"),
                          ["[done] counted 144",
                           "[done] and the second thing is done too"])
 
@@ -1030,7 +1112,7 @@ class BrokerTest(unittest.TestCase):
 
         self.assertTrue(self.b.done_replay)
         self.assertFalse(self.b.done_repeat)              # not the same agent saying it twice
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+        self.assertEqual(self.message_bodies("orch"),
                          ["[done] counted 144, the parser is fine"])
         self.assertEqual(self.h.prompts, [])              # and the parent is not rung again
         kinds = [e["kind"] for e in store.recent_events(self.db, agent="kid")]
@@ -1059,7 +1141,7 @@ class BrokerTest(unittest.TestCase):
         self.restart_sb().done("counted the other one too: 89", me="kid")
 
         self.assertFalse(self.b.done_replay)
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+        self.assertEqual(self.message_bodies("orch"),
                          ["[done] counted 144, the parser is fine",
                           "[done] counted the other one too: 89"])
         self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")
@@ -1086,7 +1168,7 @@ class BrokerTest(unittest.TestCase):
         self.restart_sb().done("counted 144, the parser is fine", me="kid")
 
         self.assertFalse(self.b.done_replay)
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+        self.assertEqual(self.message_bodies("orch"),
                          ["[done] counted 144, the parser is fine",
                           "[done] counted 144, the parser is fine"])
 
@@ -1338,7 +1420,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="w", role="worker", parent="orch",
                            pane_id="w1:p1")
-        self.b.tell(["w"], "the branch is ready", me="orch")
+        self.b.tell(["w"], "the branch is ready\nwith details", me="orch")
         doorbell = self.h.prompts[-1][1]
         args = argparse.Namespace(cmd="inbox", json=False, peek=False)
         buf = io.StringIO()
@@ -1455,8 +1537,7 @@ class BrokerTest(unittest.TestCase):
         self.b._alive_cache = None
         self.assertEqual(self.b.flush_pending(), ["lead"])
         self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
-        self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
-                         ["[done] shipped it"])
+        self.assertIn("[done] shipped it", self.h.prompts[-1][1])
 
     def _fanout(self, kids=("k1", "k2", "k3")):
         """An idle lead with `kids` children all still working."""
@@ -1495,8 +1576,9 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(who, "lead")
         for k in kids:                                   # ONE doorbell, naming all three
             self.assertIn(k, text)
-        # And nothing was collapsed to make it: every summary is in the mailbox, whole.
-        self.assertEqual([m["body"] for m in self.b.inbox(me="lead")],
+        # Nothing was collapsed: every summary travelled in the one prompt and remains
+        # in the durable message log, without an inbox-fetch turn.
+        self.assertEqual(self.message_bodies("lead"),
                          [f"[done] {k} shipped" for k in kids])
 
     def test_the_holdback_never_touches_a_block_or_an_interrupt(self):
@@ -1561,9 +1643,10 @@ class BrokerTest(unittest.TestCase):
 
         self.b.tell(["lead"], "use main", me=HUMAN)                # the answer arrives
         self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
-        bodies = [m["body"] for m in self.b.inbox(me="lead")]
-        self.assertIn("rewrite the parser", bodies[0])
-        self.assertTrue(bodies[0].startswith("[failed] kid "), bodies[0])
+        delivered = self.h.prompts[-1][1]
+        self.assertIn("rewrite the parser", delivered)
+        self.assertIn("[failed] kid ", delivered)
+        self.assertIn("use main", delivered)
 
     def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
         """A ring says "you have mail" — to an agent that has already got it, that is a
@@ -1790,7 +1873,9 @@ class BrokerTest(unittest.TestCase):
 
     def _ring_and_age(self) -> str:
         """Ring w's doorbell, age it, and return the text that went out."""
-        self.b.tell(["w"], "have a look at this", me=HUMAN)
+        # Multiline cannot travel in a provider prompt, so this deliberately exercises
+        # the fallback doorbell rather than the new inline fast path.
+        self.b.tell(["w"], "have a look\nat this", me=HUMAN)
         self._age_rings()
         return self.h.prompts[-1][1]
 
@@ -1837,7 +1922,56 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(kinds.count("ring_repaired"), 2)
         self.assertIn("ring_unconfirmed", kinds)
         [m] = store.unread_for(self.db, "w", mark=False)   # still there to be read
-        self.assertIn("have a look at this", m["body"])
+        self.assertIn("have a look\nat this", m["body"])
+
+    def test_confirmed_inline_mail_is_only_then_marked_read(self):
+        self._target()
+        (mid,) = self.b.tell(["w"], "short instruction", me=HUMAN)
+        text = self.h.prompts[-1][1]
+        self.assertIsNone(store.get_message(self.db, mid)["read_at"])
+        self._age_rings()
+        (self.bucket / "sess-w.jsonl").write_text(json.dumps({
+            "type": "queue-operation", "operation": "enqueue", "content": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }) + "\n")
+        self.assertIn("ring_confirmed", self._confirm())
+        self.assertIsNotNone(store.get_message(self.db, mid)["read_at"])
+
+    def test_unconfirmed_inline_mail_falls_back_to_a_repairable_inbox_notice(self):
+        self._target()
+        (mid,) = self.b.tell(["w"], "short instruction", me=HUMAN)
+        payload = self.h.prompts[-1][1]
+        self._age_rings()
+        kinds = self._confirm()
+        self.assertIn("ring_fallback_claimed", kinds)
+        self.assertEqual(len(self.h.prompts), 2)
+        self.assertNotEqual(self.h.prompts[-1][1], payload)
+        self.assertIn("Run: sb inbox", self.h.prompts[-1][1])
+        self.assertIsNone(store.get_message(self.db, mid)["read_at"])
+
+    def test_new_mail_does_not_supersede_an_unproved_inline_payload(self):
+        self._target()
+        self.b.tell(["w"], "first instruction", me=HUMAN)
+        first = self.h.prompts[-1][1]
+        self.b.tell(["w"], "second instruction", me=HUMAN)
+        second = self.h.prompts[-1][1]
+        self.assertIn("first instruction", first)
+        self.assertNotIn("second instruction", second)
+        self.assertIn("Run: sb inbox", second)
+        self.assertEqual(self.message_bodies("w"),
+                         ["first instruction", "second instruction"])
+
+    def test_inline_fallback_has_one_claim_against_stale_confirmers(self):
+        self._target()
+        self.b.tell(["w"], "short instruction", me=HUMAN)
+        ring = self.b._last_ring("w")
+        self.assertTrue(ring["inline_ids"])
+        claims = [self.b._claim_inline_fallback(
+            "w", ring, reason="test", text="fallback") for _ in range(3)]
+        self.assertEqual(claims, [True, False, False])
+        fallback = self.b._last_ring("w")
+        self.assertEqual(fallback["text"], "fallback")
+        self.assertTrue(fallback["repair"])
 
     def test_the_repair_cap_holds_against_a_stale_read(self):
         """What `RING_REPAIRS` counts is the claim, not the count that decided to try.
@@ -2202,7 +2336,8 @@ class BrokerTest(unittest.TestCase):
 
         self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertEqual([n for n, _ in self.h.prompts], ["w"])
-        self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["fyi", "use main"])
+        self.assertIn("fyi", self.h.prompts[-1][1])
+        self.assertIn("use main", self.h.prompts[-1][1])
 
     def test_a_flush_does_not_cancel_a_block_for_a_siblings_mail(self):
         """`flush_pending` runs at the start of every `sb` command, so this fires on any
@@ -2682,7 +2817,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("done_with_live_children",
                       [e["kind"] for e in store.recent_events(self.db, agent="lead")])
         # and the summary still reached its own parent, unchanged
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "orch")],
+        self.assertEqual(self.message_bodies("orch"),
                          ["[done] handing off"])
         # the pane survives the sweep that follows
         self.b.cleanup(me="orch")
@@ -3551,7 +3686,7 @@ class BrokerTest(unittest.TestCase):
         before = len(self.h.started)
         self.restart_sb().start(name=MAIN_NAME, task="merge PR 41")
         self.assertEqual(len(self.h.started), before)          # joined, not spawned over
-        self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
+        self.assertEqual(self.message_bodies(MAIN_NAME)[-1], "merge PR 41")
 
     # -- what "already running" is allowed to mean --------------------------
     #
@@ -3667,7 +3802,7 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.restart_sb().start(name=MAIN_NAME, task="merge PR 41"),
                          MAIN_NAME)
         self.assertIsNotNone(store.get_agent(self.db, MAIN_NAME))
-        self.assertEqual(store.unread_for(self.db, MAIN_NAME)[-1]["body"], "merge PR 41")
+        self.assertEqual(self.message_bodies(MAIN_NAME)[-1], "merge PR 41")
 
     def test_an_unreachable_herdr_does_not_resume_a_live_orchestrator(self):
         """Doubt about a named orchestrator resolves the reversible way.

@@ -432,6 +432,15 @@ class StatusTest(unittest.TestCase):
         self.assertFalse(a.needs_human)
         self.assertEqual(a.idle_excuse, "waiting on a reply")
 
+    def test_an_explicit_wait_is_visible_and_not_stalled(self):
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_wait(self.db, "w1", "background")
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", "idle")]),
+            now=self.past_the_floor()))["w1"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.idle_excuse, "waiting for background work")
+
     def test_the_answer_ends_the_excuse(self):
         """It excuses a WAIT and not a name: anything back from the agent it asked spends
         the question, and the row is a stall again like any other."""
@@ -1411,7 +1420,8 @@ class StatusCliTest(unittest.TestCase):
         from switchboard.cli import build_parser
         sample = {                                  # a minimal legal argv per verb
             "start": [], "delegate": ["do a thing"],
-            "tell": ["w1", "hi"], "inbox": [], "done": ["finished"], "block": ["why"],
+            "tell": ["w1", "hi"], "inbox": [], "waiting": [],
+            "done": ["finished"], "block": ["why"],
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             # `models`' two siblings. The role name is optional, so a bare listing is the
             # minimal legal argv for both.
