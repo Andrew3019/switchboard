@@ -106,11 +106,10 @@ parent = "parent"
 main_role = "dispatcher"
 
 # Old role names that still work. A name here resolves to the role it points at — fields,
-# prompt and display name — instead of falling through to `fallback_role` below, which is
-# the difference between a stale `--role orchestrator` behaving as a lead and it silently
-# spawning an agent that cannot delegate at all. `orchestrator` maps to `lead` rather than
-# to `dispatcher` because that is what anyone typing it at `sb delegate` meant: an agent
-# that owns this piece of work and splits it. Empty it once nothing types the old name.
+# prompt and display name — instead of being refused as unknown. `orchestrator` maps to
+# `lead` rather than `dispatcher` because that is what anyone typing it at `sb delegate`
+# meant: an agent that owns this piece of work and splits it. Empty it once nothing types
+# the old name.
 #
 # What the rename does NOT reach, which matters on the day it lands. A running agent keeps
 # the prompt it was spawned with, so no top already up becomes a dispatcher — it goes on
@@ -128,8 +127,8 @@ main_name = "main"
 # What `sb delegate` uses when no `--role` is given.
 default_role = "worker"
 
-# What an UNDEFINED role inherits — its fields, never its name. `--role archaeologist`
-# works with nobody having defined an archaeologist; it just behaves like this one.
+# Retained for compatibility with existing repo settings. Undefined role names are now
+# refused; explicit custom prompts use `--as` alongside a configured role.
 fallback_role = "worker"
 
 # What a role file gets for a tier it does not name. No shipped role names one, so this is

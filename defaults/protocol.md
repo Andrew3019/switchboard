@@ -20,15 +20,11 @@ To change it for one repo, write `<repo>/.switchboard/protocol.md`. That file RE
 this one rather than merging into it — a protocol assembled from two halves is a protocol
 nobody can read.
 
-Scope and hand-back came here from `defaults/roles/worker.md` when that file was deleted.
-`worker` is still the default role and the fallback for any UNDEFINED role (see
-`[vocabulary] default_role` / `fallback_role` in settings.toml) but it no longer has a
-prompt, so an agent spawned with no role gets this protocol, its identity line, its
-presets and its task — nothing else. The two rules it lost are universal, so they are paid
-for here rather than lost: do only what you were asked (a change nobody asked for is a
-change nobody reviews), and hand back anything too big or underspecified instead of
-absorbing it. Both had failed in real runs — a worker that quietly did a three-agent job
-badly, and workers that fixed files another agent owned.
+Scope and hand-back are universal, so they live here rather than only in a role prompt:
+do only what you were asked (a change nobody asked for is a change nobody reviews), and
+hand back anything too big or underspecified instead of absorbing it. `worker` is the
+default role and also carries a short finishing prompt. Undefined role names are refused;
+an explicit custom prompt uses `--as` with a configured role as its profile.
 
 Worded around the TASK, not the capability. The old role said "do not spawn agents of your
 own", which is flatly wrong for an orchestrator, and orchestrators read this file too.

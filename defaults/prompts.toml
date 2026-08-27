@@ -32,8 +32,8 @@
 identity = "You are agent '{name}', role '{role}'. You report to '{parent}': they spawned you, and your `sb done` summary is what they see of your work."
 
 # What roles exist, told to every agent right after its own —
-# DESIGN-TRUTH: "The role list is lightly audited and fine as it is", which also fixes how
-# it is built: "that text is generated from the roles themselves, never hardcoded".
+# DESIGN-TRUTH: "The role list is live vocabulary, not a hardcoded prompt list", which
+# fixes how it is built too.
 # So `{roles}` is filled from the merged role table this repo actually has
 # (`Broker.roles`), and naming the shipped five in this string would be the failed version of
 # this fragment even on the day it is accurate — a repo that adds `.switchboard/roles/x.md`
@@ -43,11 +43,10 @@ identity = "You are agent '{name}', role '{role}'. You report to '{parent}': the
 # list answers is the one that sentence provokes: mine is 'worker' — out of what?
 #
 # Names only, no descriptions. `Role` has no description field, the names are the vocabulary
-# `--role` takes, and DESIGN-TRUTH asks only that it is known "that there are roles, and what
-# roles there are". A description per role means a schema change and a second thing to keep
+# `--role` takes. A description per role means a schema change and a second thing to keep
 # true; if it turns out agents pick badly from names alone, that is when to add it.
 #   {roles} the role names this repo has, comma-separated
-roles = "The roles that exist are: {roles}. That is the list `--role` takes; a name that is not on it still works and inherits the default role."
+roles = "The roles that exist are: {roles}. That is the list `--role` takes. If a requested name is absent, inspect `sb roles`; use `--as` with one of these roles for an explicit custom prompt."
 
 # Operator procedures this repo offers, told ONLY to the dispatcher (the `MAIN` role) and
 # only when the registry is non-empty — a repo that `"!reset"`s it to nothing gets no

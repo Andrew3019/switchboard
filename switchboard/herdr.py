@@ -157,6 +157,11 @@ class PromptFileError(RuntimeError):
 PROMPT_DIRNAME = "prompts"
 
 
+def render_instructions(prompts: Sequence[str]) -> str:
+    """The exact standing-instruction body handed to Claude."""
+    return " ".join(prompts)
+
+
 def prompt_file_path(name: str, cwd: Optional[Path] = None) -> Path:
     """Where `name`'s system prompt lives. Never joins an unchecked name onto a path."""
     if not validate.AGENT_NAME.fullmatch(name or ""):
@@ -619,7 +624,7 @@ class Herdr:
         # --append-system-prompt "…CHARLIE."`, which answers "CHARLIE" and nothing else.
         # That bug made every prompt in `defaults/` a fiction for a while: what each agent
         # actually received was its last preset fragment, with no protocol and no role.
-        text = " ".join(prompts)
+        text = render_instructions(prompts)
         return ["--append-system-prompt-file", str(write_prompt_file(name, text))]
 
     def _codex_args(self, name: str, prompts: Sequence[str], spec: Any,

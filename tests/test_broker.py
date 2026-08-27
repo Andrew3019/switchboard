@@ -359,10 +359,16 @@ class BrokerTest(unittest.TestCase):
         typed = " ".join(cmd for _, cmd in self.h.pane_prompts)
         self.assertIn(f"export SB_AGENT={name}", typed)
 
-    def test_unknown_role_still_works(self):
-        """Vocabulary is data — an undefined role inherits defaults, it does not error."""
-        name = self.b.delegate("t", topic="t", role="wizard", me="orch")
-        self.assertEqual(store.get_agent(self.db, name)["role"], "wizard")
+    def test_unknown_role_is_refused_before_a_spawn(self):
+        """A typo cannot silently become a worker-shaped custom role."""
+        with self.assertRaises(ValueError) as cm:
+            self.b.delegate("t", topic="t", role="wizard", me="orch")
+        self.assertIn("sb roles", str(cm.exception))
+        self.assertEqual(self.h.started, [])
+
+    def test_unique_role_spelling_variant_resolves_to_the_configured_role(self):
+        name = self.b.delegate("t", topic="t", role="RE_VIEWER", me="orch")
+        self.assertEqual(store.get_agent(self.db, name)["role"], "reviewer")
 
     # -- a spawn is not a success until the task is in ----------------------
 
@@ -602,10 +608,46 @@ class BrokerTest(unittest.TestCase):
         joined = " ".join(self.h.started[0]["prompts"])
         self.assertIn("haiku critic", joined)
 
+    def test_instruction_renderer_is_the_live_spawn_assembly_without_the_spawn(self):
+        store.create_agent(self.db, name="orch", role="lead", workspace="ws",
+                           branch="ws", cwd=str(self.repo))
+        manifest = self.b.effective_instructions(
+            role="worker", name="worker-t", parent="orch", workspace="ws",
+            path=self.repo, task="t")
+        self.assertEqual(self.h.started, [])
+        expected = [s["text"] for s in manifest["segments"] if s["included"]]
+        self.b.delegate("t", topic="t", role="worker", me="orch")
+        self.assertEqual(self.h.started[-1]["prompts"], expected)
+        self.assertEqual(manifest["delivery"]["initial_task"],
+                         "separate first user message")
+        self.assertTrue(manifest["external_boundaries"])
+
+    def test_instruction_renderer_distinguishes_binding_and_caller_provenance(self):
+        preset_dir = self.repo / ".switchboard" / "presets"
+        preset_dir.mkdir(parents=True)
+        (preset_dir / "local-rule.md").write_text("Repository rule.\n")
+        manifest = self.b.effective_instructions(
+            role="reviewer", as_prompt="Custom disposition.",
+            with_=["one-off instruction", "local-rule"])
+        role_prompt = next(s for s in manifest["segments"] if s["kind"] == "ad-hoc-prompt")
+        literal = next(s for s in manifest["segments"]
+                       if s.get("binding") == "one-off instruction")
+        evidence = next(s for s in manifest["segments"] if s.get("binding") == "evidence")
+        report_bug = next(s for s in manifest["segments"] if s.get("binding") == "@report-bug")
+        local = next(s for s in manifest["segments"] if s.get("binding") == "local-rule")
+        self.assertEqual(role_prompt["ownership"], "external-to-switchboard")
+        self.assertEqual((literal["source"], literal["condition"], literal["ownership"]),
+                         ("literal --with", "explicit --with", "external-to-switchboard"))
+        self.assertEqual(evidence["condition"], "role binding:reviewer")
+        self.assertEqual(report_bug["condition"], "global binding")
+        self.assertEqual(report_bug["ownership"], "switchboard-owned")
+        self.assertEqual(local["ownership"], "external-to-switchboard")
+        self.assertEqual(local["source"], str(preset_dir / "local-rule.md"))
+
     # -- what a spawn is told exists ---------------------------------------
 
     def test_every_spawn_is_told_what_roles_exist(self):
-        """DESIGN-TRUTH: "The role list is lightly audited and fine as it is" — knowing
+        """DESIGN-TRUTH: "The role list is live vocabulary, not a hardcoded prompt list" — knowing
         there are roles, and which."""
         self.b.delegate("t", topic="t", role="worker", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
@@ -3239,6 +3281,19 @@ class BrokerTest(unittest.TestCase):
         self.b.restore(name)
         self.assertEqual(self.h.started[-1]["model_args"],
                          ["--model", "opus", "--effort", "high"])   # not researcher's
+
+    def test_restore_accepts_a_legacy_stored_raw_model_id(self):
+        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
+                           tier="claude-fable-5", cwd=str(self.repo), pane_id="w1:p1")
+        self.b.restore("kid")
+        self.assertEqual(self.h.started[-1]["model_args"],
+                         ["--model", "claude-fable-5"])
+
+    def test_a_legacy_stored_raw_model_does_not_break_child_delegation(self):
+        store.create_agent(self.db, name="old", role="lead", tier="claude-fable-5",
+                           cwd=str(self.repo), workspace="ws", branch="ws")
+        self.b.delegate("t", topic="t", role="worker", me="old")
+        self.assertEqual(self.h.started[-1]["model_args"], [])
 
     def test_a_row_with_no_recorded_tier_restores_on_its_roles_tier(self):
         """NULL means no override was given — which is what every row written before the

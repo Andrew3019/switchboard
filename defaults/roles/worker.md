@@ -31,11 +31,10 @@ its entire job. Do not "clean up the duplication" — the duplication IS the mec
 you find yourself adding a fifth or sixth sentence about how to do the work, that belongs
 somewhere else; this file is about how to finish.
 
-It stays SHORT and general for the reason it always did: it is what an undefined role
-inherits, so an ad-hoc `--role archaeologist` runs on this text, and anything assuming code
-— tests, files, commits — is wrong the moment somebody types `--role interviewer`. Both
-behaviours point at `[vocabulary] default_role` / `fallback_role` in settings.toml rather
-than at the string "worker" anywhere in Python.
+It stays SHORT and general because it is the default role and the capability/model profile
+for an explicit ad-hoc `--as` prompt. Anything assuming code — tests, files, commits — is
+wrong the moment somebody uses that path for an interviewer. The default points at
+`[vocabulary] default_role` in settings.toml rather than at the string "worker" in Python.
 
 The block rule is two steps here for the same reason it is two steps in the protocol: the
 human reads a blocked agent's CHAT (`sb inspect`), never the `<why>`, and an orchestrator

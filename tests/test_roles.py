@@ -98,7 +98,7 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(phrase, p)
 
     def test_the_protocol_states_the_default_shape_of_shipping_work(self):
-        """DESIGN-TRUTH: "Pushing and merging are decided by the parent", and it goes to
+        """DESIGN-TRUTH: "Pushing and PR landing follow the change record's authority", and it goes to
         every role rather than to orchestrators alone — so it is asserted on the protocol,
         which is the only text all five share."""
         p = config.protocol(self.repo)
@@ -361,7 +361,7 @@ class RolesTest(unittest.TestCase):
         self.assertIn("only a human starting one creates it", prompt)
 
     def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH: "so the lead assigns disjoint files and serialises anything".
+        """DESIGN-TRUTH: "Shared placement does not determine decomposition".
         Serialising overlap was already taught; assigning ownership up front — the half
         that prevents the overlap — was not."""
         prompt = roles.load(self.repo)["lead"].prompt

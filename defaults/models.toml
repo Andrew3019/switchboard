@@ -13,9 +13,8 @@
 # `sb models` prints the resolved table.
 
 [defaults]
-# Used by tiers that omit `provider`, and by the passthrough escape hatch: an unknown tier
-# name is handed to this provider verbatim as a model id, so you can pin a specific model
-# without inventing a tier for it.
+# Used by tiers that omit `provider`, and by the explicit `raw:<provider-model-id>` escape
+# hatch. Unknown tier names are errors so a typo cannot silently become a raw model id.
 provider = "claude"
 
 

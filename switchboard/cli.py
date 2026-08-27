@@ -73,7 +73,7 @@ def _tier_help() -> str:
         names = models_mod.load(store.worktree_root()).names()
     except Exception:
         names = sorted(models_mod.SHIPPED["tiers"])
-    return f"{' | '.join(names)}, or a model id (see: sb models)"
+    return f"{' | '.join(names)}, or raw:<provider-model-id> (see: sb models)"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -356,6 +356,16 @@ def build_parser() -> argparse.ArgumentParser:
     rl = cmd("roles", help="list this repo's roles, or show one in full")
     rl.add_argument("name", nargs="?", help="show this role instead of listing")
     cmd("capabilities", help="the capability vocabulary this repo grants against")
+    ins = cmd("instructions", hidden=True,
+              help="development view of one effective spawn instruction set")
+    ins.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
+    ins.add_argument("--model", help=_tier_help())
+    ins.add_argument("--as", dest="as_prompt", help="explicit ad-hoc role prompt")
+    ins.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET")
+    ins.add_argument("--workspace", metavar="NAME")
+    ins.add_argument("--name", default="preview", help="identity name shown in the preview")
+    ins.add_argument("--parent", default=HUMAN, help="parent shown in the preview")
+    ins.add_argument("--task", help="separate initial task to show beside the standing prompt")
     cmd("init", help="pin this repo for switchboard (writes no CLAUDE.md)")
     doc = cmd("doctor", help="check herdr, version, and integration conflicts")
     # The way out of the one deadlock the store can get into: a schema change that is not
@@ -498,7 +508,7 @@ def _validate(args) -> None:
         # TIER name out of the same open vocabulary, so a value one accepts and the other
         # rejects would be two answers to one question.
         if args.model is not None:
-            args.model = validate.token(args.model, "--model")
+            args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
 
     elif cmd == "delegate":
         # None is a taskless spawn and is legal (#145) — the broker substitutes the
@@ -506,9 +516,8 @@ def _validate(args) -> None:
         # checked, the same shape the `start` branch above already has for the same reason.
         if args.task is not None:
             args.task = validate.line(args.task, "task")
-        # Not slugified here: the role is also a lookup key into roles.toml, and a role
-        # nobody defined is legal (roles.get falls back to worker). Only the composed agent
-        # name has to satisfy herdr, and `Broker._compose_name` slugs it there.
+        # Not slugified here: the role is a user-facing lookup key. The resolver accepts
+        # unique case/punctuation variants and refuses unknown or ambiguous values.
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
         # NOT `agent_name`: `--name` is no longer the name. It is the topic half, and the
         # broker composes `<role>-<topic>` from it (`Broker._compose_name`), so a topic
@@ -522,12 +531,28 @@ def _validate(args) -> None:
         if args.workspace is not None:
             args.workspace = validate.ref_name(args.workspace, "--workspace")
         if args.model is not None:
-            args.model = validate.token(args.model, "--model")
+            args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
         if args.as_prompt is not None:
             args.as_prompt = validate.line(args.as_prompt, "--as",
                                            max_len=validate.MAX_PROMPT)
         # A `--with` value is either a preset name or a literal instruction; both become
         # prompt text, so both are checked again after resolution (see _dispatch).
+        args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
+                      for w in args.with_]
+
+    elif cmd == "instructions":
+        args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
+        args.name = validate.agent_name(args.name, "--name")
+        args.parent = validate.line(args.parent, "--parent", max_len=validate.MAX_TOKEN)
+        if args.model is not None:
+            args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
+        if args.as_prompt is not None:
+            args.as_prompt = validate.line(args.as_prompt, "--as",
+                                           max_len=validate.MAX_PROMPT)
+        if args.workspace is not None:
+            args.workspace = validate.ref_name(args.workspace, "--workspace")
+        if args.task is not None:
+            args.task = validate.line(args.task, "--task")
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
 
@@ -890,7 +915,8 @@ def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
         # `agents.tier` is NULL for every agent nobody pinned, which is most of them, and
         # the role's answer is the true one there.
         tier = (store._value(row, "tier") if row is not None else None) or (
-            roles_mod.get(b.roles, row["role"], b.repo).model if row is not None else None)
+            roles_mod.get_or_fallback(b.roles, row["role"], b.repo).model
+            if row is not None else None)
         text = "\n".join(t for t in (
             guidance.state_note(db, me, held=held, delegable=passable - held, tier=tier,
                                 config=guidance.configuration(db, me, repo=b.repo,
@@ -1470,6 +1496,38 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "plugin":
         return _plugin_list(args, b) if args.name == "list" else _plugin_run(args, b, db, me)
 
+    if cmd == "instructions":
+        path = b.instruction_workspace(args.workspace) if args.workspace else None
+        manifest = b.effective_instructions(
+            role=args.role, name=args.name, parent=args.parent, model=args.model,
+            as_prompt=args.as_prompt, with_=args.with_, workspace=args.workspace,
+            path=path, task=args.task)
+        resolved = manifest["resolved"]
+        delivery = manifest["delivery"]
+        lines = [
+            f"{resolved['requested_role']} -> role {resolved['role']}, tier "
+            f"{resolved['tier']}, provider {resolved['provider']}",
+            f"standing delivery: {delivery['standing_instructions']} "
+            f"({delivery['characters']} characters)",
+            "segments:",
+        ]
+        for segment in manifest["segments"]:
+            marker = "+" if segment["included"] else "-"
+            lines.append(
+                f"  {segment['order']:02d} {marker} {segment['kind']} "
+                f"[{segment['source']}; {segment['condition']}; "
+                f"{segment['ownership']}; {segment['characters']} chars]")
+            if segment["included"]:
+                lines.append(f"     {segment['text']}")
+        lines.append("external boundaries:")
+        lines.extend(
+            f"  - {boundary['source']} [{boundary['ownership']}; "
+            f"{'inspectable' if boundary['inspectable'] else 'not inspectable'}]"
+            for boundary in manifest["external_boundaries"])
+        lines.append("initial task: " + (manifest["task"] or "(none; delivered separately)"))
+        _emit(args, "\n".join(lines), manifest)
+        return 0
+
     if cmd == "models":
         tiers = models_mod.load(b.repo)
         rows = [(n, tiers.resolve(n)) for n in tiers.names()]
@@ -1506,15 +1564,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "roles":
         defined = roles_mod.load(b.repo)
         if args.name:
-            if args.name not in defined:
-                # `presets`' refusal, deliberately word for word: the caller is about to
-                # type `--role` and got the name slightly wrong, and the list is short.
-                # NOT resolved through `roles.get` — that falls back for any name at all,
-                # so a typo would print the fallback role's prompt under the typo's name.
-                known = ", ".join(sorted(defined)) or "none"
-                print(f"sb: no role '{args.name}' (have: {known})", file=sys.stderr)
-                return 1
-            role = defined[args.name]
+            # The detail view and delegation use the same resolver, including retired
+            # aliases and unique punctuation/case variants. A lookup command that rejects
+            # a spelling the action accepts would make the live vocabulary harder to debug.
+            role = roles_mod.get(defined, args.name, b.repo)
             # Both read off the functions the SEEDER and the gate read them off, rather
             # than off the Role's raw fields: a readout keeping its own copy of "what a
             # lead gets" is how a listing comes to disagree with what a spawn hands out.

@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import broker as broker_mod, cli, roles as roles_mod  # noqa: E402
+from switchboard import broker as broker_mod, cli, roles as roles_mod, store  # noqa: E402
 
 
 class ListingSandbox(unittest.TestCase):
@@ -82,13 +82,39 @@ class RolesListingTest(ListingSandbox):
         self.assertEqual(got["prompt"], defined[name].prompt)
 
     def test_an_unknown_role_is_refused_and_names_the_alternatives(self):
-        """NOT resolved through `roles.get`, which falls back for any name at all — a typo
-        would otherwise print the fallback role's prompt under the typo's name."""
+        """The readout uses the action's resolver and gives an actionable refusal."""
         code, out, err = self.sb("roles", "nonesuch")
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("no role 'nonesuch'", err)
-        self.assertIn(sorted(roles_mod.load(self.repo))[0], err)
+        self.assertIn("sb roles", err)
+        self.assertTrue(any(name in err for name in roles_mod.load(self.repo)))
+
+    def test_a_unique_spelling_variant_shows_the_resolved_role(self):
+        got = self.data("roles", "RE_VIEWER")
+        self.assertEqual(got["name"], "reviewer")
+
+
+class InstructionRendererTest(ListingSandbox):
+    def test_it_resolves_real_bindings_and_provider_delivery_without_spawning(self):
+        got = self.data("instructions", "--role", "worker", "--model", "GPT 5.6 SOL",
+                        "--name", "preview", "--task", "inspect this")
+        self.assertEqual(got["resolved"]["tier"], "gpt-5.6-sol")
+        self.assertEqual(got["resolved"]["provider"], "codex")
+        self.assertIn("AGENTS.md", got["delivery"]["standing_instructions"])
+        self.assertEqual(got["task"], "inspect this")
+        self.assertTrue(any(s["kind"] == "binding" for s in got["segments"]))
+        self.assertTrue(got["external_boundaries"])
+
+    def test_workspace_preview_uses_the_recorded_checkout(self):
+        checkout = self.repo / "worktrees" / "api"
+        checkout.mkdir(parents=True)
+        db = store.connect()
+        self.addCleanup(db.close)
+        store.record_workspace(db, "api", str(checkout), branch="api")
+        got = self.data("instructions", "--workspace", "api")
+        workspace = next(s for s in got["segments"] if s["kind"] == "workspace")
+        self.assertIn(str(checkout), workspace["text"])
 
 
 class CapabilitiesListingTest(ListingSandbox):

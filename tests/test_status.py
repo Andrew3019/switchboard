@@ -1415,7 +1415,7 @@ class StatusCliTest(unittest.TestCase):
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             # `models`' two siblings. The role name is optional, so a bare listing is the
             # minimal legal argv for both.
-            "roles": [], "capabilities": [],
+            "roles": [], "capabilities": [], "instructions": [],
             "cleanup": [], "workspace": ["list"], "restore": ["w1"],
             "grant": ["w1", "spawn"],
             "who-holds": ["spawn"],

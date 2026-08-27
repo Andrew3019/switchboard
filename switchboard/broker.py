@@ -47,6 +47,7 @@ from . import codex as codex_mod
 from . import config
 from . import guidance
 from . import output
+from . import plugins as plugins_mod
 from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
@@ -4563,8 +4564,56 @@ class Broker:
 
     # -- spawning --------------------------------------------------------
 
-    def _resolve_bindings(self, role: str, extra: Sequence[str] = ()) -> list[str]:
-        """The prompt lines this spawn's bindings contribute.
+    @staticmethod
+    def _owned_source(path: Path) -> str:
+        try:
+            path.resolve().relative_to(config.defaults_dir().resolve())
+            return "switchboard-owned"
+        except ValueError:
+            return "external-to-switchboard"
+
+    def _configured_prompt_source(self, dotted: str) -> tuple[str, str]:
+        """Effective prompts.toml entry provenance, shipped or repository override."""
+        section, _, name = dotted.partition(".")
+        path = config.path_for("prompts_file", self.repo)
+        if path is not None:
+            raw = config.read_toml(path)
+            if name in (raw.get(section) or {}):
+                return str(path), "external-to-switchboard"
+        return f"{config.defaults_dir() / 'prompts.toml'}:{dotted}", "switchboard-owned"
+
+    def _role_prompt_source(self, role: str) -> tuple[str, str]:
+        """The layer that supplied this effective role's prompt body."""
+        role_dir = config.path_for("roles_dir", self.repo)
+        if role_dir is not None:
+            path = role_dir / f"{role}.md"
+            if path.is_file():
+                _, body = config.front_matter(path.read_text())
+                if config.flatten(body):
+                    return str(path), "external-to-switchboard"
+        role_file = config.path_for("roles_file", self.repo)
+        if role_file is not None:
+            raw = config.read_toml(role_file).get(role) or {}
+            if isinstance(raw, dict) and raw.get("prompt"):
+                return f"{role_file}:[{role}].prompt", "external-to-switchboard"
+        return str(config.defaults_dir() / "roles" / f"{role}.md"), "switchboard-owned"
+
+    def instruction_workspace(self, name: str) -> Path:
+        """Read-only workspace checkout resolution for instruction previews."""
+        row = store.get_workspace(self.db, name)
+        if row is not None and not row["branch"]:
+            raise ValueError(
+                f"workspace {name!r} is bare and has no checkout to preview")
+        path = (row["checkout"] if row is not None else None) or self._recorded_path(name)
+        if path is None:
+            raise ValueError(
+                f"workspace {name!r} has no recorded checkout; omit --workspace for a "
+                "generic preview")
+        return Path(path)
+
+    def _binding_segments(self, role: str, extra: Sequence[str] = (), *,
+                          report: bool = True) -> list[dict]:
+        """Resolved bindings with their source names, in prompt delivery order.
 
         Named for what it does rather than for what the bound things are currently called:
         the vocabulary above it is being reworked, and a spawn resolving its bindings is
@@ -4590,11 +4639,145 @@ class Broker:
         spawn. Threaded from `extra` rather than from the CLI's `--with` flag, so the rule
         keeps holding for any other caller that reaches delegation with names of its own.
         """
+        every, per_role = presets_mod.bindings(self.repo)
         names = presets_mod.for_role(self.repo, role, extra)
-        return [validate.line(p, "preset text", max_len=validate.MAX_PROMPT)
-                for p in presets_mod.resolve(names, self.repo,
-                                             explicit=frozenset(extra),
-                                             on_event=self._fragment_note())]
+        explicit = frozenset(extra)
+        origins: dict[str, str] = {}
+        for name in every:
+            origins.setdefault(name, "global binding")
+        for name in per_role.get(role, ()):
+            origins.setdefault(name, f"role binding:{role}")
+        for name in extra:
+            origins.setdefault(name, "explicit --with")
+        preset_paths = presets_mod.available(self.repo)
+        plugin_paths = plugins_mod.available(self.repo)
+        out = []
+        for name in names:
+            lines = presets_mod.resolve(
+                [name], self.repo, explicit=explicit,
+                on_event=self._fragment_note() if report else None)
+            for line in lines:
+                if name.startswith(presets_mod.SIGIL):
+                    path = plugin_paths.get(name.removeprefix(presets_mod.SIGIL))
+                    source = str(path / "agent.md") if path is not None else name
+                    ownership = self._owned_source(path) if path is not None else "external-to-switchboard"
+                elif name in preset_paths:
+                    path = preset_paths[name]
+                    source = str(path)
+                    ownership = self._owned_source(path)
+                else:
+                    source = "literal --with"
+                    ownership = "external-to-switchboard"
+                out.append({
+                    "kind": "binding",
+                    "binding": name,
+                    "source": source,
+                    "condition": origins[name],
+                    "ownership": ownership,
+                    "included": True,
+                    "text": validate.line(
+                        line, "preset text", max_len=validate.MAX_PROMPT),
+                })
+        return out
+
+    def effective_instructions(
+        self, *, role: str = DEFAULT_ROLE, name: str = "preview", parent: str = HUMAN,
+        model: Optional[str] = None, as_prompt: Optional[str] = None,
+        with_: Sequence[str] = (), workspace: Optional[str] = None,
+        path: Optional[Path] = None, task: Optional[str] = None,
+        _report_bindings: bool = False,
+    ) -> dict:
+        """Render the real spawn instruction assembly without creating an agent.
+
+        This is development observability, not a second composition path: ``delegate``
+        consumes these same ordered segments. External provider/account instructions are
+        named as boundaries because switchboard cannot inspect their contents.
+        """
+        requested_role = role
+        resolved_role = roles_mod.get(self.roles, role, self.repo)
+        role = resolved_role.name
+        spec = resolved_role.spec(model)
+        where = Path(path or self.repo)
+        identity_source, identity_owner = self._configured_prompt_source("spawn.identity")
+        roles_source, roles_owner = self._configured_prompt_source("spawn.roles")
+        workspace_source, workspace_owner = self._configured_prompt_source("spawn.workspace")
+        menu_source, menu_owner = self._configured_prompt_source("spawn.operator_menu")
+        role_source, role_owner = self._role_prompt_source(role)
+        protocol_path = config.path_for("protocol_file", self.repo)
+        protocol_source = str(protocol_path) if self._protocol_override and protocol_path \
+            else str(config.defaults_dir() / "protocol.md")
+        protocol_owner = "external-to-switchboard" if self._protocol_override \
+            else "switchboard-owned"
+
+        segments = [
+            {"kind": "protocol", "source": protocol_source,
+             "condition": "always", "ownership": protocol_owner,
+             "included": True, "text": self._protocol()},
+            {"kind": "identity", "source": identity_source,
+             "condition": "always", "ownership": identity_owner,
+             "included": True,
+             "text": self._say("spawn.identity", name=name, role=role, parent=parent)},
+            {"kind": "role-vocabulary", "source": roles_source,
+             "condition": "always", "ownership": roles_owner,
+             "included": True,
+             "text": self._say("spawn.roles", roles=", ".join(sorted(self.roles)))},
+        ]
+        segments.append({
+            "kind": "workspace", "source": workspace_source,
+            "condition": "workspace is present", "ownership": workspace_owner,
+            "included": bool(workspace),
+            "text": (self._say("spawn.workspace", workspace=workspace, path=where)
+                     if workspace else ""),
+        })
+        skills, menu = self._operator_menu() if role == MAIN else ([], "")
+        segments.append({
+            "kind": "operator-menu", "source": menu_source,
+            "condition": "dispatcher role and non-empty operator registry",
+            "ownership": menu_owner, "included": bool(skills),
+            "text": self._say("spawn.operator_menu", menu=menu) if skills else "",
+        })
+        prompt = as_prompt if as_prompt is not None else resolved_role.prompt
+        segments.append({
+            "kind": "ad-hoc-prompt" if as_prompt is not None else "role-prompt",
+            "source": "literal --as" if as_prompt is not None else role_source,
+            "condition": "non-empty prompt",
+            "ownership": ("external-to-switchboard" if as_prompt is not None else role_owner),
+            "included": bool(prompt), "text": prompt or "",
+        })
+        segments.extend(self._binding_segments(role, with_, report=_report_bindings))
+
+        active = [s["text"] for s in segments if s["included"]]
+        for order, segment in enumerate(segments, 1):
+            segment["order"] = order
+            segment["characters"] = len(segment["text"])
+            segment["flattening"] = "single-line fragment before provider assembly"
+        if spec.provider == codex_mod.PROVIDER:
+            delivery = "private CODEX_HOME/AGENTS.md; blank line between fragments"
+            rendered = codex_mod.render_instructions(active)
+        else:
+            delivery = "--append-system-prompt-file; one space between flat fragments"
+            rendered = herdr_mod.render_instructions(active)
+        return {
+            "resolved": {"role": role, "requested_role": requested_role,
+                         "tier": spec.tier, "provider": spec.provider,
+                         "model": spec.model, "effort": spec.effort},
+            "delivery": {"standing_instructions": delivery,
+                         "initial_task": "separate first user message",
+                         "characters": len(rendered)},
+            "segments": segments,
+            "rendered": rendered,
+            "task": task,
+            "external_boundaries": [
+                {"source": "provider and account system instructions",
+                 "ownership": "external-to-switchboard", "inspectable": False},
+                {"source": "provider repository-instruction discovery outside this payload",
+                 "ownership": "external-to-switchboard", "inspectable": False},
+                {"source": "separately delivered initial task",
+                 "ownership": "external-to-standing-prompt", "inspectable": task is not None},
+                {"source": "later conversation history",
+                 "ownership": "external-to-standing-prompt", "inspectable": False},
+            ],
+        }
 
     def _fragment_note(self) -> Callable[..., None]:
         """What `presets.resolve` does with a fragment it dropped or cut.
@@ -4844,7 +5027,7 @@ class Broker:
         if model is None:
             mine = _column(store.get_agent(self.db, me), "tier")
             if mine:
-                mine_spec = r.spec(mine)
+                mine_spec = r.stored_spec(mine)
                 if mine_spec.provider == codex_mod.PROVIDER and mine_spec.codex_provider:
                     model = mine
 
@@ -4855,6 +5038,8 @@ class Broker:
         # the spawn call at the end. An unwired provider still raises at `cli_args()`
         # rather than here, which is where the message can still say what is wrong.
         spec = r.spec(model)
+        if model is not None:
+            model = spec.tier
         env = self._spawn_env(name, spec)
 
         # A child inherits its parent's workspace unless told otherwise, so a whole
@@ -4934,37 +5119,15 @@ class Broker:
         else:
             where = self.repo
 
-        prompts = [
-            self._protocol(),
-            self._say("spawn.identity", name=name, role=role, parent=me),
-            # Generated from the role table, never a literal list —
-            # DESIGN-TRUTH: "The role list is lightly audited and fine as it is".
-            # `self.roles` is already the merged shipped + repo set, read once per broker, so
-            # a repo's own `.switchboard/roles/*.md` shows up here with nothing edited.
-            # Sorted for a stable prompt: the merge order is dict order, and a spawn prompt
-            # that reshuffles between runs is a diff nobody can read. One flat clause because
-            # `Herdr.start_agent` refuses a multi-line prompt fragment — herdr's rule about
-            # agent arguments originally, switchboard's own since the prompt began travelling
-            # as a file. If a repo ever defines enough roles for this to run long, this is
-            # the line that needs a limit.
-            self._say("spawn.roles", roles=", ".join(sorted(self.roles))),
-        ]
-        if ws:
-            prompts.append(self._say("spawn.workspace", workspace=ws, path=where))
-        # Only the dispatcher, and only if there is anything to offer. Gated on the module
-        # constant `MAIN` rather than on `config.setting("vocabulary.main_role", repo=...)`:
-        # `_top` spawns with `role=MAIN`, read with no repo, so reading the repo's value
-        # here would let a repo that renames the role silently lose the menu. One reader,
-        # one answer.
-        if role == MAIN:
-            skills, menu = self._operator_menu()
-            if skills:
-                prompts.append(self._say("spawn.operator_menu", menu=menu))
-        if as_prompt:
-            prompts.append(as_prompt)
-        elif r.prompt:
-            prompts.append(r.prompt)
-        prompts.extend(self._resolve_bindings(role, with_))
+        # The development renderer and the live spawn consume one assembly path. This is
+        # what keeps an audit of the former from becoming a plausible reconstruction of
+        # the latter. Only included segments reach the provider; inactive conditional
+        # boundaries remain visible in the renderer.
+        manifest = self.effective_instructions(
+            role=role, name=name, parent=me, model=model, as_prompt=as_prompt,
+            with_=with_, workspace=ws, path=where, task=task,
+            _report_bindings=True)
+        prompts = [s["text"] for s in manifest["segments"] if s["included"]]
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
         # `confirmed` is what decides whether this id gets WRITTEN DOWN below. A caller
@@ -5244,7 +5407,7 @@ class Broker:
         if blockers:
             # NO STASH, and that is the point of the refusal rather than an omission. A
             # lead's non-isolated children share this very checkout (DESIGN-TRUTH:
-            # "A lead's children share its worktree"), so what is uncommitted in it is
+            # "Children share a lead's worktree by default"), so what is uncommitted in it is
             # very likely not the caller's, and
             # stash-and-pop would be taking somebody else's work sideways through a merge.
             # Names the files, because "commit first" is only actionable if you can see
@@ -7483,7 +7646,7 @@ class Broker:
         # role's own tier for the same reason: restore brings back the SAME agent, not a
         # fresh one of its role. Empty (no override, or a row predating the column) falls
         # through to the role's tier, which is exactly what this line did before.
-        spec = roles_mod.get(self.roles, a["role"], self.repo).spec(
+        spec = roles_mod.get_or_fallback(self.roles, a["role"], self.repo).stored_spec(
             _column(a, "tier") or None)
         pane = self._restore_tab(a, wsid, where, env=self._spawn_env(name, spec))
         # A restored agent gets the same proof a fresh one does — its pane is just as new,

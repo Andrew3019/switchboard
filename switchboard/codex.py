@@ -256,7 +256,7 @@ def write_home(
     # file has to survive — writing an empty one here would restore an agent into its own
     # context with no protocol at all, which is worse than not restoring it.
     if any(p and p.strip() for p in prompts):
-        _write(d / "AGENTS.md", _agents_md(prompts), name)
+        _write(d / "AGENTS.md", render_instructions(prompts), name)
     _write(d / "config.toml",
            _config_toml(worktree, model, effort, model_provider, hooks, cwd), name)
     _link_auth(d, model_provider)
@@ -309,7 +309,7 @@ def _write(path: Path, body: str, name: str) -> None:
         )
 
 
-def _agents_md(prompts: Sequence[str]) -> str:
+def render_instructions(prompts: Sequence[str]) -> str:
     """The composed prompt, as the markdown file codex reads every turn.
 
     Joined with a BLANK LINE rather than a space, which is the one place this path is
