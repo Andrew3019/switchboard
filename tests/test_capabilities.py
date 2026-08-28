@@ -162,7 +162,7 @@ class RoleBundleTest(Fixture, unittest.TestCase):
             "worker":     ["write-tracked"],
             "builder":    ["write-tracked"],           # a worker that writes code
             "researcher": [],
-            "reviewer":   [],
+            "reviewer":   ["write-tracked"],   # scoped minor fixes, 2026-08-27
             "qa":         [],                                       # read-only by default
         }
         for role, caps in expected.items():
@@ -217,13 +217,22 @@ class RoleBundleTest(Fixture, unittest.TestCase):
         b = Broker(self.db, self.h, repo=self.repo)
         self.assertIn(CAP_SPAWN, b.seed_for("qa", is_top=False))          # widened
         self.assertNotIn(CAP_SPAWN, b.seed_for("lead", is_top=False))     # and narrowed
-        self.assertEqual(b._delegating_roles(), ["dispatcher", "qa"])
+        # `planner` is a shipped role again since the plans plugin began contributing one,
+        # and it is seeded with `spawn` for the fresh plan review its specialty commissions.
+        # This repo overrode `qa` and `lead`; it said nothing about the planner, so the
+        # listing keeps it.
+        self.assertEqual(b._delegating_roles(), ["dispatcher", "planner", "qa"])
 
     def test_delegating_roles_is_capability_membership_and_names_the_same_roles(self):
         """`_delegating_roles()` filtered `.delegate`; it filters `spawn` in the bundle.
-        Same answer — the shipped roles that spawn are the two halves of the split — and
-        the refusal message that quotes it is unchanged in structure."""
-        self.assertEqual(self.b._delegating_roles(), ["dispatcher", "lead"])
+        Same answer — the two halves of the split, plus the planner the plans plugin
+        contributes, which holds `spawn` for the fresh plan review its specialty
+        commissions — and the refusal message that quotes it is unchanged in structure.
+
+        The list is a listing of the EFFECTIVE vocabulary, so a role arriving from an
+        enabled plugin belongs in it: an agent refused `spawn` is told which roles hold it,
+        and naming two when three do sends it to ask for the wrong one."""
+        self.assertEqual(self.b._delegating_roles(), ["dispatcher", "lead", "planner"])
         self.assertEqual(
             self.b._delegating_roles(),
             sorted(n for n, r in self.b.roles.items()

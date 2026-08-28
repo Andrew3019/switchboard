@@ -9,8 +9,9 @@ Everything here obeys one rule: the agent states an intent, the tooling does the
 Some verbs look like duplicates of each other and are not. The distinctions are
 load-bearing, so they are written down where the code is rather than argued about again:
 
-- **`tell`'s three delivery modes.** `tell` writes a message and rings a doorbell that
-  carries no payload. *next-turn*, the default, rings straight away: the prompt QUEUES and
+- **`tell`'s three delivery modes.** `tell` writes a durable message and, when it fits a
+  safe single prompt, carries that tagged payload directly. Otherwise it rings a mailbox
+  doorbell. *next-turn*, the default, sends straight away: the prompt QUEUES and
   the agent's own system delivers it at the next point the model can act, so nothing is
   cancelled and nothing waits. *when-idle* holds the ring until the target's turn has
   ended. *interrupt* cancels the turn with `esc` and puts the instruction itself on the
@@ -47,6 +48,7 @@ from . import codex as codex_mod
 from . import config
 from . import guidance
 from . import output
+from . import plugins as plugins_mod
 from . import presets as presets_mod
 from . import roles as roles_mod
 from . import store
@@ -54,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import GONE_STATE, RUNNING, fmt_age
+from .status import GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -161,6 +163,11 @@ PROTOCOL_LINE = config.protocol()
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
 
+# Mail below this size is cheap enough to save the recipient an inbox turn. Larger or
+# coalesced payloads stay durable and receive the ordinary notice instead; `limits.text`
+# remains the separate admission cap for one stored message.
+INLINE_MAIL_MAX = config.setting("limits.inline_mail")
+
 # DESIGN-TRUTH: "`sb tell` has three delivery modes." They differ only in WHEN the
 # doorbell is allowed to ring and whether the turn in progress survives it:
 #
@@ -188,8 +195,7 @@ def tag(sender: str) -> str:
     arrives in the pane looking exactly like Andrew's own typing, and an agent that cannot
     tell them apart cannot weigh them —
     DESIGN-TRUTH: "Every sb message is prefixed so it is clearly an sb message".
-    And *who is this from?*, which the doorbell could not answer at all before:
-    it carries no payload, so an agent
+    And *who is this from?*, which the old bare doorbell could not answer at all: an agent
     read "You have mail" with no idea whether its parent had redirected it or a sibling had
     said hello, and had to spend the turn on `sb inbox` to find out.
 
@@ -237,12 +243,13 @@ RING_SCAN = 8
 # then raised; counting it too would spend two of `RING_REPAIRS` on one attempt.
 RING_OPEN = "ring_sent"
 RING_TRY = "ring_repaired"
-RING_CLOSED = ("ring_confirmed", "ring_unconfirmed")
+RING_FALLBACK_CLAIM = "ring_fallback_claimed"
+RING_CLOSED = ("ring_confirmed", "ring_unconfirmed", RING_FALLBACK_CLAIM)
 # How long a coalescible doorbell is held back before it is allowed to ring, in seconds.
 # A burst of sibling `done`s used to ring an idle parent once EACH — five children
 # finishing inside a second put five doorbells in one pane, and every one of them said the
-# same thing, because the doorbell carries no payload. The holdback is the quiet period
-# that turns that burst into one ring: while `done` rows for a recipient keep arriving,
+# same thing, because each was only a mailbox notice. The holdback is the quiet period
+# that turns that burst into one delivery: while `done` rows for a recipient keep arriving,
 # nothing rings; once the newest of them is this old, `flush_pending` rings once and names
 # every sender in it.
 #
@@ -4563,8 +4570,69 @@ class Broker:
 
     # -- spawning --------------------------------------------------------
 
-    def _resolve_bindings(self, role: str, extra: Sequence[str] = ()) -> list[str]:
-        """The prompt lines this spawn's bindings contribute.
+    @staticmethod
+    def _owned_source(path: Path) -> str:
+        try:
+            path.resolve().relative_to(config.defaults_dir().resolve())
+            return "switchboard-owned"
+        except ValueError:
+            return "external-to-switchboard"
+
+    def _configured_prompt_source(self, dotted: str) -> tuple[str, str]:
+        """Effective prompts.toml entry provenance, shipped or repository override."""
+        section, _, name = dotted.partition(".")
+        path = config.path_for("prompts_file", self.repo)
+        if path is not None:
+            raw = config.read_toml(path)
+            if name in (raw.get(section) or {}):
+                return str(path), "external-to-switchboard"
+        return f"{config.defaults_dir() / 'prompts.toml'}:{dotted}", "switchboard-owned"
+
+    def _role_prompt_source(self, role: str) -> tuple[str, str]:
+        """The layer that supplied this effective role's prompt body.
+
+        Same precedence as `config.roles`: repo markdown, repo TOML, enabled-plugin role,
+        shipped role. Provenance is part of effective-instruction observability; inventing
+        `defaults/roles/planner.md` for a prompt actually supplied by the plans plugin makes
+        the manifest point maintainers at a file that does not exist.
+        """
+        role_dir = config.path_for("roles_dir", self.repo)
+        if role_dir is not None:
+            path = role_dir / f"{role}.md"
+            if path.is_file():
+                _, body = config.front_matter(path.read_text())
+                if config.flatten(body):
+                    return str(path), "external-to-switchboard"
+        role_file = config.path_for("roles_file", self.repo)
+        if role_file is not None:
+            raw = config.read_toml(role_file).get(role) or {}
+            if isinstance(raw, dict) and raw.get("prompt"):
+                return f"{role_file}:[{role}].prompt", "external-to-switchboard"
+        available = plugins_mod.available(self.repo)
+        for name in sorted(set(plugins_mod.enabled(self.repo)) & set(available), reverse=True):
+            path = available[name] / "roles" / f"{role}.md"
+            if path.is_file():
+                _, body = config.front_matter(path.read_text())
+                if config.flatten(body):
+                    return str(path), self._owned_source(path)
+        return str(config.defaults_dir() / "roles" / f"{role}.md"), "switchboard-owned"
+
+    def instruction_workspace(self, name: str) -> Path:
+        """Read-only workspace checkout resolution for instruction previews."""
+        row = store.get_workspace(self.db, name)
+        if row is not None and not row["branch"]:
+            raise ValueError(
+                f"workspace {name!r} is bare and has no checkout to preview")
+        path = (row["checkout"] if row is not None else None) or self._recorded_path(name)
+        if path is None:
+            raise ValueError(
+                f"workspace {name!r} has no recorded checkout; omit --workspace for a "
+                "generic preview")
+        return Path(path)
+
+    def _binding_segments(self, role: str, extra: Sequence[str] = (), *,
+                          report: bool = True) -> list[dict]:
+        """Resolved bindings with their source names, in prompt delivery order.
 
         Named for what it does rather than for what the bound things are currently called:
         the vocabulary above it is being reworked, and a spawn resolving its bindings is
@@ -4590,11 +4658,145 @@ class Broker:
         spawn. Threaded from `extra` rather than from the CLI's `--with` flag, so the rule
         keeps holding for any other caller that reaches delegation with names of its own.
         """
+        every, per_role = presets_mod.bindings(self.repo)
         names = presets_mod.for_role(self.repo, role, extra)
-        return [validate.line(p, "preset text", max_len=validate.MAX_PROMPT)
-                for p in presets_mod.resolve(names, self.repo,
-                                             explicit=frozenset(extra),
-                                             on_event=self._fragment_note())]
+        explicit = frozenset(extra)
+        origins: dict[str, str] = {}
+        for name in every:
+            origins.setdefault(name, "global binding")
+        for name in per_role.get(role, ()):
+            origins.setdefault(name, f"role binding:{role}")
+        for name in extra:
+            origins.setdefault(name, "explicit --with")
+        preset_paths = presets_mod.available(self.repo)
+        plugin_paths = plugins_mod.available(self.repo)
+        out = []
+        for name in names:
+            lines = presets_mod.resolve(
+                [name], self.repo, explicit=explicit,
+                on_event=self._fragment_note() if report else None)
+            for line in lines:
+                if name.startswith(presets_mod.SIGIL):
+                    path = plugin_paths.get(name.removeprefix(presets_mod.SIGIL))
+                    source = str(path / "agent.md") if path is not None else name
+                    ownership = self._owned_source(path) if path is not None else "external-to-switchboard"
+                elif name in preset_paths:
+                    path = preset_paths[name]
+                    source = str(path)
+                    ownership = self._owned_source(path)
+                else:
+                    source = "literal --with"
+                    ownership = "external-to-switchboard"
+                out.append({
+                    "kind": "binding",
+                    "binding": name,
+                    "source": source,
+                    "condition": origins[name],
+                    "ownership": ownership,
+                    "included": True,
+                    "text": validate.line(
+                        line, "preset text", max_len=validate.MAX_PROMPT),
+                })
+        return out
+
+    def effective_instructions(
+        self, *, role: str = DEFAULT_ROLE, name: str = "preview", parent: str = HUMAN,
+        model: Optional[str] = None, as_prompt: Optional[str] = None,
+        with_: Sequence[str] = (), workspace: Optional[str] = None,
+        path: Optional[Path] = None, task: Optional[str] = None,
+        _report_bindings: bool = False,
+    ) -> dict:
+        """Render the real spawn instruction assembly without creating an agent.
+
+        This is development observability, not a second composition path: ``delegate``
+        consumes these same ordered segments. External provider/account instructions are
+        named as boundaries because switchboard cannot inspect their contents.
+        """
+        requested_role = role
+        resolved_role = roles_mod.get(self.roles, role, self.repo)
+        role = resolved_role.name
+        spec = resolved_role.spec(model)
+        where = Path(path or self.repo)
+        identity_source, identity_owner = self._configured_prompt_source("spawn.identity")
+        roles_source, roles_owner = self._configured_prompt_source("spawn.roles")
+        workspace_source, workspace_owner = self._configured_prompt_source("spawn.workspace")
+        menu_source, menu_owner = self._configured_prompt_source("spawn.operator_menu")
+        role_source, role_owner = self._role_prompt_source(role)
+        protocol_path = config.path_for("protocol_file", self.repo)
+        protocol_source = str(protocol_path) if self._protocol_override and protocol_path \
+            else str(config.defaults_dir() / "protocol.md")
+        protocol_owner = "external-to-switchboard" if self._protocol_override \
+            else "switchboard-owned"
+
+        segments = [
+            {"kind": "protocol", "source": protocol_source,
+             "condition": "always", "ownership": protocol_owner,
+             "included": True, "text": self._protocol()},
+            {"kind": "identity", "source": identity_source,
+             "condition": "always", "ownership": identity_owner,
+             "included": True,
+             "text": self._say("spawn.identity", name=name, role=role, parent=parent)},
+            {"kind": "role-vocabulary", "source": roles_source,
+             "condition": "always", "ownership": roles_owner,
+             "included": True,
+             "text": self._say("spawn.roles", roles=", ".join(sorted(self.roles)))},
+        ]
+        segments.append({
+            "kind": "workspace", "source": workspace_source,
+            "condition": "workspace is present", "ownership": workspace_owner,
+            "included": bool(workspace),
+            "text": (self._say("spawn.workspace", workspace=workspace, path=where)
+                     if workspace else ""),
+        })
+        skills, menu = self._operator_menu() if role == MAIN else ([], "")
+        segments.append({
+            "kind": "operator-menu", "source": menu_source,
+            "condition": "dispatcher role and non-empty operator registry",
+            "ownership": menu_owner, "included": bool(skills),
+            "text": self._say("spawn.operator_menu", menu=menu) if skills else "",
+        })
+        prompt = as_prompt if as_prompt is not None else resolved_role.prompt
+        segments.append({
+            "kind": "ad-hoc-prompt" if as_prompt is not None else "role-prompt",
+            "source": "literal --as" if as_prompt is not None else role_source,
+            "condition": "non-empty prompt",
+            "ownership": ("external-to-switchboard" if as_prompt is not None else role_owner),
+            "included": bool(prompt), "text": prompt or "",
+        })
+        segments.extend(self._binding_segments(role, with_, report=_report_bindings))
+
+        active = [s["text"] for s in segments if s["included"]]
+        for order, segment in enumerate(segments, 1):
+            segment["order"] = order
+            segment["characters"] = len(segment["text"])
+            segment["flattening"] = "single-line fragment before provider assembly"
+        if spec.provider == codex_mod.PROVIDER:
+            delivery = "private CODEX_HOME/AGENTS.md; blank line between fragments"
+            rendered = codex_mod.render_instructions(active)
+        else:
+            delivery = "--append-system-prompt-file; one space between flat fragments"
+            rendered = herdr_mod.render_instructions(active)
+        return {
+            "resolved": {"role": role, "requested_role": requested_role,
+                         "tier": spec.tier, "provider": spec.provider,
+                         "model": spec.model, "effort": spec.effort},
+            "delivery": {"standing_instructions": delivery,
+                         "initial_task": "separate first user message",
+                         "characters": len(rendered)},
+            "segments": segments,
+            "rendered": rendered,
+            "task": task,
+            "external_boundaries": [
+                {"source": "provider and account system instructions",
+                 "ownership": "external-to-switchboard", "inspectable": False},
+                {"source": "provider repository-instruction discovery outside this payload",
+                 "ownership": "external-to-switchboard", "inspectable": False},
+                {"source": "separately delivered initial task",
+                 "ownership": "external-to-standing-prompt", "inspectable": task is not None},
+                {"source": "later conversation history",
+                 "ownership": "external-to-standing-prompt", "inspectable": False},
+            ],
+        }
 
     def _fragment_note(self) -> Callable[..., None]:
         """What `presets.resolve` does with a fragment it dropped or cut.
@@ -4844,7 +5046,7 @@ class Broker:
         if model is None:
             mine = _column(store.get_agent(self.db, me), "tier")
             if mine:
-                mine_spec = r.spec(mine)
+                mine_spec = r.stored_spec(mine)
                 if mine_spec.provider == codex_mod.PROVIDER and mine_spec.codex_provider:
                     model = mine
 
@@ -4855,6 +5057,8 @@ class Broker:
         # the spawn call at the end. An unwired provider still raises at `cli_args()`
         # rather than here, which is where the message can still say what is wrong.
         spec = r.spec(model)
+        if model is not None:
+            model = spec.tier
         env = self._spawn_env(name, spec)
 
         # A child inherits its parent's workspace unless told otherwise, so a whole
@@ -4934,37 +5138,15 @@ class Broker:
         else:
             where = self.repo
 
-        prompts = [
-            self._protocol(),
-            self._say("spawn.identity", name=name, role=role, parent=me),
-            # Generated from the role table, never a literal list —
-            # DESIGN-TRUTH: "The role list is lightly audited and fine as it is".
-            # `self.roles` is already the merged shipped + repo set, read once per broker, so
-            # a repo's own `.switchboard/roles/*.md` shows up here with nothing edited.
-            # Sorted for a stable prompt: the merge order is dict order, and a spawn prompt
-            # that reshuffles between runs is a diff nobody can read. One flat clause because
-            # `Herdr.start_agent` refuses a multi-line prompt fragment — herdr's rule about
-            # agent arguments originally, switchboard's own since the prompt began travelling
-            # as a file. If a repo ever defines enough roles for this to run long, this is
-            # the line that needs a limit.
-            self._say("spawn.roles", roles=", ".join(sorted(self.roles))),
-        ]
-        if ws:
-            prompts.append(self._say("spawn.workspace", workspace=ws, path=where))
-        # Only the dispatcher, and only if there is anything to offer. Gated on the module
-        # constant `MAIN` rather than on `config.setting("vocabulary.main_role", repo=...)`:
-        # `_top` spawns with `role=MAIN`, read with no repo, so reading the repo's value
-        # here would let a repo that renames the role silently lose the menu. One reader,
-        # one answer.
-        if role == MAIN:
-            skills, menu = self._operator_menu()
-            if skills:
-                prompts.append(self._say("spawn.operator_menu", menu=menu))
-        if as_prompt:
-            prompts.append(as_prompt)
-        elif r.prompt:
-            prompts.append(r.prompt)
-        prompts.extend(self._resolve_bindings(role, with_))
+        # The development renderer and the live spawn consume one assembly path. This is
+        # what keeps an audit of the former from becoming a plausible reconstruction of
+        # the latter. Only included segments reach the provider; inactive conditional
+        # boundaries remain visible in the renderer.
+        manifest = self.effective_instructions(
+            role=role, name=name, parent=me, model=model, as_prompt=as_prompt,
+            with_=with_, workspace=ws, path=where, task=task,
+            _report_bindings=True)
+        prompts = [s["text"] for s in manifest["segments"] if s["included"]]
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
         # `confirmed` is what decides whether this id gets WRITTEN DOWN below. A caller
@@ -5244,7 +5426,7 @@ class Broker:
         if blockers:
             # NO STASH, and that is the point of the refusal rather than an omission. A
             # lead's non-isolated children share this very checkout (DESIGN-TRUTH:
-            # "A lead's children share its worktree"), so what is uncommitted in it is
+            # "Children share a lead's worktree by default"), so what is uncommitted in it is
             # very likely not the caller's, and
             # stash-and-pop would be taking somebody else's work sideways through a merge.
             # Names the files, because "commit first" is only actionable if you can see
@@ -5641,6 +5823,122 @@ class Broker:
         """
         return store.unread_for(self.db, me or self.whoami(), mark=not peek)
 
+    def waiting(self, *, mode: str = "background", cohort: Iterable[str] = (),
+                me: Optional[str] = None) -> dict:
+        """Record an intentional end-of-turn wait without blocking a person.
+
+        A background wait has no Switchboard wake condition: the provider or background
+        task will produce the next turn. ``any`` and ``all`` snapshot live direct children
+        now, so an old result or an unrelated agent cannot satisfy a later wait.
+        """
+        me = me or self.whoami()
+        if me == HUMAN or store.get_agent(self.db, me) is None:
+            raise ValueError("`sb waiting` is for an agent ending its own turn")
+        if mode not in ("background", "any", "all"):
+            raise ValueError(f"no such wait mode: {mode}")
+        members: list[str] = []
+        if mode != "background":
+            requested = list(cohort)
+            if requested:
+                members = [self._resolve(name, me) for name in requested]
+            else:
+                members = [r["name"] for r in store.children_of(self.db, me)
+                           if r["state"] not in FINISHED and r["ended_at"] is None]
+            if not members:
+                raise ValueError(f"`sb waiting --{mode}` needs at least one live child")
+            if len(set(members)) != len(members):
+                raise ValueError("a waiting cohort cannot name the same child twice")
+            for name in members:
+                child = store.get_agent(self.db, name)
+                if child is None or child["parent"] != me:
+                    raise ValueError(f"{name} is not a direct child of {me}")
+                if child["state"] in FINISHED or child["ended_at"] is not None:
+                    raise ValueError(f"{name} is already finished; declare a live cohort")
+        elif list(cohort):
+            raise ValueError("plain `sb waiting` takes no cohort; use --any or --all")
+        store.set_wait(self.db, me, mode, members)
+        store.log_event(self.db, kind="waiting", agent=me, mode=mode, cohort=members)
+        return {"mode": mode, "cohort": members}
+
+    def _wait_ready(self, who: str, mine: Sequence[sqlite3.Row]) -> tuple[bool, Optional[dict]]:
+        """Whether pending mail causally satisfies this agent's explicit wait."""
+        wait = store.wait_for(self.db, who)
+        if wait is None:
+            return True, None
+        causal = [m for m in mine if m["id"] > wait["after_id"]]
+        # A direct instruction supersedes every kind of wait, but the intent is cleared
+        # only after the prompt actually lands. While a when-idle delivery is still held,
+        # the stop hook must continue to recognize the turn as intentionally waiting.
+        if any(m["kind"] in ("ask", "tell") for m in causal):
+            return True, wait
+        if wait["mode"] == "background":
+            return any(m["kind"] != SIGNAL for m in causal), wait
+        cohort = set(wait["cohort"])
+        results = {m["from_agent"] for m in causal
+                   if m["kind"] in ("done", "failed") and m["from_agent"] in cohort}
+        if wait["mode"] == "any":
+            return bool(results), wait
+        terminal = set()
+        for name in cohort:
+            row = store.get_agent(self.db, name)
+            if row is not None and (row["state"] in FINISHED or row["ended_at"] is not None):
+                terminal.add(name)
+        return bool(cohort) and terminal == cohort and bool(results), wait
+
+    def wake_expired_waits(self, names: Iterable[str]) -> list[str]:
+        """Nudge each still-expired explicit wait once, then retire that declaration.
+
+        This is deliberately narrower than the removed general stalled-agent reconciler:
+        only an agent that chose `sb waiting` enters this path. Rechecking the timestamp
+        closes the collector-snapshot race, and conditional clearing cannot erase a newer
+        declaration made while the prompt was in flight. A failed prompt leaves the wait
+        intact for a later reconciler pass; a successful queue makes an unobserved failure
+        visible as an ordinary stall rather than silently renewing it.
+        """
+        woken = []
+        for who in names:
+            wait = store.wait_for(self.db, who)
+            started = wait.get("started_at") if wait else None
+            if started is None or store.now() - started <= WAIT_EXCUSE_GRACE:
+                continue
+            text = f"{tag('sb')} {self._say('notify.wait_expired')}"
+            try:
+                self.h.prompt(who, text)
+            except HerdrError as e:
+                store.log_event(self.db, kind="wait_expiry_ping_failed", agent=who,
+                                error=str(e))
+                continue
+            if store.clear_wait(self.db, who, expected_started_at=started):
+                store.log_event(self.db, kind="wait_expiry_pinged", agent=who,
+                                mode=wait["mode"], cohort=wait["cohort"])
+                woken.append(who)
+        return woken
+
+    def _inline_mail(self, who: str,
+                     mine: Sequence[sqlite3.Row]) -> tuple[Optional[str], list[int]]:
+        """Return a safe, complete inline mailbox payload, or the ordinary doorbell."""
+        if not mine or any(m["kind"] not in ("ask", "tell", "done", "failed") for m in mine):
+            return None, []
+        # One unproved inline payload per recipient. A newer ring would supersede the
+        # older ring in `_last_ring`, losing the exact ids that still need confirmation.
+        # The fallback notice safely covers both old and new unread rows instead.
+        if self.db.execute(
+                "SELECT 1 FROM messages WHERE to_agent=? AND read_at IS NULL "
+                "AND delivered_at IS NOT NULL LIMIT 1", (who,)).fetchone():
+            return None, []
+        lines = []
+        for m in mine:
+            line = f"{tag(m['from_agent'])} {m['body']}"
+            if m["needs_reply"]:
+                line += " " + self._say("notify.needs_reply", who=m["from_agent"])
+            lines.append(line)
+        text = " ".join(lines)
+        try:
+            text = validate.line(text, "inline mail", max_len=INLINE_MAIL_MAX)
+        except validate.Invalid:
+            return None, []
+        return text, [int(m["id"]) for m in mine]
+
     def apply_preset(self, name: str, *, me: Optional[str] = None) -> int:
         """Paste a preset into the caller's own session — `sb presets <name> --apply`.
 
@@ -5948,8 +6246,14 @@ class Broker:
                 self._record_done(me, summary, parent, repeat=repeat, replay=replay,
                                   promoted=self.promoted, commit=False)
         else:
-            self._record_done(me, summary, parent, repeat=repeat, replay=replay,
-                              promoted=[], commit=True)
+            # The result row and terminal child state are one causal event. A cohort wait
+            # takes the same write lock while snapshotting live children and its message
+            # watermark; without this transaction it can land between these statements,
+            # include the child as live, exclude its just-written result as old, and wait
+            # forever for a second completion that will never come.
+            with store.mutation(self.db):
+                self._record_done(me, summary, parent, repeat=repeat, replay=replay,
+                                  promoted=[], commit=False)
         # OUTSIDE the transaction, and it has to be: the doorbell is a herdr subprocess
         # (see `store.mutation` and `grant`). The signals are already durable — this only
         # says "now", and it is held, so a promote of ten children is one doorbell each and
@@ -5987,8 +6291,8 @@ class Broker:
             #
             # HELD WHEN A BURST IS POSSIBLE, and this is the ring the holdback exists
             # for. Five children finishing inside a second used to ring an idle parent
-            # five times with five copies of one payload-free doorbell; held, the ring is
-            # owed to `flush_pending`, which sends one naming all five. The summaries are
+            # five times; held, the ring is owed to `flush_pending`, which sends one
+            # bounded inline payload or one inbox notice naming all five. The summaries are
             # untouched either way — they are in the mailbox above, and `sb inbox` reads
             # them whatever the doorbell did.
             self._ring(parent, f"{tag(me)} {self._say('notify.child_done')}",
@@ -7483,7 +7787,7 @@ class Broker:
         # role's own tier for the same reason: restore brings back the SAME agent, not a
         # fresh one of its role. Empty (no override, or a row predating the column) falls
         # through to the role's tier, which is exactly what this line did before.
-        spec = roles_mod.get(self.roles, a["role"], self.repo).spec(
+        spec = roles_mod.get_or_fallback(self.roles, a["role"], self.repo).stored_spec(
             _column(a, "tier") or None)
         pane = self._restore_tab(a, wsid, where, env=self._spawn_env(name, spec))
         # A restored agent gets the same proof a fresh one does — its pane is just as new,
@@ -7751,9 +8055,9 @@ class Broker:
         Private, and no longer a verb of its own: interrupting is a delivery mode of
         `tell` (DESIGN-TRUTH.md's rejected list). It stays a separate method because it
         shares nothing with the other two modes below the first line — the doorbell
-        carries no payload and is allowed to wait, this cancels the turn with `esc` and
-        puts the instruction itself on the wire, because a queued interrupt is not an
-        interrupt: the work you are trying to stop would finish first.
+        may fall back to a mailbox notice and is allowed to wait, this cancels the turn
+        with `esc` and puts the instruction itself on the wire, because a queued interrupt
+        is not an interrupt: the work you are trying to stop would finish first.
 
         The message still goes in the store, and once delivery is confirmed it is marked
         read — and delivery here means PROVED, by the agent's own transcript, not by
@@ -8182,9 +8486,10 @@ class Broker:
         **The repair is a RE-SEND, never an Enter.** `Herdr._rescue` presses Enter on
         whatever is in the box without looking, which is the right trade for an interrupt —
         its text is the message, so a second `prompt` would duplicate it — and the wrong one
-        here. A doorbell carries no payload, so sending it again costs the recipient one
-        wasted `sb inbox`; a blind Enter can submit a human's half-typed text or answer a
-        modal dialog (`herdr.py:648-655` records a live `agent start` returning
+        here. Repairable rings are inbox notices; inline mail is marked non-repairable and
+        falls back to such a notice if its first send cannot be proved. Re-sending a notice
+        costs one inbox visit; a blind Enter can submit a human's half-typed text or answer
+        a modal dialog (`herdr.py:648-655` records a live `agent start` returning
         `interactive_ready` over a workspace-trust prompt).
 
         It stays free when nothing is outstanding, which is the property `flush_pending` is
@@ -8227,6 +8532,9 @@ class Broker:
             a = store.get_agent(self.db, who)
             path = store.transcript_path(a) if a is not None else None
             if path is None:
+                if ring["inline_ids"]:
+                    self._fallback_inline(who, ring, reason="no_transcript")
+                    continue
                 # No session file to read, so there is no evidence either way — and "we
                 # cannot see" is not "it did not arrive". Re-sending on blindness would be a
                 # standing tax on every message to such an agent rather than a repair, so
@@ -8236,11 +8544,16 @@ class Broker:
                                 reason="no_transcript", repairs=ring["tries"])
                 continue
             if output.submitted_since(path, ring["text"], since=ring["at"]):
+                if ring["inline_ids"]:
+                    store.mark_messages_collected(self.db, ring["inline_ids"])
                 store.log_event(self.db, kind="ring_confirmed", agent=who,
                                 after=now - ring["at"], repairs=ring["tries"])
                 continue
             if not ring["repair"]:
-                # `apply_preset` — the ring whose text IS the payload. See its call site.
+                if ring["inline_ids"]:
+                    self._fallback_inline(who, ring, reason="payload_unconfirmed")
+                    continue
+                # `apply_preset` — the other ring whose text IS the payload. See its call site.
                 store.log_event(self.db, kind="ring_unconfirmed", agent=who,
                                 reason="payload", repairs=ring["tries"])
                 continue
@@ -8261,6 +8574,58 @@ class Broker:
             except HerdrError as e:
                 store.log_event(self.db, kind="ring_repair_failed", agent=who,
                                 attempt=attempt, error=str(e))
+
+    def _fallback_inline(self, who: str, ring: dict, *, reason: str) -> bool:
+        """Replace an unproved inline payload with a repairable inbox doorbell."""
+        if self._is_blocked(who):
+            return False
+        rows = [store.get_message(self.db, mid) for mid in ring["inline_ids"]]
+        senders = ", ".join(dict.fromkeys(
+            row["from_agent"] for row in rows if row is not None)) or "switchboard"
+        text = f"{tag(senders)} {self._say('notify.mail')}"
+        if not self._claim_inline_fallback(who, ring, reason=reason, text=text):
+            return False
+        try:
+            # Next-turn is safe for a mailbox notice and preserves the original tell's
+            # non-blocking behavior. Unlike the payload, this may be repaired verbatim.
+            self.h.prompt(who, text)
+        except HerdrError as e:
+            store.log_event(self.db, kind="ring_fallback_failed", agent=who,
+                            error=str(e), reason=reason)
+        return True
+
+    def _claim_inline_fallback(self, who: str, ring: dict, *,
+                               reason: str, text: str) -> bool:
+        """Atomically close the payload cycle and open its repairable fallback."""
+        claimed = False
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            holes = ",".join("?" * len(RING_CLOSED))
+            settled = self.db.execute(
+                f"SELECT 1 FROM events WHERE agent=? AND id>? "
+                f"AND kind IN ({holes}) LIMIT 1",
+                (who, ring["id"], *RING_CLOSED),
+            ).fetchone()
+            if settled is None:
+                self.db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (who, RING_FALLBACK_CLAIM,
+                     json.dumps({"reason": reason, "ring": ring["id"]}), store.now()),
+                )
+                # Durable before the external prompt: if this process exits after its
+                # claim, the ordinary capped repair path still sees an open doorbell.
+                self.db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (who, RING_OPEN,
+                     json.dumps({"text": text, "repair": True, "inline_ids": []}),
+                     store.now()),
+                )
+                claimed = True
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return claimed
 
     def _claim_repair(self, who: str, ring: dict, now: int) -> Optional[int]:
         """Take the next repair slot for this ring, or None if there is not one to take.
@@ -8359,7 +8724,8 @@ class Broker:
             payload = json.loads(r["payload"]) if r["payload"] else {}
             return {"id": r["id"], "at": r["created_at"], "last": last, "tries": tries,
                     "text": payload.get("text") or "",
-                    "repair": bool(payload.get("repair"))}
+                    "repair": bool(payload.get("repair")),
+                    "inline_ids": list(payload.get("inline_ids") or ())}
         return None
 
     def _pane_still_listed(self, who: str) -> bool:
@@ -8507,7 +8873,7 @@ class Broker:
 
     def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
               answer: bool = False, repair: bool = True, hold: bool = False) -> bool:
-        """The doorbell. Carries no payload — the message is in the store.
+        """Deliver pending mail inline when safe, or ring its durable inbox.
 
         `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`), and the
         only thing it decides here is what to do about a target that is mid-turn:
@@ -8542,12 +8908,12 @@ class Broker:
 
         `hold=True` says this ring belongs to the HELD RING CLASS (`HELD_RING_KINDS`):
         a child finishing or dying, and later the mutation rings. Those arrive in bursts —
-        a fan-out of five reporting `done` inside a second — and the doorbell carries no
-        payload, so five of them tell the parent one thing five times. A held ring is
-        never sent from here; it is left owed to `flush_pending`, which already rings once
-        for a whole backlog and names every sender in it, and which waits out the rest of
-        the burst first (`RING_HOLDBACK`). It only ever affects the *idle* path: the busy
-        path was already a hold, and its behaviour is unchanged.
+        a fan-out of five reporting `done` inside a second — and five separate prompts cost
+        five turns. A held ring is never sent from here; it is left owed to
+        `flush_pending`, which already rings once for a whole backlog and names every sender
+        in one inline payload when it fits, or one inbox notice when it does not, and which
+        waits out the rest of the burst first (`RING_HOLDBACK`). It only ever affects the
+        *idle* path: the busy path was already a hold, and its behaviour is unchanged.
 
         There is no fallback when `agent prompt` fails. There used to be one — type the
         text into the agent's pane with `pane run` — and it was a shell: any backtick or
@@ -8581,6 +8947,17 @@ class Broker:
         force = mode == INTERRUPT
         if who == HUMAN:
             return False
+        pending = store.unseen_for(self.db, who)
+        wait_ready, wait = self._wait_ready(who, pending)
+        if not force and not answer and wait is not None and not wait_ready:
+            store.log_event(self.db, kind="ring_held", agent=who,
+                            reason="waiting", mode=wait["mode"])
+            return False
+        # A satisfied cohort wait is itself the coalescing boundary. In particular,
+        # ``--any`` wakes for the first declared result and ``--all`` wakes for the last;
+        # neither should then pay the generic sibling-burst holdback too.
+        if wait is not None and wait_ready:
+            hold = False
         if self._finished_and_unreachable(who):
             # Nobody is there to hear it: the turn ended and the name no longer binds, so
             # the call can only fail. The guard lives HERE and not at `tell`/`interrupt`
@@ -8618,9 +8995,9 @@ class Broker:
             # `flush_pending`'s to ring, unchanged.
             #
             # An idle recipient used to be rung here and now, individually — which is
-            # correct for one child and wrong for five, because the doorbell carries no
-            # payload and five of them say one thing five times. So a ring in the held
-            # class does not ring from here at all: it is owed to the same opportunistic
+            # correct for one child and wrong for five, because five prompts spend five
+            # turns even when their durable results can be delivered together. So a ring
+            # in the held class does not ring from here at all: it is owed to the same opportunistic
             # drain that already coalesces a backlog into one doorbell naming every
             # sender (`flush_pending`), and that drain decides when the burst is over
             # (`RING_HOLDBACK`). Returning False is exactly what leaves it owed — the
@@ -8634,6 +9011,14 @@ class Broker:
             return False
         if answer:
             self._unblock_if_needed(who)
+        inline_ids: list[int] = []
+        if mode != INTERRUPT:
+            inline, inline_ids = self._inline_mail(who, pending)
+            if inline is not None:
+                text = inline
+                # This prompt carries instructions/results rather than a disposable
+                # doorbell. A blind confirmation retry could execute it twice.
+                repair = False
         try:
             if mode == INTERRUPT:
                 self._deliver_interrupt(who, text)
@@ -8656,23 +9041,32 @@ class Broker:
             # send again, and a prefix is no good as the second of those. Doorbells are one
             # short line; the only long one is a preset, which is recorded for the first
             # reason and re-sent for neither.
-            store.log_event(self.db, kind="ring_sent", agent=who, text=text, repair=repair)
+            store.log_event(self.db, kind="ring_sent", agent=who, text=text, repair=repair,
+                            inline_ids=inline_ids)
+        # An inline payload is announced but not yet proved read. The off-turn confirmer
+        # marks these exact ids collected after transcript proof; if proof fails it sends
+        # the ordinary inbox notice instead. Marking them read here would silently discard
+        # an instruction when the terminal accepted the paste but dropped Enter.
         store.mark_delivered(self.db, who)
+        if wait is not None and wait_ready:
+            store.clear_wait(self.db, who)
+            store.log_event(self.db, kind="waiting_woke", agent=who,
+                            mode=wait["mode"], cohort=wait["cohort"])
         return True
 
     def _deliver_interrupt(self, who: str, text: str) -> None:
         """Put an interrupt's text in the pane, CONFIRMED — or raise `HerdrError`.
 
-        The one ring that carries its payload is the one ring a bare `agent prompt`
-        cannot be trusted with. `prompt` returns nothing worth reading and has two
-        observed silent failures — pasted but never submitted, or never arrived at all —
+        The one mode that must prove its payload before returning is the one a bare
+        `agent prompt` cannot be trusted with. `prompt` returns nothing worth reading and
+        has two observed silent failures — pasted but never submitted, or never arrived at all —
         and the case this exists for is the loudest of them: a Claude Code sitting on its
         first-run auto-mode dialog eats the text whole and changes state anyway, so the
-        interrupt is thrown away while the send reports success. Every other mode can
-        afford that, because the doorbell carries nothing and `flush_pending` re-rings it
-        from the store on the next `sb` command anyone runs. An interrupt cannot: its
-        text IS the message, it has already cancelled the agent's turn with `esc`, and
-        "later" is precisely what it was refusing.
+        interrupt is thrown away while the send reports success. Ordinary mail can afford
+        asynchronous proof because it stays durable: a failed inline proof falls back to
+        an inbox notice, and a failed notice is re-rung from the store. An interrupt cannot:
+        its text IS the immediate change of course, it has already cancelled the agent's
+        turn with `esc`, and "later" is precisely what it was refusing.
 
         So this is `Herdr.deliver` — the same retry-until-proved path `_spawn` uses, and
         for the same reason — with the same proof: the text in the agent's OWN

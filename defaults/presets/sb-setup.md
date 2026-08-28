@@ -241,6 +241,17 @@ Nothing in sb does this for you and nothing will; it is a handful of existence c
 Where the sniff is ambiguous — a monorepo, two of these side by side — say what you found
 and ask, rather than picking the first row and calling it detected.
 
+**What a generated QA role is FOR, before you write a word of one.** It is the shipped `qa`
+role narrowed to this repo's stack, and the shipped one is not a test runner: an agent that
+built a change owns its own tests and builds, and a QA agent exists for the coverage that
+agent could not reach itself — another environment, device, account, simulator or
+perspective, an end-to-end flow, an integration. Read `sb roles qa` before you draft, and
+write the generated role as that job in this repo's terms. Two failure modes to write
+against, because a language-named role invites both: "run the test suite" as the whole of
+the prompt, which recreates the slow implement-test-return loop the design removed; and
+silence about evidence, which gets the author's passing checks run a second time. Say that
+what already passed on the commit is read and taken, not repeated.
+
 A generation is THREE files, and the third is the one people forget:
 
 **1. `.switchboard/roles/<name>.md`** — TOML frontmatter fenced by `+++` (not the `---` YAML
@@ -249,31 +260,45 @@ file), then the prose that becomes the role's prompt:
 
     +++
     model = "careful"
-    delegate = false
+    capabilities = []
     +++
 
-    You are an iOS QA agent for this repo. Build and run the app in the simulator, verify
-    that UI changes actually render, and check the adjacent screens for regressions before
-    reporting good to go.
+    You are the iOS QA agent for this repo, and you are here for what the agent that built
+    the change could not reach from a terminal: the app running on a simulator or a device.
+    Its tests and its build are its own and already ran on this commit — read that evidence
+    and take it. Spend yourself on the screens: exercise the changed flow the way a person
+    would, check the adjacent screens for regressions, and say what is still unverified.
 
-`model` must be a tier that already exists — the shipped ones are `cheap`, `default`,
-`standard`, `careful`, `strong`, `prose`, plus anything this repo's own `models.toml` adds.
-Do not invent a tier name; `sb models` prints what actually resolves here. `delegate` is
-whether this role may spawn other agents, and defaults to false. There is no `prompt`
-field: the body after the closing `+++` is the prompt.
+`model` must be a tier that already exists — `sb models` prints what actually resolves in
+the repo you are setting up, and that listing is the authority; do not invent a tier name
+or copy one from another repo. `capabilities` is what an agent of this role may do, as a
+list of the strings `sb capabilities` names for this repo — `[]` for a role that only reads
+and reports, `["write-tracked"]` for one that edits files git tracks, `spawn` on top of that
+for one that may put up agents of its own. (An older `delegate = true`/`false` field is still
+read for repos that have one, and means `spawn`; write `capabilities` in anything new.)
+There is no `prompt` field: the body after the closing `+++` is the prompt.
 
 **2. `.switchboard/presets/<name>.md`** — plain markdown, no frontmatter. The repo's actual
-conventions for that kind of work, in the concrete: the real test command, the real
-simulator or target, what evidence counts here.
+conventions for that kind of work, in the concrete: the real command, the real simulator or
+target, what evidence counts here. A command belongs here, in a file about THIS repo, and
+never in a shipped default that would be a lie in every other one.
 
-**3. The binding line** in `.switchboard/presets.toml`:
+**3. The binding line** in `.switchboard/presets.toml`, and for a QA role it carries THREE
+names, not one:
 
     [roles]
-    ios-qa = ["ios-qa"]
+    ios-qa = ["ios-qa", "verify", "evidence"]
 
-Left side is the role, right side is the presets appended to `all` for it. Without this
-line the preset is nameable — `sb presets ios-qa` prints it — and never reaches an agent.
-Shipping is not applying.
+Left side is the role, right side is the presets appended to `all` for it. `verify` and
+`evidence` are shipped, and `defaults/presets.toml` binds them to the role literally named
+`qa` — a binding is keyed on the exact name, so a generated `ios-qa` gets neither unless you
+name them here. Without them the generated role is the only thing telling that agent how to
+produce usable evidence, which is how a language-named QA role drifts back into being a test
+runner. Without the first line the preset is nameable — `sb presets ios-qa` prints it — and
+never reaches an agent. Shipping is not applying.
+
+A generated role that is NOT a QA role takes whichever shipped presets fit the job it does;
+the three-name rule above is about QA because that is what this tier generates.
 
 Nothing else is needed to make either file discoverable: both are found by glob, so
 `--role ios-qa` works the moment the file is saved.
@@ -284,7 +309,7 @@ not — the draft is what makes that guess correctable, and a written file is a 
 have to review rather than a thing they chose.
 
 Do not author a plugin. Tier 3 is presets and roles: files that are read. A plugin is
-Python that runs, and that goes through a plan and a PR like any other code.
+Python that runs, and that goes through review and a PR like any other code change.
 
 ## Re-runs: offer deltas, diff rather than clobber
 

@@ -535,7 +535,11 @@ class WorkspaceTest(Fixture, unittest.TestCase):
         name = b.start()
         b.start(name=name, task="merge PR 41")
         self.assertEqual(len(self.h.started), 1)             # nothing spawned twice
-        self.assertEqual(store.unread_for(self.db, name)[-1]["body"], "merge PR 41")
+        row = self.db.execute(
+            "SELECT body FROM messages WHERE to_agent=? ORDER BY id DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        self.assertEqual(row["body"], "merge PR 41")
 
     def test_the_orchestrators_children_never_land_in_the_main_checkout(self):
         """The fork rule, at the depth that matters most.

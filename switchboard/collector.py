@@ -339,10 +339,9 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     is blocked and what is safe to ring are decisions `Broker.flush_pending` already
     makes, and duplicating any of them here would be a second opinion in a second process.
 
-    It does not look at stalled agents, does not correct a state, and pings nobody. An
-    agent that is idle without having reported is a different problem, and one nothing
-    acts on: it shows on the board and in `--needs-me`, and DESIGN-TRUTH rules out "The
-    reconciler's nudge to an agent that went quiet."
+    This doorbell trigger does not look at stalled agents, correct a state or ping anyone.
+    An ordinary agent that is idle without reporting only shows on the board and in
+    `--needs-me`; the explicit-wait expiry is the narrower reconciler trigger below.
 
     `undelivered` and not `unread`: an agent that read its own inbox needs no doorbell,
     and the snapshot's `undelivered` is derived from the same pair `flush_pending` chases
@@ -407,15 +406,16 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
     In-process memory, like `last_doorbell`: a replacement collector re-sweeping once costs
     one process, and the reap is idempotent.
 
-    This trigger used to carry a second job — spawning `sb reconcile` for a STALLED agent,
-    so the reconciler could nudge it. DESIGN-TRUTH now rules out "The reconciler's nudge to
-    an agent that went quiet.", and with that went the `reconciled` memory that kept an
-    unattended stall from costing a process every tick.
+    Ordinary STALLED agents remain passive. One narrower wake is intentional: a row whose
+    explicit wait expired triggers this command so the agent can check status and either
+    resume or declare waiting again. The wait declaration itself is the once-only memory;
+    the current `sb reconcile` clears it after queueing the prompt.
     """
     now = panel.now()
     gone = sorted(a.name for a in snap.agents if a.gone)
+    expired = sorted(a.name for a in snap.agents if getattr(a, "wait_expired", False))
     due = state.last_reconcile is None or now - state.last_reconcile >= RECONCILE_SWEEP
-    if not gone and not due:
+    if not gone and not expired and not due:
         return False
     if state.last_reconcile is not None and now - state.last_reconcile < RECONCILE_GAP:
         return False

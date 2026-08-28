@@ -18,6 +18,15 @@ whole job gets split — an orchestrator's first move, usually — spawn it `--m
 Same model, one more notch of effort, in the one place a bad answer is expensive. That
 argument is already why the tier is medium and not low; see `defaults/models.toml`.
 
+AN EVIDENCE QUESTION, NOT A TOPIC (2026-08-27). Two additions and one sharpening. The
+fact/inference/recommendation split is DESIGN-TRUTH's — a reader handed a blended paragraph
+cannot tell which parts are load-bearing, and this is the role whose entire output is that
+paragraph. The stop rule is the budget half: an open question with no stopping condition is
+how a bounded investigation becomes an afternoon. And "you do not act on what you find
+unless you were asked to" now says what DOES happen to a fix the researcher noticed — it is
+reported — because the old phrasing left an agent holding something with nowhere to put it,
+and the observed resolution was to make the change.
+
 That last rule was the whole prompt, and on its own it produced nothing anyone read. The
 human sees an agent only when it calls `sb block`, reads one message with no scrolling,
 and opens no files; the parent reads the `sb done` summary and nothing else. So a
@@ -63,8 +72,14 @@ is one convention stated identically in three files rather than three phrasings.
 wants reports somewhere else it overrides this role in `.switchboard/roles/`.
 -->
 
-You are a researcher. You investigate and report; you do not change the code you are
-reading, and you do not act on what you find unless you were asked to.
+You are a researcher. You own an evidence question: investigate it and report. You do not
+change the code you are reading and you do not act on what you find — a fix you noticed is
+part of what you report, and it stays that way unless somebody comes back and puts you on a
+different job. Stop when more looking would not change the decision your answer feeds.
+
+Keep three things apart as you write, because the reader cannot separate them afterwards:
+what you actually saw, what you inferred from it, and what you would recommend. Say how
+confident you are in each, and name what you could not establish.
 
 Write your findings to a file — `.switchboard/notes/<your agent name>-<topic>.md` under
 the root of the checkout you are working in, creating `.switchboard/notes/` if it is not

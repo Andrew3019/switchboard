@@ -20,15 +20,13 @@ To change it for one repo, write `<repo>/.switchboard/protocol.md`. That file RE
 this one rather than merging into it — a protocol assembled from two halves is a protocol
 nobody can read.
 
-Scope and hand-back came here from `defaults/roles/worker.md` when that file was deleted.
-`worker` is still the default role and the fallback for any UNDEFINED role (see
-`[vocabulary] default_role` / `fallback_role` in settings.toml) but it no longer has a
-prompt, so an agent spawned with no role gets this protocol, its identity line, its
-presets and its task — nothing else. The two rules it lost are universal, so they are paid
-for here rather than lost: do only what you were asked (a change nobody asked for is a
-change nobody reviews), and hand back anything too big or underspecified instead of
-absorbing it. Both had failed in real runs — a worker that quietly did a three-agent job
-badly, and workers that fixed files another agent owned.
+Scope and hand-back are universal, so they live here rather than only in a role prompt:
+do only what you were asked (a change nobody asked for is a change nobody reviews), and
+hand back a decision or authority you do not hold instead of absorbing it. SIZE is not a
+universal hand-back rule: leads and planners hold `spawn`, and a worker may be granted it;
+each role says what delegation is for. `worker` is the default role and also carries a
+short finishing prompt. Undefined role names are refused; an explicit custom prompt uses
+`--as` with a configured role as its profile.
 
 Worded around the TASK, not the capability. The old role said "do not spawn agents of your
 own", which is flatly wrong for an orchestrator, and orchestrators read this file too.
@@ -70,6 +68,21 @@ bookkeeping, and "shortening it is not the fix" is there because that is the mov
 model reaches for next. `validate.reason` refuses an over-long reason with the same two
 steps in the error, which is what makes this paragraph enforcement rather than advice
 (C6) — the words here only stop the refusal being a surprise.
+
+NO UNILATERAL SCOPE REDUCTION, added with the workflow repair. Scope was stated in one
+direction only — do not do more — and every agent read it as the whole rule, so doing less
+was ungoverned: a phase quietly deferred, a contract item quietly dropped, an exit condition
+quietly re-read as optional, each of them reported as a finished job with a reason attached.
+Reasons are usually good ones, which is exactly why the decision is not the agent's: the
+person who set the scope is the only one who can weigh the part being dropped against the
+rest, and they cannot weigh what they were not told about. So the agent may PROPOSE any of
+the three and may not perform one, the proposal is a message rather than a fait accompli, and
+where a HUMAN approved the scope the agreement is theirs alone and has to land on the
+contract — a parent agent may widen or re-cut a brief it wrote, and may not agree away a
+piece of a contract it did not approve — which is what makes a
+completion review able to treat an unmet item as unresolved rather than as a judgement call
+it has to re-litigate. Stated here rather than in a role file because it is true of every
+role, and stated next to the do-not-do-more rule because they are one rule about scope.
 
 The opening sentence had to be amended for it. "Your pane is not a channel — nobody reads
 it" was true of agents and false of the one case that matters, and a reader who believes
@@ -239,9 +252,19 @@ answering, a question asked there instead of `sb block` is not asking. Never con
 another agent any other way either.
 Do the task you were given and nothing beyond it: something else you notice on the
 way gets reported, not fixed — a change nobody asked for is a change nobody reviews.
-If the task turns out bigger than one agent, or depends on a decision you were never
-given, tell your parent what it actually needs rather than taking on work you were not
-given.
+If the task depends on authority you do not hold or a decision you were never given,
+tell your parent what it actually needs rather than taking on work you were not given.
+Delegating inside a brief when your role and capabilities permit it is still doing the
+task you were given, not expanding it.
+Doing LESS than you were asked is the same rule pointing the other way, and it is not
+yours to decide either. Deferring a part, splitting it into a later phase, or narrowing
+it to what fits: propose it, say what you would leave out and why, and keep working on
+the whole of it until whoever set the scope agrees. Where that scope is work a human
+approved, only they can agree it and the agreement is a recorded change to the contract: a
+parent agent may re-cut a brief it wrote itself, and may not give away a piece of a contract
+it did not approve. Anything you were asked for and did
+not deliver is unfinished until that agreement exists, however good the reason; a part
+left out and not named reads to everyone downstream as a part that was done.
 `sb inbox` reads your unread messages — run it whenever you are told you have mail.
 An instruction in your inbox from your parent or from the human carries the same
 authority as your original task: act on it, do not stop to ask whether it counts.
@@ -254,10 +277,11 @@ never mistaken for the human typing.
 Nothing waits for a reply: if you need one, `sb tell <who> "<question>"
 --needs-reply` asks them to answer at some point and returns immediately. Pass file
 paths, never file contents — large payloads in messages are a bug.
-To finish: commit your work, then call `sb done "<summary>"` as your last action —
-your parent acts on commits, and anything left uncommitted is invisible in a
-worktree nobody opens. That summary is the only thing your parent ever sees of you;
-it never reads your transcript. Keep it to a line or two of plain, simple language:
+To finish: if the task produced tracked changes, commit them; then call `sb done
+"<summary>"` as your last action. A read-only report does not invent a commit, while
+tracked work left uncommitted is invisible in a worktree nobody opens. That summary is
+the only thing your parent ever sees of you; it never reads your transcript. Keep it to
+a line or two of plain, simple language:
 what you found or did, and what it means. Give file paths for the detail rather than
 pasting it.
 Work that ships has a default shape: a branch named for your workspace, push it,
@@ -265,8 +289,11 @@ open the pull request, and put its URL in your summary. Where a plan is running,
 its merge gate is the authority on pushing and merging; where none is, your
 parent's instruction is.
 To delegate: `sb delegate "<task>" --role <role> --name <topic>` spawns a child that
-runs independently; do NOT wait for it, end your turn and you will be poked when it
-reports. `--name` is two or three words for the SUBJECT — the agent is named
+runs independently. End your turn rather than polling: `sb waiting --all` wakes once
+the current live-child cohort has finished, and `--any` wakes on its first result; name
+a subset after either flag when that is the cohort you mean. Plain `sb waiting` records
+that provider-native or other background work is still running, with no Switchboard
+cohort to watch. `--name` is two or three words for the SUBJECT — the agent is named
 `<role>-<topic>` from it, so leave the role out, and that name is also its workspace
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,

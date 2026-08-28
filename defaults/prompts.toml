@@ -32,8 +32,8 @@
 identity = "You are agent '{name}', role '{role}'. You report to '{parent}': they spawned you, and your `sb done` summary is what they see of your work."
 
 # What roles exist, told to every agent right after its own —
-# DESIGN-TRUTH: "The role list is lightly audited and fine as it is", which also fixes how
-# it is built: "that text is generated from the roles themselves, never hardcoded".
+# DESIGN-TRUTH: "The role list is live vocabulary, not a hardcoded prompt list", which
+# fixes how it is built too.
 # So `{roles}` is filled from the merged role table this repo actually has
 # (`Broker.roles`), and naming the shipped five in this string would be the failed version of
 # this fragment even on the day it is accurate — a repo that adds `.switchboard/roles/x.md`
@@ -43,11 +43,10 @@ identity = "You are agent '{name}', role '{role}'. You report to '{parent}': the
 # list answers is the one that sentence provokes: mine is 'worker' — out of what?
 #
 # Names only, no descriptions. `Role` has no description field, the names are the vocabulary
-# `--role` takes, and DESIGN-TRUTH asks only that it is known "that there are roles, and what
-# roles there are". A description per role means a schema change and a second thing to keep
+# `--role` takes. A description per role means a schema change and a second thing to keep
 # true; if it turns out agents pick badly from names alone, that is when to add it.
 #   {roles} the role names this repo has, comma-separated
-roles = "The roles that exist are: {roles}. That is the list `--role` takes; a name that is not on it still works and inherits the default role."
+roles = "The roles that exist are: {roles}. That is the list `--role` takes. If a requested name is absent, inspect `sb roles`; use `--as` with one of these roles for an explicit custom prompt."
 
 # Operator procedures this repo offers, told ONLY to the dispatcher (the `MAIN` role) and
 # only when the registry is non-empty — a repo that `"!reset"`s it to nothing gets no
@@ -112,7 +111,7 @@ start_task = "Await my instructions."
 # Reworded freely, here or in a repo's own prompts.toml, on the same terms as `start_task`:
 # the `agents.awaiting_task` flag that keeps this row out of STALLED comes from
 # `Broker._first_task` seeing no task passed, never from comparing this text back.
-delegate_task = "Await further instructions. Do NOT start work, and do not invent a task from your name — the real one is coming as a message. Run `sb inbox` when you are told you have mail."
+delegate_task = "Await further instructions. Do NOT start work, and do not invent a task from your name — the real one is coming as a tagged message. If Switchboard can only send a mail notice, run `sb inbox` to read it."
 
 
 [notify]
@@ -122,20 +121,33 @@ delegate_task = "Await further instructions. Do NOT start work, and do not inven
 # and so that `sb inbox`, which is not a prompt at all, can spell it the same way. Do not
 # write a sender into these strings; it is already there.
 
-# The doorbell carries no payload — the message itself is in the store, and telling an
-# agent to go and read it is what keeps a message off the wire and out of the pane.
-mail = "You have mail. Run: sb inbox"
+# Fallback for a payload that cannot safely travel in one provider prompt (large,
+# multiline, mixed with held signals). Ordinary short mail is sent directly, still backed
+# by its durable store row, so the recipient does not pay another turn to fetch it.
+#
+# So an agent that reads THIS string has already missed the inline delivery, and the text
+# says so rather than describing mail in general: the one action left is the fetch, and a
+# recipient that has learned inline delivery is normal needs telling that this time it is
+# not. Everything about what to do with the message is the message's own business.
+mail = "A message could not be delivered inline. Run: sb inbox"
+
+# One explicit waiting declaration has stayed quiet for its configured window. This is a
+# targeted wake, not the retired loop that nudged every silent agent: the recipient chose
+# waiting, and one prompt asks it to renew that choice or resume. No placeholders because
+# the live status is deliberately read after waking rather than summarized from a stale
+# collector snapshot.
+wait_expired = "Your declared wait expired. Run `sb status`, then continue the work or declare the appropriate `sb waiting` state again if it is still genuinely pending."
 
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
 #
-# It fires once per child, and a parent that fans out five of them is woken five times. Read
-# as a bare summons, each wake looked like a cue to speak, so parents dripped one message per
-# arrival instead of waiting for the cohort. The second sentence removes the implied
-# obligation without adding payload — the message itself still lives in the store, which is
-# the whole point of a doorbell. How to handle a cohort is the orchestrator role's business,
-# not the doorbell's; this only stops the doorbell from arguing with it.
-child_done = "A child finished. Run: sb inbox. Waking is not a reason to report — if other children are still running, wait for them."
+# It used to fire once per child, and a parent that fanned out five of them was woken five
+# times. Read as a bare summons, each wake looked like a cue to speak, so parents dripped
+# one message per arrival instead of waiting for the cohort. The second sentence removes
+# the implied obligation without adding payload — the message itself still lives in the
+# store, which is the whole point of a doorbell. How to handle a cohort is the orchestrator
+# role's business, not the doorbell's; this only stops the doorbell from arguing with it.
+child_done = "A child finished and its report could not be delivered inline. Run: sb inbox. Waking is not a reason to report — use `sb waiting --all` when the whole live cohort is what you need."
 
 # `sb tell --interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
 # running, so it has to say plainly that the previous instruction is void.
@@ -149,8 +161,8 @@ child_done = "A child finished. Run: sb inbox. Waking is not a reason to report 
 #   {text} what the sender typed
 interrupt = "[INTERRUPT — stop now] The instruction you were following is cancelled; do not resume it. Do this instead: {text} — if stopping has left something half-done, say so with `sb block` before you go on."
 
-# `sb tell --needs-reply`. Appended to that message in the recipient's `sb inbox` output —
-# not to the doorbell, which deliberately carries no payload.
+# `sb tell --needs-reply`. Appended to the direct payload or, on fallback, to that
+# message in the recipient's `sb inbox` output.
 #
 # The whole of the feature is this sentence: the sender is waiting for an answer and is
 # NOT blocked waiting for it, so the recipient owes a reply at some point but owes it

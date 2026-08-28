@@ -157,6 +157,11 @@ class PromptFileError(RuntimeError):
 PROMPT_DIRNAME = "prompts"
 
 
+def render_instructions(prompts: Sequence[str]) -> str:
+    """The exact standing-instruction body handed to Claude."""
+    return " ".join(prompts)
+
+
 def prompt_file_path(name: str, cwd: Optional[Path] = None) -> Path:
     """Where `name`'s system prompt lives. Never joins an unchecked name onto a path."""
     if not validate.AGENT_NAME.fullmatch(name or ""):
@@ -619,7 +624,7 @@ class Herdr:
         # --append-system-prompt "…CHARLIE."`, which answers "CHARLIE" and nothing else.
         # That bug made every prompt in `defaults/` a fiction for a while: what each agent
         # actually received was its last preset fragment, with no protocol and no role.
-        text = " ".join(prompts)
+        text = render_instructions(prompts)
         return ["--append-system-prompt-file", str(write_prompt_file(name, text))]
 
     def _codex_args(self, name: str, prompts: Sequence[str], spec: Any,
@@ -799,7 +804,10 @@ class Herdr:
         raise HerdrError("spawn_failed", f"after {attempts} attempts: {last}", [name, pane_id])
 
     def prompt(self, name: str, text: str) -> None:
-        """The doorbell. Carries no payload — messages live in the store.
+        """Queue text into an agent's next turn.
+
+        The text may be a compact inline copy of durable mail or the ordinary inbox
+        doorbell; callers choose which. This transport promises only to queue that text.
 
         **This QUEUES. It does not interleave, and it cancels nothing.** The text is
         handed to the model at the next point it can act — the instant the in-flight tool

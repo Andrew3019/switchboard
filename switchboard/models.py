@@ -30,7 +30,9 @@ is the layer that types a provider's command line.
 
 from __future__ import annotations
 
+import difflib
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,8 +95,7 @@ EFFORT_LEVELS = effort_levels()
 
 
 def _default_provider() -> str:
-    """The provider a tier gets when it names none, and the one the passthrough escape
-    hatch hands an unknown tier name to."""
+    """The provider a tier gets when it names none or an explicit raw model uses."""
     return (_shipped().get("defaults") or {}).get("provider", "")
 
 
@@ -203,9 +204,10 @@ class Tiers:
     def resolve(self, name: Optional[str]) -> ModelSpec:
         """Tier name → spec.
 
-        An unknown name is passed through verbatim as a model id. That escape hatch lets
-        anyone pin a specific model without editing config first, and it is why an
-        undefined tier is not an error.
+        Exact configured names win. A case/punctuation/spacing variant is accepted only
+        when it identifies one configured tier uniquely. Raw provider model ids remain
+        available, but only through the explicit ``raw:<id>`` spelling: a typo in a tier
+        must never silently select a different execution path.
         """
         if not name:
             fallback = config.setting("vocabulary.default_tier")
@@ -213,10 +215,54 @@ class Tiers:
                 tier=fallback, provider=self.default_provider)
         if name in self.tiers:
             return self.tiers[name]
-        return ModelSpec(tier=name, provider=self.default_provider, model=name)
+        if name.startswith("raw:"):
+            model = name.removeprefix("raw:").strip()
+            if not model:
+                raise ModelConfigError(
+                    "raw model selector is empty; use `raw:<provider-model-id>`")
+            if any(c.isspace() for c in model):
+                raise ModelConfigError(
+                    "a raw provider model id must be one word; spacing variants are "
+                    "accepted only for configured tier names")
+            return ModelSpec(tier=name, provider=self.default_provider, model=model)
+
+        key = _lookup_key(name)
+        matches = [n for n in self.tiers if _lookup_key(n) == key]
+        if len(matches) == 1:
+            return self.tiers[matches[0]]
+        if len(matches) > 1:
+            raise ModelConfigError(
+                f"model tier {name!r} is ambiguous; use one of these exact names: "
+                f"{', '.join(sorted(matches))}")
+
+        nearby = difflib.get_close_matches(name, self.names(), n=4, cutoff=0.35)
+        choices = nearby or self.names()
+        shown = ", ".join(choices[:8]) or "(none configured)"
+        raise ModelConfigError(
+            f"no model tier {name!r}; nearby choices: {shown}. Run `sb models` for the "
+            "live table, or use `raw:<provider-model-id>` for an explicit raw model")
 
     def names(self) -> list[str]:
         return sorted(self.tiers)
+
+    def resolve_stored(self, name: Optional[str]) -> ModelSpec:
+        """Resolve a persisted override, including pre-migration implicit raw ids.
+
+        New user input always uses strict ``resolve``. Rows written before raw ids gained
+        the ``raw:`` marker contain only the provider id, so this compatibility reader
+        preserves those existing agents without reopening the ambiguous CLI path.
+        """
+        try:
+            return self.resolve(name)
+        except ModelConfigError:
+            if not name or name.startswith("raw:") or any(c.isspace() for c in name):
+                raise
+            return ModelSpec(tier=f"raw:{name}", provider=self.default_provider, model=name)
+
+
+def _lookup_key(name: str) -> str:
+    """Safe spelling equivalence for user-facing vocabulary, not model identity."""
+    return re.sub(r"[^a-z0-9]+", "", name.casefold())
 
 
 def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:

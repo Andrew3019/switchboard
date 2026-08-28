@@ -202,6 +202,17 @@ class CasesTest(unittest.TestCase):
             for heading in (brief, signal):
                 self.assertIn("hand", heading.group(0).lower(), path.name)
 
+    def test_case_one_is_small_but_genuinely_shaped(self):
+        """A planner that obeys the direct-path rule must not fail the eval for declining
+        an already-settled fix. Case 1 tells the delivered brief why shaping was chosen and
+        leaves the output semantics as a real decision; case 5 can then revise that plan."""
+        text = (EVALS / "cases" / "case-1-bounded-work.md").read_text(encoding="utf-8")
+        brief = text[self.BRIEF.search(text).start():self.SIGNAL.search(text).start()]
+        self.assertIn("task owner classified this as shaped", brief)
+        self.assertIn("boundary between configured, resolved and executable", brief)
+        self.assertNotIn("one new section in the existing output", brief)
+        self.assertNotIn("without invoking a provider command", brief)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -114,6 +114,16 @@ text = "Several of your children are writing tracked files in YOUR checkout at t
 # different kind of thing, it used to be fused into that same flag, and here it is soft
 # guidance instead: something an agent is told, not something it is refused for.
 #
+# REWRITTEN 2026-08-27, id KEPT. The text used to read "a lead is expected to split what it
+# is given and delegate on", which is now the opposite of the lead role: a lead owns its task
+# and delegation is an authority it may decline. Rewritten rather than deleted because the
+# choice it fires on is real and is made at exactly this moment. It also picked up the
+# VOCABULARY half — `sb roles` / `sb models`, and what a refusal means — which is the other
+# thing decided at a spawn and nowhere else, and which was previously taught only by the
+# refusal itself. The id is deliberately NOT renamed even though it no longer describes the
+# text: renaming re-arms the rule for every agent already told it, and `sb roles`-style
+# advice is not worth re-delivering to a fleet mid-run.
+#
 # Keyed on the COMMAND, because "who should I delegate this to" is a question that only
 # exists at the moment of delegating; there is no standing state at turn start that means
 # it. The call site is `cli._state_output` (E2), which resolves the ledger with the verb
@@ -125,16 +135,17 @@ id = "delegate-to-a-lead"
 command = "delegate"
 holds = ["spawn"]
 repeat = "once"
-text = "Work that will fan out further wants a `lead`, not a `worker`: a lead is expected to split what it is given and delegate on, a worker is expected to do one piece itself. Nothing refuses either choice — this is a convention, and the capability check is the only wall."
+text = "Two things to get right at a spawn. WHO OWNS IT: a `worker` for a bounded outcome one agent can carry to done, a `lead` where the shape is uncertain or the part may need agents of its own — and a lead is not thereby obliged to hand anything out; it may do the whole thing itself, and often should. WHAT YOU TYPE: role and model names come from this repo as it stands (`sb roles`, `sb models`), a near miss resolves to the one tier it can only mean, and an unknown or ambiguous name is refused with the near ones listed — take that refusal rather than inventing a name that gets through."
 
 
-# `--isolation own` IS NOT IN THE SPAWN PROMPT (checked 2026-08-23: `config.protocol` names
-# `sb delegate`, `--name` and the roles, and never the flag). The rationale note in
-# `protocol.md` that says "the delegate paragraph above keeps `--isolation own` itself" is
-# describing a paragraph that is not there — so until this row, the ONLY thing that ever
-# said the word to an agent was `shared-write-tracked-fan-out` below, which fires after the
-# third child is already sharing the checkout, and the `fork` refusal, which fires after the
-# flag has been typed. Both teach it by correction; neither teaches it in time.
+# `--isolation own` IS NOT IN THE SPAWN PROMPT (checked 2026-08-23, and again 2026-08-28:
+# `config.protocol` names `sb delegate`, `--name`, `sb waiting` and the roles, and never the
+# flag). `protocol.md`'s own rationale note used to claim the opposite — "the delegate
+# paragraph above keeps `--isolation own` itself", describing a paragraph that was not there
+# — and now says what is true and points at this row by name. Until this row, the ONLY thing
+# that ever said the word to an agent was `shared-write-tracked-fan-out` below, which fires
+# after the third child is already sharing the checkout, and the `fork` refusal, which fires
+# after the flag has been typed. Both teach it by correction; neither teaches it in time.
 #
 # KEYED ON THE COMMAND, not on a count, for the same reason `delegate-to-a-lead` is: "own
 # checkout or mine?" is a question that exists at the moment of spawning and at no other

@@ -162,13 +162,18 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
 
     def test_the_names_are_dropped_for_a_bare_sign_before_the_line_wraps(self):
         """A heavily granted row must not push every other column off a terminal. The
-        SIGN is what survives, exactly as `richboard.marker_short` keeps the word."""
+        SIGN is what survives, exactly as `richboard.marker_short` keeps the word.
+
+        Built on `qa` since 2026-08-27, and it was `reviewer` before: the reviewer template
+        now seeds `write-tracked` for its scoped minor fixes, so granting it all three left
+        only two names and a mark short enough to draw. `qa` is the shipped role that still
+        seeds nothing, which is what makes three grants overflow the width."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
-        reviewer = self.spawn(lead, "reviewer", "rv")
+        agent = self.spawn(lead, "qa", "q")
         for cap in (CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED):
-            self.b.grant(reviewer, cap, me=lead)
-        self.assertEqual(self.cell(reviewer), "reviewer+")
+            self.b.grant(agent, cap, me=lead)
+        self.assertEqual(self.cell(agent), "qa+")
 
     def test_a_row_older_than_the_substrate_draws_no_marker(self):
         """A NULL seed is a row nobody seeded, not a row seeded with nothing: its set is

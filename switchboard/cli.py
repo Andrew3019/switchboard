@@ -73,7 +73,36 @@ def _tier_help() -> str:
         names = models_mod.load(store.worktree_root()).names()
     except Exception:
         names = sorted(models_mod.SHIPPED["tiers"])
-    return f"{' | '.join(names)}, or a model id (see: sb models)"
+    return f"{' | '.join(names)}, or raw:<provider-model-id> (see: sb models)"
+
+
+def _role_help() -> str:
+    """The `--role` help line, read off the live role table for `_tier_help`'s reasons.
+
+    Roles are repo vocabulary exactly as tiers are — a repo adds, renames and retires them in
+    its own `roles.toml` — so a hardcoded list here would advertise names this repo may not
+    have and hide the ones it does. It had NO help at all until this line, which left the two
+    halves of a spawn's vocabulary unequal: `--model` named its tiers and the command that
+    lists them, and `--role` named nothing, so the only place a caller could learn the role
+    vocabulary was the refusal after it had already guessed. Generated instead, from the same
+    table `delegate` resolves against.
+
+    Everything is caught for the same reason: this runs while the parser is being BUILT,
+    before we know we are in a repo at all, and `sb --help` outside one — or over a broken
+    `roles.toml` — must print help rather than a traceback.
+
+    `config.roles` and not `roles.load`, and the difference is the parser-build hot path:
+    the names are the same set either way (`roles.load` iterates exactly this dict), but
+    `load` also resolves the tier table and builds a `Role` per row, which is ~7ms every
+    `sb` command pays for a help string almost none of them print. The raw merged table is
+    cached and its keys are the vocabulary.
+    """
+    try:
+        names = sorted(config.roles(store.worktree_root()))
+    except Exception:
+        names = []
+    listed = f"{' | '.join(names)}, " if names else ""
+    return f"{listed}or --as <prompt> with one of them for a custom prompt (see: sb roles)"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,11 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Hidden for the same reason, and the same shape: the verb the collector's loop runs so
     # that an agent whose pane has gone is confirmed dead and its parent told, without
-    # waiting for a person to open the board. It is `status.collect(reap=True)` and nothing
-    # else, running here in a short-lived process on current code, because the loop that
-    # triggers it is version-stale by design (collector module note). It once carried a
-    # second job — a nudge to an agent whose turn ended without a report — which
-    # DESIGN-TRUTH now rules out ("The reconciler's nudge to an agent that went quiet.").
+    # waiting for a person to open the board. It also wakes one explicit wait after its
+    # configured quiet window; ordinary stalled agents remain passive. It runs here in a
+    # short-lived process on current code because the triggering loop is version-stale by
+    # design (collector module note).
     # An agent has no use for this and is not taught it.
     cmd("reconcile", hidden=True)
 
@@ -145,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what the child is to do. Omit it ONLY when the real task is "
                         "coming next as a message — the child spawns idle and waits "
                         "for it instead of guessing from its --name")
-    d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
+    d.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
     d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
                    help=f"preset from {_preset_dir_help()}, or @<plugin> for that plugin's "
@@ -183,7 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "targets you: rights are somebody else's to give.")
     g.add_argument("agent", help="who gets it — must be in your subtree, and not you")
     g.add_argument("cap", metavar="CAPABILITY",
-                   help="the capability string (see the refusal for the list)")
+                   # Points at the generated catalogue rather than at the refusal. The
+                   # refusal does list them, but only after a caller has guessed once; the
+                   # vocabulary is a repo's own (`Broker.known_capabilities`) and `sb
+                   # capabilities` is the command that prints this repo's.
+                   help="the capability string (see: sb capabilities)")
     # The pass-through half of the model, and the flag exists because "may do it" and "may
     # hand it down" are two different decisions: a read-only researcher equips the workers
     # it spawns without ever becoming a writer itself.
@@ -215,7 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "rows, so it does not depend on the tree's shape and a promote "
                          "cannot invalidate it. Says who may DO the thing and, apart, who "
                          "may only pass it DOWN — and who granted it.")
-    wh.add_argument("cap", metavar="CAPABILITY", help="the capability string")
+    wh.add_argument("cap", metavar="CAPABILITY",
+                    help="the capability string (see: sb capabilities)")
 
     # The one verb that acts on the caller itself. `grant` above hands somebody else a
     # right and is bounded by a subtree check; this tunes nothing but how loudly
@@ -261,6 +294,16 @@ def build_parser() -> argparse.ArgumentParser:
     ib = cmd("inbox", help="read your unread messages")
     ib.add_argument("--peek", action="store_true",
                     help="do not mark as read (safe for polling)")
+
+    wt = cmd("waiting", help="end this turn while background work is still running")
+    wt.add_argument("agents", nargs="*", metavar="CHILD",
+                    help="live direct-child cohort; omit to snapshot every live child")
+    wm = wt.add_mutually_exclusive_group()
+    wm.add_argument("--any", dest="wait_mode", action="store_const", const="any",
+                    help="wake when any declared live child finishes")
+    wm.add_argument("--all", dest="wait_mode", action="store_const", const="all",
+                    help="wake once the whole declared live-child cohort finishes")
+    wt.set_defaults(wait_mode="background")
 
     dn = cmd(
         "done", help="you have finished",
@@ -356,6 +399,16 @@ def build_parser() -> argparse.ArgumentParser:
     rl = cmd("roles", help="list this repo's roles, or show one in full")
     rl.add_argument("name", nargs="?", help="show this role instead of listing")
     cmd("capabilities", help="the capability vocabulary this repo grants against")
+    ins = cmd("instructions", hidden=True,
+              help="development view of one effective spawn instruction set")
+    ins.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
+    ins.add_argument("--model", help=_tier_help())
+    ins.add_argument("--as", dest="as_prompt", help="explicit ad-hoc role prompt")
+    ins.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET")
+    ins.add_argument("--workspace", metavar="NAME")
+    ins.add_argument("--name", default="preview", help="identity name shown in the preview")
+    ins.add_argument("--parent", default=HUMAN, help="parent shown in the preview")
+    ins.add_argument("--task", help="separate initial task to show beside the standing prompt")
     cmd("init", help="pin this repo for switchboard (writes no CLAUDE.md)")
     doc = cmd("doctor", help="check herdr, version, and integration conflicts")
     # The way out of the one deadlock the store can get into: a schema change that is not
@@ -498,7 +551,7 @@ def _validate(args) -> None:
         # TIER name out of the same open vocabulary, so a value one accepts and the other
         # rejects would be two answers to one question.
         if args.model is not None:
-            args.model = validate.token(args.model, "--model")
+            args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
 
     elif cmd == "delegate":
         # None is a taskless spawn and is legal (#145) — the broker substitutes the
@@ -506,9 +559,8 @@ def _validate(args) -> None:
         # checked, the same shape the `start` branch above already has for the same reason.
         if args.task is not None:
             args.task = validate.line(args.task, "task")
-        # Not slugified here: the role is also a lookup key into roles.toml, and a role
-        # nobody defined is legal (roles.get falls back to worker). Only the composed agent
-        # name has to satisfy herdr, and `Broker._compose_name` slugs it there.
+        # Not slugified here: the role is a user-facing lookup key. The resolver accepts
+        # unique case/punctuation variants and refuses unknown or ambiguous values.
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
         # NOT `agent_name`: `--name` is no longer the name. It is the topic half, and the
         # broker composes `<role>-<topic>` from it (`Broker._compose_name`), so a topic
@@ -522,12 +574,28 @@ def _validate(args) -> None:
         if args.workspace is not None:
             args.workspace = validate.ref_name(args.workspace, "--workspace")
         if args.model is not None:
-            args.model = validate.token(args.model, "--model")
+            args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
         if args.as_prompt is not None:
             args.as_prompt = validate.line(args.as_prompt, "--as",
                                            max_len=validate.MAX_PROMPT)
         # A `--with` value is either a preset name or a literal instruction; both become
         # prompt text, so both are checked again after resolution (see _dispatch).
+        args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
+                      for w in args.with_]
+
+    elif cmd == "instructions":
+        args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
+        args.name = validate.agent_name(args.name, "--name")
+        args.parent = validate.line(args.parent, "--parent", max_len=validate.MAX_TOKEN)
+        if args.model is not None:
+            args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
+        if args.as_prompt is not None:
+            args.as_prompt = validate.line(args.as_prompt, "--as",
+                                           max_len=validate.MAX_PROMPT)
+        if args.workspace is not None:
+            args.workspace = validate.ref_name(args.workspace, "--workspace")
+        if args.task is not None:
+            args.task = validate.line(args.task, "--task")
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
 
@@ -573,6 +641,9 @@ def _validate(args) -> None:
             args.message = validate.line(args.message, "message")
         else:
             args.message = validate.text(args.message, "message")
+
+    elif cmd == "waiting":
+        args.agents = [validate.agent_name(name) for name in args.agents]
 
     elif cmd == "done":
         # herdr carries the summary as `report-agent --message`, so one line.
@@ -890,7 +961,8 @@ def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
         # `agents.tier` is NULL for every agent nobody pinned, which is most of them, and
         # the role's answer is the true one there.
         tier = (store._value(row, "tier") if row is not None else None) or (
-            roles_mod.get(b.roles, row["role"], b.repo).model if row is not None else None)
+            roles_mod.get_or_fallback(b.roles, row["role"], b.repo).model
+            if row is not None else None)
         text = "\n".join(t for t in (
             guidance.state_note(db, me, held=held, delegable=passable - held, tier=tier,
                                 config=guidance.configuration(db, me, repo=b.repo,
@@ -1011,7 +1083,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         # an absence is still inside `GONE_CONFIRM_GRACE` and records nothing, and the
         # second one a minute later is what confirms it (`status._confirmed_gone`).
         gone = sorted(a.name for a in snap.agents if a.gone)
-        _emit(args, f"gone: {', '.join(gone)}" if gone else "nobody gone", {"gone": gone})
+        woken = b.wake_expired_waits(a.name for a in snap.agents if a.wait_expired)
+        human = []
+        if gone:
+            human.append(f"gone: {', '.join(gone)}")
+        if woken:
+            human.append(f"expired waits: {', '.join(woken)}")
+        _emit(args, "; ".join(human) if human else "nothing to reconcile",
+              {"gone": gone, "expired_waits": woken})
         return 0
 
     try:
@@ -1340,6 +1419,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
               {"messages": [dict(m) for m in msgs]})
         return 0
 
+    if cmd == "waiting":
+        result = b.waiting(mode=args.wait_mode, cohort=args.agents, me=me)
+        if result["mode"] == "background":
+            text = "waiting for background work"
+        else:
+            text = (f"waiting for {result['mode']} of: "
+                    + ", ".join(result["cohort"]))
+        _emit(args, text, result)
+        return 0
+
     if cmd == "done":
         still = b.done(args.summary, me=me,
                        preserve_children=args.preserve_children)
@@ -1470,6 +1559,38 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "plugin":
         return _plugin_list(args, b) if args.name == "list" else _plugin_run(args, b, db, me)
 
+    if cmd == "instructions":
+        path = b.instruction_workspace(args.workspace) if args.workspace else None
+        manifest = b.effective_instructions(
+            role=args.role, name=args.name, parent=args.parent, model=args.model,
+            as_prompt=args.as_prompt, with_=args.with_, workspace=args.workspace,
+            path=path, task=args.task)
+        resolved = manifest["resolved"]
+        delivery = manifest["delivery"]
+        lines = [
+            f"{resolved['requested_role']} -> role {resolved['role']}, tier "
+            f"{resolved['tier']}, provider {resolved['provider']}",
+            f"standing delivery: {delivery['standing_instructions']} "
+            f"({delivery['characters']} characters)",
+            "segments:",
+        ]
+        for segment in manifest["segments"]:
+            marker = "+" if segment["included"] else "-"
+            lines.append(
+                f"  {segment['order']:02d} {marker} {segment['kind']} "
+                f"[{segment['source']}; {segment['condition']}; "
+                f"{segment['ownership']}; {segment['characters']} chars]")
+            if segment["included"]:
+                lines.append(f"     {segment['text']}")
+        lines.append("external boundaries:")
+        lines.extend(
+            f"  - {boundary['source']} [{boundary['ownership']}; "
+            f"{'inspectable' if boundary['inspectable'] else 'not inspectable'}]"
+            for boundary in manifest["external_boundaries"])
+        lines.append("initial task: " + (manifest["task"] or "(none; delivered separately)"))
+        _emit(args, "\n".join(lines), manifest)
+        return 0
+
     if cmd == "models":
         tiers = models_mod.load(b.repo)
         rows = [(n, tiers.resolve(n)) for n in tiers.names()]
@@ -1506,15 +1627,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "roles":
         defined = roles_mod.load(b.repo)
         if args.name:
-            if args.name not in defined:
-                # `presets`' refusal, deliberately word for word: the caller is about to
-                # type `--role` and got the name slightly wrong, and the list is short.
-                # NOT resolved through `roles.get` — that falls back for any name at all,
-                # so a typo would print the fallback role's prompt under the typo's name.
-                known = ", ".join(sorted(defined)) or "none"
-                print(f"sb: no role '{args.name}' (have: {known})", file=sys.stderr)
-                return 1
-            role = defined[args.name]
+            # The detail view and delegation use the same resolver, including retired
+            # aliases and unique punctuation/case variants. A lookup command that rejects
+            # a spelling the action accepts would make the live vocabulary harder to debug.
+            role = roles_mod.get(defined, args.name, b.repo)
             # Both read off the functions the SEEDER and the gate read them off, rather
             # than off the Role's raw fields: a readout keeping its own copy of "what a
             # lead gets" is how a listing comes to disagree with what a spawn hands out.

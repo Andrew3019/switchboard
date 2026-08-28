@@ -1698,6 +1698,7 @@ class CatalogueTest(PlansSandbox):
         its own right with its own id, and nothing in the record says they arrived together.
         A step that contained another would be a plan by another name."""
         self.define("build", name="build it")
+        self.define("merge", name="merge it", obliges=["merge-human-review"])
         self.define("ship", steps=["build", "merge"])
         self.ok("plugin", "plans", "create", "a job",
                 "--display", "board: a job", "--step", 'shape = shape the work')
@@ -1759,7 +1760,8 @@ class CatalogueTest(PlansSandbox):
         self.data("plugin", "plans", "template", "use", "docs")
         stored = self.steps()
         self.assertEqual([s["def"] for s in stored],
-                         [None, None, None, None, "merge", "merge-human-review"])
+                         [None, None, None, None, "create-pr", "change-approval",
+                          "merge-human-review", "review", "merge"])
 
         self.define("merge", name="land it, once Andrew says so", obliges=["merge-human-review"])
         self.assertIn("land it, once Andrew says so", self.ok("plugin", "plans", "show", "p-1"))
@@ -1806,11 +1808,11 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("redone as a cut", stored[2]["notes"][0]["text"])
         self.assertEqual(stored[3]["progress"], "skipped")
         self.assertTrue(stored[3]["why"])
-        # On the entry's own step and never on what it obliged: the gate belongs to the
-        # merge, not to the human review that came along with it.
-        self.assertEqual(stored[4]["def"], "merge")
-        self.assertIn("Andrew", stored[4]["gate"])
-        self.assertIsNone(stored[5]["gate"])
+        # On the entry's own step and never on another named step's obligations: the gate
+        # belongs to the merge entry.
+        merge = next(s for s in stored if s.get("def") == "merge")
+        self.assertIn("Andrew", merge["gate"])
+        self.assertTrue(all(s["gate"] is None for s in stored if s is not merge))
 
         shown = self.ok("plugin", "plans", "show", "p-1")
         for text in ("design/PLANS-AND-STEPS.md", "Claims checked", "try 2",
@@ -1832,33 +1834,37 @@ class CatalogueTest(PlansSandbox):
 
     # -- the obligation --------------------------------------------------------
 
-    def test_adding_a_merge_step_brings_its_review_by_every_route(self):
+    def test_adding_a_create_pr_step_brings_its_human_list_by_every_route(self):
         """Obliged, not optional. Both routes that can put a library step in a plan go
         through one expansion, so there is no argument, no template shape and no ordering
-        that lands a merge without its review — and the review says which merge it belongs
-        to, which is what PR7's gate will read."""
+        that opens a PR without its human list — and the list says which PR it belongs to."""
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
-        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
-                         [("merge", None), ("merge-human-review", "step-1")])
+                         [("create-pr", None), ("change-approval", "step-1"),
+                          ("merge-human-review", "step-1"), ("review", "step-2")])
 
-        # A second merge is a second thing to review: the dedupe is inside one act, not
-        # across a plan, or the second merge would land with nothing reading its diff.
-        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        # A second PR is a second human-facing candidate: nothing reuses the first list.
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
-                         [("merge", None), ("merge-human-review", "step-1"),
-                          ("merge", None), ("merge-human-review", "step-3")])
+                         [("create-pr", None), ("change-approval", "step-1"),
+                          ("merge-human-review", "step-1"), ("review", "step-2"),
+                          ("create-pr", None), ("change-approval", "step-5"),
+                          ("merge-human-review", "step-5"), ("review", "step-6")])
 
         # And the other route in. `--reason` and nothing else: no flag turns this off.
         self.data("plugin", "plans", "template", "use", "docs")
-        self.assertEqual([s["def"] for s in self.steps("p-2")][-2:],
-                         ["merge", "merge-human-review"])
+        template = self.steps("p-2")
+        pr = next(s for s in template if s.get("def") == "create-pr")
+        human = next(s for s in template if s.get("def") == "merge-human-review")
+        self.assertEqual(human["obliged_by"], pr["id"])
         self.assertEqual(sorted(_plans_args("name-step")), ["--reason", "name", "plan"])
 
     def test_an_obliged_step_is_skipped_with_a_reason_never_omitted(self):
         """The exchange the design makes: skipping is allowed and is expected to be rare,
         and what is paid for it is a state on the board with a sentence beside it. An
         omitted step is invisible; a skipped one can be seen and questioned."""
+        self.define("merge", name="merge", obliges=["merge-human-review"])
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "merge")
         self.edit_step("s-2", progress="skipped", why="a one-line docs change")
@@ -1876,10 +1882,10 @@ class CatalogueTest(PlansSandbox):
 
     # -- change approval and review, the shipped pair ---------------------------
 
-    def test_naming_create_pr_lands_change_approval_and_its_review_in_one_act(self):
+    def test_naming_create_pr_lands_approval_reviews_and_human_checks_in_one_act(self):
         """The chain the landing shape depends on: `create-pr` obliges `change-approval`,
-        which obliges `review`, and `_mint` walks obligations TRANSITIVELY — so an agent
-        that names the one step it knows it needs gets the gate and the review it did not
+        which obliges `review`, while the PR also obliges the human checklist. `_mint`
+        walks obligations TRANSITIVELY — so an agent that names the one step it knows it needs gets the gate and the review it did not
         think of, in the same act. That transitive walk is the whole mechanism here: a
         one-level walk would land the gate and silently lose the review under it."""
         self.ok(*_create("ship a change", "write the code"))
@@ -1887,7 +1893,9 @@ class CatalogueTest(PlansSandbox):
 
         self.assertEqual([(s["def"], s["obliged_by"]) for s in self.steps()],
                          [(None, None), ("create-pr", None),
-                          ("change-approval", "step-2"), ("review", "step-3")])
+                          ("change-approval", "step-2"),
+                          ("merge-human-review", "step-2"),
+                          ("review", "step-3")])
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("get the intended change approved before implementing it", shown)
         self.assertIn("review the implementation", shown)
@@ -1904,9 +1912,9 @@ class CatalogueTest(PlansSandbox):
         self.assertEqual([s["def"] for s in self.steps()], ["review"])
         self.assertNotIn("change-approval", self._raw())
 
-    def test_naming_create_pr_twice_lands_six_steps_and_never_four(self):
-        """No dedupe, for the new pair as for the old one. Two PRs are two diffs and
-        therefore two contracts and two reviews; a dedupe would let one approval stand for
+    def test_naming_create_pr_twice_lands_eight_steps_and_never_four(self):
+        """No dedupe, for the new group as for the old one. Two PRs are two diffs and
+        therefore two contracts, reviews and human lists; a dedupe would let one approval stand for
         a change it never saw. A lead who thinks one covers both skips the second with
         that as the reason, which is visible where a dedupe was not."""
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
@@ -1914,22 +1922,24 @@ class CatalogueTest(PlansSandbox):
         self.data("plugin", "plans", "name-step", "p-1", "create-pr")
 
         self.assertEqual([s["def"] for s in self.steps()],
-                         ["create-pr", "change-approval", "review",
-                          "create-pr", "change-approval", "review"])
+                         ["create-pr", "change-approval", "merge-human-review", "review",
+                          "create-pr", "change-approval", "merge-human-review", "review"])
         self.assertEqual([s["obliged_by"] for s in self.steps()],
-                         [None, "step-1", "step-2", None, "step-4", "step-5"])
+                         [None, "step-1", "step-1", "step-2",
+                          None, "step-5", "step-5", "step-6"])
 
-    def test_each_of_the_landing_three_is_skipped_with_a_reason_never_omitted(self):
-        """The exchange, on the pair that will meet it most: a contract for a typo and a
-        review of a one-line docs change are both skips somebody should be able to make.
-        What is paid is a state on the board with a sentence beside it — so all three skip
+    def test_each_of_the_landing_four_is_skipped_with_a_reason_never_omitted(self):
+        """The exchange, on the group that will meet it most: a contract for a typo and a
+        review or manual pass on a one-line docs change are skips somebody should be able to make.
+        What is paid is a state on the board with a sentence beside it — so all four skip
         clean, and none of them can be left out in the first place."""
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "create-pr")
 
         for sid, why in (("s-1", "no PR, this lands on main"),
                          ("s-2", "a one-line typo fix needs no contract"),
-                         ("s-3", "the typo was reviewed in the pull request")):
+                         ("s-3", "the typo needs no manual pass"),
+                         ("s-4", "the typo was independently reviewed")):
             self.edit_step(sid, progress="skipped", why=why)
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
 
@@ -2036,6 +2046,7 @@ class CatalogueTest(PlansSandbox):
         its parts ever appear — so there is no step for `obliged_by` to name. Dropping the
         obligation instead loses one in silence, which is the single thing this mechanism
         exists to prevent, and it would be invisible to whoever wrote the file."""
+        self.define("merge", name="merge", obliges=["merge-human-review"])
         self.define("signoff", name="get a signoff")
         self.define("landing", name="land it", steps=["merge"], obliges=["signoff"])
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
@@ -2066,6 +2077,7 @@ class CatalogueTest(PlansSandbox):
         by a step it has nothing to do with — the door round the obligation in a tidier
         coat — and a lead who thinks one review covers both skips the second with that as
         the reason, which is visible where a dedupe would not have been."""
+        self.define("merge", name="merge", obliges=["merge-human-review"])
         self.define("land-both", name="land two branches", steps=["merge", "merge"])
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "land-both")
@@ -2081,6 +2093,7 @@ class CatalogueTest(PlansSandbox):
         would report a failure over a mutation that had already landed, and the agent that
         retried it would get a second plan or a second changelog entry. So the catalogue is
         read on the way IN, and the state file is byte-identical after a refusal."""
+        self.define("merge", name="merge", obliges=["merge-human-review"])
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "merge")
         before = self._raw()
@@ -2290,8 +2303,8 @@ class CatalogueTest(PlansSandbox):
     def test_an_anchor_puts_a_step_where_it_runs_and_not_where_it_was_named(self):
         """The bug this field was added for, on the shipped catalogue.
 
-        `create-pr` obliges `change-approval`, which obliges `review` — so naming the PR
-        step lands three, and reading the ORDER off the obligation put the approval
+        `create-pr` obliges `change-approval`, which obliges `review`, and the human-only
+        checklist — so naming the PR step lands four, and reading the ORDER off the obligation put the approval
         immediately before the PR. An approval is the gate before any code: it landed
         mid-chain and the lead re-deped it to the front of every plan it was ever named
         into. The obligation was right and the edge was wrong, and the anchor is the fact
@@ -2308,19 +2321,22 @@ class CatalogueTest(PlansSandbox):
         self.assertTrue(by_def["change-approval"]["root"])
         # The review comes after the WORK, not after the approval that obliged it.
         self.assertEqual(by_def["review"]["deps"], ["step-2"])
-        # And the PR waits on the review AND on the approval — the second of those is the
+        # The human-only list is prepared from completed evidence before the PR, not after
+        # the human has already opened it.
+        self.assertEqual(by_def["merge-human-review"]["deps"], ["step-2"])
+        # And the PR waits on both reviews AND on the approval — the last of those is the
         # obligation, put back as an edge because the anchor drew none. See
         # `test_the_pr_waits_on_the_approval_it_obliged`.
-        self.assertEqual(by_def["create-pr"]["deps"],
-                         [by_def["review"]["id"], by_def["change-approval"]["id"]])
+        self.assertEqual(set(by_def["create-pr"]["deps"]),
+                         {by_def["review"]["id"], by_def["merge-human-review"]["id"],
+                          by_def["change-approval"]["id"]})
         self.assertNotIn("incomplete", added, f"and nothing is left to fix: {added}")
 
-        # The merge and its human review land on the end of that chain, in that order.
+        # The merge is the landing step and waits on the PR that already carried the list.
         more = self.data("plugin", "plans", "name-step", "p-1", "merge")
         by_def = {s["def"]: s for s in more["steps"]}
         pr = next(s["id"] for s in added["steps"] if s["def"] == "create-pr")
-        self.assertEqual(by_def["merge-human-review"]["deps"], [pr])
-        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertEqual(by_def["merge"]["deps"], [pr])
 
     def test_an_unanchored_definition_keeps_the_placement_it_always_had(self):
         """A repo's own library predates this field, and a catalogue that grows will hold
@@ -2393,10 +2409,12 @@ class CatalogueTest(PlansSandbox):
         # The review waits on the implementation's SINK and not on both of its steps,
         # which is what drawing the entry's edges in the same round buys.
         self.assertEqual([at[d]["display"] for d in by_def["review"]["deps"]], ["tests"])
-        self.assertEqual(by_def["create-pr"]["deps"],
-                         [by_def["review"]["id"], by_def["change-approval"]["id"]])
-        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]])
-        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertEqual(set(by_def["create-pr"]["deps"]),
+                         {by_def["review"]["id"], by_def["merge-human-review"]["id"],
+                          by_def["change-approval"]["id"]})
+        self.assertEqual([at[d]["display"]
+                          for d in by_def["merge-human-review"]["deps"]], ["tests"])
+        self.assertEqual(by_def["merge"]["deps"], [by_def["create-pr"]["id"]])
         self.assertNotIn("incomplete", made, f"and nothing is left to fix: {made}")
 
     def test_the_pr_waits_on_the_approval_it_obliged(self):
@@ -2429,6 +2447,10 @@ class CatalogueTest(PlansSandbox):
         self.assertEqual(released["data"].get("next", []), [],
                          "the review alone does not release the PR")
         after = json.loads(self.ok("plugin", "plans", "tick", approval, "--json"))
+        self.assertEqual(after["data"].get("next", []), [],
+                         "approval still does not release a PR with no human list")
+        after = json.loads(self.ok("plugin", "plans", "tick",
+                                   by_def["merge-human-review"]["id"], "--json"))
         self.assertEqual([s["def"] for s in after["data"]["next"]], ["create-pr"])
 
     def test_an_obligation_left_out_of_the_order_is_reported(self):
@@ -2451,7 +2473,8 @@ class CatalogueTest(PlansSandbox):
 
         # The PR stops waiting on the approval, which is the exact shape the bug produced.
         steps = {s["def"]: s["id"] for s in self.steps() if s.get("def")}
-        self.edit_step(steps["create-pr"], deps=[steps["review"]])
+        self.edit_step(steps["create-pr"],
+                       deps=[steps["review"], steps["merge-human-review"]])
         said = self.ok("plugin", "plans", "validate", "p-1")
         self.assertIn("left out of the order", said)
         self.assertIn(steps["change-approval"], said)
@@ -2510,9 +2533,9 @@ class CatalogueTest(PlansSandbox):
         back = self.data("plugin", "plans", "create", "B", "--display", "B",
                          "--step", "impl = build it", "--lib", "merge", "--lib", "create-pr")
         by_def = {s["def"]: s for s in back["steps"] if s.get("def")}
-        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]],
-                         "the human review waits on the PR, whichever flag came first")
-        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertIn(by_def["merge-human-review"]["id"], by_def["create-pr"]["deps"],
+                      "the PR waits on the human list, whichever flag came first")
+        self.assertEqual(by_def["merge"]["deps"], [by_def["create-pr"]["id"]])
         self.assertNotIn("incomplete", back)
 
         # And the same flags the other way round are the same plan, edge for edge.
@@ -2539,9 +2562,9 @@ class CatalogueTest(PlansSandbox):
         self.ok(*_create("a job", "build it"))
         back = self.data("plugin", "plans", "name-step", "p-1", "merge", "create-pr")
         by_def = {s["def"]: s for s in back["steps"] if s.get("def")}
-        self.assertEqual(by_def["merge-human-review"]["deps"], [by_def["create-pr"]["id"]],
-                         "the human review waits on the PR, whichever name came first")
-        self.assertEqual(by_def["merge"]["deps"], [by_def["merge-human-review"]["id"]])
+        self.assertIn(by_def["merge-human-review"]["id"], by_def["create-pr"]["deps"],
+                      "the PR waits on the human list, whichever name came first")
+        self.assertEqual(by_def["merge"]["deps"], [by_def["create-pr"]["id"]])
         self.assertNotIn("incomplete", back)
 
         # And the same names the other way round are the same shape, edge for edge — read
@@ -2565,13 +2588,12 @@ class CatalogueTest(PlansSandbox):
         self.data("plugin", "plans", "name-step", "p-1", "merge")
         impl = self.steps()[0]["id"]
         first = {s.get("def"): s for s in self.steps()}
-        self.assertEqual(first["merge-human-review"]["deps"], [impl],
-                         "the human review waits on the impl, which is all there was")
+        self.assertEqual(first["merge"]["deps"], [impl],
+                         "the merge waits on the impl, which is all there was")
 
         self.data("plugin", "plans", "name-step", "p-1", "create-pr")
         by_def = {s.get("def"): s for s in self.steps()}
-        self.assertEqual(by_def["merge-human-review"]["deps"], [impl],
-                         "and is not re-deped onto the PR that arrived after it")
+        self.assertIn(by_def["merge-human-review"]["id"], by_def["create-pr"]["deps"])
         self.assertNotIn(by_def["create-pr"]["id"], by_def["merge"]["deps"])
 
     def test_name_step_refuses_the_whole_call_before_it_writes_any_of_it(self):
@@ -2720,7 +2742,9 @@ class CatalogueTest(PlansSandbox):
         self.assertTrue(by_def["change-approval"]["root"])
         self.assertEqual(by_def["review"]["deps"], [impl["id"]])
         self.assertEqual(sorted(by_def["create-pr"]["deps"]),
-                         sorted([by_def["review"]["id"], by_def["change-approval"]["id"]]))
+                         sorted([by_def["review"]["id"],
+                                 by_def["merge-human-review"]["id"],
+                                 by_def["change-approval"]["id"]]))
 
     def test_create_lib_refuses_before_it_writes_anything(self):
         """The guards on the new flag, which are the ones `name-step` already had.
@@ -3042,21 +3066,24 @@ class CompletenessTest(PlansSandbox):
         """The shipped `docs` template, used, which is the one plan a lead gets for free.
 
         What it has to land is a chain: every step with a board label, every step but the
-        first with a dep, and its obliged human review before the merge it belongs to. A
+        first with a dep, and its obliged human review before the PR that presents it. A
         template that landed a loose stack would be the design's own example of the shape
         it says a plan must not have.
         """
         made = self.data("plugin", "plans", "template", "use", "docs")
         self.assertTrue(made["display"], "the copy has a board name of its own")
         self.assertEqual([s["deps"] for s in made["steps"]][0], [])
-        self.assertTrue(all(s["deps"] for s in made["steps"][1:]),
-                        f"every step but the first: {[s['deps'] for s in made['steps']]}")
+        self.assertTrue(all(s["deps"] or s.get("root") for s in made["steps"][1:]),
+                        f"every later step is chained or a deliberate root: "
+                        f"{[s['deps'] for s in made['steps']]}")
         self.assertNotIn("incomplete", made)
-        # The review is what the merge waits for, not the other way round: the list exists
-        # to be read just before the gate.
+        # The PR waits for the list and the merge waits for the PR: the list exists in the
+        # first comment the human reads.
         merge = next(s for s in made["steps"] if s.get("def") == "merge")
         review = next(s for s in made["steps"] if s.get("def") == "merge-human-review")
-        self.assertIn(review["id"], merge["deps"])
+        pr = next(s for s in made["steps"] if s.get("def") == "create-pr")
+        self.assertIn(review["id"], pr["deps"])
+        self.assertIn(pr["id"], merge["deps"])
 
 
 class HandEditTest(PlansSandbox):
@@ -3628,8 +3655,8 @@ class TriggerTest(PlansSandbox):
 class PlannerPackageTest(PlansSandbox):
     """The plan writer's three reads and the field that says a plan has one.
 
-    A plan writer is a `researcher` plus what this plugin owns: `planner`, the instruction
-    it reads on its first turn; `catalog`, the vocabulary it may name; and the plan-level
+    A plan writer is the first-class role this plugin contributes plus what else it owns:
+    `planner`, the instruction it reads on its first turn; `catalog`, the vocabulary it may name; and the plan-level
     `planner` field, which moves the shape of one plan off the worktree's owner and onto
     the agent that wrote it. The properties worth pinning are that the catalogue is
     GENERATED — it says what this repo has, not what someone once wrote down — that it
@@ -3654,9 +3681,7 @@ class PlannerPackageTest(PlansSandbox):
                          "sb plugin plans catalog",
                          "sb plugin plans guide",
                          "THIS REPLACES THE FINDINGS NOTE",
-                         "you do not call `sb done`",
-                         "STRATEGY IS ADVISORY AND NEVER ENFORCEMENT",
-                         "--planner"):
+                         "STRATEGY IS ADVISORY AND NEVER ENFORCEMENT"):
             self.assertIn(expected, " ".join(out.split()))
         self.assertNotIn("<!--", out)
         self.assertEqual(json.loads(self.ok("plugin", "plans", "planner", "--json"))
@@ -3664,41 +3689,44 @@ class PlannerPackageTest(PlansSandbox):
         # Reads one file and writes nothing: no state file exists after it runs.
         self.assertEqual(self._files(), [])
 
-    def test_the_planner_instruction_carries_the_sibling_handoff_and_fallback(self):
-        """Unit 4's lifecycle, on the planner's side of it. The handoff FLIPPED — the planner
-        no longer spawns the main; it hands the brief and the seed to its parent, which
-        spawns the sibling — so the two claims that would have been true under the nested
-        model (the planner spawns; deltas go to `parent`) must be the sibling ones instead.
-        The fallback ladder is the net-new part and the reason the unit is more than
-        documentation: it is what the planner writes into the main's brief so a dead planner
-        does not strand the completion handshake, as one did in Unit 3.
+    def test_the_planner_instruction_bounds_its_ownership_and_hands_the_shape_back(self):
+        """The 2026-08-27 ownership model, on the planner's side of it. The planner is a
+        BOUNDED specialist: it expands the plan the task owner already made, challenges the
+        approach, clears the `planner` field and finishes. Everything that made it long-lived
+        — creating its own plan, a fresh main it hands execution to, staying open for the
+        plan's life, the completion handshake and the dead-planner fallback ladder — is gone,
+        because all of it existed to support a planner that outlives its plan.
 
         Asserted on the printed text as one whitespace-joined run, like the guide tests: the
         claims are what matter, not where a reflow puts the line breaks."""
         said = " ".join(self.ok("plugin", "plans", "planner").split())
         for expected in (
-                # The flip: the planner does not spawn, and the handoff is in two halves
-                # because `sb delegate` only makes the caller's own child.
-                "You do NOT spawn the main agent.",
-                "the handoff has two halves",
-                # The handoff tell carries --needs-reply, and it is what keeps a childless
-                # sibling planner cleanly open instead of STALLED by the stop gate.
-                '"ready: spawn the main with this brief and this seed" --needs-reply',
-                "`--needs-reply` IS WHAT KEEPS YOU CLEANLY OPEN",
-                # The one address the sibling main cannot derive.
-                "YOUR EXACT AGENT NAME",
-                # Delta routing is by the planner's name now, not `tell parent`.
-                "sends you a delta — BY YOUR NAME",
-                # The fallback ladder: detect on any wake, route to parent, then owner rule.
-                "RE-CHECK THE TREE",
-                "That is the lead: structural, always live",
-                "the worktree's owner writes the shape for the rest of the job",
-                # The deliberate exclusion, kept with its reason so it is not re-added.
-                "`sb restore` IS DELIBERATELY NOT ON THIS PATH"):
+                # Bounded: the shape is held, not owned, and writing the plan buys no claim
+                # on running it.
+                "You do not own the job",
+                "gives you no claim on running it",
+                # The plan is not the planner's to create: it exists first, and is expanded.
+                "THE PLAN IS ALREADY THERE",
+                "You EXPAND that plan in place. Do not create a second one",
+                # Challenge is half the job, and over-delegation is the named target.
+                "CHALLENGE IT",
+                "Delegation is the one to look at hardest",
+                # The clean return, in the three acts that make it observable.
+                "Clear the `planner` field",
+                "Approval is the task owner's to obtain, not yours",
+                "You are finished; you do not stay open",
+                # The one structural rule the old sibling apparatus was protecting.
+                "you do not spawn the agent that runs the plan"):
             self.assertIn(expected, said)
-        # The nested-model claims are gone: the planner does not spawn the main, and a delta
-        # is not routed to `parent` while the planner is alive.
-        self.assertNotIn("Write the main agent a focused brief, spawn it", said)
+        # The long-lived model is gone, not reworded: no handshake, no fallback ladder, no
+        # sibling topology, and no instruction to stay open on a background wait.
+        for retired in ("You do NOT spawn the main agent.",
+                        "the handoff has two halves",
+                        "`sb waiting` IS WHAT KEEPS YOU CLEANLY OPEN",
+                        "sends you a delta — BY YOUR NAME",
+                        "RE-CHECK THE TREE",
+                        "`sb restore` IS DELIBERATELY NOT ON THIS PATH"):
+            self.assertNotIn(retired, said)
 
     def test_the_catalogue_is_generated_from_this_repo_and_not_from_a_list(self):
         """Every category, keyed, and each one holding what this sandbox actually has —
@@ -3822,7 +3850,11 @@ class PlannerPackageTest(PlansSandbox):
                 # owner where there is not.
                 "The worktree's owner: the lead, or the sole worker where there is no lead",
                 "UNLESS THE PLAN NAMES A PLANNER",
-                "THAT agent is the sole shape writer for the life of the plan",
+                # Held, not owned: the field is a temporary handover with two named halves,
+                # each written by whoever is giving something up.
+                "moves it temporarily",
+                "THE FIELD IS THE HANDOVER",
+                "it clears the field, with a `note` saying so, when it hands the shape back",
                 "A plan with no `planner` is the ordinary case",
                 "sb plugin plans planner",
                 "sb plugin plans catalog",
@@ -3832,38 +3864,45 @@ class PlannerPackageTest(PlansSandbox):
                 "Apart from `strategy` above there is no schema to satisfy"):
             self.assertIn(expected, said)
 
-    def test_the_guide_carries_the_planner_spawn_and_sibling_lifecycle(self):
-        """Unit 4's lifecycle at the LEAD's altitude — the side read by whoever spawns a
-        planner. Three things the guide has to get right, because the whole unit turns on
-        them: the capability seed the planner is given (held `spawn`, `fork` when foreseen,
-        and NEVER `write-tracked`), that seeding the main is two verbs and not a flag on one,
-        and that the completion handshake has a structural fallback to `parent` when the
-        planner is gone — with `sb restore` kept off that path on purpose.
+    def test_the_guide_carries_the_planner_seed_and_who_runs_the_plan_after(self):
+        """The planner lifecycle at the TASK OWNER's altitude — the side read by whoever
+        spawns one. Three things the guide has to get right: the capability seed (held
+        `spawn`, `fork` when foreseen, and NEVER `write-tracked`), that seeding is two verbs
+        and not a flag on one, and who runs the plan once the shape comes back — which since
+        2026-08-27 is the task owner by default, with a fresh main an option that has to earn
+        itself and that the owner spawns itself.
 
         Matched against the printed block as one whitespace-joined run, like the guide tests
         above: the claims are what is pinned, not the line breaks."""
         said = " ".join(self.ok("plugin", "plans", "guide").split())
         for expected in (
-                "SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT",
-                "spawns BOTH the planner and the main agent",
+                "SPAWNING A PLANNER, AND WHO RUNS THE PLAN AFTERWARDS",
+                # The plan is not created by the planner.
+                "THE PLAN EXISTS BEFORE THE PLANNER DOES",
                 # The seed, and the one grant it must never carry.
-                "NEVER grant it held `write-tracked`",
+                "NEVER `write-tracked`",
                 # Seeding is two verbs; there is no combined flag.
                 "There is no `delegate --grant`",
-                "PLUS `sb grant",
-                # The two-halves handoff, its --needs-reply, and where deltas go.
-                "THE HANDOFF HAS TWO HALVES",
-                '`sb tell parent "ready" --needs-reply`',
-                "Material deltas go to the planner BY NAME",
-                # The structural fallback, and the route deliberately left off it.
-                "route the candidate to `parent`",
-                "`sb restore` is NOT on this path"):
+                "`sb grant <agent> <cap>` adds anything beyond that template",
+                # The clean return, and continuing as the default afterwards.
+                "IT HANDS THE SHAPE BACK AND FINISHES",
+                "CONTINUING IS THE DEFAULT",
+                "A fresh main agent is an option that has to earn itself",
+                # The one structural rule the retired sibling topology was protecting.
+                "a fresh main is your child and never the planner's"):
             self.assertIn(expected, said)
+        # The long-lived planner is gone from this side too.
+        for retired in ("spawns BOTH the planner and the main agent",
+                        "THE HANDOFF HAS TWO HALVES",
+                        "Material deltas go to the planner BY NAME",
+                        "route the candidate to `parent`",
+                        "`sb restore` is NOT on this path"):
+            self.assertNotIn(retired, said)
 
     def test_the_guide_names_every_library_root_and_the_library_still_agrees(self):
         """Bug 2026-08-26-143005 defect 1: a singular heading over a library with more than
-        one unobliged root. Naming `create-pr` alone dropped the merge and its human-review
-        list, and the plan was well-formed, so nothing downstream could tell that truncation
+        one unobliged root. Naming `create-pr` alone dropped the merge landing step, and the
+        plan was well-formed, so nothing downstream could tell that truncation
         from a job that genuinely ended at the PR.
 
         The roots are DERIVED from the shipped library here rather than typed, because the
@@ -4107,7 +4146,11 @@ class GateTest(PlansSandbox):
         # The sections belong to the step, and the file says so where the agent will read
         # it. Pinned because the whole re-section is this sentence: without it the example
         # below reads as two headings to copy, which is what it stopped being.
-        self.assertIn("WHICH two is the step's own to say", body)
+        self.assertIn("WHICH ones is the step's own to say", body)
+        # And the count is the step's too: the approval gate has two, the human-check list
+        # has one, and a file insisting on two contradicted the step that
+        # sends it the second reader.
+        self.assertIn("merge-human-review", body)
         self.assertIn("Scope & Objectives", body)
         # And the worked example keeps the two it was written around, as an example.
         self.assertIn("What is causing it", body)
@@ -4409,7 +4452,9 @@ class MarkdownTest(PlansSandbox):
                           {"id": "s-2", "name": "write it"}]}
         md = _plans()._markdown(flat)
 
-        self.assertEqual(md.count("<summary>"), 2, "one fold per step, dump or no dump")
+        # One fold per step (dump or no dump), plus the one collapse the detailed record
+        # sits behind. No metadata block here — the plan carries only id/title/steps.
+        self.assertEqual(md.count("<summary>"), len(flat["steps"]) + 1)
         self.assertIn("get it approved", md)
         self.assertIn("[step-1 output](#step-1-output)", md)
         self.assertIn("### step-1 output", md)
@@ -4458,22 +4503,27 @@ class MarkdownTest(PlansSandbox):
             {"id": "s-2", "name": "review it", "progress": "skipped", "deps": ["s-1"]},
             {"id": "s-3", "name": "merge it", "display": "merge", "deps": ["s-2"],
              "gate": "Andrew: merge it?"}]}
-        line = _plans()._markdown(plan).splitlines()[2]
 
-        self.assertTrue(line.startswith("**Status:**"), line)
+        def status(pl):
+            # The status line lives in the detailed record now, not at a fixed index — found
+            # by its label rather than by counting lines above it.
+            return next(l for l in _plans()._markdown(pl).splitlines()
+                        if l.startswith("**Status:**"))
+
+        line = status(plan)
         self.assertIn("in progress", line)
         self.assertIn("1/3 done", line)
         self.assertIn("1 skipped", line)
         self.assertIn("blocked at the merge gate", line)
         # The gate the plan has not reached yet is named and is not called a block.
         plan["steps"][1]["progress"] = "open"
-        ahead = _plans()._markdown(plan).splitlines()[2]
+        ahead = status(plan)
         self.assertIn("merge gate ahead", ahead)
         self.assertNotIn("blocked", ahead)
         # And a progress word nobody here wrote is NAMED rather than counted as open:
         # `progress` is an open vocabulary and a hand-edit is where that word comes from.
         plan["steps"][1]["progress"] = "waiting on Andrew"
-        self.assertIn("waiting on Andrew", _plans()._markdown(plan).splitlines()[2])
+        self.assertIn("waiting on Andrew", status(plan))
 
     def test_a_dump_that_is_not_a_string_takes_the_ordinary_path(self):
         """The fallback, in the spirit of the field-nobody-wrote-this-for test above. The
@@ -4538,11 +4588,20 @@ class LayoutTest(PlansSandbox):
     """
 
     def _plan(self) -> dict:
-        """A plan with one of everything the layout has to place."""
+        """A plan with one of everything the layout has to place, and a change record so the
+        human-first sections above the detailed record have something to draw."""
         self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
         hour = 3600
-        return {"id": "p-1", "display": "board: ship it", "title": "ship the thing",
-                "created_at": 1000, "steps": [
+        return {"id": "p-1", "kind": "plan", "display": "board: ship it",
+                "title": "ship the thing", "created_at": 1000,
+                "change": {"path": "shaped",
+                           "cause": "the cap was too low",
+                           "solution": "raise the cap and pin it with a test",
+                           "verification": {"commit": "abc1234", "result": "green"},
+                           "review": {"commit": "abc1234", "reviewer": "reviewer-x",
+                                      "findings": "no majors"},
+                           "human_checks": "- Upload a 20MB file and confirm it works"},
+                "steps": [
                     {"id": "s-1", "display": "impl", "name": "write it",
                      "progress": "done"},
                     {"id": "s-2", "display": "approve", "name": "get it approved",
@@ -4557,26 +4616,33 @@ class LayoutTest(PlansSandbox):
                      "detail": "s-2 open → done"}]}
 
     def test_the_open_sections_come_in_the_order_a_reader_needs_them(self):
-        """Where the job is, what shape it is, what was agreed, what is being asked of you
-        — and only then the steps. The order is the argument: the gate at the bottom of the
-        open part is a question, and the three sections above it are what has to have been
-        read before it means anything.
-
-        All four are OUTSIDE every fold. A `<details>` opening before `## steps` would mean
-        one of them had been put behind a click, which is the failure this pins.
+        """HUMAN-FIRST, and the order is the argument: what you need to do, then what changed
+        and why, then the evidence, and only then the detailed record. The first screenful is
+        for the person deciding what THEY still have to do, so the human checks and the open
+        gate are the top of the page and the plan's own detail is one click down.
         """
         plan = self._plan()
         md = _plans()._markdown(plan)
-        top = md.split("## steps", 1)[0]
 
-        self.assertLess(top.index("**Status:**"), top.index("**Elapsed:**"))
-        order = [top.index(x) for x in
-                 ("**Status:**", "## how it runs", "## contract", "## waiting on a human")]
-        self.assertEqual(order, sorted(order), top)
-        self.assertNotIn("<details>", top, "nothing above the steps is behind a click")
-        self.assertIn("```mermaid", top)
-        self.assertIn("Change Contract", top)
-        self.assertIn("Andrew: merge it?", top)
+        order = [md.index(x) for x in
+                 ("## What you need to do", "## What changed and why", "## Agent evidence",
+                  "## Detailed record")]
+        self.assertEqual(order, sorted(order), md)
+        # `What you need to do` is the first section: nothing but the heading above it.
+        head = md.split("## What you need to do", 1)[0]
+        self.assertNotIn("##", head)
+        # The human's questions are up top: the manual check and the open gate.
+        need = md.split("## What you need to do", 1)[1].split("## What changed", 1)[0]
+        self.assertIn("Upload a 20MB file", need)
+        self.assertIn("Andrew: merge it?", need)
+        # And the shaped plan itself — graph, contract, steps — is COLLAPSED under the
+        # detailed record, not above it. The mermaid graph appears only down there.
+        above, below = md.split("## Detailed record", 1)
+        self.assertNotIn("```mermaid", above)
+        self.assertIn("<details>", below)
+        self.assertIn("```mermaid", below)
+        self.assertIn("## steps", below)
+        self.assertIn("Change Contract", below)
 
     def test_every_step_is_a_fold_titled_with_its_name_state_and_elapsed(self):
         """`{id} · {display} — {name} | {state} | {elapsed}`, one per step, no exceptions —
@@ -4604,9 +4670,10 @@ class LayoutTest(PlansSandbox):
             {"id": "s-1", "display": "impl", "name": "write it"}]})
         self.assertIn('<summary><a id="step-1"></a>step-1 · impl — write it | open</summary>',
                       bare)
-        # One fold per step and nothing else folded up there: the metadata block at the
-        # bottom is the only other `<details>` in the comment.
-        self.assertEqual(md.count("<details>"), len(plan["steps"]) + 1)
+        # One fold per step, plus the metadata block, plus the change-record remainder (this
+        # plan's change carries a non-promoted `path`), plus the one collapse the whole
+        # detailed record sits behind.
+        self.assertEqual(md.count("<details>"), len(plan["steps"]) + 3)
         # The title is the anchor everything else in the comment links a step by.
         self.assertIn('<summary><a id="step-1"></a>step-1 ·', md)
         self.assertIn("[step-1](#step-1)", md)
@@ -4651,11 +4718,17 @@ class LayoutTest(PlansSandbox):
         plan = self._plan()
         md = _plans()._markdown(plan)
 
-        for fold in md.split("<details>")[1:]:
-            body = fold.split("</summary>", 1)
-            self.assertTrue(body[0].lstrip().startswith("<summary>"), fold[:80])
-            self.assertTrue(body[1].startswith("\n\n"), body[1][:40])
-            self.assertIn("\n\n</details>", body[1])
+        # The detailed record now nests the per-step folds inside one outer collapse, so the
+        # rule is checked per DELIMITER rather than by splitting on `<details>` (which cannot
+        # tell an inner `</details>` from the outer one): every summary is followed by a
+        # blank line, and every close is preceded by one.
+        self.assertIn("<details>", md)
+        for m in re.finditer("</summary>", md):
+            self.assertTrue(md[m.end():m.end() + 2] == "\n\n",
+                            f"no blank line after a summary: {md[m.end():m.end()+40]!r}")
+        for m in re.finditer("</details>", md):
+            self.assertTrue(md[m.start() - 2:m.start()] == "\n\n",
+                            f"no blank line before a close: {md[m.start()-40:m.start()]!r}")
 
 
 class TelemetryTest(PlansSandbox):
@@ -4788,6 +4861,590 @@ class TelemetryTest(PlansSandbox):
             json.dumps({"type": "assistant", "message": dict(turn, id="msg_2")}),
         ]) + "\n")
         self.assertEqual(_plans()._burned(str(path)), 2 * 1115)
+
+
+class RecordTest(PlansSandbox):
+    """The change record: the shared landing lifecycle, held whether or not a plan exists.
+
+    Phase 3's separation. A DIRECT change has no plan and no change-approval step; it gets a
+    record only when it needs somewhere to keep landing metadata, and `record` is that verb.
+    A SHAPED change is a plan, and its record is born with it at shaping entry — sparse, and
+    invisible in `show` until a landing fact lands, so a fresh plan reads as it did before
+    the record existed. A legacy document carries neither `kind` nor `change` and reads as
+    the plain plan it is: the field is additive and nothing silently rewrites a stored one.
+    """
+
+    def test_record_makes_a_plan_less_change_record(self):
+        """`record` is a document with no step graph and a change on the direct path. It
+        shares the plan id space and its own file, and `show`/`list`/`--json` all read it."""
+        made = self.data("plugin", "plans", "record", "raise the upload timeout",
+                         "--display", "board: raise the upload timeout",
+                         "--reason", "a bounded fix, no plan")
+        self.assertEqual(made["id"], "p-1")
+        self.assertEqual(made["kind"], "record")
+        self.assertEqual(made["change"]["path"], "direct")
+        self.assertIsNone(made["change"]["phase"])
+        # The STORED document has no step graph — a record is not a plan. (The rendered
+        # view adds an empty `steps` for the renderers, but nothing is written to the file.)
+        stored = self._doc()["plans"][0]
+        self.assertNotIn("steps", stored)
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("change", shown)
+        self.assertIn("direct", shown)
+        self.assertNotIn("(no steps yet)", shown)
+
+        listed = self.ok("plugin", "plans", "list")
+        self.assertIn("p-1", listed)
+        self.assertIn("record", listed)
+
+    def test_a_record_takes_a_request_and_carries_it(self):
+        """`--request` seeds the human ask the record exists to carry to the PR."""
+        made = self.data("plugin", "plans", "record", "raise the timeout",
+                         "--display", "board: raise the timeout",
+                         "--request", "uploads over 10MB time out; make them not")
+        self.assertEqual(made["change"]["request"],
+                         "uploads over 10MB time out; make them not")
+        self.assertIn("uploads over 10MB", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_record_needs_a_board_name_like_a_plan(self):
+        """The same door `create` keeps: a record owns a header line and is refused without
+        one, and the refusal reaches a machine reader in `data`."""
+        code, _, _ = self.sb("plugin", "plans", "record", "no display", "--json")
+        self.assertNotEqual(code, 0)
+
+    def test_a_shaped_plan_is_born_with_its_record_but_reads_as_before(self):
+        """`create` is shaping entry, so the plan carries a shaped record from birth — but
+        sparse, so `show` says nothing new until a landing fact lands. The record is in the
+        file and in `--json`; the human view is unchanged."""
+        made = self.data("plugin", "plans", "create", "a shaped job",
+                         "--display", "board: a shaped job", "--step", "impl = write it")
+        self.assertEqual(made["kind"], "plan")
+        self.assertEqual(made["change"]["path"], "shaped")
+        self.assertEqual(made["change"]["phase"], "shaping")
+        # A fresh shaped plan's record holds no landing fact, so `show` does not draw a
+        # change section — the plan reads exactly as it did before Phase 3.
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertNotIn("path      shaped", shown)
+
+    def test_template_use_starts_a_shaped_plan_with_a_record_too(self):
+        """A template starts a shaped plan, so it is born with the same shaped change record
+        `create` gives — the two make-a-plan verbs agree."""
+        made = self.data("plugin", "plans", "template", "use", "docs")
+        self.assertEqual(made["kind"], "plan")
+        self.assertEqual(made["change"]["path"], "shaped")
+        self.assertEqual(made["change"]["phase"], "shaping")
+
+    def test_a_landed_fact_draws_the_record_on_a_shaped_plan(self):
+        """Once a landing fact is written into the record by hand — a verification, a PR —
+        `show` draws the change section. Structured facts render nested."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["verification"] = {
+            "commit": "abc1234", "check": "pytest tests", "result": "green"}
+        doc["plans"][0]["change"]["pr"] = {"number": 42, "head": "abc1234"}
+        self._save(doc)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("change", shown)
+        self.assertIn("verification", shown)
+        self.assertIn("abc1234", shown)
+
+    def test_a_legacy_document_has_no_kind_and_reads_as_a_plan(self):
+        """A plan written before Phase 3 carries neither `kind` nor `change`. It reads,
+        lists and renders as the plain plan it is — the field is additive and nothing here
+        rewrites a stored document to add it."""
+        self.data(*_create("an older job", "shape the work"))
+        doc = self._doc()
+        plan = doc["plans"][0]
+        plan.pop("kind", None)
+        plan.pop("change", None)
+        self._save(doc)
+        # Reads without error, is not a record, and its change section is silent.
+        again = self.data("plugin", "plans", "show", "p-1")
+        self.assertNotIn("kind", again)
+        self.assertNotIn("change", again)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("shape the work", shown)
+        self.assertNotIn("path      ", shown)
+        listed = self.ok("plugin", "plans", "list")
+        self.assertIn("1 step", listed)
+
+    def test_record_is_a_declared_verb_with_its_flags(self):
+        """The verb is registered and takes the flags the direct path needs."""
+        self.ok("plugin", "plans", "guide")     # import the module the registry reads
+        self.assertIn("record", _plans_commands())
+        args = _plans_args("record")
+        for flag in ("title", "--display", "--request", "--note", "--reason"):
+            self.assertIn(flag, args)
+
+    def test_name_step_refuses_a_record(self):
+        """A library step cannot be named onto a change record: it has no step graph, and
+        letting one in would leave a mongrel document the renderers read as a plan. Refused
+        at the door, with the reason in `data` for a machine reader; nothing is written."""
+        self.data("plugin", "plans", "record", "raise the timeout",
+                  "--display", "board: raise the timeout")
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "review", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("change record", json.loads(out)["data"]["error"])
+        # Nothing was written: the record still has no steps.
+        self.assertNotIn("steps", self._doc()["plans"][0])
+
+    def test_the_guide_names_the_direct_and_shaped_paths(self):
+        """The guide is coherent with the two-path model: a shaped plan and, for a direct
+        change, a change record made only when landing facts are needed. It keeps the phrase
+        the spawn-side test pins."""
+        out = " ".join(self.ok("plugin", "plans", "guide").split())
+        self.assertIn("heading for a change that will land", out)   # still pinned
+        for token in ("DIRECT change", "CHANGE RECORD", "sb plugin plans record",
+                      "SHAPING first"):
+            self.assertIn(token, out)
+
+    def test_the_board_says_record_not_empty_for_a_record(self):
+        """A change record has no step graph, so the board header says what it is rather
+        than counting it as an empty plan."""
+        from defaults.plugins.plans import board
+        rec = {"id": "p-1", "kind": "record", "display": "raise timeout", "condition": "live"}
+        header = board._header(rec, False)
+        self.assertIn("record", header)
+        self.assertNotIn("empty", header)
+
+
+class ChangeRecordLifecycleTest(PlansSandbox):
+    """The change record's identity fields and the lifecycle it validates.
+
+    Two things Phase 3 owns beyond the record existing: the combined change approval is an
+    IDENTITY (the plan revision and contract digest it was approved against), not a boolean;
+    and the lifecycle DESCRIBES AND VALIDATES the record — a warning, never a refusal, when
+    the record presents itself as sanctioned before it was. The phases stay advisory: nothing
+    here polices when a step ran, only what the record claims about itself.
+    """
+
+    def test_the_combined_approval_is_an_identity_and_round_trips(self):
+        """The approved change approval binds a plan revision and a contract digest, recorded
+        by hand into `change.approval`, and it round-trips and renders."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["approval"] = {
+            "plan_revision": "p-1@r3", "contract_digest": "sha256:abcd1234",
+            "by": "andrew", "at": 1787880000}
+        doc["plans"][0]["change"]["phase"] = "execution"
+        self._save(doc)
+        stored = self._doc()["plans"][0]["change"]["approval"]
+        self.assertEqual(stored["plan_revision"], "p-1@r3")
+        self.assertEqual(stored["contract_digest"], "sha256:abcd1234")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("approval", shown)
+        self.assertIn("sha256:abcd1234", shown)
+
+    def test_execution_before_a_recorded_approval_is_a_defect(self):
+        """A shaped record claiming execution without a complete combined approval identity
+        is drawn red and reported by `validate`, and never refused."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["phase"] = "execution"     # no approval recorded
+        self._save(doc)
+        defects = self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"]
+        joined = " ".join(defects)
+        self.assertIn("sanctioned without the complete approval identity", joined)
+        # Recording the approval clears it.
+        doc = self._doc()
+        doc["plans"][0]["change"]["approval"] = {"plan_revision": "p-1@r1",
+                                                 "contract_digest": "sha256:x", "by": "a"}
+        self._save(doc)
+        self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
+                         [])
+
+    def test_an_incomplete_approval_identity_does_not_sanction_execution(self):
+        """A truthy approval object is not enough: both identity fields are load-bearing."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["phase"] = "execution"
+        doc["plans"][0]["change"]["approval"] = {"by": "andrew", "at": 1787880000}
+        self._save(doc)
+        defects = self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"]
+        joined = " ".join(defects)
+        self.assertIn("`plan_revision`", joined)
+        self.assertIn("`contract_digest`", joined)
+
+    def test_a_direct_record_never_trips_the_approval_check(self):
+        """A direct change has no approval and never claims one; its phase stays null, so the
+        sanction check does not apply to it."""
+        self.data("plugin", "plans", "record", "a direct fix", "--display", "board: fix")
+        self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
+                         [])
+
+    def test_landing_before_a_pr_is_a_defect(self):
+        """A change at or past landing with no PR recorded is an order the lifecycle cannot
+        have."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        c = doc["plans"][0]["change"]
+        c["phase"] = "landing"
+        c["approval"] = {"plan_revision": "r1", "contract_digest": "d"}  # so only the PR trips
+        self._save(doc)
+        joined = " ".join(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"])
+        self.assertIn("before it is on a pull request", joined)
+
+    def test_a_phase_the_lifecycle_does_not_have_is_not_a_defect(self):
+        """`phase` is advisory and open like `progress`: an unrecognised word is a job's own,
+        not a defect, so the lifecycle checks simply skip it."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["phase"] = "waiting on the vendor"
+        self._save(doc)
+        self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
+                         [])
+
+    def test_an_optional_fresh_main_handoff_renders_only_when_present(self):
+        """The fresh-main handoff is optional and recorded only when used — absent on every
+        ordinary record, and rendered as a first-class fact when a hand-edit adds it."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        self.assertNotIn("handoff", self.ok("plugin", "plans", "show", "p-1"))
+        doc = self._doc()
+        doc["plans"][0]["change"]["handoff"] = {"from": "lead-1", "to": "main-2",
+                                                "at": 1787880000}
+        self._save(doc)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("handoff", shown)
+        self.assertIn("main-2", shown)
+
+
+class HumanFirstCommentTest(PlansSandbox):
+    """Phase 4: the PR comment reads human-first. What a person still has to do is the first
+    screenful; the shaped plan and its observability are collapsed under a detailed record;
+    and a DIRECT change renders the same shape from its record, with no empty or invented
+    plan under it. The idempotent marker/upsert is Phase 3's and is unchanged.
+    """
+
+    def _md(self, plan_id: str = "p-1") -> str:
+        return self.ok("plugin", "plans", "show", plan_id, "--markdown")
+
+    def test_the_four_sections_come_human_first_and_in_order(self):
+        """What you need to do, what changed and why, the evidence, then the detailed record.
+        The plan's own graph is collapsed below, not in the first screenful."""
+        self.data("plugin", "plans", "create", "raise the cap",
+                  "--display", "board: raise the cap", "--step", "impl = raise it")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "cause": "the cap was too low", "solution": "raise it and pin a test",
+            "verification": {"commit": "abc1234", "result": "green"},
+            "human_checks": "- Upload a 20MB file and confirm it works"})
+        self._save(doc)
+        md = self._md()
+        order = [md.index(x) for x in
+                 ("## What you need to do", "## What changed and why", "## Agent evidence",
+                  "## Detailed record")]
+        self.assertEqual(order, sorted(order), md)
+        self.assertIn("Upload a 20MB file", md.split("## What changed", 1)[0])
+        self.assertNotIn("```mermaid", md.split("## Detailed record", 1)[0])
+
+    def test_nothing_needed_says_so_outright(self):
+        """A change whose record ANSWERED the question with none says so, in as many words,
+        rather than leaving the section empty for a reader to interpret."""
+        self.data("plugin", "plans", "create", "a tidy job",
+                  "--display", "board: a tidy job", "--step", "impl = do it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = "none"
+        self._save(doc)
+        md = self._md()
+        need = md.split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("Nothing—agent verification covers this change.", need)
+
+    def test_an_unanswered_change_is_not_told_agent_verification_covers_it(self):
+        """"Nothing for you" is the line a person acts on by closing the tab, so it is only
+        said where somebody said it. A record nobody has filled — a legacy plan from before
+        the change record, or a comment posted before the list was written — says it is
+        unrecorded instead of claiming an assurance nobody gave."""
+        self.data("plugin", "plans", "create", "a tidy job",
+                  "--display", "board: a tidy job", "--step", "impl = do it")
+        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertNotIn("agent verification covers", need)
+        self.assertIn("Not recorded", need)
+
+    def test_a_skipped_human_review_step_is_itself_the_answer(self):
+        """Skipping `merge-human-review` is a person's work considered and found
+        unnecessary, so it answers the question even when the skip wrote no output."""
+        self.data("plugin", "plans", "create", "a tidy job",
+                  "--display", "board: a tidy job", "--step", "impl = do it")
+        self.ok("plugin", "plans", "name-step", "p-1", "merge-human-review")
+        doc = self._doc()
+        step = next(s for s in doc["plans"][0]["steps"]
+                    if s.get("def") == "merge-human-review")
+        step["progress"], step["why"] = "skipped", "a one-line docs change"
+        self._save(doc)
+        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("Nothing—agent verification covers this change.", need)
+
+    def test_the_none_sentinel_renders_as_nothing_not_the_word(self):
+        """`human_checks: "none"` is the sentinel for a change with nothing for a human; it
+        renders as the sentence, never the bare word."""
+        self.data("plugin", "plans", "record", "a direct fix", "--display", "board: fix")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = "none"
+        self._save(doc)
+        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("Nothing—agent verification covers this change.", need)
+        self.assertNotIn("- none", need)
+
+    def test_a_direct_record_renders_human_first_with_no_plan(self):
+        """A direct change has no plan: its record drives the human-first sections and there
+        is no `## how it runs` graph and no `## steps` invented under it."""
+        made = self.data("plugin", "plans", "record", "raise the timeout",
+                         "--display", "board: raise the timeout",
+                         "--request", "uploads over 10MB time out")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "solution": "raise the timeout to 60s",
+            "verification": {"commit": "def5678", "result": "green"}})
+        self._save(doc)
+        md = self._md()
+        self.assertTrue(md.lstrip().startswith("#"))
+        self.assertIn("## What you need to do", md)
+        self.assertIn("uploads over 10MB time out", md)          # the request
+        self.assertIn("raise the timeout to 60s", md)            # the solution
+        self.assertIn("def5678", md)                             # the evidence
+        self.assertNotIn("## how it runs", md)                   # no invented plan
+        self.assertNotIn("## steps", md)
+
+    def test_agent_evidence_binds_the_reviewed_commit_and_review(self):
+        """The evidence section names the reviewed commit and carries the verification and
+        the independent review, so a reader sees what was checked, not a claim that it was."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "verification": {"commit": "c0ffee1", "check": "pytest tests", "result": "green"},
+            "review": {"commit": "c0ffee1", "reviewer": "reviewer-y",
+                       "findings": "one minor, fixed"}})
+        self._save(doc)
+        ev = self._md().split("## Agent evidence", 1)[1].split("## Detailed record", 1)[0]
+        self.assertIn("Reviewed commit", ev)
+        self.assertIn("c0ffee1", ev)
+        self.assertIn("reviewer-y", ev)
+        self.assertIn("one minor, fixed", ev)
+
+    def test_a_structured_review_carries_its_identity_fixes_and_open_majors(self):
+        """The review is an identity, not a verdict word: WHO reviewed, WHICH head, the
+        fixes they applied against it and any major still open. A structured record renders
+        every one of those into the evidence a reader gets — an unresolved major that only
+        the author can see is how a PR comes to say `reviewed` while a defect stands."""
+        self.data("plugin", "plans", "record", "a direct fix", "--display", "board: fix")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "human_checks": "none",
+            "review": {"commit": "9f1c2ab", "reviewer": "reviewer-cache-keys",
+                       "findings": [{"severity": "major", "state": "unresolved",
+                                     "what": "the cache key drops the tenant id"}],
+                       "fixes": [{"commit": "3aa77e0", "what": "renamed the stale local"}]}})
+        self._save(doc)
+        ev = self._md().split("## Agent evidence", 1)[1]
+        for part in ("9f1c2ab", "reviewer-cache-keys", "major", "unresolved",
+                     "the cache key drops the tenant id", "3aa77e0",
+                     "renamed the stale local"):
+            with self.subTest(part=part):
+                self.assertIn(part, ev)
+
+    def test_the_detailed_record_still_carries_the_whole_plan_collapsed(self):
+        """Nothing a human could want is gone — the graph, the contract, the per-step folds
+        and the metadata are all still there, one click down under the detailed record."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job",
+                  "--step", "impl = write it", "--lib", "review")
+        doc = self._doc()
+        doc["plans"][0]["steps"][0]["output"] = "Change Contract\n\n- the thing"
+        self._save(doc)
+        below = self._md().split("## Detailed record", 1)[1]
+        self.assertIn("<details>", below)
+        self.assertIn("```mermaid", below)
+        self.assertIn("## steps", below)
+        self.assertIn("## contract", below)
+
+    def test_the_change_record_remainder_preserves_every_unpromoted_fact(self):
+        """The facts the first three sections do not lift — the approved contract, the
+        approval identity, the PR head, the landing approval and outcome, the fresh-main
+        handoff — are still the record and must not vanish. They render in a collapsed change-
+        record block under the detailed record, for a direct change and a shaped one alike."""
+        made = self.data("plugin", "plans", "record", "raise the timeout",
+                         "--display", "board: raise the timeout")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "contract": "Change Contract\n\n- raise it to 60s",
+            "approval": {"plan_revision": "p-1@r1", "contract_digest": "sha256:aa",
+                         "by": "andrew"},
+            "pr": {"number": 42, "head": "def5678"},
+            "landing": {"head": "def5678", "by": "andrew", "outcome": "merged"},
+            "handoff": {"from": "lead-1", "to": "main-2"}})
+        self._save(doc)
+        below = self._md().split("## Detailed record", 1)[1]
+        self.assertIn("change record", below)                 # the collapsed remainder block
+        self.assertIn("Change Contract", below)               # the approved contract, whole
+        self.assertIn("sha256:aa", below)                     # the approval identity
+        self.assertIn("42", below)                            # the PR
+        self.assertIn("merged", below)                        # the landing outcome
+        self.assertIn("main-2", below)                        # the handoff
+        # And promoted content is not duplicated into the remainder.
+        doc = self._doc(); doc["plans"][0]["change"]["cause"] = "UNIQUE-CAUSE-TOKEN"
+        self._save(doc)
+        remainder = self._md().split("<summary>change record</summary>", 1)[1]
+        self.assertNotIn("UNIQUE-CAUSE-TOKEN", remainder)
+
+    def test_scope_limitations_and_baseline_reach_the_first_screenful(self):
+        """Phase 4 requires scope boundaries in `what changed`, and known limitations or an
+        evidenced baseline failure in `agent evidence`; the verification environment and the
+        reviewer's fixes ride along inside their own facts."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "solution": "raise the cap",
+            "scope": "server config only; no client change",
+            "verification": {"commit": "c0ffee1", "environment": "ci ubuntu-22",
+                             "result": "green"},
+            "review": {"commit": "c0ffee1", "reviewer": "rev-y",
+                       "fixes": ["tightened a log line"]},
+            "limitations": "does not cover chunked uploads",
+            "baseline": "test_flaky_x was already failing on main"})
+        self._save(doc)
+        md = self._md()
+        why = md.split("## What changed and why", 1)[1].split("## Agent evidence", 1)[0]
+        self.assertIn("Scope boundaries", why)
+        self.assertIn("server config only", why)
+        ev = md.split("## Agent evidence", 1)[1].split("## Detailed record", 1)[0]
+        self.assertIn("ci ubuntu-22", ev)                     # verification environment
+        self.assertIn("tightened a log line", ev)             # reviewer fixes
+        self.assertIn("does not cover chunked uploads", ev)   # known limitations
+        self.assertIn("already failing on main", ev)          # baseline failure
+        # They are change-record facts, not renderer-only magic: the ordinary record view
+        # exposes them too, so an author can inspect what the PR will consume.
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("scope", shown)
+        self.assertIn("limitations", shown)
+        self.assertIn("baseline", shown)
+
+    def test_a_mirrored_shaped_contract_renders_once(self):
+        """The approved contract is mirrored into the record and approval-step output; an
+        exact mirror remains one fact in the collapsed detailed record, not two copies."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it",
+                  "--lib", "change-approval")
+        doc = self._doc()
+        contract = "Change Contract\n\n- change only the timeout"
+        doc["plans"][0]["change"]["contract"] = contract
+        approval = next(s for s in doc["plans"][0]["steps"]
+                        if s.get("def") == "change-approval")
+        approval["output"] = contract
+        self._save(doc)
+        self.assertEqual(self._md().count("change only the timeout"), 1)
+
+    def test_a_malformed_step_falls_to_the_walk_even_with_a_change_record(self):
+        """A non-dict in the steps list is corruption, and the render falls back to the walk
+        rather than the human-first path — even when a change record is present. The
+        human-first path renders an empty steps list, which would silently drop the
+        legitimate step beside the bad one; the walk shows everything."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        p = {"id": "p-1", "title": "t", "change": {"path": "shaped", "cause": "x"},
+             "steps": ["corrupt", {"id": "s-1", "name": "the real step"}]}
+        md = _plans()._markdown(p)
+        # The legitimate step is not dropped, and the human-first sections are not drawn.
+        self.assertIn("the real step", md)
+        self.assertNotIn("## What you need to do", md)
+
+    def test_create_pr_says_the_comment_is_refreshed_on_material_change(self):
+        """Phase 4: the authoritative comment is updated when review fixes, the head, or
+        landing state materially change what a human should see — not only at merge."""
+        about = " ".join(self.ok("plugin", "plans", "library", "create-pr").split())
+        self.assertIn("REFRESHED, NOT ONLY AT MERGE", about)
+        self.assertIn("materially changes", about)
+
+    def test_the_marked_comment_body_still_upserts_but_show_hides_the_nonce(self):
+        """The Phase-3 identity is preserved: the posted body carries the marker line, and
+        `show --markdown` — a human rendering — does not leak the per-PR nonce marker."""
+        self.data("plugin", "plans", "create", "a job", "--display", "board: a job",
+                  "--step", "impl = do it")
+        # The nonce marker is added by `comment`, never by the human-facing render.
+        self.assertNotIn("switchboard-plan:", self._md())
+
+
+class LibrarySemanticsTest(PlansSandbox):
+    """Phase 3's library semantics, read off `library <name>`. These pin the change-record
+    connection and the review's structure; the full composition-aware prose pass is Phase 5.
+
+    The structural fields — anchors, obliges, displays — are pinned by CatalogueTest and are
+    unchanged here; this class is only about the semantics Phase 3 added to the `about`.
+    """
+
+    def _about(self, name: str) -> str:
+        """`library <name>`, whitespace-collapsed — the renderer reflows the prose, so a
+        multi-word token would otherwise straddle a wrap."""
+        return " ".join(self.ok("plugin", "plans", "library", name).split())
+
+    def test_review_is_independent_structured_and_recorded_by_the_owner(self):
+        """`review` names a fresh agent, a target commit, the major/minor/nit classification,
+        the reviewer's own minor fixes, and one writer for the result: the reviewer returns
+        the structure and the worktree owner records it for identity-bound landing."""
+        about = self._about("review")
+        for token in ("FRESH agent", "COMMIT", "MAJOR", "MINOR", "NIT", "change record",
+                      "review: {commit, reviewer, findings, fixes}", "worktree owner",
+                      "single writer"):
+            self.assertIn(token, about)
+
+    def test_change_approval_is_combined_and_recorded(self):
+        """`change-approval` is the shaped path's single sign-off on solution, plan and
+        contract, recorded into the change record; a direct change never gets one."""
+        about = self._about("change-approval")
+        for token in ("COMBINED", "solution", "contract", "change record", "DIRECT"):
+            self.assertIn(token, about)
+
+    def test_create_pr_requires_evidence_and_serves_the_direct_path(self):
+        """`create-pr` requires current verification and a resolved review, read from the
+        record by identity; and a direct change reaches its PR here with no plan."""
+        about = self._about("create-pr")
+        for token in ("verification", "RESOLVED review", "DIRECT change", "comment <record>"):
+            self.assertIn(token, about)
+
+    def test_merge_consumes_an_identity_without_rerunning(self):
+        """`merge` reads the record's approval and evidence and checks the head, and does not
+        rerun the tests or the review to rebuild confidence."""
+        about = self._about("merge")
+        for token in ("CONSUMES IDENTITIES", "combined change `approval`",
+                      "human landing approval", "`landing`", "does NOT rerun", "head"):
+            self.assertIn(token, about)
+
+    def test_the_definitions_point_at_canonical_homes_not_re_teach_procedure(self):
+        """Phase 3's bounded six-definition de-dup: a definition POINTS at the preset, role
+        or runtime that owns a procedure rather than re-teaching it. Bounded on purpose — the
+        composition-wide rewrite across protocol/roles/guide/library is Phase 5. The removed
+        strings are the evidence the cleanup happened, not just more prose."""
+        ca = self._about("change-approval")
+        self.assertIn("sb presets design-gate", ca)          # points at the format's owner
+        self.assertNotIn("Order it for READING", ca)         # removed: the format re-teaching
+        self.assertNotIn("two-space indents under", ca)      # removed: the nesting mechanic
+        cp = self._about("create-pr")
+        self.assertNotIn("what has already been tested", cp)  # removed: the PR-description how-to
+        hr = self._about("merge-human-review")
+        self.assertNotIn("MARKDOWN-READY NESTING", hr)       # removed: the rendering mechanic
+        rv = self._about("review")
+        self.assertNotIn("markdown-ready nesting", rv)       # removed: the rendering mechanic
+        # And the step-specific facts the tests pin elsewhere are still there — the trim did
+        # not gut the definitions, it removed what a role/runtime/preset already owns.
+        self.assertIn("EMPTY THE `gate` FIELD as you tick", ca)
+        self.assertIn("renders the plan AS IT STANDS AT THAT MOMENT", cp)
+
+    def test_the_shipped_library_still_has_exactly_its_six_definitions(self):
+        """Phase 3 changed semantics, not the shipped set: the six definitions and their
+        anchors and obligations are what CatalogueTest pins, and nothing here adds a
+        seventh or renames one."""
+        listed = self.ok("plugin", "plans", "library")
+        for key in ("change-approval", "create-pr", "merge", "merge-human-review",
+                    "plan-review", "review"):
+            self.assertIn(key, listed)
 
 
 def _plans_commands() -> list[str]:

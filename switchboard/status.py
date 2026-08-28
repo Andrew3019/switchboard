@@ -329,6 +329,11 @@ TURN_DOUBT_GRACE = config.setting("timeouts.turn_doubt_grace")
 # `collect` for why that is the honest arrangement and not a stack of two debounces.
 STALLED_FLOOR = config.setting("timeouts.stalled_floor")
 
+# An explicit wait explains an idle turn, but not forever. The stored timestamp makes the
+# excuse ageable without mutating state from this read-only module; after this window the
+# row is ordinary STALLED and reaches the same needs-human path as any other silent agent.
+WAIT_EXCUSE_GRACE = config.setting("timeouts.wait_excuse_grace")
+
 # `sb done "<summary>"` reaches the parent as a message body with this prefix (see
 # broker.done). Stripping it here keeps the prefix an implementation detail of the
 # mailbox rather than something every reader has to know about.
@@ -412,6 +417,11 @@ DONE_TO_THE_AGENT = (
     "ring_unconfirmed",
     "mail_unannounced", "mail_cleared", "notify_failed", "read_output",
     "cleanup_refused", "cleanup_held",
+    # The wait wake is the same sentence again: `Broker.wake_expired_waits` writes these
+    # against the agent it pinged, so counting one as the agent's own activity would let
+    # the poke reset the idle clock of the silence it was sent to break — the row read
+    # `idle 0s` and not stalled immediately after being woken.
+    "wait_expiry_pinged", "wait_expiry_ping_failed",
 )
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
@@ -468,6 +478,10 @@ class AgentStatus:
     # an agent that quietly died, and telling those two apart at a glance is the whole
     # point of showing `idle` at all.
     idle_excuse: Optional[str] = None
+    # The one stalled shape that earns an automatic nudge: this agent explicitly declared
+    # a wait and its configured quiet window elapsed. Ordinary stalls remain passive and
+    # visible to a person, as before.
+    wait_expired: bool = False
     # How long this row's INFERRED summons has held, in seconds, or None if nobody was
     # watching continuously enough to say. See `settled`, which is the only reader, and
     # `stamp_needs_for`, which is the only writer.
@@ -959,6 +973,7 @@ class AgentStatus:
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
+            "wait_expired",
             "needs_for", "awaiting_keypress", "pane_id",
             "caps_held", "caps_delegable", "caps_template", "diverged_below",
             "worktrees", "worktrees_below",
@@ -1348,6 +1363,16 @@ def collect(
         # `store.connect`). Missing the column reads as 0, which is the label the row
         # already had; the alternative is every tick raising until a writer runs.
         awaiting = "awaiting_task" in row.keys() and bool(row["awaiting_task"])
+        wait_mode = (row["wait_mode"] if "wait_mode" in row.keys() else None)
+        wait_started = (row["wait_started_at"]
+                        if "wait_started_at" in row.keys() else None)
+        wait_expired = bool(wait_mode and wait_started is not None
+                            and now - wait_started > WAIT_EXCUSE_GRACE)
+        wait_is_fresh = bool(wait_mode and wait_started is not None and not wait_expired)
+        wait_excuse = ({"background": "waiting for background work",
+                        "any": "waiting for any child",
+                        "all": "waiting for child cohort"}.get(wait_mode)
+                       if wait_is_fresh else None)
         # Read defensively for the same reason, and remembered per row rather than
         # re-queried: the write that uses it is in the reap path (`_record_gone`), which is
         # the only place that both can write and is running current code.
@@ -1386,6 +1411,7 @@ def collect(
         # vocabulary is how they come to disagree.
         idle_for = max(0, now - last)
         excuse = ("awaiting first task" if awaiting
+                  else wait_excuse if wait_excuse
                   else "waiting on children" if name in live_parent
                   else "waiting on a reply" if name in awaiting_reply
                   else "starting up" if starting
@@ -1434,6 +1460,7 @@ def collect(
             # happening would be a note about nothing, and a working agent that happens to
             # have children is working, not waiting on them.
             idle_excuse=excuse if idle else None,
+            wait_expired=wait_expired and idle and excuse is None,
             # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
             # like any other. Nothing else about a blocked agent changes: it is still not
             # `stalled` (that reads `running`), still not pinged, still waiting on its human

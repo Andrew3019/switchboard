@@ -86,7 +86,9 @@ class ResolverTest(Fixture, unittest.TestCase):
         self.family()
         _reparent(self.repo / "state.db", "kid", "top")
         self.b.tell(["parent"], "hi", me="kid")
-        self.assertEqual([m["body"] for m in store.unread_for(self.db, "top")], ["hi"])
+        rows = self.db.execute(
+            "SELECT body FROM messages WHERE to_agent='top' ORDER BY id").fetchall()
+        self.assertEqual([m["body"] for m in rows], ["hi"])
         self.assertEqual(store.unread_for(self.db, "proxy"), [])
 
     def test_a_parentless_agent_still_resolves_to_the_human(self):

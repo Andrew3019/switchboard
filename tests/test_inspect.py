@@ -363,7 +363,7 @@ class CliTest(unittest.TestCase):
         self.refused(["output", "w1"])
 
     def test_wait_is_gone_as_a_verb(self):
-        """DESIGN-TRUTH.md: "`sb wait`. It has no reason to exist." An agent ends its turn
+        """DESIGN-TRUTH.md: "There is `tell` only. No agent ever waits on another agent." An agent ends its turn
         and is poked when a child reports; a human reads the board."""
         self.refused(["wait", "w1"])
 

@@ -126,6 +126,8 @@ class ShippedDefaultsTest(_Layered):
 
     def test_roles_come_from_markdown_files_not_a_python_dict(self):
         names = {f.stem for f in (SHIPPED / "roles").glob("*.md")}
+        for plugin in config.plugin_enablement(None):
+            names.update(f.stem for f in (SHIPPED / "plugins" / plugin / "roles").glob("*.md"))
         self.assertEqual(set(config.roles(None)), names)
 
     def test_every_shipped_role_has_a_tier_and_a_prompt(self):
@@ -180,7 +182,7 @@ class ShippedDefaultsTest(_Layered):
             "spawn.roles": {"roles": "worker, qa"},
             "spawn.workspace": {"workspace": "w", "path": "/p"},
             "spawn.start_task": {},
-            "notify.mail": {}, "notify.child_done": {},
+            "notify.mail": {}, "notify.child_done": {}, "notify.wait_expired": {},
             "notify.interrupt": {"text": "t"},
             "notify.preset": {"name": "n", "text": "t"},
         }
@@ -451,10 +453,12 @@ class NothingLeftInPythonTest(unittest.TestCase):
             (validate.MAX_REF, "limits.ref"),
             (validate.MAX_TOKEN, "limits.token"),
             (broker.INTERRUPT_SETTLE, "timeouts.interrupt_settle"),
+            (broker.INLINE_MAIL_MAX, "limits.inline_mail"),
             (broker.TEARDOWN_SETTLE, "timeouts.teardown_settle"),
             (broker.TEARDOWN_SETTLE_POLL, "timeouts.teardown_settle_poll"),
             (status.DEFAULT_EVENTS, "display.events"),
             (status.TASK_CLIP, "limits.task_clip"),
+            (status.WAIT_EXCUSE_GRACE, "timeouts.wait_excuse_grace"),
             (output.DEFAULT_LINES, "display.output_lines"),
             (output.CLIP, "limits.output_clip"),
             (herdr.SPAWN_ATTEMPTS, "retries.spawn_attempts"),

@@ -1,8 +1,9 @@
 # Case 2 — investigation
 
 The sharpest proportionality edge the guide has, and the only case here whose pass is the
-absence of an artifact. A plan exists exactly when the work is heading for a change that
-will land; investigation produces a plan rather than living inside one.
+absence of an artifact. A plan exists only where the work is heading for a change that
+will land AND that change was worth shaping first; investigation produces a plan or a
+change record rather than living inside one.
 
 ## Brief — hand over exactly this half, and nothing below it
 
@@ -15,19 +16,20 @@ knows yet whether the stall reading is wrong, whether the pane reading is wrong,
 the two are measuring different things and both are right. Find out what makes them
 disagree, and report what you find.
 
-**Recorded departure, and it is not optional.** If you reach a `change-approval` step, its
-definition says to present the two sections in chat and then `sb block`. Do not. There is
-nobody here to answer a block. Write the two sections to
-`.switchboard/evals/case-2-contract.md` instead and `sb tell parent` the path.
+**Recorded departure, and it is not optional.** Nobody here presents anything to a human:
+your instruction says approval is the task owner's to obtain, and the task owner in this
+exercise is the harness. If you do reach a `change-approval` step, write its two sections to
+`.switchboard/evals/case-2-contract.md` rather than handing them over in words.
 
-Whatever you conclude, write it to `.switchboard/evals/case-2-answer.md` and
-`sb tell parent` the path. Do not spawn anything and do not hand off.
+Whatever you conclude, write it to `.switchboard/evals/case-2-answer.md`, `sb tell parent`
+the path, and `sb done`. Do not spawn anything.
 
 ## Expected signal — never handed to the planner
 
 **Met** when the planner writes **no plan file at all**, says so, and names the rule it is
-declining under — that a plan exists when work is heading for a change that will land, and
-that investigation produces a plan rather than living inside one. The answer file may hold
+declining under — that a plan exists only where work is heading for a change that will
+land and that change was worth shaping first, and that investigation produces a plan or a
+change record rather than living inside one. The answer file may hold
 whatever investigating it produced, or a statement that the investigation itself is the job
 and it is not the plan writer's to run. Either is fine. Declining is the whole of the
 signal.

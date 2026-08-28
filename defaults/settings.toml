@@ -106,11 +106,10 @@ parent = "parent"
 main_role = "dispatcher"
 
 # Old role names that still work. A name here resolves to the role it points at — fields,
-# prompt and display name — instead of falling through to `fallback_role` below, which is
-# the difference between a stale `--role orchestrator` behaving as a lead and it silently
-# spawning an agent that cannot delegate at all. `orchestrator` maps to `lead` rather than
-# to `dispatcher` because that is what anyone typing it at `sb delegate` meant: an agent
-# that owns this piece of work and splits it. Empty it once nothing types the old name.
+# prompt and display name — instead of being refused as unknown. `orchestrator` maps to
+# `lead` rather than `dispatcher` because that is what anyone typing it at `sb delegate`
+# meant: an agent that owns this piece of work and splits it. Empty it once nothing types
+# the old name.
 #
 # What the rename does NOT reach, which matters on the day it lands. A running agent keeps
 # the prompt it was spawned with, so no top already up becomes a dispatcher — it goes on
@@ -128,8 +127,11 @@ main_name = "main"
 # What `sb delegate` uses when no `--role` is given.
 default_role = "worker"
 
-# What an UNDEFINED role inherits — its fields, never its name. `--role archaeologist`
-# works with nobody having defined an archaeologist; it just behaves like this one.
+# Retained for compatibility, and it is no longer what an undefined `--role` inherits:
+# selection is strict now and an unknown name is refused with the near ones listed. What
+# still reads this is `roles.get_or_fallback`, the path that reads rows ALREADY IN THE
+# STORE — an agent spawned under a role this repo has since retired stays readable,
+# restorable and correctly shaped instead of becoming an unloadable row.
 fallback_role = "worker"
 
 # What a role file gets for a tier it does not name. No shipped role names one, so this is
@@ -309,6 +311,13 @@ agent_name = 32
 # and this number is now only the runaway guard behind it.
 text = 40000
 
+# How much tagged mail may be placed directly into an agent's next turn. Larger mail stays
+# durable and gets the ordinary inbox notice instead. This is deliberately far below
+# `text`: accepting a long report into the store is cheap, but forcing it into somebody's
+# context is not. 8k keeps ordinary replies and a small completion cohort inline while a
+# pasted artifact or a large burst falls back before it dominates the recipient's turn.
+inline_mail = 8000
+
 # `sb block "<why>"`. NOT a runaway guard and not style advice — the only cap here that is
 # load-bearing, because the reason is the one field whose SIZE tells the agent it is using
 # the verb wrong. The human never reads it (he reads the agent's own chat, via
@@ -392,6 +401,14 @@ gone_confirm_grace = 60.0
 # Erring long here would delay a real stall on the paths that have no other guard, so it is
 # deliberately the smallest number that is not zero and still means something.
 stalled_floor = 3.0
+
+# How long an explicit `sb waiting` remains quiet before Switchboard asks the agent to
+# check again. Thirty minutes clears ordinary background work without turning a forgotten
+# wait into permanent immunity from STALLED. On expiry the unattended reconciler sends one
+# targeted nudge; the agent checks status and either continues or declares waiting again.
+# This is not the retired general stall nudge — only a wait the agent explicitly set earns
+# it, once per declaration.
+wait_excuse_grace = 1800.0
 
 # How long a `working` turn edge must have NOTHING behind it before that edge is doubted at
 # all (`status.TURN_STALE_GRACE`). Measured, not guessed: across 406 real agent sessions in

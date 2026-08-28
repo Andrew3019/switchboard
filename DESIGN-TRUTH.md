@@ -26,11 +26,12 @@ in this repo, because everything else may be inferred and this may not.
   one wins and the older goes — and Andrew is told what was dropped.
 
 **`design/PLANS-AND-STEPS.md` is the only other file held to this bar.** It carries these
-same rules — only Andrew edits it, nothing arrives by inference, absence is not a decision —
-for one subject: plans, steps and templates. That file is where the detail of that subject
-lives, and this file stays the authority wherever the two meet, so the entries under Plans
-below are what it is read against. Every other doc, README and code comment in the repo
-stays untrusted until checked against the code. — confirmed 2026-08-18
+same rules — only Andrew decides its content, nothing arrives by inference, absence is not
+a decision —
+for one subject: plans, steps, templates and change records. That file is where the detail
+of that subject lives, and this file stays the authority wherever the two meet, so the
+entries under Plans below are what it is read against. Every other doc, README and code
+comment in the repo stays untrusted until checked against the code. — confirmed 2026-08-18
 
 Entry format: one short claim, plus the date it was confirmed.
 
@@ -46,13 +47,22 @@ main checkout, so in practice those are the same place. (The refusal is skipped,
 guessed, when the main checkout cannot be established at all.) — confirmed 2026-08-09,
 the dispatcher's home confirmed 2026-08-14, corrected against the code 2026-08-14
 
-**Anything that might need code changes.** It gets a workspace/worktree, and a lead with
-it — which is also what such an agent was already being called, `<name>-lead` — unless the
-whole of it plainly fits one agent, in which case the dispatcher may hand it to a single
-worker in the same setup instead. Whether a part of the work underneath a lead is small
-and clear enough for one agent end to end stays that lead's judgement to make. — confirmed
-2026-08-09, the role named `lead` and the routing judgement below it moved to it
-2026-08-14, the dispatcher's own lead-or-worker choice 2026-08-15
+**How work enters the system.** Research, discussion and advice begin without a plan. A
+clear bounded change is handed to one task-owning lead or worker and runs directly, without
+a placeholder plan or separate change-approval ceremony. Work needing investigation,
+design, tradeoff analysis, coordination or material risk management enters the shaped path:
+its first task-owning agent creates a lightweight plan before the shaping work can diverge.
+That plan is expanded in place and approved before tracked implementation. A direct change
+that discovers material uncertainty moves to the shaped path before continuing. The
+dispatcher chooses the initial owner and preserves the request; it does not decide the
+solution. — confirmed 2026-08-27
+
+**A dispatcher chooses an initial task owner, not an agent tree.** A worker is suitable for
+a clearly bounded outcome with no expected orchestration. A lead is suitable when the shape
+is uncertain, the work may need planning or coordination, or one owner needs broader
+authority. Neither choice predetermines delegation. A lead may complete the entire job
+itself; a worker may receive explicitly bounded temporary help authority when that is the
+smallest useful exception. — confirmed 2026-08-27
 
 **Only `sb start` ever creates a TOP — that is the only path.** Being a top is stamped at
 that moment, and `sb delegate` still branches on the stamp: a top's spawn gets a new space
@@ -102,38 +112,36 @@ its own worktree because it gets its own space, and so does a child spawned with
 somebody else's. — confirmed 2026-08-09, read-only exception dropped 2026-08-12, isolation
 added 2026-08-23
 
-**Work heading for a change that will land gets a plan.** That is the whole trigger, and
-small is not exempt: a one-line docs change bound for a PR gets a plan, only a short one.
-Everything else runs without one — investigation, questions, scouting, review-only work,
-anything a single agent answers and reports, and everything a dispatcher does. Investigation
-produces a plan rather than living inside one: the plan is written once the outcome is known
-and there is a path from what was found through to a merged PR, and investigation is a step
-only where it is one piece of an already-shaped job. Every agent is told that one line at
-spawn even though the plan-making instruction itself is not carried there — knowing plans
-exist is not the same as knowing when to make one, and an agent left to infer the second will
-not. What a plan is, and who writes it, are under Plans below. — confirmed 2026-08-18
+**A plan exists only for shaped work.** Research, discussion and clear bounded changes do
+not get one. A shaped plan begins before investigation or design can diverge, initially
+records only what is honestly known, and expands in place through solution design, formal
+planning and approval. The absence of a plan on direct work is intentional rather than a
+skip. What a plan is, and who writes it, are under Plans below. — confirmed 2026-08-27
 
 **While the work runs.** The dispatcher is just idle. It should not be monitoring. It
 persists until Andrew closes it. — confirmed 2026-08-09
 
-**When work finishes.** It depends who is done and who is reporting it. A worker that is
-done reports done, and its parent lead sees it. Once all of its children are done, that
-lead either reports done or blocks, depending on whether the task is fully complete:
-fully complete, report done; Andrew's input needed to finish it, block. Once that is done
-it reports done, and the dispatcher blocks. A lead cleans up its children, pushes the PR
-if relevant, and summarizes — it does not close itself, since cleaning a lead takes its
-children and it still has to report; where its children were isolated, folding their
-branches in with `sb merge` comes before it pushes anything. A dispatcher hands work to a
-lead or to a single
-worker, and where a worker is directly under it, that agent pushes and opens its own PR if
-it was told to; the dispatcher blocks for it either way, since being told his work has
-landed is the one report a dispatcher makes. Once a block is resolved the agent finishes
-and reports done, and the parent cleans up — a lead on its own judgement, a dispatcher on
-Andrew's. The plans plugin can override how work lands: where a plan is running, its merge
-gate decides pushing, opening the PR and merging, on one approval — see the entry on
-pushing and merging below. — confirmed 2026-08-09, the dispatcher's report restated
-2026-08-14, the lead-or-worker spawn and the dispatcher's cleanup 2026-08-15, the plans
-plugin's merge-gate override 2026-08-17
+**When implementation finishes.** The main agent performs proportionate verification
+against the coherent completed change and fixes ordinary failures. A fresh implementation
+reviewer then examines the current result. The reviewer omits nits, applies safe local minor
+fixes under scoped authority and reports them, and returns defensible major issues to the
+main agent. The PR opens only when applicable verification is current and no major review
+issue remains. — confirmed 2026-08-27
+
+**When the PR opens.** One authoritative comment begins with exactly what Andrew must do:
+only decisions or manual checks agents could not cover, or an explicit statement that none
+remain. Intent, solution, reviewed commit, evidence and risks follow; detailed plan and
+execution history are secondary. Andrew's landing approval applies to the current reviewed
+head. The task owner remains the channel for this review rather than handing it back through
+an idle dispatcher. — confirmed 2026-08-27
+
+**When the work lands.** Landing compares the expected and current target once. If approval
+and evidence still apply, it merges without automatically rerunning tests, builds, reviews
+or manual checks. Unexpected head changes, unresolved major review state, relevant red
+checks, cancellation or concrete landing failures remain visible and unfinished. Cleanup
+then follows the existing ownership rules: a lead cleans its children on its judgment, a
+dispatcher cleans its direct child on Andrew's, and isolated child branches are folded in
+before the assembled branch is pushed. — confirmed 2026-08-27
 
 **A follow-up on a child's report is a handoff, not another relay.** A parent may report a
 child's work once; it may not become the channel for the conversation about it. "When work
@@ -177,13 +185,15 @@ the same as Andrew typing; the prefix is what tells them apart. — confirmed 20
 
 **switchboard is personal, for now.** — confirmed 2026-08-09
 
-**The role list is lightly audited and fine as it is** — as long as it is known that
-there are roles, and what roles there are. Every agent is told at spawn what roles exist,
-and that text is generated from the roles themselves, never hardcoded. — confirmed
-2026-08-09
+**The role list is live vocabulary, not a hardcoded prompt list.** Every agent can inspect
+the configured roles, and generated text names them from configuration. Planner is a
+first-class bounded specialist role. Adding or removing a configured role changes the
+vocabulary without another maintained prose list. — confirmed 2026-08-27
 
-**Which model an agent gets is set in config, and does not really matter.** — confirmed
-2026-08-09
+**Model choice is configured and human intent must resolve reliably.** Exact configured
+names and unambiguous common formatting variants resolve to the same tier. Unknown or
+ambiguous names fail actionably rather than becoming accidental raw provider identifiers;
+raw models remain an explicit escape path. — confirmed 2026-08-27
 
 **We should detect failures, and can start with just telling the parent that it has
 failed.** How detection works, whether anything retries, and what becomes of
@@ -200,6 +210,39 @@ worth more than a rule for each one — e.g. a reply that was asked for and neve
 surfaces through the idle state, which is enough for it to be noticed and chased. —
 confirmed 2026-08-09, the reconciler's ping dropped out of it 2026-08-25 with the entry
 under Explicitly rejected
+
+**Implementation is kept coherent before normal verification.** The main agent completes
+the related implementation, then runs tests, builds and agent-driven walkthroughs in
+proportion to scope and risk. Early diagnostic checks are allowed when they distinguish
+causes or guide implementation. Full suites are not universal and are not repeated between
+related edits. The main agent owns ordinary failures and fixes. QA is used only for a
+specialized environment, perspective or scenario that adds coverage; it is not the routine
+test runner. — confirmed 2026-08-27
+
+**Every landing change receives fresh implementation review.** Review breadth may have one
+or several facets according to risk, but the reviewer did not author the target before the
+review began. Findings are major, minor or nit. Nits are omitted. A safe local unambiguous
+minor fix is applied by the reviewer and named in the result. A major issue returns to the
+main agent and must be defensible by reachable live path, likelihood, impact and remediation
+value. A rare low-impact issue does not justify a large complex fix merely because it can be
+imagined. — confirmed 2026-08-27
+
+**Intentional waiting is a runtime state, not repeated polling.** Plain waiting covers
+native subagents and background work; any-child and all-child waiting cover declared
+cohorts. The stop hook recognizes it, and stalled detection recognizes each declaration for
+30 minutes. A causally relevant event may wake it sooner; after 30 minutes the reconciler
+sends that agent one targeted prompt to check status and either resume or declare the
+appropriate waiting state again. Ordinary message content should arrive with its
+notification when safe, while durable inbox storage, reply tracking, interrupts, blocking,
+restoration, cleanup and notification holdback remain authoritative. — confirmed
+2026-08-27, bounded reminder confirmed 2026-08-28
+
+**Operational vocabulary comes from live configuration.** Supported roles, models,
+capabilities, plugins, presets and plan steps are generated and inspectable. Safe common
+spelling and punctuation variants normalize only when they identify one target. Unknown or
+ambiguous input fails with nearby valid choices. Raw provider models and ad-hoc prompts
+remain explicit escape paths rather than the silent meaning of a typo. — confirmed
+2026-08-27
 
 **Agents should avoid blocking unless it is really needed** — a genuine, big,
 behaviour-changing design question; being blocked on running some command; being
@@ -322,23 +365,13 @@ dispatchers outside the repo would mean separating a dispatcher's home from the 
 dispatches into, which `sb start` does not support today. So this is a known limitation,
 not pending work. — confirmed 2026-08-14
 
-**A dispatcher relays; it does not interpret.** Its job is basically to relay Andrew's
-words to the new agent that will own them, and to orchestrate the creation of the
-worktrees, workspaces and agents that takes — without assuming too much, and without adding
-instructions of its own about
-how the work should be approached. Whether a piece of work is to be carried end to end, or
-investigated with the questions brought back first, is his to say and not the dispatcher's
-to guess. If that is unclear, it does not start: it asks him to clarify intent before
-dispatching. Choosing a lead or a worker is a judgement about the shape of the tree and is
-no licence to interpret: it picks who runs the work, never what the work is. (This is
-relaying the *task* downward, untouched — a different thing from relaying a child's
-*answer* back upward, which "A follow-up on a child's report is a handoff" above now
-covers, and which is not always the right move.) — confirmed
-2026-08-14, widened from leads to whichever agent it hands the work to 2026-08-15; it still
-supersedes the 2026-08-09 rule that the top spawns scout or research agents to improve its
-own decisions, which is a lead's judgement now, while the other rule it superseded —
-routing a small, clear task straight to a single agent — is back on the terms of the `sb
-delegate` entry
+**A dispatcher relays; it does not interpret the engineering solution.** It preserves
+Andrew's objective, constraints and requested role or model while creating the worktree,
+workspace and initial task owner. It asks only when a missing decision materially changes
+that owner or its authority; otherwise it makes the smallest safe routing choice. Research,
+direct and shaped paths are task-owner judgments after context is gathered, not categories
+Andrew must choose before a context-free dispatcher can act. Choosing a lead or worker picks
+who owns the work, never how that owner must solve or decompose it. — confirmed 2026-08-27
 
 **A delegation brief goes to `.switchboard/briefs/<name>/brief.md`.** A task argument
 cannot carry a newline, so a dispatcher or lead relaying an ask longer than one line writes
@@ -347,6 +380,13 @@ is gitignored and symlinked into every worktree, so the brief stays off `main` a
 path reads the same from the child's tree as from the writer's. It used to be `notes/`,
 which is tracked — about 48 briefs were committed to `main` in two weeks as a side effect.
 Convention in the prompts, with no `sb delegate` flag behind it. — confirmed 2026-08-16
+
+**A brief defines ownership, not the receiver's internal procedure.** It states the
+objective, broad but firm scope, constraints, acceptance conditions, evidence expectations
+and ownership boundary. It names files or commands only when they are load-bearing. The
+receiving agent gathers context, reasons about alternatives and chooses the detailed method.
+Related edits remain one coherent assignment unless isolation, specialization or genuine
+parallelism justifies a split. — confirmed 2026-08-27
 
 **Work that belongs in another repo is a question, not a spawn.** A dispatcher that
 notices it asks Andrew and starts nothing — it never puts an agent in that repo, because
@@ -359,11 +399,12 @@ forked a worktree of *this* repo instead and appeared in this repo's space. Noth
 adopted by anything; an agent was simply in the wrong repo. — confirmed 2026-08-14, the
 handover reworded 2026-08-14 so it cannot be read as a spawn the dispatcher performs
 
-**A lead's children share its worktree, so the lead assigns disjoint files and
-serialises anything that overlaps.** That is the default and stays the common case. Where
-it is not wanted, the lead spawns the child with `--isolation own` and folds its branch
-back with `sb merge` once it finishes — see Capabilities and isolation below. — confirmed
-2026-08-09, the isolation escape hatch built and named 2026-08-23
+**Shared placement does not determine decomposition.** Children share a lead's worktree by
+default, so overlapping concurrent writes must be avoided, serialized or isolated. The lead
+first chooses coherent outcome boundaries; it does not create children merely to assign
+disjoint files. `--isolation own` remains the per-child escape hatch when overlap or
+independent integration justifies it, and `sb merge` folds that branch back. — confirmed
+2026-08-27
 
 **Not every level gets a worktree of its own — the shared model is the one Andrew
 means, and it is what the code already does.** A dispatcher's children each get a
@@ -383,14 +424,12 @@ in: a per-spawn escape hatch asked for one child at a time, not an isolated-by-d
 rebuild. Shared is still the default for everyone below the top. — confirmed 2026-08-14,
 the escape hatch built 2026-08-23
 
-**A lead's job is to orchestrate other agents and stuff.** Review is coordinated by it.
-— confirmed 2026-08-09
-
-**A lead can spawn discovery or scout or research agents or whatever, to improve its
-decisions and actions.** — confirmed 2026-08-09
-
-**The lead prompt is mostly good already.** It is the old orchestrator prompt, carried
-through the split. — confirmed 2026-08-09
+**A lead owns the requested outcome and may perform every ordinary part of it.** It may
+investigate, read and edit the codebase, design, implement, verify, integrate, communicate
+with Andrew and land the work within its authority. It delegates only when independence,
+specialization, useful parallelism, extensive research, planning, review or genuinely
+separable scale earns the coordination cost. Review is always assigned to a fresh agent;
+other delegation is optional. — confirmed 2026-08-27
 
 **Dispatcher and lead must be clearly differentiated, and some mechanism other than the
 prompt must make that true as well.** The mechanism is the `is_top` stamp, which decides
@@ -402,9 +441,8 @@ half 2026-08-23
 
 **`orchestrator` is retired as a role name.** It survives only as a config alias for
 `lead`, resolving all the way through — so a stale `--role orchestrator` gets a lead
-rather than falling through to the fallback role, whose template holds no `spawn` and so
-cannot delegate at all. — confirmed 2026-08-14, the wording read off the capability
-templates 2026-08-23
+rather than being refused as unknown. — confirmed 2026-08-14, vocabulary resolution
+confirmed 2026-08-27
 
 ### Capabilities and isolation
 
@@ -527,28 +565,31 @@ hand. — confirmed 2026-08-23, against the merged code
 a plan lands its work is under Commands, in the entries on pushing, merging and cleanup. The
 detail behind all of it lives in `design/PLANS-AND-STEPS.md`.*
 
-**Plans, steps and templates — three words, and no others were available.** A **step** is
-the unit: what an agent owns, what gets ticked, what carries a try count and notes. A **plan**
-is a group of steps with an identity of its own, a worktree, a changelog and a kept record —
-a DAG, semi-structured, changeable at any time, and interpreted by an agent rather than
-executed by anything; there is no workflow engine around it. A **template** is a preconfigured
-plan in the ordinary sense of the word: a starting point that is copied and then edited as the
-job needs, with nothing linking the copy back to it. `task` was taken — it is already the
-agent's own task — and so was `preset`, which is already prompt text injected at spawn. —
-confirmed 2026-08-18
+**Plans, steps, templates and change records are distinct.** A **step** is the unit of
+planned work: what one agent owns, what gets progress and evidence, and what carries a try
+count and notes. A **plan** is the evolving DAG for one shaped change, with an identity,
+worktree, changelog and kept record. It is semi-structured, changeable and interpreted by an
+agent rather than executed by anything. A **template** is a copied starting plan with no
+live link back to its source. A **change record** is the durable landing record shared by
+direct and shaped work: path, task owner, intent or approved contract, solution, evidence,
+independent review, human-only checks, PR/head identity, landing approval and final outcome.
+A direct change has a change record when it heads toward a PR and no plan; a shaped change
+attaches its plan to the same record. Research or discussion creates neither until it
+becomes landing work. — confirmed 2026-08-27
 
-**Only the worktree's owner writes to a plan's shape.** That is the lead of the worktree, or
-the sole worker standing in as one where there is no lead — standing in for this and nothing
-else, since planning the work you were given is how the task is carried rather than work you
-took on. Shape is the steps, their order, their owners, the gates and the deps. A child that
-wants any of it changed asks its parent and does not edit the file itself. One writer is what
-makes a file that is edited by hand safe, and it is the only thing that does. — confirmed
-2026-08-18
+**A shaped plan has one accountable task owner and may grant bounded shape ownership to a
+planner.** The first task-owning agent creates the lightweight record and remains
+accountable for the outcome. A planning specialist may temporarily own formal construction
+and challenge the proposed solution. It expands the same plan in place, then returns
+ownership. A fresh main agent after approval is optional and requires a concrete continuity,
+capability, independence or scale reason. Ordinary step owners update their own progress and
+evidence; material reshaping returns to the current plan owner. Shape writes remain
+serialized through the plan's single write path. — confirmed 2026-08-27
 
 **Ticking a step is not a shape edit.** Any agent ticks the step it did, and is trusted to
-tick that one and no other. An agent that reports back without ticking leaves the tick to the
-lead, which does it on the report — or, where the step is not actually done, does something
-else about it instead. — confirmed 2026-08-18
+tick that one and no other. An agent that reports back without ticking leaves the decision
+to the current plan owner, which closes it from the report or leaves it open when the outcome
+is not complete. — confirmed 2026-08-27
 
 **A dispatcher is never involved in a plan.** It does not plan one, own one, tick one or read
 one. It relays work and orchestrates the creation of agents and worktrees, which is the same
@@ -644,34 +685,30 @@ later.) — confirmed 2026-08-09
 ### Commands
 
 **`sb delegate` works out where a spawn lands, and `--isolation` is the one flag that
-overrides it.** A dispatcher's spawn gets a space and a worktree of its own whatever role
-it is given — the code branches on the `is_top` stamp, not on the role. Below the top the
-default is still a tab in the caller's own space with no flag passed at all, and
-`--isolation own` is the one way a caller asks for something else. What a dispatcher hands
-out is a lead or a single worker, and it chooses: a worker when one agent can carry the
-whole thing to done, a lead otherwise and whenever it is unsure. A worker it hands out
-gets exactly the same setup and environment a lead would have got — its own space, its own
-worktree, all of it — and the only difference is the role it runs as, which now also means
-the capability set that role's template seeds. — confirmed
-2026-08-09, lead-or-worker 2026-08-15, superseding the 2026-08-14 rule that a dispatcher
-hands out a lead every time; `--isolation` and the capability half 2026-08-23
+overrides it.** A dispatcher's spawn gets a space and worktree of its own whatever role it
+is given — the code branches on the `is_top` stamp, not on the role. Below the top the
+default is a tab in the caller's space, and `--isolation own` asks for a separate worktree.
+A dispatcher chooses a worker for a clearly bounded outcome and a lead for uncertain shape,
+planning or broader ownership, but neither choice decides whether children will be spawned.
+Both receive the same top-level workspace setup; their role templates differ in authority.
+— confirmed 2026-08-27
 
 **The lead handles cleanup itself, and it should do this aggressively** — probably
 literally every agent that is done. Cleaning up a lead always cleans its children. What
 stays open below a dispatcher is still decided by the person watching the board, and never
 by the dispatcher sweeping on its own judgement — what changes is that the dispatcher
 carries that decision out. It closes children when Andrew tells it to, and when a child
-reports its task fully done it may ask him to approve closing it. The plans plugin can
-override that ask: where a plan is running, its merge gate is the one approval and cleanup
-follows it, so a finished child is not a separate ask. The automatic worktree sweep is not
-an exception to that and not a judgement anybody is making: it closes whole workspaces
+reports its task fully done it may ask him to approve closing it. For landing work, cleanup
+follows the recorded landing approval and does not create another routine gate, so a
+finished task owner is not a separate ask. The automatic worktree sweep is not an exception
+to that and not a judgement anybody is making: it closes whole workspaces
 rather than agents, it only reaches one where every agent has already finished, and an
 agent still working or blocked holds its worktree open. The agent rows under a workspace
 it takes go with the workspace, which is that same whole-workspace act and not a decision
 about any agent. — confirmed 2026-08-09, the dispatcher half 2026-08-15, superseding the
 2026-08-14 wording that left closing below a dispatcher entirely off it; the sweep's place
-in it 2026-08-16 and its agent rows 2026-08-25; the plans plugin's merge-gate override of
-the separate close-approval 2026-08-17
+in it 2026-08-16 and its agent rows 2026-08-25; landing cleanup authority updated
+2026-08-27
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 parent, which then decides whether to close it. It always uses the **when idle**
@@ -782,18 +819,13 @@ be brought up again.** — confirmed 2026-08-09
 
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
-**Pushing and merging are decided by the parent, which may or may not be a human.** An
-agent can push if its parent says so; a lead can push if the dispatcher says so;
-any agent can merge if Andrew tells some dispatcher and it passes that instruction
-down. So it is never merge without asking your parent. The default shape of shipping work
-is branch named for the workspace, push, open the PR, and put its URL in the summary. The
-plans plugin can override this: where a plan is running, its merge gate decides pushing and
-merging — the agent asks once, and once approved merges and cleans up without asking again.
-`sb merge` is not the act this entry governs: it folds a child's branch into the caller's
-own branch and reaches no push, no `main` and no pull request.
-— confirmed 2026-08-12, superseding the 2026-08-09 rule that merging needed Andrew's own
-explicit approval and that no agent merges without asking first; the plans plugin's
-merge-gate override 2026-08-17
+**Pushing and PR landing follow the change record's authority.** The task owner may push and
+open the PR after implementation, applicable verification and fresh review are complete.
+Andrew's landing approval covers the current reviewed head. Landing compares that head and
+its evidence once, then merges directly when they still apply; it does not automatically
+repeat tests, builds, reviews or manual checks. The default branch/workspace shape remains
+unchanged. `sb merge` is a separate act: it folds an isolated child's branch into the
+caller's branch and reaches no push, `main` or pull request. — confirmed 2026-08-27
 
 **`sb workspace new` is deleted, provided the other commands cover it fully and it is
 clear how to use them.** — confirmed 2026-08-09
@@ -834,11 +866,17 @@ and stays there for a person to act on; nothing speaks to the agent about it any
 stays: the Stop hook, which catches the ordinary silent finish at the moment it happens,
 and the loop itself, which still confirms a dead pane and tells its parent. — confirmed
 2026-08-25, superseding the 2026-08-09 rule that a reconciler pings an idle agent that is
-neither blocked nor done
+neither blocked nor done. This rejection remains for ordinary silent agents; it does not
+include the one-time 30-minute reminder earned by an explicit `sb waiting` declaration. —
+narrowed 2026-08-28
 
-**`sb ask`.** No agent waits on another agent. — confirmed 2026-08-09
+**`sb ask` as a synchronous request.** Agent messages and reply tracking remain
+asynchronous; nobody blocks another agent's turn waiting for an immediate response. —
+confirmed 2026-08-27
 
-**`sb wait`.** It has no reason to exist. — confirmed 2026-08-09
+**Polling as waiting.** Intentional waiting is recorded once and woken by the relevant
+background, any-child or all-child condition. Repeated status or inbox turns are not the
+waiting mechanism. — confirmed 2026-08-27
 
 **`sb interrupt` as a verb.** Interrupting is a delivery mode of `tell`. — confirmed
 2026-08-09

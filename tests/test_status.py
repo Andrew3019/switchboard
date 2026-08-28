@@ -432,6 +432,60 @@ class StatusTest(unittest.TestCase):
         self.assertFalse(a.needs_human)
         self.assertEqual(a.idle_excuse, "waiting on a reply")
 
+    def test_an_explicit_wait_is_visible_and_not_stalled(self):
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_wait(self.db, "w1", "background")
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", "idle")]),
+            now=self.past_the_floor()))["w1"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.idle_excuse, "waiting for background work")
+
+    def test_an_explicit_wait_eventually_stops_hiding_a_stall(self):
+        """Waiting explains a quiet turn, not permanent silence. If its native task or
+        child never produces a wake, the stored timestamp eventually returns the row to
+        the ordinary needs-human path without status mutating the wait itself."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_wait(self.db, "w1", "background")
+        wait = store.wait_for(self.db, "w1")
+        h = FakeHerdr([alive("w1", "idle")])
+
+        fresh = self.by_name(status.collect(
+            self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE - 1))["w1"]
+        self.assertFalse(fresh.stalled)
+        self.assertFalse(fresh.wait_expired)
+        self.assertEqual(fresh.idle_excuse, "waiting for background work")
+
+        stale = self.by_name(status.collect(
+            self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE + 1))["w1"]
+        self.assertTrue(stale.stalled)
+        self.assertTrue(stale.needs_human)
+        self.assertTrue(stale.wait_expired)
+        self.assertIsNone(stale.idle_excuse)
+        self.assertIsNotNone(store.wait_for(self.db, "w1"), "status is read-only")
+
+    def test_only_a_live_unexcused_waiter_earns_the_expiry_nudge(self):
+        """The timestamp alone is not a work list. A dead waiter cannot answer a prompt,
+        and a parent with a visibly live cohort is still waiting on known work; repeatedly
+        reconciling either would revive the retired broad stalled-agent nudge."""
+        store.create_agent(self.db, name="dead", role="worker", session_id="s1")
+        store.set_wait(self.db, "dead", "background")
+        store.create_agent(self.db, name="lead", role="lead", session_id="s2")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           session_id="s3")
+        store.set_wait(self.db, "lead", "all", ["kid"])
+        expired = store.now() - int(status.WAIT_EXCUSE_GRACE) - 1
+        self.db.execute("UPDATE agents SET wait_started_at=? WHERE name IN ('dead','lead')",
+                        (expired,))
+        self.db.commit()
+
+        agents = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("lead", "idle"), alive("kid", "working")]),
+            now=store.now(), reap=False))
+        self.assertFalse(agents["dead"].wait_expired)
+        self.assertFalse(agents["lead"].wait_expired)
+        self.assertEqual(agents["lead"].idle_excuse, "waiting on children")
+
     def test_the_answer_ends_the_excuse(self):
         """It excuses a WAIT and not a name: anything back from the agent it asked spends
         the question, and the row is a stall again like any other."""
@@ -1411,11 +1465,12 @@ class StatusCliTest(unittest.TestCase):
         from switchboard.cli import build_parser
         sample = {                                  # a minimal legal argv per verb
             "start": [], "delegate": ["do a thing"],
-            "tell": ["w1", "hi"], "inbox": [], "done": ["finished"], "block": ["why"],
+            "tell": ["w1", "hi"], "inbox": [], "waiting": [],
+            "done": ["finished"], "block": ["why"],
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             # `models`' two siblings. The role name is optional, so a bare listing is the
             # minimal legal argv for both.
-            "roles": [], "capabilities": [],
+            "roles": [], "capabilities": [], "instructions": [],
             "cleanup": [], "workspace": ["list"], "restore": ["w1"],
             "grant": ["w1", "spawn"],
             "who-holds": ["spawn"],
@@ -1607,15 +1662,13 @@ class ReconcileReapsTest(unittest.TestCase):
         self.assertEqual(self.state_of("w1"), "working")
 
 
-class ReconcileDoesNotNudgeTest(unittest.TestCase):
-    """The nudge is gone, and this is what says so.
+class ReconcileWaitNudgeTest(unittest.TestCase):
+    """Ordinary stalls stay passive; an expired explicit wait earns one targeted nudge.
 
     `sb reconcile` used to end with `Broker.reconcile`, which prompted every agent whose
-    turn had ended without `sb done` or `sb block`. DESIGN-TRUTH now rules out "The
-    reconciler's nudge to an agent that went quiet." — it fired five times in the fleet's
-    whole history and never once changed an outcome. What is left is the reap, which this fleet gives
-    nothing to do — one live, idle, silent agent, no mail, no dead pane. Before the removal
-    that agent was the nudge's exact target; now nothing in the fleet speaks to it.
+    turn had ended without `sb done` or `sb block`. That broad nudge remains gone. The
+    30-minute wait reminder is different by construction: the agent opted into a runtime
+    wait, its timestamp is the due time and clearing that declaration makes it once-only.
     """
 
     def setUp(self):
@@ -1665,6 +1718,32 @@ class ReconcileDoesNotNudgeTest(unittest.TestCase):
         self.assertTrue({a.name for a in snap.agents if a.stalled} == {"quiet"})
         self.assertEqual([e for e in db.execute(
             "SELECT kind FROM events WHERE kind LIKE 'reconcile_ping%'")], [])
+
+    def test_an_expired_explicit_wait_is_pinged_once_and_cleared(self):
+        db = store.connect(self.repo)
+        store.set_wait(db, "quiet", "background")
+        db.execute("UPDATE agents SET wait_started_at=? WHERE name='quiet'",
+                   (store.now() - int(status.WAIT_EXCUSE_GRACE) - 1,))
+        db.commit()
+        db.close()
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli_mod.main(["reconcile"]), 0, err.getvalue())
+        self.assertEqual([n for n, _ in self.herdr.prompts], ["quiet"])
+        self.assertIn("Run `sb status`", self.herdr.prompts[0][1])
+
+        db = store.connect(self.repo)
+        self.addCleanup(db.close)
+        self.assertIsNone(store.wait_for(db, "quiet"))
+        self.assertEqual([e["kind"] for e in store.recent_events(db, agent="quiet")
+                          if e["kind"].startswith("wait_expiry")],
+                         ["wait_expiry_pinged"])
+
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli_mod.main(["reconcile"]), 0)
+        self.assertEqual(len(self.herdr.prompts), 1)
 
 
 class ArchivedTest(unittest.TestCase):

@@ -144,7 +144,7 @@ class RidesTheHoldbackTest(SignalFixture, unittest.TestCase):
 
     def test_a_burst_of_grants_rings_the_recipient_once(self):
         """#168 on another channel. Two grants to one idle worker used to be two
-        payload-free doorbells saying the same sentence twice."""
+        separate prompts announcing the same durable backlog twice."""
         self.b.grant(self.w1, CAP_SPAWN, me=self.lead)
         self.b.grant(self.w1, CAP_FORK, me=self.topa, delegable=True)
         self.assertEqual(self.rings(), [])                 # not one ring in the burst

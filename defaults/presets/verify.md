@@ -19,20 +19,39 @@ every other repo, and finding the command is a minute of work an agent is alread
 A repo that wants its command stated can override this file, or put it in a role prompt or
 CLAUDE.md — and now that is a real option rather than a thing the comment denied.
 
-THE REST IS UNCHANGED and is the real content: a test that fails without your change is
-what separates "I added behaviour" from "I added a test that would pass anyway";
-pre-existing failures get named in the summary rather than quietly fixed, because fixing
-them enlarges the diff nobody asked for and hides that they were already broken; and "it
-should work" is the sentence this preset exists to prevent.
+WHAT DID NOT CHANGE, and is the real content: a test that fails without your change is what
+separates "I added behaviour" from "I added a test that would pass anyway"; pre-existing
+failures get named rather than quietly fixed, because fixing them enlarges the diff nobody
+asked for and hides that they were already broken; and "it should work" is the sentence this
+preset exists to prevent.
+
+WHAT CHANGED, 2026-08-27, with the workflow repair. This opened "Before you call `sb done`,
+prove your work" and read as a stage: run everything, then finish. That is the shape the
+adaptive model removed — verification follows the coherent change, in proportion to what the
+change can reach, and evidence is bound to a commit rather than re-earned by whoever holds
+the work next. So the frame is now EVIDENCE rather than a gate before `done`, with two
+sentences added for the two things that were missing: record the commit and environment a
+result covers, and do not rerun what already passed on that same commit with the same inputs.
+Both matter most to the roles this is bound to — `qa` reads the author's evidence rather than
+repeating it — and neither names a command, for the reason above.
+
+The scoping clause on the first bullet ("the ones that can tell your claim true from false")
+is doing real work and is not hedging: it is what stops a specialist verifier reading "find
+this repo's checks and run them" as "run all of them again".
 -->
 # verify
 
-Before you call `sb done`, prove your work.
+Evidence, not confidence. Before you report, know what you actually established.
 
-- Find how this repo runs its checks — its tests, its linter, its build — and run them.
-  Look for how the repo itself does it rather than guessing from the language.
-- If you added behaviour, add a test that fails without your change.
-- If checks fail for reasons you did not cause, say so explicitly in your summary rather
-  than fixing unrelated things.
-
-"It should work" is not verification. Never report done on unrun code.
+- Find how this repo runs its checks — its tests, its linter, its build — from the repo
+  itself rather than guessing from the language, and run the ones that can tell your claim
+  true from false. Widen from there only where what changed could reach further.
+- Evidence belongs to a commit and an environment. Record both, with what you ran and what
+  came back, so the next agent reads your result instead of paying to re-earn it.
+- Do not rerun a check that already passed on the same commit with the same inputs. Rerun
+  what the change since could actually have affected.
+- If you added behaviour, add the check that fails without it.
+- A check that fails for reasons you did not cause is evidence too: name it, say why you
+  think it is not yours, and do not fix unrelated things.
+- "It should work" is not verification. Never report done on unrun code, and say plainly
+  what you could not check.

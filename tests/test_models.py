@@ -102,11 +102,35 @@ class ModelsTest(unittest.TestCase):
         self.assertIn("midnight", t)
         self.assertEqual(t.resolve("midnight").effort, "max")
 
-    def test_unknown_tier_passes_through_as_a_model_id(self):
-        """The escape hatch: pin a model without editing config first."""
-        spec = self.load().resolve("claude-fable-5")
+    def test_a_raw_model_id_requires_the_explicit_selector(self):
+        """The escape hatch stays available without turning every typo into a model id."""
+        spec = self.load().resolve("raw:claude-fable-5")
         self.assertEqual(spec.model, "claude-fable-5")
         self.assertEqual(spec.cli_args(), ["--model", "claude-fable-5"])
+
+    def test_an_unknown_tier_is_actionable(self):
+        with self.assertRaises(models.ModelConfigError) as cm:
+            self.load().resolve("gpt-5.6-slo")
+        self.assertIn("gpt-5.6-sol", str(cm.exception))
+        self.assertIn("sb models", str(cm.exception))
+        self.assertIn("raw:", str(cm.exception))
+
+    def test_a_legacy_stored_raw_id_keeps_its_pre_migration_meaning(self):
+        spec = self.load().resolve_stored("claude-fable-5")
+        self.assertEqual(spec.tier, "raw:claude-fable-5")
+        self.assertEqual(spec.cli_args(), ["--model", "claude-fable-5"])
+
+    def test_case_and_punctuation_variants_resolve_when_unique(self):
+        self.assertEqual(self.load().resolve("GPT 5.6 SOL").tier, "gpt-5.6-sol")
+
+    def test_a_normalized_collision_requires_an_exact_name(self):
+        self.write_repo('[tiers."one-two"]\nmodel = "sonnet"\n'
+                        '[tiers.one_two]\nmodel = "opus"\n')
+        with self.assertRaises(models.ModelConfigError) as cm:
+            self.load().resolve("one two")
+        self.assertIn("ambiguous", str(cm.exception))
+        self.assertIn("one-two", str(cm.exception))
+        self.assertIn("one_two", str(cm.exception))
 
     # -- layering ---------------------------------------------------------
 
@@ -243,9 +267,9 @@ class RoleModelTest(unittest.TestCase):
         spec = roles.get(r, "researcher").spec()      # researcher is the "cheap" tier
         self.assertEqual(spec.cli_args(), ["--model", "sonnet", "--effort", "medium"])
 
-    def test_a_role_can_pin_a_model_id_directly(self):
+    def test_a_role_can_use_the_explicit_raw_model_selector(self):
         (self.repo / ".switchboard" / "roles.toml").write_text(
-            '[odd]\nmodel = "claude-fable-5"\n')
+            '[odd]\nmodel = "raw:claude-fable-5"\n')
         r = roles.load(self.repo)
         self.assertEqual(r["odd"].spec().model, "claude-fable-5")
 

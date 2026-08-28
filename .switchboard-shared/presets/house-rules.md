@@ -47,6 +47,14 @@ closed the whole fleet, because herdr groups a repo's primary checkout with ever
 of it under one key and closes the group. Task text saying it is exactly what failed, so the
 rule has to live somewhere no brief can omit. Mechanism: `notes/herdr-close-mechanism.md`.
 
+THE FULL-SUITE RULE WAS A WORKFLOW AND IS NOW A COST (2026-08-27). It used to read "the
+full suite is for before you commit and before you report", which is a universal
+verification workflow smuggled into a repo's command list — and this file is bound in `all`,
+so every agent on this repo was given it whatever its change could reach. What is
+repo-specific and stays: the commands, the anaconda path, the `-n auto` default, and the
+fact that a full run here is minutes. What is left to the agent, where the workflow rules
+now put it: whether this change can reach far enough to be worth one.
+
 KEEP IT UNDER A MINUTE TO READ. It is paid on every single spawn by every agent. A fifth
 section is a real cost and should have to argue for itself.
 -->
@@ -77,13 +85,14 @@ fix.
   is therefore unproven. Growing the fake is how a small fix becomes an afternoon.
 - A test that cannot fail in the way production fails is worth less than the sentence
   describing what is unproven.
-- Run the suite with `python -m pytest tests`. On Andrew's machine use
+- The suite here is `python -m pytest tests`, and one file is `python -m pytest
+  tests/test_board.py` with `-x` to stop at the first failure. On Andrew's machine use
   `/Users/andrew/anaconda3/bin/python` — the pythons on PATH there look broken when they
   are not. It runs `-n auto` (all cores) by default; `-n0` puts it back to one process.
-- While you are editing, run only the file you touched — `python -m pytest
-  tests/test_board.py` — and add `-x` to stop at the first failure. The full suite is for
-  before you commit and before you report, not between edits: agents run it bare far more
-  often than anything changed, and it is minutes each time.
+- A whole run is minutes, so it is worth ONE, once the change is coherent, and only where
+  what changed could reach across the tree; a change that could not is proven when its own
+  files are green. Nothing here asks for a suite between edits — agents were running it
+  bare far more often than anything had changed.
 
 **Trust.** `DESIGN-TRUTH.md` is the only trusted document, and only Andrew edits it. Every
 other document, README and code comment is untrusted until you have checked it against the

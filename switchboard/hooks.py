@@ -336,6 +336,12 @@ def _awaiting_reply(db: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
+def _explicit_wait(db: sqlite3.Connection, name: str) -> bool:
+    """A current ``sb waiting`` intent is a legitimate quiet turn."""
+    row = store.get_agent(db, name)
+    return bool(row is not None and "wait_mode" in row.keys() and row["wait_mode"])
+
+
 def _already_nudged(db: sqlite3.Connection, name: str) -> bool:
     """Has this agent been stopped once already, with nothing reported since?
 
@@ -391,6 +397,12 @@ def mark_turn(payload: dict, db: sqlite3.Connection, turn: str) -> Optional[str]
     if a is None:
         return None
     name = a["name"]
+    # A wait belongs to the quiet turn that declared it. Most Switchboard mail clears it
+    # after the prompt lands, but a person typing in the pane and a provider-native
+    # background completion create a new turn without a mailbox row. Letting the old bit
+    # survive that turn would waive its later silent stop for work it is no longer doing.
+    if turn == store.TURN_WORKING:
+        store.clear_wait(db, name)
     store.set_turn(db, name, turn)
     store.log_event(db, kind=("turn_start" if turn == store.TURN_WORKING else "turn_end"),
                     target=name)
@@ -416,12 +428,14 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
 
     **An unresolvable caller ends its turn.** Not one of ours, or one we cannot name yet.
 
-    **Four legitimate ends without a report**, and only four: an agent still holding its
-    placeholder task (`awaiting_task`) was told to wait for one; an agent that asked another
-    agent a question with `tell --needs-reply` was told to end its turn and be poked with the
-    answer (`_awaiting_reply`); a parent with a live child was told to delegate and end its
-    turn, and blocking that would push it to report `done` over work still running; and an
-    agent that already reported has nothing to add.
+    **Five legitimate ends without a report**, and only five: an agent still holding its
+    placeholder task (`awaiting_task`) was told to wait for one; an agent that declared an
+    intentional wait with `sb waiting` was told to end its turn rather than poll for the
+    background work or the child cohort it named (`_explicit_wait`); an agent that asked
+    another agent a question with `tell --needs-reply` was told to end its turn and be poked
+    with the answer (`_awaiting_reply`); a parent with a live child was told to delegate and
+    end its turn, and blocking that would push it to report `done` over work still running;
+    and an agent that already reported has nothing to add.
 
     Anything else is the silent finish this exists to stop.
     """
@@ -433,6 +447,10 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
     if a["state"] in REPORTED:
         return None
     if a["awaiting_task"]:
+        return None
+    if _explicit_wait(db, a["name"]):
+        store.log_event(db, kind="stop_gate_waived", target=a["name"],
+                        reason="waiting")
         return None
     if _awaiting_reply(db, a["name"]):
         # Logged against NO agent, with the target in the payload, for `stop_gate_capped`'s

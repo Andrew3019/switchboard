@@ -22,14 +22,15 @@ what happens when it disagrees with the files; whether concurrent writers take a
 what that costs a worktree that only wanted to read. Those are yours to decide and to put in
 front of Andrew.
 
-**Recorded departure, and it is not optional.** Your `change-approval` step's definition
-says to present the two sections in chat and then `sb block`. Do not. There is nobody here
-to answer a block. Instead: write the two-section contract to
-`.switchboard/evals/case-3-contract.md`, then `sb tell parent "contract at
-.switchboard/evals/case-3-contract.md"` and stop.
+**Recorded departure, and it is not optional.** Nobody here presents the contract to a
+human: your instruction says approval is the task owner's to obtain, and the task owner in
+this exercise is the harness. So write the two-section contract to
+`.switchboard/evals/case-3-contract.md` instead, then finish the way your instruction says
+to — clear the plan's `planner` field, `sb tell parent "contract at
+.switchboard/evals/case-3-contract.md"`, and `sb done`.
 
-Do not spawn a main agent, and do not hand off. If you put up a plan reviewer of your own,
-that is yours to decide; it counts as part of the plan you are writing either way.
+Do not spawn a main agent. If you put up a plan reviewer of your own, that is yours to
+decide; it counts as part of the plan you are writing either way.
 
 ## Expected signal — never handed to the planner
 

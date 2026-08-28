@@ -22,14 +22,46 @@ is more than the verbs ever covered.
 The records
 -----------
 
-    plan  {"id": "p-1", "workspace": "task-guardrails-build", "workspace_from": "agent",
-           "checkout": "/…/worktrees/switchboard/task-guardrails-build", "title": "…",
-           "display": "…", "next_step": 4, "steps": [...], "changelog": [...],
-           "notes": [...], "created_by": "lead", "created_at": 1754570000}
+    plan   {"id": "p-1", "kind": "plan", "workspace": "task-guardrails-build",
+            "workspace_from": "agent", "checkout": "/…/…", "title": "…", "display": "…",
+            "next_step": 4, "steps": [...], "changelog": [...], "notes": [...],
+            "change": {...}, "created_by": "lead", "created_at": 1754570000}
 
-    step  {"id": "step-1", "name": "…", "display": null, "def": null, "obliged_by": null,
-           "progress": "open", "why": null, "gate": null, "output": null, "owner": null,
-           "tries": 1, "notes": [], "deps": [], "root": false, "checkpoints": []}
+    step   {"id": "step-1", "name": "…", "display": null, "def": null, "obliged_by": null,
+            "progress": "open", "why": null, "gate": null, "output": null, "owner": null,
+            "tries": 1, "notes": [], "deps": [], "root": false, "checkpoints": []}
+
+    record {"id": "p-2", "kind": "record", "workspace": "…", "checkout": "…", "title": "…",
+            "display": "…", "changelog": [...], "notes": [...], "change": {...},
+            "created_by": "w1", "created_at": …}
+
+TWO DOCUMENTS, ONE STORE. A `plan` is the step graph this file has always held; a `record`
+is a change record with no plan — the landing facts a DIRECT change accumulates. Both share
+the `p-<n>` ids, the file-per-plan storage, the locking, the crash-safety and the migration;
+what a record does not have is `steps`, and nothing that reads the step graph touches it.
+`kind` tells them apart, and its ABSENCE means `plan` — which is the whole of backward
+compatibility for the field: every document written before Phase 3 is a plan and reads as
+one without being rewritten.
+
+    change {"path": "direct"|"shaped", "phase": "shaping"|…|null, "request": …, "contract": …,
+            "cause": …, "solution": …, "scope"?: …, "verification": {...}, "review": {...},
+            "limitations"?: …, "baseline"?: …,
+            "human_checks": […]|"none"|null, "pr": {number, head},
+            "approval": {plan_revision, contract_digest, by, at},
+            "landing": {head, by, at, outcome, cleanup}, "handoff"?: {from, to, at}}
+
+THE CHANGE RECORD is a document-level object — never a step field, so the step schema above
+is untouched — carrying the landing lifecycle every change has whether or not a plan exists:
+the human request or approved contract, the combined change approval, the verification
+evidence and the commit it covers, the independent review and its target, the human-only
+checks, the PR head, the human's landing approval and the head it covers, and the outcome. A
+SHAPED change (a plan) is born with one at `create`; a DIRECT change gets one from `record`,
+only when landing metadata is needed. The identity-bound fields name the commit or head they
+cover — `approval` binds the plan REVISION and contract DIGEST it was approved against — so
+landing compares an identity once rather than rerunning the work, and implementation is
+presented as sanctioned only once the approval is recorded (`_change_defects`). `handoff` is
+optional and present only when a fresh main took the work over. Born sparse and rendered only
+once it holds a landing fact, so a fresh plan reads as it did before the record existed.
 
 `progress` is an OPEN VOCABULARY, exactly as `todo`'s `state` is: `open` is what `create`
 writes and `done`/`skipped` are what the lifecycle verbs will, but nothing here is an enum
@@ -205,17 +237,17 @@ traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps
 `dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
 hang. Expansion mints fresh ids from the plan's own counter, like every step in it.
 
-A definition may also OBLIGE another — `merge` obliges `merge-human-review` — and naming it
-adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
+A definition may also OBLIGE another — `create-pr` obliges `merge-human-review` — and naming
+it adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
 be skipped with a reason like any other. What it cannot be is omitted: the obligation is a
 property of the definition rather than a rule an agent remembers, so there is no way to name
-a merge step and end up without its review on the board. A skip is a state with a sentence
+a create-PR step and end up without its human checklist on the board. A skip is a state with a sentence
 beside it and a bad call can be questioned; an omission is invisible, which is enforcement in
 appearance only. An on-the-fly step called "merge the PR" obliges nothing, and that is not a
 hole — it is a word-only step, and the obligation belongs to the definition, not to the word.
 
-Every obliging step gets its OWN obliged step, and nothing is ever deduplicated: two merges
-are two diffs and therefore two reviews, whether they arrive in one act or two. A dedupe
+Every obliging step gets its OWN obliged step, and nothing is ever deduplicated: two steps
+obliging reviews are two reviewed results, whether they arrive in one act or two. A dedupe
 would let one step's obligation be satisfied by a step it has nothing to do with, which is
 the door round the obligation in a tidier coat — and a lead who thinks one review covers
 both skips the second with that as the reason, which is visible where a dedupe was not.
@@ -542,6 +574,41 @@ LIBRARY, TEMPLATES = "library", "templates"
 _ANCHORS = ("design", "build", "review", "pr", "pre-merge", "merge")
 _UNANCHORED = _ANCHORS.index("build")
 
+# THE TWO KINDS OF DOCUMENT this store holds, and the field that tells them apart. A `plan`
+# is the step graph this file has always held. A `record` is the change record: the durable
+# landing facts a change accumulates — verification, review, PR head, human approval — held
+# for a change that has NO plan, which is the ordinary direct change. Both live in the same
+# `p-<n>.json` store and share its ids, locking, crash-safety, migration and rendering; what
+# a `record` does not have is `steps`, and nothing that reads the step graph touches it.
+#
+# ABSENT MEANS PLAN, which is the whole of backward compatibility for this field: every
+# document written before it existed is a plan, and reads as one without being rewritten. A
+# `record` is the only document that carries `kind` explicitly, because it is the only one
+# that is not the thing this store started out holding.
+KIND_PLAN, KIND_RECORD = "plan", "record"
+
+# A CHANGE'S PATH: whether it was shaped (a plan was made, investigation-first) or direct (no
+# plan, a bounded change that went straight to the work). It is the change record's own field
+# and the first fact everything else about landing is read against — a direct change never
+# gets a change-approval step, a shaped one carries its approved contract. A closed pair,
+# because the PR that derives landing behaviour switches on it.
+DIRECT, SHAPED = "direct", "shaped"
+
+# THE SHAPED PLAN'S LIFECYCLE, as points a change record passes through. They DESCRIBE and
+# VALIDATE the record; they execute nothing and ban no diagnostic. `shaping` is a sparse plan
+# of investigation/design steps; `approval` is the combined solution/plan/contract sign-off;
+# `execution` is implementation sanctioned; `review` is fresh independent review owning the
+# next move; `human-review` is the PR open with only human checks left; `landing` is human
+# approval against the reviewed head; `finished` is merged and cleaned up. A direct change
+# has no plan and so no shaping/approval/execution — its record is `None` here until it opens
+# a PR. ADVISORY AND OPEN, exactly as `progress` is: written by the owner by hand, and
+# nothing here refuses or warns on a word the lifecycle does not have. The phase DESCRIBES
+# the record, the agent is the interpreter of it, and a phase this file has never heard of is
+# a job's own word rather than a defect. The closed list is here so a renderer or a later
+# check has the vocabulary — not to police the field.
+_PHASES = ("shaping", "approval", "execution", "review", "human-review", "landing",
+           "finished")
+
 # `p-1`, `P-1`, `plan-1` and a bare `1` all name the same plan; likewise `s-1`, `step-1` and
 # `1` for a step. An id is read out of a board or a spawn prompt and retyped, and being
 # strict buys nothing. The long forms are what the markdown dump renders (see `_markdown`),
@@ -601,7 +668,19 @@ def register(reg):
               reg.arg("--planner", flag=True,
                       help="you are this plan's plan writer: records you in the plan's "
                            "`planner` field, which makes the SHAPE of the plan yours "
-                           "rather than the worktree owner's"),
+                           "rather than the worktree owner's until you clear it again"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "record", record, audience="both",
+        help="start a change record for a DIRECT change — the landing facts, and no plan; "
+             "made only when a change needs somewhere to keep verification, review, PR and "
+             "approval",
+        args=[reg.arg("title", repeat=True, help="what the change is"),
+              reg.arg("--display", help="the record's board name — a display version of the "
+                                        "title, one line, required"),
+              reg.arg("--request", help="the human ask this change answers, carried to the "
+                                        "PR"),
+              reg.arg("--note", repeat=True, help="a note on the record; repeat for more"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "list", ls, audience="both", help="the plans on this worktree",
@@ -617,9 +696,13 @@ def register(reg):
                            "reads it — a PR comment. Walked, not templated: it survives "
                            "the schema changing")])
     reg.command(
+        # A DIRECT change reaches its pull request through this verb and no other, so the
+        # help says "or change record" outright: a caller holding one has no plan, and help
+        # that names only plans reads as a verb that is not for it.
         "comment", comment, audience="both",
-        help="create or update one plan's marked PR comment by its exact numeric id",
-        args=[reg.arg("plan", help="the plan to post, e.g. p-1"),
+        help="create or update one plan or change record's marked PR comment by its exact "
+             "numeric id",
+        args=[reg.arg("plan", help="the plan or change record to post, e.g. p-1"),
               reg.arg("--pr", help="the pull request number, required")])
     reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
@@ -714,13 +797,89 @@ Plan-making — read this when a job comes up, not before.
 
 WHEN A PLAN EXISTS
 
-  A plan exists exactly when the work is heading for a change that will land. Small is not
-  exempt: a one-line docs change bound for a PR gets a plan, only a short one.
+  A plan exists when the work is heading for a change that will land AND that change was
+  worth SHAPING first: an investigation-first or design-first job, carried by one evolving
+  plan whose approval precedes the implementation. That is the shaped path, and the rest of
+  this guide is about it.
 
-  Everything else runs without one — investigation, questions, scouting, review-only work,
-  anything a single agent answers and reports, and everything a dispatcher does.
-  Investigation PRODUCES a plan rather than living inside one; it is a step only when it is
-  one piece of an already-shaped job.
+  A DIRECT change is heading for a landing change too, and it gets NO plan. A bounded fix
+  that goes straight to the work makes no plan and no change approval — no ceremony because
+  the plugin exists. When it needs somewhere to keep its landing facts — the verification,
+  the review, the PR, the human's approval — it makes a CHANGE RECORD with `sb plugin plans
+  record`, and only then. Small is the direct path and not a short plan: a one-line docs
+  change is a record if it needs one and nothing at all if it does not.
+
+  Everything else runs without either — investigation, questions, scouting, review-only
+  work, anything a single agent answers and reports, and everything a dispatcher does.
+  Investigation that becomes a change PRODUCES one of the two rather than living inside it: a
+  shaped plan where the work needed shaping, a direct record where it did not.
+
+THE CHANGE RECORD, WHICH BOTH PATHS HAVE
+
+  Landing has facts, and they are the same facts whether or not the work was shaped: what
+  was asked for, what was wrong and what was done about it, what was verified and on which
+  commit, who reviewed it and what they found, what a human still has to check, which PR
+  and which head, who approved the landing and against which head, and how it ended. Those
+  live on the change record — one object, `change`, on the document. A shaped plan is born
+  with one at `create`; a direct change gets one from `record`, and only when it needs it.
+
+  It is EDITED BY HAND, like every other field on a plan. The only things a verb writes are
+  the path, the opening `phase` a shaped plan is born in (`shaping`), and `request` when
+  `record --request` seeds it; there is no schema to satisfy past that — put what the job
+  needs on it. `sb plugin plans show` draws every field that is filled, `--markdown` puts
+  them on the pull request, and `validate` reports two things and refuses neither: a shaped
+  record at or past `execution` whose combined approval does not name both the plan revision
+  and the contract digest, and a record at or past `landing` with no PR on it. Both are the
+  same defect in two places — a record claiming to be further along than what it can point at.
+
+  The fields, and who fills each one as they reach it:
+
+    path         `direct` or `shaped`, written when the record is made. Everything else
+                 about landing reads against it: a direct change has no plan, no contract
+                 and no change approval, and never claims one.
+    phase        where the work has got to, in the job's own words. The lifecycle's are
+                 shaping, approval, execution, review, human-review, landing, finished; a
+                 direct change has none until it opens a PR. Nothing polices what work
+                 happened when — this is the record describing itself.
+    request      the human's ask, in their words, for a direct change. It is what the PR
+                 says the change is FOR.
+    contract     the approved scope, exclusions, success conditions and constraints, for a
+                 shaped one. The approved text itself stays in the approval step's `output`.
+    cause        the root cause, or the feature intent where there was no defect.
+    solution     what was actually done about it, and the scope boundaries worth naming.
+    approval     the combined change approval as an IDENTITY — `{plan_revision,
+                 contract_digest, by, at}` — recorded when Andrew approves. Shaped only.
+                 Naming what was approved is what lets review and landing compare it later
+                 instead of re-reading the wording.
+    verification `{commit, check, environment, result, at}`. Evidence belongs to the commit
+                 it ran on; that is what makes it reusable rather than re-earned.
+    review       `{commit, reviewer, findings, fixes}` — the independent review, the head it
+                 covered, what came back and what the reviewer fixed itself. The fresh
+                 reviewer returns this structure in its report; the worktree owner writes
+                 that report into the record, preserving the single-writer rule below.
+    human_checks the list of things only a person can do, or the string saying none remain.
+                 Written BEFORE the PR opens, so the human meets it the first time they read
+                 the comment.
+    pr           `{number, head}`.
+    landing      `{head, by, at, outcome, cleanup}` — the human's landing approval, the head
+                 it covers, and how the merge and the cleanup actually went.
+    scope, limitations, baseline, handoff
+                 optional, absent until used: important scope boundaries, known relevant
+                 limitations, evidenced pre-existing failures, and `{from, to, at}` when a
+                 fresh main took the work over.
+
+  WHY IT IS SEPARATE FROM THE PLAN. Review, evidence, PR rendering and landing safety are
+  things a CHANGE has, not things a plan has, and tying them to the step graph would have
+  meant either inventing a plan for every bounded fix or leaving direct work without any of
+  them. So a direct change reaches its PR, its review and its merge through this record and
+  no plan at all.
+
+  HOW IT REACHES THE PULL REQUEST. `sb plugin plans comment <record> --pr <PR>` posts the
+  record as one marked comment and edits that same comment every later time it is run —
+  the same command a shaped plan gets handed by its `create-pr` step, and on the direct
+  path the only thing that puts the record in front of a human. Run it as the PR opens,
+  and again whenever what that human should see materially changes: a reviewer's fix, the
+  reviewed head moving, a landing decision.
 
 WHO WRITES TO IT
 
@@ -732,21 +891,26 @@ WHO WRITES TO IT
   A child that wants one ASKS, with `sb tell parent`, and does not edit the file. One
   writer is what makes editing this file by hand safe, and it is the only thing that does.
 
-  UNLESS THE PLAN NAMES A PLANNER, which is the one thing that moves that writer. A plan
-  carrying a `planner` field was written by a plan writer, and THAT agent is the sole shape
-  writer for the life of the plan, whoever owns the worktree — until the fallback under
-  SPAWNING A PLANNER takes over, the one case where a gone planner hands the shape back to
-  the worktree's owner: scope, success criteria, the
-  decomposition, cross-step deps, `strategy`, the verification strategy and the termination
-  condition are all its own. What the main agent owns on such a plan is execution state —
-  progress, notes, evidence, checkpoints, outputs, and the ticks — and it records a local
-  adaptation as a note rather than by reshaping the plan. Anything material goes back to
-  the planner with `sb tell`, and it revises the plan itself.
+  UNLESS THE PLAN NAMES A PLANNER, which is the one thing that moves that writer, and it
+  moves it temporarily. A `planner` field says the SHAPE of this plan is that agent's for as
+  long as the field is there: scope, success criteria, the decomposition, cross-step deps,
+  `strategy`, the verification strategy and the termination condition. Execution state —
+  progress, notes, evidence, checkpoints, outputs and the ticks — never moves with it, and
+  the agents doing the work record a local adaptation as a note rather than by reshaping the
+  plan.
 
-  A plan with no `planner` is the ordinary case and the rule above it is the whole of it.
-  The field is written by `create --planner`, which records the calling agent; the plan
-  writer's own instruction is `sb plugin plans planner`, and the vocabulary it plans
-  against is `sb plugin plans catalog`.
+  THE FIELD IS THE HANDOVER, and each half is written by whoever is giving something up. You
+  write `"planner": "<its exact agent name>"` into the plan file when you hand the shape to a
+  plan writer; it clears the field, with a `note` saying so, when it hands the shape back.
+  (`create --planner` writes it too, for a planner creating a plan from nothing — not the
+  ordinary case, since the plan exists before the planner does.) An empty field is this
+  section's ordinary rule again, unchanged: the worktree's owner writes the shape. While the
+  field is filled, anything material goes to that agent BY NAME with `sb tell` — `parent`
+  reaches you, not it.
+
+  A plan with no `planner` is the ordinary case. The plan writer's own instruction is
+  `sb plugin plans planner`, and the vocabulary it plans against is `sb plugin plans
+  catalog`.
 
   TICKING IS NOT THAT. Any agent ticks the step it did, and is trusted to tick only that
   one. An agent that reports back without ticking leaves the tick to the lead, who does it
@@ -755,82 +919,56 @@ WHO WRITES TO IT
   A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
   it does not plan, own, tick or read one.
 
-SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
+SPAWNING A PLANNER, AND WHO RUNS THE PLAN AFTERWARDS
 
-  A planner-managed plan runs three long-lived agents — the planner may put up its own
-  short-lived reviewers besides — and the shape of the workflow is who spawns
-  whom. The LEAD — the worktree's owner — spawns BOTH the planner and the main agent, so
-  they are SIBLINGS under one durable parent. The planner is the fragile agent: it writes
-  the plan, hands off, and then stays open and inactive for the plan's life. Nesting it as
-  the main agent's parent would put that fragile agent in a load-bearing slot, and its death
-  would orphan the main and the completion handshake — which is exactly what happened once.
-  Siblings under a durable lead cost only an advisor when the planner dies, never the
-  structure. `sb plugin plans planner` is the planner's own instruction; this section is the
-  lead's side.
+  A planner is worth an agent when the shaping produced real alternatives, a wide blast
+  radius, work crossing subsystems, or verification that is expensive or uncertain — the
+  cases where a fresh reader challenging the approach changes the plan. Bounded work with an
+  obvious approach does not get one: you write the short plan yourself, and a planner added
+  to work of that size is the process this design exists to remove.
 
-  BEFORE PLANNING, SEED THE PLANNER. Spawn a fresh strong `researcher` and grant it held
-  `spawn`, so it can put up its own plan reviewer, and held `fork` only where an isolated
-  helper is actually foreseen. NEVER grant it held `write-tracked`: a planner reads and does
-  not write tracked files, and its own writes — the plan file (under the git common dir's
+  THE PLAN EXISTS BEFORE THE PLANNER DOES. You created it at shaping entry and it holds what
+  the shaping found; the planner EXPANDS that one in place and never creates a second. Hand
+  it the shape with the `planner` field above, and give it a brief carrying the job in a
+  sentence, the plan id, the files in and out of scope, the decisions already settled, and
+  what you want challenged.
+
+  SEED IT SMALL. Spawn the first-class `planner` role. Its shipped template is strong and
+  holds `spawn` so it can put up its own plan reviewer; grant `fork` only where an isolated
+  helper is actually foreseen. NEVER `write-tracked`: a planner reads and does not write
+  tracked files, and its own writes — the plan file (under the git common dir's
   `agentflow/`, via `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither
-  of them tracked.
-  The `reviewer` role it spawns carries no capabilities of its own.
-
-    - WHY THE SEED IS SMALL, and this is the sibling payoff. Under a nested topology the
-      planner also had to be handed `write-tracked` and everything else DELEGABLE-ONLY,
-      purely so it could pass those on when it spawned the main. Siblings delete that: the
-      lead spawns the main itself and seeds it directly, so nothing load-bearing routes
-      through the fragile agent. A delegable-only grant to a planner is now only ever about
-      the planner's OWN helpers.
+  of them tracked. A reviewer it spawns is seeded from that same set and so arrives without `write-tracked` too, which points the plan-review
+  boundary the right way — but it is not a wall, and nothing here should be relied on as one:
+  the plan file is not a tracked file, no write is refused anywhere, and what actually keeps
+  a plan reviewer off the plan is the instruction it is given.
 
   SEEDING IS TWO VERBS, and neither is a flag on the other. `sb delegate --role <role>` sets
   the child's ROLE TEMPLATE, which is the seed narrowed by the template/intersection rule;
   `sb grant <agent> <cap>` adds anything beyond that template. There is no `delegate --grant`.
-  So "the lead seeds the main directly" is `sb delegate --role …` PLUS `sb grant …`. A
-  capability the lead cannot supply is a precondition — record it and resolve it before the
-  spawn, not at it. The chosen main role still narrows its seed by the same
-  template/intersection rule.
+  A capability you cannot supply is a precondition — resolve it before the spawn, not at it.
 
-  WHERE THE PLAN LIVES. In the one workspace the lead, the planner and the main all share —
-  the lead's. The lead spawns the main there by default. An isolated main uses the same
-  repo-state plan by qualified id (`p-<n>/step-<n>`) while the plan stays attached to that
-  workspace.
+  IT HANDS THE SHAPE BACK AND FINISHES. The planner clears the `planner` field, tells you
+  what it wrote and what it challenged, and calls `sb done`. It does not stay open, it does
+  not take the plan to Andrew, and it does not spawn whatever runs the plan. From there the
+  shape is yours again: you put the two sections to Andrew at `change-approval`, and a
+  rejection or a later material delta comes to you — you decide whether to make the change
+  yourself or spend a fresh planning pass on it.
 
-  THE HANDOFF HAS TWO HALVES, because `sb delegate` only ever makes the caller's OWN child.
+  WHO RUNS THE PLAN IS THEN YOUR CALL, AND CONTINUING IS THE DEFAULT. You already hold the
+  problem, the decisions and the risks, so carry on as the agent that executes it. A fresh
+  main agent is an option that has to earn itself: shaping consumed most of your context,
+  execution needs capabilities or a specialism you do not have, or the execution is large
+  enough to deserve its own accountable owner. When you do use one, YOU spawn it — a fresh
+  main is your child and never the planner's, because `sb delegate` only ever makes the
+  caller's own child and a planner that finishes would orphan it — and you hand it the
+  approved design, the plan, the contract, the constraints and the open risks rather than a
+  compressed sentence. Record it on the change record's `handoff`, which exists for exactly
+  this and is absent when it did not happen.
 
-    - The planner writes the main's brief, states the capability seed, and `sb tell parent
-      "ready" --needs-reply` — then stays open and inactive. It does not `sb done` and it
-      does not spawn. The `--needs-reply` is load-bearing: with no live child to waive the
-      stop gate, an unanswered question is what keeps the planner cleanly open rather than
-      STALLED (planner.md says why). The lead spawns the main rather than answering "ready",
-      so that question stays open for the plan's life.
-    - The lead spawns the main as its own child — the planner's sibling — and grants the seed
-      directly.
-
-  The brief the planner writes carries the plan id, the files in and out of scope, THE
-  PLANNER'S EXACT AGENT NAME, the ownership boundary and the completion handshake; the
-  planner's instruction is the worked example for it, and the exact name is the load-bearing
-  item — under sibling it is the one address the main cannot derive.
-
-  OWNERSHIP, ON A PLANNER-MANAGED PLAN, is the split under UNLESS THE PLAN NAMES A PLANNER
-  above: the planner owns the SHAPE, the main owns EXECUTION STATE and records local
-  adjustments as notes. Material deltas go to the planner BY NAME (`sb tell <planner>`),
-  never to `parent`, which is the lead; local adjustments stay with the main.
-
-  THE COMPLETION HANDSHAKE, AND ITS FALLBACK. Before its final `done` the main closes any
-  helper of its own — a parent with a live child is exempt from the stall ping, so a main
-  still holding one open would never be woken to notice the planner is gone — then sends its
-  completion candidate to the planner by name with `--needs-reply`, and ends its turn. The
-  planner checks it against the termination condition and either returns missing work or
-  clears the main to finish. But the planner may be GONE — an inactive planner once died
-  silently after handoff — and a message to a dead sibling is accepted and silently written
-  off, so the main has to notice for itself. On ANY wake with no reply the main re-checks the
-  tree (`sb status`): planner alive and slow, wait again; planner gone, route the candidate to
-  `parent` — the lead, which is structural, always live, and holds the plan file with the
-  contract and the criteria. With the planner unrecoverable the plan reverts to the ordinary
-  rule above: the worktree's owner writes the shape, recorded as a plan note. `sb restore` is
-  NOT on this path — it is what failed before, and a recovery that starts with the thing that
-  broke is not one. The same route covers a material delta to a dead planner.
+  WHERE THE PLAN LIVES. In the one workspace you and the planner share — yours. An isolated
+  main uses the same repo-state plan by qualified id (`p-<n>/step-<n>`) while the plan stays
+  attached to that workspace.
 
 WHAT TO BUILD IT FROM
 
@@ -864,12 +1002,13 @@ WHAT TO BUILD IT FROM
   NAME EVERY OUTERMOST STEP, AND WHAT EACH OBLIGES ARRIVES WITH IT — the library has THREE
   steps nothing else brings, `create-pr`, `merge` and `plan-review`, and naming one never
   brings another. The two flags above land seven steps, because `create-pr` obliges the
-  change approval, which obliges the review, and `merge` obliges the human-review list.
-  `create-pr` on its own lands three of those and the plan ends at the open PR, which is
-  right for a job that ends there — and nothing downstream can tell that plan from one
+  change approval, which obliges the implementation review, AND the human-review list;
+  `merge` is the landing step itself. `create-pr` on its own lands four of those and the
+  plan ends at the open PR, which is right for a job that ends there — and nothing
+  downstream can tell that plan from one
   which meant to land and lost its merge, so the naming is where it has to be got right.
   Naming an obliged step as well gets you a SECOND copy of it: nothing is ever
-  deduplicated, since two merges are two diffs and therefore two reviews. Read `library`
+  deduplicated, since two obliging steps represent two outcomes and get two checks. Read `library`
   first and name the ones nothing else brings.
 
   A definition carries its own account of how that step is run — what it obliges, what it
@@ -877,6 +1016,13 @@ WHAT TO BUILD IT FROM
   repeated here, so that nothing here can be out of date about one. The one exception is
   the section below, and it is an exception for a reason: an EDGE between two definitions
   belongs to neither of them, so no definition can be the only place it is written down.
+
+  A STEP IS A UNIT OF WORK AND NOT AN AGENT BOUNDARY. One agent normally owns a run of
+  steps and stays with them across implementation, verification, fixes and integration;
+  another agent is worth its brief and its wait where the separation buys independence, a
+  specialism or real parallelism. Independent review is the exception that always buys it —
+  a fresh agent that did not write the change — and it is the one step whose owner is
+  decided for you.
 
   Then re-plan on what you now know, rather than executing a split you decided before you
   knew anything.
@@ -889,8 +1035,8 @@ TWO STEPS IN ONE BAND GET NO EDGE, AND `plan-review` IS WHERE YOU MEET THAT
 
   `plan-review` is the case in the shipped library, and it is OPTIONAL: like `create-pr`
   and `merge`, nothing composes it and nothing obliges it, so it is in a plan because
-  whoever shaped the plan — the plan writer, where there is one — decided the planning risk
-  earned a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach,
+  whoever holds the shape — a plan writer where there is one, otherwise you — decided the
+  planning risk earned a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach,
   a plan crossing subsystems, several agents or handoffs, verification that is expensive or
   incomplete, a large blast radius. A small linear plan does not get one and goes straight
   to Andrew at `change-approval`, which is the shape most jobs are.
@@ -902,11 +1048,12 @@ TWO STEPS IN ONE BAND GET NO EDGE, AND `plan-review` IS WHERE YOU MEET THAT
   together. Left unwired, the plan reads as one whose approval can be reached without the
   review.
 
-  The reviewer reports to the planner and touches neither the plan nor the approval; the
-  planner resolves the findings, puts a compact result in the step's `output` and ticks it.
-  A rejection at the approval goes back to that same planner, with `tries` bumped and the
-  approval reopened, and the review runs again only where the revised planning risk earns
-  it. The definition is the detail — `sb plugin plans library plan-review`.
+  The reviewer reports to whoever holds the shape and touches neither the plan nor the
+  approval; that agent resolves the findings, puts a compact result in the step's `output`
+  and ticks it. A rejection at the approval goes back to whoever holds the shape THEN —
+  which is you, unless a planner is still engaged — with `tries` bumped and the approval
+  reopened, and the review runs again only where the revised planning risk earns it. The
+  definition is the detail — `sb plugin plans library plan-review`.
 
 EVERY STEP HAS A BOARD NAME AND A DEP
 
@@ -1108,9 +1255,9 @@ def guide(ctx, args) -> Result:
 # spawn trigger already make: what is read once, when a job comes up, is not paid for on
 # every spawn — `planner.md` is NOT in `agent.md` and nothing carries it.
 #
-# All three live in the plugin so that deleting the plugin takes every planner-specific
-# surface with it. What is left is the generic `researcher` role, which is all a plan
-# writer is made of, and plan data already in the repo, which goes inert.
+# All three live in the plugin so that deleting it takes every planner-specific surface
+# with it. Its first-class role lives under this plugin's `roles/` directory for the same
+# reason; what remains is plan data already in the repo, which goes inert.
 
 # The instruction's own file. A file rather than a Python string, unlike `GUIDE`, because
 # it is the length of a role prompt and is edited far more like one: the comment block at
@@ -1427,13 +1574,18 @@ def create(ctx, args) -> Result:
     expensive one.
 
     `--planner` IS A CLAIM AND NOT AN ASSIGNMENT, which is why it takes no value. The
-    field says who owns the SHAPE of this plan for its life (`GUIDE`), so the only name
+    field says who owns the SHAPE of this plan while it is set (`GUIDE`), so the only name
     that can go in it honestly is the caller's own: a name typed for somebody else is a
-    claim about an agent that may not exist, made by an agent that is not it. A plan
-    writer sets it on itself as it creates the plan; anybody setting one up by hand writes
-    the field into the file, which is what every other field on a plan is done by anyway.
-    Absent — the ordinary case, and every plan made before this flag existed — the
-    worktree-owner rule applies unchanged.
+    claim about an agent that may not exist, made by an agent that is not it. Absent — the
+    ordinary case, and every plan made before this flag existed — the worktree-owner rule
+    applies unchanged.
+
+    IT IS NOT THE USUAL WAY THE FIELD GETS WRITTEN, since the shaped path creates the plan
+    before a planner exists: the task owner writes the name into the file when it hands the
+    shape over and the planner clears it when it hands the shape back, each half written by
+    whoever is giving something up, both of them ordinary field edits like everything else
+    on a plan. The flag covers the case this verb can honestly cover — a plan writer
+    creating a plan from nothing — and nothing here reads the field as permanent.
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
     display = str(args.display or "").strip()
@@ -1490,10 +1642,17 @@ def create(ctx, args) -> Result:
         doc, seal = _read(ctx.state_dir)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
-        plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
+        plan = {"id": f"p-{doc['next_plan']}", "kind": KIND_PLAN,
+                "workspace": where, "workspace_from": how,
                 "checkout": str(_here(ctx)), "title": title, "display": display,
                 "next_step": 1, "steps": [], "changelog": [],
                 "notes": [_note(n, who) for n in notes],
+                # A created plan IS a shaped change: `create` is shaping entry, so the change
+                # record is born here (`design`: "shaped change creates the record and sparse
+                # plan at shaping entry"). Born sparse — nothing but `path`/`phase` until a
+                # landing fact lands — and rendered only once it holds one, so a fresh plan
+                # reads exactly as it did before the record existed.
+                "change": _change(SHAPED),
                 "created_by": who, "created_at": int(time.time())}
         if getattr(args, "planner", False):
             # ABSENT AND NOT NULL when there is no planner. A plan carrying `planner: null`
@@ -1547,6 +1706,61 @@ def create(ctx, args) -> Result:
     # a freetext plan holds no link to resolve, and a plan that does holds one whose
     # catalogue has already been opened, so nothing past the write can fail.
     return _plan_result(_shown(plan, lib), path=_path(ctx, plan))
+
+
+def record(ctx, args) -> Result:
+    """A change record for a DIRECT change — the landing facts, and no plan.
+
+    The direct path is the ordinary one: a bounded change that went straight to the work,
+    with no plan to shape and no change-approval step to sit in front of it. It still has to
+    land, and landing has facts — a verification, a review, a PR head, a human's approval —
+    that the design says are a change's concern whether or not a plan exists. This verb is
+    where a direct change gets somewhere to keep them, and the whole point of Phase 3 is that
+    it does not need a plan to do so.
+
+    MADE ONLY WHEN LANDING METADATA IS NEEDED, which is what keeps a direct change direct: a
+    bounded fix that is reviewed and reported without a PR never makes one of these, and a
+    dispatcher's relay never does either. It is the same store, the same `p-<n>` ids, the same
+    locking and crash-safety as a plan — a record is just the document with no step graph, so
+    `create-pr`, `merge` and `comment` name it exactly as they name a plan.
+
+    The record is born on the `direct` path. `--request` seeds the human ask it exists to
+    carry to the PR; everything else about it — the verification, the review, the PR head, the
+    approval, the landing — is written into the file by hand as the change reaches each one,
+    the way every field on a plan is.
+    """
+    title = " ".join(str(w) for w in (args.title or ())).strip()
+    display = str(args.display or "").strip()
+    request = str(getattr(args, "request", None) or "").strip()
+    notes = [str(n).strip() for n in (args.note or ()) if str(n).strip()]
+    bad = _cap(title, display, request, *notes, args.reason)
+    if bad:
+        return bad
+    if not display:
+        return _no_display(
+            "a change record", "It owns the board's whole header line, so it is a display "
+            "version of the title: `--display \"raise the upload timeout\"`.")
+    with _minting(ctx.state_dir):
+        doc, seal = _read(ctx.state_dir)
+        who = ctx.agent or "human"
+        where, how = _workspace(ctx)
+        rec = {"id": f"p-{doc['next_plan']}", "kind": KIND_RECORD,
+               "workspace": where, "workspace_from": how,
+               "checkout": str(_here(ctx)), "title": title, "display": display,
+               "changelog": [], "notes": [_note(n, who) for n in notes],
+               "change": _change(DIRECT),
+               "created_by": who, "created_at": int(time.time())}
+        if request:
+            rec["change"]["request"] = request
+        doc["next_plan"] += 1
+        detail = "direct change record"
+        if how == UNAVAILABLE:
+            detail += "; workspace unresolved — sb did not answer"
+        _log(rec, who, "record", args.reason, detail)
+        _reserve(ctx.state_dir, doc, rec)
+        doc["plans"].append(rec)
+        _write(ctx.state_dir, doc, seal)
+    return _plan_result(_shown(rec, {}), path=_path(ctx, rec))
 
 
 def ls(ctx, args) -> Result:
@@ -2113,6 +2327,15 @@ def name_step(ctx, args) -> Result:
     plan = _find(doc, args.plan)
     if plan is None:
         return _missing(doc, args.plan)
+    if _is_record(plan):
+        # A change record has no step graph, so naming a library step onto it would leave a
+        # mongrel — a `kind:record` document that suddenly has `steps`, which the renderers
+        # then read as a plan. Refused at the door, the way a typo'd definition is: a direct
+        # change keeps its landing facts in the record, and only a shaped plan has steps.
+        why = (f"{plan['id']} is a change record, not a plan — it has no steps, so a "
+               f"library step cannot be named onto it. A direct change carries its landing "
+               f"facts in the record; a job that needs steps is a shaped plan (`create`).")
+        return Result(ok=False, human=why, data={"error": why})
     added: list[dict] = []
     try:
         # STABLE, so names sharing a band keep the order they were typed — the only order
@@ -2186,11 +2409,15 @@ def template(ctx, args) -> Result:
         doc, seal = _read(ctx.state_dir)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
-        plan = {"id": f"p-{doc['next_plan']}", "workspace": where, "workspace_from": how,
+        plan = {"id": f"p-{doc['next_plan']}", "kind": KIND_PLAN,
+                "workspace": where, "workspace_from": how,
                 "checkout": str(_here(ctx)), "title": title, "display": display,
                 "next_step": 1, "steps": [], "changelog": [],
                 "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
                           if str(n).strip()],
+                # A template starts a SHAPED plan, so it is born with a change record exactly
+                # as `create` is — sparse, and silent until a landing fact lands.
+                "change": _change(SHAPED),
                 "created_by": who, "created_at": int(time.time())}
         doc["next_plan"] += 1
         try:
@@ -2305,8 +2532,8 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
     """One template entry, as the steps it puts in the copy. A name, or a link.
 
     An entry that says `def` is a link and goes through the same expansion `name-step`
-    does — obligations included, since a template naming a merge and forgetting its review
-    is exactly the memory this obligation exists to replace.
+    does — obligations included, since a template naming a PR and forgetting its human
+    checklist is exactly the memory this obligation exists to replace.
 
     Either way the entry's remaining keys are written onto the step it made (`_written`),
     which is how a template authors a gate, an owner or a checkpoint on a step that has no
@@ -2327,8 +2554,8 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
                               f"step draws its definition's board label, so add one to "
                               f"`library/{k}.json`")
         # The entry's own step is the first one its expansion minted; what it obliged is
-        # its own step and carries none of this. A gate written against `merge` belongs to
-        # the merge and not to the human review that came along with it.
+        # its own step and carries none of this. A gate written against an obliging step
+        # belongs to that step and not to anything that came along with it.
         _written(plan, entry, made[0])
         return made
     name = str(entry.get("name") or "").strip()
@@ -2679,9 +2906,9 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     filled. An on-the-fly step owns its words; a named one owns a LINK, and its `name` stays
     null so that there is no copy of the definition here to go stale — the text is resolved
     at render time and an edit to the library reaches this step wherever it is. `obliged_by`
-    is the id of the step that brought this one, which is how a review says which merge it
-    belongs to and how PR7's gate will find it. Both are explicit nulls for the same reason
-    `why` is.
+    is the id of the step that brought this one, which is how an obliged check says which
+    outcome it belongs to and how PR7's gate will find it. Both are explicit nulls for the
+    same reason `why` is.
 
     `display` is the short name the board draws, and it pairs with `name` exactly as they do:
     a named step leaves it null and resolves it live from the definition, an on-the-fly step
@@ -2702,6 +2929,49 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
             "obliged_by": obliged_by, "progress": OPEN, "why": None, "gate": None,
             "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
             "root": False, "checkpoints": []}
+
+
+def _change(path: str) -> dict:
+    """The change record as it is born — the sparse landing facts a change accumulates.
+
+    Every field the design names it owns, explicit-null so the shape is documented rather
+    than guessed at, exactly as `_step` does. It is a DOCUMENT-level object, never a step
+    field: the fresh-step dict is fixed and a per-step record would change it, and the
+    landing facts belong to the change and not to any one step of it.
+
+    `path` is the one fact set at birth and the one everything else reads against — `direct`
+    or `shaped`. A shaped record starts life in `shaping`; a direct record has no plan and no
+    phase to be in until it opens a PR, so `phase` is null and stays that way until landing.
+
+    The identity-bound fields are null objects filled by hand as the change reaches each one,
+    and each names the commit or head it covers so that landing compares an identity once
+    rather than rerunning the work:
+
+      approval      the COMBINED change approval — `{plan_revision, contract_digest, by, at}`.
+                    The design-time sanction, and the reason it is an identity and not a
+                    boolean: it binds implementation to the PLAN REVISION it was approved at
+                    and the DIGEST of the contract that was approved, so a plan or contract
+                    that moves after approval no longer reads as sanctioned. Implementation is
+                    presented as sanctioned only once this is recorded (`_change_defects`).
+      verification  `{commit, check, environment, result, at}`.
+      review        `{commit, reviewer, findings, fixes}`.
+      pr            `{number, head}`.
+      landing       the merge-time `{head, by, at, outcome, cleanup}` — the human landing
+                    approval on the reviewed head, and the outcome.
+
+    `scope`, `limitations`, `baseline`, and `handoff` are NOT born here. They are optional
+    and recorded only when used, so — like `planner` on a plan — they are ABSENT rather than
+    null on every record. `handoff` is `{from, to, at}`, written when a fresh main takes the
+    work over; the other three carry important scope boundaries, known relevant limitations,
+    and evidenced pre-existing failures. `output` is not among any of these: a record dumps
+    its own fields, not a step's. Written and edited by hand like every document field; no
+    verb mints past `path` and the opening `phase` above, and `record --request` seeding
+    `request` is the only write any verb makes to a record after it is born.
+    """
+    return {"path": path, "phase": "shaping" if path == SHAPED else None,
+            "request": None, "contract": None, "cause": None, "solution": None,
+            "verification": None, "review": None, "human_checks": None,
+            "pr": None, "approval": None, "landing": None}
 
 
 def _note(text: str, who: str) -> dict:
@@ -2874,10 +3144,10 @@ def _mint(plan: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
     Two walks. Composition expands first and may repeat a definition, because what a
     composite says is "this is several steps". Then every step that resulted is asked what
     it obliges, and it gets its own — ONE OBLIGED STEP PER OBLIGING STEP, with no dedupe of
-    any kind. A composite naming `merge` twice is two merges and therefore two reviews, for
-    the same reason naming `merge` twice in two separate acts is: two merges are two diffs,
-    and a review that covered both is a lead's judgement to make by skipping one with a
-    reason. Dedupe would make a step's obligation satisfiable by a step it has nothing to do
+    any kind. A composite naming an obliging step twice gets two copies of what it obliges,
+    for the same reason naming it twice in two separate acts does: two independently named
+    units are two outcomes, and one check covering both is a lead's judgement to make by
+    skipping one with a reason. Dedupe would make a step's obligation satisfiable by a step it has nothing to do
     with, which is the door round the obligation wearing a tidier shape.
 
     What stops that running forever is a cycle check rather than a dedupe: each step carries
@@ -2947,8 +3217,8 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     RUNS, which is the bug this function was written for. An anchored obliged step is
     placed by its anchor and the obligation then says only that the step exists; an
     unanchored one has nothing else to go on, so the edge is what it always was and the
-    obliging step waits on it. `merge` obliging its human review comes out the same under
-    either rule, which is the check that this is a fix and not a rewrite.
+    obliging step waits on it. An anchored PR step obliging an unanchored checklist comes
+    out the same under either rule, which is the check that this is a fix and not a rewrite.
 
     The rule is about the OBLIGED end and not about both ends, and that is load-bearing: an
     unanchored step obliging an anchored one — `implement the thing` obliging `review`, the
@@ -3418,7 +3688,10 @@ def _defective(plan: dict) -> tuple[bool, set[str]]:
     a glance to tell two shades apart to learn something the plan says in words.
     """
     short, nameless, rootless = _faults(plan)
-    return short, set(nameless) | set(rootless) | {sid for sid, _ in _wrong(plan)}
+    # A change-record lifecycle defect is not tied to a step, so it reddens the plan itself
+    # the way a missing display name does, rather than a cell.
+    changed = bool(_change_defects(plan))
+    return short or changed, set(nameless) | set(rootless) | {sid for sid, _ in _wrong(plan)}
 
 
 def _defects(plan: dict) -> list[str]:
@@ -3430,12 +3703,14 @@ def _defects(plan: dict) -> list[str]:
     """
     short, nameless, rootless = _faults(plan)
     wrong = _wrong(plan)
-    if not (short or nameless or rootless or wrong):
+    changes = _change_defects(plan)
+    if not (short or nameless or rootless or wrong or changes):
         return []
     # "incomplete" while anything is MISSING, which is what the word means and what the
     # three doors were built for; "wrong" for the rules that came out of the removed verbs,
-    # where the field is filled in and says something it may not. Both sentences end the
-    # same way, because the promise is the same one: drawn red, and never refused.
+    # where the field is filled in and says something it may not — the change-record
+    # lifecycle checks are of that second kind. Both sentences end the same way, because the
+    # promise is the same one: drawn red, and never refused.
     what = "is incomplete" if (short or nameless or rootless) else "has something wrong"
     out = [f"! {plan.get('id') or '?'} {what} — the board draws it red until this is "
            f"fixed, and nothing here refused the write"]
@@ -3455,6 +3730,7 @@ def _defects(plan: dict) -> list[str]:
                    f"runs beside the plan's first, `\"root\": true`, which says so and is "
                    f"complete. Never an edge you do not mean.")
     out.extend(f"    {sid}: {why}" for sid, why in wrong)
+    out.extend(f"    change: {why}" for why in changes)
     return out
 
 
@@ -4721,8 +4997,115 @@ def _line(p: dict, *, workspace: bool) -> str:
     cond = f"{str(p.get('condition') or ''):<11}" if p.get("condition") else ""
     short, bad = _defective(p)
     return (f"{'!' if short or bad else ' '}{p['id']:<6}"
-            f"{_count(p.get('steps') or []):<10}{cond}{where}"
+            f"{_units(p):<10}{cond}{where}"
             f"{_flat(p.get('display') or p.get('title') or '(untitled)')}")
+
+
+def _is_record(p: dict) -> bool:
+    """A change-record document — landing facts with no plan. `kind` absent means plan.
+
+    The one discriminator between the two documents this store holds. A record has no step
+    graph and nothing that reads one touches it; everything else — storage, ids, locking,
+    migration, the changelog — is shared, which is the whole reason the record lives here
+    rather than in a store of its own.
+    """
+    return p.get("kind") == KIND_RECORD
+
+
+# The change-record fields that are landing FACTS, as against `path`/`phase`, which a record
+# is born with. A plan's record is drawn only once one of these lands, so a fresh shaped plan
+# reads exactly as it did before the record existed; a record document draws its section
+# always, the record being the whole of what it is.
+_CHANGE_FACTS = ("request", "contract", "cause", "solution", "scope", "verification",
+                 "review", "limitations", "baseline", "human_checks", "pr", "approval",
+                 "landing", "handoff")
+
+
+def _change_told(p: dict) -> bool:
+    """Is there a change record worth drawing here? A record document always is."""
+    c = p.get("change")
+    if not isinstance(c, dict):
+        return False
+    return _is_record(p) or any(_some(c.get(k)) for k in _CHANGE_FACTS)
+
+
+def _units(p: dict) -> str:
+    """What `list` says in the column a plan uses for its step count."""
+    return "record" if _is_record(p) else _count(p.get("steps") or [])
+
+
+def _change_defects(plan: dict) -> list[str]:
+    """What the lifecycle VALIDATES about a change record, as warnings and never refusals.
+
+    The phases are advisory — a lead writes `phase` by hand and the agent is its interpreter
+    — so this does NOT police what work happened when: the guide says plainly that running a
+    step ahead of its deps is allowed, and nothing here second-guesses that scheduling. What
+    it validates is narrower and is the one thing the design is firm about: a record must not
+    PRESENT ITSELF AS SANCTIONED before it was. So the checks are on the record's own claims,
+    read against `_PHASES`, and each is drawn red like any other defect and refuses nothing.
+
+    - `execution` or later without both parts of the combined approval identity is
+      implementation presented as sanctioned without identifying what was approved — the one
+      lifecycle rule the Phase 3 contract states outright. Shaped only: a direct change has
+      no approval and never claims one.
+    - `landing` or later with no PR recorded is a change landing before it is on a pull
+      request, which is an order the lifecycle cannot have.
+
+    A phase the lifecycle does not have is not a defect — it is a job's own word, exactly as
+    an unknown `progress` is — so an unrecognised phase is simply not checked here.
+    """
+    c = plan.get("change")
+    if not isinstance(c, dict):
+        return []
+    phase = c.get("phase")
+    if phase not in _PHASES:
+        return []
+    pi = _PHASES.index(phase)
+    out: list[str] = []
+    if c.get("path") == SHAPED and pi >= _PHASES.index("execution"):
+        approval = c.get("approval")
+        missing = [key for key in ("plan_revision", "contract_digest")
+                   if not isinstance(approval, dict) or not _some(approval.get(key))]
+        if missing:
+            out.append(f"phase is '{_flat(phase)}', at or past execution, but the combined "
+                       f"change approval (`change.approval`) has no "
+                       f"{' or '.join(f'`{key}`' for key in missing)} — implementation is "
+                       f"presented as sanctioned without the complete approval identity. "
+                       f"Record that identity, or move the phase back to `approval`.")
+    if pi >= _PHASES.index("landing") and not _some(c.get("pr")):
+        out.append(f"phase is '{_flat(phase)}', at or past landing, but no PR is recorded "
+                   f"(`change.pr`) — a change cannot be landing before it is on a pull "
+                   f"request. Record the PR, or move the phase back.")
+    return out
+
+
+def _change_section(p: dict) -> list[str]:
+    """The change record as `show` draws it: path, phase, and every landing fact present.
+
+    Empty for a plan whose record holds nothing yet, so a fresh shaped plan reads as it did
+    before Phase 3; always drawn for a record document. The structured facts render through
+    the same small nested view `strategy` uses; the scalar ones render as their own lines,
+    block text line by line. Defensive about a hand-mangled `change`: a wrong record costs
+    this one section rather than the file, exactly as a bare checkpoint or note does.
+    """
+    c = p.get("change")
+    if not isinstance(c, dict) or not _change_told(p):
+        return []
+    path = _flat(c["path"]) if _some(c.get("path")) else "—"
+    if _some(c.get("phase")):
+        path += f" · {_flat(c['phase'])}"
+    out = ["change", f"  path      {path}"]
+    for key in ("request", "cause", "solution", "scope", "contract"):
+        if _some(c.get(key)):
+            lines = _lines(c[key])
+            out.append(f"  {key:<9} {lines[0]}")
+            out.extend(f"            {ln}" for ln in lines[1:])
+    for key in ("approval", "verification", "review", "limitations", "baseline",
+                "human_checks", "pr", "landing", "handoff"):
+        if _some(c.get(key)):
+            out.append(f"  {key}")
+            out.extend(f"    {ln}" for ln in _strategy_lines(c[key]))
+    return out
 
 
 def _full(p: dict) -> str:
@@ -4756,8 +5139,13 @@ def _full(p: dict) -> str:
     lines.append(f"  created     {_when(p.get('created_at'))} "
                  f"by {_flat(p.get('created_by') or '—')}")
     steps = p.get("steps") or []
-    lines.append("")
-    lines.extend([f"  {s}" for s in (_step_lines(steps) or ["(no steps yet)"])])
+    if not _is_record(p):
+        lines.append("")
+        lines.extend([f"  {s}" for s in (_step_lines(steps) or ["(no steps yet)"])])
+    change = _change_section(p)
+    if change:
+        lines.append("")
+        lines.extend(f"  {ln}" for ln in change)
     if p.get("notes"):
         lines.append("")
         lines.append("  notes")
@@ -4922,7 +5310,7 @@ def _step_lines(steps: list) -> list[str]:
 #
 # Kept out of markdown by dropping these fields from the copy being dumped (`_dumped`),
 # one call above it. The underlying record and `--json` remain untouched.
-_MACHINERY = frozenset({"anchor", "pr_comment_nonce"})
+_MACHINERY = frozenset({"anchor", "pr_comment_nonce", "kind"})
 
 
 def _dumped(shown: dict) -> dict:
@@ -5005,12 +5393,23 @@ def _markdown(p: dict) -> str:
     terminal by whoever is working the step, it has no graph to draw and no rows to line
     up, and the walk is what stops a new field going missing there.
 
-    A plan whose `steps` is empty, absent, or holding something that is not a dict takes
-    the walk too. Falls back rather than fails, like the three schema facts below it.
+    A DOCUMENT is a plan (a `steps` list, even empty) or a change record (a `change` object);
+    both render human-first through `_comment`. A single step is neither — `_one_step` passes
+    one step dict — and takes the walk. `kind` cannot be the discriminator here: `_dumped`
+    strips it before this is reached, so the shape a document actually has on the copy — a
+    `steps` list or a `change` — is what decides. Something that is not a dict where a step
+    should be falls back to the walk rather than failing, like the schema facts below it.
     """
     steps = p.get("steps")
-    if isinstance(steps, list) and steps and all(isinstance(s, dict) for s in steps):
-        return _comment(p, steps)
+    steps_ok = isinstance(steps, list) and all(isinstance(s, dict) for s in steps)
+    # A non-empty steps list with a non-dict in it is CORRUPTION, and it falls to the walk
+    # even when a `change` record is present. The human-first path would render such a
+    # document with an empty steps list and silently drop the legitimate steps beside the
+    # bad one; the walk shows everything, which is the fallback this function promises
+    # everywhere else and the reason a malformed record costs a rendering rather than a step.
+    malformed = isinstance(steps, list) and steps and not steps_ok
+    if not malformed and (steps_ok or isinstance(p.get("change"), dict)):
+        return _comment(p, steps if steps_ok else [])
     return _markdown_walk(p)
 
 
@@ -5088,7 +5487,13 @@ _SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete",
                          # total on its own line, and `roles` inside each step's fold. Named
                          # here so neither also lands in the metadata block below the fold —
                          # `roles` especially, which is a lookup table and not a reading.
-                         "tokens", "roles"})
+                         "tokens", "roles",
+                         # The change record is drawn by the human-first sections — the
+                         # `_need_section`/`_why_section`/`_evidence_section` on the pull
+                         # request, `_change_section` in the terminal — not walked into the
+                         # metadata block, and `kind` is machinery the dump strips. Named
+                         # here so neither lands in the metadata fold.
+                         "change", "kind"})
 _SHOWN_STEP = frozenset({"id", "name", "display", "progress", "why", "gate", "output",
                          "owner", "deps", "obliged_by", "root"})
 
@@ -5097,22 +5502,28 @@ _UNSAFE = re.compile(r"[^0-9A-Za-z]+")
 
 
 def _comment(p: dict, steps: list) -> str:
-    """A whole plan as the comment that goes on the pull request, top to bottom.
+    """A plan or a change record as the comment that goes on the pull request, HUMAN-FIRST.
 
-    FOUR THINGS OPEN AND EVERY STEP FOLDED, in that order, and the order is the argument.
-    What a human at a pull request needs without clicking is: where the job is (the status
-    line and the totals), what shape it is (the graph), what was agreed (the contract), and
-    what is being asked of THEM (the gates). None of those is about a particular step, and
-    all four together are shorter than one step's detail — so they are the whole of what is
-    open, and the per-step detail is behind a fold each.
+    THE FIRST SCREENFUL IS FOR ANDREW, and that is the whole of the order. A pull request is
+    read by a person deciding what THEY still have to do and whether the change is safe to
+    land, so the comment opens with exactly that, in four sections and in this order:
 
-    THE STEPS WERE A TABLE AND ARE NOT ANY MORE. A table put every step's every column in
-    front of a reader who wanted one step's detail, and the columns still could not hold
-    what a step actually carries — its notes, its checkpoints, whatever field a later author
-    put on it — so those went to a metadata block at the bottom, away from the step they
-    belong to. One `<details>` per step is the trade taken instead: the collapsed title
-    carries what a scan needs (which step, what state, how long) and the body carries
-    everything else about that step, including the fields this file has never heard of.
+      1. What you need to do    the human-only checks and the open gates — or, in as many
+                                words, that there are none. Nothing else is above it.
+      2. What changed and why   the root cause or feature intent and the selected solution,
+                                read from the change record. A summary, not the diff.
+      3. Agent evidence         the reviewed commit, the verification, the independent review
+                                and its fixes — the case that the change is sound.
+      4. Detailed record        everything else, COLLAPSED: the shaped plan with its graph,
+                                its per-step folds, the full contract, and the observability
+                                detail. Present when there is a plan; a direct change has no
+                                plan and this is just its record's own leftovers.
+
+    The change record is where the first three sections read from, which is what lets a
+    DIRECT change — no plan, no steps — render the same shape as a shaped one without an
+    empty or invented plan under it. The detailed record keeps the whole of the old
+    rendering, so nothing a human could want is gone; it is one click away rather than the
+    first thing in the way.
     """
     used = next((k for k in _HEADS if _some(p.get(k))), None)
     lines = ["# " + _heading(p, used)]
@@ -5120,18 +5531,220 @@ def _comment(p: dict, steps: list) -> str:
     # different sentences on purpose, and the long one is the one that says what the job is.
     if used == "display" and _some(p.get("title")):
         lines += ["", f"_{_cell('title', p['title'])}_"]
-    lines += ["", _status(steps)]
-    if (span := _elapsed(p)):
-        lines += ["", span]
-    if (spend := _tokens(p)):
-        lines += ["", spend]
-    lines += _defect_lines(p)
-    lines += ["", "## how it runs", ""] + _graph(steps)
-    lines += _outputs(steps)
-    lines += _gates(steps)
-    lines += ["", "## steps"] + _folds(p, steps)
-    lines += _metadata(p)
+    lines += _need_section(p, steps)
+    lines += _why_section(p)
+    lines += _evidence_section(p)
+    lines += _detail_record(p, steps)
     return "\n".join(lines)
+
+
+def _change_of(p: dict) -> dict:
+    """The change record on a document, or an empty one — read defensively, never refused."""
+    c = p.get("change")
+    return c if isinstance(c, dict) else {}
+
+
+def _def_output(steps: list, key: str) -> Optional[str]:
+    """The finished `output` text of the step naming definition `key`, if any.
+
+    The human-first sections read from the change record, but the CONTENT a shaped plan
+    writes as it runs lands in step outputs — the human checks in `merge-human-review`, the
+    contract in `change-approval`. Where the record does not carry a summary of its own, the
+    step that produced the thing is the fallback, so a plan that filled its outputs and not
+    its record still renders something a human can act on.
+    """
+    for s in steps or ():
+        if s.get("def") == key and isinstance(s.get("output"), str) and _some(s["output"]):
+            return s["output"]
+    return None
+
+
+# WHAT §1 SAYS WHEN THERE IS NOTHING IN IT, and why that is two sentences rather than one.
+# "Nothing for you" is the single most consequential line in this comment — it is the one a
+# person acts on by closing the tab — so it may only be said where somebody actually said
+# it. An ANSWERED change is one whose record carries `human_checks` (the list, or the `none`
+# sentinel), or whose `merge-human-review` step wrote its output or was skipped: in every
+# one of those a person's work was considered and the answer was none. A record carrying
+# none of them has not been asked yet — a legacy plan from before the change record existed,
+# or a comment posted before the list was written, which `create-pr` says outright is a
+# thing that happens — and saying "agent verification covers this" there is the record
+# claiming an assurance nobody gave.
+_NO_HUMAN_WORK = "Nothing—agent verification covers this change."
+_NO_HUMAN_ANSWER = ("Not recorded — nobody has written down what a human still has to "
+                    "check, so this is unanswered rather than empty.")
+
+
+def _need_section(p: dict, steps: list) -> list[str]:
+    """`## What you need to do` — the human-only checks and the open gates, or that none remain.
+
+    Always drawn, because the one thing a person must not have to hunt for is whether the
+    change is waiting on them. Empty is itself the answer, said outright — but only where the
+    record answered it; see `_NO_HUMAN_ANSWER` above for the case where nobody has.
+    """
+    c = _change_of(p)
+    checks = c.get("human_checks")
+    answered = _some(checks)
+    if not answered:
+        checks = _def_output(steps, "merge-human-review")
+        answered = _some(checks)
+    if not answered:
+        # A SKIPPED human-review step is itself the answer, whether or not it wrote the
+        # output its definition asks for: skipping it is a person's work being considered
+        # and found unnecessary, and the reason is on the step's `why` for the board.
+        answered = any(s.get("def") == "merge-human-review" and s.get("progress") == SKIPPED
+                       for s in (steps or ()))
+    # `none` is the sentinel a change with nothing for a human writes into `human_checks`;
+    # it means the same as an empty list, and it renders as the sentence below, not the word.
+    if isinstance(checks, str) and checks.strip().lower() == "none":
+        checks = None
+    body: list[str] = []
+    if _some(checks):
+        if isinstance(checks, list):
+            body += [f"- {_flat(x)}" for x in checks]
+        else:
+            body += _lines(checks)      # a markdown block, rendered as itself
+    body += [f"- **{_cell('id', s.get('id'))}** — {_cell('gate', s['gate'])}"
+             for s in (steps or ())
+             if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
+    if not body:
+        body = [_NO_HUMAN_WORK if answered else _NO_HUMAN_ANSWER]
+    return ["", "## What you need to do", ""] + body
+
+
+def _why_section(p: dict) -> list[str]:
+    """`## What changed and why` — the root cause/intent and the selected solution.
+
+    A summary read from the change record, not the contract in full — the full contract is a
+    click away in the detailed record. Omitted when the record carries none of it, rather
+    than drawn empty: a legacy plan that never filled its record has nothing to summarise
+    here, and its contract is still under the fold.
+    """
+    c = _change_of(p)
+    rows = [(label, c[key]) for key, label in
+            (("request", "Request"), ("cause", "Root cause / intent"),
+             ("solution", "Selected solution"), ("scope", "Scope boundaries"))
+            if _some(c.get(key))]
+    if not rows:
+        return []
+    lines = ["", "## What changed and why", ""]
+    for label, val in rows:
+        vlines = _lines(val)
+        lines.append(f"- **{label}:** {vlines[0] if vlines else ''}")
+        lines += [f"  {x}" for x in vlines[1:]]
+    return lines
+
+
+def _evidence_section(p: dict) -> list[str]:
+    """`## Agent evidence` — the reviewed commit, the verification, the review and its fixes.
+
+    The case that the change is sound, bound to the identities the change record carries so a
+    reader sees what was verified and reviewed rather than a claim that it was. Omitted when
+    the record carries no evidence.
+    """
+    c = _change_of(p)
+    rev = c.get("review") if isinstance(c.get("review"), dict) else {}
+    ver = c.get("verification") if isinstance(c.get("verification"), dict) else {}
+    parts: list[tuple[str, Any]] = []
+    commit = rev.get("commit") or ver.get("commit")
+    if _some(commit):
+        parts.append(("Reviewed commit", commit))
+    # `verification` carries its own `environment`, and `review` its `fixes`, so both render
+    # under their section without a field of their own. `limitations` and `baseline` are
+    # optional and absent unless used (like `handoff`): a known limitation, and an evidenced
+    # pre-existing failure the change did not cause.
+    for key, label in (("verification", "Verification"), ("review", "Independent review"),
+                       ("limitations", "Known limitations"),
+                       ("baseline", "Baseline failures")):
+        if _some(c.get(key)):
+            parts.append((label, c[key]))
+    if not parts:
+        return []
+    lines = ["", "## Agent evidence", ""]
+    for label, val in parts:
+        if _scalar(val):
+            lines.append(f"- **{label}:** {_cell(label.lower(), val)}")
+        else:
+            lines.append(f"- **{label}:**")
+            lines += [f"  {x}" for x in _bullets(val, depth=1)]
+    return lines
+
+
+# The change-record keys the first three sections DRAW. Everything else on the record is
+# preserved by `_change_remainder` below, so the split is stated once here rather than kept in
+# step with three functions by hand. `human_checks` is §1; `request`/`cause`/`solution`/`scope`
+# are §2; the evidence keys are §3. What is left — the approved `contract`, the `approval`
+# identity, the `pr` head, the `landing` approval and outcome, an optional `handoff`, `path`,
+# `phase`, and any field a later author adds — is the remainder, and it MUST render somewhere
+# or a direct PR would silently drop half its record (`_metadata` cannot draw it: `change` is
+# in `_SHOWN_PLAN`, so the walk skips it).
+_CHANGE_PROMOTED = frozenset({"request", "cause", "solution", "scope",
+                              "verification", "review", "human_checks",
+                              "limitations", "baseline"})
+
+
+def _change_remainder(p: dict, steps: list) -> list[str]:
+    """The change-record fields the first three sections did not draw, collapsed, once.
+
+    The record is the point of a direct change and half of a shaped one, and the human-first
+    sections lift only what belongs in the first screenful. The rest — the approved contract,
+    the approval identity, the PR head, the landing approval and outcome, the optional handoff,
+    and anything a later author adds — is still the record and must not vanish, so it renders
+    here in a collapsed block. Promoted content is not repeated (`_CHANGE_PROMOTED`), and a
+    block string like the contract renders as the markdown it is rather than one escaped row;
+    everything else walks, so a field this file has never heard of still lands.
+    """
+    c = _change_of(p)
+    rest = {k: v for k, v in c.items() if k not in _CHANGE_PROMOTED and _some(v)}
+    # A shaped approval mirrors the approved contract into both `change.contract` and the
+    # change-approval step's output. `_outputs` already preserves the step output above this
+    # block, so an exact mirror is one fact and renders once.
+    if "contract" in rest and any(s.get("output") == rest["contract"] for s in steps):
+        rest.pop("contract")
+    if not rest:
+        return []
+    blocks = {k: v for k, v in rest.items() if isinstance(v, str) and "\n" in v}
+    walk = {k: v for k, v in rest.items() if k not in blocks}
+    lines = ["", "<details>", "<summary>change record</summary>", ""] + _walked(walk, set(),
+                                                                                level=4)
+    for k, v in blocks.items():
+        lines += ["", "#### " + _title(k), ""] + _lines(v)
+    return lines + ["", "</details>"]
+
+
+def _detail_record(p: dict, steps: list) -> list[str]:
+    """`## Detailed record` — everything else, collapsed: the shaped plan, and the record's rest.
+
+    The whole of the rendering that used to be the comment, moved under one fold so nothing a
+    human could want is gone — only out of the first screenful. A plan brings its status, its
+    graph, the full contract, the per-step folds and the metadata; both a plan and a direct
+    change bring the CHANGE-RECORD REMAINDER — the record fields the first three sections did
+    not draw — so nothing on the record is silently dropped. Drawn only when there is something
+    under it to draw.
+    """
+    inner: list[str] = []
+    if steps:
+        inner += [_status(steps)]
+        if (span := _elapsed(p)):
+            inner += ["", span]
+        if (spend := _tokens(p)):
+            inner += ["", spend]
+        inner += _defect_lines(p)
+        inner += ["", "## how it runs", ""] + _graph(steps)
+        inner += _outputs(steps)
+        inner += _gates(steps)
+        inner += ["", "## steps"] + _folds(p, steps)
+        inner += _change_remainder(p, steps)
+        inner += _metadata(p)
+    else:
+        if (span := _elapsed(p)):
+            inner += [span]
+        inner += _defect_lines(p)
+        inner += _change_remainder(p, steps)
+        inner += _metadata(p)
+    if not any(str(x).strip() for x in inner):
+        return []
+    return (["", "## Detailed record", "", "<details>", "<summary>the full record</summary>",
+             ""] + inner + ["", "</details>"])
 
 
 def _status(steps: list) -> str:
