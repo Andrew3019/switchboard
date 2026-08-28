@@ -229,10 +229,13 @@ imagined. — confirmed 2026-08-27
 
 **Intentional waiting is a runtime state, not repeated polling.** Plain waiting covers
 native subagents and background work; any-child and all-child waiting cover declared
-cohorts. The stop hook and stalled detection recognize it, and only a causally relevant
-event wakes it. Ordinary message content should arrive with its notification when safe,
-while durable inbox storage, reply tracking, interrupts, blocking, restoration, cleanup and
-notification holdback remain authoritative. — confirmed 2026-08-27
+cohorts. The stop hook recognizes it, and stalled detection recognizes each declaration for
+30 minutes. A causally relevant event may wake it sooner; after 30 minutes the reconciler
+sends that agent one targeted prompt to check status and either resume or declare the
+appropriate waiting state again. Ordinary message content should arrive with its
+notification when safe, while durable inbox storage, reply tracking, interrupts, blocking,
+restoration, cleanup and notification holdback remain authoritative. — confirmed
+2026-08-27, bounded reminder confirmed 2026-08-28
 
 **Operational vocabulary comes from live configuration.** Supported roles, models,
 capabilities, plugins, presets and plan steps are generated and inspectable. Safe common
@@ -863,7 +866,9 @@ and stays there for a person to act on; nothing speaks to the agent about it any
 stays: the Stop hook, which catches the ordinary silent finish at the moment it happens,
 and the loop itself, which still confirms a dead pane and tells its parent. — confirmed
 2026-08-25, superseding the 2026-08-09 rule that a reconciler pings an idle agent that is
-neither blocked nor done
+neither blocked nor done. This rejection remains for ordinary silent agents; it does not
+include the one-time 30-minute reminder earned by an explicit `sb waiting` declaration. —
+narrowed 2026-08-28
 
 **`sb ask` as a synchronous request.** Agent messages and reply tracking remain
 asynchronous; nobody blocks another agent's turn waiting for an immediate response. —
