@@ -332,9 +332,10 @@ class DeliverTest(unittest.TestCase):
         """A delivery that lands is one `agent prompt` and no keys at all.
 
         The rescue below is for a box that already holds text. On the first attempt
-        nothing has been pasted yet, and an enter into a pane that may still be showing
-        the workspace-trust dialog answers the dialog — the exact way a prompt gets
-        eaten. So it is spent only on a retry.
+        nothing has been pasted yet, so the keys can only spend a quarter-window on a
+        delivery that was going to land anyway. A cost argument, not a harm one: since
+        `_rescue` sends down-enter, a pane still showing the workspace-trust dialog gets
+        it ANSWERED, which is the fix. So it is spent only on a retry.
         """
         h, calls = self.herdr(takes_on=1)
         h.deliver("w1", "do the thing")
