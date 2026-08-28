@@ -5230,6 +5230,27 @@ class HumanFirstCommentTest(PlansSandbox):
         self.assertIn("reviewer-y", ev)
         self.assertIn("one minor, fixed", ev)
 
+    def test_a_structured_review_carries_its_identity_fixes_and_open_majors(self):
+        """The review is an identity, not a verdict word: WHO reviewed, WHICH head, the
+        fixes they applied against it and any major still open. A structured record renders
+        every one of those into the evidence a reader gets — an unresolved major that only
+        the author can see is how a PR comes to say `reviewed` while a defect stands."""
+        self.data("plugin", "plans", "record", "a direct fix", "--display", "board: fix")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "human_checks": "none",
+            "review": {"commit": "9f1c2ab", "reviewer": "reviewer-cache-keys",
+                       "findings": [{"severity": "major", "state": "unresolved",
+                                     "what": "the cache key drops the tenant id"}],
+                       "fixes": [{"commit": "3aa77e0", "what": "renamed the stale local"}]}})
+        self._save(doc)
+        ev = self._md().split("## Agent evidence", 1)[1]
+        for part in ("9f1c2ab", "reviewer-cache-keys", "major", "unresolved",
+                     "the cache key drops the tenant id", "3aa77e0",
+                     "renamed the stale local"):
+            with self.subTest(part=part):
+                self.assertIn(part, ev)
+
     def test_the_detailed_record_still_carries_the_whole_plan_collapsed(self):
         """Nothing a human could want is gone — the graph, the contract, the per-step folds
         and the metadata are all still there, one click down under the detailed record."""

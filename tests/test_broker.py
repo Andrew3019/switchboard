@@ -613,6 +613,35 @@ class BrokerTest(unittest.TestCase):
         joined = " ".join(self.h.started[0]["prompts"])
         self.assertIn("haiku critic", joined)
 
+    def test_a_role_nobody_defined_refuses_the_spawn_and_starts_nothing(self):
+        """The vocabulary refusal where it actually costs something. A typo used to spawn:
+        the unknown name inherited the fallback's profile and kept itself as the label, so
+        the fleet gained an agent with a worker's authority under a role that exists
+        nowhere. It is refused now, before herdr is touched and before a row is written,
+        and the refusal names the near miss."""
+        with self.assertRaises(ValueError) as cm:
+            self.b.delegate("t", topic="t", role="wroker", me="orch")
+        self.assertIn("wroker", str(cm.exception))
+        self.assertIn("worker", str(cm.exception))
+        self.assertEqual(self.h.started, [])
+        self.assertEqual(store.live_agents(self.db), [])
+
+    def test_the_manifest_reports_the_delivery_the_resolved_provider_uses(self):
+        """Phase 1's renderer follows the real assembly, and assembly is provider-specific:
+        a claude agent gets one flattened system-prompt file, a codex agent gets fragments
+        in its own `AGENTS.md`. Rendering the same role twice, once per provider, is what
+        proves the manifest reads the resolved spec rather than restating a constant."""
+        claude = self.b.effective_instructions(role="worker")
+        codex = self.b.effective_instructions(role="worker", model="gpt-5.6-sol")
+        self.assertEqual(claude["resolved"]["provider"], "claude")
+        self.assertEqual(codex["resolved"]["provider"], "codex")
+        self.assertIn("--append-system-prompt-file",
+                      claude["delivery"]["standing_instructions"])
+        self.assertIn("AGENTS.md", codex["delivery"]["standing_instructions"])
+        self.assertNotEqual(claude["rendered"], codex["rendered"])
+        self.assertEqual(claude["delivery"]["characters"], len(claude["rendered"]))
+        self.assertEqual(codex["delivery"]["characters"], len(codex["rendered"]))
+
     def test_instruction_renderer_is_the_live_spawn_assembly_without_the_spawn(self):
         store.create_agent(self.db, name="orch", role="lead", workspace="ws",
                            branch="ws", cwd=str(self.repo))

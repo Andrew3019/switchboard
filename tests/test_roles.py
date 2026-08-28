@@ -419,6 +419,47 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(roles.get(r, "foreman", self.repo).name, "lead")
         self.assertEqual(roles.get(r, "orchestrator", self.repo).name, "lead")
 
+    def test_an_unknown_role_is_refused_and_points_at_the_live_vocabulary(self):
+        """Phase 1: an undefined `--role` used to be a role. It inherited the fallback's
+        model, prompt and capabilities but kept the typed name, so `--role wroker` spawned
+        a worker-shaped agent filed under a name nobody defined and nothing said so. A
+        misspelling is now a refusal that names the near misses and the command that lists
+        them — the escape hatch for a genuinely custom disposition is `--as`, which is
+        explicit and still takes a configured role's profile."""
+        r = roles.load(self.repo)
+        with self.assertRaises(roles.RoleConfigError) as cm:
+            roles.get(r, "wroker", self.repo)
+        said = str(cm.exception)
+        self.assertIn("no role 'wroker'", said)
+        self.assertIn("worker", said)
+        self.assertIn("sb roles", said)
+        self.assertIn("--as", said)
+
+    def test_a_normalized_role_collision_asks_for_an_exact_name(self):
+        """Case and punctuation variants resolve only where they identify ONE role. A repo
+        that adds a name normalizing onto a shipped one has two live answers, and guessing
+        between them is how a spawn silently gets the other one's capabilities."""
+        self.write('[re_viewer]\nmodel = "cheap"\nprompt = "mine"\n')
+        r = roles.load(self.repo)
+        self.assertEqual(roles.get(r, "re_viewer", self.repo).name, "re_viewer")  # exact
+        with self.assertRaises(roles.RoleConfigError) as cm:
+            roles.get(r, "Re Viewer", self.repo)
+        said = str(cm.exception)
+        self.assertIn("ambiguous", said)
+        self.assertIn("re_viewer", said)
+        self.assertIn("reviewer", said)
+
+    def test_a_role_already_in_the_store_stays_readable_after_the_refusal(self):
+        """The compatibility half of the same change. Strictness is for what a caller
+        TYPES; a row already written under an ad-hoc role predates it, and refusing that
+        name at read time would make the agent unrestorable and its stored model
+        unresolvable. `get_or_fallback` is that reader and nothing else uses it."""
+        r = roles.load(self.repo)
+        got = roles.get_or_fallback(r, "archaeologist", self.repo)
+        self.assertEqual(got.name, "archaeologist")
+        self.assertEqual(got.capabilities, r["worker"].capabilities)
+        self.assertEqual(got.prompt, r["worker"].prompt)
+
     def test_no_shipped_prompt_tells_a_task_owner_to_delegate_by_default(self):
         """2026-08-27, and the largest of the workflow-repair prompt changes. DESIGN-TRUTH:
         "A lead owns the requested outcome and may perform every ordinary part of it. It may
