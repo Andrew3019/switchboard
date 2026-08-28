@@ -131,6 +131,13 @@ delegate_task = "Await further instructions. Do NOT start work, and do not inven
 # not. Everything about what to do with the message is the message's own business.
 mail = "A message could not be delivered inline. Run: sb inbox"
 
+# One explicit waiting declaration has stayed quiet for its configured window. This is a
+# targeted wake, not the retired loop that nudged every silent agent: the recipient chose
+# waiting, and one prompt asks it to renew that choice or resume. No placeholders because
+# the live status is deliberately read after waking rather than summarized from a stale
+# collector snapshot.
+wait_expired = "Your declared wait expired. Run `sb status`, then continue the work or declare the appropriate `sb waiting` state again if it is still genuinely pending."
+
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
 #

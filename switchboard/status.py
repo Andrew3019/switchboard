@@ -473,6 +473,10 @@ class AgentStatus:
     # an agent that quietly died, and telling those two apart at a glance is the whole
     # point of showing `idle` at all.
     idle_excuse: Optional[str] = None
+    # The one stalled shape that earns an automatic nudge: this agent explicitly declared
+    # a wait and its configured quiet window elapsed. Ordinary stalls remain passive and
+    # visible to a person, as before.
+    wait_expired: bool = False
     # How long this row's INFERRED summons has held, in seconds, or None if nobody was
     # watching continuously enough to say. See `settled`, which is the only reader, and
     # `stamp_needs_for`, which is the only writer.
@@ -964,6 +968,7 @@ class AgentStatus:
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
+            "wait_expired",
             "needs_for", "awaiting_keypress", "pane_id",
             "caps_held", "caps_delegable", "caps_template", "diverged_below",
             "worktrees", "worktrees_below",
@@ -1356,8 +1361,9 @@ def collect(
         wait_mode = (row["wait_mode"] if "wait_mode" in row.keys() else None)
         wait_started = (row["wait_started_at"]
                         if "wait_started_at" in row.keys() else None)
-        wait_is_fresh = bool(wait_mode and wait_started is not None
-                             and now - wait_started <= WAIT_EXCUSE_GRACE)
+        wait_expired = bool(wait_mode and wait_started is not None
+                            and now - wait_started > WAIT_EXCUSE_GRACE)
+        wait_is_fresh = bool(wait_mode and wait_started is not None and not wait_expired)
         wait_excuse = ({"background": "waiting for background work",
                         "any": "waiting for any child",
                         "all": "waiting for child cohort"}.get(wait_mode)
@@ -1449,6 +1455,7 @@ def collect(
             # happening would be a note about nothing, and a working agent that happens to
             # have children is working, not waiting on them.
             idle_excuse=excuse if idle else None,
+            wait_expired=wait_expired,
             # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
             # like any other. Nothing else about a blocked agent changes: it is still not
             # `stalled` (that reads `running`), still not pinged, still waiting on its human

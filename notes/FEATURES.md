@@ -674,8 +674,10 @@ It once had a second half, **the reconciler's nudge**: one ping to every agent `
 calls `stalled`, saying its turn ended without a report. That is removed — it fired five
 times in the fleet's whole history and never once changed an outcome (DESIGN-TRUTH,
 "Explicitly rejected" — "The reconciler's nudge to an agent that went quiet."). A stall is
-still named, on the board, in `sb status --needs-me` and in DRIFT; nothing speaks to the
-agent about it.
+still named on the board, in `sb status --needs-me` and in DRIFT; nothing speaks to an
+ordinary stalled agent. One bounded exception is opt-in: an explicit `sb waiting`
+declaration that stays quiet for `timeouts.wait_excuse_grace` triggers one prompt to check
+status and either resume or declare waiting again, then that declaration is cleared.
 
 ### The panel — one collector, many renderers
 `switchboard/panel.py` (renderer half) and `switchboard/collector.py` (collecting half).

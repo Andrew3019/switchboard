@@ -453,12 +453,14 @@ class StatusTest(unittest.TestCase):
         fresh = self.by_name(status.collect(
             self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE - 1))["w1"]
         self.assertFalse(fresh.stalled)
+        self.assertFalse(fresh.wait_expired)
         self.assertEqual(fresh.idle_excuse, "waiting for background work")
 
         stale = self.by_name(status.collect(
             self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE + 1))["w1"]
         self.assertTrue(stale.stalled)
         self.assertTrue(stale.needs_human)
+        self.assertTrue(stale.wait_expired)
         self.assertIsNone(stale.idle_excuse)
         self.assertIsNotNone(store.wait_for(self.db, "w1"), "status is read-only")
 
@@ -1638,15 +1640,13 @@ class ReconcileReapsTest(unittest.TestCase):
         self.assertEqual(self.state_of("w1"), "working")
 
 
-class ReconcileDoesNotNudgeTest(unittest.TestCase):
-    """The nudge is gone, and this is what says so.
+class ReconcileWaitNudgeTest(unittest.TestCase):
+    """Ordinary stalls stay passive; an expired explicit wait earns one targeted nudge.
 
     `sb reconcile` used to end with `Broker.reconcile`, which prompted every agent whose
-    turn had ended without `sb done` or `sb block`. DESIGN-TRUTH now rules out "The
-    reconciler's nudge to an agent that went quiet." — it fired five times in the fleet's
-    whole history and never once changed an outcome. What is left is the reap, which this fleet gives
-    nothing to do — one live, idle, silent agent, no mail, no dead pane. Before the removal
-    that agent was the nudge's exact target; now nothing in the fleet speaks to it.
+    turn had ended without `sb done` or `sb block`. That broad nudge remains gone. The
+    30-minute wait reminder is different by construction: the agent opted into a runtime
+    wait, its timestamp is the due time and clearing that declaration makes it once-only.
     """
 
     def setUp(self):
@@ -1696,6 +1696,32 @@ class ReconcileDoesNotNudgeTest(unittest.TestCase):
         self.assertTrue({a.name for a in snap.agents if a.stalled} == {"quiet"})
         self.assertEqual([e for e in db.execute(
             "SELECT kind FROM events WHERE kind LIKE 'reconcile_ping%'")], [])
+
+    def test_an_expired_explicit_wait_is_pinged_once_and_cleared(self):
+        db = store.connect(self.repo)
+        store.set_wait(db, "quiet", "background")
+        db.execute("UPDATE agents SET wait_started_at=? WHERE name='quiet'",
+                   (store.now() - int(status.WAIT_EXCUSE_GRACE) - 1,))
+        db.commit()
+        db.close()
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli_mod.main(["reconcile"]), 0, err.getvalue())
+        self.assertEqual([n for n, _ in self.herdr.prompts], ["quiet"])
+        self.assertIn("Run `sb status`", self.herdr.prompts[0][1])
+
+        db = store.connect(self.repo)
+        self.addCleanup(db.close)
+        self.assertIsNone(store.wait_for(db, "quiet"))
+        self.assertEqual([e["kind"] for e in store.recent_events(db, agent="quiet")
+                          if e["kind"].startswith("wait_expiry")],
+                         ["wait_expiry_pinged"])
+
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli_mod.main(["reconcile"]), 0)
+        self.assertEqual(len(self.herdr.prompts), 1)
 
 
 class ArchivedTest(unittest.TestCase):

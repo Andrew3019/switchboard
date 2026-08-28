@@ -56,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import GONE_STATE, RUNNING, fmt_age
+from .status import GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -5884,6 +5884,35 @@ class Broker:
             if row is not None and (row["state"] in FINISHED or row["ended_at"] is not None):
                 terminal.add(name)
         return bool(cohort) and terminal == cohort and bool(results), wait
+
+    def wake_expired_waits(self, names: Iterable[str]) -> list[str]:
+        """Nudge each still-expired explicit wait once, then retire that declaration.
+
+        This is deliberately narrower than the removed general stalled-agent reconciler:
+        only an agent that chose `sb waiting` enters this path. Rechecking the timestamp
+        closes the collector-snapshot race, and conditional clearing cannot erase a newer
+        declaration made while the prompt was in flight. A failed prompt leaves the wait
+        intact for a later reconciler pass; a successful queue makes an unobserved failure
+        visible as an ordinary stall rather than silently renewing it.
+        """
+        woken = []
+        for who in names:
+            wait = store.wait_for(self.db, who)
+            started = wait.get("started_at") if wait else None
+            if started is None or store.now() - started <= WAIT_EXCUSE_GRACE:
+                continue
+            text = f"{tag('sb')} {self._say('notify.wait_expired')}"
+            try:
+                self.h.prompt(who, text)
+            except HerdrError as e:
+                store.log_event(self.db, kind="wait_expiry_ping_failed", agent=who,
+                                error=str(e))
+                continue
+            if store.clear_wait(self.db, who, expected_started_at=started):
+                store.log_event(self.db, kind="wait_expiry_pinged", agent=who,
+                                mode=wait["mode"], cohort=wait["cohort"])
+                woken.append(who)
+        return woken
 
     def _inline_mail(self, who: str,
                      mine: Sequence[sqlite3.Row]) -> tuple[Optional[str], list[int]]:

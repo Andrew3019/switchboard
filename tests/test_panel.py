@@ -1025,6 +1025,13 @@ class TheReconcilerTrigger(PanelTest):
             a.gone = True
         return snap
 
+    def _expired_wait(self, *names):
+        snap = a_snapshot(*names)
+        for a in snap.agents:
+            a.stalled = True
+            a.wait_expired = True
+        return snap
+
     def test_a_death_spawns_sb_reconcile(self):
         """`sb reconcile` is the one unattended path that reaps (`cli.main`), so a dead
         agent has to be able to start one — otherwise a dead child is recorded only when a
@@ -1074,6 +1081,15 @@ class TheReconcilerTrigger(PanelTest):
         state.last_reconcile -= collector.RECONCILE_SWEEP
         self.assertTrue(collector.run_reconciler(self._stalled("w1"), state, None))
         self.assertEqual(len(self.sb_runs()), 2)
+
+    def test_an_expired_explicit_wait_triggers_the_reconciler(self):
+        """Not the retired general stall trigger: only the flag derived from an explicit
+        wait declaration makes this due before the periodic sweep."""
+        state = collector.State(pid=1, started_at=0.0)
+        state.last_reconcile = collector.panel.now()
+        state.last_reconcile -= collector.RECONCILE_GAP + 1
+        self.assertTrue(collector.run_reconciler(self._expired_wait("w1"), state, None))
+        self.assertEqual(self.sb_runs(), [["/bin/sb", "reconcile"]])
 
 
 class WhichSbTheDoorbellRuns(PanelTest):

@@ -182,7 +182,7 @@ class ShippedDefaultsTest(_Layered):
             "spawn.roles": {"roles": "worker, qa"},
             "spawn.workspace": {"workspace": "w", "path": "/p"},
             "spawn.start_task": {},
-            "notify.mail": {}, "notify.child_done": {},
+            "notify.mail": {}, "notify.child_done": {}, "notify.wait_expired": {},
             "notify.interrupt": {"text": "t"},
             "notify.preset": {"name": "n", "text": "t"},
         }

@@ -155,11 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Hidden for the same reason, and the same shape: the verb the collector's loop runs so
     # that an agent whose pane has gone is confirmed dead and its parent told, without
-    # waiting for a person to open the board. It is `status.collect(reap=True)` and nothing
-    # else, running here in a short-lived process on current code, because the loop that
-    # triggers it is version-stale by design (collector module note). It once carried a
-    # second job — a nudge to an agent whose turn ended without a report — which
-    # DESIGN-TRUTH now rules out ("The reconciler's nudge to an agent that went quiet.").
+    # waiting for a person to open the board. It also wakes one explicit wait after its
+    # configured quiet window; ordinary stalled agents remain passive. It runs here in a
+    # short-lived process on current code because the triggering loop is version-stale by
+    # design (collector module note).
     # An agent has no use for this and is not taught it.
     cmd("reconcile", hidden=True)
 
@@ -1084,7 +1083,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         # an absence is still inside `GONE_CONFIRM_GRACE` and records nothing, and the
         # second one a minute later is what confirms it (`status._confirmed_gone`).
         gone = sorted(a.name for a in snap.agents if a.gone)
-        _emit(args, f"gone: {', '.join(gone)}" if gone else "nobody gone", {"gone": gone})
+        woken = b.wake_expired_waits(a.name for a in snap.agents if a.wait_expired)
+        human = []
+        if gone:
+            human.append(f"gone: {', '.join(gone)}")
+        if woken:
+            human.append(f"expired waits: {', '.join(woken)}")
+        _emit(args, "; ".join(human) if human else "nothing to reconcile",
+              {"gone": gone, "expired_waits": woken})
         return 0
 
     try:

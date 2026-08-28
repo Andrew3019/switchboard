@@ -402,13 +402,13 @@ gone_confirm_grace = 60.0
 # deliberately the smallest number that is not zero and still means something.
 stalled_floor = 3.0
 
-# How long an explicit `sb waiting` remains an excuse for an idle turn. Waiting is a state,
-# not permanent immunity from STALLED: a native background task or child cohort may fail
-# without producing the event that clears the state. Four hours is clear of ordinary agent
-# and tool runs while still ensuring a forgotten wait returns to the fleet's needs-human
-# path the same day. This ages only the readout's excuse; it does not fabricate a wake or
-# mutate the stored intent.
-wait_excuse_grace = 14400.0
+# How long an explicit `sb waiting` remains quiet before Switchboard asks the agent to
+# check again. Thirty minutes clears ordinary background work without turning a forgotten
+# wait into permanent immunity from STALLED. On expiry the unattended reconciler sends one
+# targeted nudge; the agent checks status and either continues or declares waiting again.
+# This is not the retired general stall nudge — only a wait the agent explicitly set earns
+# it, once per declaration.
+wait_excuse_grace = 1800.0
 
 # How long a `working` turn edge must have NOTHING behind it before that edge is doubted at
 # all (`status.TURN_STALE_GRACE`). Measured, not guessed: across 406 real agent sessions in

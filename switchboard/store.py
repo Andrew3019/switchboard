@@ -2610,15 +2610,18 @@ def set_wait(db: sqlite3.Connection, name: str, mode: str,
         raise
 
 
-def clear_wait(db: sqlite3.Connection, name: str, *, commit: bool = True) -> None:
-    db.execute(
+def clear_wait(db: sqlite3.Connection, name: str, *, commit: bool = True,
+               expected_started_at: Optional[int] = None) -> bool:
+    """Clear one wait, optionally only if it is still the declaration the caller read."""
+    where = "name=?" if expected_started_at is None else "name=? AND wait_started_at=?"
+    args = ((name,) if expected_started_at is None else (name, expected_started_at))
+    changed = db.execute(
         "UPDATE agents SET wait_mode=NULL, wait_cohort=NULL, wait_started_at=NULL, "
         "wait_after_id=NULL "
-        "WHERE name=?",
-        (name,),
-    )
+        f"WHERE {where}", args).rowcount
     if commit:
         db.commit()
+    return bool(changed)
 
 
 def wait_for(db: sqlite3.Connection, name: str) -> Optional[dict]:
