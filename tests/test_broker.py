@@ -1428,10 +1428,9 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNotNone(m["delivered_at"])     # so nothing re-rings for it
 
     def test_every_line_sb_puts_in_a_pane_names_who_sent_it(self):
-        """Item 3.3. The doorbell carries no payload, so before this an agent read "You
-        have mail" with no way to tell whether its parent had redirected it or a sibling
-        had said hello — nor whether sb or Andrew had typed it. One tag, three call sites:
-        the doorbell, the inline interrupt body, and the child-done poke."""
+        """Item 3.3. Before tags an agent could not tell whether its parent redirected it,
+        a sibling said hello, or Andrew typed into the pane. One tag covers ordinary mail,
+        the inline interrupt body and the child-done delivery."""
         store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
         store.create_agent(self.db, name="kid", role="worker", parent="lead",
                            pane_id="w1:p2")
@@ -1586,8 +1585,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_a_burst_of_sibling_dones_rings_the_parent_once(self):
         """#168. Three children finishing inside a second rang an idle parent three
-        times, and the doorbell carries no payload — so it was the same sentence three
-        times over, and the parent burned a turn on each.
+        times, so the parent burned a turn on each instead of receiving one cohort result.
 
         The ring is held on the IDLE path and owed to `flush_pending`, which was already
         the one place that rings once for a whole backlog and names every sender in it.
@@ -1826,8 +1824,9 @@ class BrokerTest(unittest.TestCase):
         """The interrupt is the one ring whose TEXT is the message, so it is the one ring
         a bare `agent prompt` cannot be trusted with: a first-run dialog eats the text and
         moves the agent's state anyway, and the send reports success over a wedged agent.
-        Every other mode carries no payload and is re-rung from the store, so it stays a
-        plain prompt — this asserts the split, not just the interrupt half."""
+        Ordinary mail may carry a bounded inline payload, but it stays durable and falls
+        back to an inbox notice if proof fails; only interrupt must prove delivery before
+        returning — this asserts the split, not just the interrupt half."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1",
                            cwd=str(self.repo))
         self.b.tell(["w"], "you have mail", me=HUMAN)
@@ -1965,6 +1964,20 @@ class BrokerTest(unittest.TestCase):
         }) + "\n")
         self.assertIn("ring_confirmed", self._confirm())
         self.assertIsNotNone(store.get_message(self.db, mid)["read_at"])
+
+    def test_oversized_mail_stays_durable_and_sends_only_the_inbox_notice(self):
+        """The stored-message cap is deliberately generous; the inline cap is the smaller
+        context-budget decision. A legal long message must not be forced into the next
+        turn, and falling back must not lose or mark its durable body as read."""
+        self._target()
+        body = "x" * broker_mod.INLINE_MAIL_MAX
+        (mid,) = self.b.tell(["w"], body, me=HUMAN)
+        sent = self.h.prompts[-1][1]
+        self.assertIn("Run: sb inbox", sent)
+        self.assertNotIn(body, sent)
+        saved = store.get_message(self.db, mid)
+        self.assertEqual(saved["body"], body)
+        self.assertIsNone(saved["read_at"])
 
     def test_unconfirmed_inline_mail_falls_back_to_a_repairable_inbox_notice(self):
         self._target()

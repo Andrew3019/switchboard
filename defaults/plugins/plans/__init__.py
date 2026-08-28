@@ -854,7 +854,9 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
     verification `{commit, check, environment, result, at}`. Evidence belongs to the commit
                  it ran on; that is what makes it reusable rather than re-earned.
     review       `{commit, reviewer, findings, fixes}` — the independent review, the head it
-                 covered, what came back and what the reviewer fixed itself.
+                 covered, what came back and what the reviewer fixed itself. The fresh
+                 reviewer returns this structure in its report; the worktree owner writes
+                 that report into the record, preserving the single-writer rule below.
     human_checks the list of things only a person can do, or the string saying none remain.
                  Written BEFORE the PR opens, so the human meets it the first time they read
                  the comment.

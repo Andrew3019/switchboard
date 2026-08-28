@@ -126,10 +126,10 @@ DEPTH IS PROPORTIONAL TO THE WORK
   scope or blast radius is unclear, when the work crosses subsystems or needs coordination,
   when the change is hard to reverse, or when verification is expensive or uncertain.
 
-  Otherwise go shallow. Bounded work with an obvious approach gets a SHORT plan — the task
-  owner carrying the whole thing, no agent plan review, focused verification. If a plan of
-  yours routinely adds a reviewer or a handoff to work of that size, it has repeated the
-  failure it exists to fix.
+  Otherwise go shallow. Where shaping was justified by a real decision but left a bounded
+  implementation, write a SHORT plan — the task owner carrying the whole thing, no agent
+  plan review, focused verification. If a plan of yours routinely adds a reviewer or a
+  handoff to work of that size, it has repeated the failure it exists to fix.
 
   Work that should never have been shaped at all skips planning, with the reason recorded.
   That call is the task owner's, made before you were spawned; if the brief you were handed

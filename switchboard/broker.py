@@ -163,6 +163,11 @@ PROTOCOL_LINE = config.protocol()
 # instruction. Without the pause the interrupt races the cancel it depends on.
 INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
 
+# Mail below this size is cheap enough to save the recipient an inbox turn. Larger or
+# coalesced payloads stay durable and receive the ordinary notice instead; `limits.text`
+# remains the separate admission cap for one stored message.
+INLINE_MAIL_MAX = config.setting("limits.inline_mail")
+
 # DESIGN-TRUTH: "`sb tell` has three delivery modes." They differ only in WHEN the
 # doorbell is allowed to ring and whether the turn in progress survives it:
 #
@@ -5900,7 +5905,7 @@ class Broker:
             lines.append(line)
         text = " ".join(lines)
         try:
-            text = validate.line(text, "inline mail", max_len=validate.MAX_PROMPT)
+            text = validate.line(text, "inline mail", max_len=INLINE_MAIL_MAX)
         except validate.Invalid:
             return None, []
         return text, [int(m["id"]) for m in mine]
@@ -6257,8 +6262,8 @@ class Broker:
             #
             # HELD WHEN A BURST IS POSSIBLE, and this is the ring the holdback exists
             # for. Five children finishing inside a second used to ring an idle parent
-            # five times with five copies of one payload-free doorbell; held, the ring is
-            # owed to `flush_pending`, which sends one naming all five. The summaries are
+            # five times; held, the ring is owed to `flush_pending`, which sends one
+            # bounded inline payload or one inbox notice naming all five. The summaries are
             # untouched either way — they are in the mailbox above, and `sb inbox` reads
             # them whatever the doorbell did.
             self._ring(parent, f"{tag(me)} {self._say('notify.child_done')}",
@@ -8452,9 +8457,10 @@ class Broker:
         **The repair is a RE-SEND, never an Enter.** `Herdr._rescue` presses Enter on
         whatever is in the box without looking, which is the right trade for an interrupt —
         its text is the message, so a second `prompt` would duplicate it — and the wrong one
-        here. A doorbell carries no payload, so sending it again costs the recipient one
-        wasted `sb inbox`; a blind Enter can submit a human's half-typed text or answer a
-        modal dialog (`herdr.py:648-655` records a live `agent start` returning
+        here. Repairable rings are inbox notices; inline mail is marked non-repairable and
+        falls back to such a notice if its first send cannot be proved. Re-sending a notice
+        costs one inbox visit; a blind Enter can submit a human's half-typed text or answer
+        a modal dialog (`herdr.py:648-655` records a live `agent start` returning
         `interactive_ready` over a workspace-trust prompt).
 
         It stays free when nothing is outstanding, which is the property `flush_pending` is
@@ -8873,12 +8879,12 @@ class Broker:
 
         `hold=True` says this ring belongs to the HELD RING CLASS (`HELD_RING_KINDS`):
         a child finishing or dying, and later the mutation rings. Those arrive in bursts —
-        a fan-out of five reporting `done` inside a second — and the doorbell carries no
-        payload, so five of them tell the parent one thing five times. A held ring is
-        never sent from here; it is left owed to `flush_pending`, which already rings once
-        for a whole backlog and names every sender in it, and which waits out the rest of
-        the burst first (`RING_HOLDBACK`). It only ever affects the *idle* path: the busy
-        path was already a hold, and its behaviour is unchanged.
+        a fan-out of five reporting `done` inside a second — and five separate prompts cost
+        five turns. A held ring is never sent from here; it is left owed to
+        `flush_pending`, which already rings once for a whole backlog and names every sender
+        in one inline payload when it fits, or one inbox notice when it does not, and which
+        waits out the rest of the burst first (`RING_HOLDBACK`). It only ever affects the
+        *idle* path: the busy path was already a hold, and its behaviour is unchanged.
 
         There is no fallback when `agent prompt` fails. There used to be one — type the
         text into the agent's pane with `pane run` — and it was a shell: any backtick or
@@ -8960,9 +8966,9 @@ class Broker:
             # `flush_pending`'s to ring, unchanged.
             #
             # An idle recipient used to be rung here and now, individually — which is
-            # correct for one child and wrong for five, because the doorbell carries no
-            # payload and five of them say one thing five times. So a ring in the held
-            # class does not ring from here at all: it is owed to the same opportunistic
+            # correct for one child and wrong for five, because five prompts spend five
+            # turns even when their durable results can be delivered together. So a ring
+            # in the held class does not ring from here at all: it is owed to the same opportunistic
             # drain that already coalesces a backlog into one doorbell naming every
             # sender (`flush_pending`), and that drain decides when the burst is over
             # (`RING_HOLDBACK`). Returning False is exactly what leaves it owed — the
@@ -9022,16 +9028,16 @@ class Broker:
     def _deliver_interrupt(self, who: str, text: str) -> None:
         """Put an interrupt's text in the pane, CONFIRMED — or raise `HerdrError`.
 
-        The one ring that carries its payload is the one ring a bare `agent prompt`
-        cannot be trusted with. `prompt` returns nothing worth reading and has two
-        observed silent failures — pasted but never submitted, or never arrived at all —
+        The one mode that must prove its payload before returning is the one a bare
+        `agent prompt` cannot be trusted with. `prompt` returns nothing worth reading and
+        has two observed silent failures — pasted but never submitted, or never arrived at all —
         and the case this exists for is the loudest of them: a Claude Code sitting on its
         first-run auto-mode dialog eats the text whole and changes state anyway, so the
-        interrupt is thrown away while the send reports success. Every other mode can
-        afford that, because the doorbell carries nothing and `flush_pending` re-rings it
-        from the store on the next `sb` command anyone runs. An interrupt cannot: its
-        text IS the message, it has already cancelled the agent's turn with `esc`, and
-        "later" is precisely what it was refusing.
+        interrupt is thrown away while the send reports success. Ordinary mail can afford
+        asynchronous proof because it stays durable: a failed inline proof falls back to
+        an inbox notice, and a failed notice is re-rung from the store. An interrupt cannot:
+        its text IS the immediate change of course, it has already cancelled the agent's
+        turn with `esc`, and "later" is precisely what it was refusing.
 
         So this is `Herdr.deliver` — the same retry-until-proved path `_spawn` uses, and
         for the same reason — with the same proof: the text in the agent's OWN

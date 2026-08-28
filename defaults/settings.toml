@@ -311,6 +311,13 @@ agent_name = 32
 # and this number is now only the runaway guard behind it.
 text = 40000
 
+# How much tagged mail may be placed directly into an agent's next turn. Larger mail stays
+# durable and gets the ordinary inbox notice instead. This is deliberately far below
+# `text`: accepting a long report into the store is cheap, but forcing it into somebody's
+# context is not. 8k keeps ordinary replies and a small completion cohort inline while a
+# pasted artifact or a large burst falls back before it dominates the recipient's turn.
+inline_mail = 8000
+
 # `sb block "<why>"`. NOT a runaway guard and not style advice — the only cap here that is
 # load-bearing, because the reason is the one field whose SIZE tells the agent it is using
 # the verb wrong. The human never reads it (he reads the agent's own chat, via
@@ -394,6 +401,14 @@ gone_confirm_grace = 60.0
 # Erring long here would delay a real stall on the paths that have no other guard, so it is
 # deliberately the smallest number that is not zero and still means something.
 stalled_floor = 3.0
+
+# How long an explicit `sb waiting` remains an excuse for an idle turn. Waiting is a state,
+# not permanent immunity from STALLED: a native background task or child cohort may fail
+# without producing the event that clears the state. Four hours is clear of ordinary agent
+# and tool runs while still ensuring a forgotten wait returns to the fleet's needs-human
+# path the same day. This ages only the readout's excuse; it does not fabricate a wake or
+# mutate the stored intent.
+wait_excuse_grace = 14400.0
 
 # How long a `working` turn edge must have NOTHING behind it before that edge is doubted at
 # all (`status.TURN_STALE_GRACE`). Measured, not guessed: across 406 real agent sessions in

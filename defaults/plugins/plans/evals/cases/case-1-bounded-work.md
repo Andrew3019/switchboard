@@ -1,8 +1,9 @@
 # Case 1 — bounded work
 
-The shape most jobs are, and the one the whole design exists to protect: a small change
-with an obvious approach. A plan that reaches for a reviewer and a handoff here has
-repeated the failure it was built to fix.
+The smallest SHAPED job: the implementation is bounded, but the user-visible claim needs a
+real design choice before anybody can honestly write it. The task owner has already chosen
+the shaped path for that reason. A plan that turns this into several implementation owners
+or adds a planning handoff has repeated the failure the design was built to fix.
 
 Case 5 is a delta into **this** planner. Snapshot this case's plan file, contract text and
 manifest before you send it, or there is nothing left to compare case 5 against.
@@ -10,16 +11,19 @@ manifest before you send it, or there is nothing left to compare case 5 against.
 ## Brief — hand over exactly this half, and nothing below it
 
 You are the plan writer for one job in the switchboard repo. The checkout you are standing
-in is the whole of it; read it freely.
+in is the whole of it; read it freely. The task owner classified this as shaped because the
+meaning of the new health claim must be settled before implementation, not during it.
 
 **The job.** `sb doctor` reports the herdr version, the store path and the panel's health.
 It says nothing about this repo's model tiers, though `sb models` resolves all of them and
-`sb models --json` already carries the resolution per tier. Add the tiers to `sb doctor`'s
-output, so one command says whether this repo's agents can actually be spawned on the tiers
-it declares.
+`sb models --json` already carries the resolution per tier. A user wants doctor to say
+whether this repo's declared tiers are usable. Investigate what doctor and models can
+truthfully establish without invoking a provider command or stopping for login, choose the
+meaning and shape of that output, and plan the bounded implementation.
 
-**What is settled already.** It is one new section in the existing output, no new flag, no
-new command. The change lands as a pull request on this repo.
+**What is settled already.** Do not add a new top-level command. The exact output shape and
+the boundary between configured, resolved and executable are yours to reason about. The
+change lands as a pull request on this repo.
 
 **Recorded departure, and it is not optional.** Nobody here presents the contract to a
 human: your instruction says approval is the task owner's to obtain, and the task owner in

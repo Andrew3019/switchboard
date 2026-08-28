@@ -5385,13 +5385,14 @@ class LibrarySemanticsTest(PlansSandbox):
         multi-word token would otherwise straddle a wrap."""
         return " ".join(self.ok("plugin", "plans", "library", name).split())
 
-    def test_review_is_independent_structured_and_recorded(self):
+    def test_review_is_independent_structured_and_recorded_by_the_owner(self):
         """`review` names a fresh agent, a target commit, the major/minor/nit classification,
-        the reviewer's own minor fixes, and that the result is recorded in the change record
-        so landing reads it by identity."""
+        the reviewer's own minor fixes, and one writer for the result: the reviewer returns
+        the structure and the worktree owner records it for identity-bound landing."""
         about = self._about("review")
         for token in ("FRESH agent", "COMMIT", "MAJOR", "MINOR", "NIT", "change record",
-                      "review: {commit, reviewer, findings, fixes}"):
+                      "review: {commit, reviewer, findings, fixes}", "worktree owner",
+                      "single writer"):
             self.assertIn(token, about)
 
     def test_change_approval_is_combined_and_recorded(self):

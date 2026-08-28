@@ -441,6 +441,27 @@ class StatusTest(unittest.TestCase):
         self.assertFalse(a.stalled)
         self.assertEqual(a.idle_excuse, "waiting for background work")
 
+    def test_an_explicit_wait_eventually_stops_hiding_a_stall(self):
+        """Waiting explains a quiet turn, not permanent silence. If its native task or
+        child never produces a wake, the stored timestamp eventually returns the row to
+        the ordinary needs-human path without status mutating the wait itself."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_wait(self.db, "w1", "background")
+        wait = store.wait_for(self.db, "w1")
+        h = FakeHerdr([alive("w1", "idle")])
+
+        fresh = self.by_name(status.collect(
+            self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE - 1))["w1"]
+        self.assertFalse(fresh.stalled)
+        self.assertEqual(fresh.idle_excuse, "waiting for background work")
+
+        stale = self.by_name(status.collect(
+            self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE + 1))["w1"]
+        self.assertTrue(stale.stalled)
+        self.assertTrue(stale.needs_human)
+        self.assertIsNone(stale.idle_excuse)
+        self.assertIsNotNone(store.wait_for(self.db, "w1"), "status is read-only")
+
     def test_the_answer_ends_the_excuse(self):
         """It excuses a WAIT and not a name: anything back from the agent it asked spends
         the question, and the row is a stall again like any other."""
