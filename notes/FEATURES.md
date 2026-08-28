@@ -586,11 +586,13 @@ depend on somebody typing a command:
 
 ### Deferred message delivery ("the doorbell")
 `Broker._ring` and `Broker.flush_pending`, run at the top of every `sb` invocation
-(`cli.py:585-589`) and on the collector's own timer. The doorbell carries no payload — the
-message is in the store — and what a mode decides is only what happens to a target that is
-mid-turn: *when-idle* holds the ring (`ring_deferred`) until `flush_pending` fires it,
-*next-turn* rings anyway (`agent prompt` queues at the tool-call boundary rather than
-interleaving, measured against three 90-second single tool calls), *interrupt* rings anyway
+(`cli.py:585-589`) and on the collector's own timer. Small mail rides along with the ring
+(`Broker._inline_mail`, capped at `limits.inline_mail`); anything larger, or a burst that
+coalesces past that cap, falls back to a bare notice with the message left in the store.
+What a mode decides is only what happens to a target that is mid-turn: *when-idle*
+holds the ring (`ring_deferred`) until `flush_pending` fires it, *next-turn* rings anyway
+(`agent prompt` queues at the tool-call boundary rather than interleaving, measured against
+three 90-second single tool calls), *interrupt* rings anyway
 and its caller has already sent `esc`. Underlies `tell`, `done`, `block` and
 `sb presets --apply`; surfaced to humans in `sb status`/`sb inspect` as `UNDELIVERED`.
 
