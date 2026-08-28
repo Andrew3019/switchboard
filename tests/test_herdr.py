@@ -340,7 +340,7 @@ class DeliverTest(unittest.TestCase):
         h.deliver("w1", "do the thing")
         self.assertEqual([c for c in calls if c[1:3] == ["agent", "send-keys"]], [])
 
-    def test_a_retry_presses_enter_before_it_types_anything_again(self):
+    def test_a_retry_accepts_a_dialog_before_it_types_anything_again(self):
         """The duplicate this fix exists to stop, asserted as a call ORDER.
 
         The retry used to be `agent prompt` verbatim — a second paste into a box already
@@ -356,7 +356,7 @@ class DeliverTest(unittest.TestCase):
         self.assertEqual(kinds, [["agent", "prompt"], ["agent", "send-keys"],
                                  ["agent", "prompt"]])
         keys = next(c for c in calls if c[1:3] == ["agent", "send-keys"])
-        self.assertEqual(keys[3:], ["w1", "enter"])
+        self.assertEqual(keys[3:], ["w1", "down", "enter"])
 
     def test_a_prompt_that_never_started_a_turn_is_re_sent(self):
         """Pasted without submitting: herdr took the call and the agent never moved.

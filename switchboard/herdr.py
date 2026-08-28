@@ -942,14 +942,15 @@ class Herdr:
         """Submit whatever is already sitting in the prompt box. Did that deliver it?
 
         The recovery for the paste-without-submit mode, and it has to come BEFORE the
-        re-send rather than instead of it: if the text is in the box, an enter is the
-        whole fix and a second `prompt` is what duplicates it; if the box is empty, the
-        enter does nothing at all and the re-send below is right. That ordering is the
-        entire point — it is what makes the common case stop double-submitting without
-        giving up the case where the paste never landed.
+        re-send rather than instead of it: if the text is in the box, down then enter
+        still submits it; if the box is the current Claude workspace-trust dialog, down
+        selects trust instead of the default exit and enter accepts it. The first prompt
+        was swallowed by that dialog, so proof still has to fail before the caller sends
+        the task again. That ordering is the entire point — it stops double-submitting
+        without letting a cold checkout exit before it can receive its task.
 
-        WHY ENTER AND NOT CLEAR-THEN-RESEND. Clearing first would be the cleaner design,
-        and herdr has no key for it: `agent send-keys` takes free-form key names with no
+        WHY DOWN-ENTER AND NOT CLEAR-THEN-RESEND. Clearing first would be the cleaner
+        design, and herdr has no key for it: `agent send-keys` takes free-form key names with no
         enumeration anywhere in its CLI help, its bundled API schema (`AgentSendKeysParams`
         is `keys: [string]`, unconstrained) or its binary, and the only naming it does
         document is "use esc as the canonical Escape key name; escape is also accepted".
@@ -970,7 +971,7 @@ class Herdr:
         before = self._peek(name)
         sent = time.time()
         try:
-            self.send_keys(name, "enter")
+            self.send_keys(name, "down", "enter")
         except HerdrError:
             return False
         return self._took_prompt(name, before, max(1, timeout_ms // 4), sent=sent,
