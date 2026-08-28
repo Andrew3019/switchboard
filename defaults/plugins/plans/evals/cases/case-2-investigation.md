@@ -15,13 +15,13 @@ knows yet whether the stall reading is wrong, whether the pane reading is wrong,
 the two are measuring different things and both are right. Find out what makes them
 disagree, and report what you find.
 
-**Recorded departure, and it is not optional.** If you reach a `change-approval` step, its
-definition says to present the two sections in chat and then `sb block`. Do not. There is
-nobody here to answer a block. Write the two sections to
-`.switchboard/evals/case-2-contract.md` instead and `sb tell parent` the path.
+**Recorded departure, and it is not optional.** Nobody here presents anything to a human:
+your instruction says approval is the task owner's to obtain, and the task owner in this
+exercise is the harness. If you do reach a `change-approval` step, write its two sections to
+`.switchboard/evals/case-2-contract.md` rather than handing them over in words.
 
-Whatever you conclude, write it to `.switchboard/evals/case-2-answer.md` and
-`sb tell parent` the path. Do not spawn anything and do not hand off.
+Whatever you conclude, write it to `.switchboard/evals/case-2-answer.md`, `sb tell parent`
+the path, and `sb done`. Do not spawn anything.
 
 ## Expected signal — never handed to the planner
 

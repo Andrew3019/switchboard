@@ -3654,9 +3654,7 @@ class PlannerPackageTest(PlansSandbox):
                          "sb plugin plans catalog",
                          "sb plugin plans guide",
                          "THIS REPLACES THE FINDINGS NOTE",
-                         "you do not call `sb done`",
-                         "STRATEGY IS ADVISORY AND NEVER ENFORCEMENT",
-                         "--planner"):
+                         "STRATEGY IS ADVISORY AND NEVER ENFORCEMENT"):
             self.assertIn(expected, " ".join(out.split()))
         self.assertNotIn("<!--", out)
         self.assertEqual(json.loads(self.ok("plugin", "plans", "planner", "--json"))
@@ -3664,41 +3662,44 @@ class PlannerPackageTest(PlansSandbox):
         # Reads one file and writes nothing: no state file exists after it runs.
         self.assertEqual(self._files(), [])
 
-    def test_the_planner_instruction_carries_the_sibling_handoff_and_fallback(self):
-        """Unit 4's lifecycle, on the planner's side of it. The handoff FLIPPED — the planner
-        no longer spawns the main; it hands the brief and the seed to its parent, which
-        spawns the sibling — so the two claims that would have been true under the nested
-        model (the planner spawns; deltas go to `parent`) must be the sibling ones instead.
-        The fallback ladder is the net-new part and the reason the unit is more than
-        documentation: it is what the planner writes into the main's brief so a dead planner
-        does not strand the completion handshake, as one did in Unit 3.
+    def test_the_planner_instruction_bounds_its_ownership_and_hands_the_shape_back(self):
+        """The 2026-08-27 ownership model, on the planner's side of it. The planner is a
+        BOUNDED specialist: it expands the plan the task owner already made, challenges the
+        approach, clears the `planner` field and finishes. Everything that made it long-lived
+        — creating its own plan, a fresh main it hands execution to, staying open for the
+        plan's life, the completion handshake and the dead-planner fallback ladder — is gone,
+        because all of it existed to support a planner that outlives its plan.
 
         Asserted on the printed text as one whitespace-joined run, like the guide tests: the
         claims are what matter, not where a reflow puts the line breaks."""
         said = " ".join(self.ok("plugin", "plans", "planner").split())
         for expected in (
-                # The flip: the planner does not spawn, and the handoff is in two halves
-                # because `sb delegate` only makes the caller's own child.
-                "You do NOT spawn the main agent.",
-                "the handoff has two halves",
-                # The planner now records a real background wait instead of manufacturing
-                # an unanswered question to stay open.
-                '"ready: spawn the main with this brief and this seed"',
-                "`sb waiting` IS WHAT KEEPS YOU CLEANLY OPEN",
-                # The one address the sibling main cannot derive.
-                "YOUR EXACT AGENT NAME",
-                # Delta routing is by the planner's name now, not `tell parent`.
-                "sends you a delta — BY YOUR NAME",
-                # The fallback ladder: detect on any wake, route to parent, then owner rule.
-                "RE-CHECK THE TREE",
-                "That is the lead: structural, always live",
-                "the worktree's owner writes the shape for the rest of the job",
-                # The deliberate exclusion, kept with its reason so it is not re-added.
-                "`sb restore` IS DELIBERATELY NOT ON THIS PATH"):
+                # Bounded: the shape is held, not owned, and writing the plan buys no claim
+                # on running it.
+                "You do not own the job",
+                "gives you no claim on running it",
+                # The plan is not the planner's to create: it exists first, and is expanded.
+                "THE PLAN IS ALREADY THERE",
+                "You EXPAND that plan in place. Do not create a second one",
+                # Challenge is half the job, and over-delegation is the named target.
+                "CHALLENGE IT",
+                "Delegation is the one to look at hardest",
+                # The clean return, in the three acts that make it observable.
+                "Clear the `planner` field",
+                "Approval is the task owner's to obtain, not yours",
+                "You are finished; you do not stay open",
+                # The one structural rule the old sibling apparatus was protecting.
+                "you do not spawn the agent that runs the plan"):
             self.assertIn(expected, said)
-        # The nested-model claims are gone: the planner does not spawn the main, and a delta
-        # is not routed to `parent` while the planner is alive.
-        self.assertNotIn("Write the main agent a focused brief, spawn it", said)
+        # The long-lived model is gone, not reworded: no handshake, no fallback ladder, no
+        # sibling topology, and no instruction to stay open on a background wait.
+        for retired in ("You do NOT spawn the main agent.",
+                        "the handoff has two halves",
+                        "`sb waiting` IS WHAT KEEPS YOU CLEANLY OPEN",
+                        "sends you a delta — BY YOUR NAME",
+                        "RE-CHECK THE TREE",
+                        "`sb restore` IS DELIBERATELY NOT ON THIS PATH"):
+            self.assertNotIn(retired, said)
 
     def test_the_catalogue_is_generated_from_this_repo_and_not_from_a_list(self):
         """Every category, keyed, and each one holding what this sandbox actually has —
@@ -3822,7 +3823,11 @@ class PlannerPackageTest(PlansSandbox):
                 # owner where there is not.
                 "The worktree's owner: the lead, or the sole worker where there is no lead",
                 "UNLESS THE PLAN NAMES A PLANNER",
-                "THAT agent is the sole shape writer for the life of the plan",
+                # Held, not owned: the field is a temporary handover with two named halves,
+                # each written by whoever is giving something up.
+                "moves it temporarily",
+                "THE FIELD IS THE HANDOVER",
+                "it clears the field, with a `note` saying so, when it hands the shape back",
                 "A plan with no `planner` is the ordinary case",
                 "sb plugin plans planner",
                 "sb plugin plans catalog",
@@ -3832,33 +3837,40 @@ class PlannerPackageTest(PlansSandbox):
                 "Apart from `strategy` above there is no schema to satisfy"):
             self.assertIn(expected, said)
 
-    def test_the_guide_carries_the_planner_spawn_and_sibling_lifecycle(self):
-        """Unit 4's lifecycle at the LEAD's altitude — the side read by whoever spawns a
-        planner. Three things the guide has to get right, because the whole unit turns on
-        them: the capability seed the planner is given (held `spawn`, `fork` when foreseen,
-        and NEVER `write-tracked`), that seeding the main is two verbs and not a flag on one,
-        and that the completion handshake has a structural fallback to `parent` when the
-        planner is gone — with `sb restore` kept off that path on purpose.
+    def test_the_guide_carries_the_planner_seed_and_who_runs_the_plan_after(self):
+        """The planner lifecycle at the TASK OWNER's altitude — the side read by whoever
+        spawns one. Three things the guide has to get right: the capability seed (held
+        `spawn`, `fork` when foreseen, and NEVER `write-tracked`), that seeding is two verbs
+        and not a flag on one, and who runs the plan once the shape comes back — which since
+        2026-08-27 is the task owner by default, with a fresh main an option that has to earn
+        itself and that the owner spawns itself.
 
         Matched against the printed block as one whitespace-joined run, like the guide tests
         above: the claims are what is pinned, not the line breaks."""
         said = " ".join(self.ok("plugin", "plans", "guide").split())
         for expected in (
-                "SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT",
-                "spawns BOTH the planner and the main agent",
+                "SPAWNING A PLANNER, AND WHO RUNS THE PLAN AFTERWARDS",
+                # The plan is not created by the planner.
+                "THE PLAN EXISTS BEFORE THE PLANNER DOES",
                 # The seed, and the one grant it must never carry.
-                "NEVER grant it held `write-tracked`",
+                "NEVER `write-tracked`",
                 # Seeding is two verbs; there is no combined flag.
                 "There is no `delegate --grant`",
-                "PLUS `sb grant",
-                # The two-halves handoff, its --needs-reply, and where deltas go.
-                "THE HANDOFF HAS TWO HALVES",
-                '`sb tell parent "ready" --needs-reply`',
-                "Material deltas go to the planner BY NAME",
-                # The structural fallback, and the route deliberately left off it.
-                "route the candidate to `parent`",
-                "`sb restore` is NOT on this path"):
+                "`sb grant <agent> <cap>` adds anything beyond that template",
+                # The clean return, and continuing as the default afterwards.
+                "IT HANDS THE SHAPE BACK AND FINISHES",
+                "CONTINUING IS THE DEFAULT",
+                "A fresh main agent is an option that has to earn itself",
+                # The one structural rule the retired sibling topology was protecting.
+                "a fresh main is your child and never the planner's"):
             self.assertIn(expected, said)
+        # The long-lived planner is gone from this side too.
+        for retired in ("spawns BOTH the planner and the main agent",
+                        "THE HANDOFF HAS TWO HALVES",
+                        "Material deltas go to the planner BY NAME",
+                        "route the candidate to `parent`",
+                        "`sb restore` is NOT on this path"):
+            self.assertNotIn(retired, said)
 
     def test_the_guide_names_every_library_root_and_the_library_still_agrees(self):
         """Bug 2026-08-26-143005 defect 1: a singular heading over a library with more than

@@ -121,11 +121,15 @@ class CommandRuleTest(unittest.TestCase):
     def test_delegate_to_a_lead_now_fires_at_command_time(self):
         """The activation, in one assertion: the shipped rule is keyed `command =
         "delegate"`, and until this call site existed the only resolver call passed None,
-        so it matched nothing ever. `once`, so it is said to this agent one time."""
+        so it matched nothing ever. `once`, so it is said to this agent one time.
+
+        The row was rewritten on 2026-08-27 — it used to say a lead "is expected to split
+        what it is given", which the lead role no longer promises — and kept its id, so what
+        is matched here is the current text rather than the old convention."""
         first = self.out("delegate", "delegate")
-        self.assertIn("wants a `lead`, not a `worker`", first)
+        self.assertIn("WHO OWNS IT", first)
         self.assertIn(guidance.MARK, first)
-        self.assertNotIn("wants a `lead`", self.out("delegate", "delegate"))
+        self.assertNotIn("WHO OWNS IT", self.out("delegate", "delegate"))
 
     def test_isolation_is_offered_through_the_same_call_site(self):
         """The second `command = "delegate"` row, proved at the real call site rather than

@@ -21,15 +21,16 @@ it declares.
 **What is settled already.** It is one new section in the existing output, no new flag, no
 new command. The change lands as a pull request on this repo.
 
-**Recorded departure, and it is not optional.** Your `change-approval` step's definition
-says to present the two sections in chat and then `sb block`. Do not. There is nobody here
-to answer a block. Instead: write the two-section contract to
-`.switchboard/evals/case-1-contract.md`, then `sb tell parent "contract at
-.switchboard/evals/case-1-contract.md"` and stop. Everything else in the approval step's
-definition still applies — the two sections, in that format, with nothing added.
+**Recorded departure, and it is not optional.** Nobody here presents the contract to a
+human: your instruction says approval is the task owner's to obtain, and the task owner in
+this exercise is the harness. So write the two-section contract to
+`.switchboard/evals/case-1-contract.md` instead of handing it over in words, then finish the
+way your instruction says to — clear the plan's `planner` field, `sb tell parent "contract at
+.switchboard/evals/case-1-contract.md"`, and `sb done`. Everything else in the approval
+step's definition still applies — the two sections, in that format, with nothing added.
 
-Do not spawn a main agent, and do not hand off. This job ends when the plan exists and the
-contract is written.
+Do not spawn anything. This job ends when the plan exists, the contract is written and you
+have handed the shape back.
 
 ## Expected signal — never handed to the planner
 

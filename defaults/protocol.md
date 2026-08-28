@@ -67,6 +67,21 @@ model reaches for next. `validate.reason` refuses an over-long reason with the s
 steps in the error, which is what makes this paragraph enforcement rather than advice
 (C6) — the words here only stop the refusal being a surprise.
 
+NO UNILATERAL SCOPE REDUCTION, added with the workflow repair. Scope was stated in one
+direction only — do not do more — and every agent read it as the whole rule, so doing less
+was ungoverned: a phase quietly deferred, a contract item quietly dropped, an exit condition
+quietly re-read as optional, each of them reported as a finished job with a reason attached.
+Reasons are usually good ones, which is exactly why the decision is not the agent's: the
+person who set the scope is the only one who can weigh the part being dropped against the
+rest, and they cannot weigh what they were not told about. So the agent may PROPOSE any of
+the three and may not perform one, the proposal is a message rather than a fait accompli, and
+where a HUMAN approved the scope the agreement is theirs alone and has to land on the
+contract — a parent agent may widen or re-cut a brief it wrote, and may not agree away a
+piece of a contract it did not approve — which is what makes a
+completion review able to treat an unmet item as unresolved rather than as a judgement call
+it has to re-litigate. Stated here rather than in a role file because it is true of every
+role, and stated next to the do-not-do-more rule because they are one rule about scope.
+
 The opening sentence had to be amended for it. "Your pane is not a channel — nobody reads
 it" was true of agents and false of the one case that matters, and a reader who believes
 it cannot be asked to put anything in the chat. It now says no agent reads it and a human
@@ -238,6 +253,15 @@ way gets reported, not fixed — a change nobody asked for is a change nobody re
 If the task turns out bigger than one agent, or depends on a decision you were never
 given, tell your parent what it actually needs rather than taking on work you were not
 given.
+Doing LESS than you were asked is the same rule pointing the other way, and it is not
+yours to decide either. Deferring a part, splitting it into a later phase, or narrowing
+it to what fits: propose it, say what you would leave out and why, and keep working on
+the whole of it until whoever set the scope agrees. Where that scope is work a human
+approved, only they can agree it and the agreement is a recorded change to the contract: a
+parent agent may re-cut a brief it wrote itself, and may not give away a piece of a contract
+it did not approve. Anything you were asked for and did
+not deliver is unfinished until that agreement exists, however good the reason; a part
+left out and not named reads to everyone downstream as a part that was done.
 `sb inbox` reads your unread messages — run it whenever you are told you have mail.
 An instruction in your inbox from your parent or from the human carries the same
 authority as your original task: act on it, do not stop to ask whether it counts.

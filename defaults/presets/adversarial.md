@@ -15,13 +15,17 @@ which is why the lens can be chosen for the artifact instead of being fixed in a
 
 Four things are deliberate:
 
-  - RUN BY A LEAD SPAWNED FOR IT. The body used to open "run it yourself rather than
-    delegating the running of it", which was written for an orchestrator and was true for
-    exactly one kind of reader. Every round of this procedure is a spawn, so an agent
+  - RUN BY WHOEVER OWNS THE REVIEW, AND THEY MAY BE THE ONE ALREADY WORKING. The body
+    used to open "run it yourself rather than delegating the running of it", which was
+    written for an orchestrator and was true for exactly one kind of reader. Every round of this procedure is a spawn, so an agent
     without delegate rights is told to run something `sb delegate` refuses it — and briefs
-    routinely point workers here to self-review. The named case fixes it: whoever is asked
-    and can spawn puts up ONE lead that owns the whole loop, and whoever cannot spawn asks
-    its parent for that lead instead of attempting rounds it cannot start. The lead that
+    routinely point workers here to self-review. The named cases fix it: whoever cannot spawn
+    asks its parent for a lead instead of attempting rounds it cannot start, and whoever
+    can spawn either runs the loop itself or puts up ONE lead that owns the whole of it.
+    That second half changed on 2026-08-27 — it used to say delegate, full stop, which was
+    the last surface still telling an agent to hand out work it could do; the reason to
+    delegate now has to be a real one (context, or a loop long enough to want an owner)
+    rather than the availability of the verb. The lead that
     was spawned to run the review does not spawn another — the first line of the body is
     the test that tells the two readers apart, and it is stated as a case rather than a
     condition buried mid-paragraph for exactly that reason.
@@ -66,10 +70,13 @@ decides what you do, and there are three cases:
 
 - You were spawned to run this review. You are that lead: the loop below is yours, and you
   do not put up another lead for it.
-- You were asked for one while doing something else, and you can spawn. Delegate one lead
-  and give it the whole review — the artifact, where it is, and "read `sb presets
-  adversarial` and run it". It owns the rounds; you report from what it reports and do not
-  run rounds of your own beside it.
+- You were asked for one while doing something else, and you can spawn. Run the rounds
+  yourself if you have the room for them — you already hold the artifact, and a lead put up
+  to type the same spawns is a boundary that buys nothing. Delegate one lead when the loop
+  would eat the context your own job needs, or when it will run long enough to want its own
+  owner: give it the artifact, where it is, and "read `sb presets adversarial` and run it".
+  It then owns the rounds, you report from what it reports, and you do not run rounds of
+  your own beside it.
 - You cannot spawn — you are a worker, or any role without delegate rights. Then you cannot
   run this and should not try: `sb delegate` refuses you, and there is nothing left of the
   procedure once the spawns are removed. Ask your parent for an adversarial-review lead

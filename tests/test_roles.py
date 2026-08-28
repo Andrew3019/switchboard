@@ -277,11 +277,18 @@ class RolesTest(unittest.TestCase):
         same setup and environment. The guardrail is the half worth pinning — the choice is
         asymmetric (an extra agent against half a job that looks finished), so an unsure
         dispatcher spawns a lead, and nothing here licenses it to size the work by going
-        and reading."""
+        and reading.
+
+        Two more since 2026-08-27. `researcher` joined the routing options for the ask that
+        is explicitly to look and report; and choosing a lead is pinned as committing nobody
+        to delegating anything, because that is the sentence a lead prompt no longer
+        promising a fan-out needs the dispatcher to agree with."""
         prompt = roles.load(self.repo)["dispatcher"].prompt
         self.assertIn("--role worker", prompt)
+        self.assertIn("--role researcher", prompt)
         self.assertIn("Unsure is a lead", prompt)
-        self.assertIn("picking who runs the work, never what the work is", prompt)
+        self.assertIn("Choosing a lead commits nobody to delegating anything", prompt)
+        self.assertIn("picking who owns the work, never what the work is", prompt)
 
     def test_a_dispatcher_puts_a_multi_line_ask_in_a_file_rather_than_flattening_it(self):
         """herdr refuses a multi-line agent argument, so "relay it verbatim" and "pass it
@@ -411,6 +418,125 @@ class RolesTest(unittest.TestCase):
         r = roles.load(self.repo)
         self.assertEqual(roles.get(r, "foreman", self.repo).name, "lead")
         self.assertEqual(roles.get(r, "orchestrator", self.repo).name, "lead")
+
+    def test_no_shipped_prompt_tells_a_task_owner_to_delegate_by_default(self):
+        """2026-08-27, and the largest of the workflow-repair prompt changes. DESIGN-TRUTH:
+        "A lead owns the requested outcome and may perform every ordinary part of it. It may
+        investigate, read and edit the codebase, design, implement, verify, integrate,
+        communicate with Andrew and land the work within its authority."
+
+        The lead prompt used to say the opposite four times over, and the observed effect
+        was a lead spawning a lead to do its own job. Pinned as an absence across every
+        delivered prompt AND the guidance ledger, because the sentences were spread over a
+        role file and a reminder that fires at the moment of spawning — a rewrite of one
+        that left the other would restore the contradiction with nothing failing."""
+        every = " ".join([config.protocol(self.repo)]
+                         + [r.prompt for r in roles.load(self.repo).values()])
+        lead = roles.load(self.repo)["lead"].prompt
+        for retired in ("get other agents to do the work rather than doing it yourself",
+                        "Do not do the work yourself",
+                        "Do not read the codebase yourself",
+                        "delegate real work"):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, every)
+        # And the positive half, so the absence cannot be satisfied by saying nothing.
+        self.assertIn("Owning it means doing it", lead)
+        self.assertIn("That is authority, not an instruction", lead)
+        # The one delegation nothing may make optional.
+        self.assertIn("reviewed by a fresh agent that did not write it", lead)
+
+    def test_the_protocol_forbids_quietly_doing_less_than_was_asked(self):
+        """The other direction of scope, and the one that was ungoverned: "do only what you
+        were asked" was read as the whole rule, so deferring a phase, dropping a contract
+        item or re-reading an exit condition as optional was a call any agent could make and
+        report as a finished job. It is universal, so it is the protocol's — and the
+        reviewer is the reader that has to act on it, so it is pinned in both places."""
+        p = config.protocol(self.repo)
+        self.assertIn("Doing LESS than you were asked", p)
+        self.assertIn("propose it", p)
+        self.assertIn("recorded change to the contract", p)
+        reviewer = roles.load(self.repo)["reviewer"].prompt
+        self.assertIn("treat anything unmet as unresolved", reviewer)
+
+    def test_a_reviewer_may_apply_a_minor_fix_and_is_told_what_that_reaches(self):
+        """DESIGN-TRUTH: "A safe local unambiguous minor fix is applied by the reviewer and
+        named in the result." That needs three things to be true together, and each one
+        fails differently on its own: the capability (a role with no `write-tracked` is
+        being asked for work the runtime flags at `done`), the boundary (uncertain means
+        major, not edit), and the carve-out from the protocol's report-do-not-fix rule,
+        which every agent reads several thousand characters earlier."""
+        role = roles.load(self.repo)["reviewer"]
+        self.assertIn("write-tracked", role.capabilities)
+        for expected in ("make it yourself",
+                         "Unsure whether a fix is minor? Then it is a major",
+                         "Your write authority reaches those minor fixes and nothing else",
+                         'not the "something else\nyou noticed" the protocol tells you'
+                         .replace("\n", " ")):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, " ".join(role.prompt.split()))
+
+    def test_qa_reads_the_evidence_that_exists_instead_of_rerunning_it(self):
+        """DESIGN-TRUTH: "QA is used only for a specialized environment, perspective or
+        scenario that adds coverage; it is not the routine test runner." The old prompt
+        described a routine post-implementation stage, which is the slow loop that separates
+        a failure from the agent that could fix it. Both halves are pinned: whose the
+        ordinary tests are, and what qa does with evidence already bound to the commit."""
+        qa = " ".join(roles.load(self.repo)["qa"].prompt.split())
+        self.assertIn("the ordinary tests and builds are the author's", qa)
+        self.assertIn("Read what was already run on this commit and take it", qa)
+
+    def test_both_task_owning_roles_are_told_to_finish_the_change_before_proving_it(self):
+        """DESIGN-TRUTH: "Implementation is kept coherent before normal verification." A
+        worker is the main agent for a whole job as often as a lead is, so the rule cannot
+        live in one of them; and the diagnostic carve-out has to travel with it, or the rule
+        reads as a ban on running anything while working."""
+        r = roles.load(self.repo)
+        for name in ("lead", "worker"):
+            with self.subTest(role=name):
+                said = " ".join(r[name].prompt.split())
+                self.assertIn("Make the whole change before you verify it", said)
+                self.assertIn("diagnostic", said)
+
+    def test_the_universal_verbs_are_taught_once_and_the_roles_only_decide(self):
+        """DESIGN-TRUTH's subtractive rule, applied to the three prompts that were breaking
+        it: "a rule in both places is paid for twice and drifts". The protocol carries the
+        `sb block` two-step, the `sb delegate` / `--name` syntax and the waiting syntax, and
+        every agent reads it BEFORE its role file — so a role restating any of them buys
+        nothing and gives the two copies room to disagree. `--isolation own` and
+        `sb merge <child>` are the same rule one layer further out: they are guidance rows
+        that fire at the delegate itself, and a rule that moves to the ledger is deleted
+        from the spawn prompt.
+
+        What the roles keep is their own decision — which part gets a worker, that a fan-out
+        is one cohort to synthesise, what a block is FOR — and, at the block, the clause
+        naming the CHAT, which the test above requires and which is not a procedure."""
+        p = config.protocol(self.repo)
+        r = roles.load(self.repo)
+        for canonical in ("--name", "sb waiting --all", "ONE short line"):
+            with self.subTest(protocol=canonical):
+                self.assertIn(canonical, p)
+        for name in ("lead", "worker", "dispatcher"):
+            said = r[name].prompt
+            for restated in ("--name", "short line", "sb waiting", "--isolation own",
+                             "sb merge"):
+                with self.subTest(role=name, restated=restated):
+                    self.assertNotIn(restated, said)
+        # The ledger rows that own the two isolation rules are still there to own them.
+        rows = (config.defaults_dir() / "guidance.toml").read_text()
+        self.assertIn("isolation-at-the-spawn", rows)
+        self.assertIn("merge-finished-isolated-child", rows)
+
+    def test_a_reviewers_fixes_stop_at_a_commit(self):
+        """Seeding `write-tracked` made the reviewer the first role that produces commits,
+        and the protocol's shipping default — branch, push, open the pull request — is read
+        by every agent thousands of characters earlier and is written for the agent that
+        OWNS the work. A reviewer is usually a tab on the author's in-flight branch, so
+        without this the composed default is push-and-PR on somebody else's unfinished
+        work. `house-rules` closes it on this repo only, and that file does not ship."""
+        said = " ".join(roles.load(self.repo)["reviewer"].prompt.split())
+        self.assertIn("Your fixes STOP at that commit", said)
+        self.assertIn("do not push", said)
+        self.assertIn("do not open a pull request", said)
 
     def test_a_dispatcher_and_a_lead_are_given_different_jobs(self):
         """The one thing that justifies two prompts rather than one with a branch in it: a

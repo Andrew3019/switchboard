@@ -161,7 +161,7 @@ class RoleBundleTest(Fixture, unittest.TestCase):
             "lead":       ["dispatch", "fork", "spawn", "write-tracked"],
             "worker":     ["write-tracked"],
             "researcher": [],
-            "reviewer":   [],
+            "reviewer":   ["write-tracked"],   # scoped minor fixes, 2026-08-27
             "qa":         [],                                       # read-only by default
         }
         for role, caps in expected.items():

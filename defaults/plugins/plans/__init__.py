@@ -668,7 +668,7 @@ def register(reg):
               reg.arg("--planner", flag=True,
                       help="you are this plan's plan writer: records you in the plan's "
                            "`planner` field, which makes the SHAPE of the plan yours "
-                           "rather than the worktree owner's"),
+                           "rather than the worktree owner's until you clear it again"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "record", record, audience="both",
@@ -810,6 +810,64 @@ WHEN A PLAN EXISTS
   Investigation that becomes a change PRODUCES one of the two rather than living inside it: a
   shaped plan where the work needed shaping, a direct record where it did not.
 
+THE CHANGE RECORD, WHICH BOTH PATHS HAVE
+
+  Landing has facts, and they are the same facts whether or not the work was shaped: what
+  was asked for, what was wrong and what was done about it, what was verified and on which
+  commit, who reviewed it and what they found, what a human still has to check, which PR
+  and which head, who approved the landing and against which head, and how it ended. Those
+  live on the change record — one object, `change`, on the document. A shaped plan is born
+  with one at `create`; a direct change gets one from `record`, and only when it needs it.
+
+  It is EDITED BY HAND, like every other field on a plan. The only two things a verb writes
+  are the path, and `request` when `record --request` seeds it; there is no schema to
+  satisfy past that — put what the job needs on it. `sb plugin plans show`
+  draws every field that is filled, `--markdown` puts them on the pull request, and
+  `validate` reports two things and refuses neither: a shaped record at or past `execution`
+  whose combined approval does not name both the plan revision and the contract digest, and
+  a record at or past `landing` with no PR on it. Both are the same defect in two places —
+  a record claiming to be further along than what it can point at.
+
+  The fields, and who fills each one as they reach it:
+
+    path         `direct` or `shaped`, written when the record is made. Everything else
+                 about landing reads against it: a direct change has no plan, no contract
+                 and no change approval, and never claims one.
+    phase        where the work has got to, in the job's own words. The lifecycle's are
+                 shaping, approval, execution, review, human-review, landing, finished; a
+                 direct change has none until it opens a PR. Nothing polices what work
+                 happened when — this is the record describing itself.
+    request      the human's ask, in their words, for a direct change. It is what the PR
+                 says the change is FOR.
+    contract     the approved scope, exclusions, success conditions and constraints, for a
+                 shaped one. The approved text itself stays in the approval step's `output`.
+    cause        the root cause, or the feature intent where there was no defect.
+    solution     what was actually done about it, and the scope boundaries worth naming.
+    approval     the combined change approval as an IDENTITY — `{plan_revision,
+                 contract_digest, by, at}` — recorded when Andrew approves. Shaped only.
+                 Naming what was approved is what lets review and landing compare it later
+                 instead of re-reading the wording.
+    verification `{commit, check, environment, result, at}`. Evidence belongs to the commit
+                 it ran on; that is what makes it reusable rather than re-earned.
+    review       `{commit, reviewer, findings, fixes}` — the independent review, the head it
+                 covered, what came back and what the reviewer fixed itself.
+    human_checks the list of things only a person can do, or the string saying none remain.
+                 Written BEFORE the PR opens, so the human meets it the first time they read
+                 the comment.
+    pr           `{number, head}`.
+    landing      `{head, by, at, outcome, cleanup}` — the human's landing approval, the head
+                 it covers, and how the merge and the cleanup actually went.
+    scope, limitations, baseline, handoff
+                 optional, absent until used: important scope boundaries, known relevant
+                 limitations, evidenced pre-existing failures, and `{from, to, at}` when a
+                 fresh main took the work over.
+
+  WHY IT IS SEPARATE FROM THE PLAN. Review, evidence, PR rendering and landing safety are
+  things a CHANGE has, not things a plan has, and tying them to the step graph would have
+  meant either inventing a plan for every bounded fix or leaving direct work without any of
+  them. So a direct change reaches its PR, its review and its merge through this record and
+  no plan at all.
+
 WHO WRITES TO IT
 
   The worktree's owner: the lead, or the sole worker where there is no lead. A sole worker
@@ -820,21 +878,26 @@ WHO WRITES TO IT
   A child that wants one ASKS, with `sb tell parent`, and does not edit the file. One
   writer is what makes editing this file by hand safe, and it is the only thing that does.
 
-  UNLESS THE PLAN NAMES A PLANNER, which is the one thing that moves that writer. A plan
-  carrying a `planner` field was written by a plan writer, and THAT agent is the sole shape
-  writer for the life of the plan, whoever owns the worktree — until the fallback under
-  SPAWNING A PLANNER takes over, the one case where a gone planner hands the shape back to
-  the worktree's owner: scope, success criteria, the
-  decomposition, cross-step deps, `strategy`, the verification strategy and the termination
-  condition are all its own. What the main agent owns on such a plan is execution state —
-  progress, notes, evidence, checkpoints, outputs, and the ticks — and it records a local
-  adaptation as a note rather than by reshaping the plan. Anything material goes back to
-  the planner with `sb tell`, and it revises the plan itself.
+  UNLESS THE PLAN NAMES A PLANNER, which is the one thing that moves that writer, and it
+  moves it temporarily. A `planner` field says the SHAPE of this plan is that agent's for as
+  long as the field is there: scope, success criteria, the decomposition, cross-step deps,
+  `strategy`, the verification strategy and the termination condition. Execution state —
+  progress, notes, evidence, checkpoints, outputs and the ticks — never moves with it, and
+  the agents doing the work record a local adaptation as a note rather than by reshaping the
+  plan.
 
-  A plan with no `planner` is the ordinary case and the rule above it is the whole of it.
-  The field is written by `create --planner`, which records the calling agent; the plan
-  writer's own instruction is `sb plugin plans planner`, and the vocabulary it plans
-  against is `sb plugin plans catalog`.
+  THE FIELD IS THE HANDOVER, and each half is written by whoever is giving something up. You
+  write `"planner": "<its exact agent name>"` into the plan file when you hand the shape to a
+  plan writer; it clears the field, with a `note` saying so, when it hands the shape back.
+  (`create --planner` writes it too, for a planner creating a plan from nothing — not the
+  ordinary case, since the plan exists before the planner does.) An empty field is this
+  section's ordinary rule again, unchanged: the worktree's owner writes the shape. While the
+  field is filled, anything material goes to that agent BY NAME with `sb tell` — `parent`
+  reaches you, not it.
+
+  A plan with no `planner` is the ordinary case. The plan writer's own instruction is
+  `sb plugin plans planner`, and the vocabulary it plans against is `sb plugin plans
+  catalog`.
 
   TICKING IS NOT THAT. Any agent ticks the step it did, and is trusted to tick only that
   one. An agent that reports back without ticking leaves the tick to the lead, who does it
@@ -843,82 +906,54 @@ WHO WRITES TO IT
   A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
   it does not plan, own, tick or read one.
 
-SPAWNING A PLANNER, AND THE SIBLING MAIN AGENT
+SPAWNING A PLANNER, AND WHO RUNS THE PLAN AFTERWARDS
 
-  A planner-managed plan runs three long-lived agents — the planner may put up its own
-  short-lived reviewers besides — and the shape of the workflow is who spawns
-  whom. The LEAD — the worktree's owner — spawns BOTH the planner and the main agent, so
-  they are SIBLINGS under one durable parent. The planner is the fragile agent: it writes
-  the plan, hands off, and then stays open and inactive for the plan's life. Nesting it as
-  the main agent's parent would put that fragile agent in a load-bearing slot, and its death
-  would orphan the main and the completion handshake — which is exactly what happened once.
-  Siblings under a durable lead cost only an advisor when the planner dies, never the
-  structure. `sb plugin plans planner` is the planner's own instruction; this section is the
-  lead's side.
+  A planner is worth an agent when the shaping produced real alternatives, a wide blast
+  radius, work crossing subsystems, or verification that is expensive or uncertain — the
+  cases where a fresh reader challenging the approach changes the plan. Bounded work with an
+  obvious approach does not get one: you write the short plan yourself, and a planner added
+  to work of that size is the process this design exists to remove.
 
-  BEFORE PLANNING, SEED THE PLANNER. Spawn a fresh strong `researcher` and grant it held
-  `spawn`, so it can put up its own plan reviewer, and held `fork` only where an isolated
-  helper is actually foreseen. NEVER grant it held `write-tracked`: a planner reads and does
-  not write tracked files, and its own writes — the plan file (under the git common dir's
-  `agentflow/`, via `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither
-  of them tracked.
-  The `reviewer` role it spawns carries no capabilities of its own.
+  THE PLAN EXISTS BEFORE THE PLANNER DOES. You created it at shaping entry and it holds what
+  the shaping found; the planner EXPANDS that one in place and never creates a second. Hand
+  it the shape with the `planner` field above, and give it a brief carrying the job in a
+  sentence, the plan id, the files in and out of scope, the decisions already settled, and
+  what you want challenged.
 
-    - WHY THE SEED IS SMALL, and this is the sibling payoff. Under a nested topology the
-      planner also had to be handed `write-tracked` and everything else DELEGABLE-ONLY,
-      purely so it could pass those on when it spawned the main. Siblings delete that: the
-      lead spawns the main itself and seeds it directly, so nothing load-bearing routes
-      through the fragile agent. A delegable-only grant to a planner is now only ever about
-      the planner's OWN helpers.
+  SEED IT SMALL. A fresh strong `researcher`, granted held `spawn` so it can put up its own
+  plan reviewer, and held `fork` only where an isolated helper is actually foreseen. NEVER
+  `write-tracked`: a planner reads and does not write tracked files, and its own writes — the
+  plan file (under the git common dir's `agentflow/`, via `sb`) and its briefs (under
+  `.switchboard/`, gitignored) — are neither of them tracked. That omission is also what
+  keeps its plan reviewer read-only on the plan, since a spawn is seeded from what the
+  spawner can pass down.
 
   SEEDING IS TWO VERBS, and neither is a flag on the other. `sb delegate --role <role>` sets
   the child's ROLE TEMPLATE, which is the seed narrowed by the template/intersection rule;
   `sb grant <agent> <cap>` adds anything beyond that template. There is no `delegate --grant`.
-  So "the lead seeds the main directly" is `sb delegate --role …` PLUS `sb grant …`. A
-  capability the lead cannot supply is a precondition — record it and resolve it before the
-  spawn, not at it. The chosen main role still narrows its seed by the same
-  template/intersection rule.
+  A capability you cannot supply is a precondition — resolve it before the spawn, not at it.
 
-  WHERE THE PLAN LIVES. In the one workspace the lead, the planner and the main all share —
-  the lead's. The lead spawns the main there by default. An isolated main uses the same
-  repo-state plan by qualified id (`p-<n>/step-<n>`) while the plan stays attached to that
-  workspace.
+  IT HANDS THE SHAPE BACK AND FINISHES. The planner clears the `planner` field, tells you
+  what it wrote and what it challenged, and calls `sb done`. It does not stay open, it does
+  not take the plan to Andrew, and it does not spawn whatever runs the plan. From there the
+  shape is yours again: you put the two sections to Andrew at `change-approval`, and a
+  rejection or a later material delta comes to you — you decide whether to make the change
+  yourself or spend a fresh planning pass on it.
 
-  THE HANDOFF HAS TWO HALVES, because `sb delegate` only ever makes the caller's OWN child.
+  WHO RUNS THE PLAN IS THEN YOUR CALL, AND CONTINUING IS THE DEFAULT. You already hold the
+  problem, the decisions and the risks, so carry on as the agent that executes it. A fresh
+  main agent is an option that has to earn itself: shaping consumed most of your context,
+  execution needs capabilities or a specialism you do not have, or the execution is large
+  enough to deserve its own accountable owner. When you do use one, YOU spawn it — a fresh
+  main is your child and never the planner's, because `sb delegate` only ever makes the
+  caller's own child and a planner that finishes would orphan it — and you hand it the
+  approved design, the plan, the contract, the constraints and the open risks rather than a
+  compressed sentence. Record it on the change record's `handoff`, which exists for exactly
+  this and is absent when it did not happen.
 
-    - The planner writes the main's brief, states the capability seed, and `sb tell parent
-      "ready" --needs-reply` — then stays open and inactive. It does not `sb done` and it
-      does not spawn. The `--needs-reply` is load-bearing: with no live child to waive the
-      stop gate, an unanswered question is what keeps the planner cleanly open rather than
-      STALLED (planner.md says why). The lead spawns the main rather than answering "ready",
-      so that question stays open for the plan's life.
-    - The lead spawns the main as its own child — the planner's sibling — and grants the seed
-      directly.
-
-  The brief the planner writes carries the plan id, the files in and out of scope, THE
-  PLANNER'S EXACT AGENT NAME, the ownership boundary and the completion handshake; the
-  planner's instruction is the worked example for it, and the exact name is the load-bearing
-  item — under sibling it is the one address the main cannot derive.
-
-  OWNERSHIP, ON A PLANNER-MANAGED PLAN, is the split under UNLESS THE PLAN NAMES A PLANNER
-  above: the planner owns the SHAPE, the main owns EXECUTION STATE and records local
-  adjustments as notes. Material deltas go to the planner BY NAME (`sb tell <planner>`),
-  never to `parent`, which is the lead; local adjustments stay with the main.
-
-  THE COMPLETION HANDSHAKE, AND ITS FALLBACK. Before its final `done` the main closes any
-  helper of its own — a parent with a live child is exempt from the stall ping, so a main
-  still holding one open would never be woken to notice the planner is gone — then sends its
-  completion candidate to the planner by name with `--needs-reply`, and ends its turn. The
-  planner checks it against the termination condition and either returns missing work or
-  clears the main to finish. But the planner may be GONE — an inactive planner once died
-  silently after handoff — and a message to a dead sibling is accepted and silently written
-  off, so the main has to notice for itself. On ANY wake with no reply the main re-checks the
-  tree (`sb status`): planner alive and slow, wait again; planner gone, route the candidate to
-  `parent` — the lead, which is structural, always live, and holds the plan file with the
-  contract and the criteria. With the planner unrecoverable the plan reverts to the ordinary
-  rule above: the worktree's owner writes the shape, recorded as a plan note. `sb restore` is
-  NOT on this path — it is what failed before, and a recovery that starts with the thing that
-  broke is not one. The same route covers a material delta to a dead planner.
+  WHERE THE PLAN LIVES. In the one workspace you and the planner share — yours. An isolated
+  main uses the same repo-state plan by qualified id (`p-<n>/step-<n>`) while the plan stays
+  attached to that workspace.
 
 WHAT TO BUILD IT FROM
 
@@ -966,6 +1001,13 @@ WHAT TO BUILD IT FROM
   the section below, and it is an exception for a reason: an EDGE between two definitions
   belongs to neither of them, so no definition can be the only place it is written down.
 
+  A STEP IS A UNIT OF WORK AND NOT AN AGENT BOUNDARY. One agent normally owns a run of
+  steps and stays with them across implementation, verification, fixes and integration;
+  another agent is worth its brief and its wait where the separation buys independence, a
+  specialism or real parallelism. Independent review is the exception that always buys it —
+  a fresh agent that did not write the change — and it is the one step whose owner is
+  decided for you.
+
   Then re-plan on what you now know, rather than executing a split you decided before you
   knew anything.
 
@@ -977,8 +1019,8 @@ TWO STEPS IN ONE BAND GET NO EDGE, AND `plan-review` IS WHERE YOU MEET THAT
 
   `plan-review` is the case in the shipped library, and it is OPTIONAL: like `create-pr`
   and `merge`, nothing composes it and nothing obliges it, so it is in a plan because
-  whoever shaped the plan — the plan writer, where there is one — decided the planning risk
-  earned a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach,
+  whoever holds the shape — a plan writer where there is one, otherwise you — decided the
+  planning risk earned a fresh agent reading the whole plan first. Meaningful tradeoffs in the approach,
   a plan crossing subsystems, several agents or handoffs, verification that is expensive or
   incomplete, a large blast radius. A small linear plan does not get one and goes straight
   to Andrew at `change-approval`, which is the shape most jobs are.
@@ -990,11 +1032,12 @@ TWO STEPS IN ONE BAND GET NO EDGE, AND `plan-review` IS WHERE YOU MEET THAT
   together. Left unwired, the plan reads as one whose approval can be reached without the
   review.
 
-  The reviewer reports to the planner and touches neither the plan nor the approval; the
-  planner resolves the findings, puts a compact result in the step's `output` and ticks it.
-  A rejection at the approval goes back to that same planner, with `tries` bumped and the
-  approval reopened, and the review runs again only where the revised planning risk earns
-  it. The definition is the detail — `sb plugin plans library plan-review`.
+  The reviewer reports to whoever holds the shape and touches neither the plan nor the
+  approval; that agent resolves the findings, puts a compact result in the step's `output`
+  and ticks it. A rejection at the approval goes back to whoever holds the shape THEN —
+  which is you, unless a planner is still engaged — with `tries` bumped and the approval
+  reopened, and the review runs again only where the revised planning risk earns it. The
+  definition is the detail — `sb plugin plans library plan-review`.
 
 EVERY STEP HAS A BOARD NAME AND A DEP
 
@@ -1515,13 +1558,18 @@ def create(ctx, args) -> Result:
     expensive one.
 
     `--planner` IS A CLAIM AND NOT AN ASSIGNMENT, which is why it takes no value. The
-    field says who owns the SHAPE of this plan for its life (`GUIDE`), so the only name
+    field says who owns the SHAPE of this plan while it is set (`GUIDE`), so the only name
     that can go in it honestly is the caller's own: a name typed for somebody else is a
-    claim about an agent that may not exist, made by an agent that is not it. A plan
-    writer sets it on itself as it creates the plan; anybody setting one up by hand writes
-    the field into the file, which is what every other field on a plan is done by anyway.
-    Absent — the ordinary case, and every plan made before this flag existed — the
-    worktree-owner rule applies unchanged.
+    claim about an agent that may not exist, made by an agent that is not it. Absent — the
+    ordinary case, and every plan made before this flag existed — the worktree-owner rule
+    applies unchanged.
+
+    IT IS NOT THE USUAL WAY THE FIELD GETS WRITTEN, since the shaped path creates the plan
+    before a planner exists: the task owner writes the name into the file when it hands the
+    shape over and the planner clears it when it hands the shape back, each half written by
+    whoever is giving something up, both of them ordinary field edits like everything else
+    on a plan. The flag covers the case this verb can honestly cover — a plan writer
+    creating a plan from nothing — and nothing here reads the field as permanent.
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
     display = str(args.display or "").strip()

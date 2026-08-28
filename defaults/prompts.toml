@@ -124,7 +124,12 @@ delegate_task = "Await further instructions. Do NOT start work, and do not inven
 # Fallback for a payload that cannot safely travel in one provider prompt (large,
 # multiline, mixed with held signals). Ordinary short mail is sent directly, still backed
 # by its durable store row, so the recipient does not pay another turn to fetch it.
-mail = "You have mail. Run: sb inbox"
+#
+# So an agent that reads THIS string has already missed the inline delivery, and the text
+# says so rather than describing mail in general: the one action left is the fetch, and a
+# recipient that has learned inline delivery is normal needs telling that this time it is
+# not. Everything about what to do with the message is the message's own business.
+mail = "A message could not be delivered inline. Run: sb inbox"
 
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
@@ -135,7 +140,7 @@ mail = "You have mail. Run: sb inbox"
 # the implied obligation without adding payload — the message itself still lives in the
 # store, which is the whole point of a doorbell. How to handle a cohort is the orchestrator
 # role's business, not the doorbell's; this only stops the doorbell from arguing with it.
-child_done = "A child finished. Run: sb inbox. Waking is not a reason to report — use `sb waiting --all` when the whole live cohort is what you need."
+child_done = "A child finished and its report could not be delivered inline. Run: sb inbox. Waking is not a reason to report — use `sb waiting --all` when the whole live cohort is what you need."
 
 # `sb tell --interrupt`. Delivered mid-turn, after an escape keypress cancels whatever was
 # running, so it has to say plainly that the previous instruction is void.

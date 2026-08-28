@@ -66,6 +66,15 @@ Case 5 is a delta sent to case 1's own planner, so it runs last and it depends o
 copy of case 1's plan file, contract text and manifest there is nothing left to measure
 case 5 against, and the proportionality contrast the whole pass turns on is gone.
 
+**Do not restore that planner, and do not replace it.** A planner finishes when it hands
+the shape back, so case 1's is `done` by the time case 5 exists — and `done` is not closed:
+the pane stays, the name still answers, and `sb tell <the case-1 planner>` is how the delta
+reaches it, with its own reasoning still in context. `sb restore` is for an agent `cleanup`
+took away, which here is the teardown and runs after case 5, so a restore attempted now is
+refused (`already running — nothing to restore`) and nothing is wrong. Putting a FRESH
+planner on the delta is case 1 again, not replanning — the case is unrunnable without that
+same agent, and its own file says what else to hand back to it before you send.
+
 ## Running it
 
 Everything below is one worked path. Adapt the paths; do not adapt the order.
@@ -160,22 +169,30 @@ or one that caught the wrong half, is a mistake nothing downstream will catch fo
 
 ### 4. The recorded departure every case brief carries
 
-Every real planner reaches `change-approval`, whose definition says: present the two
-sections in chat, then `sb block`. **Nobody answers a block in a throwaway clone**, and a
-blocked clone agent sits there being visible to the machine's supervisor for the rest of the
-run. So each case brief departs from that, on purpose and in writing:
+A planner does not present the approval — that is the task owner's, and the task owner in
+this exercise is the harness, which cannot read a two-section summary out of a chat pane.
+**And nobody answers a block in a throwaway clone**, so a planner that reached for one would
+sit there being visible to the machine's supervisor for the rest of the run. So each case
+brief departs on one point, on purpose and in writing:
 
-> Write the two-section contract to `<path>` and send `sb tell parent "contract at
-> <path>"`. Do not call `sb block`.
+> Write the two-section contract to `<path>` rather than handing it over in words, then
+> finish as your instruction says: clear the `planner` field, `sb tell parent "contract at
+> <path>"`, `sb done`.
 
-Watch for one that blocks anyway — that is itself worth recording — and clear it by telling
-it to carry on.
+Everything else — the two sections, that format, nothing added, the shape handed back — is
+the planner's ordinary instruction and is what is being scored.
 
-**The departure costs you two things, and neither is optional to know about.** A planner
-told to stop rather than to `sb done` ends its turn *stalled*, and `sb cleanup` will not
-close a stalled agent — see the teardown. And the approval step is never ticked, so anything
-a case expects to see *reopened* cannot be observed at all. Case 5's `progress` condition is
+**What the departure still costs you.** The approval step is never ticked, so anything a
+case expects to see *reopened* cannot be observed at all. Case 5's `progress` condition is
 the one that hits, and its file says so.
+
+**What it no longer costs you**, since the planner rewrite: the briefs used to tell a planner
+to *stop* rather than to `sb done`, which left every one of them stalled and un-closable by
+plain `cleanup`. A planner now finishes by handing the shape back — clear the `planner`
+field, tell the parent, `sb done` — so the briefs say that, the agents end cleanly, and the
+teardown below is an ordinary `cleanup`. Watch instead for a planner that blocks anyway, or
+that presents the contract in chat rather than writing it to the file: either is worth
+recording, and neither is what its instruction now says.
 
 ### 5. The manifest and the grounding check
 
@@ -243,10 +260,11 @@ pass has.
 ./bin/sb workspace close <each workspace the run created> --yes
 ```
 
-**`cleanup` on its own will refuse every planner, and this is the step that leaves litter.**
-The case briefs tell planners to *stop*, not to `sb done`, so each one ends stalled and
-plain `cleanup` answers `refused …: working, not finished — it has not reported an end`.
-`--force` on the lead takes the subtree with it. `workspace close` wants `--yes` when
+**This is still the step that leaves litter, even though the planners now end cleanly.** The
+briefs tell each planner to `sb done`, so plain `cleanup` closes them — but a planner that
+departed from its brief and blocked, or one whose turn switchboard gave up on, will refuse,
+and `--force` on the lead takes the subtree with it either way. Read `sb status` before and
+after rather than assuming. `workspace close` wants `--yes` when
 nothing is standing there to confirm. An operator who runs the two bare commands, reads no
 error, and walks away leaves five live agents and a worktree behind — it has happened, and
 the next pass's spawn is what discovers it.
