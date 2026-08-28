@@ -4966,9 +4966,8 @@ class ChangeRecordLifecycleTest(PlansSandbox):
         self.assertIn("sha256:abcd1234", shown)
 
     def test_execution_before_a_recorded_approval_is_a_defect(self):
-        """A shaped record whose phase claims execution or later with no combined approval
-        recorded is implementation presented as sanctioned before it was approved — drawn red
-        and reported by `validate`, and never refused."""
+        """A shaped record claiming execution without a complete combined approval identity
+        is drawn red and reported by `validate`, and never refused."""
         self.data("plugin", "plans", "create", "a shaped job",
                   "--display", "board: a shaped job", "--step", "impl = write it")
         doc = self._doc()
@@ -4976,7 +4975,7 @@ class ChangeRecordLifecycleTest(PlansSandbox):
         self._save(doc)
         defects = self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"]
         joined = " ".join(defects)
-        self.assertIn("sanctioned before it was approved", joined)
+        self.assertIn("sanctioned without the complete approval identity", joined)
         # Recording the approval clears it.
         doc = self._doc()
         doc["plans"][0]["change"]["approval"] = {"plan_revision": "p-1@r1",
@@ -4984,6 +4983,19 @@ class ChangeRecordLifecycleTest(PlansSandbox):
         self._save(doc)
         self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
                          [])
+
+    def test_an_incomplete_approval_identity_does_not_sanction_execution(self):
+        """A truthy approval object is not enough: both identity fields are load-bearing."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["phase"] = "execution"
+        doc["plans"][0]["change"]["approval"] = {"by": "andrew", "at": 1787880000}
+        self._save(doc)
+        defects = self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"]
+        joined = " ".join(defects)
+        self.assertIn("`plan_revision`", joined)
+        self.assertIn("`contract_digest`", joined)
 
     def test_a_direct_record_never_trips_the_approval_check(self):
         """A direct change has no approval and never claims one; its phase stays null, so the
@@ -5071,7 +5083,8 @@ class LibrarySemanticsTest(PlansSandbox):
         """`merge` reads the record's approval and evidence and checks the head, and does not
         rerun the tests or the review to rebuild confidence."""
         about = self._about("merge")
-        for token in ("CONSUMES AN IDENTITY", "approval", "does NOT rerun", "head"):
+        for token in ("CONSUMES IDENTITIES", "combined change `approval`",
+                      "human landing approval", "`landing`", "does NOT rerun", "head"):
             self.assertIn(token, about)
 
     def test_the_definitions_point_at_canonical_homes_not_re_teach_procedure(self):

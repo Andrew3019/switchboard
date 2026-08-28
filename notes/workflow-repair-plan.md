@@ -268,6 +268,10 @@ Rewrite all affected surfaces as one composition-aware pass:
   fixes against the reviewed result.
 - QA is invoked only for specialized additional coverage and consumes existing evidence.
 - Brief guidance specifies outcome boundaries without prescribing internal steps.
+- Agents may propose deferring, re-phasing, or narrowing approved work, but may not do so
+  without explicit human approval recorded as a change to the contract.
+- Completion review treats every unmet contract or exit-condition item as unresolved unless
+  the change record contains that approved scope change.
 - Implementation guidance puts routine verification after the coherent change.
 - Plan instructions describe only shaped work and link to runtime-generated syntax.
 - JIT guidance replaces spawn-time text whose relevance depends on later state.

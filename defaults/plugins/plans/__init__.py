@@ -4976,9 +4976,10 @@ def _change_defects(plan: dict) -> list[str]:
     PRESENT ITSELF AS SANCTIONED before it was. So the checks are on the record's own claims,
     read against `_PHASES`, and each is drawn red like any other defect and refuses nothing.
 
-    - `execution` or later with no combined approval recorded is implementation presented as
-      sanctioned before it was approved — the one lifecycle rule the Phase 3 contract states
-      outright. Shaped only: a direct change has no approval and never claims one.
+    - `execution` or later without both parts of the combined approval identity is
+      implementation presented as sanctioned without identifying what was approved — the one
+      lifecycle rule the Phase 3 contract states outright. Shaped only: a direct change has
+      no approval and never claims one.
     - `landing` or later with no PR recorded is a change landing before it is on a pull
       request, which is an order the lifecycle cannot have.
 
@@ -4993,12 +4994,16 @@ def _change_defects(plan: dict) -> list[str]:
         return []
     pi = _PHASES.index(phase)
     out: list[str] = []
-    if (c.get("path") == SHAPED and pi >= _PHASES.index("execution")
-            and not _some(c.get("approval"))):
-        out.append(f"phase is '{_flat(phase)}', at or past execution, but no combined change "
-                   f"approval is recorded (`change.approval`) — implementation is presented "
-                   f"as sanctioned before it was approved. Record the approval (its plan "
-                   f"revision and contract digest), or move the phase back to `approval`.")
+    if c.get("path") == SHAPED and pi >= _PHASES.index("execution"):
+        approval = c.get("approval")
+        missing = [key for key in ("plan_revision", "contract_digest")
+                   if not isinstance(approval, dict) or not _some(approval.get(key))]
+        if missing:
+            out.append(f"phase is '{_flat(phase)}', at or past execution, but the combined "
+                       f"change approval (`change.approval`) has no "
+                       f"{' or '.join(f'`{key}`' for key in missing)} — implementation is "
+                       f"presented as sanctioned without the complete approval identity. "
+                       f"Record that identity, or move the phase back to `approval`.")
     if pi >= _PHASES.index("landing") and not _some(c.get("pr")):
         out.append(f"phase is '{_flat(phase)}', at or past landing, but no PR is recorded "
                    f"(`change.pr`) — a change cannot be landing before it is on a pull "
