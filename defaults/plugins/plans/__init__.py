@@ -872,6 +872,13 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
   them. So a direct change reaches its PR, its review and its merge through this record and
   no plan at all.
 
+  HOW IT REACHES THE PULL REQUEST. `sb plugin plans comment <record> --pr <PR>` posts the
+  record as one marked comment and edits that same comment every later time it is run —
+  the same command a shaped plan gets handed by its `create-pr` step, and on the direct
+  path the only thing that puts the record in front of a human. Run it as the PR opens,
+  and again whenever what that human should see materially changes: a reviewer's fix, the
+  reviewed head moving, a landing decision.
+
 WHO WRITES TO IT
 
   The worktree's owner: the lead, or the sole worker where there is no lead. A sole worker
