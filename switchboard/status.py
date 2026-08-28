@@ -417,6 +417,11 @@ DONE_TO_THE_AGENT = (
     "ring_unconfirmed",
     "mail_unannounced", "mail_cleared", "notify_failed", "read_output",
     "cleanup_refused", "cleanup_held",
+    # The wait wake is the same sentence again: `Broker.wake_expired_waits` writes these
+    # against the agent it pinged, so counting one as the agent's own activity would let
+    # the poke reset the idle clock of the silence it was sent to break — the row read
+    # `idle 0s` and not stalled immediately after being woken.
+    "wait_expiry_pinged", "wait_expiry_ping_failed",
 )
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
