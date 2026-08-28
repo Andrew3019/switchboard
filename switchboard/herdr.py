@@ -892,16 +892,20 @@ class Herdr:
         the first. Both of the outcomes that produces were filed from one incident — the
         two copies submitted together as a single message, and neither submitted at all
         with the agent sitting forever on a box holding its own instructions twice. So a
-        retry now presses enter on what is already there before it considers typing
-        anything else, and re-sends only when that produced nothing (the box really was
-        empty, or herdr has lost the pane). On a cold checkout the first send is lost far
-        more often than not, so a spawn routinely pays a full `timeout_ms` before the
-        send — or now, often, the keypress — that works.
+        retry now submits what is already there — `down` then `enter`, see `_rescue` —
+        before it considers typing anything else, and re-sends only when that produced
+        nothing (the box really was empty, or herdr has lost the pane). On a cold checkout
+        the first send is lost far more often than not, so a spawn routinely pays a full
+        `timeout_ms` before the send — or now, often, the keypresses — that works.
         """
         last = "nothing in the agent's own record ever held the text"
         for attempt in range(attempts):
-            # Not on the first attempt: there is nothing stuck in the box yet, and an
-            # enter into a fresh pane can only answer a dialog we would rather leave up.
+            # Not on the first attempt: there is nothing stuck in the box yet, so the
+            # keys can only spend a quarter-window on every delivery that was going to
+            # land anyway. That is now a COST argument and no longer a harm one — it used
+            # to read "an enter into a fresh pane can only answer a dialog we would rather
+            # leave up", and since `_rescue` sends down-enter, answering that dialog is
+            # the fix rather than the failure.
             if attempt and self._rescue(name, timeout_ms, proof=proof,
                                         working_ms=working_ms):
                 return
@@ -942,20 +946,24 @@ class Herdr:
         """Submit whatever is already sitting in the prompt box. Did that deliver it?
 
         The recovery for the paste-without-submit mode, and it has to come BEFORE the
-        re-send rather than instead of it: if the text is in the box, an enter is the
-        whole fix and a second `prompt` is what duplicates it; if the box is empty, the
-        enter does nothing at all and the re-send below is right. That ordering is the
-        entire point — it is what makes the common case stop double-submitting without
-        giving up the case where the paste never landed.
+        re-send rather than instead of it: if the text is in the box, down then enter
+        still submits it; if the box is the current Claude workspace-trust dialog, down
+        selects trust instead of the default exit and enter accepts it. The first prompt
+        was swallowed by that dialog, so proof still has to fail before the caller sends
+        the task again. That ordering is the entire point — it stops double-submitting
+        without letting a cold checkout exit before it can receive its task.
 
-        WHY ENTER AND NOT CLEAR-THEN-RESEND. Clearing first would be the cleaner design,
-        and herdr has no key for it: `agent send-keys` takes free-form key names with no
-        enumeration anywhere in its CLI help, its bundled API schema (`AgentSendKeysParams`
-        is `keys: [string]`, unconstrained) or its binary, and the only naming it does
-        document is "use esc as the canonical Escape key name; escape is also accepted".
-        Nothing attests a select-all or a kill-line, and guessing one costs a real
-        keystroke into a real agent's pane. So: submit what is there, re-send only if
-        nothing came of it.
+        WHY DOWN-ENTER AND NOT CLEAR-THEN-RESEND. Clearing first would be the cleaner
+        design, and herdr has no key for it: `agent send-keys` takes free-form key names
+        with no enumeration anywhere in its CLI help, its bundled API schema
+        (`AgentSendKeysParams` is `keys: [string]`, unconstrained) or its binary, and the
+        only naming it does document is "use esc as the canonical Escape key name; escape
+        is also accepted". Nothing attests a select-all or a kill-line, and guessing one
+        costs a real keystroke into a real agent's pane. `down` is a guess by that same
+        standard, and it is here on measurement rather than on documentation: a cold
+        fan-out accepted trust and ran 6/6 with it. A select-all has no such measurement,
+        and the keystroke it would cost to get one is the point. So: submit what is there,
+        re-send only if nothing came of it.
 
         The window is a quarter of a send's, because this is not waiting for an agent to
         start from cold — the text was already pasted and Claude Code appends a submitted
@@ -970,7 +978,7 @@ class Herdr:
         before = self._peek(name)
         sent = time.time()
         try:
-            self.send_keys(name, "enter")
+            self.send_keys(name, "down", "enter")
         except HerdrError:
             return False
         return self._took_prompt(name, before, max(1, timeout_ms // 4), sent=sent,
