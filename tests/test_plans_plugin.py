@@ -5229,6 +5229,27 @@ class HumanFirstCommentTest(PlansSandbox):
         self.assertIn("tightened a log line", ev)             # reviewer fixes
         self.assertIn("does not cover chunked uploads", ev)   # known limitations
         self.assertIn("already failing on main", ev)          # baseline failure
+        # They are change-record facts, not renderer-only magic: the ordinary record view
+        # exposes them too, so an author can inspect what the PR will consume.
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("scope", shown)
+        self.assertIn("limitations", shown)
+        self.assertIn("baseline", shown)
+
+    def test_a_mirrored_shaped_contract_renders_once(self):
+        """The approved contract is mirrored into the record and approval-step output; an
+        exact mirror remains one fact in the collapsed detailed record, not two copies."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it",
+                  "--lib", "change-approval")
+        doc = self._doc()
+        contract = "Change Contract\n\n- change only the timeout"
+        doc["plans"][0]["change"]["contract"] = contract
+        approval = next(s for s in doc["plans"][0]["steps"]
+                        if s.get("def") == "change-approval")
+        approval["output"] = contract
+        self._save(doc)
+        self.assertEqual(self._md().count("change only the timeout"), 1)
 
     def test_a_malformed_step_falls_to_the_walk_even_with_a_change_record(self):
         """A non-dict in the steps list is corruption, and the render falls back to the walk

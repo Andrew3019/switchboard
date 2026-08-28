@@ -44,7 +44,8 @@ compatibility for the field: every document written before Phase 3 is a plan and
 one without being rewritten.
 
     change {"path": "direct"|"shaped", "phase": "shaping"|…|null, "request": …, "contract": …,
-            "cause": …, "solution": …, "verification": {...}, "review": {...},
+            "cause": …, "solution": …, "scope"?: …, "verification": {...}, "review": {...},
+            "limitations"?: …, "baseline"?: …,
             "human_checks": […]|"none"|null, "pr": {number, head},
             "approval": {plan_revision, contract_digest, by, at},
             "landing": {head, by, at, outcome, cleanup}, "handoff"?: {from, to, at}}
@@ -2894,12 +2895,13 @@ def _change(path: str) -> dict:
       landing       the merge-time `{head, by, at, outcome, cleanup}` — the human landing
                     approval on the reviewed head, and the outcome.
 
-    `handoff` is NOT born here. A fresh-main handoff is optional and recorded only when it
-    actually happens, so — like `planner` on a plan — it is ABSENT rather than a null on every
-    record: `{from, to, at}`, written by hand when a fresh main takes the work over, reusing
-    the outer owner identity. `output` is not among any of these: a record dumps its own
-    fields, not a step's. Written and edited by hand like every document field; no verb mints
-    past `path`.
+    `scope`, `limitations`, `baseline`, and `handoff` are NOT born here. They are optional
+    and recorded only when used, so — like `planner` on a plan — they are ABSENT rather than
+    null on every record. `handoff` is `{from, to, at}`, written when a fresh main takes the
+    work over; the other three carry important scope boundaries, known relevant limitations,
+    and evidenced pre-existing failures. `output` is not among any of these: a record dumps
+    its own fields, not a step's. Written and edited by hand like every document field; no
+    verb mints past `path`.
     """
     return {"path": path, "phase": "shaping" if path == SHAPED else None,
             "request": None, "contract": None, "cause": None, "solution": None,
@@ -4949,8 +4951,9 @@ def _is_record(p: dict) -> bool:
 # is born with. A plan's record is drawn only once one of these lands, so a fresh shaped plan
 # reads exactly as it did before the record existed; a record document draws its section
 # always, the record being the whole of what it is.
-_CHANGE_FACTS = ("request", "contract", "cause", "solution", "verification",
-                 "review", "human_checks", "pr", "approval", "landing", "handoff")
+_CHANGE_FACTS = ("request", "contract", "cause", "solution", "scope", "verification",
+                 "review", "limitations", "baseline", "human_checks", "pr", "approval",
+                 "landing", "handoff")
 
 
 def _change_told(p: dict) -> bool:
@@ -5027,13 +5030,13 @@ def _change_section(p: dict) -> list[str]:
     if _some(c.get("phase")):
         path += f" · {_flat(c['phase'])}"
     out = ["change", f"  path      {path}"]
-    for key in ("request", "cause", "solution", "contract"):
+    for key in ("request", "cause", "solution", "scope", "contract"):
         if _some(c.get(key)):
             lines = _lines(c[key])
             out.append(f"  {key:<9} {lines[0]}")
             out.extend(f"            {ln}" for ln in lines[1:])
-    for key in ("approval", "verification", "review", "human_checks", "pr", "landing",
-                "handoff"):
+    for key in ("approval", "verification", "review", "limitations", "baseline",
+                "human_checks", "pr", "landing", "handoff"):
         if _some(c.get(key)):
             out.append(f"  {key}")
             out.extend(f"    {ln}" for ln in _strategy_lines(c[key]))
@@ -5590,7 +5593,7 @@ _CHANGE_PROMOTED = frozenset({"request", "cause", "solution", "scope",
                               "limitations", "baseline"})
 
 
-def _change_remainder(p: dict) -> list[str]:
+def _change_remainder(p: dict, steps: list) -> list[str]:
     """The change-record fields the first three sections did not draw, collapsed, once.
 
     The record is the point of a direct change and half of a shaped one, and the human-first
@@ -5603,6 +5606,11 @@ def _change_remainder(p: dict) -> list[str]:
     """
     c = _change_of(p)
     rest = {k: v for k, v in c.items() if k not in _CHANGE_PROMOTED and _some(v)}
+    # A shaped approval mirrors the approved contract into both `change.contract` and the
+    # change-approval step's output. `_outputs` already preserves the step output above this
+    # block, so an exact mirror is one fact and renders once.
+    if "contract" in rest and any(s.get("output") == rest["contract"] for s in steps):
+        rest.pop("contract")
     if not rest:
         return []
     blocks = {k: v for k, v in rest.items() if isinstance(v, str) and "\n" in v}
@@ -5636,13 +5644,13 @@ def _detail_record(p: dict, steps: list) -> list[str]:
         inner += _outputs(steps)
         inner += _gates(steps)
         inner += ["", "## steps"] + _folds(p, steps)
-        inner += _change_remainder(p)
+        inner += _change_remainder(p, steps)
         inner += _metadata(p)
     else:
         if (span := _elapsed(p)):
             inner += [span]
         inner += _defect_lines(p)
-        inner += _change_remainder(p)
+        inner += _change_remainder(p, steps)
         inner += _metadata(p)
     if not any(str(x).strip() for x in inner):
         return []
