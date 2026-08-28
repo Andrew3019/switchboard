@@ -1460,7 +1460,7 @@ def collect(
             # happening would be a note about nothing, and a working agent that happens to
             # have children is working, not waiting on them.
             idle_excuse=excuse if idle else None,
-            wait_expired=wait_expired,
+            wait_expired=wait_expired and idle and excuse is None,
             # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
             # like any other. Nothing else about a blocked agent changes: it is still not
             # `stalled` (that reads `running`), still not pinged, still waiting on its human

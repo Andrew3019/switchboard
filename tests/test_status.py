@@ -464,6 +464,28 @@ class StatusTest(unittest.TestCase):
         self.assertIsNone(stale.idle_excuse)
         self.assertIsNotNone(store.wait_for(self.db, "w1"), "status is read-only")
 
+    def test_only_a_live_unexcused_waiter_earns_the_expiry_nudge(self):
+        """The timestamp alone is not a work list. A dead waiter cannot answer a prompt,
+        and a parent with a visibly live cohort is still waiting on known work; repeatedly
+        reconciling either would revive the retired broad stalled-agent nudge."""
+        store.create_agent(self.db, name="dead", role="worker", session_id="s1")
+        store.set_wait(self.db, "dead", "background")
+        store.create_agent(self.db, name="lead", role="lead", session_id="s2")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           session_id="s3")
+        store.set_wait(self.db, "lead", "all", ["kid"])
+        expired = store.now() - int(status.WAIT_EXCUSE_GRACE) - 1
+        self.db.execute("UPDATE agents SET wait_started_at=? WHERE name IN ('dead','lead')",
+                        (expired,))
+        self.db.commit()
+
+        agents = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("lead", "idle"), alive("kid", "working")]),
+            now=store.now(), reap=False))
+        self.assertFalse(agents["dead"].wait_expired)
+        self.assertFalse(agents["lead"].wait_expired)
+        self.assertEqual(agents["lead"].idle_excuse, "waiting on children")
+
     def test_the_answer_ends_the_excuse(self):
         """It excuses a WAIT and not a name: anything back from the agent it asked spends
         the question, and the row is a stall again like any other."""
