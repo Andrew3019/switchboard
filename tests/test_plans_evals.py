@@ -211,6 +211,7 @@ class CasesTest(unittest.TestCase):
         self.assertIn("task owner classified this as shaped", brief)
         self.assertIn("boundary between configured, resolved and executable", brief)
         self.assertNotIn("one new section in the existing output", brief)
+        self.assertNotIn("without invoking a provider command", brief)
 
 
 if __name__ == "__main__":

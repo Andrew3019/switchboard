@@ -18,8 +18,8 @@ meaning of the new health claim must be settled before implementation, not durin
 It says nothing about this repo's model tiers, though `sb models` resolves all of them and
 `sb models --json` already carries the resolution per tier. A user wants doctor to say
 whether this repo's declared tiers are usable. Investigate what doctor and models can
-truthfully establish without invoking a provider command or stopping for login, choose the
-meaning and shape of that output, and plan the bounded implementation.
+truthfully establish, choose the meaning and shape of that output, and plan the bounded
+implementation.
 
 **What is settled already.** Do not add a new top-level command. The exact output shape and
 the boundary between configured, resolved and executable are yours to reason about. The
