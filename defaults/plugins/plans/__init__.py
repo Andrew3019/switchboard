@@ -237,17 +237,17 @@ traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps
 `dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
 hang. Expansion mints fresh ids from the plan's own counter, like every step in it.
 
-A definition may also OBLIGE another — `merge` obliges `merge-human-review` — and naming it
-adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
+A definition may also OBLIGE another — `create-pr` obliges `merge-human-review` — and naming
+it adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
 be skipped with a reason like any other. What it cannot be is omitted: the obligation is a
 property of the definition rather than a rule an agent remembers, so there is no way to name
-a merge step and end up without its review on the board. A skip is a state with a sentence
+a create-PR step and end up without its human checklist on the board. A skip is a state with a sentence
 beside it and a bad call can be questioned; an omission is invisible, which is enforcement in
 appearance only. An on-the-fly step called "merge the PR" obliges nothing, and that is not a
 hole — it is a word-only step, and the obligation belongs to the definition, not to the word.
 
-Every obliging step gets its OWN obliged step, and nothing is ever deduplicated: two merges
-are two diffs and therefore two reviews, whether they arrive in one act or two. A dedupe
+Every obliging step gets its OWN obliged step, and nothing is ever deduplicated: two steps
+obliging reviews are two reviewed results, whether they arrive in one act or two. A dedupe
 would let one step's obligation be satisfied by a step it has nothing to do with, which is
 the door round the obligation in a tidier coat — and a lead who thinks one review covers
 both skips the second with that as the reason, which is visible where a dedupe was not.
@@ -696,9 +696,13 @@ def register(reg):
                            "reads it — a PR comment. Walked, not templated: it survives "
                            "the schema changing")])
     reg.command(
+        # A DIRECT change reaches its pull request through this verb and no other, so the
+        # help says "or change record" outright: a caller holding one has no plan, and help
+        # that names only plans reads as a verb that is not for it.
         "comment", comment, audience="both",
-        help="create or update one plan's marked PR comment by its exact numeric id",
-        args=[reg.arg("plan", help="the plan to post, e.g. p-1"),
+        help="create or update one plan or change record's marked PR comment by its exact "
+             "numeric id",
+        args=[reg.arg("plan", help="the plan or change record to post, e.g. p-1"),
               reg.arg("--pr", help="the pull request number, required")])
     reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
@@ -819,14 +823,14 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
   live on the change record — one object, `change`, on the document. A shaped plan is born
   with one at `create`; a direct change gets one from `record`, and only when it needs it.
 
-  It is EDITED BY HAND, like every other field on a plan. The only two things a verb writes
-  are the path, and `request` when `record --request` seeds it; there is no schema to
-  satisfy past that — put what the job needs on it. `sb plugin plans show`
-  draws every field that is filled, `--markdown` puts them on the pull request, and
-  `validate` reports two things and refuses neither: a shaped record at or past `execution`
-  whose combined approval does not name both the plan revision and the contract digest, and
-  a record at or past `landing` with no PR on it. Both are the same defect in two places —
-  a record claiming to be further along than what it can point at.
+  It is EDITED BY HAND, like every other field on a plan. The only things a verb writes are
+  the path, the opening `phase` a shaped plan is born in (`shaping`), and `request` when
+  `record --request` seeds it; there is no schema to satisfy past that — put what the job
+  needs on it. `sb plugin plans show` draws every field that is filled, `--markdown` puts
+  them on the pull request, and `validate` reports two things and refuses neither: a shaped
+  record at or past `execution` whose combined approval does not name both the plan revision
+  and the contract digest, and a record at or past `landing` with no PR on it. Both are the
+  same defect in two places — a record claiming to be further along than what it can point at.
 
   The fields, and who fills each one as they reach it:
 
@@ -920,13 +924,15 @@ SPAWNING A PLANNER, AND WHO RUNS THE PLAN AFTERWARDS
   sentence, the plan id, the files in and out of scope, the decisions already settled, and
   what you want challenged.
 
-  SEED IT SMALL. A fresh strong `researcher`, granted held `spawn` so it can put up its own
-  plan reviewer, and held `fork` only where an isolated helper is actually foreseen. NEVER
-  `write-tracked`: a planner reads and does not write tracked files, and its own writes — the
-  plan file (under the git common dir's `agentflow/`, via `sb`) and its briefs (under
-  `.switchboard/`, gitignored) — are neither of them tracked. That omission is also what
-  keeps its plan reviewer read-only on the plan, since a spawn is seeded from what the
-  spawner can pass down.
+  SEED IT SMALL. Spawn the first-class `planner` role. Its shipped template is strong and
+  holds `spawn` so it can put up its own plan reviewer; grant `fork` only where an isolated
+  helper is actually foreseen. NEVER `write-tracked`: a planner reads and does not write
+  tracked files, and its own writes — the plan file (under the git common dir's
+  `agentflow/`, via `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither
+  of them tracked. A reviewer it spawns is seeded from that same set and so arrives without `write-tracked` too, which points the plan-review
+  boundary the right way — but it is not a wall, and nothing here should be relied on as one:
+  the plan file is not a tracked file, no write is refused anywhere, and what actually keeps
+  a plan reviewer off the plan is the instruction it is given.
 
   SEEDING IS TWO VERBS, and neither is a flag on the other. `sb delegate --role <role>` sets
   the child's ROLE TEMPLATE, which is the seed narrowed by the template/intersection rule;
@@ -987,12 +993,13 @@ WHAT TO BUILD IT FROM
   NAME EVERY OUTERMOST STEP, AND WHAT EACH OBLIGES ARRIVES WITH IT — the library has THREE
   steps nothing else brings, `create-pr`, `merge` and `plan-review`, and naming one never
   brings another. The two flags above land seven steps, because `create-pr` obliges the
-  change approval, which obliges the review, and `merge` obliges the human-review list.
-  `create-pr` on its own lands three of those and the plan ends at the open PR, which is
-  right for a job that ends there — and nothing downstream can tell that plan from one
+  change approval, which obliges the implementation review, AND the human-review list;
+  `merge` is the landing step itself. `create-pr` on its own lands four of those and the
+  plan ends at the open PR, which is right for a job that ends there — and nothing
+  downstream can tell that plan from one
   which meant to land and lost its merge, so the naming is where it has to be got right.
   Naming an obliged step as well gets you a SECOND copy of it: nothing is ever
-  deduplicated, since two merges are two diffs and therefore two reviews. Read `library`
+  deduplicated, since two obliging steps represent two outcomes and get two checks. Read `library`
   first and name the ones nothing else brings.
 
   A definition carries its own account of how that step is run — what it obliges, what it
@@ -1239,9 +1246,9 @@ def guide(ctx, args) -> Result:
 # spawn trigger already make: what is read once, when a job comes up, is not paid for on
 # every spawn — `planner.md` is NOT in `agent.md` and nothing carries it.
 #
-# All three live in the plugin so that deleting the plugin takes every planner-specific
-# surface with it. What is left is the generic `researcher` role, which is all a plan
-# writer is made of, and plan data already in the repo, which goes inert.
+# All three live in the plugin so that deleting it takes every planner-specific surface
+# with it. Its first-class role lives under this plugin's `roles/` directory for the same
+# reason; what remains is plan data already in the repo, which goes inert.
 
 # The instruction's own file. A file rather than a Python string, unlike `GUIDE`, because
 # it is the length of a role prompt and is edited far more like one: the comment block at
@@ -2516,8 +2523,8 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
     """One template entry, as the steps it puts in the copy. A name, or a link.
 
     An entry that says `def` is a link and goes through the same expansion `name-step`
-    does — obligations included, since a template naming a merge and forgetting its review
-    is exactly the memory this obligation exists to replace.
+    does — obligations included, since a template naming a PR and forgetting its human
+    checklist is exactly the memory this obligation exists to replace.
 
     Either way the entry's remaining keys are written onto the step it made (`_written`),
     which is how a template authors a gate, an owner or a checkpoint on a step that has no
@@ -2538,8 +2545,8 @@ def _from_template(plan: dict, lib: dict, entry: Any) -> list[dict]:
                               f"step draws its definition's board label, so add one to "
                               f"`library/{k}.json`")
         # The entry's own step is the first one its expansion minted; what it obliged is
-        # its own step and carries none of this. A gate written against `merge` belongs to
-        # the merge and not to the human review that came along with it.
+        # its own step and carries none of this. A gate written against an obliging step
+        # belongs to that step and not to anything that came along with it.
         _written(plan, entry, made[0])
         return made
     name = str(entry.get("name") or "").strip()
@@ -2890,9 +2897,9 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     filled. An on-the-fly step owns its words; a named one owns a LINK, and its `name` stays
     null so that there is no copy of the definition here to go stale — the text is resolved
     at render time and an edit to the library reaches this step wherever it is. `obliged_by`
-    is the id of the step that brought this one, which is how a review says which merge it
-    belongs to and how PR7's gate will find it. Both are explicit nulls for the same reason
-    `why` is.
+    is the id of the step that brought this one, which is how an obliged check says which
+    outcome it belongs to and how PR7's gate will find it. Both are explicit nulls for the
+    same reason `why` is.
 
     `display` is the short name the board draws, and it pairs with `name` exactly as they do:
     a named step leaves it null and resolves it live from the definition, an on-the-fly step
@@ -2949,7 +2956,8 @@ def _change(path: str) -> dict:
     work over; the other three carry important scope boundaries, known relevant limitations,
     and evidenced pre-existing failures. `output` is not among any of these: a record dumps
     its own fields, not a step's. Written and edited by hand like every document field; no
-    verb mints past `path`.
+    verb mints past `path` and the opening `phase` above, and `record --request` seeding
+    `request` is the only write any verb makes to a record after it is born.
     """
     return {"path": path, "phase": "shaping" if path == SHAPED else None,
             "request": None, "contract": None, "cause": None, "solution": None,
@@ -3127,10 +3135,10 @@ def _mint(plan: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
     Two walks. Composition expands first and may repeat a definition, because what a
     composite says is "this is several steps". Then every step that resulted is asked what
     it obliges, and it gets its own — ONE OBLIGED STEP PER OBLIGING STEP, with no dedupe of
-    any kind. A composite naming `merge` twice is two merges and therefore two reviews, for
-    the same reason naming `merge` twice in two separate acts is: two merges are two diffs,
-    and a review that covered both is a lead's judgement to make by skipping one with a
-    reason. Dedupe would make a step's obligation satisfiable by a step it has nothing to do
+    any kind. A composite naming an obliging step twice gets two copies of what it obliges,
+    for the same reason naming it twice in two separate acts does: two independently named
+    units are two outcomes, and one check covering both is a lead's judgement to make by
+    skipping one with a reason. Dedupe would make a step's obligation satisfiable by a step it has nothing to do
     with, which is the door round the obligation wearing a tidier shape.
 
     What stops that running forever is a cycle check rather than a dedupe: each step carries
@@ -3200,8 +3208,8 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     RUNS, which is the bug this function was written for. An anchored obliged step is
     placed by its anchor and the obligation then says only that the step exists; an
     unanchored one has nothing else to go on, so the edge is what it always was and the
-    obliging step waits on it. `merge` obliging its human review comes out the same under
-    either rule, which is the check that this is a fix and not a rewrite.
+    obliging step waits on it. An anchored PR step obliging an unanchored checklist comes
+    out the same under either rule, which is the check that this is a fix and not a rewrite.
 
     The rule is about the OBLIGED end and not about both ends, and that is load-bearing: an
     unanchored step obliging an anchored one — `implement the thing` obliging `review`, the
@@ -5542,16 +5550,40 @@ def _def_output(steps: list, key: str) -> Optional[str]:
     return None
 
 
+# WHAT §1 SAYS WHEN THERE IS NOTHING IN IT, and why that is two sentences rather than one.
+# "Nothing for you" is the single most consequential line in this comment — it is the one a
+# person acts on by closing the tab — so it may only be said where somebody actually said
+# it. An ANSWERED change is one whose record carries `human_checks` (the list, or the `none`
+# sentinel), or whose `merge-human-review` step wrote its output or was skipped: in every
+# one of those a person's work was considered and the answer was none. A record carrying
+# none of them has not been asked yet — a legacy plan from before the change record existed,
+# or a comment posted before the list was written, which `create-pr` says outright is a
+# thing that happens — and saying "agent verification covers this" there is the record
+# claiming an assurance nobody gave.
+_NO_HUMAN_WORK = "Nothing—agent verification covers this change."
+_NO_HUMAN_ANSWER = ("Not recorded — nobody has written down what a human still has to "
+                    "check, so this is unanswered rather than empty.")
+
+
 def _need_section(p: dict, steps: list) -> list[str]:
     """`## What you need to do` — the human-only checks and the open gates, or that none remain.
 
     Always drawn, because the one thing a person must not have to hunt for is whether the
-    change is waiting on them. Empty is itself the answer, said outright.
+    change is waiting on them. Empty is itself the answer, said outright — but only where the
+    record answered it; see `_NO_HUMAN_ANSWER` above for the case where nobody has.
     """
     c = _change_of(p)
     checks = c.get("human_checks")
-    if not _some(checks):
+    answered = _some(checks)
+    if not answered:
         checks = _def_output(steps, "merge-human-review")
+        answered = _some(checks)
+    if not answered:
+        # A SKIPPED human-review step is itself the answer, whether or not it wrote the
+        # output its definition asks for: skipping it is a person's work being considered
+        # and found unnecessary, and the reason is on the step's `why` for the board.
+        answered = any(s.get("def") == "merge-human-review" and s.get("progress") == SKIPPED
+                       for s in (steps or ()))
     # `none` is the sentinel a change with nothing for a human writes into `human_checks`;
     # it means the same as an empty list, and it renders as the sentence below, not the word.
     if isinstance(checks, str) and checks.strip().lower() == "none":
@@ -5566,7 +5598,7 @@ def _need_section(p: dict, steps: list) -> list[str]:
              for s in (steps or ())
              if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
     if not body:
-        body = ["Nothing—agent verification covers this change."]
+        body = [_NO_HUMAN_WORK if answered else _NO_HUMAN_ANSWER]
     return ["", "## What you need to do", ""] + body
 
 

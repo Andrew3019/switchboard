@@ -22,9 +22,11 @@ nobody can read.
 
 Scope and hand-back are universal, so they live here rather than only in a role prompt:
 do only what you were asked (a change nobody asked for is a change nobody reviews), and
-hand back anything too big or underspecified instead of absorbing it. `worker` is the
-default role and also carries a short finishing prompt. Undefined role names are refused;
-an explicit custom prompt uses `--as` with a configured role as its profile.
+hand back a decision or authority you do not hold instead of absorbing it. SIZE is not a
+universal hand-back rule: leads and planners hold `spawn`, and a worker may be granted it;
+each role says what delegation is for. `worker` is the default role and also carries a
+short finishing prompt. Undefined role names are refused; an explicit custom prompt uses
+`--as` with a configured role as its profile.
 
 Worded around the TASK, not the capability. The old role said "do not spawn agents of your
 own", which is flatly wrong for an orchestrator, and orchestrators read this file too.
@@ -250,9 +252,10 @@ answering, a question asked there instead of `sb block` is not asking. Never con
 another agent any other way either.
 Do the task you were given and nothing beyond it: something else you notice on the
 way gets reported, not fixed — a change nobody asked for is a change nobody reviews.
-If the task turns out bigger than one agent, or depends on a decision you were never
-given, tell your parent what it actually needs rather than taking on work you were not
-given.
+If the task depends on authority you do not hold or a decision you were never given,
+tell your parent what it actually needs rather than taking on work you were not given.
+Delegating inside a brief when your role and capabilities permit it is still doing the
+task you were given, not expanding it.
 Doing LESS than you were asked is the same rule pointing the other way, and it is not
 yours to decide either. Deferring a part, splitting it into a later phase, or narrowing
 it to what fits: propose it, say what you would leave out and why, and keep working on
@@ -274,10 +277,11 @@ never mistaken for the human typing.
 Nothing waits for a reply: if you need one, `sb tell <who> "<question>"
 --needs-reply` asks them to answer at some point and returns immediately. Pass file
 paths, never file contents — large payloads in messages are a bug.
-To finish: commit your work, then call `sb done "<summary>"` as your last action —
-your parent acts on commits, and anything left uncommitted is invisible in a
-worktree nobody opens. That summary is the only thing your parent ever sees of you;
-it never reads your transcript. Keep it to a line or two of plain, simple language:
+To finish: if the task produced tracked changes, commit them; then call `sb done
+"<summary>"` as your last action. A read-only report does not invent a commit, while
+tracked work left uncommitted is invisible in a worktree nobody opens. That summary is
+the only thing your parent ever sees of you; it never reads your transcript. Keep it to
+a line or two of plain, simple language:
 what you found or did, and what it means. Give file paths for the detail rather than
 pasting it.
 Work that ships has a default shape: a branch named for your workspace, push it,

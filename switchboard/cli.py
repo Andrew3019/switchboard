@@ -76,6 +76,35 @@ def _tier_help() -> str:
     return f"{' | '.join(names)}, or raw:<provider-model-id> (see: sb models)"
 
 
+def _role_help() -> str:
+    """The `--role` help line, read off the live role table for `_tier_help`'s reasons.
+
+    Roles are repo vocabulary exactly as tiers are — a repo adds, renames and retires them in
+    its own `roles.toml` — so a hardcoded list here would advertise names this repo may not
+    have and hide the ones it does. It had NO help at all until this line, which left the two
+    halves of a spawn's vocabulary unequal: `--model` named its tiers and the command that
+    lists them, and `--role` named nothing, so the only place a caller could learn the role
+    vocabulary was the refusal after it had already guessed. Generated instead, from the same
+    table `delegate` resolves against.
+
+    Everything is caught for the same reason: this runs while the parser is being BUILT,
+    before we know we are in a repo at all, and `sb --help` outside one — or over a broken
+    `roles.toml` — must print help rather than a traceback.
+
+    `config.roles` and not `roles.load`, and the difference is the parser-build hot path:
+    the names are the same set either way (`roles.load` iterates exactly this dict), but
+    `load` also resolves the tier table and builds a `Role` per row, which is ~7ms every
+    `sb` command pays for a help string almost none of them print. The raw merged table is
+    cached and its keys are the vocabulary.
+    """
+    try:
+        names = sorted(config.roles(store.worktree_root()))
+    except Exception:
+        names = []
+    listed = f"{' | '.join(names)}, " if names else ""
+    return f"{listed}or --as <prompt> with one of them for a custom prompt (see: sb roles)"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sb", description="switchboard")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -145,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what the child is to do. Omit it ONLY when the real task is "
                         "coming next as a message — the child spawns idle and waits "
                         "for it instead of guessing from its --name")
-    d.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
+    d.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
     d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
                    help=f"preset from {_preset_dir_help()}, or @<plugin> for that plugin's "
@@ -183,7 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "targets you: rights are somebody else's to give.")
     g.add_argument("agent", help="who gets it — must be in your subtree, and not you")
     g.add_argument("cap", metavar="CAPABILITY",
-                   help="the capability string (see the refusal for the list)")
+                   # Points at the generated catalogue rather than at the refusal. The
+                   # refusal does list them, but only after a caller has guessed once; the
+                   # vocabulary is a repo's own (`Broker.known_capabilities`) and `sb
+                   # capabilities` is the command that prints this repo's.
+                   help="the capability string (see: sb capabilities)")
     # The pass-through half of the model, and the flag exists because "may do it" and "may
     # hand it down" are two different decisions: a read-only researcher equips the workers
     # it spawns without ever becoming a writer itself.
@@ -215,7 +248,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "rows, so it does not depend on the tree's shape and a promote "
                          "cannot invalidate it. Says who may DO the thing and, apart, who "
                          "may only pass it DOWN — and who granted it.")
-    wh.add_argument("cap", metavar="CAPABILITY", help="the capability string")
+    wh.add_argument("cap", metavar="CAPABILITY",
+                    help="the capability string (see: sb capabilities)")
 
     # The one verb that acts on the caller itself. `grant` above hands somebody else a
     # right and is bounded by a subtree check; this tunes nothing but how loudly
@@ -368,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmd("capabilities", help="the capability vocabulary this repo grants against")
     ins = cmd("instructions", hidden=True,
               help="development view of one effective spawn instruction set")
-    ins.add_argument("--role", default=broker_mod.DEFAULT_ROLE)
+    ins.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     ins.add_argument("--model", help=_tier_help())
     ins.add_argument("--as", dest="as_prompt", help="explicit ad-hoc role prompt")
     ins.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET")

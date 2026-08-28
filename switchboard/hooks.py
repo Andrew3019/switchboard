@@ -428,12 +428,14 @@ def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
 
     **An unresolvable caller ends its turn.** Not one of ours, or one we cannot name yet.
 
-    **Four legitimate ends without a report**, and only four: an agent still holding its
-    placeholder task (`awaiting_task`) was told to wait for one; an agent that asked another
-    agent a question with `tell --needs-reply` was told to end its turn and be poked with the
-    answer (`_awaiting_reply`); a parent with a live child was told to delegate and end its
-    turn, and blocking that would push it to report `done` over work still running; and an
-    agent that already reported has nothing to add.
+    **Five legitimate ends without a report**, and only five: an agent still holding its
+    placeholder task (`awaiting_task`) was told to wait for one; an agent that declared an
+    intentional wait with `sb waiting` was told to end its turn rather than poll for the
+    background work or the child cohort it named (`_explicit_wait`); an agent that asked
+    another agent a question with `tell --needs-reply` was told to end its turn and be poked
+    with the answer (`_awaiting_reply`); a parent with a live child was told to delegate and
+    end its turn, and blocking that would push it to report `done` over work still running;
+    and an agent that already reported has nothing to add.
 
     Anything else is the silent finish this exists to stop.
     """

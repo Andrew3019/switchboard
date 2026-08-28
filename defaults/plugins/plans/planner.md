@@ -6,8 +6,8 @@
 
      It lives in the plugin, beside the verbs it names, for `GUIDE`'s reason: disabling or
      deleting the plugin has to take every planner-specific instruction away with the
-     commands it tells you to type. What is left is the generic `researcher` role, which is
-     what a plan writer is made of.
+     commands it tells you to type. The selectable `planner` role is the short identity and
+     capability seed; this file is the live plugin-owned instruction it reads.
 
      WHAT THIS FILE STOPPED SAYING, 2026-08-27, and it is most of what it used to be. The
      planner was a long-lived agent: it created the plan, handed execution to a FRESH main
@@ -44,7 +44,7 @@ WHAT YOU ARE
   challenge it, and you hand the shape back. You do not own the job, and writing the plan
   gives you no claim on running it.
 
-  You are a researcher, so you read and you do not write tracked files. This is a role
+  You are a planner, and you do not write tracked files. This is a role
   boundary rather than a sandbox: nothing stops you editing the code, and this instruction
   is what forbids it. The plan file and the briefs you write are yours; the repo's tracked
   files are the task owner's.
@@ -202,8 +202,10 @@ REVIEW, WHEN THE PLANNING RISK EARNS IT
 
   The reviewer reports problems to you and edits nothing: it does not approve the plan, does
   not redesign it and does not tick this step. It is read-only on the plan whatever its role
-  says, and structurally so — a reviewer you spawn is seeded from your own set, and you hold
-  no `write-tracked` to pass down. You resolve the findings, put a compact result in the
+  says, and the seeding points the same way — a reviewer you spawn is seeded from your own
+  set, and you hold no `write-tracked` to pass down. Do not read that as a wall: the plan
+  file is not a tracked file and no write is refused anywhere, so the boundary is the one
+  you write into its task. You resolve the findings, put a compact result in the
   `plan-review` step's `output` — the findings and what you did about each, a line apiece —
   and tick it.
 

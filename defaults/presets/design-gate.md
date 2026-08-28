@@ -53,12 +53,14 @@ bullets that each lose which condition governs which branch.
 The bullet format for a message written for Andrew to read once and answer: what you write
 after planning and before implementing, or the list you leave him just before a merge.
 
-## Two sections, and the step names them
+## The sections, and the step names them
 
-Two sections and no more, each headed. WHICH two is the step's own to say, not this file's:
-read the `about` of the step that sent you here. `change-approval` heads its two
-Scope & Objectives and Change Contract; the design gate this file is named after headed its
-two "what is causing it" and "what the fix will be". The bullets are the same either way.
+Headed sections, and no more of them than the step asks for. Read the `about` of the step
+that sent you here: WHICH ones is the step's own to say, not this file's. An approval gate
+has TWO — `change-approval` heads its two Scope & Objectives and Change Contract, and the
+design gate this file is named after headed its two "what is causing it" and "what the fix
+will be". The pre-merge human-check list is ONE: `merge-human-review` heads its own for
+what it is. The bullets are the same in every case, and that is what this file is for.
 
 ## The bullets
 

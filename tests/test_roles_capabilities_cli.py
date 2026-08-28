@@ -116,6 +116,15 @@ class InstructionRendererTest(ListingSandbox):
         workspace = next(s for s in got["segments"] if s["kind"] == "workspace")
         self.assertIn(str(checkout), workspace["text"])
 
+    def test_a_plugin_role_reports_the_plugin_file_as_its_source(self):
+        """Effective-instruction provenance must point at the file that supplied the text,
+        including roles contributed by an enabled plugin."""
+        got = self.data("instructions", "--role", "planner")
+        role = next(s for s in got["segments"] if s["kind"] == "role-prompt")
+        self.assertTrue(role["source"].endswith(
+            "defaults/plugins/plans/roles/planner.md"), role["source"])
+        self.assertEqual(role["ownership"], "switchboard-owned")
+
 
 class CapabilitiesListingTest(ListingSandbox):
     def vocabulary(self) -> list[str]:

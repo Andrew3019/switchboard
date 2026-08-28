@@ -9,6 +9,7 @@ job, so no model name appears here. And no role name, disposition or prompt appe
 either: the definitions are files, one markdown file per role, read by config.py.
 
     defaults/roles/<name>.md          shipped
+    <enabled plugin>/roles/<name>.md  plugin-specific specialists
     <repo>/.switchboard/roles.toml    this repo's overrides
     <repo>/.switchboard/roles/*.md    this repo's own roles, in the same form
 

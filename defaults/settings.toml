@@ -127,8 +127,11 @@ main_name = "main"
 # What `sb delegate` uses when no `--role` is given.
 default_role = "worker"
 
-# Retained for compatibility with existing repo settings. Undefined role names are now
-# refused; explicit custom prompts use `--as` alongside a configured role.
+# Retained for compatibility, and it is no longer what an undefined `--role` inherits:
+# selection is strict now and an unknown name is refused with the near ones listed. What
+# still reads this is `roles.get_or_fallback`, the path that reads rows ALREADY IN THE
+# STORE — an agent spawned under a role this repo has since retired stays readable,
+# restorable and correctly shaped instead of becoming an unloadable row.
 fallback_role = "worker"
 
 # What a role file gets for a tier it does not name. No shipped role names one, so this is

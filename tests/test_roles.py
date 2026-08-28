@@ -485,6 +485,26 @@ class RolesTest(unittest.TestCase):
         self.assertIn("the ordinary tests and builds are the author's", qa)
         self.assertIn("Read what was already run on this commit and take it", qa)
 
+    def test_planner_is_a_first_class_bounded_specialist(self):
+        """The workflow repair chose a real configured role, not a researcher plus a model
+        override and a grant that every caller has to reconstruct. The role owns the seed;
+        the plugin command owns the detailed lifecycle."""
+        planner = roles.load(self.repo)["planner"]
+        self.assertEqual(planner.model, "strong")
+        self.assertEqual(planner.capabilities, frozenset({"spawn"}))
+        said = " ".join(planner.prompt.split())
+        self.assertIn("bounded specialist", said)
+        self.assertIn("sb plugin plans planner", said)
+        self.assertIn("Before reading the task brief", said)
+        self.assertNotIn("write-tracked", planner.capabilities)
+
+    def test_disabling_plans_removes_its_planner_role(self):
+        """A plugin-specific role must not survive the commands its prompt tells it to use.
+        Role discovery reads enabled plugin directories without importing their code."""
+        (self.repo / ".switchboard" / "plugins.toml").write_text(
+            'enabled = ["!reset"]\n')
+        self.assertNotIn("planner", roles.load(self.repo))
+
     def test_both_task_owning_roles_are_told_to_finish_the_change_before_proving_it(self):
         """DESIGN-TRUTH: "Implementation is kept coherent before normal verification." A
         worker is the main agent for a whole job as often as a lead is, so the rule cannot
@@ -496,6 +516,20 @@ class RolesTest(unittest.TestCase):
                 said = " ".join(r[name].prompt.split())
                 self.assertIn("Make the whole change before you verify it", said)
                 self.assertIn("diagnostic", said)
+
+    def test_the_protocol_returns_missing_authority_not_multi_agent_work(self):
+        """A universal size rule contradicted both roles whose configured authority is to
+        spawn. Hand-back is for missing authority or decisions; role prompts decide when
+        authorized delegation earns its cost."""
+        said = " ".join(config.protocol(self.repo).split())
+        self.assertNotIn("task turns out bigger than one agent", said)
+        self.assertIn("authority you do not hold", said)
+        self.assertIn("Delegating inside a brief", said)
+
+    def test_read_only_work_is_not_told_to_manufacture_a_commit(self):
+        said = " ".join(config.protocol(self.repo).split())
+        self.assertIn("if the task produced tracked changes, commit them", said)
+        self.assertIn("A read-only report does not invent a commit", said)
 
     def test_the_universal_verbs_are_taught_once_and_the_roles_only_decide(self):
         """DESIGN-TRUTH's subtractive rule, applied to the three prompts that were breaking
@@ -553,7 +587,7 @@ class RolesTest(unittest.TestCase):
     def test_every_shipped_role_pins_the_tier_the_table_chose(self):
         """The table in `notes/model-selection.md`, in the form the spawn layer sees it.
 
-        Four roles, not six: `reviewer` and `worker` were moved off `default` by that pass
+        Five roles, not eight: `reviewer` and `worker` were moved off `default` by that pass
         and Andrew moved them back the same day, so they are deliberately absent here rather
         than asserted to be empty — the tier a role does NOT pin is that role file's
         statement to make, and reviewer.md and worker.md make it.
@@ -566,6 +600,7 @@ class RolesTest(unittest.TestCase):
             "researcher": ["--model", "sonnet", "--effort", "medium"],
             "qa":         ["--model", "sonnet", "--effort", "high"],
             "lead":       ["--model", "claude-opus-4-8", "--effort", "medium"],
+            "planner":    ["--model", "opus", "--effort", "high"],
         }
         got = {name: roles.get(r, name).spec().cli_args() for name in want}
         self.assertEqual(got, want)

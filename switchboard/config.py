@@ -381,17 +381,29 @@ def flag(dotted: str, repo: Optional[Path] = None) -> bool:
 def roles(repo: Optional[Path] = None) -> dict[str, dict]:
     """Every role, merged field by field. `{name: {model, prompt}}`.
 
-    Three sources, most general first — the shipped markdown, the repo's single TOML file,
-    then the repo's own markdown directory:
+    Four sources, most general first — shipped markdown, roles contributed by enabled
+    plugins, the repo's single TOML file, then the repo's own markdown directory:
 
         defaults/roles/*.md
+        <enabled plugin>/roles/*.md
         <repo>/.switchboard/roles.toml
         <repo>/.switchboard/roles/*.md
 
     Field by field is the point: a repo that says `[reviewer] model = "strong"` keeps the
     reviewer's prompt.
+
+    Plugin roles are discovered without importing plugin code, on the same level-1 path as
+    plugin availability. This is what makes a plugin-specific specialty first-class in
+    `sb roles` while keeping deletion or disablement honest: the `plans` plugin contributes
+    `planner`, and removing that plugin removes the role that points at its commands too.
     """
     out = _roles_from_dir(defaults_dir() / "roles")
+    # Local import avoids config/plugins import recursion at module load. At call time both
+    # modules are complete, and `available` only globs directories — no plugin is imported.
+    from . import plugins
+    visible = plugins.available(repo)
+    for name in sorted(set(plugin_enablement(repo)) & set(visible)):
+        out = merge(out, _roles_from_dir(visible[name] / "roles"))
     d = repo_dir(repo)
     if d is None:
         return out

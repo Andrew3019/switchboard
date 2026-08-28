@@ -4584,7 +4584,13 @@ class Broker:
         return f"{config.defaults_dir() / 'prompts.toml'}:{dotted}", "switchboard-owned"
 
     def _role_prompt_source(self, role: str) -> tuple[str, str]:
-        """The layer that supplied this effective role's prompt body."""
+        """The layer that supplied this effective role's prompt body.
+
+        Same precedence as `config.roles`: repo markdown, repo TOML, enabled-plugin role,
+        shipped role. Provenance is part of effective-instruction observability; inventing
+        `defaults/roles/planner.md` for a prompt actually supplied by the plans plugin makes
+        the manifest point maintainers at a file that does not exist.
+        """
         role_dir = config.path_for("roles_dir", self.repo)
         if role_dir is not None:
             path = role_dir / f"{role}.md"
@@ -4597,6 +4603,13 @@ class Broker:
             raw = config.read_toml(role_file).get(role) or {}
             if isinstance(raw, dict) and raw.get("prompt"):
                 return f"{role_file}:[{role}].prompt", "external-to-switchboard"
+        available = plugins_mod.available(self.repo)
+        for name in sorted(set(plugins_mod.enabled(self.repo)) & set(available), reverse=True):
+            path = available[name] / "roles" / f"{role}.md"
+            if path.is_file():
+                _, body = config.front_matter(path.read_text())
+                if config.flatten(body):
+                    return str(path), self._owned_source(path)
         return str(config.defaults_dir() / "roles" / f"{role}.md"), "switchboard-owned"
 
     def instruction_workspace(self, name: str) -> Path:

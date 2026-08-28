@@ -11,11 +11,16 @@ capabilities = ["write-tracked"]
 # prompt, which forbids widening scope or redesigning and turns any uncertainty about
 # whether a fix is minor into a major finding instead of an edit.
 #
-# WHAT THIS DOES NOT REACH, structurally rather than by promise: a spawn NARROWS
-# (`Broker.seed_for`, template ∩ what the spawner may pass down), so a reviewer put up by a
-# planner — a `researcher`, which holds no `write-tracked` — comes out without it. Plan and
-# design review therefore stay read-only without a second role or a flag, which is exactly
-# the boundary `plan-review` asks for.
+# WHAT THIS DOES NOT REACH: a spawn NARROWS (`Broker.seed_for`, template ∩ what the spawner
+# may pass down), so a reviewer put up by a planner — a `researcher`, which holds no
+# `write-tracked` — comes out without it. Plan and design review therefore come out seeded
+# read-only without a second role or a flag, which is the boundary `plan-review` asks for.
+#
+# THAT IS THE SEED AND NOT A GATE, and nothing may be written as though it were. There is no
+# filesystem chokepoint in sb (`roles.side_effect_capabilities`): `write-tracked` is refused
+# at `sb merge` and flagged at `done`, both post-hoc, and the plan file is not a tracked file
+# at all. So the seeding makes the capability agree with the instruction; the instruction is
+# still what holds. `plan-review` and `planner.md` say so in the same words.
 +++
 
 <!--

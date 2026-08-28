@@ -130,17 +130,16 @@ anyway — it costs a line — and if one does hang on the dialog, trust the wor
 ### 3. The agents
 
 The eval planners are seeded the way the guide seeds a plan writer, because the seed is
-half of what this pass exists to check: `--role researcher --model strong`, held `spawn`,
-never held `write-tracked`.
+half of what this pass exists to check: `--role planner`, whose shipped template is strong,
+holds `spawn` and never holds `write-tracked`.
 
-`sb grant` refuses a caller the store has no row for, and an operator standing in a clone is
-exactly that. So the clone gets one throwaway `lead` first, and the lead does the spawning
-and the granting — which is the guide's own shape anyway, since a planner is spawned by the
-lead that owns the worktree.
+An operator standing in a clone has no agent row, so the clone gets one throwaway `lead`
+first and that lead does the spawning — the guide's own shape, since a planner is spawned
+by the task owner that holds the worktree.
 
 ```
 ./bin/sb delegate "<hold and follow instructions>" --role lead --model strong --name "eval run 0825"
-./bin/sb tell lead-eval-run-0825 "spawn <n> planners with ./bin/sb delegate, --role researcher --model strong, one --name per case; then ./bin/sb grant <each> spawn"
+./bin/sb tell lead-eval-run-0825 "spawn <n> planners with ./bin/sb delegate, --role planner, one --name per case"
 ```
 
 **Quote every `--name`.** It takes one argument, and `--name eval run` is refused outright
