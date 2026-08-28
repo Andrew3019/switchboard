@@ -5325,12 +5325,23 @@ def _markdown(p: dict) -> str:
     terminal by whoever is working the step, it has no graph to draw and no rows to line
     up, and the walk is what stops a new field going missing there.
 
-    A plan whose `steps` is empty, absent, or holding something that is not a dict takes
-    the walk too. Falls back rather than fails, like the three schema facts below it.
+    A DOCUMENT is a plan (a `steps` list, even empty) or a change record (a `change` object);
+    both render human-first through `_comment`. A single step is neither — `_one_step` passes
+    one step dict — and takes the walk. `kind` cannot be the discriminator here: `_dumped`
+    strips it before this is reached, so the shape a document actually has on the copy — a
+    `steps` list or a `change` — is what decides. Something that is not a dict where a step
+    should be falls back to the walk rather than failing, like the schema facts below it.
     """
     steps = p.get("steps")
-    if isinstance(steps, list) and steps and all(isinstance(s, dict) for s in steps):
-        return _comment(p, steps)
+    steps_ok = isinstance(steps, list) and all(isinstance(s, dict) for s in steps)
+    # A non-empty steps list with a non-dict in it is CORRUPTION, and it falls to the walk
+    # even when a `change` record is present. The human-first path would render such a
+    # document with an empty steps list and silently drop the legitimate steps beside the
+    # bad one; the walk shows everything, which is the fallback this function promises
+    # everywhere else and the reason a malformed record costs a rendering rather than a step.
+    malformed = isinstance(steps, list) and steps and not steps_ok
+    if not malformed and (steps_ok or isinstance(p.get("change"), dict)):
+        return _comment(p, steps if steps_ok else [])
     return _markdown_walk(p)
 
 
@@ -5409,9 +5420,11 @@ _SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete",
                          # here so neither also lands in the metadata block below the fold —
                          # `roles` especially, which is a lookup table and not a reading.
                          "tokens", "roles",
-                         # The change record is drawn by its own section (`_change_section`),
-                         # not walked into the metadata block, and `kind` is machinery the
-                         # dump strips. Named here so neither lands in the metadata fold.
+                         # The change record is drawn by the human-first sections — the
+                         # `_need_section`/`_why_section`/`_evidence_section` on the pull
+                         # request, `_change_section` in the terminal — not walked into the
+                         # metadata block, and `kind` is machinery the dump strips. Named
+                         # here so neither lands in the metadata fold.
                          "change", "kind"})
 _SHOWN_STEP = frozenset({"id", "name", "display", "progress", "why", "gate", "output",
                          "owner", "deps", "obliged_by", "root"})
@@ -5421,22 +5434,28 @@ _UNSAFE = re.compile(r"[^0-9A-Za-z]+")
 
 
 def _comment(p: dict, steps: list) -> str:
-    """A whole plan as the comment that goes on the pull request, top to bottom.
+    """A plan or a change record as the comment that goes on the pull request, HUMAN-FIRST.
 
-    FOUR THINGS OPEN AND EVERY STEP FOLDED, in that order, and the order is the argument.
-    What a human at a pull request needs without clicking is: where the job is (the status
-    line and the totals), what shape it is (the graph), what was agreed (the contract), and
-    what is being asked of THEM (the gates). None of those is about a particular step, and
-    all four together are shorter than one step's detail — so they are the whole of what is
-    open, and the per-step detail is behind a fold each.
+    THE FIRST SCREENFUL IS FOR ANDREW, and that is the whole of the order. A pull request is
+    read by a person deciding what THEY still have to do and whether the change is safe to
+    land, so the comment opens with exactly that, in four sections and in this order:
 
-    THE STEPS WERE A TABLE AND ARE NOT ANY MORE. A table put every step's every column in
-    front of a reader who wanted one step's detail, and the columns still could not hold
-    what a step actually carries — its notes, its checkpoints, whatever field a later author
-    put on it — so those went to a metadata block at the bottom, away from the step they
-    belong to. One `<details>` per step is the trade taken instead: the collapsed title
-    carries what a scan needs (which step, what state, how long) and the body carries
-    everything else about that step, including the fields this file has never heard of.
+      1. What you need to do    the human-only checks and the open gates — or, in as many
+                                words, that there are none. Nothing else is above it.
+      2. What changed and why   the root cause or feature intent and the selected solution,
+                                read from the change record. A summary, not the diff.
+      3. Agent evidence         the reviewed commit, the verification, the independent review
+                                and its fixes — the case that the change is sound.
+      4. Detailed record        everything else, COLLAPSED: the shaped plan with its graph,
+                                its per-step folds, the full contract, and the observability
+                                detail. Present when there is a plan; a direct change has no
+                                plan and this is just its record's own leftovers.
+
+    The change record is where the first three sections read from, which is what lets a
+    DIRECT change — no plan, no steps — render the same shape as a shaped one without an
+    empty or invented plan under it. The detailed record keeps the whole of the old
+    rendering, so nothing a human could want is gone; it is one click away rather than the
+    first thing in the way.
     """
     used = next((k for k in _HEADS if _some(p.get(k))), None)
     lines = ["# " + _heading(p, used)]
@@ -5444,18 +5463,191 @@ def _comment(p: dict, steps: list) -> str:
     # different sentences on purpose, and the long one is the one that says what the job is.
     if used == "display" and _some(p.get("title")):
         lines += ["", f"_{_cell('title', p['title'])}_"]
-    lines += ["", _status(steps)]
-    if (span := _elapsed(p)):
-        lines += ["", span]
-    if (spend := _tokens(p)):
-        lines += ["", spend]
-    lines += _defect_lines(p)
-    lines += ["", "## how it runs", ""] + _graph(steps)
-    lines += _outputs(steps)
-    lines += _gates(steps)
-    lines += ["", "## steps"] + _folds(p, steps)
-    lines += _metadata(p)
+    lines += _need_section(p, steps)
+    lines += _why_section(p)
+    lines += _evidence_section(p)
+    lines += _detail_record(p, steps)
     return "\n".join(lines)
+
+
+def _change_of(p: dict) -> dict:
+    """The change record on a document, or an empty one — read defensively, never refused."""
+    c = p.get("change")
+    return c if isinstance(c, dict) else {}
+
+
+def _def_output(steps: list, key: str) -> Optional[str]:
+    """The finished `output` text of the step naming definition `key`, if any.
+
+    The human-first sections read from the change record, but the CONTENT a shaped plan
+    writes as it runs lands in step outputs — the human checks in `merge-human-review`, the
+    contract in `change-approval`. Where the record does not carry a summary of its own, the
+    step that produced the thing is the fallback, so a plan that filled its outputs and not
+    its record still renders something a human can act on.
+    """
+    for s in steps or ():
+        if s.get("def") == key and isinstance(s.get("output"), str) and _some(s["output"]):
+            return s["output"]
+    return None
+
+
+def _need_section(p: dict, steps: list) -> list[str]:
+    """`## What you need to do` — the human-only checks and the open gates, or that none remain.
+
+    Always drawn, because the one thing a person must not have to hunt for is whether the
+    change is waiting on them. Empty is itself the answer, said outright.
+    """
+    c = _change_of(p)
+    checks = c.get("human_checks")
+    if not _some(checks):
+        checks = _def_output(steps, "merge-human-review")
+    # `none` is the sentinel a change with nothing for a human writes into `human_checks`;
+    # it means the same as an empty list, and it renders as the sentence below, not the word.
+    if isinstance(checks, str) and checks.strip().lower() == "none":
+        checks = None
+    body: list[str] = []
+    if _some(checks):
+        if isinstance(checks, list):
+            body += [f"- {_flat(x)}" for x in checks]
+        else:
+            body += _lines(checks)      # a markdown block, rendered as itself
+    body += [f"- **{_cell('id', s.get('id'))}** — {_cell('gate', s['gate'])}"
+             for s in (steps or ())
+             if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
+    if not body:
+        body = ["Nothing—agent verification covers this change."]
+    return ["", "## What you need to do", ""] + body
+
+
+def _why_section(p: dict) -> list[str]:
+    """`## What changed and why` — the root cause/intent and the selected solution.
+
+    A summary read from the change record, not the contract in full — the full contract is a
+    click away in the detailed record. Omitted when the record carries none of it, rather
+    than drawn empty: a legacy plan that never filled its record has nothing to summarise
+    here, and its contract is still under the fold.
+    """
+    c = _change_of(p)
+    rows = [(label, c[key]) for key, label in
+            (("request", "Request"), ("cause", "Root cause / intent"),
+             ("solution", "Selected solution"), ("scope", "Scope boundaries"))
+            if _some(c.get(key))]
+    if not rows:
+        return []
+    lines = ["", "## What changed and why", ""]
+    for label, val in rows:
+        vlines = _lines(val)
+        lines.append(f"- **{label}:** {vlines[0] if vlines else ''}")
+        lines += [f"  {x}" for x in vlines[1:]]
+    return lines
+
+
+def _evidence_section(p: dict) -> list[str]:
+    """`## Agent evidence` — the reviewed commit, the verification, the review and its fixes.
+
+    The case that the change is sound, bound to the identities the change record carries so a
+    reader sees what was verified and reviewed rather than a claim that it was. Omitted when
+    the record carries no evidence.
+    """
+    c = _change_of(p)
+    rev = c.get("review") if isinstance(c.get("review"), dict) else {}
+    ver = c.get("verification") if isinstance(c.get("verification"), dict) else {}
+    parts: list[tuple[str, Any]] = []
+    commit = rev.get("commit") or ver.get("commit")
+    if _some(commit):
+        parts.append(("Reviewed commit", commit))
+    # `verification` carries its own `environment`, and `review` its `fixes`, so both render
+    # under their section without a field of their own. `limitations` and `baseline` are
+    # optional and absent unless used (like `handoff`): a known limitation, and an evidenced
+    # pre-existing failure the change did not cause.
+    for key, label in (("verification", "Verification"), ("review", "Independent review"),
+                       ("limitations", "Known limitations"),
+                       ("baseline", "Baseline failures")):
+        if _some(c.get(key)):
+            parts.append((label, c[key]))
+    if not parts:
+        return []
+    lines = ["", "## Agent evidence", ""]
+    for label, val in parts:
+        if _scalar(val):
+            lines.append(f"- **{label}:** {_cell(label.lower(), val)}")
+        else:
+            lines.append(f"- **{label}:**")
+            lines += [f"  {x}" for x in _bullets(val, depth=1)]
+    return lines
+
+
+# The change-record keys the first three sections DRAW. Everything else on the record is
+# preserved by `_change_remainder` below, so the split is stated once here rather than kept in
+# step with three functions by hand. `human_checks` is §1; `request`/`cause`/`solution`/`scope`
+# are §2; the evidence keys are §3. What is left — the approved `contract`, the `approval`
+# identity, the `pr` head, the `landing` approval and outcome, an optional `handoff`, `path`,
+# `phase`, and any field a later author adds — is the remainder, and it MUST render somewhere
+# or a direct PR would silently drop half its record (`_metadata` cannot draw it: `change` is
+# in `_SHOWN_PLAN`, so the walk skips it).
+_CHANGE_PROMOTED = frozenset({"request", "cause", "solution", "scope",
+                              "verification", "review", "human_checks",
+                              "limitations", "baseline"})
+
+
+def _change_remainder(p: dict) -> list[str]:
+    """The change-record fields the first three sections did not draw, collapsed, once.
+
+    The record is the point of a direct change and half of a shaped one, and the human-first
+    sections lift only what belongs in the first screenful. The rest — the approved contract,
+    the approval identity, the PR head, the landing approval and outcome, the optional handoff,
+    and anything a later author adds — is still the record and must not vanish, so it renders
+    here in a collapsed block. Promoted content is not repeated (`_CHANGE_PROMOTED`), and a
+    block string like the contract renders as the markdown it is rather than one escaped row;
+    everything else walks, so a field this file has never heard of still lands.
+    """
+    c = _change_of(p)
+    rest = {k: v for k, v in c.items() if k not in _CHANGE_PROMOTED and _some(v)}
+    if not rest:
+        return []
+    blocks = {k: v for k, v in rest.items() if isinstance(v, str) and "\n" in v}
+    walk = {k: v for k, v in rest.items() if k not in blocks}
+    lines = ["", "<details>", "<summary>change record</summary>", ""] + _walked(walk, set(),
+                                                                                level=4)
+    for k, v in blocks.items():
+        lines += ["", "#### " + _title(k), ""] + _lines(v)
+    return lines + ["", "</details>"]
+
+
+def _detail_record(p: dict, steps: list) -> list[str]:
+    """`## Detailed record` — everything else, collapsed: the shaped plan, and the record's rest.
+
+    The whole of the rendering that used to be the comment, moved under one fold so nothing a
+    human could want is gone — only out of the first screenful. A plan brings its status, its
+    graph, the full contract, the per-step folds and the metadata; both a plan and a direct
+    change bring the CHANGE-RECORD REMAINDER — the record fields the first three sections did
+    not draw — so nothing on the record is silently dropped. Drawn only when there is something
+    under it to draw.
+    """
+    inner: list[str] = []
+    if steps:
+        inner += [_status(steps)]
+        if (span := _elapsed(p)):
+            inner += ["", span]
+        if (spend := _tokens(p)):
+            inner += ["", spend]
+        inner += _defect_lines(p)
+        inner += ["", "## how it runs", ""] + _graph(steps)
+        inner += _outputs(steps)
+        inner += _gates(steps)
+        inner += ["", "## steps"] + _folds(p, steps)
+        inner += _change_remainder(p)
+        inner += _metadata(p)
+    else:
+        if (span := _elapsed(p)):
+            inner += [span]
+        inner += _defect_lines(p)
+        inner += _change_remainder(p)
+        inner += _metadata(p)
+    if not any(str(x).strip() for x in inner):
+        return []
+    return (["", "## Detailed record", "", "<details>", "<summary>the full record</summary>",
+             ""] + inner + ["", "</details>"])
 
 
 def _status(steps: list) -> str:

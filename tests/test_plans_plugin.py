@@ -4409,7 +4409,9 @@ class MarkdownTest(PlansSandbox):
                           {"id": "s-2", "name": "write it"}]}
         md = _plans()._markdown(flat)
 
-        self.assertEqual(md.count("<summary>"), 2, "one fold per step, dump or no dump")
+        # One fold per step (dump or no dump), plus the one collapse the detailed record
+        # sits behind. No metadata block here — the plan carries only id/title/steps.
+        self.assertEqual(md.count("<summary>"), len(flat["steps"]) + 1)
         self.assertIn("get it approved", md)
         self.assertIn("[step-1 output](#step-1-output)", md)
         self.assertIn("### step-1 output", md)
@@ -4458,22 +4460,27 @@ class MarkdownTest(PlansSandbox):
             {"id": "s-2", "name": "review it", "progress": "skipped", "deps": ["s-1"]},
             {"id": "s-3", "name": "merge it", "display": "merge", "deps": ["s-2"],
              "gate": "Andrew: merge it?"}]}
-        line = _plans()._markdown(plan).splitlines()[2]
 
-        self.assertTrue(line.startswith("**Status:**"), line)
+        def status(pl):
+            # The status line lives in the detailed record now, not at a fixed index — found
+            # by its label rather than by counting lines above it.
+            return next(l for l in _plans()._markdown(pl).splitlines()
+                        if l.startswith("**Status:**"))
+
+        line = status(plan)
         self.assertIn("in progress", line)
         self.assertIn("1/3 done", line)
         self.assertIn("1 skipped", line)
         self.assertIn("blocked at the merge gate", line)
         # The gate the plan has not reached yet is named and is not called a block.
         plan["steps"][1]["progress"] = "open"
-        ahead = _plans()._markdown(plan).splitlines()[2]
+        ahead = status(plan)
         self.assertIn("merge gate ahead", ahead)
         self.assertNotIn("blocked", ahead)
         # And a progress word nobody here wrote is NAMED rather than counted as open:
         # `progress` is an open vocabulary and a hand-edit is where that word comes from.
         plan["steps"][1]["progress"] = "waiting on Andrew"
-        self.assertIn("waiting on Andrew", _plans()._markdown(plan).splitlines()[2])
+        self.assertIn("waiting on Andrew", status(plan))
 
     def test_a_dump_that_is_not_a_string_takes_the_ordinary_path(self):
         """The fallback, in the spirit of the field-nobody-wrote-this-for test above. The
@@ -4538,11 +4545,20 @@ class LayoutTest(PlansSandbox):
     """
 
     def _plan(self) -> dict:
-        """A plan with one of everything the layout has to place."""
+        """A plan with one of everything the layout has to place, and a change record so the
+        human-first sections above the detailed record have something to draw."""
         self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
         hour = 3600
-        return {"id": "p-1", "display": "board: ship it", "title": "ship the thing",
-                "created_at": 1000, "steps": [
+        return {"id": "p-1", "kind": "plan", "display": "board: ship it",
+                "title": "ship the thing", "created_at": 1000,
+                "change": {"path": "shaped",
+                           "cause": "the cap was too low",
+                           "solution": "raise the cap and pin it with a test",
+                           "verification": {"commit": "abc1234", "result": "green"},
+                           "review": {"commit": "abc1234", "reviewer": "reviewer-x",
+                                      "findings": "no majors"},
+                           "human_checks": "- Upload a 20MB file and confirm it works"},
+                "steps": [
                     {"id": "s-1", "display": "impl", "name": "write it",
                      "progress": "done"},
                     {"id": "s-2", "display": "approve", "name": "get it approved",
@@ -4557,26 +4573,33 @@ class LayoutTest(PlansSandbox):
                      "detail": "s-2 open → done"}]}
 
     def test_the_open_sections_come_in_the_order_a_reader_needs_them(self):
-        """Where the job is, what shape it is, what was agreed, what is being asked of you
-        — and only then the steps. The order is the argument: the gate at the bottom of the
-        open part is a question, and the three sections above it are what has to have been
-        read before it means anything.
-
-        All four are OUTSIDE every fold. A `<details>` opening before `## steps` would mean
-        one of them had been put behind a click, which is the failure this pins.
+        """HUMAN-FIRST, and the order is the argument: what you need to do, then what changed
+        and why, then the evidence, and only then the detailed record. The first screenful is
+        for the person deciding what THEY still have to do, so the human checks and the open
+        gate are the top of the page and the plan's own detail is one click down.
         """
         plan = self._plan()
         md = _plans()._markdown(plan)
-        top = md.split("## steps", 1)[0]
 
-        self.assertLess(top.index("**Status:**"), top.index("**Elapsed:**"))
-        order = [top.index(x) for x in
-                 ("**Status:**", "## how it runs", "## contract", "## waiting on a human")]
-        self.assertEqual(order, sorted(order), top)
-        self.assertNotIn("<details>", top, "nothing above the steps is behind a click")
-        self.assertIn("```mermaid", top)
-        self.assertIn("Change Contract", top)
-        self.assertIn("Andrew: merge it?", top)
+        order = [md.index(x) for x in
+                 ("## What you need to do", "## What changed and why", "## Agent evidence",
+                  "## Detailed record")]
+        self.assertEqual(order, sorted(order), md)
+        # `What you need to do` is the first section: nothing but the heading above it.
+        head = md.split("## What you need to do", 1)[0]
+        self.assertNotIn("##", head)
+        # The human's questions are up top: the manual check and the open gate.
+        need = md.split("## What you need to do", 1)[1].split("## What changed", 1)[0]
+        self.assertIn("Upload a 20MB file", need)
+        self.assertIn("Andrew: merge it?", need)
+        # And the shaped plan itself — graph, contract, steps — is COLLAPSED under the
+        # detailed record, not above it. The mermaid graph appears only down there.
+        above, below = md.split("## Detailed record", 1)
+        self.assertNotIn("```mermaid", above)
+        self.assertIn("<details>", below)
+        self.assertIn("```mermaid", below)
+        self.assertIn("## steps", below)
+        self.assertIn("Change Contract", below)
 
     def test_every_step_is_a_fold_titled_with_its_name_state_and_elapsed(self):
         """`{id} · {display} — {name} | {state} | {elapsed}`, one per step, no exceptions —
@@ -4604,9 +4627,10 @@ class LayoutTest(PlansSandbox):
             {"id": "s-1", "display": "impl", "name": "write it"}]})
         self.assertIn('<summary><a id="step-1"></a>step-1 · impl — write it | open</summary>',
                       bare)
-        # One fold per step and nothing else folded up there: the metadata block at the
-        # bottom is the only other `<details>` in the comment.
-        self.assertEqual(md.count("<details>"), len(plan["steps"]) + 1)
+        # One fold per step, plus the metadata block, plus the change-record remainder (this
+        # plan's change carries a non-promoted `path`), plus the one collapse the whole
+        # detailed record sits behind.
+        self.assertEqual(md.count("<details>"), len(plan["steps"]) + 3)
         # The title is the anchor everything else in the comment links a step by.
         self.assertIn('<summary><a id="step-1"></a>step-1 ·', md)
         self.assertIn("[step-1](#step-1)", md)
@@ -4651,11 +4675,17 @@ class LayoutTest(PlansSandbox):
         plan = self._plan()
         md = _plans()._markdown(plan)
 
-        for fold in md.split("<details>")[1:]:
-            body = fold.split("</summary>", 1)
-            self.assertTrue(body[0].lstrip().startswith("<summary>"), fold[:80])
-            self.assertTrue(body[1].startswith("\n\n"), body[1][:40])
-            self.assertIn("\n\n</details>", body[1])
+        # The detailed record now nests the per-step folds inside one outer collapse, so the
+        # rule is checked per DELIMITER rather than by splitting on `<details>` (which cannot
+        # tell an inner `</details>` from the outer one): every summary is followed by a
+        # blank line, and every close is preceded by one.
+        self.assertIn("<details>", md)
+        for m in re.finditer("</summary>", md):
+            self.assertTrue(md[m.end():m.end() + 2] == "\n\n",
+                            f"no blank line after a summary: {md[m.end():m.end()+40]!r}")
+        for m in re.finditer("</details>", md):
+            self.assertTrue(md[m.start() - 2:m.start()] == "\n\n",
+                            f"no blank line before a close: {md[m.start()-40:m.start()]!r}")
 
 
 class TelemetryTest(PlansSandbox):
@@ -5041,6 +5071,192 @@ class ChangeRecordLifecycleTest(PlansSandbox):
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("handoff", shown)
         self.assertIn("main-2", shown)
+
+
+class HumanFirstCommentTest(PlansSandbox):
+    """Phase 4: the PR comment reads human-first. What a person still has to do is the first
+    screenful; the shaped plan and its observability are collapsed under a detailed record;
+    and a DIRECT change renders the same shape from its record, with no empty or invented
+    plan under it. The idempotent marker/upsert is Phase 3's and is unchanged.
+    """
+
+    def _md(self, plan_id: str = "p-1") -> str:
+        return self.ok("plugin", "plans", "show", plan_id, "--markdown")
+
+    def test_the_four_sections_come_human_first_and_in_order(self):
+        """What you need to do, what changed and why, the evidence, then the detailed record.
+        The plan's own graph is collapsed below, not in the first screenful."""
+        self.data("plugin", "plans", "create", "raise the cap",
+                  "--display", "board: raise the cap", "--step", "impl = raise it")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "cause": "the cap was too low", "solution": "raise it and pin a test",
+            "verification": {"commit": "abc1234", "result": "green"},
+            "human_checks": "- Upload a 20MB file and confirm it works"})
+        self._save(doc)
+        md = self._md()
+        order = [md.index(x) for x in
+                 ("## What you need to do", "## What changed and why", "## Agent evidence",
+                  "## Detailed record")]
+        self.assertEqual(order, sorted(order), md)
+        self.assertIn("Upload a 20MB file", md.split("## What changed", 1)[0])
+        self.assertNotIn("```mermaid", md.split("## Detailed record", 1)[0])
+
+    def test_nothing_needed_says_so_outright(self):
+        """A change with no human checks and no open gate says so, in as many words, rather
+        than leaving the section empty for a reader to interpret."""
+        self.data("plugin", "plans", "create", "a tidy job",
+                  "--display", "board: a tidy job", "--step", "impl = do it")
+        md = self._md()
+        need = md.split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("Nothing—agent verification covers this change.", need)
+
+    def test_the_none_sentinel_renders_as_nothing_not_the_word(self):
+        """`human_checks: "none"` is the sentinel for a change with nothing for a human; it
+        renders as the sentence, never the bare word."""
+        self.data("plugin", "plans", "record", "a direct fix", "--display", "board: fix")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = "none"
+        self._save(doc)
+        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("Nothing—agent verification covers this change.", need)
+        self.assertNotIn("- none", need)
+
+    def test_a_direct_record_renders_human_first_with_no_plan(self):
+        """A direct change has no plan: its record drives the human-first sections and there
+        is no `## how it runs` graph and no `## steps` invented under it."""
+        made = self.data("plugin", "plans", "record", "raise the timeout",
+                         "--display", "board: raise the timeout",
+                         "--request", "uploads over 10MB time out")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "solution": "raise the timeout to 60s",
+            "verification": {"commit": "def5678", "result": "green"}})
+        self._save(doc)
+        md = self._md()
+        self.assertTrue(md.lstrip().startswith("#"))
+        self.assertIn("## What you need to do", md)
+        self.assertIn("uploads over 10MB time out", md)          # the request
+        self.assertIn("raise the timeout to 60s", md)            # the solution
+        self.assertIn("def5678", md)                             # the evidence
+        self.assertNotIn("## how it runs", md)                   # no invented plan
+        self.assertNotIn("## steps", md)
+
+    def test_agent_evidence_binds_the_reviewed_commit_and_review(self):
+        """The evidence section names the reviewed commit and carries the verification and
+        the independent review, so a reader sees what was checked, not a claim that it was."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "verification": {"commit": "c0ffee1", "check": "pytest tests", "result": "green"},
+            "review": {"commit": "c0ffee1", "reviewer": "reviewer-y",
+                       "findings": "one minor, fixed"}})
+        self._save(doc)
+        ev = self._md().split("## Agent evidence", 1)[1].split("## Detailed record", 1)[0]
+        self.assertIn("Reviewed commit", ev)
+        self.assertIn("c0ffee1", ev)
+        self.assertIn("reviewer-y", ev)
+        self.assertIn("one minor, fixed", ev)
+
+    def test_the_detailed_record_still_carries_the_whole_plan_collapsed(self):
+        """Nothing a human could want is gone — the graph, the contract, the per-step folds
+        and the metadata are all still there, one click down under the detailed record."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job",
+                  "--step", "impl = write it", "--lib", "review")
+        doc = self._doc()
+        doc["plans"][0]["steps"][0]["output"] = "Change Contract\n\n- the thing"
+        self._save(doc)
+        below = self._md().split("## Detailed record", 1)[1]
+        self.assertIn("<details>", below)
+        self.assertIn("```mermaid", below)
+        self.assertIn("## steps", below)
+        self.assertIn("## contract", below)
+
+    def test_the_change_record_remainder_preserves_every_unpromoted_fact(self):
+        """The facts the first three sections do not lift — the approved contract, the
+        approval identity, the PR head, the landing approval and outcome, the fresh-main
+        handoff — are still the record and must not vanish. They render in a collapsed change-
+        record block under the detailed record, for a direct change and a shaped one alike."""
+        made = self.data("plugin", "plans", "record", "raise the timeout",
+                         "--display", "board: raise the timeout")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "contract": "Change Contract\n\n- raise it to 60s",
+            "approval": {"plan_revision": "p-1@r1", "contract_digest": "sha256:aa",
+                         "by": "andrew"},
+            "pr": {"number": 42, "head": "def5678"},
+            "landing": {"head": "def5678", "by": "andrew", "outcome": "merged"},
+            "handoff": {"from": "lead-1", "to": "main-2"}})
+        self._save(doc)
+        below = self._md().split("## Detailed record", 1)[1]
+        self.assertIn("change record", below)                 # the collapsed remainder block
+        self.assertIn("Change Contract", below)               # the approved contract, whole
+        self.assertIn("sha256:aa", below)                     # the approval identity
+        self.assertIn("42", below)                            # the PR
+        self.assertIn("merged", below)                        # the landing outcome
+        self.assertIn("main-2", below)                        # the handoff
+        # And promoted content is not duplicated into the remainder.
+        doc = self._doc(); doc["plans"][0]["change"]["cause"] = "UNIQUE-CAUSE-TOKEN"
+        self._save(doc)
+        remainder = self._md().split("<summary>change record</summary>", 1)[1]
+        self.assertNotIn("UNIQUE-CAUSE-TOKEN", remainder)
+
+    def test_scope_limitations_and_baseline_reach_the_first_screenful(self):
+        """Phase 4 requires scope boundaries in `what changed`, and known limitations or an
+        evidenced baseline failure in `agent evidence`; the verification environment and the
+        reviewer's fixes ride along inside their own facts."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "solution": "raise the cap",
+            "scope": "server config only; no client change",
+            "verification": {"commit": "c0ffee1", "environment": "ci ubuntu-22",
+                             "result": "green"},
+            "review": {"commit": "c0ffee1", "reviewer": "rev-y",
+                       "fixes": ["tightened a log line"]},
+            "limitations": "does not cover chunked uploads",
+            "baseline": "test_flaky_x was already failing on main"})
+        self._save(doc)
+        md = self._md()
+        why = md.split("## What changed and why", 1)[1].split("## Agent evidence", 1)[0]
+        self.assertIn("Scope boundaries", why)
+        self.assertIn("server config only", why)
+        ev = md.split("## Agent evidence", 1)[1].split("## Detailed record", 1)[0]
+        self.assertIn("ci ubuntu-22", ev)                     # verification environment
+        self.assertIn("tightened a log line", ev)             # reviewer fixes
+        self.assertIn("does not cover chunked uploads", ev)   # known limitations
+        self.assertIn("already failing on main", ev)          # baseline failure
+
+    def test_a_malformed_step_falls_to_the_walk_even_with_a_change_record(self):
+        """A non-dict in the steps list is corruption, and the render falls back to the walk
+        rather than the human-first path — even when a change record is present. The
+        human-first path renders an empty steps list, which would silently drop the
+        legitimate step beside the bad one; the walk shows everything."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        p = {"id": "p-1", "title": "t", "change": {"path": "shaped", "cause": "x"},
+             "steps": ["corrupt", {"id": "s-1", "name": "the real step"}]}
+        md = _plans()._markdown(p)
+        # The legitimate step is not dropped, and the human-first sections are not drawn.
+        self.assertIn("the real step", md)
+        self.assertNotIn("## What you need to do", md)
+
+    def test_create_pr_says_the_comment_is_refreshed_on_material_change(self):
+        """Phase 4: the authoritative comment is updated when review fixes, the head, or
+        landing state materially change what a human should see — not only at merge."""
+        about = " ".join(self.ok("plugin", "plans", "library", "create-pr").split())
+        self.assertIn("REFRESHED, NOT ONLY AT MERGE", about)
+        self.assertIn("materially changes", about)
+
+    def test_the_marked_comment_body_still_upserts_but_show_hides_the_nonce(self):
+        """The Phase-3 identity is preserved: the posted body carries the marker line, and
+        `show --markdown` — a human rendering — does not leak the per-PR nonce marker."""
+        self.data("plugin", "plans", "create", "a job", "--display", "board: a job",
+                  "--step", "impl = do it")
+        # The nonce marker is added by `comment`, never by the human-facing render.
+        self.assertNotIn("switchboard-plan:", self._md())
 
 
 class LibrarySemanticsTest(PlansSandbox):
