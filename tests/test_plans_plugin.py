@@ -4790,6 +4790,320 @@ class TelemetryTest(PlansSandbox):
         self.assertEqual(_plans()._burned(str(path)), 2 * 1115)
 
 
+class RecordTest(PlansSandbox):
+    """The change record: the shared landing lifecycle, held whether or not a plan exists.
+
+    Phase 3's separation. A DIRECT change has no plan and no change-approval step; it gets a
+    record only when it needs somewhere to keep landing metadata, and `record` is that verb.
+    A SHAPED change is a plan, and its record is born with it at shaping entry — sparse, and
+    invisible in `show` until a landing fact lands, so a fresh plan reads as it did before
+    the record existed. A legacy document carries neither `kind` nor `change` and reads as
+    the plain plan it is: the field is additive and nothing silently rewrites a stored one.
+    """
+
+    def test_record_makes_a_plan_less_change_record(self):
+        """`record` is a document with no step graph and a change on the direct path. It
+        shares the plan id space and its own file, and `show`/`list`/`--json` all read it."""
+        made = self.data("plugin", "plans", "record", "raise the upload timeout",
+                         "--display", "board: raise the upload timeout",
+                         "--reason", "a bounded fix, no plan")
+        self.assertEqual(made["id"], "p-1")
+        self.assertEqual(made["kind"], "record")
+        self.assertEqual(made["change"]["path"], "direct")
+        self.assertIsNone(made["change"]["phase"])
+        # The STORED document has no step graph — a record is not a plan. (The rendered
+        # view adds an empty `steps` for the renderers, but nothing is written to the file.)
+        stored = self._doc()["plans"][0]
+        self.assertNotIn("steps", stored)
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("change", shown)
+        self.assertIn("direct", shown)
+        self.assertNotIn("(no steps yet)", shown)
+
+        listed = self.ok("plugin", "plans", "list")
+        self.assertIn("p-1", listed)
+        self.assertIn("record", listed)
+
+    def test_a_record_takes_a_request_and_carries_it(self):
+        """`--request` seeds the human ask the record exists to carry to the PR."""
+        made = self.data("plugin", "plans", "record", "raise the timeout",
+                         "--display", "board: raise the timeout",
+                         "--request", "uploads over 10MB time out; make them not")
+        self.assertEqual(made["change"]["request"],
+                         "uploads over 10MB time out; make them not")
+        self.assertIn("uploads over 10MB", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_a_record_needs_a_board_name_like_a_plan(self):
+        """The same door `create` keeps: a record owns a header line and is refused without
+        one, and the refusal reaches a machine reader in `data`."""
+        code, _, _ = self.sb("plugin", "plans", "record", "no display", "--json")
+        self.assertNotEqual(code, 0)
+
+    def test_a_shaped_plan_is_born_with_its_record_but_reads_as_before(self):
+        """`create` is shaping entry, so the plan carries a shaped record from birth — but
+        sparse, so `show` says nothing new until a landing fact lands. The record is in the
+        file and in `--json`; the human view is unchanged."""
+        made = self.data("plugin", "plans", "create", "a shaped job",
+                         "--display", "board: a shaped job", "--step", "impl = write it")
+        self.assertEqual(made["kind"], "plan")
+        self.assertEqual(made["change"]["path"], "shaped")
+        self.assertEqual(made["change"]["phase"], "shaping")
+        # A fresh shaped plan's record holds no landing fact, so `show` does not draw a
+        # change section — the plan reads exactly as it did before Phase 3.
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertNotIn("path      shaped", shown)
+
+    def test_template_use_starts_a_shaped_plan_with_a_record_too(self):
+        """A template starts a shaped plan, so it is born with the same shaped change record
+        `create` gives — the two make-a-plan verbs agree."""
+        made = self.data("plugin", "plans", "template", "use", "docs")
+        self.assertEqual(made["kind"], "plan")
+        self.assertEqual(made["change"]["path"], "shaped")
+        self.assertEqual(made["change"]["phase"], "shaping")
+
+    def test_a_landed_fact_draws_the_record_on_a_shaped_plan(self):
+        """Once a landing fact is written into the record by hand — a verification, a PR —
+        `show` draws the change section. Structured facts render nested."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["verification"] = {
+            "commit": "abc1234", "check": "pytest tests", "result": "green"}
+        doc["plans"][0]["change"]["pr"] = {"number": 42, "head": "abc1234"}
+        self._save(doc)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("change", shown)
+        self.assertIn("verification", shown)
+        self.assertIn("abc1234", shown)
+
+    def test_a_legacy_document_has_no_kind_and_reads_as_a_plan(self):
+        """A plan written before Phase 3 carries neither `kind` nor `change`. It reads,
+        lists and renders as the plain plan it is — the field is additive and nothing here
+        rewrites a stored document to add it."""
+        self.data(*_create("an older job", "shape the work"))
+        doc = self._doc()
+        plan = doc["plans"][0]
+        plan.pop("kind", None)
+        plan.pop("change", None)
+        self._save(doc)
+        # Reads without error, is not a record, and its change section is silent.
+        again = self.data("plugin", "plans", "show", "p-1")
+        self.assertNotIn("kind", again)
+        self.assertNotIn("change", again)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("shape the work", shown)
+        self.assertNotIn("path      ", shown)
+        listed = self.ok("plugin", "plans", "list")
+        self.assertIn("1 step", listed)
+
+    def test_record_is_a_declared_verb_with_its_flags(self):
+        """The verb is registered and takes the flags the direct path needs."""
+        self.ok("plugin", "plans", "guide")     # import the module the registry reads
+        self.assertIn("record", _plans_commands())
+        args = _plans_args("record")
+        for flag in ("title", "--display", "--request", "--note", "--reason"):
+            self.assertIn(flag, args)
+
+    def test_name_step_refuses_a_record(self):
+        """A library step cannot be named onto a change record: it has no step graph, and
+        letting one in would leave a mongrel document the renderers read as a plan. Refused
+        at the door, with the reason in `data` for a machine reader; nothing is written."""
+        self.data("plugin", "plans", "record", "raise the timeout",
+                  "--display", "board: raise the timeout")
+        code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "review", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("change record", json.loads(out)["data"]["error"])
+        # Nothing was written: the record still has no steps.
+        self.assertNotIn("steps", self._doc()["plans"][0])
+
+    def test_the_guide_names_the_direct_and_shaped_paths(self):
+        """The guide is coherent with the two-path model: a shaped plan and, for a direct
+        change, a change record made only when landing facts are needed. It keeps the phrase
+        the spawn-side test pins."""
+        out = " ".join(self.ok("plugin", "plans", "guide").split())
+        self.assertIn("heading for a change that will land", out)   # still pinned
+        for token in ("DIRECT change", "CHANGE RECORD", "sb plugin plans record",
+                      "SHAPING first"):
+            self.assertIn(token, out)
+
+    def test_the_board_says_record_not_empty_for_a_record(self):
+        """A change record has no step graph, so the board header says what it is rather
+        than counting it as an empty plan."""
+        from defaults.plugins.plans import board
+        rec = {"id": "p-1", "kind": "record", "display": "raise timeout", "condition": "live"}
+        header = board._header(rec, False)
+        self.assertIn("record", header)
+        self.assertNotIn("empty", header)
+
+
+class ChangeRecordLifecycleTest(PlansSandbox):
+    """The change record's identity fields and the lifecycle it validates.
+
+    Two things Phase 3 owns beyond the record existing: the combined change approval is an
+    IDENTITY (the plan revision and contract digest it was approved against), not a boolean;
+    and the lifecycle DESCRIBES AND VALIDATES the record — a warning, never a refusal, when
+    the record presents itself as sanctioned before it was. The phases stay advisory: nothing
+    here polices when a step ran, only what the record claims about itself.
+    """
+
+    def test_the_combined_approval_is_an_identity_and_round_trips(self):
+        """The approved change approval binds a plan revision and a contract digest, recorded
+        by hand into `change.approval`, and it round-trips and renders."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["approval"] = {
+            "plan_revision": "p-1@r3", "contract_digest": "sha256:abcd1234",
+            "by": "andrew", "at": 1787880000}
+        doc["plans"][0]["change"]["phase"] = "execution"
+        self._save(doc)
+        stored = self._doc()["plans"][0]["change"]["approval"]
+        self.assertEqual(stored["plan_revision"], "p-1@r3")
+        self.assertEqual(stored["contract_digest"], "sha256:abcd1234")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("approval", shown)
+        self.assertIn("sha256:abcd1234", shown)
+
+    def test_execution_before_a_recorded_approval_is_a_defect(self):
+        """A shaped record whose phase claims execution or later with no combined approval
+        recorded is implementation presented as sanctioned before it was approved — drawn red
+        and reported by `validate`, and never refused."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["phase"] = "execution"     # no approval recorded
+        self._save(doc)
+        defects = self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"]
+        joined = " ".join(defects)
+        self.assertIn("sanctioned before it was approved", joined)
+        # Recording the approval clears it.
+        doc = self._doc()
+        doc["plans"][0]["change"]["approval"] = {"plan_revision": "p-1@r1",
+                                                 "contract_digest": "sha256:x", "by": "a"}
+        self._save(doc)
+        self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
+                         [])
+
+    def test_a_direct_record_never_trips_the_approval_check(self):
+        """A direct change has no approval and never claims one; its phase stays null, so the
+        sanction check does not apply to it."""
+        self.data("plugin", "plans", "record", "a direct fix", "--display", "board: fix")
+        self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
+                         [])
+
+    def test_landing_before_a_pr_is_a_defect(self):
+        """A change at or past landing with no PR recorded is an order the lifecycle cannot
+        have."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        c = doc["plans"][0]["change"]
+        c["phase"] = "landing"
+        c["approval"] = {"plan_revision": "r1", "contract_digest": "d"}  # so only the PR trips
+        self._save(doc)
+        joined = " ".join(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"])
+        self.assertIn("before it is on a pull request", joined)
+
+    def test_a_phase_the_lifecycle_does_not_have_is_not_a_defect(self):
+        """`phase` is advisory and open like `progress`: an unrecognised word is a job's own,
+        not a defect, so the lifecycle checks simply skip it."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["phase"] = "waiting on the vendor"
+        self._save(doc)
+        self.assertEqual(self.data("plugin", "plans", "validate", "p-1")["plans"][0]["defects"],
+                         [])
+
+    def test_an_optional_fresh_main_handoff_renders_only_when_present(self):
+        """The fresh-main handoff is optional and recorded only when used — absent on every
+        ordinary record, and rendered as a first-class fact when a hand-edit adds it."""
+        self.data("plugin", "plans", "create", "a shaped job",
+                  "--display", "board: a shaped job", "--step", "impl = write it")
+        self.assertNotIn("handoff", self.ok("plugin", "plans", "show", "p-1"))
+        doc = self._doc()
+        doc["plans"][0]["change"]["handoff"] = {"from": "lead-1", "to": "main-2",
+                                                "at": 1787880000}
+        self._save(doc)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("handoff", shown)
+        self.assertIn("main-2", shown)
+
+
+class LibrarySemanticsTest(PlansSandbox):
+    """Phase 3's library semantics, read off `library <name>`. These pin the change-record
+    connection and the review's structure; the full composition-aware prose pass is Phase 5.
+
+    The structural fields — anchors, obliges, displays — are pinned by CatalogueTest and are
+    unchanged here; this class is only about the semantics Phase 3 added to the `about`.
+    """
+
+    def _about(self, name: str) -> str:
+        """`library <name>`, whitespace-collapsed — the renderer reflows the prose, so a
+        multi-word token would otherwise straddle a wrap."""
+        return " ".join(self.ok("plugin", "plans", "library", name).split())
+
+    def test_review_is_independent_structured_and_recorded(self):
+        """`review` names a fresh agent, a target commit, the major/minor/nit classification,
+        the reviewer's own minor fixes, and that the result is recorded in the change record
+        so landing reads it by identity."""
+        about = self._about("review")
+        for token in ("FRESH agent", "COMMIT", "MAJOR", "MINOR", "NIT", "change record",
+                      "review: {commit, reviewer, findings, fixes}"):
+            self.assertIn(token, about)
+
+    def test_change_approval_is_combined_and_recorded(self):
+        """`change-approval` is the shaped path's single sign-off on solution, plan and
+        contract, recorded into the change record; a direct change never gets one."""
+        about = self._about("change-approval")
+        for token in ("COMBINED", "solution", "contract", "change record", "DIRECT"):
+            self.assertIn(token, about)
+
+    def test_create_pr_requires_evidence_and_serves_the_direct_path(self):
+        """`create-pr` requires current verification and a resolved review, read from the
+        record by identity; and a direct change reaches its PR here with no plan."""
+        about = self._about("create-pr")
+        for token in ("verification", "RESOLVED review", "DIRECT change", "comment <record>"):
+            self.assertIn(token, about)
+
+    def test_merge_consumes_an_identity_without_rerunning(self):
+        """`merge` reads the record's approval and evidence and checks the head, and does not
+        rerun the tests or the review to rebuild confidence."""
+        about = self._about("merge")
+        for token in ("CONSUMES AN IDENTITY", "approval", "does NOT rerun", "head"):
+            self.assertIn(token, about)
+
+    def test_the_definitions_point_at_canonical_homes_not_re_teach_procedure(self):
+        """Phase 3's bounded six-definition de-dup: a definition POINTS at the preset, role
+        or runtime that owns a procedure rather than re-teaching it. Bounded on purpose — the
+        composition-wide rewrite across protocol/roles/guide/library is Phase 5. The removed
+        strings are the evidence the cleanup happened, not just more prose."""
+        ca = self._about("change-approval")
+        self.assertIn("sb presets design-gate", ca)          # points at the format's owner
+        self.assertNotIn("Order it for READING", ca)         # removed: the format re-teaching
+        self.assertNotIn("two-space indents under", ca)      # removed: the nesting mechanic
+        cp = self._about("create-pr")
+        self.assertNotIn("what has already been tested", cp)  # removed: the PR-description how-to
+        hr = self._about("merge-human-review")
+        self.assertNotIn("MARKDOWN-READY NESTING", hr)       # removed: the rendering mechanic
+        rv = self._about("review")
+        self.assertNotIn("markdown-ready nesting", rv)       # removed: the rendering mechanic
+        # And the step-specific facts the tests pin elsewhere are still there — the trim did
+        # not gut the definitions, it removed what a role/runtime/preset already owns.
+        self.assertIn("EMPTY THE `gate` FIELD as you tick", ca)
+        self.assertIn("renders the plan AS IT STANDS AT THAT MOMENT", cp)
+
+    def test_the_shipped_library_still_has_exactly_its_six_definitions(self):
+        """Phase 3 changed semantics, not the shipped set: the six definitions and their
+        anchors and obligations are what CatalogueTest pins, and nothing here adds a
+        seventh or renames one."""
+        listed = self.ok("plugin", "plans", "library")
+        for key in ("change-approval", "create-pr", "merge", "merge-human-review",
+                    "plan-review", "review"):
+            self.assertIn(key, listed)
+
+
 def _plans_commands() -> list[str]:
     """The verbs the plugin declares, read off the registry rather than off a docstring."""
     reg = plugins.Registry()

@@ -60,8 +60,8 @@ from typing import Any
 
 from switchboard.board import _visible_len
 
-from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _defective, _flat, _lib, _num,
-               _read, _shown, _viewed, _Live)
+from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _defective, _flat, _is_record, _lib,
+               _num, _read, _shown, _viewed, _Live)
 
 
 # A SECTION OF THE BOARD'S OWN, under the tree, rather than a block hanging off the last
@@ -176,7 +176,9 @@ def _header(p: dict, bad: bool = False) -> str:
     steps = p.get("steps") or []
     n = len(steps)
     meta = [str(p.get("condition") or "")] if p.get("condition") else []
-    meta.append(f"{n} step{'' if n == 1 else 's'}" if n else "empty")
+    # A change record has no step graph, so it does not count steps — it says what it is.
+    meta.append("record" if _is_record(p)
+                else f"{n} step{'' if n == 1 else 's'}" if n else "empty")
     name = _flat(p.get("display") or p.get("title") or "(untitled)")
     head = f"{_flat(p.get('id') or '?')}  {name}"
     return ((RED + head + PLAIN if bad else head)
