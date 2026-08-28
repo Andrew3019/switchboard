@@ -160,6 +160,7 @@ class RoleBundleTest(Fixture, unittest.TestCase):
             "dispatcher": ["dispatch", "spawn", "write-tracked"],
             "lead":       ["dispatch", "fork", "spawn", "write-tracked"],
             "worker":     ["write-tracked"],
+            "builder":    ["write-tracked"],           # a worker that writes code
             "researcher": [],
             "reviewer":   ["write-tracked"],   # scoped minor fixes, 2026-08-27
             "qa":         [],                                       # read-only by default

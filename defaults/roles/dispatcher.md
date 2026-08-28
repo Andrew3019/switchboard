@@ -1,5 +1,5 @@
 +++
-model = "cheap"
+model = "prose"
 capabilities = ["spawn", "dispatch", "write-tracked"]
 # The NON-TOP dispatcher's bundle. `sb start`'s top reads none of this: its set is fixed in
 # code (`roles.TOP_CAPABILITIES`) and drops `write-tracked` for `fork`, because the top
@@ -228,13 +228,16 @@ motivating it that way is promising something the command does not do.
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
 
-TIER: `cheap`, sharing it with researcher. This role makes exactly one decision — lead or
-worker — and holds no context to make a hard one with; everything else it does is relaying.
-There is no version of that which repays an Opus-tier model, and it is the agent most likely
-to be sitting idle, so it is the wrong place for anything expensive. It said `default` until
-2026-08-16, which was not a cheaper choice, only an unmade one — `default` pins nothing and
-resolves to whatever the provider CLI defaults to that week. The model it lands on is
-unchanged in practice; what changed is that it is now written down.
+TIER: `prose`, sharing it with lead — Opus 4.8 at medium effort. Not for the decision it
+makes, which is still one small one (lead or worker), but for WHO READS IT. This is the top
+agent: the only role a person types at all day, and the only one whose every word reaches
+them directly rather than through a parent's summary. `prose` is the tier that exists for
+exactly that — see its definition in `defaults/models.toml` for why it pins the older Opus
+and what output style it is avoiding.
+
+So the cost argument that put it on `cheap` still holds on the work and loses on the
+audience. It said `cheap` from 2026-08-16, and `default` before that; both were reasoning
+about how hard the routing decision is, which was never the expensive part of this role.
 -->
 
 You are a dispatcher. Work reaches you from one person, and your job is to put it in the

@@ -48,13 +48,14 @@ would pick, weighted toward your dislike of Opus 5's style.
 
 | Role / task | Current | Best (capability) | Preferred (Reddit / style) | Recommendation |
 |---|---|---|---|---|
-| **dispatcher** — route an ask to lead or worker | CLI default (Sonnet 5) | Sonnet 5 | no view | **keep** — one small decision, no reason to pay Opus |
+| **dispatcher** — route an ask to lead or worker | CLI default (Sonnet 5) | Sonnet 5 | no view | **Opus 4.8, medium** (`prose`) — the decision is small, but this is the top agent and the only one a person reads unmediated, which is what `prose` is for |
 | **lead** — split work, synthesise, write to humans | CLI default (Sonnet 5) | Opus 5 | **Opus 4.8** | **Opus 4.8, high** — leads write the prose you read; this is where the style complaint bites |
-| **worker** — implementation | CLI default (Sonnet 5) | Opus 5, xhigh | **Opus 4.8** (contested) | **Opus 5, xhigh** — its output is code, not prose; style matters least here |
+| **worker** — implementation, and the fallback for any undefined role | CLI default (Sonnet 5) | Opus 5, xhigh | **Opus 4.8** (contested) | **Opus 5** (`default`) — stays on Claude whatever the coding scores say, because it is `default_role` and `fallback_role` both, and a codex tier here puts a codex-cli dependency on every ordinary spawn |
+| **builder** — the code-writing leaf, asked for by name | new role | GPT-5.6-sol | GPT over Claude for code | **GPT-5.6-sol, medium** (`gpt-5.6-sol`) — best agentic-coding scores going (Terminal-Bench 2.1, the Coding Agent Index) at less than the Opus tiers cost, and reachable only as `--role builder`, which is what keeps it off the fallback path |
 | **researcher / scout** — read, map, report | Sonnet 5, medium | Sonnet 5 | no view | **keep**, bump to high effort for a first scout |
-| **reviewer** — read work, give a verdict | CLI default (Sonnet 5) | Opus 5, high | Opus 5 | **Opus 5, high** — the one thing the community rates Opus 5 above 4.8 at is diagnosing |
+| **reviewer** — read work, give a verdict | CLI default (Sonnet 5) | Opus 5, high | Opus 5 | **Sonnet 5, high** (`careful`) — Opus 5 is the better diagnostician, but reviewers fan out one per diff, so the shipped default takes the effort dial instead and `--model strong` escalates the review that earns it |
 | **qa** — does the thing actually work | CLI default (Sonnet 5) | Sonnet 5, high | no view | **Sonnet 5, high** — tool-driven verification, not deep reasoning |
-| **adversarial review** (a procedure a lead runs) | inherits reviewer/CLI default | Opus 5, high | Opus 5 | **Opus 5, high** — same as reviewer; run more of them rather than a costlier one |
+| **adversarial review** (a procedure a lead runs) | inherits reviewer/CLI default | Opus 5, high | Opus 5 | **Opus 5, high** — the explicit escalation the reviewer row reserves it for; run more of them rather than making every review costlier |
 | **summarisation** (`sb done`) | whoever wrote it | n/a | n/a | not separable — it rides the agent's own model |
 
 ## What the community actually says
@@ -87,18 +88,27 @@ price, not as community consensus.
 
 ## Two gaps found on the way
 
-Reported, not fixed — neither was in scope.
+Reported rather than fixed — neither was in scope at the time.
 
 1. **`sb restore` drops a per-call `--model` override.** It re-resolves the tier from
    the agent's role alone, so an agent spawned `--model strong` comes back on its role's
    plain tier (`switchboard/broker.py:4643-4648`).
-2. **The `default` tier pins nothing**, so five of six roles follow whatever the Claude
-   Code CLI decides its default is — which can change under you without any switchboard
-   change. That is deliberate per the config comment, but it does mean switchboard cannot
-   answer "what model is my fleet on".
+2. **The `default` tier pinned nothing**, so the roles on it followed whatever the Claude
+   Code CLI decided its default was — which could change under you without any switchboard
+   change, and meant switchboard could not answer "what model is my fleet on".
+   **Since closed**: every shipped Claude tier now names a concrete id
+   (`defaults/models.toml`), `default` among them at `claude-opus-5`. `standard` is the one
+   tier left that still defers, and it defers on purpose — it is the name for that answer.
 
 ## What this costs
 
-Moving lead, worker and reviewer off the unpinned default onto Opus-tier takes those
-agents from roughly $0.30–0.90 to $0.70–2.20 per task — call it 2.5x on the agents that
-do the heavy work, unchanged on dispatcher, researcher and qa.
+Pinning `default` to Opus 5 is where the money goes. `worker` is the role still on that
+tier, so worker spawns move off the CLI's Sonnet-5 default and onto Opus 5: roughly
+$0.30–0.90 to $0.70–2.20 per task, call it 2.5x on the role that does the heavy work.
+`lead` was already Opus-tier through `prose` and does not move.
+
+Reviewer was the third candidate for that move and went the other way. `careful` is Sonnet 5
+at high effort — the same model it was already running on, at the same price per token — so
+it buys the extra judgement with effort rather than with a bigger model, and `--model strong`
+is there for the review that genuinely needs Opus. dispatcher, researcher and qa are
+unchanged.
