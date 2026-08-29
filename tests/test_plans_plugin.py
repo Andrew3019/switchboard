@@ -4004,12 +4004,12 @@ class PlannerPackageTest(PlansSandbox):
         lib = json.loads(self.ok("plugin", "plans", "library", "--json"))["data"]
         obliged = {name for d in lib.values() for name in (d.get("obliges") or ())}
         roots = sorted(set(lib) - obliged)
-        self.assertEqual(roots, ["create-pr", "merge", "plan-review"])
+        self.assertEqual(roots, ["create-pr", "implementation", "merge", "plan-review"])
 
         said = " ".join(self.ok("plugin", "plans", "guide").split())
         # The heading is plural, and the roots are named at the moment of composing.
         self.assertIn("NAME EVERY OUTERMOST STEP", said)
-        self.assertIn("the library has THREE steps nothing else brings", said)
+        self.assertIn("the library has FOUR steps nothing else brings", said)
         for root in roots:
             self.assertIn(f"`{root}`", said)
         # And the silence is named: a truncated plan is a legal plan.
@@ -4966,9 +4966,10 @@ class RecordTest(PlansSandbox):
     the plain plan it is: the field is additive and nothing silently rewrites a stored one.
     """
 
-    def test_record_makes_a_plan_less_change_record(self):
-        """`record` is a document with no step graph and a change on the direct path. It
-        shares the plan id space and its own file, and `show`/`list`/`--json` all read it."""
+    def test_record_makes_a_change_record_with_the_direct_skeleton(self):
+        """`record` is a change on the direct path, born with the fixed execution+landing
+        skeleton. It shares the plan id space and its own file, and `show`/`list`/`--json`
+        all read it."""
         made = self.data("plugin", "plans", "record", "raise the upload timeout",
                          "--display", "board: raise the upload timeout",
                          "--reason", "a bounded fix, no plan")
@@ -4976,19 +4977,57 @@ class RecordTest(PlansSandbox):
         self.assertEqual(made["kind"], "record")
         self.assertEqual(made["change"]["path"], "direct")
         self.assertIsNone(made["change"]["phase"])
-        # The STORED document has no step graph — a record is not a plan. (The rendered
-        # view adds an empty `steps` for the renderers, but nothing is written to the file.)
+        # The STORED document carries the fixed skeleton — a direct change is no longer
+        # stepless: the steps are written to the file, not just added by the renderer.
         stored = self._doc()["plans"][0]
-        self.assertNotIn("steps", stored)
+        self.assertEqual([s.get("def") for s in stored["steps"]],
+                         ["implementation", "review", "merge-human-review",
+                          "create-pr", "merge"])
 
         shown = self.ok("plugin", "plans", "show", "p-1")
         self.assertIn("change", shown)
         self.assertIn("direct", shown)
-        self.assertNotIn("(no steps yet)", shown)
+        self.assertIn("implement the change", shown)   # the skeleton's first step, resolved
 
         listed = self.ok("plugin", "plans", "list")
         self.assertIn("p-1", listed)
-        self.assertIn("record", listed)
+        self.assertIn("direct", listed)                # the tier tag, in place of "record"
+
+    def test_the_direct_skeleton_is_a_linear_chain_in_run_order(self):
+        """The skeleton is a fixed list, chained linearly in the order it runs — each step
+        after the one before, no branches, and no `obliged_by` so `validate` stays clean."""
+        self.data("plugin", "plans", "record", "raise the timeout",
+                  "--display", "board: raise the timeout")
+        steps = self._doc()["plans"][0]["steps"]
+        self.assertEqual(len(steps), 5)
+        # merge-human-review sits BEFORE create-pr: the checklist must exist when the PR opens.
+        self.assertEqual([s["def"] for s in steps],
+                         ["implementation", "review", "merge-human-review",
+                          "create-pr", "merge"])
+        # Linear: the first is a root, every later one waits on exactly its predecessor.
+        self.assertEqual(steps[0]["deps"], [])
+        for earlier, later in zip(steps, steps[1:]):
+            self.assertEqual(later["deps"], [earlier["id"]])
+        # Named steps, not freetext: the label resolves from the library, none is hand-copied.
+        for s in steps:
+            self.assertIsNone(s["name"])
+            self.assertIsNone(s["obliged_by"])
+        # It validates with no defects — a plain named skeleton trips no obligation warning.
+        self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_a_legacy_stepless_record_still_renders(self):
+        """A record written before the skeleton has no `steps`. It must keep rendering — no
+        migration injects steps into it, and `show`/`list` read it without error."""
+        self.data("plugin", "plans", "record", "an older direct change",
+                  "--display", "board: older change")
+        doc = self._doc()
+        doc["plans"][0].pop("steps", None)          # a pre-skeleton record
+        doc["plans"][0].pop("next_step", None)
+        self._save(doc)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("direct", shown)              # still legible as a direct change
+        self.assertNotIn("(no steps yet)", shown)   # a record, not a plan, so no plan prompt
+        self.assertIn("p-1", self.ok("plugin", "plans", "list"))
 
     def test_a_record_takes_a_request_and_carries_it(self):
         """`--request` seeds the human ask the record exists to carry to the PR."""
@@ -5071,16 +5110,17 @@ class RecordTest(PlansSandbox):
             self.assertIn(flag, args)
 
     def test_name_step_refuses_a_record(self):
-        """A library step cannot be named onto a change record: it has no step graph, and
-        letting one in would leave a mongrel document the renderers read as a plan. Refused
-        at the door, with the reason in `data` for a machine reader; nothing is written."""
+        """A library step cannot be named onto a change record: it carries the FIXED skeleton
+        and is not extended step by step — a job that needs more is a shaped plan. Refused at
+        the door, with the reason in `data` for a machine reader; nothing is added."""
         self.data("plugin", "plans", "record", "raise the timeout",
                   "--display", "board: raise the timeout")
+        before = list(self._doc()["plans"][0]["steps"])
         code, out, _ = self.sb("plugin", "plans", "name-step", "p-1", "review", "--json")
         self.assertNotEqual(code, 0)
         self.assertIn("change record", json.loads(out)["data"]["error"])
-        # Nothing was written: the record still has no steps.
-        self.assertNotIn("steps", self._doc()["plans"][0])
+        # Nothing was added: the record still carries only the skeleton it was born with.
+        self.assertEqual(self._doc()["plans"][0]["steps"], before)
 
     def test_the_guide_names_the_direct_and_shaped_paths(self):
         """The guide is coherent with the two-path model: a shaped plan and, for a direct
@@ -5092,14 +5132,29 @@ class RecordTest(PlansSandbox):
                       "SHAPING first"):
             self.assertIn(token, out)
 
-    def test_the_board_says_record_not_empty_for_a_record(self):
-        """A change record has no step graph, so the board header says what it is rather
-        than counting it as an empty plan."""
+    def test_the_board_tags_a_record_with_its_tier_and_counts_its_skeleton(self):
+        """A record now draws a step chart like a plan, so the board header tags it with its
+        TIER (`direct`) — that is what tells the two apart — and counts the skeleton steps."""
         from defaults.plugins.plans import board
-        rec = {"id": "p-1", "kind": "record", "display": "raise timeout", "condition": "live"}
+        rec = {"id": "p-1", "kind": "record", "display": "raise timeout", "condition": "live",
+               "change": {"path": "direct"},
+               "steps": [{"id": "s-1"}, {"id": "s-2"}, {"id": "s-3"},
+                         {"id": "s-4"}, {"id": "s-5"}]}
         header = board._header(rec, False)
-        self.assertIn("record", header)
-        self.assertNotIn("empty", header)
+        self.assertIn("direct", header)
+        self.assertIn("5 steps", header)
+        self.assertNotIn("record", header)
+
+    def test_the_board_falls_back_to_a_line_when_a_document_has_no_chart(self):
+        """A stepless document — a legacy record, or a sparse shaped placeholder — is no
+        longer a bare header: the board draws a fallback line from its phase and gist."""
+        from defaults.plugins.plans import board
+        sparse = {"id": "p-1", "kind": "plan", "display": "shape it", "steps": [],
+                  "change": {"path": "shaped", "phase": "shaping"},
+                  "notes": [{"text": "Investigating the widget bug", "by": "x", "at": 0}]}
+        line = board._empty_line(sparse)
+        self.assertIn("shaping", line)
+        self.assertIn("Investigating the widget bug", line)
 
 
 class ChangeRecordLifecycleTest(PlansSandbox):
@@ -5237,6 +5292,25 @@ class HumanFirstCommentTest(PlansSandbox):
         self.assertIn("Upload a 20MB file", md.split("## What changed", 1)[0])
         self.assertNotIn("```mermaid", md.split("## Detailed record", 1)[0])
 
+    def test_human_checks_render_as_tickable_checkboxes(self):
+        """A list of human checks renders as GitHub checkboxes (`- [ ]`), so a person reading
+        the PR on a phone runs the list by ticking it. Open gates tick the same way."""
+        self.data("plugin", "plans", "create", "raise the cap",
+                  "--display", "board: raise the cap", "--step", "impl = raise it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = [
+            "Upload a 50MB file on a real device", "Confirm the progress bar reaches 100%"]
+        doc["plans"][0]["steps"].append(
+            {"id": "s-9", "name": "merge it", "display": "merge", "progress": "open",
+             "gate": "Andrew: land it?"})
+        self._save(doc)
+        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("- [ ] Upload a 50MB file on a real device", need)
+        self.assertIn("- [ ] Confirm the progress bar reaches 100%", need)
+        # The open gate is in the list too, and it is a checkbox as well.
+        gate_line = next(ln for ln in need.splitlines() if "Andrew: land it?" in ln)
+        self.assertTrue(gate_line.startswith("- [ ] "), gate_line)
+
     def test_nothing_needed_says_so_outright(self):
         """A change whose record ANSWERED the question with none says so, in as many words,
         rather than leaving the section empty for a reader to interpret."""
@@ -5285,9 +5359,10 @@ class HumanFirstCommentTest(PlansSandbox):
         self.assertIn("Nothing—agent verification covers this change.", need)
         self.assertNotIn("- none", need)
 
-    def test_a_direct_record_renders_human_first_with_no_plan(self):
-        """A direct change has no plan: its record drives the human-first sections and there
-        is no `## how it runs` graph and no `## steps` invented under it."""
+    def test_a_direct_record_renders_human_first_with_its_skeleton(self):
+        """A direct change's record drives the human-first sections, and its fixed skeleton
+        renders in the collapsed detailed record — a real graph, not an invented plan, drawn
+        from the steps the record was born with."""
         made = self.data("plugin", "plans", "record", "raise the timeout",
                          "--display", "board: raise the timeout",
                          "--request", "uploads over 10MB time out")
@@ -5302,8 +5377,13 @@ class HumanFirstCommentTest(PlansSandbox):
         self.assertIn("uploads over 10MB time out", md)          # the request
         self.assertIn("raise the timeout to 60s", md)            # the solution
         self.assertIn("def5678", md)                             # the evidence
-        self.assertNotIn("## how it runs", md)                   # no invented plan
-        self.assertNotIn("## steps", md)
+        # The human-first sections come before the detailed record; the skeleton graph is
+        # collapsed under it, not in the first screenful.
+        above = md.split("## Detailed record", 1)[0]
+        self.assertNotIn("## how it runs", above)
+        below = md.split("## Detailed record", 1)[1]
+        self.assertIn("## how it runs", below)                   # the real skeleton graph
+        self.assertIn("implementation", below)
 
     def test_agent_evidence_binds_the_reviewed_commit_and_review(self):
         """The evidence section names the reviewed commit and carries the verification and

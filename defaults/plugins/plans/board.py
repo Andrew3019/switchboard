@@ -61,7 +61,7 @@ from typing import Any
 from switchboard.board import _visible_len
 
 from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _defective, _flat, _is_record, _lib,
-               _num, _read, _shown, _viewed, _Live)
+               _num, _read, _shown, _some, _tier, _viewed, _Live)
 
 
 # A SECTION OF THE BOARD'S OWN, under the tree, rather than a block hanging off the last
@@ -149,10 +149,44 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
         # definition: asking the stored step would report every library step as defective.
         plan_bad, bad = _defective(v)
         out.append(_header(v, plan_bad or bool(bad)))
-        # One space, not two: a chart's own cells are padded (`_cell`), so the first name
-        # already sits a column in from wherever this block starts.
-        out.extend(" " + line for line in _chart(v.get("steps") or [], bad))
+        steps = v.get("steps") or []
+        if steps:
+            # One space, not two: a chart's own cells are padded (`_cell`), so the first name
+            # already sits a column in from wherever this block starts.
+            out.extend(" " + line for line in _chart(steps, bad))
+        else:
+            # ROBUST EMPTY RENDER. A document with no chart — a legacy stepless record, or a
+            # sparse shaped placeholder like the ones that read as a bare header before — still
+            # says something useful: where it is (`phase`) and the first line of what it is
+            # about. A header alone on the board is a row nobody can act on.
+            line = _empty_line(v)
+            if line:
+                out.append(" " + line)
     return out
+
+
+def _empty_line(p: dict) -> str:
+    """A one-line stand-in for a chart when a document has no steps.
+
+    Drawn dim, because it is a placeholder for the picture rather than the picture. It reads
+    the coarse `phase` and the first line of whatever the change record or the notes say the
+    job is — enough for a lead scanning the board to tell an empty row apart from the next
+    empty row, which a bare header cannot do.
+    """
+    change = p.get("change") if isinstance(p.get("change"), dict) else {}
+    bits: list[str] = []
+    if _some(change.get("phase")):
+        bits.append(_flat(change["phase"]))
+    gist = next((change.get(k) for k in ("solution", "cause", "request", "contract")
+                 if _some(change.get(k))), None)
+    if not _some(gist):
+        notes = p.get("notes") or []
+        gist = (notes[0] or {}).get("text") if notes and isinstance(notes[0], dict) else None
+    if _some(gist):
+        bits.append(_flat(gist).split(". ")[0])
+    if not bits:
+        return ""
+    return DIM + "  ·  ".join(bits) + PLAIN
 
 
 def _header(p: dict, bad: bool = False) -> str:
@@ -177,9 +211,12 @@ def _header(p: dict, bad: bool = False) -> str:
     steps = p.get("steps") or []
     n = len(steps)
     meta = [str(p.get("condition") or "")] if p.get("condition") else []
-    # A change record has no step graph, so it does not count steps — it says what it is.
-    meta.append("record" if _is_record(p)
-                else f"{n} step{'' if n == 1 else 's'}" if n else "empty")
+    # THE TIER TAG, first among the state facts: a record now draws a step chart like a
+    # plan's, so `direct` / `shaped` is what tells the two apart at a glance. Then the step
+    # count — a record carries its skeleton, so it counts steps like a plan; only a legacy
+    # stepless record or a sparse shaped placeholder reads `empty`.
+    meta.append(_tier(p))
+    meta.append(f"{n} step{'' if n == 1 else 's'}" if n else "empty")
     name = _flat(p.get("display") or p.get("title") or "(untitled)")
     head = f"{_flat(p.get('id') or '?')}  {name}"
     return ((RED + head + PLAIN if bad else head)
