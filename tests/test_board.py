@@ -2427,6 +2427,62 @@ class OpenWorktreeTest(unittest.TestCase):
         self.assertEqual(seen.read_text(), "true")
 
 
+class InspectDeadlineTest(unittest.TestCase):
+    """`ww` and `oo` open nothing when `_inspect` runs out of time, and the reported
+    failure was exactly that rather than anything the editor did.
+
+    `sb inspect` answers about one agent by collecting the whole fleet, so it costs
+    seconds and the cost grows with the fleet, not the machine: measured six times on a
+    thirty-agent WSL board at 7.4–10.5 s against the flat ten-second deadline it used to
+    be given, and two of the six overran. `locate` cannot tell an overrun from "no such
+    agent" — both are None — so the keystroke said "could not read this agent" and
+    stopped before the editor was reached.
+    """
+
+    def fake_sb(self, body: str) -> Path:
+        """A REAL `sb` where `_inspect` looks for this build's one: `<pkg>/../bin/sb`.
+
+        Patching `board.__file__` rather than `shutil.which`, because the path that
+        production takes is the own-build branch, and a child that actually takes time
+        is the only thing a deadline can be tested against.
+        """
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "bin").mkdir()
+        sb = tmp / "bin" / "sb"
+        sb.write_text("#!/bin/sh\n" + body + "\n")
+        sb.chmod(0o755)
+        self.enterContext(
+            mock.patch.object(board, "__file__", str(tmp / "pkg" / "board.py")))
+        return sb
+
+    def test_inspect_does_not_get_the_flat_fast_call_deadline(self):
+        # The two `herdr` calls in board.py keep `timeouts.subprocess`; this one may not,
+        # and the margin is the point — a deadline cut fine above the worst case seen
+        # (11.3 s) would put the keystroke back to failing whenever the fleet grows.
+        seen = {}
+
+        def spy(argv, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+        with mock.patch.object(board.subprocess, "run", spy):
+            board._inspect("w1")
+        self.assertEqual(seen["timeout"], board._INSPECT_TIMEOUT)
+        self.assertGreater(board._INSPECT_TIMEOUT, 12)
+        self.assertGreater(board._INSPECT_TIMEOUT, board._SUBPROCESS_TIMEOUT)
+
+    def test_a_slow_but_working_inspect_is_read_rather_than_lost(self):
+        # Both halves against one live child: the deadline is the whole of what decides
+        # between an agent the board can open and one it reports it cannot read.
+        self.fake_sb('sleep 0.4\necho \'{"cwd": "/w", "transcript": null}\'')
+        with mock.patch.object(board, "_INSPECT_TIMEOUT", 0.1):
+            self.assertIsNone(board._inspect("w1"))         # the reported failure
+        with mock.patch.object(board, "_INSPECT_TIMEOUT", 30):
+            self.assertEqual(board._inspect("w1"),
+                             {"cwd": "/w", "transcript": None})
+
+
 class OpenTickTest(unittest.TestCase):
     """The open runs off the drawing thread, because a synchronous one could freeze the
     board for the length of eight subprocess timeouts — and in raw mode ctrl-C is a byte
