@@ -3915,6 +3915,39 @@ class PlannerPackageTest(PlansSandbox):
                 "Apart from `strategy` above there is no schema to satisfy"):
             self.assertIn(expected, said)
 
+    def test_the_strategy_schema_verb_prints_the_shipped_contract(self):
+        """The read path the guide's prose now names. What matters is that it prints the
+        FILE the validator loads rather than a copy written out beside it: a second
+        transcription of the schema would be the drift this verb exists to remove."""
+        shipped = json.loads((Path(__file__).resolve().parent.parent / "defaults"
+                              / "plugins" / "plans" / "strategy.schema.json")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.ok("plugin", "plans", "strategy-schema")), shipped)
+        self.assertEqual(self.data("plugin", "plans", "strategy-schema")["strategy_schema"],
+                         shipped)
+
+    def test_the_guide_names_every_strategy_field_the_schema_has(self):
+        """The prose half, pinned to the schema rather than to itself. A plan writer reads
+        the guide and not the JSON, so a field added to `strategy.schema.json` and not to
+        the guide's bullet is a name nobody planning will ever see — and the two types that
+        read like numbers and are not are what cost the p-25 worker a validate round."""
+        said = " ".join(self.ok("plugin", "plans", "guide").split())
+        schema = self.data("plugin", "plans", "strategy-schema")["strategy_schema"]
+        names = list(schema["properties"])
+        for parent in ("resources", "budget"):
+            names += list(schema["properties"][parent]["properties"])
+        for name in names:
+            self.assertIn(f"`{name}`", said, f"the guide never names strategy.{name}")
+        self.assertIn("`budget` holds `context` and `passes`, BOTH STRINGS", said)
+
+    def test_the_planner_instruction_sends_a_plan_writer_at_the_types_first(self):
+        """planner.md's own half: the strategy section points at both readings of the
+        contract BEFORE the first strategy is written, rather than leaving `validate` to
+        report it afterwards."""
+        said = " ".join(self.ok("plugin", "plans", "planner").split())
+        self.assertIn("sb plugin plans strategy-schema", said)
+        self.assertIn("Both are STRINGS", said)
+
     def test_the_guide_carries_the_planner_seed_and_who_runs_the_plan_after(self):
         """The planner lifecycle at the TASK OWNER's altitude — the side read by whoever
         spawns one. Three things the guide has to get right: the capability seed (held

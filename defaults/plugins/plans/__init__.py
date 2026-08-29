@@ -655,6 +655,10 @@ def register(reg):
         help="the vocabulary this repo has right now — roles, model tiers, presets, "
              "enabled plugins, capabilities, the step library and the templates")
     reg.command(
+        "strategy-schema", strategy_schema, audience="both",
+        help="the exact field names and value types a step's `strategy` may carry — the "
+             "contract `validate` checks one against")
+    reg.command(
         "create", create, audience="both",
         help="start a plan on this worktree, empty or with its steps already in it",
         args=[reg.arg("title", repeat=True, help="what this plan is for"),
@@ -1173,15 +1177,22 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
                  is for, and the definitions needing one say so in their own `about`.
                  Multi-line; replaced and never appended when a step is redone.
     strategy     the recommended way to run this step, written by whoever shaped the
-                 plan — a plan writer where there is one. A sparse object: `continuity`,
-                 `orchestration`, `model`, `resources` (`skills`, `presets`, `tools`),
-                 `isolation`, `budget` (`context`, `passes`), `verification`, `replan_if`,
-                 and `brief`, all optional. It is the ONE field here whose names and types
-                 are fixed — `strategy.schema.json` is the contract and `validate` reports
-                 what does not match it — and it is ADVISORY: nothing reads a strategy and
-                 acts on it, and no check here asks whether anybody followed one. Missing
-                 means use your judgement; departing from one you were given needs no
-                 permission, and only a consequential departure is worth a note.
+                 plan — a plan writer where there is one. A sparse object, every field
+                 optional, and these nine names and no others. Seven are plain non-empty
+                 STRINGS: `continuity`, `orchestration`, `model`, `isolation`,
+                 `verification`, `replan_if`, and `brief` — which is a one-line path or
+                 reference to a brief, never the brief itself. The other two are objects.
+                 `resources` holds any of `skills`, `presets` and `tools`, each an ARRAY
+                 OF STRINGS. `budget` holds `context` and `passes`, BOTH STRINGS: a budget
+                 is prose a person reads, so `"one build pass, one review pass"` or `"2"`,
+                 and a bare number is the mistake this list exists to stop. It is the ONE
+                 field here whose names and types are fixed — `strategy.schema.json` is
+                 the contract, `sb plugin plans strategy-schema` prints it, and `validate`
+                 reports what does not match it, a field name it has never heard of
+                 included — and it is ADVISORY: nothing reads a strategy and acts on it,
+                 and no check here asks whether anybody followed one. Missing means use
+                 your judgement; departing from one you were given needs no permission,
+                 and only a consequential departure is worth a note.
     display      required on every step, and `deps` on every step but the first — see
                  above. The minting verbs refuse a step without a board name.
 
@@ -1248,6 +1259,23 @@ def guide(ctx, args) -> Result:
     string so a machine reader gets the instruction rather than a rendering of it.
     """
     return Result(human=GUIDE.rstrip("\n"), data={"guide": GUIDE})
+
+
+def strategy_schema(ctx, args) -> Result:
+    """Print the strategy contract itself. Reads nothing at call time and writes nothing.
+
+    THE GUIDE SAYS THE SAME THING IN PROSE, and that is the read a plan writer is already
+    doing; this verb is the machine-readable half of it, for a caller that wants the field
+    names and types as data rather than as a paragraph. Both come from this one file —
+    `strategy.schema.json` is loaded once at import and is what `validate` checks against —
+    so the guide's prose is the only copy that can drift, and a test pins it to this.
+
+    Printed as the JSON it is rather than as a rendering of it: the whole value of asking
+    for the contract is getting the contract, and a prettified summary would be a second
+    description of the schema sitting next to the guide's.
+    """
+    return Result(human=json.dumps(_STRATEGY_SCHEMA, indent=2, ensure_ascii=False),
+                  data={"strategy_schema": _STRATEGY_SCHEMA})
 
 
 # -- the planner package -------------------------------------------------------

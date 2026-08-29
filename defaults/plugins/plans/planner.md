@@ -157,9 +157,17 @@ WHAT YOU WRITE
   implementation detail, which needs problem knowledge the step's owner will have and you
   do not.
 
+  ITS NAMES AND TYPES ARE THE ONE PART OF A PLAN YOU DO NOT INVENT. Read them BEFORE you
+  write your first strategy, not out of `validate` afterwards: the guide's `strategy`
+  bullet spells out all nine fields and their types in prose, and `sb plugin plans
+  strategy-schema` prints the contract itself. The near-miss they are there to stop is a
+  field that reads like a number and is not.
+
   Budget is measured in agent CONTEXT and PASSES, never in wall-clock minutes. Context is
   how much of an agent context the work deserves; passes is how many independent work or
   review attempts are justified. Exceeding either is a signal to reconsider, not a stop.
+  Both are STRINGS — `"2"` or, better, the sentence that says what the two passes are for;
+  a bare `2` is the schema defect a planner writes first and reads about second.
 
   A DETAILED BRIEF stays a separate file that the step points at — `strategy.brief`, or a
   checkpoint. A plan holding a copy of a brief is a second copy that goes stale.
