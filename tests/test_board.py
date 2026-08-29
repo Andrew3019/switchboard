@@ -43,7 +43,7 @@ HAVE_RICH = richboard.available()
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
           summary=None, parent=None, archived=False, undelivered=0, undelivered_age=0,
-          idle_excuse=None, pane_id=None, workspace="api"):
+          idle_excuse=None, wait_excuse=None, pane_id=None, workspace="api"):
     """One agent. `archived=True` sets what being absent from herdr past the spawn
     grace actually looks like, so the real `AgentStatus.archived` decides — nothing
     here mocks the predicate."""
@@ -56,7 +56,7 @@ def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
         idle=5, last_activity=0, workspace=workspace, task=task,
         blocked_why=blocked_why, summary=summary,
         undelivered=undelivered, undelivered_age=undelivered_age,
-        idle_excuse=idle_excuse, pane_id=pane_id,
+        idle_excuse=idle_excuse, wait_excuse=wait_excuse, pane_id=pane_id,
     )
 
 
@@ -167,6 +167,28 @@ class RowSaysOneThingTest(unittest.TestCase):
         line = self.line(agent("w", state="working", herdr_state="idle", stalled=True))
         self.assertIn("idle", line)
         self.assertNotIn("working", line)
+        self.assertIn("STALLED", line)
+
+    def test_each_fresh_broker_wait_has_a_distinct_headline(self):
+        labels = {
+            "WAITING·ALL — waiting on all children",
+            "WAITING·ANY — waiting on a child",
+            "WAITING — background work",
+        }
+        for label in labels:
+            with self.subTest(label=label):
+                a = agent("w", state="working", herdr_state="idle",
+                          idle_excuse=label, wait_excuse=label)
+                line = self.line(a)
+                self.assertIn("idle", line)
+                self.assertIn(label, line)
+                self.assertEqual(line.count(label), 1)
+                self.assertEqual(board.marker(a), label)
+
+    def test_an_expired_broker_wait_has_no_waiting_headline(self):
+        a = agent("w", state="working", herdr_state="idle", stalled=True)
+        line = self.line(a)
+        self.assertNotIn("WAITING", line)
         self.assertIn("STALLED", line)
 
     def test_the_word_is_whatever_the_pane_was_observed_to_be_doing(self):

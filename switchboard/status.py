@@ -492,6 +492,11 @@ class AgentStatus:
     # a wait and its configured quiet window elapsed. Ordinary stalls remain passive and
     # visible to a person, as before.
     wait_expired: bool = False
+    # A fresh broker wait, already interpreted into the wording the board draws. Separate
+    # from `idle_excuse`: this is a first-class declaration worth a headline, not merely
+    # one of several reasons an idle row is not stalled. None means no live wait, including
+    # one past WAIT_EXCUSE_GRACE.
+    wait_excuse: Optional[str] = None
     # How long this row's INFERRED summons has held, in seconds, or None if nobody was
     # watching continuously enough to say. See `settled`, which is the only reader, and
     # `stamp_needs_for`, which is the only writer.
@@ -1024,7 +1029,7 @@ class AgentStatus:
             "stalled", "gone", "unread", "age", "idle", "last_activity",
             "workspace", "task", "blocked_why", "summary",
             "undelivered", "undelivered_age", "undelivered_answer", "idle_excuse",
-            "wait_expired",
+            "wait_expired", "wait_excuse",
             "needs_for", "awaiting_keypress", "pane_id",
             "caps_held", "caps_delegable", "caps_template", "diverged_below",
             "worktrees", "worktrees_below",
@@ -1435,9 +1440,9 @@ def collect(
         wait_expired = bool(wait_mode and wait_started is not None
                             and now - wait_started > WAIT_EXCUSE_GRACE)
         wait_is_fresh = bool(wait_mode and wait_started is not None and not wait_expired)
-        wait_excuse = ({"background": "waiting for background work",
-                        "any": "waiting for any child",
-                        "all": "waiting for child cohort"}.get(wait_mode)
+        wait_excuse = ({"background": "WAITING — background work",
+                        "any": "WAITING·ANY — waiting on a child",
+                        "all": "WAITING·ALL — waiting on all children"}.get(wait_mode)
                        if wait_is_fresh else None)
         # Read defensively for the same reason, and remembered per row rather than
         # re-queried: the write that uses it is in the reap path (`_record_gone`), which is
@@ -1527,6 +1532,7 @@ def collect(
             # have children is working, not waiting on them.
             idle_excuse=excuse if idle else None,
             wait_expired=wait_expired and idle and excuse is None,
+            wait_excuse=wait_excuse,
             # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
             # like any other. Nothing else about a blocked agent changes: it is still not
             # `stalled` (that reads `running`), still not pinged, still waiting on its human
