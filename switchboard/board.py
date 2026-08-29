@@ -7,8 +7,11 @@ it starts, `sb board` opens one here, and
 This is a HUMAN-ONLY surface and must stay one. `sb board` is hidden from
 `--help` and refuses any caller that `whoami()` resolves to an agent, and the
 board appears nowhere in defaults/protocol.md, which is where an agent actually
-learns what `sb` can do. Its only side effect is `herdr agent focus`, a human
-jumping to a pane.
+learns what `sb` can do. Its side effects are two, and both are a human's own
+hand: `herdr agent focus`, jumping to a pane, and four presses of `c`, which
+runs `sb cleanup` on the highlighted agent (`cleanup_agent`). The second one
+destroys things, and it reaches them exactly as the first does — a separate
+process, off the drawing thread, never the store.
 
 **This file does not import `store`, and must not start.** It once did, inside
 `snapshot()`, and the claim that a two-second tick there was read-only was false
@@ -1933,7 +1936,11 @@ def refresh(sup: panel.Supervisor):
 
 
 def focus(name: str) -> str:
-    """The board's only side effect. Returns a line for the status bar."""
+    """A human jumping to a pane. Returns a line for the status bar.
+
+    Also what `cccc` does before it cleans anything up — see `cleanup_agent`, which is
+    where the ordering is argued.
+    """
     try:
         p = subprocess.run(["herdr", "agent", "focus", name],
                            capture_output=True, text=True,
@@ -2070,6 +2077,83 @@ def double_press_run(last: float, presses: int, now: float,
         fire, last = double_press(last, now, window)
         fired = fired or fire
     return fired, last
+
+
+# How many presses of `c` clean up the highlighted agent. FOUR and not two, because it
+# is the only key on this board that destroys anything — it closes two panes and can
+# delete a worktree — and two is a number a hand resting on a keyboard reaches by
+# accident. Four is the whole guard: there is no confirmation prompt behind it.
+CLEANUP_PRESSES = 4
+
+
+def multi_press(last: float, count: int, now: float, needed: int,
+                window: float = DOUBLE_PRESS):
+    """`double_press` for a run of `needed` of them. -> (fire?, `last`, `count`).
+
+    A COUNTER, where the double press needs only a float: two presses can be told from
+    one by "is there an unspent press inside the window", which is exactly what a
+    non-zero `last` says, and three cannot. So `double_press` is left as it is — a count
+    that is only ever 0 or 1 improves nothing there — and this is the shape the four-press
+    key needs.
+
+    The window is BETWEEN CONSECUTIVE PRESSES rather than around the run as a whole, and
+    that is what makes this four presses rather than two doubles: `cc` … pause … `cc`
+    fires under a chained-doubles reading and does nothing at all under this one. A pause
+    is a hand that stopped, and what the guard has to establish is that it did not.
+
+    Reset-after-fire, exactly as `double_press`: a fifth press starts a new count rather
+    than firing again off the fourth.
+    """
+    count = count + 1 if now - last < window else 1
+    if count >= needed:
+        return True, 0.0, 0
+    return False, now, count
+
+
+def multi_press_run(last: float, count: int, presses: int, now: float, needed: int,
+                    window: float = DOUBLE_PRESS):
+    """The same, for a RUN that arrived together. -> (fire?, new `last`, new `count`).
+
+    `double_press_run`'s reason, and more of it: one terminal read carries whatever was
+    waiting, so four quick presses of one key reach the loop as a single event with
+    `raw="cccc"` whenever the loop was busy for a few tens of milliseconds, and key
+    auto-repeat is that always. Four presses in a row is the shape MOST likely to arrive
+    coalesced, which makes `raw="cccc"` the ordinary spelling of this keystroke rather
+    than an exotic one — counting per character, not membership, is what makes it fire.
+
+    Fires at most once per run: somebody leaning on `c` is one request to clean an agent
+    up, and a second firing would land on whatever the board highlights next.
+    """
+    fired = False
+    for _ in range(max(presses, 0)):
+        fire, last, count = multi_press(last, count, now, needed, window)
+        fired = fired or fire
+    return fired, last, count
+
+
+def next_focus(rows, name: str) -> Optional[str]:
+    """Which agent to focus once `name` is cleaned up, in board order. Pure.
+
+    THE POINT IS THAT A BOARD IS STILL ON SCREEN, not which board: cleanup closes the
+    pane pair the human is sitting in, and any other live agent comes back up in its own
+    two-pane layout. So this takes the reading that needs no explaining — the row below,
+    or the row above when the one going away was the last.
+
+    ARCHIVED ROWS ARE NOT CANDIDATES. Archived is exactly "herdr has no pane for it"
+    (`AgentStatus.archived`), and focusing a pane that does not exist gets a refusal
+    instead of a board. `a` draws those rows, so they are in what this is given and have
+    to be dropped here.
+
+    None when nothing else is left to look at, which the caller reports rather than
+    turning into a focus of nobody.
+    """
+    order = [a.name for a in rows]
+    i = order.index(name) if name in order else -1
+    below = [a.name for a in rows[i + 1:] if not a.archived and a.name != name]
+    if below:
+        return below[0]
+    above = [a.name for a in rows[:max(i, 0)] if not a.archived and a.name != name]
+    return above[-1] if above else None
 
 
 def open_report_files(name: Optional[str]) -> str:
@@ -2366,26 +2450,148 @@ def files_for(cwd: Optional[str], transcript: Optional[str]) -> list[str]:
                         cwd)
 
 
-# The two editor actions, by the key pair that fires them: what runs, and what it
-# opens — the noun a refusal needs to tell one from the other.
-_ACTIONS = {"oo": ("files", lambda name: open_report_files(name)),
-            "ww": ("worktree", lambda name: open_worktree(name))}
+# How long `sb cleanup` gets. Its own herdr calls are each bounded by
+# `timeouts.subprocess`, and it makes several of them and then deletes a worktree, so the
+# flat one-call ceiling would fire on a perfectly healthy teardown. Something has to
+# bound it — the slot it holds is the one `oo` and `ww` share, and a wedged `sb` would
+# hold that for the life of the board — so it gets a multiple of the same knob rather
+# than a number of its own.
+_CLEANUP_TIMEOUT = _SUBPROCESS_TIMEOUT * 6
 
 
-def open_tick(name: Optional[str], note: list, running, action: str = "oo"):
-    """Start an open off the drawing thread. -> (what is running now, a line to show).
+def cleanup_agent(name: Optional[str], follow: Optional[str] = None) -> str:
+    """Four `c`s: `sb cleanup <name>`, with a board still on screen afterwards.
+
+    Plain `sb cleanup <name>`, exactly what a human types: no `--force` ever from the
+    board, no scoping flags, no separate "is it finished?" question first. Cleanup's own
+    gates decide, and a refusal is reported in cleanup's own words.
+
+    THE FOCUS GOES FIRST, which is the opposite of how this reads and the whole substance
+    of it. Cleanup closes the agent's pane AND the board pane beside it — this pane, the
+    one this code is running in. Closing it hangs up our terminal, so a focus sequenced
+    after the cleanup is a focus by a process that is being killed while it waits, and
+    the human is left on whatever pane herdr happens to raise, with no board anywhere:
+    exactly the outcome the focus exists to prevent. Focused first, the human is already
+    looking at another agent's board before anything can be closed, and the end state on
+    success is identical.
+
+    ON A REFUSAL THAT LEAVES THEM WHERE THEY WERE: nothing was closed, so this pane is
+    still alive, and the focus is taken back before the reason goes to the status bar. A
+    refusal changes nothing, and the pane the human is looking at is part of nothing.
+    The visible cost of the ordering is that one flick away and back.
+
+    `start_new_session` for the same reason the order is what it is: the pane's death
+    sends SIGHUP to its foreground process group, and a cleanup killed halfway through
+    has closed panes and left the worktree behind. Out of that group it runs to the end
+    whatever becomes of this board.
+
+    Returns a line for the status bar and never raises — a keypress may not take the
+    board down.
+    """
+    if not name:
+        return "press c on a highlighted agent"
+    sb = _sb()
+    if not sb:
+        return "sb not on PATH"
+    # `focus` answers in a LINE and not a flag, and the arrow is the shape of one that
+    # happened. A focus that did not happen — herdr missing, the pane gone — does not
+    # stop the cleanup, which is what the human asked for; it only means there is no
+    # board to claim they are now looking at, and nothing to put back afterwards.
+    moved = focus(follow).startswith("→") if follow else False
+    try:
+        p = subprocess.run([sb, "cleanup", name, "--json"], capture_output=True,
+                           text=True, timeout=_CLEANUP_TIMEOUT, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        return _cleanup_kept(name, moved, f"{name}: cleanup timed out")
+    except (OSError, subprocess.SubprocessError) as e:
+        return _cleanup_kept(name, moved,
+                             f"{name}: cleanup failed: {status_mod.clip(str(e), 40)}")
+    closed, why = _cleanup_said(p, name)
+    if not closed:
+        return _cleanup_kept(name, moved, f"{name}: {why}")
+    if moved:
+        return f"→ cleaned up {name} · now on {follow}"
+    return (f"→ cleaned up {name} — could not focus {follow}" if follow
+            else f"→ cleaned up {name} — no other agent to focus")
+
+
+def _cleanup_kept(name: str, moved: bool, msg: str) -> str:
+    """A cleanup that did not happen: put the human back, and say why. -> the line."""
+    if moved:
+        focus(name)
+    return msg
+
+
+def _cleanup_said(p, name: str):
+    """-> (was `name` closed?, cleanup's own reason it was not).
+
+    `--json` and not the human text, for one reason: A REFUSAL EXITS 0. "closed:
+    (nothing)" with "refused w1: still working" under it is a successful run of the
+    command and a no to the question, and telling those two apart off the text means
+    matching a sentence this module does not own. The JSON says both outright — `closed`
+    is a list of names, `refused` a list of `{name, reason}`. Nothing else about the call
+    changes: same command, same gates, same worktree deletion.
+
+    A non-zero exit is `sb` itself failing rather than cleanup declining, and it comes
+    with no JSON at all — an agent the store has never heard of exits 1 saying "sb: not
+    yours to clean up, or no such agent: ghost", which is a board row that has gone stale
+    under the human. Its own first line is the only part worth the width
+    (`_editor_said`'s reasoning), minus the `sb: ` it opens with: the status bar has
+    already put the agent's name in front of it, and "w1: sb: no such agent" is one
+    colon too many.
+    """
+    if p.returncode != 0:
+        said = [ln.strip() for ln in ((p.stderr or "") + "\n" + (p.stdout or "")
+                                      ).splitlines() if ln.strip()]
+        first = said[0] if said else "cleanup failed"
+        return False, status_mod.clip(first[4:] if first.startswith("sb: ") else first, 50)
+    try:
+        d = json.loads(p.stdout)
+    except (json.JSONDecodeError, TypeError):
+        d = None
+    if not isinstance(d, dict):
+        return False, "cleanup said nothing that could be read"
+    if name in (d.get("closed") or []):
+        return True, ""
+    for r in (d.get("refused") or []):
+        if isinstance(r, dict) and r.get("name") == name and r.get("reason"):
+            return False, status_mod.clip(str(r["reason"]), 50)
+    return False, "cleanup closed nothing and said no reason"
+
+
+# The three actions, by the key run that fires them: the noun a refusal needs to tell one
+# from the other, the verb it is doing, and what runs. `cccc`'s noun is EMPTY because what
+# it acts on is the agent itself and not something of the agent's — "still cleaning up A's
+# cleanup" is a sentence about nothing where "still cleaning up A" is the fact.
+_ACTIONS = {"oo": ("files", "opening", lambda name, follow: open_report_files(name)),
+            "ww": ("worktree", "opening", lambda name, follow: open_worktree(name)),
+            "cccc": ("", "cleaning up", lambda name, follow: cleanup_agent(name, follow))}
+
+
+def _of(who: str, noun: str) -> str:
+    """"A's files", or just "A" for an action whose object is the agent. See `_ACTIONS`."""
+    return f"{who}'s {noun}" if noun else who
+
+
+def open_tick(name: Optional[str], note: list, running, action: str = "oo",
+              follow: Optional[str] = None):
+    """Start a keypress action off the drawing thread. -> (what is running, a line).
 
     `running` is the `(thread, agent name, action)` this returned last, or None.
+    `follow` is what `cccc` focuses afterwards, worked out by the caller from the rows
+    it is drawing (`next_focus`); the editor actions have no use for it.
 
-    ONE EDITOR ACTION AT A TIME, and `oo` and `ww` share the slot rather than having
-    one each. Leaning on `o` re-fires once per read; without this the bursts would pile
-    up behind each other and every one of them would open the same tabs again. Sharing
-    it with `ww` is what two independent mailboxes would have cost: `drain` pops EVERY
-    non-empty box and keeps the last line, which is sound only while exactly one
-    keypress answer can be waiting, and two boxes would silently destroy one of two
-    answers that landed in the same pass. Sharing also puts `oo` behind `ww` when both
-    are asked for at once — the ordering the files want, since a worktree window that
-    exists is the one containment sends them to.
+    ONE ACTION AT A TIME, and `oo`, `ww` and `cccc` share the slot rather than having one
+    each. Leaning on `o` re-fires once per read; without this the bursts would pile up
+    behind each other and every one of them would open the same tabs again. Sharing is
+    also what two independent mailboxes would have cost: `drain` pops EVERY non-empty box
+    and keeps the last line, which is sound only while exactly one keypress answer can be
+    waiting, and two boxes would silently destroy one of two answers that landed in the
+    same pass. Sharing also puts `oo` behind `ww` when both are asked for at once — the
+    ordering the files want, since a worktree window that exists is the one containment
+    sends them to. A cleanup asked for while an open is running is DROPPED like any other
+    second action, which is the right answer for it too: four presses that arrive during
+    an `oo` are four presses the human can spend again.
 
     What it does NOT fix: `cursor <cwd>` returns when the CLI hands off, not when the
     window is up, so a cold-start `ww` followed straight away by `oo` can still have
@@ -2399,24 +2605,26 @@ def open_tick(name: Optional[str], note: list, running, action: str = "oo"):
     actions it names what each one is opening as well, since "still opening A — A not
     started" is otherwise a sentence about nothing.
     """
-    noun, _ = _ACTIONS[action]
+    noun, verb, _ = _ACTIONS[action]
     if not name:
         return running, f"press {action[0]} on a highlighted agent"
     if running is not None and running[0].is_alive():
+        busy_noun, busy_verb, _ = _ACTIONS[running[2]]
         if running[2] == action:
             busy, asked = running[1], name
         else:
-            busy = f"{running[1]}'s {_ACTIONS[running[2]][0]}"
-            asked = f"{name}'s {noun}"
-        return running, f"still opening {busy} — {asked} not started, press {action} again"
-    t = threading.Thread(target=_open, args=(name, note, action), daemon=True)
+            busy = _of(running[1], busy_noun)
+            asked = _of(name, noun)
+        return running, (f"still {busy_verb} {busy} — {asked} not started, "
+                         f"press {action} again")
+    t = threading.Thread(target=_open, args=(name, note, action, follow), daemon=True)
     try:
         t.start()
     except RuntimeError as e:
         # Thread exhaustion. Vanishingly rare and `sweep_tick` has the same exposure,
         # but this one is on a keypress, and a keypress may not end the board.
         return running, f"{name}: could not start: {status_mod.clip(str(e), 40)}"
-    return (t, name, action), f"opening {name}…"
+    return (t, name, action), f"{verb} {name}…"
 
 
 def drain(msg: str, *boxes: list):
@@ -2435,13 +2643,16 @@ def drain(msg: str, *boxes: list):
     return msg, drained
 
 
-def _open(name: Optional[str], note: list, action: str = "oo") -> None:
-    """The open itself, off the drawing thread. Never raises into it."""
+def _open(name: Optional[str], note: list, action: str = "oo",
+          follow: Optional[str] = None) -> None:
+    """The action itself, off the drawing thread. Never raises into it."""
     try:
-        note.append(_ACTIONS[action][1](name))
+        note.append(_ACTIONS[action][2](name, follow))
     except BaseException as e:                  # noqa: BLE001 — a dead thread that says
-        note.append(f"{name}: open failed: {e}")        # nothing is the one outcome worth ruling
-                                                # out; both actions catch their own
+        note.append(f"{name}: {action} failed: {e}")    # nothing is the one outcome worth
+                                                # ruling out; every action catches its own.
+                                                # THE KEY RUN names it, not a verb: "open
+                                                # failed" is a lie over a cleanup thread
 
 
 # How far back a transcript is read. One JSONL record is one content block, not one
@@ -2535,16 +2746,21 @@ def _codex_assistant_texts(rec: dict) -> list[str]:
             and isinstance(p.get("text"), str) and p["text"].strip()]
 
 
-def _inspect(name: str) -> Optional[dict]:
-    """One agent's row, as JSON, from a separate process. None if anything went wrong.
+def _sb() -> Optional[str]:
+    """THIS build's `sb`, or whatever is on PATH, or None if there is neither.
 
-    THIS build's `sb` and not whatever is on PATH, for `collector.doorbell_sb`'s reason
-    — that symlink points at the main checkout, so a board running a branch would ask a
-    different build. Its three lines are copied rather than imported: `collector` reaches
-    the store, and a renderer may not name a module that does.
+    For `collector.doorbell_sb`'s reason — the `sb` symlink points at the main checkout,
+    so a board running a branch would otherwise ask a different build. Its lines are
+    copied from there rather than imported: `collector` reaches the store, and a renderer
+    may not name a module that does.
     """
     own = Path(__file__).resolve().parent.parent / "bin" / "sb"
-    sb = str(own) if os.access(own, os.X_OK) else shutil.which("sb")
+    return str(own) if os.access(own, os.X_OK) else shutil.which("sb")
+
+
+def _inspect(name: str) -> Optional[dict]:
+    """One agent's row, as JSON, from a separate process. None if anything went wrong."""
+    sb = _sb()
     if not sb:
         return None
     try:
@@ -2873,6 +3089,11 @@ def main() -> int:
     # anything but the frame loop. ONE mailbox and one `opening` slot for both keys —
     # see `open_tick` for why two would break `drain`.
     last_o, last_w, open_note, opening = 0.0, 0.0, [], None
+    # `c` is the four-press one, so it carries a COUNT beside its float — see
+    # `multi_press`, which is where the difference is. Its own pair of variables and
+    # nobody else's, for the reason `o` and `w` have one each: counting is per character,
+    # so no key can fire off another's presses.
+    last_c, presses_c = 0.0, 0
     show_archived = status_mod.SHOW_ARCHIVED
     # Which agent shares this pane's tab — the row this board highlights. Built here and
     # not at import, so the environment it reads is this process's own, and asked again per
@@ -2993,6 +3214,29 @@ def main() -> int:
                             if fire:
                                 opening, msg = open_tick(
                                     where.name(snap.agents), open_note, opening, "oo")
+                                dirty[0] = True
+                        # LAST of the three, so that when one read carries `c`s beside
+                        # anything else the cleanup owns the status line: it is the only
+                        # one of them whose answer is about something that was destroyed.
+                        if "c" in ev["raw"]:
+                            fire, last_c, presses_c = multi_press_run(
+                                last_c, presses_c, ev["raw"].count("c"),
+                                time.monotonic(), CLEANUP_PRESSES)
+                            if fire:
+                                # THE HIGHLIGHTED agent, exactly as `oo` and `ww` take it
+                                # — the one sharing this pane's tab, not the arrow-key
+                                # cursor. And who to focus afterwards is decided HERE,
+                                # off the rows this board is drawing: the worker thread
+                                # has no snapshot, and by the time it needs the answer
+                                # the agent it is about is gone.
+                                who = where.name(snap.agents)
+                                opening, msg = open_tick(
+                                    who, open_note, opening, "cccc",
+                                    follow=next_focus(
+                                        status_mod.board_rows(
+                                            snap.agents,
+                                            show_archived=show_archived), who)
+                                    if who else None)
                                 dirty[0] = True
                         continue
                     step = wheel(ev)
