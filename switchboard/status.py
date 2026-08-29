@@ -1300,8 +1300,10 @@ def collect(
     to pay the whole-fleet collect to get it — the three `done`/`blocked`/activity scans
     are `GROUP BY` over every event and message in the store and measured 7–11 s on a busy
     WSL fleet, all to read one cwd. With `only` set, the six per-fleet SQL aggregates are
-    scoped to that agent (each uses an index instead of scanning the tree), so the row the
-    caller asked for is built with its OWN counts, activity, block reason and summary intact
+    scoped to that agent — the event scans, which dominated the profile, hit
+    `idx_events_agent` instead of grouping the whole table (the smaller `messages` scans on
+    `from_agent` have no index and still walk that table) — so the row the caller asked for
+    is built with its OWN counts, activity, block reason and summary intact
     — every other row is still built, but from empty aggregates, because nothing reads them.
     That partial data is exactly why `only` also forces `reap` off: `gone`/`stalled`/
     `turn_doubted` for the OTHER rows are now wrong (their idle clock reads from creation),
@@ -1590,7 +1592,11 @@ def collect(
     # On the single-agent fast path only the asked-for row has a trustworthy idle clock, so
     # only it may be a keypress candidate — every other row's empty activity would read as
     # stalled and fan `explain_agent` out across the fleet, which is the cost `only` exists
-    # to avoid.
+    # to avoid. NOTE: `_mark_awaiting_keypress` prunes the module-global `_KEYPRESS_SEEN` to
+    # the names it is handed, so this hands it only the target. That is safe ONLY because
+    # `only` has a single caller — the one-shot `sb inspect` CLI process, whose cache is
+    # empty and dies at exit. A long-running caller passing `only` would evict every other
+    # agent from that cache each call; give this its own path before adding one.
     keypress_rows = [a for a in agents if a.name == only] if only is not None else agents
     _mark_awaiting_keypress(h if consulted else None, keypress_rows, now)
 
@@ -2127,10 +2133,12 @@ def _last_activity(db: sqlite3.Connection, only: Optional[str] = None) -> dict[s
     seen: dict[str, int] = {}
     kinds = ",".join("?" * len(DONE_TO_THE_AGENT))
     # `only` scopes each of the three signals to one agent so a single-agent reader
-    # (`inspect`) filters on `idx_events_agent`/`idx_msgs_inbox` rather than grouping the
-    # whole fleet's events and mail. The column differs per query — the agent that ACTED is
-    # the event's `agent`, the sender's `from_agent`, then the reader's `to_agent`. See
-    # `collect`'s note.
+    # (`inspect`) reads one agent's rows instead of grouping the whole fleet's events and
+    # mail. The column differs per query — the agent that ACTED is the event's `agent`, the
+    # sender's `from_agent`, then the reader's `to_agent`. The events scan and the read scan
+    # hit an index (`idx_events_agent`, `idx_msgs_inbox`); the sender scan has no
+    # `from_agent` index, so it still walks `messages`, but that table is far smaller than
+    # the events table this exists to stop grouping. See `collect`'s note.
     ev_scope = " AND agent = ?" if only is not None else ""
     sent_scope = " WHERE from_agent = ?" if only is not None else ""
     read_scope = " AND to_agent = ?" if only is not None else ""
@@ -2252,9 +2260,10 @@ def _last_summaries(db: sqlite3.Connection, only: Optional[str] = None) -> dict[
     That record is the point — this is where a root agent's summary reaches you, on its
     row here and in full in `sb inspect`.
     """
-    # `only` scopes both sources to one agent so a single-agent reader (`inspect`) filters
-    # on `idx_events_agent` and the mail index rather than grouping every `done` in the
-    # fleet. See `collect`'s note.
+    # `only` scopes both sources to one agent so a single-agent reader (`inspect`) reads one
+    # agent's `done` rows rather than grouping every `done` in the fleet. The events scan
+    # hits `idx_events_agent`; the message scan has no `from_agent` index and still walks
+    # `messages`, which is far smaller than the events table. See `collect`'s note.
     ev_scope = " AND agent = ?" if only is not None else ""
     msg_scope = " AND from_agent = ?" if only is not None else ""
     params = (only,) if only is not None else ()
