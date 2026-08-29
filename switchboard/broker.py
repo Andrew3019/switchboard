@@ -4771,7 +4771,7 @@ class Broker:
     # "relevant guidance and lifecycle state"), and a prompt inventory that lists only the
     # text an agent is handed at second zero describes about half of what reaches it.
 
-    def _preview_capabilities(self, role: str, *, parent: str, name: str) -> dict:
+    def _preview_capabilities(self, role: str, *, parent: str, name: Optional[str]) -> dict:
         """What the previewed spawn would be able to do, and where each half comes from.
 
         Read through `seed_for`, so this is THE SEED THE SPAWN WOULD ACTUALLY WRITE rather
@@ -4821,8 +4821,10 @@ class Broker:
             "live": False,
         }
         # An existing row overrides the whole derivation: what an agent under this name may
-        # do NOW is a fact, and a preview standing beside a fact should report the fact.
-        held = self.held_for(name)
+        # do NOW is a fact, and a preview standing beside a fact should report the fact. Only
+        # an explicitly named agent is looked up — the nameless preview (`name is None`) never
+        # reads live rows, so it cannot inherit some unrelated agent's capabilities by accident.
+        held = self.held_for(name) if name is not None else None
         if held is not None:
             passable_now = self.passable_for(name) or set()
             out["live"] = True
@@ -5020,7 +5022,7 @@ class Broker:
         return out
 
     def effective_instructions(
-        self, *, role: str = DEFAULT_ROLE, name: str = "preview", parent: str = HUMAN,
+        self, *, role: str = DEFAULT_ROLE, name: Optional[str] = None, parent: str = HUMAN,
         model: Optional[str] = None, as_prompt: Optional[str] = None,
         with_: Sequence[str] = (), workspace: Optional[str] = None,
         path: Optional[Path] = None, task: Optional[str] = None,
@@ -5045,6 +5047,11 @@ class Broker:
         and why.
         """
         requested_role = role
+        # `name is None` is the ordinary nameless preview: show a placeholder identity but do
+        # NOT read a live agent's rows for it. Only an explicitly given name previews a real
+        # agent's held capabilities — otherwise a bare `sb instructions --role X` would leak
+        # the caps of whatever agent happened to be named after the old default placeholder.
+        display_name = name if name is not None else "preview"
         resolved_role = roles_mod.get(self.roles, role, self.repo)
         role = resolved_role.name
         spec = resolved_role.spec(model)
@@ -5067,7 +5074,7 @@ class Broker:
             {"kind": "identity", "source": identity_source,
              "condition": "always", "ownership": identity_owner,
              "included": True,
-             "text": self._say("spawn.identity", name=name, role=role, parent=parent)},
+             "text": self._say("spawn.identity", name=display_name, role=role, parent=parent)},
             {"kind": "role-vocabulary", "source": roles_source,
              "condition": "always", "ownership": roles_owner,
              "included": True,

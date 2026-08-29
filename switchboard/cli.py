@@ -419,7 +419,9 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--as", dest="as_prompt", help="explicit ad-hoc role prompt")
     ins.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET")
     ins.add_argument("--workspace", metavar="NAME")
-    ins.add_argument("--name", default="preview", help="identity name shown in the preview")
+    ins.add_argument("--name", default=None,
+                     help="identity name shown in the preview; give a live agent's name to "
+                          "preview its actual held capabilities and grants")
     ins.add_argument("--parent", default=HUMAN, help="parent shown in the preview")
     ins.add_argument("--task", help="separate initial task to show beside the standing prompt")
     cmd("init", help="pin this repo for switchboard (writes no CLAUDE.md)")
@@ -605,7 +607,8 @@ def _validate(args) -> None:
 
     elif cmd == "instructions":
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
-        args.name = validate.agent_name(args.name, "--name")
+        if args.name is not None:
+            args.name = validate.agent_name(args.name, "--name")
         args.parent = validate.line(args.parent, "--parent", max_len=validate.MAX_TOKEN)
         if args.model is not None:
             args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
