@@ -2517,7 +2517,7 @@ class OpenTickTest(unittest.TestCase):
                                mock.Mock(side_effect=RuntimeError("boom"))):
             run, _ = board.open_tick("w1", note, None)
             run[0].join(5)
-        self.assertEqual(note, ["w1: open failed: boom"])
+        self.assertEqual(note, ["w1: oo failed: boom"])
 
     def test_no_highlighted_agent_starts_no_thread(self):
         note = []
@@ -2953,6 +2953,105 @@ class CoalescedPressTest(unittest.TestCase):
     def test_a_longer_burst_fires_once_not_once_per_pair(self):
         # Somebody leaning on the key wants the files open, not opened twice.
         self.assertEqual(board.double_press_run(0.0, 5, 1000.0), (True, 1000.0))
+
+
+class QuadPressTest(unittest.TestCase):
+    """`cccc`: four presses in quick succession, and nothing less than that.
+
+    The four-press key is the one most likely to arrive as a single read, so the burst
+    case is the ordinary spelling of it rather than the exotic one.
+    """
+
+    def test_three_presses_are_not_a_cleanup(self):
+        fire, _, count = board.multi_press_run(0.0, 0, 3, 1000.0,
+                                               board.CLEANUP_PRESSES)
+        self.assertFalse(fire)
+        self.assertEqual(count, 3)        # and the fourth is still to come
+
+    def test_one_read_carrying_the_whole_burst_fires_once(self):
+        events, rest = board.parse_sgr("cccc")
+        self.assertEqual((rest, [e["raw"] for e in events]), ("", ["cccc"]))
+        fire, last, count = board.multi_press_run(
+            0.0, 0, events[0]["raw"].count("c"), 1000.0, board.CLEANUP_PRESSES)
+        self.assertTrue(fire)
+        self.assertEqual((last, count), (0.0, 0))     # reset after fire
+
+    def test_a_pause_in_the_middle_starts_the_count_again(self):
+        """Four presses, not two doubles: `cc` … pause … `cc` is a hand that stopped."""
+        _, last, count = board.multi_press_run(0.0, 0, 2, 1000.0,
+                                               board.CLEANUP_PRESSES)
+        stalled, _, count_after = board.multi_press_run(last, count, 2, 1002.0,
+                                                        board.CLEANUP_PRESSES)
+        self.assertFalse(stalled)
+        self.assertEqual(count_after, 2)
+        # Two reads INSIDE the window are the same four presses and do fire.
+        self.assertTrue(board.multi_press_run(last, count, 2, 1000.3,
+                                              board.CLEANUP_PRESSES)[0])
+
+
+class NextFocusTest(unittest.TestCase):
+    """Which board is on screen after `cccc` closes the one you were looking at."""
+
+    def test_the_row_below_or_the_row_above_when_it_was_last(self):
+        rows = [agent("a"), agent("b"), agent("c")]
+        self.assertEqual(board.next_focus(rows, "a"), "b")
+        self.assertEqual(board.next_focus(rows, "c"), "b")
+
+    def test_archived_rows_are_not_candidates_and_nor_is_an_empty_board(self):
+        """Archived is `herdr has no pane for it`, and a pane that is not there cannot
+        be focused — `a` draws those rows, so they arrive here and are dropped."""
+        self.assertEqual(
+            board.next_focus([agent("a"), agent("b", archived=True), agent("c")], "a"),
+            "c")
+        self.assertIsNone(board.next_focus([agent("a")], "a"))
+        self.assertIsNone(
+            board.next_focus([agent("a"), agent("b", archived=True)], "a"))
+
+
+class CleanupAgentTest(unittest.TestCase):
+    """`cccc`: what it runs, and the focus that has to happen BEFORE it.
+
+    Cleanup closes the board pane this code is running in, so a focus sequenced after it
+    is a focus by a process being killed while it waits. Ordering is the substance of
+    this action, which is why it is what is pinned here.
+
+    NOT PROVEN HERE, and not provable without a live fleet: that the pane really does
+    die mid-cleanup, and that `start_new_session` is what carries the teardown to the end.
+    """
+
+    def setUp(self):
+        self.calls = []
+
+    def go(self, payload, *, code=0, follow="w2"):
+        def fake_run(argv, **kw):
+            self.calls.append(("run", list(argv), kw.get("start_new_session")))
+            return subprocess.CompletedProcess(argv, code, json.dumps(payload), "")
+
+        def fake_focus(name):
+            self.calls.append(("focus", name))
+            return f"→ {name}"
+
+        with mock.patch.object(board, "_sb", lambda: "/x/sb"), \
+             mock.patch.object(board, "focus", fake_focus), \
+             mock.patch.object(board.subprocess, "run", fake_run):
+            return board.cleanup_agent("w1", follow)
+
+    def test_it_focuses_first_then_runs_plain_sb_cleanup(self):
+        msg = self.go({"closed": ["w1"], "refused": []})
+        self.assertEqual(self.calls, [
+            ("focus", "w2"),
+            ("run", ["/x/sb", "cleanup", "w1", "--json"], True),   # never --force
+        ])
+        self.assertEqual(msg, "→ cleaned up w1 · now on w2")
+
+    def test_a_refusal_exits_zero_and_puts_the_human_back(self):
+        """`sb cleanup` REFUSING is a successful run of the command, which is why the
+        answer is read out of `--json` and not off the exit code."""
+        msg = self.go({"closed": [],
+                       "refused": [{"name": "w1", "reason": "still working"}]})
+        self.assertEqual(msg, "w1: still working")
+        self.assertEqual([c[0] for c in self.calls], ["focus", "run", "focus"])
+        self.assertEqual(self.calls[-1], ("focus", "w1"))
 
 
 class BoardCommandTest(unittest.TestCase):

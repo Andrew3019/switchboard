@@ -673,8 +673,7 @@ def register(reg):
     reg.command(
         "record", record, audience="both",
         help="start a change record for a DIRECT change — the landing facts, and no plan; "
-             "made only when a change needs somewhere to keep verification, review, PR and "
-             "approval",
+             "made as soon as the work is direct and heading for a landing change",
         args=[reg.arg("title", repeat=True, help="what the change is"),
               reg.arg("--display", help="the record's board name — a display version of the "
                                         "title, one line, required"),
@@ -804,10 +803,13 @@ WHEN A PLAN EXISTS
 
   A DIRECT change is heading for a landing change too, and it gets NO plan. A bounded fix
   that goes straight to the work makes no plan and no change approval — no ceremony because
-  the plugin exists. When it needs somewhere to keep its landing facts — the verification,
-  the review, the PR, the human's approval — it makes a CHANGE RECORD with `sb plugin plans
-  record`, and only then. Small is the direct path and not a short plan: a one-line docs
-  change is a record if it needs one and nothing at all if it does not.
+  the plugin exists. It makes a CHANGE RECORD with `sb plugin plans record --request "..."`
+  as soon as it is clear the work is direct and heading for a landing change — the same
+  moment a shaped change is born with one, not reconstructed once the PR is already open.
+  That first call costs one line; verification, review, the PR and the human's approval
+  fill the rest of it in as the work actually produces them. Small is still the direct
+  path and not a short plan: work so small it will never reach review or a PR — a typo, a
+  one-line comment fix — makes no record at all.
 
   Everything else runs without either — investigation, questions, scouting, review-only
   work, anything a single agent answers and reports, and everything a dispatcher does.
