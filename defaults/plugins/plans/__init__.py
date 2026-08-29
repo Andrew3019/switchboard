@@ -706,6 +706,26 @@ def register(reg):
         args=[reg.arg("plan", help="the plan or change record to post, e.g. p-1"),
               reg.arg("--pr", help="the pull request number, required")])
     reg.command(
+        # The landing verb, and the reason it is a verb: the approved-head-versus-live-head
+        # comparison is the one check the design says must fail closed, and prose asking an
+        # agent to eyeball it before a hand-run `gh pr merge` is not a check. It runs NO test
+        # suite, no build and no review — by landing, all of that is recorded evidence, and
+        # this consumes it.
+        "merge", merge, audience="both",
+        help="land the pull request a plan or change record covers — refuses unless the "
+             "live head is the one the landing approval and the recorded evidence cover, "
+             "then merges, records the outcome and refreshes the plan comment",
+        args=[reg.arg("plan", help="the plan or change record being landed, e.g. p-1"),
+              reg.arg("--pr", help="the pull request number; the record's own `change.pr` "
+                                   "is the default, and a number disagreeing with it is "
+                                   "refused rather than preferred"),
+              reg.arg("--method", choices=("merge", "squash", "rebase"),
+                      help="how GitHub merges it; `merge` is the default"),
+              reg.arg("--delete-branch", flag=True,
+                      help="delete the head branch once the merge lands, recorded as "
+                           "`change.landing.cleanup`"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
         args=[reg.arg("id", help="a plan id, e.g. p-1")])
     reg.command(
@@ -828,9 +848,10 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
   with one at `create`; a direct change gets one from `record`, and only when it needs it.
 
   It is EDITED BY HAND, like every other field on a plan. The only things a verb writes are
-  the path, the opening `phase` a shaped plan is born in (`shaping`), and `request` when
-  `record --request` seeds it; there is no schema to satisfy past that — put what the job
-  needs on it. `sb plugin plans show` draws every field that is filled, `--markdown` puts
+  the path, the opening `phase` a shaped plan is born in (`shaping`), `request` when
+  `record --request` seeds it, and `landing.outcome` — with `landing.cleanup` — when `merge`
+  lands the PR and says how that went; there is no schema to satisfy past that — put what the
+  job needs on it. `sb plugin plans show` draws every field that is filled, `--markdown` puts
   them on the pull request, and `validate` reports two things and refuses neither: a shaped
   record at or past `execution` whose combined approval does not name both the plan revision
   and the contract digest, and a record at or past `landing` with no PR on it. Both are the
@@ -865,8 +886,10 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
                  Written BEFORE the PR opens, so the human meets it the first time they read
                  the comment.
     pr           `{number, head}`.
-    landing      `{head, by, at, outcome, cleanup}` — the human's landing approval, the head
-                 it covers, and how the merge and the cleanup actually went.
+    landing      `{head, by, at, outcome, cleanup}`. You write the first three — the human's
+                 landing approval and the head it covers. `merge` writes the last two, and
+                 REFUSES to land until the head it is about to merge is the one those and the
+                 evidence above all name.
     scope, limitations, baseline, handoff
                  optional, absent until used: important scope boundaries, known relevant
                  limitations, evidenced pre-existing failures, and `{from, to, at}` when a
@@ -884,6 +907,33 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
   path the only thing that puts the record in front of a human. Run it as the PR opens,
   and again whenever what that human should see materially changes: a reviewer's fix, the
   reviewed head moving, a landing decision.
+
+AFTER THE PR IS OPEN — FEEDBACK, AND A HEAD THAT MOVED
+
+  Two things that happen between the open PR and the merge. Both are EDGES between steps
+  rather than the business of any one of them, which is why they are written here and not in
+  a definition. Neither is a restart, and the whole of both is knowing what NOT to redo.
+
+  A HUMAN REPORTS A PROBLEM from the manual checks. Record what they actually saw and where
+  — the observed behaviour and the environment, in their words rather than in your reading
+  of them — and return it to the main agent as a defect on a live path. Fix the COHERENT
+  CAUSE and not the symptom they happened to hit. Then rerun ONLY the verification and the
+  review facets that fix touched, update the same PR comment, and ask the person to repeat
+  only the manual checks the fix invalidated. Unrelated testing and review are NOT restarted
+  because the PR went back to implementation: evidence for what the fix did not touch is
+  still evidence, and asking somebody to redo a check that still holds is the cost this
+  design exists to remove.
+
+  THE HEAD MOVED AFTER THE LANDING APPROVAL, which is the other one, and A DIFFERENT COMMIT
+  HASH IS NOT BY ITSELF A REAPPROVAL. Code and configuration changes get the verification and
+  review they affect; human checks are repeated only where the behaviour they cover changed.
+  Ask for RENEWED landing approval when the behaviour, the risk, the evidence or the reviewed
+  result materially changed — and do NOT ask for one where the move cannot affect the change:
+  a rebase onto an unrelated main, a commit message, a metadata-only edit. The trigger is
+  INVALIDATED JUDGEMENT, not a different hash. Whichever it is, the record carries it:
+  `verification` and `review` name the commit each covers and `landing.head` names the head a
+  person approved, `merge` refuses to land until those agree, and a renewed approval is those
+  fields being rewritten rather than a conversation somebody remembers.
 
 WHO WRITES TO IT
 
@@ -1960,17 +2010,353 @@ def comment(ctx, args) -> Result:
                         "comment_id": comment_id, "marker": marker})
 
 
-def _github(ctx, argv: list[str], *, body: Optional[str] = None):
+def merge(ctx, args) -> Result:
+    """Land the pull request one plan or change record covers, and record how it went.
+
+    THE VERB EXISTS BECAUSE THE CHECK DID NOT. Landing used to be a hand-run `gh pr merge`
+    with the approved-head-versus-live-head comparison written as prose an agent was trusted
+    to eyeball, which is the one comparison the design says must fail closed. Here it is code:
+    every head this change was approved and evidenced against is read off the record, compared
+    against the head GitHub is holding right now, and any disagreement — or any missing piece
+    of that identity — refuses before a single mutation is made.
+
+    IT CONSUMES EVIDENCE AND NEVER RE-EARNS IT. Nothing in this path runs a test, a build, a
+    lint or a review, and nothing here may ever be made to. Verification is evidence that
+    belongs to the commit it ran on; by the time landing begins that evidence is on the record
+    and the only honest question left is whether it still covers the head about to be merged.
+    Rerunning a passing check to make the merge feel safer is the failure this verb was
+    written to remove, not a precaution it forgot.
+
+    WHAT IT COMPARES, all against `change.landing.head` — the head the human approved:
+
+      change.landing        a human landing approval, with a `head` and a `by`. Absent, and
+                            there is nothing to land against and no merge.
+      change.approval       on the SHAPED path, the combined change approval naming the plan
+                            revision and the contract digest it covered. Not a head, so not
+                            compared to one — checked for being THERE, because a shaped
+                            change landing without it is unsanctioned work becoming
+                            everybody's. A direct change has none and is not asked for one.
+      change.pr.head        the head the pull request was recorded at.
+      change.verification   the commit the agent evidence covers.
+      change.review         the commit the independent review covers.
+      the live PR head      what GitHub is holding at this instant.
+
+    A short sha is a real spelling of a head, so the comparison is a prefix match with a
+    seven-character floor; anything that is not a hex sha at all refuses rather than matching
+    loosely. The merge itself is sent with GitHub's own `sha` precondition, so a head that
+    moves between the read above and the write below is refused by GitHub rather than by
+    nobody.
+
+    WHAT IS DELIBERATELY NOT CHECKED HERE, so that neither reads as forgotten. The required
+    STATUS CHECKS are GitHub's own gate and it refuses the merge itself when they are red —
+    reimplementing that comparison here would be a second, staler copy of a rule the server
+    already enforces, and the refusal it sends back is recorded as the failed attempt like
+    any other. And an unresolved MAJOR is prose on `change.review.findings`, written by the
+    owner in the job's own words; there is no field for a machine to read one out of, and
+    guessing at the text would refuse real landings and pass invented ones.
+
+    THE ORDER AFTER THE MERGE IS THE RECORD'S. The outcome is written to
+    `change.landing.outcome` before the comment is refreshed, so the comment renders the state
+    the change actually ended in; a cleanup asked for runs first and lands in
+    `change.landing.cleanup`. Anything that fails AFTER the merge has landed is recorded as
+    the partial state it is and returned as a failure — a merge that happened and a comment
+    that did not is not a success, and pretending the merge can be undone would be worse.
+    """
+    doc, _ = _read(ctx.state_dir)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    change = plan.get("change")
+    if not isinstance(change, dict):
+        return _unlanded(plan, "no change record, so there is no landing approval and no "
+                               "evidence to land against. Landing facts live on `change`; "
+                               "record them before merging.")
+
+    # The human's landing approval, which is the identity everything else is compared to.
+    landing = change.get("landing") if isinstance(change.get("landing"), dict) else None
+    approved = _sha(landing.get("head")) if landing else None
+    if landing is None or not _some(landing.get("by")) or approved is None:
+        return _unlanded(plan, "no human landing approval to merge against: "
+                               "`change.landing` needs the `head` a person approved and the "
+                               "`by` who approved it. Get the approval, record it, merge "
+                               "then.", landing=landing)
+
+    # The design-time sanction, on the shaped path only — a direct change has no plan and
+    # no contract and never claims one. `validate` already draws a record at or past
+    # `execution` without both halves of this as a defect; landing is where that defect has
+    # to stop being a warning, because merging it is the moment the unsanctioned work becomes
+    # everybody's.
+    if change.get("path") == SHAPED:
+        approval = change.get("approval") if isinstance(change.get("approval"), dict) else {}
+        missing = [k for k in ("plan_revision", "contract_digest")
+                   if not _some(approval.get(k))]
+        if missing:
+            return _unlanded(plan, f"the combined change approval (`change.approval`) has no "
+                                   f"{' or '.join(f'`{k}`' for k in missing)}, so what is "
+                                   f"about to land was never identified as sanctioned. "
+                                   f"Record the plan revision and the contract digest the "
+                                   f"approval covered, or do not land it.",
+                             missing=missing)
+
+    pr, bad = _pr_number(plan, change, getattr(args, "pr", None))
+    if bad:
+        return bad
+
+    recorded = change.get("pr") if isinstance(change.get("pr"), dict) else {}
+    bad = _covers(plan, "the recorded PR head (`change.pr.head`)", recorded.get("head"),
+                  approved)
+    if bad:
+        return bad
+    for key, what in (("verification", "the agent verification (`change.verification`)"),
+                      ("review", "the independent review (`change.review`)")):
+        evidence = change.get(key) if isinstance(change.get(key), dict) else {}
+        bad = _covers(plan, what, evidence.get("commit"), approved)
+        if bad:
+            return bad
+
+    pull, bad = _pull(ctx, pr)
+    if bad:
+        return bad
+    live = _sha((pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), dict)
+                else None)
+    if pull.get("merged"):
+        return _unlanded(plan, f"PR {pr} is already merged on GitHub. Record the outcome on "
+                               f"`change.landing.outcome` rather than merging it again.",
+                         pr=pr, already_merged=True)
+    if str(pull.get("state") or "") != "open":
+        return _unlanded(plan, f"PR {pr} is {_flat(pull.get('state') or 'not open')} on "
+                               f"GitHub, not open. Reopen it, or land a different PR.", pr=pr)
+    if live is None:
+        return _unlanded(plan, f"GitHub returned no head sha for PR {pr}, so there is "
+                               f"nothing to compare the landing approval against.", pr=pr)
+    bad = _covers(plan, f"the live head of PR {pr}", live, approved)
+    if bad:
+        return bad
+
+    method = str(getattr(args, "method", None) or "merge")
+    who = ctx.agent or "human"
+    # GitHub's own precondition on the head, so the window between the read above and this
+    # write is closed by the side that owns the branch rather than left to this process.
+    merged, bad = _github(
+        ctx, ["--method", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{pr}/merge", "--input", "-"],
+        payload={"merge_method": method, "sha": live})
+    at = int(time.time())
+    if bad:
+        _record_landing(ctx, plan["id"], who, args.reason,
+                        outcome={"result": "failed", "method": method, "pr": pr,
+                                 "head": live, "by": who, "at": at,
+                                 "error": _flat(bad.data.get("error") or "merge failed")})
+        return Result(ok=False, data=dict(bad.data, plan=plan["id"], pr=pr, merged=False),
+                      human=f"{plan['id']}: PR {pr} was NOT merged — {bad.human}. The record "
+                            f"carries the failed attempt; nothing else was done.")
+    try:
+        landed = json.loads(merged.stdout or "{}")
+    except json.JSONDecodeError:
+        landed = {}
+    outcome = {"result": "merged", "method": method, "pr": pr, "head": live,
+               "sha": _sha(landed.get("sha")) or None, "by": who, "at": at}
+
+    cleanup = None
+    if getattr(args, "delete_branch", False):
+        cleanup = _delete_branch(ctx, pull, at)
+
+    _record_landing(ctx, plan["id"], who, args.reason, outcome=outcome, cleanup=cleanup)
+
+    # Last, and after the write above, so the one authoritative comment renders the state the
+    # change ended in rather than the state it was in when landing began.
+    posted = comment(ctx, SimpleNamespace(plan=plan["id"], pr=str(pr)))
+    outcome["comment"] = "updated" if posted.ok else f"failed: {_flat(posted.human)}"
+    _record_landing(ctx, plan["id"], who, None, outcome=outcome, cleanup=cleanup,
+                    log=False)
+
+    data = {"plan": plan["id"], "pr": pr, "merged": True, "method": method,
+            "head": live, "sha": outcome["sha"], "landing": outcome, "cleanup": cleanup}
+    if not posted.ok:
+        return Result(ok=False, data=dict(data, error=posted.data.get("error")),
+                      human=f"{plan['id']}: PR {pr} IS MERGED, and the plan comment was not "
+                            f"updated — {posted.human}. Rerun `sb plugin plans comment "
+                            f"{plan['id']} --pr {pr}`; do not merge again.")
+    lines = [f"merged PR {pr} ({method}) at the approved head {live[:12]} — "
+             f"{plan['id']} comment updated"]
+    if cleanup and not cleanup.get("deleted"):
+        lines.append(f"  branch {_flat(cleanup.get('branch') or '?')} was NOT deleted: "
+                     f"{_flat(cleanup.get('error') or 'unknown')}")
+        return Result(ok=False, human="\n".join(lines), data=data)
+    if cleanup:
+        lines.append(f"  deleted branch {_flat(cleanup.get('branch') or '?')}")
+    return Result(human="\n".join(lines), data=data)
+
+
+# The head comparison, and the two reasons it is not `==`. A head is written down by hand as
+# often as it is copied, and a seven-character short sha is a real spelling of one — so a
+# prefix match with git's own floor is what keeps a correct record from reading as a mismatch.
+# What it does NOT do is match loosely: anything that is not a hex sha of at least seven
+# characters is not a head at all and refuses, which is the fail-closed half of the same rule.
+_SHA = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _sha(value: Any) -> Optional[str]:
+    """A commit sha as this file compares them, or None for anything that is not one."""
+    text = str(value or "").strip().lower()
+    return text if _SHA.fullmatch(text) else None
+
+
+def _covers(plan: dict, what: str, given: Any, approved: str) -> Optional[Result]:
+    """Refuse unless `given` names the same commit the landing approval covers.
+
+    One refusal shape for every head on the record, because they fail for one reason: the
+    change that was approved and the change about to land are not the same change. The
+    message names which of them disagreed and what to do about it, since an agent that has
+    just been refused at the merge is exactly who cannot afford to guess.
+    """
+    head = _sha(given)
+    if head is None:
+        return _unlanded(plan, f"{what} does not name a commit, so nothing can be compared "
+                               f"against the approved head {approved[:12]}. Record the "
+                               f"commit it covers, or get the landing approval renewed "
+                               f"against what is actually there.",
+                         expected=approved, found=str(given or "") or None)
+    if not (head.startswith(approved) or approved.startswith(head)):
+        return _unlanded(plan, f"{what} is {head[:12]}, but the landing approval covers "
+                               f"{approved[:12]}. REFUSING TO MERGE. Work out whether the "
+                               f"move changed behaviour, risk, evidence or the reviewed "
+                               f"result: if it did, rerun only the affected verification and "
+                               f"review and ask for renewed landing approval; if it did not, "
+                               f"record the approval against the head that is actually "
+                               f"there. A different hash is not by itself a reapproval.",
+                         expected=approved, found=head)
+    return None
+
+
+def _unlanded(plan: dict, why: str, **data) -> Result:
+    """A merge refused before anything was mutated. Nothing here has written to GitHub."""
+    text = f"{plan['id']}: {why}"
+    return Result(ok=False, human=text,
+                  data=dict({"error": text, "plan": plan["id"], "merged": False}, **data))
+
+
+def _pr_number(plan: dict, change: dict, given: Any) -> tuple[int, Optional[Result]]:
+    """The PR to land: the record's own, and `--pr` only where the two agree.
+
+    The record is the authority — it is what the approval and the evidence were recorded
+    against — so a `--pr` that disagrees is a typo or a stale copy of the step's command, and
+    either way is the case where merging the wrong pull request is one keystroke away.
+    """
+    recorded = change.get("pr") if isinstance(change.get("pr"), dict) else {}
+    on_record = _pr_int(recorded.get("number"))
+    asked = str(given or "").strip()
+    if asked and not re.fullmatch(r"[1-9]\d*", asked):
+        return 0, _needs("--pr", "a pull request number, e.g. `--pr 181`")
+    wanted = int(asked) if asked else None
+    if on_record is None and wanted is None:
+        return 0, _unlanded(plan, "no pull request on the record (`change.pr.number`) and "
+                                  "none given. A change cannot land before it is on a pull "
+                                  "request — record the PR, or pass `--pr`.")
+    if on_record is not None and wanted is not None and on_record != wanted:
+        return 0, _unlanded(plan, f"the record names PR {on_record} but `--pr {wanted}` "
+                                  f"was given. "
+                                  f"REFUSING TO MERGE: the approval and the evidence were "
+                                  f"recorded against the PR on the record. Fix whichever is "
+                                  f"wrong before merging.",
+                            expected=on_record, found=wanted)
+    return (on_record if on_record is not None else wanted), None
+
+
+def _pr_int(value: Any) -> Optional[int]:
+    """A PR number off a hand-edited record, which may be `181` or `"#181"` or nothing."""
+    text = str(value or "").strip().lstrip("#")
+    return int(text) if re.fullmatch(r"[1-9]\d*", text) else None
+
+
+def _pull(ctx, pr: int) -> tuple[dict, Optional[Result]]:
+    """The pull request as GitHub holds it right now — head, state and branch."""
+    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/pulls/{pr}"])
+    if bad:
+        return {}, bad
+    try:
+        pull = json.loads(got.stdout or "{}")
+    except json.JSONDecodeError as e:
+        why = f"GitHub returned an unreadable pull request {pr}: {e}"
+        return {}, Result(ok=False, human=why, data={"error": why, "pr": pr})
+    if not isinstance(pull, dict):
+        why = f"GitHub returned no pull request object for {pr}"
+        return {}, Result(ok=False, human=why, data={"error": why, "pr": pr})
+    return pull, None
+
+
+def _delete_branch(ctx, pull: dict, at: int) -> dict:
+    """Drop the merged head branch, and say plainly whether it went. Never raises.
+
+    Cleanup runs after a merge that has already landed, so a failure here cannot un-merge
+    anything and must not be reported as though it could. It is recorded as the unfinished
+    half it is — `change.landing.cleanup` — and the verb returns a failure saying so.
+    """
+    head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+    ref = str(head.get("ref") or "").strip()
+    if not ref:
+        return {"deleted": False, "branch": None, "at": at,
+                "error": "GitHub named no head branch on the pull request"}
+    _, bad = _github(ctx, ["--method", "DELETE",
+                           f"repos/{{owner}}/{{repo}}/git/refs/heads/{ref}"])
+    if bad:
+        return {"deleted": False, "branch": ref, "at": at,
+                "error": _flat(bad.data.get("error") or "delete failed")}
+    return {"deleted": True, "branch": ref, "at": at}
+
+
+def _record_landing(ctx, plan_id: str, who: str, reason: Optional[str], *,
+                    outcome: dict, cleanup: Optional[dict] = None,
+                    log: bool = True) -> None:
+    """Write what landing actually did onto the record, re-reading first.
+
+    Re-read rather than reusing the document this verb opened with, because `comment` writes
+    between the two calls to this and the merge nonce it may have minted must survive. The
+    write is deliberately narrow: `change.landing.outcome` and `change.landing.cleanup`, and
+    nothing else — `phase` stays the record describing itself in the owner's own words, which
+    is what the guide says it is, and no verb here promotes it.
+    """
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, plan_id)
+    if plan is None:
+        return
+    change = plan.get("change")
+    if not isinstance(change, dict):
+        return
+    landing = change.get("landing")
+    if not isinstance(landing, dict):
+        landing = {}
+        change["landing"] = landing
+    landing["outcome"] = outcome
+    if cleanup is not None:
+        landing["cleanup"] = cleanup
+    if log:
+        # One entry per landing attempt, stamped by the call that made it. The second write
+        # of a run is the comment's result landing on an outcome already in the record, and a
+        # changelog saying `merge` twice for one merge would read as two attempts.
+        _log(plan, who, "merge", reason,
+             f"PR {outcome.get('pr')} {outcome.get('result')}")
+    _write(ctx.state_dir, doc, seal)
+
+
+def _github(ctx, argv: list[str], *, body: Optional[str] = None,
+            payload: Optional[dict] = None):
     """One bounded `gh api` call, returned as `(process, refusal)`.
 
     JSON goes through stdin so a full plan is neither shell-expanded nor exposed as an
     argument. The endpoint uses gh's repository placeholders and therefore remains scoped
     to the checkout the plan belongs to.
+
+    `body` is the comment case and the common one — the text becomes `{"body": ...}`, which
+    is the shape both the comment endpoints take. `payload` is the same door for a request
+    whose JSON is not a comment: the merge endpoint's `{merge_method, sha}`, sent whole. One
+    of the two at most, and neither means a GET with no stdin at all.
     """
+    if payload is None and body is not None:
+        payload = {"body": body}
     try:
         got = subprocess.run(["gh", "api", *argv], cwd=str(_here(ctx)),
-                             input=json.dumps({"body": body}) if body is not None else None,
-                             stdin=subprocess.DEVNULL if body is None else None,
+                             input=json.dumps(payload) if payload is not None else None,
+                             stdin=subprocess.DEVNULL if payload is None else None,
                              capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
         why = f"could not reach GitHub through gh: {e}"
@@ -2963,7 +3349,11 @@ def _change(path: str) -> dict:
       review        `{commit, reviewer, findings, fixes}`.
       pr            `{number, head}`.
       landing       the merge-time `{head, by, at, outcome, cleanup}` — the human landing
-                    approval on the reviewed head, and the outcome.
+                    approval on the reviewed head, and the outcome. The first three are
+                    written by hand when the approval is given; `outcome` and `cleanup` are
+                    written by `merge`, which refuses to run at all until `head` here, the
+                    PR head, the verification and the review commits and the LIVE head are
+                    all the same commit.
 
     `scope`, `limitations`, `baseline`, and `handoff` are NOT born here. They are optional
     and recorded only when used, so — like `planner` on a plan — they are ABSENT rather than
@@ -2971,8 +3361,10 @@ def _change(path: str) -> dict:
     work over; the other three carry important scope boundaries, known relevant limitations,
     and evidenced pre-existing failures. `output` is not among any of these: a record dumps
     its own fields, not a step's. Written and edited by hand like every document field; no
-    verb mints past `path` and the opening `phase` above, and `record --request` seeding
-    `request` is the only write any verb makes to a record after it is born.
+    verb mints past `path` and the opening `phase` above, and the only two writes any verb
+    makes to a record after it is born are `record --request` seeding `request` and `merge`
+    recording `landing.outcome` and `landing.cleanup` — what landing actually did, which is
+    the one fact about a change no hand is present to write down at the moment it happens.
     """
     return {"path": path, "phase": "shaping" if path == SHAPED else None,
             "request": None, "contract": None, "cause": None, "solution": None,
