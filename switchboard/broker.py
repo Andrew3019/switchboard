@@ -7675,9 +7675,10 @@ class Broker:
         pane that `pane_shell` proves is an idle shell is safe to take.
 
         This deliberately closes every match.  There is no durable per-agent pane label,
-        so one of them may be an unrelated closed agent's leftover when several agents
-        shared a workspace and checkout.  A live process is never closed: `None` is the
-        conservative answer from `pane_shell`, including when herdr cannot answer.
+        so one of them may be an unrelated closed agent's leftover—or a human's own idle
+        terminal parked there—when several users or agents share a workspace and checkout.
+        A live process is never closed: `None` is the conservative answer from `pane_shell`,
+        including when herdr cannot answer.
 
         The capability check keeps older adapters usable.  In particular, the broker's
         test fake does not model pane listing or process inspection; teaching it those
@@ -7702,10 +7703,10 @@ class Broker:
             try:
                 self.h.close_pane(pane)
             except HerdrError as e:
-                if e.code != "pane_not_found":
-                    raise
-                store.log_event(self.db, kind="restore_stale_pane_gone", agent=name,
-                                pane=pane)
+                kind = ("restore_stale_pane_gone" if e.code == "pane_not_found"
+                        else "restore_stale_pane_close_failed")
+                store.log_event(self.db, kind=kind, agent=name, pane=pane,
+                                error=str(e))
                 continue
             store.log_event(self.db, kind="restore_stale_pane_closed", agent=name,
                             pane=pane)
