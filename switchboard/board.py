@@ -8,7 +8,8 @@ This is a HUMAN-ONLY surface and must stay one. `sb board` is hidden from
 `--help` and refuses any caller that `whoami()` resolves to an agent, and the
 board appears nowhere in defaults/protocol.md, which is where an agent actually
 learns what `sb` can do. Its side effects are two, and both are a human's own
-hand: `herdr agent focus`, jumping to a pane, and four presses of `c`, which
+hand: `focus`, jumping to a pane (`herdr agent focus`, then one pane right onto
+the board beside it), and four presses of `c`, which
 runs `sb cleanup` on the highlighted agent (`cleanup_agent`). The second one
 destroys things, and it reaches them exactly as the first does — a separate
 process, off the drawing thread, never the store.
@@ -1941,8 +1942,19 @@ def refresh(sup: panel.Supervisor):
 def focus(name: str) -> str:
     """A human jumping to a pane. Returns a line for the status bar.
 
+    IT LANDS ON THE BOARD PANE, not on the agent's own. `herdr agent focus` raises the
+    agent's tab and puts the focus on the agent's pane; `_focus_board_pane` then steps one
+    pane right, onto the board `open_beside` split off it. The keyboard is the whole
+    reason: `oo`, `ww` and `cccc` are read by the board pane and by nothing else, so a
+    human who clicks a row and then presses a key is typing into that agent's prompt
+    instead — which is what "the close keystroke does nothing" was, once (Andrew,
+    2026-08-29). Landing on the board leaves them where the keys work, with the agent's
+    session still on screen beside it, which is what a two-pane tab is for.
+
     Also what `cccc` does before it cleans anything up — see `cleanup_agent`, which is
-    where the ordering is argued.
+    where the ordering is argued. Both of its focuses want the board half too: the one
+    before the cleanup so the human keeps a board to press keys on, and the one that puts
+    them back after a refusal so that "nothing changed" is true of the pane as well.
     """
     try:
         p = subprocess.run(["herdr", "agent", "focus", name],
@@ -1954,7 +1966,32 @@ def focus(name: str) -> str:
         return f"{name}: focus timed out"
     if p.returncode != 0:
         return f"{name}: {status_mod.clip((p.stderr or p.stdout or 'focus failed'), 50)}"
+    _focus_board_pane()
     return f"→ {name}"
+
+
+def _focus_board_pane() -> None:
+    """One pane right of whatever was just focused — the board beside an agent. Silent.
+
+    `--current` is HERDR'S FOCUSED PANE and not the pane this process is standing in
+    (herdr 0.8.2, measured: with `HERDR_PANE_ID` set to a pane in another tab it still
+    answered about the focused one). That is exactly the pane id wanted here and the one
+    that cannot be had any other way — the store's `pane_id` for the agent can be stale,
+    and herdr's own idea of where the focus just landed cannot be — but it only holds for
+    as long as the focus does, so this runs immediately after `herdr agent focus` and
+    nowhere else.
+
+    NOTHING IS REPORTED, including the ordinary failure. A tab with no pane to the right
+    is a single-pane tab or a board a human closed by hand, and the focus stays on the
+    agent — which is where every jump landed before this existed. The jump itself
+    succeeded, and `focus` has already said so; a second line about the half of it that
+    is polish would be noise in a status bar one line tall.
+    """
+    try:
+        subprocess.run(["herdr", "pane", "focus", "--direction", "right", "--current"],
+                       capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 # What double-`o` opens, and how it decides. Prose fences a path in backticks nearly

@@ -3046,6 +3046,52 @@ class NextFocusTest(unittest.TestCase):
             board.next_focus([agent("a"), agent("b", archived=True)], "a"))
 
 
+class FocusTest(unittest.TestCase):
+    """A jump lands on the BOARD half of the pair, not on the agent's own pane.
+
+    The keys this board reads are read by this board and nowhere else, so a jump that
+    leaves the keyboard on the agent's pane sends the next `cccc` into that agent's
+    prompt as text. Two herdr calls, in this order, is the whole of it.
+
+    NOT PROVEN HERE: that `--current` is herdr's focused pane rather than the caller's
+    own. That is a fact about herdr 0.8.2, measured against it, and a fake `subprocess`
+    cannot hold an opinion about it.
+    """
+
+    def go(self, *, code=0, pane_raises=None):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            if argv[1] == "pane" and pane_raises is not None:
+                raise pane_raises
+            return subprocess.CompletedProcess(argv, code if argv[1] == "agent" else 0,
+                                               "", "no such agent")
+
+        with mock.patch.object(board.subprocess, "run", fake_run):
+            return board.focus("w1"), calls
+
+    def test_it_focuses_the_agent_then_steps_one_pane_right(self):
+        msg, calls = self.go()
+        self.assertEqual(calls, [
+            ["herdr", "agent", "focus", "w1"],
+            ["herdr", "pane", "focus", "--direction", "right", "--current"],
+        ])
+        self.assertEqual(msg, "→ w1")
+
+    def test_a_failed_jump_does_not_step_anywhere(self):
+        """The focused pane is then whatever the human was already on, and stepping
+        right of THAT would move them for a jump that did not happen."""
+        msg, calls = self.go(code=1)
+        self.assertEqual([c[1] for c in calls], ["agent"])
+        self.assertEqual(msg, "w1: no such agent")
+
+    def test_no_pane_to_the_right_is_not_reported(self):
+        """A single-pane tab is ordinary. The jump happened; the polish did not."""
+        msg, _ = self.go(pane_raises=OSError("boom"))
+        self.assertEqual(msg, "→ w1")
+
+
 class CleanupAgentTest(unittest.TestCase):
     """`cccc`: what it runs, and the focus that has to happen BEFORE it.
 
