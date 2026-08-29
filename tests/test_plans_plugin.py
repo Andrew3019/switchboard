@@ -2266,20 +2266,28 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("list what only a human can check", shown)
         self.assertNotIn("cmd", shown)
 
-    def test_the_two_shipped_pr_steps_carry_the_command_that_posts_the_plan(self):
-        """The pair the field was added for: `create-pr` posts the plan as a comment and
-        `merge` calls the same exact-marker upsert rather than targeting an actor's latest
-        comment. Both commands stay on the steps with obvious placeholders."""
+    def test_the_two_shipped_pr_steps_carry_the_commands_that_do_them(self):
+        """The pair the field was added for, and they are no longer the same command.
+
+        `create-pr` posts the plan as one marked comment. `merge` is the landing VERB — it
+        does the head comparison, the merge and the same exact-marker upsert in one act,
+        rather than handing an agent the comment command and trusting it to hand-run
+        `gh pr merge` beside it. Both stay on their steps with obvious placeholders.
+        """
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "create-pr")
         self.data("plugin", "plans", "name-step", "p-1", "merge")
 
         shown = self.ok("plugin", "plans", "show", "p-1")
-        self.assertEqual(shown.count("cmd   sb plugin plans comment <PLAN> --pr <PR>"), 2)
+        self.assertIn("cmd   sb plugin plans comment <PLAN> --pr <PR>", shown)
+        self.assertIn("cmd   sb plugin plans merge <PLAN> --pr <PR>", shown)
         self.assertNotIn("--edit-last", shown)
-        # And the library prints it under the definition read in full, beside the prose.
-        self.assertIn("command     sb plugin plans comment <PLAN> --pr <PR>",
+        self.assertNotIn("gh pr merge", shown)
+        # And the library prints each under the definition read in full, beside the prose.
+        self.assertIn("command     sb plugin plans merge <PLAN> --pr <PR>",
                       self.ok("plugin", "plans", "library", "merge"))
+        self.assertIn("command     sb plugin plans comment <PLAN> --pr <PR>",
+                      self.ok("plugin", "plans", "library", "create-pr"))
 
     def test_comment_updates_the_marked_id_and_leaves_a_later_comment_unchanged(self):
         """The PR-181 sequence: the same actor writes something after the plan comment.
@@ -4022,7 +4030,7 @@ class PlannerPackageTest(PlansSandbox):
         pr = " ".join(lib["create-pr"]["about"].split())
         self.assertIn("renders the plan AS IT STANDS AT THAT MOMENT", pr)
         self.assertIn("waits for nothing: no step has to be finished first", pr)
-        self.assertIn("`merge` re-runs this same command later", pr)
+        self.assertIn("`merge` does this same marked upsert again as it lands", pr)
         self.assertIn("never that the comment waits for it", pr)
 
         approval = " ".join(lib["change-approval"]["about"].split())
@@ -5529,6 +5537,319 @@ class LibrarySemanticsTest(PlansSandbox):
         for key in ("change-approval", "create-pr", "merge", "merge-human-review",
                     "plan-review", "review"):
             self.assertIn(key, listed)
+
+
+class LandingMergeTest(PlansSandbox):
+    """`merge`: the landing verb, and the head comparison that is its whole reason to exist.
+
+    Landing used to be a hand-run `gh pr merge` with the approved-head-versus-live-head check
+    written as prose an agent was asked to eyeball. These pin the three decisions that made it
+    a verb instead: it REFUSES on any head that is not the one the landing approval and the
+    recorded evidence cover, it merges and RECORDS what happened when they all agree, and it
+    RUNS NO TEST, BUILD OR REVIEW on that path — by landing, all of that is evidence already
+    on the record, and re-earning it is the cost this design exists to remove.
+
+    GitHub is faked at the exact `gh api` argv the plugin builds, so every one of these still
+    crosses the real dispatch, the real store and the real rendering. Nothing here reaches
+    github.com.
+    """
+
+    HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+    OTHER = "9876543210fedcba9876543210fedcba98765432"
+
+    @contextlib.contextmanager
+    def github(self, *, head=HEAD, state="open", merged=False, branch="worker-x",
+               merge_error=None, comment_error=None):
+        """A pull request, its comments and its merge button, behind the real argv.
+
+        The merge endpoint enforces GitHub's own `sha` precondition, because that is half of
+        what makes this fail closed: the plugin compares once and then hands the head it
+        compared back to GitHub, so a branch that moves in between is refused by the side
+        that owns it rather than by nobody.
+        """
+        seen: list[list] = []
+        comments: list[dict] = []
+        box = {"merged": merged, "head": head, "next_id": 100, "deleted": None}
+        real_run = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            argv = list(argv)
+            seen.append(argv)
+            if argv[:2] != ["gh", "api"]:
+                return real_run(argv, *args, **kwargs)
+            method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
+            target = next(str(a) for a in argv if str(a).startswith("repos/"))
+            if target.endswith("/merge"):
+                if merge_error:
+                    return subprocess.CompletedProcess(argv, 1, "", merge_error)
+                if json.loads(kwargs["input"]).get("sha") != box["head"]:
+                    return subprocess.CompletedProcess(
+                        argv, 1, "", "HTTP 409: Head branch was modified")
+                box["merged"] = True
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"merged": True, "sha": "f" * 40}), "")
+            if "/git/refs/heads/" in target:
+                box["deleted"] = target.rsplit("/heads/", 1)[-1]
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if "/pulls/" in target:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(
+                    {"number": int(target.rsplit("/", 1)[-1]), "state": state,
+                     "merged": box["merged"],
+                     "head": {"sha": box["head"], "ref": branch}}), "")
+            if comment_error:
+                return subprocess.CompletedProcess(argv, 1, "", comment_error)
+            if "--paginate" in argv:
+                return subprocess.CompletedProcess(argv, 0, json.dumps([comments]), "")
+            body = json.loads(kwargs["input"])["body"]
+            if method == "POST":
+                row = {"id": box["next_id"], "body": body}
+                box["next_id"] += 1
+                comments.append(row)
+            else:
+                cid = int(str(argv[argv.index("--method") + 2]).rsplit("/", 1)[-1])
+                row = next(r for r in comments if r["id"] == cid)
+                row["body"] = body
+            return subprocess.CompletedProcess(argv, 0, json.dumps(row), "")
+
+        with mock.patch("subprocess.run", side_effect=run):
+            yield _Fake(seen, comments, box)
+
+    def approved(self, *, head=HEAD, **over) -> None:
+        """A change record standing exactly where landing begins: approved, evidenced, on a
+        PR, every recorded head the same commit. Written by hand, which is how a record is
+        filled — `merge` is the only verb that writes to one after `record --request`."""
+        self.data("plugin", "plans", "record", "raise the upload timeout",
+                  "--display", "board: raise the upload timeout")
+        doc = self._doc()
+        change = doc["plans"][0]["change"]
+        change.update({
+            "phase": "landing",
+            "cause": "the client timeout was shorter than the server's",
+            "pr": {"number": 42, "head": head},
+            "verification": {"commit": head, "check": "pytest tests/test_upload.py",
+                             "result": "green"},
+            "review": {"commit": head, "reviewer": "reviewer-uploads",
+                       "findings": "no majors"},
+            "landing": {"head": head, "by": "andrew", "at": 1700000000},
+        })
+        change.update(over)
+        self._save(doc)
+
+    def landing(self) -> dict:
+        return self._doc()["plans"][0]["change"]["landing"]
+
+    # -- it refuses ------------------------------------------------------------
+
+    def test_merge_refuses_when_the_live_head_is_not_the_head_that_was_approved(self):
+        """THE case the verb exists for. The branch moved under a landing approval, so the
+        approval covers a change that is no longer the one about to land — and the merge is
+        refused before any mutation, with the reason a machine reader can act on."""
+        self.approved()
+        with self.github(head=self.OTHER) as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42", "--json")
+
+        self.assertNotEqual(code, 0)
+        data = json.loads(out)["data"]
+        self.assertFalse(data["merged"])
+        self.assertEqual(data["expected"], self.HEAD)
+        self.assertEqual(data["found"], self.OTHER)
+        self.assertIn("REFUSING TO MERGE", data["error"])
+        # Nothing was merged and nothing was written: no PUT was ever sent, and the record
+        # carries no outcome for a landing that did not happen.
+        self.assertFalse([c for c in gh.seen if "PUT" in [str(a) for a in c]])
+        self.assertFalse(gh.box["merged"])
+        self.assertNotIn("outcome", self.landing())
+
+    def test_merge_refuses_when_no_human_has_approved_the_landing(self):
+        """Fail closed on the absence too. A record with the evidence but no landing approval
+        is a change nobody agreed to land, and an absent approval must refuse as loudly as a
+        moved head — the two are the same defect and the quiet one is the dangerous one."""
+        self.approved(landing=None)
+        with self.github() as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42", "--json")
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("no human landing approval", json.loads(out)["data"]["error"])
+        self.assertFalse(gh.box["merged"])
+        # It refused before it even asked GitHub anything.
+        self.assertFalse([c for c in gh.seen if list(c[:2]) == ["gh", "api"]])
+
+    # -- it lands --------------------------------------------------------------
+
+    def test_merge_lands_the_approved_head_and_records_the_outcome(self):
+        """The clean path: every recorded head agrees with the live one, so the verb merges
+        it ITSELF rather than telling an agent to, writes what happened to
+        `change.landing.outcome`, and refreshes the one authoritative comment in place —
+        after the write, so the comment renders the state the change ended in."""
+        self.approved()
+        with self.github() as gh:
+            data = self.data("plugin", "plans", "merge", "p-1", "--pr", "42")
+
+        self.assertTrue(data["merged"])
+        self.assertTrue(gh.box["merged"])
+        outcome = self.landing()["outcome"]
+        self.assertEqual(outcome["result"], "merged")
+        self.assertEqual(outcome["method"], "merge")
+        self.assertEqual(outcome["head"], self.HEAD)
+        self.assertEqual(outcome["pr"], 42)
+        self.assertEqual(outcome["sha"], "f" * 40)
+        self.assertEqual(outcome["comment"], "updated")
+        # One comment, and it carries the outcome — so the write happened before the post.
+        self.assertEqual(len(gh.comments), 1)
+        self.assertIn("merged", gh.comments[0]["body"])
+        # The landing approval a human gave is untouched; only the outcome was added.
+        self.assertEqual(self.landing()["by"], "andrew")
+        self.assertEqual(self.landing()["head"], self.HEAD)
+
+    def test_a_merge_that_lands_and_a_comment_that_does_not_is_recorded_as_both(self):
+        """Partial state stays visible. The merge cannot be undone once GitHub has taken it,
+        so a failure after that point is recorded as what actually completed and returned as
+        a failure — never reported as a clean landing, and never retried as a merge."""
+        self.approved()
+        with self.github(comment_error="HTTP 502: Bad Gateway") as gh:
+            code, _, said = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42")
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(gh.box["merged"])
+        self.assertIn("IS MERGED", said)
+        self.assertIn("do not merge again", said)
+        outcome = self.landing()["outcome"]
+        self.assertEqual(outcome["result"], "merged")
+        self.assertTrue(outcome["comment"].startswith("failed:"))
+
+    def test_a_shaped_change_cannot_land_without_the_combined_change_approval(self):
+        """`validate` reports a shaped record past execution with no `change.approval` as a
+        defect and refuses nothing, which is right everywhere except here: landing is the
+        moment unsanctioned work becomes everybody's, so at the merge that warning has to be
+        a refusal. A DIRECT change has no approval and is never asked for one — the same
+        record on the direct path lands."""
+        self.approved()
+        doc = self._doc()
+        doc["plans"][0]["change"]["path"] = "shaped"
+        self._save(doc)
+        with self.github() as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42", "--json")
+        self.assertNotEqual(code, 0)
+        error = json.loads(out)["data"]["error"]
+        self.assertIn("change.approval", error)
+        self.assertIn("plan_revision", error)
+        self.assertFalse(gh.box["merged"])
+
+        # Recorded, and the same record lands.
+        doc = self._doc()
+        doc["plans"][0]["change"]["approval"] = {
+            "plan_revision": 4, "contract_digest": "sha256:abc", "by": "andrew", "at": 1}
+        self._save(doc)
+        with self.github() as gh:
+            self.data("plugin", "plans", "merge", "p-1", "--pr", "42")
+        self.assertTrue(gh.box["merged"])
+
+    def test_the_recorded_evidence_has_to_cover_the_approved_head_as_well(self):
+        """The approval is not the only identity landing consumes. Evidence belongs to the
+        commit it ran on, so a verification naming a different commit — or naming none at
+        all — is evidence for a different change, and merging on it would be landing an
+        approval whose basis was never checked. Refused the same way a moved head is."""
+        self.approved(verification={"commit": self.OTHER, "check": "pytest", "result": "ok"})
+        with self.github() as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("change.verification", json.loads(out)["data"]["error"])
+        self.assertFalse(gh.box["merged"])
+
+        # And a review that names no commit at all is the same refusal, not a pass.
+        self.approved(review={"reviewer": "reviewer-uploads", "findings": "no majors"})
+        with self.github() as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("does not name a commit", json.loads(out)["data"]["error"])
+        self.assertFalse(gh.box["merged"])
+
+    def test_a_squash_and_a_branch_deletion_are_asked_for_and_recorded(self):
+        """The two flags that change what landing DOES, and both end up on the record —
+        `cleanup` beside `outcome`, because a merge that landed and a branch that did not go
+        is a real half-finished state and the record is where it stays visible."""
+        self.approved()
+        with self.github() as gh:
+            data = self.data("plugin", "plans", "merge", "p-1", "--pr", "42",
+                             "--method", "squash", "--delete-branch")
+
+        self.assertTrue(data["merged"])
+        self.assertEqual(gh.box["deleted"], "worker-x")
+        landing = self.landing()
+        self.assertEqual(landing["outcome"]["method"], "squash")
+        self.assertEqual(landing["cleanup"], dict(landing["cleanup"],
+                                                  deleted=True, branch="worker-x"))
+
+    # -- and it re-earns nothing ----------------------------------------------
+
+    def test_the_merge_path_runs_no_test_build_or_review_of_any_kind(self):
+        """The hard constraint, pinned as a test because prose has never held it.
+
+        Merge CONSUMES the recorded evidence and never re-earns it: by the time landing
+        begins the tests have run, on a commit the record names, and rerunning a passing
+        check to make the merge feel safer is the whole cost this design removes. So the only
+        programs this path may reach for are `gh` — GitHub — and this repo's own `sb`, which
+        the rendering asks who is alive — with `git` and `herdr` under that. Anything else
+        appearing here is the regression.
+        """
+        self.approved()
+        with self.github() as gh:
+            self.data("plugin", "plans", "merge", "p-1", "--pr", "42")
+
+        # `gh` is GitHub; `sb`, `git` and `herdr` are how the rendering under this asks who
+        # is alive and where the worktree is. None of the four is a test or build runner, and
+        # a fifth program appearing on this path is the regression this pins.
+        programs = {Path(str(call[0])).name for call in gh.seen}
+        self.assertTrue(programs <= {"gh", "sb", "git", "herdr"}, programs)
+        flat = " ".join(" ".join(str(a) for a in call) for call in gh.seen)
+        for banned in ("pytest", "unittest", "npm", "yarn", "tox", "cargo", "coverage",
+                       "lint", "review"):
+            self.assertNotIn(banned, flat)
+        # And the GitHub calls are exactly the landing ones: read the PR, merge it, upsert
+        # the comment. No checks endpoint, no runs endpoint, nothing re-verified.
+        endpoints = [next(str(a) for a in call if str(a).startswith("repos/"))
+                     for call in gh.seen if list(call[:2]) == ["gh", "api"]]
+        self.assertTrue(all("/pulls/42" in e or "/issues/42/comments" in e
+                            or "/issues/comments/" in e for e in endpoints), endpoints)
+
+    # -- the surface -----------------------------------------------------------
+
+    def test_merge_is_a_declared_verb_and_the_library_step_points_at_it(self):
+        """The verb is registered with its flags, and `merge.json`'s command is it — a step
+        still handing an agent `comment` would leave the head check unrun by anybody."""
+        self.ok("plugin", "plans", "guide")     # import the module the registry reads
+        self.assertIn("merge", _plans_commands())
+        args = _plans_args("merge")
+        for flag in ("plan", "--pr", "--method", "--delete-branch", "--reason"):
+            self.assertIn(flag, args)
+        spec = json.loads((self.catalogue("library") / "merge.json").read_text())
+        self.assertEqual(spec["command"], "sb plugin plans merge <PLAN> --pr <PR>")
+
+    def test_the_prose_carries_the_feedback_reapproval_and_description_workflows(self):
+        """A3 and A5 are text, and text is only delivered if it renders where an agent
+        reads it: the guide for the two edges no definition owns, and `create-pr`'s own
+        `about` for what the durable PR description has to carry."""
+        guide = " ".join(self.ok("plugin", "plans", "guide").split())
+        self.assertIn("AFTER THE PR IS OPEN", guide)
+        for token in ("observed behaviour and the environment", "COHERENT CAUSE",
+                      "only the manual checks the fix invalidated",
+                      "A DIFFERENT COMMIT HASH IS NOT BY ITSELF A REAPPROVAL",
+                      "INVALIDATED JUDGEMENT, not a different hash"):
+            self.assertIn(token, guide)
+
+        about = " ".join(self.ok("plugin", "plans", "library", "create-pr").split())
+        for token in ("ROOT CAUSE", "FEATURE INTENT", "SELECTED SOLUTION",
+                      "BEHAVIOUR CHANGES", "SCOPE", "VERIFICATION", "INDEPENDENT REVIEW",
+                      "RISKS accepted or deferred", "DRAW IT FROM THE RECORD"):
+            self.assertIn(token, about)
+
+
+class _Fake:
+    """What the GitHub fake hands a test: every subprocess argv it saw, the PR's comments,
+    and the mutable pull request itself."""
+
+    def __init__(self, seen: list, comments: list, box: dict) -> None:
+        self.seen, self.comments, self.box = seen, comments, box
 
 
 def _plans_commands() -> list[str]:

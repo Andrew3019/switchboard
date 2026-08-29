@@ -126,6 +126,92 @@ class InstructionRendererTest(ListingSandbox):
         self.assertEqual(role["ownership"], "switchboard-owned")
 
 
+    def test_the_render_carries_the_capability_seed_and_names_where_it_came_from(self):
+        """§8's renderer list says "capability seed and later grants", and the manifest
+        used to carry no capability field at all. Asserted against the broker's own
+        `seed_for` rather than a literal bundle: the vocabulary is open (C12), so a list
+        written here would pin today's shipped roles and pass while the seed drifted."""
+        got = self.data("instructions", "--role", "lead")
+        b = broker_mod.Broker(store.connect(), None, repo=self.repo)
+        self.addCleanup(b.db.close)
+        self.assertEqual(got["capabilities"]["seed"],
+                         b.seed_for("lead", False, spawner="human"))
+        self.assertEqual(got["capabilities"]["template"],
+                         sorted(roles_mod.template_capabilities(
+                             roles_mod.load(self.repo), "lead", False, self.repo)))
+        self.assertTrue(got["capabilities"]["template_source"].endswith("lead.md"))
+        code, out, _ = self.sb("instructions", "--role", "lead")
+        self.assertEqual(code, 0)
+        self.assertIn("capabilities:", out)
+        for cap in got["capabilities"]["seed"]:
+            self.assertIn(cap, out)
+        # And the provenance follows the BUNDLE, not the prose: a repo that states a
+        # role's capabilities in its own `roles.toml` must be credited for them, or the
+        # manifest sends a maintainer to edit a shipped file that no longer decides it.
+        (self.sw / "roles.toml").write_text(
+            '[lead]\ncapabilities = ["!reset", "write-tracked"]\n')
+        mine = self.data("instructions", "--role", "lead")["capabilities"]
+        self.assertEqual(mine["seed"], ["write-tracked"])
+        self.assertEqual(mine["template_source"], f"{self.sw / 'roles.toml'}:[lead]")
+        self.assertEqual(mine["template_ownership"], "external-to-switchboard")
+
+    def test_the_render_lists_guidance_and_lifecycle_rows_outside_the_prompt(self):
+        """The other half of §8's renderer list — "relevant guidance and lifecycle state".
+        The shape assertion that matters is the LAST one: these rows are delivered at the
+        turn they apply to, so a render that let one into the standing payload would be
+        previewing a prompt switchboard does not send."""
+        got = self.data("instructions", "--role", "lead")
+        kinds = {r["kind"] for r in got["just_in_time"]}
+        self.assertEqual(kinds, {"guidance", "lifecycle"})
+        for row in got["just_in_time"]:
+            self.assertTrue(row["source"] and row["condition"] and row["resolution"])
+            self.assertIn(row["ownership"],
+                          {"switchboard-owned", "external-to-switchboard"})
+            self.assertNotIn(row["text"], got["rendered"])
+        self.assertTrue(any(r["kind"] == "guidance" for r in got["just_in_time"]))
+        self.assertTrue(any(r["prompt"] == "notify.wait_expired"
+                            for r in got["just_in_time"] if r["kind"] == "lifecycle"))
+        code, out, _ = self.sb("instructions", "--role", "lead")
+        self.assertIn("just-in-time (not in the standing prompt)", out)
+        self.assertIn("notify.wait_expired", out)
+
+    def test_a_nameless_preview_never_reads_a_live_agents_capabilities(self):
+        """A bare `sb instructions --role X` must not inherit the held capabilities of an
+        agent that merely happens to be named like the preview placeholder. Only an
+        explicitly given `--name` previews a real live agent's caps and grants — otherwise
+        the renderer would silently leak one agent's authority into an unrelated preview."""
+        db = store.connect()
+        self.addCleanup(db.close)
+        store.create_agent(db, name="preview", role="lead", parent="human")
+        store.seed_capabilities(db, "preview", ["spawn", "write-tracked"])
+        # Nameless preview: the DERIVED seed, not the planted agent's caps, and not "live".
+        got = self.data("instructions", "--role", "worker")["capabilities"]
+        self.assertFalse(got["live"])
+        self.assertEqual(got["held"], got["seed"])
+        self.assertNotIn("spawn", got["held"])       # the planted agent had it; the preview must not
+        self.assertEqual(got["grants"], [])
+        # The live-preview feature still works when the name is asked for explicitly.
+        named = self.data("instructions", "--role", "worker", "--name", "preview")["capabilities"]
+        self.assertTrue(named["live"])
+        self.assertEqual(named["held"], ["spawn", "write-tracked"])
+
+    def test_a_repository_guidance_row_is_reported_against_the_file_that_added_it(self):
+        """Provenance for a JOINED table. The ledger merges shipped rows with the repo's
+        and a `Rule` carries no source field, so the manifest has to ask the repo file
+        which ids it named — and a renderer that credited every row to
+        `defaults/guidance.toml` would point a maintainer at a file they cannot edit."""
+        (self.sw / "guidance.toml").write_text(
+            '[[rule]]\nid = "house-rule"\ntext = "Ours."\n')
+        got = self.data("instructions", "--role", "worker")
+        mine = next(r for r in got["just_in_time"] if r.get("rule") == "house-rule")
+        self.assertEqual(mine["source"], str(self.sw / "guidance.toml"))
+        self.assertEqual(mine["ownership"], "external-to-switchboard")
+        self.assertTrue(mine["included"])
+        shipped = next(r for r in got["just_in_time"]
+                       if r.get("rule") and r["rule"] != "house-rule")
+        self.assertEqual(shipped["ownership"], "switchboard-owned")
+
+
 class CapabilitiesListingTest(ListingSandbox):
     def vocabulary(self) -> list[str]:
         """What `sb grant` will accept here, asked of the broker itself.

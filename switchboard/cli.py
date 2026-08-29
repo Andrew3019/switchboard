@@ -419,7 +419,9 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--as", dest="as_prompt", help="explicit ad-hoc role prompt")
     ins.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET")
     ins.add_argument("--workspace", metavar="NAME")
-    ins.add_argument("--name", default="preview", help="identity name shown in the preview")
+    ins.add_argument("--name", default=None,
+                     help="identity name shown in the preview; give a live agent's name to "
+                          "preview its actual held capabilities and grants")
     ins.add_argument("--parent", default=HUMAN, help="parent shown in the preview")
     ins.add_argument("--task", help="separate initial task to show beside the standing prompt")
     cmd("init", help="pin this repo for switchboard (writes no CLAUDE.md)")
@@ -605,7 +607,8 @@ def _validate(args) -> None:
 
     elif cmd == "instructions":
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
-        args.name = validate.agent_name(args.name, "--name")
+        if args.name is not None:
+            args.name = validate.agent_name(args.name, "--name")
         args.parent = validate.line(args.parent, "--parent", max_len=validate.MAX_TOKEN)
         if args.model is not None:
             args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
@@ -1600,6 +1603,40 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 f"  {segment['order']:02d} {marker} {segment['kind']} "
                 f"[{segment['source']}; {segment['condition']}; "
                 f"{segment['ownership']}; {segment['characters']} chars]")
+            if segment["included"]:
+                lines.append(f"     {segment['text']}")
+        caps = manifest["capabilities"]
+        lines.append("capabilities:")
+        lines.append(
+            f"  seed {', '.join(caps['seed']) or 'nothing'} "
+            f"[template {', '.join(caps['template']) or 'nothing'} via "
+            f"{caps['template_source']}; {caps['template_ownership']}]")
+        # The ∩-rule, printed only when it actually took something away. A "withheld:
+        # nothing" line under every preview would train the reader past the one preview
+        # where a lead comes out crippled because a worker spawned it.
+        if caps["withheld_by_spawner"]:
+            lines.append(f"  withheld by spawner {caps['spawner']}: "
+                         + ", ".join(caps["withheld_by_spawner"]))
+        if caps["live"]:
+            lines.append(f"  live now: may do {', '.join(caps['held']) or 'nothing'}"
+                         + (f"; may pass down only {', '.join(caps['delegable_only'])}"
+                            if caps["delegable_only"] else ""))
+        for g in caps["grants"]:
+            lines.append(f"  granted {g['capability']} by {g['granted_by']}"
+                         + (f" — {g['reason']}" if g["reason"] else ""))
+        lines.append("just-in-time (not in the standing prompt): "
+                     + delivery["just_in_time"])
+        for segment in manifest["just_in_time"]:
+            marker = "+" if segment["included"] else "-"
+            named = segment.get("rule") or segment.get("prompt")
+            lines.append(
+                f"  {segment['order']:02d} {marker} {segment['kind']} {named} "
+                f"[{segment['source']}; {segment['condition']}; "
+                f"{segment['ownership']}; {segment['characters']} chars]")
+            lines.append(f"     {segment['resolution']} -> {segment['channel']}")
+            # Same convention as the segments block above: the text of what is actually
+            # delivered, for the rows that would be. A `-` row's text is in the JSON —
+            # printing all twenty of them would bury the two that fire.
             if segment["included"]:
                 lines.append(f"     {segment['text']}")
         lines.append("external boundaries:")
