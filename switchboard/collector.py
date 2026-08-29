@@ -481,6 +481,18 @@ def run_auto_restore(snap, state: State, db_path: Optional[Path]) -> bool:
     — is all `Broker.restore_sweep`'s, running in a process on current code. Nothing about
     that policy is re-decided here, and this must never grow a second opinion about it.
 
+    **Including "is this a restart at all".** A confirmed death is the cheapest signal the
+    collector can spawn on, and it is deliberately NOT the whole test: a pane closed by
+    hand is one confirmed death and looks identical to a restart casualty from here, where
+    the only thing in view is one snapshot with no death-timing in it. So this fires the
+    sweep on a confirmed death and the sweep decides whether the cohort is actually
+    restart-SHAPED (`Broker._looks_like_restart` — several agents down together), restoring
+    nothing when it is a lone death. That keeps the "several simultaneous deaths" narrowing
+    where the timing data lives, next to the cohort it judges, rather than half here on a
+    snapshot that cannot see it — the same reason every other decision on this loop is the
+    spawned command's and not this file's. A lone death therefore still costs one spawn
+    that restores nothing; the once-per-name memory keeps that to one.
+
     **Why the trigger is a CONFIRMED death and not `gone`.** `gone` is one reading of
     herdr, and the reconciler is what turns a sustained one into a recorded death
     (`status._record_gone`, after `GONE_CONFIRM_GRACE` of continuous absence). Waiting for

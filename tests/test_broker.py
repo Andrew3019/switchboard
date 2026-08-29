@@ -4800,3 +4800,81 @@ class RestoreSweepTest(unittest.TestCase):
         r = self.b.restore_sweep(me=HUMAN, dry_run=True)
 
         self.assertEqual(list(r), ["mid-debounce"])
+
+    # --- The automatic half only: a confirmed death is not yet a restart -----------------
+
+    def test_the_automatic_sweep_declines_a_lone_death(self):
+        """The whole point of narrowing the trigger: a pane closed by hand, a single kill,
+        or one dropped binding is one confirmed death and looks exactly like a restart
+        casualty to the cohort query. The automatic sweep restores NOTHING unless the
+        cohort is restart-shaped, and says so in the log rather than in silence."""
+        self._agent("solo", is_top=True)
+        self._crashed("solo")
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(list(r), [])
+        self.assertEqual(self.h.started, [])
+        self.assertEqual(store.get_agent(self.db, "solo")["state"], status.GONE_STATE)
+        ev = next(json.loads(e["payload"]) for e in store.recent_events(self.db, limit=50)
+                  if e["kind"] == "restore_sweep")
+        self.assertEqual(ev["declined"], "not a fleet-wide restart")
+        self.assertEqual(ev["cohort"], ["solo"])
+
+    def test_a_human_sweep_still_restores_a_lone_death(self):
+        """`auto` is the whole gate. A person typing `sb restore --sweep` is trusted to
+        mean it, so the same lone death the automatic half declines still comes back."""
+        self._agent("solo", is_top=True)
+        self._crashed("solo")
+
+        r = self.b.restore_sweep(me=HUMAN)
+
+        self.assertEqual(list(r), ["solo"])
+        self.assertIn("solo", [s["name"] for s in self.h.started])
+
+    def test_the_automatic_sweep_restores_a_simultaneous_cohort(self):
+        """Several agents down together inside one window IS a restart, and is the case the
+        automatic half exists for — parents first, exactly as a human's sweep."""
+        self._agent("alpha", is_top=True)
+        self._agent("alpha-kid", parent="alpha")
+        self._crashed("alpha", "alpha-kid")           # set_state stamps ended_at ≈ now
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(sorted(r), ["alpha", "alpha-kid"])
+        order = [s["name"] for s in self.h.started]
+        self.assertLess(order.index("alpha"), order.index("alpha-kid"))
+
+    def test_the_automatic_sweep_declines_two_deaths_spread_past_the_window(self):
+        """Two unrelated deaths minutes apart inside the same ten-minute `SWEEP_RECENT`
+        window are a coincidence, not one event — `_crash_time` places them far enough
+        apart that the cluster test rejects them."""
+        self._agent("early", is_top=True)
+        self._agent("late", is_top=True)
+        self._crashed("early", "late")
+        self.db.execute("UPDATE agents SET ended_at=? WHERE name=?",
+                        (store.now() - broker_mod.RESTART_WINDOW - 30, "early"))
+        self.db.commit()
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(list(r), [])
+        self.assertEqual(self.h.started, [])
+
+    def test_the_automatic_sweep_clusters_mid_debounce_and_confirmed_together(self):
+        """The two halves of a real restart cohort ride different clocks — `absent_since`
+        for a row still debouncing, `ended_at` (about a grace later) for one confirmed.
+        `_crash_time` puts both back on the crash instant, so a fleet caught half-confirmed
+        still reads as the one event it was."""
+        self._agent("confirmed", is_top=True)
+        self._agent("debouncing", is_top=True)
+        self._crashed("confirmed")                    # ended_at ≈ now (confirmed just now)
+        # The other went absent at the same instant but is not confirmed yet: absent_since
+        # is the crash moment, ~a grace BEFORE this confirmation landed.
+        self.db.execute("UPDATE agents SET absent_since=? WHERE name=?",
+                        (store.now() - status.GONE_CONFIRM_GRACE, "debouncing"))
+        self.db.commit()
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(sorted(r), ["confirmed", "debouncing"])

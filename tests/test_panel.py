@@ -1136,6 +1136,9 @@ class TheAutoRestoreTrigger(PanelTest):
 
         self.enterContext(mock.patch.object(collector.subprocess, "run", record))
         self.enterContext(mock.patch.object(collector, "doorbell_sb", lambda: "/bin/sb"))
+        # The switch ships OFF (`[restore] auto = false`), so every test here that means to
+        # watch the trigger FIRE turns it on; `test_the_switch...` covers both positions.
+        self.enterContext(mock.patch.object(collector, "AUTO_RESTORE", True))
 
     def _dead(self, *names, alive=False):
         """The fleet a herdr restart leaves once the reconciler has recorded the deaths."""
@@ -1198,12 +1201,17 @@ class TheAutoRestoreTrigger(PanelTest):
         self.assertTrue(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
         self.assertEqual(len(self.ran), 2)
 
-    def test_the_switch_turns_the_automatic_half_off(self):
-        """`sb restore --sweep` typed by hand is untouched by it — see `[restore] auto`."""
+    def test_the_switch_governs_the_automatic_half_both_ways(self):
+        """It ships OFF (`[restore] auto = false`), and `sb restore --sweep` typed by hand
+        is untouched by it either way. Off restores nothing; on runs the sweep."""
         state = collector.State(pid=1, started_at=0.0)
         with mock.patch.object(collector, "AUTO_RESTORE", False):
-            self.assertFalse(collector.run_auto_restore(self._dead("w1"), state, None))
+            self.assertFalse(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
         self.assertEqual((self.ran, state.restores), ([], 0))
+
+        with mock.patch.object(collector, "AUTO_RESTORE", True):
+            self.assertTrue(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
+        self.assertEqual([a[1] for a in self.ran], ["restore"])
 
     def test_it_never_starts_in_the_same_tick_as_a_reap(self):
         """The reconciler records a death and this brings the dead back. Two `sb`

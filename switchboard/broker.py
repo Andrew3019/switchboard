@@ -56,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
+from .status import GONE_CONFIRM_GRACE, GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -146,6 +146,26 @@ FINISHED = tuple(config.setting("states.finished"))
 # visible — an unrelated crash inside the same ten minutes is offered, named on its own
 # line, and `--dry-run` shows the whole list before anything spawns.
 SWEEP_RECENT = 600
+
+# What tells a fleet-wide herdr restart from a single pane dying, for the AUTOMATIC sweep
+# only (`restore_sweep(auto=True)`; a human typing the command is trusted to mean it and is
+# never gated). A restart takes out every agent at one instant; a pane closed in herdr's UI,
+# a lone `kill`, or one dropped binding takes out exactly one — and those two look identical
+# to `_crash_cohort`, which is why the automatic half must not act on cohort membership
+# alone. So it acts only on a CLUSTER: at least `RESTART_MIN_COHORT` agents whose crash
+# moments (`_crash_time`) fall inside one `RESTART_WINDOW`. This is the "several simultaneous
+# deaths" narrowing, not a herdr process-identity check — it needs no new herdr call and no
+# new snapshot field, and its cost is a rare false negative (a genuine restart of a fleet
+# that happened to hold a single agent is left for `sb restore --sweep`, typed) far cheaper
+# than the false positive it removes (a hand-closed pane silently resumed a minute later).
+#
+# `RESTART_WINDOW` is wider than a tick on purpose: at the moment the sweep runs, a real
+# restart's cohort is part still mid-debounce and part already confirmed, and `_crash_time`
+# puts both back on the crash-instant clock to within about a `gone_confirm_grace`. Two
+# minutes absorbs that spread while staying far under `SWEEP_RECENT`, so two unrelated
+# deaths minutes apart inside the same ten-minute window do not read as one event.
+RESTART_MIN_COHORT = 2
+RESTART_WINDOW = 120.0
 
 # The protocol travels as a system prompt, NOT a file.
 #   - ~/.claude/CLAUDE.md would leak into every ordinary Claude session
@@ -8045,12 +8065,16 @@ class Broker:
         refuses a live agent on its own — but the sweep classifies it up front so the
         second run reports `already running` rather than a list of failures.
 
-        **`auto` is a label on the event and nothing else.** The collector runs this
-        command by itself once a herdr restart's deaths have been confirmed
-        (`collector.run_auto_restore`), and everything it gets is what a person typing the
-        command gets — same scope, same cohort, same order, same refusals. What the flag
-        buys is that `sb log` can tell a fleet that came back on its own from one somebody
-        asked for, which is the first question about a restore nobody remembers ordering.
+        **`auto` is the label on the event AND the one gate a person's sweep does not
+        get.** The collector runs this command by itself once a death has been confirmed
+        (`collector.run_auto_restore`), but a confirmed death is not yet a restart: a pane
+        closed by hand looks identical to `_crash_cohort`. So the automatic half acts only
+        on a cohort that is restart-SHAPED — several agents down together, `_looks_like_restart`
+        — and restores nothing otherwise, while a person typing `sb restore --sweep` is
+        trusted to mean it and reaches the same scope, cohort, order and refusals with no
+        such gate. What the flag also buys is that `sb log` can tell a fleet that came back
+        on its own from one somebody asked for, the first question about a restore nobody
+        remembers ordering.
 
         **One herdr check, at the top, and never read as an empty cohort.** A herdr that
         cannot be asked fails identically for every candidate, so it refuses the whole
@@ -8074,7 +8098,19 @@ class Broker:
             scope = self._descendants(me)
 
         out = RestoreSweepResult()
-        for a in self._crash_cohort(scope):
+        cohort = self._crash_cohort(scope)
+        if auto and not self._looks_like_restart(cohort):
+            # The automatic half declines a cohort that is not restart-shaped and restores
+            # NOTHING — see `_looks_like_restart` and `[restore] auto`. Logged so a fleet
+            # that did not come back on its own is a recorded decision, not silence: the
+            # question after a restart nobody remembers is "did it try", and this answers
+            # it. A human's sweep never reaches here; `auto` is the whole gate.
+            store.log_event(self.db, kind="restore_sweep", dry_run=dry_run, by=me,
+                            auto=auto, restored=[], skipped=[], unrestorable=[],
+                            failed=[], declined="not a fleet-wide restart",
+                            cohort=[a["name"] for a in cohort])
+            return out
+        for a in cohort:
             name = a["name"]
             if not a["session_id"]:
                 # Excluded from the attempt and never from the report. A row that silently
@@ -8139,6 +8175,43 @@ class Broker:
                   if (a["ended_at"] is None and _column(a, "absent_since"))
                   or (a["state"] == GONE_STATE and (a["ended_at"] or 0) >= cutoff)]
         return self._parents_first(picked)
+
+    def _crash_time(self, a) -> Optional[float]:
+        """When this cohort member actually went missing, on ONE clock — or None.
+
+        A cohort is racing the collector (see `_crash_cohort`), so its members carry the
+        crash moment in two different columns on two different clocks, and telling a
+        simultaneous event from a coincidence needs them on one. A row still mid-debounce
+        has `absent_since` — the moment herdr first stopped listing it, which IS the crash
+        instant. A row already confirmed has that cleared and an `ended_at` set at
+        CONFIRMATION, about a `gone_confirm_grace` later; subtracting the grace puts it back
+        beside the mid-debounce rows, so a fleet whose deaths are half confirmed and half
+        still debouncing still reads as the one instant it was.
+        """
+        absent = _column(a, "absent_since")
+        if a["ended_at"] is None:
+            return float(absent) if absent else None
+        return float(a["ended_at"]) - GONE_CONFIRM_GRACE
+
+    def _looks_like_restart(self, cohort) -> bool:
+        """Whether this crash cohort is a fleet-wide restart rather than a lone death.
+
+        The narrowing the automatic sweep needs and a human's does not (`restore_sweep`,
+        `RESTART_MIN_COHORT`). True when some `RESTART_WINDOW`-long span holds at least
+        `RESTART_MIN_COHORT` of the cohort's crash moments — a burst of deaths at one
+        instant, which is what a restart is and what a single pane closing can never be.
+
+        Rows whose crash moment cannot be placed on the clock (`_crash_time` is None) are
+        left out of the count rather than treated as now: a row that cannot prove it went
+        down with the others is not evidence of a restart.
+        """
+        times = sorted(t for t in (self._crash_time(a) for a in cohort) if t is not None)
+        if len(times) < RESTART_MIN_COHORT:
+            return False
+        for i in range(len(times) - RESTART_MIN_COHORT + 1):
+            if times[i + RESTART_MIN_COHORT - 1] - times[i] <= RESTART_WINDOW:
+                return True
+        return False
 
     def _parents_first(self, rows) -> list:
         """Root-first, so a restored child's mail has somewhere live to land.
