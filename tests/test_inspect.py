@@ -96,6 +96,59 @@ class InspectTest(Base):
         self.assertEqual(d.agent.state, "working")
         self.assertEqual(d.agent.herdr_state, "idle")
 
+    def test_the_single_agent_fast_path_reads_the_same_row_as_a_full_collect(self):
+        """#227: `inspect` scopes collect to one agent to skip the whole-fleet scans, and
+        the row it hands back must be byte-for-byte what an unscoped collect would build —
+        its own counts, activity, block reason and summary all intact, for every shape of
+        agent (a busy sibling, a blocked one, the root, the newest)."""
+        for i in range(6):
+            self.agent(name=f"a{i}", session_id=f"s{i}",
+                       parent="a0" if i else None)
+            store.log_event(self.db, kind="herdr", agent=f"a{i}")
+            store.put_message(self.db, from_agent=f"a{i}", to_agent="a0", kind="done",
+                              body=f"[done] summary {i}")
+            store.put_message(self.db, from_agent="a0", to_agent=f"a{i}", kind="tell",
+                              body=f"unread {i}")
+        store.log_event(self.db, kind="blocked", agent="a3", why="stuck on a3")
+        store.set_state(self.db, "a3", "blocked")
+        h = FakeHerdr([alive(f"a{i}") for i in range(6)])
+        now = store.now() + int(status.STALLED_FLOOR) + 1
+        full = {a.name: a for a in status.collect(self.db, h, now=now, reap=False).agents}
+        for name in ("a0", "a1", "a3", "a5"):
+            scoped = status.inspect(self.db, h, name, lines=0, now=now).agent
+            self.assertEqual(scoped.as_dict(), full[name].as_dict(), name)
+
+    def test_the_scoped_aggregates_agree_with_the_whole_fleet_versions(self):
+        """The perf win (#227) is the six per-fleet SQL scans reading one agent instead of
+        grouping the whole store. Each scoped read must return, for its agent, exactly what
+        the unscoped read has in that agent's slot — the scoping is a filter, not a new
+        answer."""
+        for i in range(4):
+            self.agent(name=f"a{i}", session_id=f"s{i}", parent="a0" if i else None)
+            store.log_event(self.db, kind="herdr", agent=f"a{i}")
+            store.put_message(self.db, from_agent=f"a{i}", to_agent="a0", kind="done",
+                              body=f"[done] summary {i}")
+            store.put_message(self.db, from_agent="a0", to_agent=f"a{i}", kind="tell",
+                              body=f"unread {i}")
+        store.log_event(self.db, kind="blocked", agent="a2", why="stuck")
+        # `asker` asked a0 a question and a0 has never messaged it back — the one row
+        # `_awaiting_reply` finds. It is deliberately NOT one of the a{i} above, because a0
+        # sent each of those an "unread" message, which counts as an answer.
+        self.agent(name="asker", session_id="sq", parent="a0")
+        store.put_message(self.db, from_agent="asker", to_agent="a0", kind="tell",
+                          body="which library?", needs_reply=True)
+        for fn in (status._unread_counts, status._undelivered_counts,
+                   status._last_activity, status._block_reasons, status._last_summaries):
+            full = fn(self.db)
+            for name in ("a0", "a2", "a3"):
+                self.assertEqual(fn(self.db, name).get(name), full.get(name),
+                                 f"{fn.__name__}[{name}]")
+        full_wait = status._awaiting_reply(self.db)
+        self.assertIn("asker", full_wait)       # the asker is genuinely waiting
+        for name in ("a0", "a2", "asker"):
+            self.assertEqual(name in status._awaiting_reply(self.db, name),
+                             name in full_wait, f"_awaiting_reply[{name}]")
+
     def test_an_agent_herdr_has_never_heard_of_is_gone_not_an_error(self):
         self.agent(session_id="s1")     # past its spawn; a session-less row this young
         d = self.inspect(h=FakeHerdr([]))   # would be a claim, and claims are not reaped
