@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -208,6 +209,17 @@ class StoreTest(unittest.TestCase):
         self.assertIsNotNone(store.get_agent(d2, "w"))       # data survived
         self.assertEqual(store.schema_deficit(d2), [])       # and is fully caught up
         d2.close()
+
+    def test_index_ddl_emits_every_declared_index(self):
+        """`_index_ddl` parses SCHEMA with a regex, and a declaration it fails to match is
+        dropped SILENTLY — an index that would then never migrate onto an existing store.
+        Pin the emitted set against the indexes SCHEMA actually declares, so a future
+        declaration the regex cannot read fails here instead of on a slow board."""
+        declared = re.findall(r"CREATE (?:UNIQUE )?INDEX (\w+)", store.SCHEMA)
+        emitted = [re.search(r"INDEX IF NOT EXISTS (\w+)", s).group(1)
+                   for s in store._index_ddl()]
+        self.assertEqual(sorted(emitted), sorted(declared))
+        self.assertTrue(all("IF NOT EXISTS" in s for s in store._index_ddl()))
 
     # -- the branch column -----------------------------------------------
     #

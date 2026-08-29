@@ -81,6 +81,10 @@ STATE = {
     # still recedes, which is what "finished, nothing to do" should do.
     "done": "steel_blue",
     "idle": "dim",
+    # `waiting` — an idle turn the agent parked on purpose (`sb waiting`). A desaturated
+    # purple: brighter than `idle`'s dim so it reads as deliberate, but no red/yellow —
+    # nothing is wrong. NOT cyan, which is the gutter's, for `done`'s reason above.
+    "waiting": "medium_purple",
     "blocked": "bold red",
     "failed": "bold red",
     "gone": "bold red",

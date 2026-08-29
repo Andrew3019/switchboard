@@ -92,10 +92,12 @@ STATE_STYLE = {
     # border, `bold blue` is its title, and anything bluer leans into the gutter's cyan.
     "done": "steel_blue",
     "idle": "dim",
-    # A calm cyan: a parked-on-purpose turn, brighter than `idle`'s dim so it reads as a
-    # deliberate state and not a stall, quieter than `working`'s green. See
-    # `status.AgentStatus._idle_word`.
-    "waiting": "cyan",
+    # A desaturated purple — a parked-on-purpose turn: brighter than `idle`'s dim so it
+    # reads as a deliberate state and not a stall, but no red or yellow because nothing is
+    # wrong. NOT cyan: that is the workspace gutter's colour, drawn two columns from this
+    # word, and `done` already sidesteps the same clash. Kept in step with
+    # `scripts/board_mockup.py`. See `status.AgentStatus._idle_word`.
+    "waiting": "medium_purple",
     "blocked": "bold red",
     "failed": "bold red",
     "gone": "bold red",
