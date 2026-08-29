@@ -875,7 +875,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("lead-only", rows)
         worker = self.rules(role="worker")
         self.assertFalse(worker["needs-fork"]["included"])
-        self.assertIn("capability seed", worker["needs-fork"]["resolution"])
+        self.assertIn("does not hold fork", worker["needs-fork"]["resolution"])
         self.assertNotIn("lead-only", worker)
 
     def test_just_in_time_rows_never_enter_the_standing_prompt(self):

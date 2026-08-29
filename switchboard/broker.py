@@ -4909,10 +4909,20 @@ class Broker:
             keys += [f"holds {c}" for c in rule.holds]
             keys += [f"lacks {c}" for c in rule.lacks]
             keys += [f"{fact} {op} {value}" for fact, op, value in rule.when]
-            capable = (all(c in mine for c in rule.holds)
-                       and not any(c in mine for c in rule.lacks))
+            # NAMED, not just refused. "Excluded" alone sends the reader back to the
+            # ledger to work out which key shut the row out — and the answer is the other
+            # half of this same manifest, so it costs nothing to say it here. It is read
+            # off the set above, which is the LIVE one for an agent that exists and the
+            # seed for a preview, so a delegable-only `fork` correctly keeps a row out:
+            # the gate asks what the agent HOLDS.
+            missing = [c for c in rule.holds if c not in mine]
+            blocking = [c for c in rule.lacks if c in mine]
+            capable = not missing and not blocking
             if not capable:
-                resolution = "excluded by the capability seed"
+                why = ("does not hold " + ", ".join(missing)) if missing else ""
+                why += ("; " if why and blocking else "")
+                why += ("holds " + ", ".join(blocking)) if blocking else ""
+                resolution = f"excluded by this agent's capabilities: {why}"
             elif rule.when:
                 resolution = "turn-conditional: live store facts, no agent to ask yet"
             elif rule.command:
