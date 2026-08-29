@@ -92,6 +92,10 @@ STATE_STYLE = {
     # border, `bold blue` is its title, and anything bluer leans into the gutter's cyan.
     "done": "steel_blue",
     "idle": "dim",
+    # A calm cyan: a parked-on-purpose turn, brighter than `idle`'s dim so it reads as a
+    # deliberate state and not a stall, quieter than `working`'s green. See
+    # `status.AgentStatus._idle_word`.
+    "waiting": "cyan",
     "blocked": "bold red",
     "failed": "bold red",
     "gone": "bold red",
