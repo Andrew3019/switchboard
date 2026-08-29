@@ -7692,7 +7692,7 @@ class Broker:
         return panes
 
     def _close_restore_panes(self, a, workspace_id: str, cwd: str) -> None:
-        """Close the dead shells a restore is about to replace — ONLY this agent's own.
+        """Close the dead shells a restore has just replaced — ONLY this agent's own.
 
         Pane ids survive a herdr restart, and that is the fact this is built on. Measured
         against an isolated instance on herdr 0.8.2 (`kill -9` the server, restart it
@@ -7786,13 +7786,19 @@ class Broker:
         tier 4), good enough to aim a tab at and never good enough to write down as where
         this agent is.
         """
-        # Close first, then recreate.  When the recorded id is still valid this is the
-        # target workspace; after a herdr restart it selects nothing, and the by-name
-        # retry below performs the same cleanup against the new run's id.
-        self._close_restore_panes(a, wsid, str(where))
+        # CREATE FIRST, THEN CLOSE, and that order is load-bearing: a workspace whose
+        # last pane closes is destroyed by herdr, so closing this agent's pair before
+        # making its new tab empties the very space the restore is aiming at. Measured on
+        # herdr 0.8.2 with a real agent: both panes closed, then `tab create --workspace
+        # w6A` came back `workspace_not_found`, the id was purged from every row holding
+        # it and the agent came back in a bare tab — the placement this whole method
+        # exists to keep. Creating first leaves the space occupied throughout, and it is
+        # the safer order for the cleanup too: the new pane is live when the old ids are
+        # matched, so herdr cannot have handed one of them to it.
         pane, landed = self._tab_for(wsid, where, env=env)
         if not wsid or landed or not a["workspace"]:
             # Nothing was recorded, or what was recorded still works: no second guess.
+            self._close_restore_panes(a, landed or wsid, str(where))
             return pane
         byname = self._workspace_id(a["workspace"])
         if not byname or byname == wsid:
@@ -7801,8 +7807,10 @@ class Broker:
             self.h.close_pane(pane)
         except HerdrError as e:
             store.log_event(self.db, kind="orphan_pane", agent=a["name"], error=str(e))
-        self._close_restore_panes(a, byname, str(where))
         pane, landed = self._tab_for(byname, where, env=env)
+        # The same cleanup against the new run's id, and after the tab for the same
+        # reason as above.
+        self._close_restore_panes(a, byname, str(where))
         store.log_event(self.db, kind="restore_workspace_reresolved", agent=a["name"],
                         workspace=a["workspace"], was=wsid, now=landed or "")
         return pane

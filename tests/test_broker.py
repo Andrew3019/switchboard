@@ -236,6 +236,30 @@ class RestoreCleanupTest(unittest.TestCase):
 
         self.assertEqual(self.h.closed, ["idle"])
 
+    def test_the_new_tab_is_made_before_the_old_panes_are_closed(self):
+        """A workspace whose last pane closes is destroyed by herdr, so closing this
+        agent's pair first empties the space the restore is aiming at.
+
+        Measured on herdr 0.8.2 with a real agent, before this order was fixed: both panes
+        closed, `tab create --workspace w6A` came back `workspace_not_found`, the id was
+        purged from every row holding it, and the agent came back in a bare tab — losing
+        the placement `_restore_tab` exists to keep.
+        """
+        cwd = str(self.repo)
+        order: list = []
+        self.h.restore_panes = [{"pane_id": "w1:p1", "workspace_id": "w1", "cwd": cwd},
+                                {"pane_id": "w1:p2", "workspace_id": "w1", "cwd": cwd}]
+        self.h.restore_shells = {"w1:p1": 101, "w1:p2": 102}
+        create, close = self.h.create_tab, self.h.close_pane
+        self.h.create_tab = lambda **kw: (order.append("create"), create(**kw))[1]
+        self.h.close_pane = lambda pane: (order.append(f"close {pane}"), close(pane))[1]
+
+        row = self._agent(pane="w1:p1", board="w1:p2")
+        row["workspace"] = "space"
+        self.b._restore_tab(row, "w1", cwd)
+
+        self.assertEqual(order, ["create", "close w1:p1", "close w1:p2"])
+
     def test_restore_cleanup_close_failure_is_nonfatal(self):
         cwd = str(self.repo)
         self.h.restore_panes = [{"pane_id": "idle", "workspace_id": "ws", "cwd": cwd}]
