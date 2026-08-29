@@ -432,14 +432,23 @@ class StatusTest(unittest.TestCase):
         self.assertFalse(a.needs_human)
         self.assertEqual(a.idle_excuse, "waiting on a reply")
 
-    def test_an_explicit_wait_is_visible_and_not_stalled(self):
-        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        store.set_wait(self.db, "w1", "background")
-        a = self.by_name(status.collect(
-            self.db, FakeHerdr([alive("w1", "idle")]),
-            now=self.past_the_floor()))["w1"]
-        self.assertFalse(a.stalled)
-        self.assertEqual(a.idle_excuse, "waiting for background work")
+    def test_each_explicit_wait_mode_is_carried_to_the_board(self):
+        labels = {
+            "background": "WAITING — background work",
+            "any": "WAITING·ANY — waiting on a child",
+            "all": "WAITING·ALL — waiting on all children",
+        }
+        for mode, label in labels.items():
+            with self.subTest(mode=mode):
+                name = f"w-{mode}"
+                store.create_agent(self.db, name=name, role="worker", session_id=name)
+                store.set_wait(self.db, name, mode)
+                a = self.by_name(status.collect(
+                    self.db, FakeHerdr([alive(name, "idle")]),
+                    now=self.past_the_floor()))[name]
+                self.assertFalse(a.stalled)
+                self.assertEqual(a.idle_excuse, label)
+                self.assertEqual(a.wait_excuse, label)
 
     def test_an_explicit_wait_eventually_stops_hiding_a_stall(self):
         """Waiting explains a quiet turn, not permanent silence. If its native task or
@@ -454,7 +463,8 @@ class StatusTest(unittest.TestCase):
             self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE - 1))["w1"]
         self.assertFalse(fresh.stalled)
         self.assertFalse(fresh.wait_expired)
-        self.assertEqual(fresh.idle_excuse, "waiting for background work")
+        self.assertEqual(fresh.idle_excuse, "WAITING — background work")
+        self.assertEqual(fresh.wait_excuse, "WAITING — background work")
 
         stale = self.by_name(status.collect(
             self.db, h, now=wait["started_at"] + status.WAIT_EXCUSE_GRACE + 1))["w1"]
@@ -462,6 +472,7 @@ class StatusTest(unittest.TestCase):
         self.assertTrue(stale.needs_human)
         self.assertTrue(stale.wait_expired)
         self.assertIsNone(stale.idle_excuse)
+        self.assertIsNone(stale.wait_excuse)
         self.assertIsNotNone(store.wait_for(self.db, "w1"), "status is read-only")
 
     def test_only_a_live_unexcused_waiter_earns_the_expiry_nudge(self):

@@ -370,6 +370,8 @@ def marker(a) -> str:
         return "AT PROMPT — waiting on you"
     if a.blocked:
         return f"BLOCKED — {a.blocked_why or 'no reason recorded'}"
+    if a.wait_excuse:
+        return a.wait_excuse
     if not a.settled:
         return ""
     if a.awaiting_keypress:
@@ -401,7 +403,7 @@ def tail_note(a) -> str:
     """
     if a.finished and a.summary:
         return f"done: {a.summary}"
-    if a.idle_excuse:
+    if a.idle_excuse and not a.wait_excuse:
         # THE OTHER HALF OF THE STALLED LINE, and the reason it is above the task.
         # Two rows can both say `idle` and mean opposite things: a lead waiting on
         # its children is doing exactly what the protocol asked of it, and an agent
