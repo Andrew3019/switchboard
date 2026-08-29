@@ -1,0 +1,6 @@
+{
+  "name": "implement the change",
+  "display": "implementation",
+  "anchor": "build",
+  "about": "Build the change. This is the work itself — the longest phase, and the one the board's step chart exists to anchor: without a step here a change record's row is a bare header while the whole of the work happens. Make the coherent change in full before verifying it, then record the verification on the change record (`verification: {commit, check, environment, result, at}`), naming the commit it covers so the evidence is reusable rather than re-earned. On a DIRECT change this is the first step of the auto-composed execution+landing skeleton — implementation, then review, then the human-only checklist, then the PR, then merge — and it owns everything from the first edit to a verified commit. On a SHAPED change it is the same step, sitting after the shaping and the approved change contract."
+}

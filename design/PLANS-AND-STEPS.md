@@ -45,8 +45,9 @@ edited afterwards if it needs it, and nothing links it back to what it came from
 **Change record** — the durable landing record for a direct or shaped change. It carries
 path, task owner, intent or approved contract, solution, evidence, independent review,
 human-only checks, PR/head identity, approval and landing outcome. It may reference one
-evolving plan; it is not a step graph and does not create planning ceremony for a direct
-change.
+evolving plan; on the direct path it carries a fixed execution+landing step skeleton
+(implementation, review, human checklist, PR, merge) rather than a hand-shaped step graph,
+and creates no planning ceremony.
 
 ---
 
@@ -436,9 +437,11 @@ verification and change contract. Execution cannot be presented as sanctioned un
 state is approved.
 
 **An obliged step is added automatically and may be skipped, never omitted, inside the path
-where it applies.** Direct work does not receive shaped-path obligations. Fresh
-implementation review and human-action/landing state are change-record requirements shared
-by both paths rather than synthetic plan steps.
+where it applies.** Direct work does not receive shaped-path obligations — there is no
+change-approval on a direct change, so nothing obliges a review off it. Implementation,
+review, the human checklist, the PR and merge are instead the fixed execution+landing
+skeleton a direct change record is born with: the same step vocabulary as a shaped plan,
+minus the shaping half, with the review and landing evidence recorded on the change record.
 
 What this buys is that **a skip is a state rather than an absence**. An omitted step is
 invisible; a skipped one is on the board with its reason, so a bad call can be seen and

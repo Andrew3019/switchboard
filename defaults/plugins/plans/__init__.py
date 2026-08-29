@@ -35,13 +35,16 @@ The records
             "display": "…", "changelog": [...], "notes": [...], "change": {...},
             "created_by": "w1", "created_at": …}
 
-TWO DOCUMENTS, ONE STORE. A `plan` is the step graph this file has always held; a `record`
-is a change record with no plan — the landing facts a DIRECT change accumulates. Both share
-the `p-<n>` ids, the file-per-plan storage, the locking, the crash-safety and the migration;
-what a record does not have is `steps`, and nothing that reads the step graph touches it.
+TWO DOCUMENTS, ONE STORE. A `plan` is the hand-shaped step graph this file has always held;
+a `record` is a change record with no plan — the landing facts a DIRECT change accumulates.
+Both share the `p-<n>` ids, the file-per-plan storage, the locking, the crash-safety and the
+migration. A record is no longer stepless: it is born with a FIXED execution+landing skeleton
+(`_skeleton`) so a direct change is legible on the board and its PR — what a record does not
+have is a hand-shaped graph, only the fixed one, and the step renderers read both alike.
 `kind` tells them apart, and its ABSENCE means `plan` — which is the whole of backward
 compatibility for the field: every document written before Phase 3 is a plan and reads as
-one without being rewritten.
+one without being rewritten, and a record written before the skeleton simply has no steps to
+draw.
 
     change {"path": "direct"|"shaped", "phase": "shaping"|…|null, "request": …, "contract": …,
             "cause": …, "solution": …, "scope"?: …, "verification": {...}, "review": {...},
@@ -577,11 +580,13 @@ _ANCHORS = ("design", "build", "review", "pr", "pre-merge", "merge")
 _UNANCHORED = _ANCHORS.index("build")
 
 # THE TWO KINDS OF DOCUMENT this store holds, and the field that tells them apart. A `plan`
-# is the step graph this file has always held. A `record` is the change record: the durable
-# landing facts a change accumulates — verification, review, PR head, human approval — held
-# for a change that has NO plan, which is the ordinary direct change. Both live in the same
-# `p-<n>.json` store and share its ids, locking, crash-safety, migration and rendering; what
-# a `record` does not have is `steps`, and nothing that reads the step graph touches it.
+# is the hand-shaped step graph this file has always held. A `record` is the change record:
+# the durable landing facts a change accumulates — verification, review, PR head, human
+# approval — held for a change that has NO plan, which is the ordinary direct change. Both
+# live in the same `p-<n>.json` store and share its ids, locking, crash-safety, migration and
+# rendering; what a `record` does not have is a HAND-SHAPED graph — it is born with the fixed
+# execution+landing skeleton (`_skeleton`), and the step renderers read a record's steps and a
+# plan's alike.
 #
 # ABSENT MEANS PLAN, which is the whole of backward compatibility for this field: every
 # document written before it existed is a plan, and reads as one without being rewritten. A
@@ -827,15 +832,19 @@ WHEN A PLAN EXISTS
   plan whose approval precedes the implementation. That is the shaped path, and the rest of
   this guide is about it.
 
-  A DIRECT change is heading for a landing change too, and it gets NO plan. A bounded fix
-  that goes straight to the work makes no plan and no change approval — no ceremony because
-  the plugin exists. It makes a CHANGE RECORD with `sb plugin plans record --request "..."`
-  as soon as it is clear the work is direct and heading for a landing change — the same
-  moment a shaped change is born with one, not reconstructed once the PR is already open.
-  That first call costs one line; verification, review, the PR and the human's approval
-  fill the rest of it in as the work actually produces them. Small is still the direct
-  path and not a short plan: work so small it will never reach review or a PR — a typo, a
-  one-line comment fix — makes no record at all.
+  A DIRECT change is heading for a landing change too, and it gets NO plan — no shaping, no
+  change approval, none of that ceremony. It makes a CHANGE RECORD with `sb plugin plans
+  record --request "..."` as soon as it is clear the work is direct and heading for a landing
+  change — the same moment a shaped change is born with its record, not reconstructed once
+  the PR is already open. That record is born with a fixed execution+landing STEP SKELETON —
+  implementation, review, the human-only checklist, the PR, merge — so a direct change shows
+  its progress on the board and its PR exactly as a plan does, without a plan's shaping half.
+  What the skeleton is NOT is a plan: it is a fixed list, not a shaped DAG, and it is not
+  extended step by step — a job that needs more than the skeleton is a shaped change. The
+  first call costs one line; verification, review, the PR and the human's approval fill the
+  record in as the work actually produces them. Small is still the direct path and not a
+  short plan: work so small it will never reach review or a PR — a typo, a one-line comment
+  fix — makes no record at all, and so no skeleton.
 
   Everything else runs without either — investigation, questions, scouting, review-only
   work, anything a single agent answers and reports, and everything a dispatcher does.
@@ -900,10 +909,11 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
                  fresh main took the work over.
 
   WHY IT IS SEPARATE FROM THE PLAN. Review, evidence, PR rendering and landing safety are
-  things a CHANGE has, not things a plan has, and tying them to the step graph would have
-  meant either inventing a plan for every bounded fix or leaving direct work without any of
+  things a CHANGE has, not things a plan has, and binding them to a SHAPED plan would have
+  meant either inventing one for every bounded fix or leaving direct work without any of
   them. So a direct change reaches its PR, its review and its merge through this record and
-  no plan at all.
+  no shaped plan at all — carrying only the fixed execution+landing skeleton it is born with,
+  which is a legible progression and not a plan to shape.
 
   HOW IT REACHES THE PULL REQUEST. `sb plugin plans comment <record> --pr <PR>` posts the
   record as one marked comment and edits that same comment every later time it is run —
@@ -1057,13 +1067,16 @@ WHAT TO BUILD IT FROM
   ended with when it was named. Name them together, or fix the edge in the file
   afterwards, which is one field.
 
-  NAME EVERY OUTERMOST STEP, AND WHAT EACH OBLIGES ARRIVES WITH IT — the library has THREE
-  steps nothing else brings, `create-pr`, `merge` and `plan-review`, and naming one never
-  brings another. The two flags above land seven steps, because `create-pr` obliges the
-  change approval, which obliges the implementation review, AND the human-review list;
-  `merge` is the landing step itself. `create-pr` on its own lands four of those and the
-  plan ends at the open PR, which is right for a job that ends there — and nothing
-  downstream can tell that plan from one
+  NAME EVERY OUTERMOST STEP, AND WHAT EACH OBLIGES ARRIVES WITH IT — the library has FOUR
+  steps nothing else brings, `implementation`, `create-pr`, `merge` and `plan-review`, and
+  naming one never brings another. Three of them are the landing and review roots a shaped
+  plan must not truncate; `implementation` is the work step itself — the first step of the
+  fixed skeleton a DIRECT change is born with, and available to name where a shaped plan
+  wants the library's version rather than its own freetext work steps. The two flags above
+  land seven steps, because `create-pr` obliges the change approval, which obliges the
+  implementation review, AND the human-review list; `merge` is the landing step itself.
+  `create-pr` on its own lands four of those and the plan ends at the open PR, which is right
+  for a job that ends there — and nothing downstream can tell that plan from one
   which meant to land and lost its merge, so the naming is where it has to be got right.
   Naming an obliged step as well gets you a SECOND copy of it: nothing is ever
   deduplicated, since two obliging steps represent two outcomes and get two checks. Read `library`
@@ -1803,13 +1816,17 @@ def record(ctx, args) -> Result:
     MADE ONLY WHEN LANDING METADATA IS NEEDED, which is what keeps a direct change direct: a
     bounded fix that is reviewed and reported without a PR never makes one of these, and a
     dispatcher's relay never does either. It is the same store, the same `p-<n>` ids, the same
-    locking and crash-safety as a plan — a record is just the document with no step graph, so
-    `create-pr`, `merge` and `comment` name it exactly as they name a plan.
+    locking and crash-safety as a plan — a record carries a FIXED skeleton rather than a
+    hand-shaped graph, so `create-pr`, `merge` and `comment` name it exactly as they name a
+    plan.
 
-    The record is born on the `direct` path. `--request` seeds the human ask it exists to
-    carry to the PR; everything else about it — the verification, the review, the PR head, the
-    approval, the landing — is written into the file by hand as the change reaches each one,
-    the way every field on a plan is.
+    BORN WITH THE SKELETON. The record is born on the `direct` path AND with the fixed
+    execution+landing skeleton (`_skeleton`) — implementation, review, the human checklist,
+    the PR, merge — so the change is legible on the board and its PR the moment it exists,
+    without a plan's shaping half. `--request` seeds the human ask it exists to carry to the
+    PR; everything else — the verification, the review, the PR head, the approval, the
+    landing — is written into the file by hand as the change reaches each one, and the
+    skeleton's steps are ticked as they are done, the way every field and step on a plan is.
     """
     title = " ".join(str(w) for w in (args.title or ())).strip()
     display = str(args.display or "").strip()
@@ -1822,6 +1839,14 @@ def record(ctx, args) -> Result:
         return _no_display(
             "a change record", "It owns the board's whole header line, so it is a display "
             "version of the title: `--display \"raise the upload timeout\"`.")
+    # The catalogue BEFORE the write, exactly as `create --lib` reads it first: the skeleton's
+    # steps are NAMED (they carry a `def`), so their labels and commands resolve from the
+    # library, and the return rendering needs it to draw them as words rather than as raw keys.
+    # Read before the lock so a broken shipped definition refuses cleanly rather than over a
+    # record already written.
+    lib, bad = _lib()
+    if bad:
+        return bad
     with _minting(ctx.state_dir):
         doc, seal = _read(ctx.state_dir)
         who = ctx.agent or "human"
@@ -1829,20 +1854,27 @@ def record(ctx, args) -> Result:
         rec = {"id": f"p-{doc['next_plan']}", "kind": KIND_RECORD,
                "workspace": where, "workspace_from": how,
                "checkout": str(_here(ctx)), "title": title, "display": display,
+               "next_step": 1, "steps": [],
                "changelog": [], "notes": [_note(n, who) for n in notes],
                "change": _change(DIRECT),
                "created_by": who, "created_at": int(time.time())}
+        # BORN WITH THE SKELETON. A direct change is no longer stepless: it carries the fixed
+        # execution+landing skeleton (`_skeleton`) so it is legible on the board and its PR,
+        # composed here at birth — the one moment a record is made, and only made when landing
+        # metadata is needed, so a typo that never opens a PR still makes no record and no
+        # steps.
+        _skeleton(rec)
         if request:
             rec["change"]["request"] = request
         doc["next_plan"] += 1
-        detail = "direct change record"
+        detail = f"direct change record; {_count(rec['steps'])} skeleton"
         if how == UNAVAILABLE:
             detail += "; workspace unresolved — sb did not answer"
         _log(rec, who, "record", args.reason, detail)
         _reserve(ctx.state_dir, doc, rec)
         doc["plans"].append(rec)
         _write(ctx.state_dir, doc, seal)
-    return _plan_result(_shown(rec, {}), path=_path(ctx, rec))
+    return _plan_result(_shown(rec, lib), path=_path(ctx, rec))
 
 
 def ls(ctx, args) -> Result:
@@ -2748,13 +2780,13 @@ def name_step(ctx, args) -> Result:
     if plan is None:
         return _missing(doc, args.plan)
     if _is_record(plan):
-        # A change record has no step graph, so naming a library step onto it would leave a
-        # mongrel — a `kind:record` document that suddenly has `steps`, which the renderers
-        # then read as a plan. Refused at the door, the way a typo'd definition is: a direct
-        # change keeps its landing facts in the record, and only a shaped plan has steps.
-        why = (f"{plan['id']} is a change record, not a plan — it has no steps, so a "
-               f"library step cannot be named onto it. A direct change carries its landing "
-               f"facts in the record; a job that needs steps is a shaped plan (`create`).")
+        # A change record carries the FIXED execution+landing skeleton it was born with, not
+        # a hand-shaped graph — naming further library steps onto it is what a shaped plan is
+        # for. Refused at the door, the way a typo'd definition is: the skeleton is not
+        # extended, and a job that needs more than it is a shaped plan.
+        why = (f"{plan['id']} is a change record — it carries the fixed direct-change "
+               f"skeleton and is not extended with further library steps. A job that needs "
+               f"steps beyond the skeleton is a shaped plan (`create`).")
         return Result(ok=False, human=why, data={"error": why})
     added: list[dict] = []
     try:
@@ -3398,6 +3430,43 @@ def _change(path: str) -> dict:
             "request": None, "contract": None, "cause": None, "solution": None,
             "verification": None, "review": None, "human_checks": None,
             "pr": None, "approval": None, "landing": None}
+
+
+# THE EXECUTION+LANDING SKELETON a DIRECT change is born with, in the order it runs. Every
+# landing change passes through these same acts, so a direct change stops being stepless and
+# carries them as real, tickable steps — the same step vocabulary a shaped plan uses, minus
+# the shaping half (a direct change has no change-approval). This is what makes a direct
+# change legible: the board draws these as a flowchart exactly as it draws a plan's, and
+# `merge-human-review`'s output populates the PR checklist with no wiring of its own.
+#
+# A FIXED LIST AND NOT A COMPOSER. The five are named as library defs and chained linearly,
+# minted DIRECTLY rather than through `_mint`/oblige: `create-pr` obliges `change-approval`,
+# and composing it the obliged way would drag that shaping step into a change that must not
+# have one. So the skeleton is spelled out here, in anchor order — implementation (`build`),
+# then review and the human-only checklist (`review`), then the PR (`pr`), then merge
+# (`merge`) — and nothing about it is configurable. `merge-human-review` sits BEFORE
+# `create-pr`: the checklist a human meets must exist when the PR opens, which is the order
+# `create-pr` already obliges and the order the anchors already produce.
+_SKELETON = ("implementation", "review", "merge-human-review", "create-pr", "merge")
+
+
+def _skeleton(rec: dict) -> None:
+    """Compose the fixed execution+landing skeleton onto a fresh direct change record.
+
+    Built as plain NAMED steps — `def` set, `name` null — so each draws its label and its
+    command from the library at render time, exactly as a `name-step` step does, and an edit
+    to a definition reaches the record wherever it is. No `obliged_by` is set: these are not
+    obliged steps waiting on an obligor, they are the skeleton itself, so `_wrong`'s
+    orphaned-obligation check never fires on them. Chained linearly, each after the one
+    before, which is the order they run and all the board needs to draw the chart.
+    """
+    prev: Optional[str] = None
+    for key in _SKELETON:
+        step = _step(_mint_step(rec), None, key=key)
+        if prev is not None:
+            step["deps"] = [prev]
+        rec["steps"].append(step)
+        prev = step["id"]
 
 
 def _note(text: str, who: str) -> dict:
@@ -5479,12 +5548,30 @@ def _line(p: dict, *, workspace: bool) -> str:
 def _is_record(p: dict) -> bool:
     """A change-record document — landing facts with no plan. `kind` absent means plan.
 
-    The one discriminator between the two documents this store holds. A record has no step
-    graph and nothing that reads one touches it; everything else — storage, ids, locking,
-    migration, the changelog — is shared, which is the whole reason the record lives here
-    rather than in a store of its own.
+    The one discriminator between the two documents this store holds. A record carries a
+    fixed execution+landing skeleton (`_skeleton`) rather than a hand-shaped step graph;
+    everything else — storage, ids, locking, migration, the changelog, and the step
+    rendering — is shared, which is the whole reason the record lives here rather than in a
+    store of its own.
     """
     return p.get("kind") == KIND_RECORD
+
+
+def _tier(p: dict) -> str:
+    """A document's change tier — `direct` or `shaped` — for the board and `list` tag.
+
+    Read from `change.path`, the tier's own field, and NOT from `kind`: the path is where the
+    design says the tier lives. It agrees with the kind today (a record is direct, a plan is
+    shaped), but a document whose `change` is missing or hand-mangled still gets an honest
+    answer from the kind rather than a blank. The tag matters precisely because a record now
+    draws a step chart like a plan's, so the two are no longer told apart by having a chart or
+    not — the word is what restores the distinction at a glance.
+    """
+    c = p.get("change")
+    path = c.get("path") if isinstance(c, dict) else None
+    if path in (DIRECT, SHAPED):
+        return path
+    return DIRECT if _is_record(p) else SHAPED
 
 
 # The change-record fields that are landing FACTS, as against `path`/`phase`, which a record
@@ -5505,8 +5592,13 @@ def _change_told(p: dict) -> bool:
 
 
 def _units(p: dict) -> str:
-    """What `list` says in the column a plan uses for its step count."""
-    return "record" if _is_record(p) else _count(p.get("steps") or [])
+    """What `list` says in the column a plan uses for its step count.
+
+    A record now carries a step skeleton like a plan, so the bare word `record` no longer
+    tells the two apart — the TIER does. A record shows its tier word (`direct`); a plan shows
+    its step count, a number that already reads as the shaped side of the pair.
+    """
+    return _tier(p) if _is_record(p) else _count(p.get("steps") or [])
 
 
 def _change_defects(plan: dict) -> list[str]:
@@ -5614,7 +5706,11 @@ def _full(p: dict) -> str:
     lines.append(f"  created     {_when(p.get('created_at'))} "
                  f"by {_flat(p.get('created_by') or '—')}")
     steps = p.get("steps") or []
-    if not _is_record(p):
+    # Drawn whenever there are steps, whichever kind of document — a direct change's skeleton
+    # renders here exactly as `show --markdown` renders it, so the terminal and the PR agree.
+    # A plan with no steps still says so; a legacy stepless record simply has nothing to draw
+    # here and leans on its change section below.
+    if steps or not _is_record(p):
         lines.append("")
         lines.extend([f"  {s}" for s in (_step_lines(steps) or ["(no steps yet)"])])
     change = _change_section(p)
@@ -6075,10 +6171,16 @@ def _need_section(p: dict, steps: list) -> list[str]:
     body: list[str] = []
     if _some(checks):
         if isinstance(checks, list):
-            body += [f"- {_flat(x)}" for x in checks]
+            # TICKABLE, so a human reading the PR on a phone runs the list by ticking it —
+            # GitHub renders `- [ ]` as a checkbox where a plain `-` is an inert bullet, and
+            # a manual-verification list is the one thing on this comment a person acts on
+            # item by item. (State does not persist across a comment refresh — the body is
+            # regenerated each time — so this is a legible checklist, not a saved one.)
+            body += [f"- [ ] {_flat(x)}" for x in checks]
         else:
             body += _lines(checks)      # a markdown block, rendered as itself
-    body += [f"- **{_cell('id', s.get('id'))}** — {_cell('gate', s['gate'])}"
+    # Open gates are the other thing a human still owes, and they tick the same way.
+    body += [f"- [ ] **{_cell('id', s.get('id'))}** — {_cell('gate', s['gate'])}"
              for s in (steps or ())
              if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
     if not body:
