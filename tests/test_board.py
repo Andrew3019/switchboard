@@ -1266,6 +1266,22 @@ class PlanBlockTest(unittest.TestCase):
             self.assertNotIn("s-1", " ".join(body))
             self.assertNotIn("s-2", " ".join(body))
 
+    def test_an_unresolved_plan_never_shells_out_on_the_board_read(self):
+        """Workspace repair belongs to `show`/`list`, not the twice-a-second board path.
+        Until one of those reads persists an answer, the board leaves the stored transient
+        marker untouched and draws the plan in no workspace group."""
+        plan = self.plan("p-1", None, "guardrails",
+                         [{"id": "s-1", "name": "build", "progress": "open"}])
+        plan["workspace_from"] = "unavailable"
+        plan["created_by"] = "lead"
+        self.write(plan)
+        [(_, hook, _, _)] = board.board_hooks(self.repo)
+        with mock.patch("subprocess.run", side_effect=AssertionError("board must not ask")):
+            self.assertEqual(hook(self.state, "api", [agent("lead")]), [])
+        stored = json.loads((self.state / "p-1.json").read_text())
+        self.assertEqual((stored["workspace"], stored["workspace_from"]),
+                         (None, "unavailable"))
+
     def test_a_plans_condition_is_read_off_the_rows_the_board_already_has(self):
         """The rule the design turns on: liveness is read off the agent rows and never
         copied onto the plan. The chart shows no owners, so the CONDITION is where that
@@ -2427,6 +2443,62 @@ class OpenWorktreeTest(unittest.TestCase):
         self.assertEqual(seen.read_text(), "true")
 
 
+class InspectDeadlineTest(unittest.TestCase):
+    """`ww` and `oo` open nothing when `_inspect` runs out of time, and the reported
+    failure was exactly that rather than anything the editor did.
+
+    `sb inspect` answers about one agent by collecting the whole fleet, so it costs
+    seconds and the cost grows with the fleet, not the machine: measured six times on a
+    thirty-agent WSL board at 7.4–10.5 s against the flat ten-second deadline it used to
+    be given, and two of the six overran. `locate` cannot tell an overrun from "no such
+    agent" — both are None — so the keystroke said "could not read this agent" and
+    stopped before the editor was reached.
+    """
+
+    def fake_sb(self, body: str) -> Path:
+        """A REAL `sb` where `_inspect` looks for this build's one: `<pkg>/../bin/sb`.
+
+        Patching `board.__file__` rather than `shutil.which`, because the path that
+        production takes is the own-build branch, and a child that actually takes time
+        is the only thing a deadline can be tested against.
+        """
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "bin").mkdir()
+        sb = tmp / "bin" / "sb"
+        sb.write_text("#!/bin/sh\n" + body + "\n")
+        sb.chmod(0o755)
+        self.enterContext(
+            mock.patch.object(board, "__file__", str(tmp / "pkg" / "board.py")))
+        return sb
+
+    def test_inspect_does_not_get_the_flat_fast_call_deadline(self):
+        # The two `herdr` calls in board.py keep `timeouts.subprocess`; this one may not,
+        # and the margin is the point — a deadline cut fine above the worst case seen
+        # (11.3 s) would put the keystroke back to failing whenever the fleet grows.
+        seen = {}
+
+        def spy(argv, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+        with mock.patch.object(board.subprocess, "run", spy):
+            board._inspect("w1")
+        self.assertEqual(seen["timeout"], board._INSPECT_TIMEOUT)
+        self.assertGreater(board._INSPECT_TIMEOUT, 12)
+        self.assertGreater(board._INSPECT_TIMEOUT, board._SUBPROCESS_TIMEOUT)
+
+    def test_a_slow_but_working_inspect_is_read_rather_than_lost(self):
+        # Both halves against one live child: the deadline is the whole of what decides
+        # between an agent the board can open and one it reports it cannot read.
+        self.fake_sb('sleep 0.4\necho \'{"cwd": "/w", "transcript": null}\'')
+        with mock.patch.object(board, "_INSPECT_TIMEOUT", 0.1):
+            self.assertIsNone(board._inspect("w1"))         # the reported failure
+        with mock.patch.object(board, "_INSPECT_TIMEOUT", 30):
+            self.assertEqual(board._inspect("w1"),
+                             {"cwd": "/w", "transcript": None})
+
+
 class OpenTickTest(unittest.TestCase):
     """The open runs off the drawing thread, because a synchronous one could freeze the
     board for the length of eight subprocess timeouts — and in raw mode ctrl-C is a byte
@@ -2461,7 +2533,7 @@ class OpenTickTest(unittest.TestCase):
                                mock.Mock(side_effect=RuntimeError("boom"))):
             run, _ = board.open_tick("w1", note, None)
             run[0].join(5)
-        self.assertEqual(note, ["w1: open failed: boom"])
+        self.assertEqual(note, ["w1: oo failed: boom"])
 
     def test_no_highlighted_agent_starts_no_thread(self):
         note = []
@@ -2897,6 +2969,105 @@ class CoalescedPressTest(unittest.TestCase):
     def test_a_longer_burst_fires_once_not_once_per_pair(self):
         # Somebody leaning on the key wants the files open, not opened twice.
         self.assertEqual(board.double_press_run(0.0, 5, 1000.0), (True, 1000.0))
+
+
+class QuadPressTest(unittest.TestCase):
+    """`cccc`: four presses in quick succession, and nothing less than that.
+
+    The four-press key is the one most likely to arrive as a single read, so the burst
+    case is the ordinary spelling of it rather than the exotic one.
+    """
+
+    def test_three_presses_are_not_a_cleanup(self):
+        fire, _, count = board.multi_press_run(0.0, 0, 3, 1000.0,
+                                               board.CLEANUP_PRESSES)
+        self.assertFalse(fire)
+        self.assertEqual(count, 3)        # and the fourth is still to come
+
+    def test_one_read_carrying_the_whole_burst_fires_once(self):
+        events, rest = board.parse_sgr("cccc")
+        self.assertEqual((rest, [e["raw"] for e in events]), ("", ["cccc"]))
+        fire, last, count = board.multi_press_run(
+            0.0, 0, events[0]["raw"].count("c"), 1000.0, board.CLEANUP_PRESSES)
+        self.assertTrue(fire)
+        self.assertEqual((last, count), (0.0, 0))     # reset after fire
+
+    def test_a_pause_in_the_middle_starts_the_count_again(self):
+        """Four presses, not two doubles: `cc` … pause … `cc` is a hand that stopped."""
+        _, last, count = board.multi_press_run(0.0, 0, 2, 1000.0,
+                                               board.CLEANUP_PRESSES)
+        stalled, _, count_after = board.multi_press_run(last, count, 2, 1002.0,
+                                                        board.CLEANUP_PRESSES)
+        self.assertFalse(stalled)
+        self.assertEqual(count_after, 2)
+        # Two reads INSIDE the window are the same four presses and do fire.
+        self.assertTrue(board.multi_press_run(last, count, 2, 1000.3,
+                                              board.CLEANUP_PRESSES)[0])
+
+
+class NextFocusTest(unittest.TestCase):
+    """Which board is on screen after `cccc` closes the one you were looking at."""
+
+    def test_the_row_below_or_the_row_above_when_it_was_last(self):
+        rows = [agent("a"), agent("b"), agent("c")]
+        self.assertEqual(board.next_focus(rows, "a"), "b")
+        self.assertEqual(board.next_focus(rows, "c"), "b")
+
+    def test_archived_rows_are_not_candidates_and_nor_is_an_empty_board(self):
+        """Archived is `herdr has no pane for it`, and a pane that is not there cannot
+        be focused — `a` draws those rows, so they arrive here and are dropped."""
+        self.assertEqual(
+            board.next_focus([agent("a"), agent("b", archived=True), agent("c")], "a"),
+            "c")
+        self.assertIsNone(board.next_focus([agent("a")], "a"))
+        self.assertIsNone(
+            board.next_focus([agent("a"), agent("b", archived=True)], "a"))
+
+
+class CleanupAgentTest(unittest.TestCase):
+    """`cccc`: what it runs, and the focus that has to happen BEFORE it.
+
+    Cleanup closes the board pane this code is running in, so a focus sequenced after it
+    is a focus by a process being killed while it waits. Ordering is the substance of
+    this action, which is why it is what is pinned here.
+
+    NOT PROVEN HERE, and not provable without a live fleet: that the pane really does
+    die mid-cleanup, and that `start_new_session` is what carries the teardown to the end.
+    """
+
+    def setUp(self):
+        self.calls = []
+
+    def go(self, payload, *, code=0, follow="w2"):
+        def fake_run(argv, **kw):
+            self.calls.append(("run", list(argv), kw.get("start_new_session")))
+            return subprocess.CompletedProcess(argv, code, json.dumps(payload), "")
+
+        def fake_focus(name):
+            self.calls.append(("focus", name))
+            return f"→ {name}"
+
+        with mock.patch.object(board, "_sb", lambda: "/x/sb"), \
+             mock.patch.object(board, "focus", fake_focus), \
+             mock.patch.object(board.subprocess, "run", fake_run):
+            return board.cleanup_agent("w1", follow)
+
+    def test_it_focuses_first_then_runs_plain_sb_cleanup(self):
+        msg = self.go({"closed": ["w1"], "refused": []})
+        self.assertEqual(self.calls, [
+            ("focus", "w2"),
+            ("run", ["/x/sb", "cleanup", "w1", "--json"], True),   # never --force
+        ])
+        self.assertEqual(msg, "→ cleaned up w1 · now on w2")
+
+    def test_a_refusal_exits_zero_and_puts_the_human_back(self):
+        """`sb cleanup` REFUSING is a successful run of the command, which is why the
+        answer is read out of `--json` and not off the exit code."""
+        msg = self.go({"closed": [],
+                       "refused": [{"name": "w1", "reason": "still working"}]})
+        self.assertEqual(msg, "w1: still working")
+        self.assertEqual([c[0] for c in self.calls], ["focus", "run", "focus"])
+        self.assertEqual(self.calls[-1], ("focus", "w1"))
 
 
 class BoardCommandTest(unittest.TestCase):

@@ -121,8 +121,9 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
     Matched on the WORKSPACE NAME and not on the checkout path, which is the one place
     this differs from `list`: the board groups by the name the store holds, that name is
     what `create` filed the plan under, and the board has no checkout path to offer. A
-    plan whose workspace is null — a plain clone, or an sb that was unreachable when it
-    was made — is in no group and so is drawn by nobody, which is the honest answer.
+    plan whose workspace is null — a plain clone, or one not yet repaired by `show`/`list`
+    after sb was unavailable at creation — is in no group and so is drawn by nobody. Once
+    a CLI read persists its workspace, the next render picks it up without asking anything.
 
     Every failure here is silence, enforced on the board's side as well as this one: a
     board is what a human looks at to find out that something has gone wrong, and a plugin

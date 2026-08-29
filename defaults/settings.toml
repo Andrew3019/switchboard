@@ -501,6 +501,19 @@ subprocess = 10
 # fast so the board and its RIGHT NOW numbers stay fresh.
 keypress_probe = 1.5
 
+# The board's `sb inspect --json` fork, which is the whole of what `ww` and `oo` have to
+# get past before either reaches the editor. Deliberately not the flat number above:
+# `status.inspect` answers about ONE agent by running the entire fleet's `collect`, which
+# reads every agent's transcript — measured six times on a thirty-agent board here at
+# 7.4, 7.7, 8.7, 9.0, 10.4 and 10.5 seconds, so two of the six overran ten. What that cost
+# is the worst shape a deadline has: an overrun and "no such agent" are the same answer by
+# the time `locate` returns None, so the keystroke said "could not read this agent" and
+# never touched the editor — an open that silently did nothing, which is how it was
+# reported. Generous because the fleet rather than the machine sets the cost and the wait
+# is already on screen as "opening…"; still bounded, because a wedged `sb` must not hold
+# the board's single open slot for ever.
+board_inspect = 45
+
 # `agent start`. Generous: spawning a Claude Code session in a fresh pane is slow.
 spawn_ms = 90000
 

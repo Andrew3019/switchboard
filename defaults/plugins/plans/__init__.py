@@ -310,11 +310,12 @@ from it.
 
 A plan is keyed on the WORKSPACE NAME — the string `agents.workspace` and `workspaces.name`
 hold, which is what the board groups by and what a later PR reads to decide a plan's
-worktree is gone. It is resolved ONCE, at `create`, and stored; no verb recomputes it and
-none re-attaches a plan to another key. A plugin `Context` has no store handle by design, so
-the resolution is a shell-out to sb itself (`inspect` for an agent caller, `workspace list`
-to map this checkout's path otherwise) — D2's sanctioned path, and the only one that returns
-the same string the board uses.
+worktree is gone. It is resolved at `create` and stored. If sb did not answer then, a
+later read asks again and persists any answer; a plan is never re-attached after
+an answer was stored. A plugin `Context` has no store handle by design, so the resolution
+is a shell-out to sb itself (`inspect` for an agent caller, `workspace list` to map this
+checkout's path otherwise) — D2's sanctioned path, and the only one that returns the same
+string the board uses.
 
 The branch is NOT that name, which an earlier draft of this file had wrong. A branch changes
 under a checkout that stays what it was: `git checkout -b fixups` in a worktree made a plan's
@@ -332,8 +333,8 @@ is gone — abandoned rather than live.
 `unavailable` — because a null on its own is two different facts wearing one face. `none`
 is sb answering that this checkout belongs to no workspace; `unavailable` is sb not
 answering at all, which is a hiccup at one instant and not a statement about the job.
-Nothing recomputes the field, so a plan made during a hiccup would otherwise carry a
-worktree-is-gone verdict for the rest of its life.
+Only `unavailable` is recomputed lazily. An answer of `none` is as final as a workspace
+name, while a hiccup can repair itself without making every ordinary read a subprocess.
 
 Nothing about liveness is stored: whether the workspace still exists, whether anybody is
 working in it, and whether a step's owner is alive are all read at display time and never
@@ -425,6 +426,7 @@ import subprocess
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from switchboard import config as config_mod
@@ -673,8 +675,7 @@ def register(reg):
     reg.command(
         "record", record, audience="both",
         help="start a change record for a DIRECT change — the landing facts, and no plan; "
-             "made only when a change needs somewhere to keep verification, review, PR and "
-             "approval",
+             "made as soon as the work is direct and heading for a landing change",
         args=[reg.arg("title", repeat=True, help="what the change is"),
               reg.arg("--display", help="the record's board name — a display version of the "
                                         "title, one line, required"),
@@ -804,10 +805,13 @@ WHEN A PLAN EXISTS
 
   A DIRECT change is heading for a landing change too, and it gets NO plan. A bounded fix
   that goes straight to the work makes no plan and no change approval — no ceremony because
-  the plugin exists. When it needs somewhere to keep its landing facts — the verification,
-  the review, the PR, the human's approval — it makes a CHANGE RECORD with `sb plugin plans
-  record`, and only then. Small is the direct path and not a short plan: a one-line docs
-  change is a record if it needs one and nothing at all if it does not.
+  the plugin exists. It makes a CHANGE RECORD with `sb plugin plans record --request "..."`
+  as soon as it is clear the work is direct and heading for a landing change — the same
+  moment a shaped change is born with one, not reconstructed once the PR is already open.
+  That first call costs one line; verification, review, the PR and the human's approval
+  fill the rest of it in as the work actually produces them. Small is still the direct
+  path and not a short plan: work so small it will never reach review or a PR — a typo, a
+  one-line comment fix — makes no record at all.
 
   Everything else runs without either — investigation, questions, scouting, review-only
   work, anything a single agent answers and reports, and everything a dispatcher does.
@@ -1775,10 +1779,11 @@ def ls(ctx, args) -> Result:
     A plan with no `checkout` — one written by hand — is only ever shown by `--all`, which
     is the honest answer to "is this here?" when the record does not say.
     """
-    doc = _read(ctx.state_dir)[0]
+    doc, seal = _read(ctx.state_dir)
     plans, here = doc["plans"], _here(ctx)
     if not args.all:
         plans = [p for p in plans if _same(p.get("checkout"), here)]
+    _repair_workspaces(ctx.state_dir, doc, seal, plans)
     if not plans:
         return Result(human="\n".join(_broke(doc) + ["(no plans on this worktree)"
                                                      if not args.all
@@ -1836,10 +1841,11 @@ def show(ctx, args) -> Result:
     given = str(args.id or "").strip()
     if "/" in given or (given[:1].lower() == "s" and _num(_STEP_ID, given) is not None):
         return _one_step(ctx, given, markdown=bool(getattr(args, "markdown", False)))
-    doc, _ = _read(ctx.state_dir)
+    doc, seal = _read(ctx.state_dir)
     plan = _find(doc, args.id)
     if plan is None:
         return _missing(doc, args.id)
+    _repair_workspaces(ctx.state_dir, doc, seal, [plan])
     # Resolved HERE and never in the file: this is the moment a link becomes text, which is
     # why an edit to a definition reaches a plan that was made last week and is running now.
     lib, bad = _lib([plan])
@@ -4461,7 +4467,7 @@ def _same(stored: Any, here: Path) -> bool:
         return str(stored) == str(here)
 
 
-def _workspace(ctx) -> tuple[Optional[str], str]:
+def _workspace(ctx, *, clock: Optional["_Budget"] = None) -> tuple[Optional[str], str]:
     """Which workspace this checkout belongs to, and HOW that was decided. Asked of sb.
 
     The name has to be the string the store holds — it is what the board groups by and what
@@ -4489,13 +4495,14 @@ def _workspace(ctx) -> tuple[Optional[str], str]:
 
     Both store `workspace: null`, which is why the second half of this return value exists.
     A record that cannot tell them apart hands PR4 a transient hiccup dressed as a plan
-    whose worktree is gone — permanently, since nothing recomputes this. `create` writes
+    whose worktree is gone. `create` writes
     the answer to `workspace_from`, and the four values are the whole vocabulary:
     `agent`, `workspace-list`, `none`, `unavailable`.
 
-    Called once, by `create`. Nothing else recomputes it, and no verb re-attaches a plan.
+    Called at creation and, only for a stored `unavailable`, again on a later read.
+    A shared clock lets one read repair several plans without multiplying the budget.
     """
-    clock = _Budget()
+    clock = clock or _Budget()
     reached = True
     if ctx.agent:
         row = _ask(ctx, "inspect", ctx.agent, clock=clock)
@@ -4518,6 +4525,46 @@ def _workspace(ctx) -> tuple[Optional[str], str]:
         if set(w.get("sources") or ()) - {"git"}:
             return str(w["name"]), BY_LIST
     return None, (NONE if reached else UNAVAILABLE)
+
+
+def _repair_workspaces(d: Path, doc: dict, seal: dict, plans: list[dict]) -> None:
+    """Retry transient workspace misses in stored plans and persist every real answer.
+
+    The checkout and creator stored on the plan are the context of the original question.
+    Using the reader's context would misfile `show p-N` or `list --all` when it reads a plan
+    from another worktree. All unresolved plans on one read share one budget; failure is
+    left exactly as stored, while `none` and either named resolution stick permanently.
+
+    This is deliberately best-effort. Workspace labelling must never make a readable plan
+    fail to render, including when the late write itself cannot land.
+    """
+    pending = [p for p in plans
+               if p.get("workspace_from") == UNAVAILABLE and not p.get("workspace")]
+    if not pending:
+        return
+    clock = _Budget()
+    changed: list[tuple[dict, Any, Any]] = []
+    for plan in pending:
+        checkout = plan.get("checkout")
+        if not checkout:
+            continue
+        creator = str(plan.get("created_by") or "")
+        repair_ctx = SimpleNamespace(
+            worktree=Path(str(checkout)),
+            agent=creator if creator and creator != "human" else None,
+        )
+        where, how = _workspace(repair_ctx, clock=clock)
+        if how == UNAVAILABLE:
+            continue
+        changed.append((plan, plan.get("workspace"), plan.get("workspace_from")))
+        plan["workspace"], plan["workspace_from"] = where, how
+    if not changed:
+        return
+    try:
+        _write(d, doc, seal)
+    except Exception:                       # noqa: BLE001 — metadata repair, never the read
+        for plan, where, how in changed:
+            plan["workspace"], plan["workspace_from"] = where, how
 
 
 # How long resolving a workspace may cost, in total and for any one question. Measured, not
@@ -4720,7 +4767,8 @@ class _Live:
         for a checkout that is no workspace sb knows (`none`) and for an sb that could not
         be asked at all (`unavailable`), and reading the second as a worktree that has gone
         would let one timeout, at one instant, mark a healthy job abandoned for the rest of
-        its life — nothing recomputes `workspace_from`, so that verdict would never lift.
+        its life. A later read may repair `workspace_from`, but until one succeeds this
+        null still cannot support an abandoned verdict.
 
         `sb workspace list` is deliberately not asked either, and it is worth saying why,
         since it is the other handle the plan doc names. Its `verdict` for a checkout is
@@ -5127,7 +5175,7 @@ def _full(p: dict) -> str:
     WRITE do not — a tick should not also pay a subprocess to say who is alive, and `show`
     is one command away.
     """
-    lines = [f"{p['id']}  {_flat(p.get('title') or '(untitled)')}"]
+    lines = [f"{p['id']}  {_flat(p.get('display') or p.get('title') or '(untitled)')}"]
     if p.get("display"):
         # The title is what the job is and this is what the BOARD draws instead of it, so
         # an author reading a plan back can see the header a glance will actually get.
