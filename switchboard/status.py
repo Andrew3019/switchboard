@@ -1259,6 +1259,7 @@ def collect(
     tree: Optional[Collection[str]] = None,
     reap: bool = True,
     repo: Optional[Any] = None,
+    only: Optional[str] = None,
 ) -> Snapshot:
     """The whole readout: one herdr call, one pass over the store.
 
@@ -1294,6 +1295,22 @@ def collect(
     reaping on code from before `SPAWN_GRACE` existed, is how every spawn in one night
     came to be marked `failed` during its own startup. A readout should not be able to
     end an agent's life on the strength of code nobody is running any more.
+
+    `only` is the SINGLE-AGENT FAST PATH (#227): `inspect` needs one agent's row and used
+    to pay the whole-fleet collect to get it — the three `done`/`blocked`/activity scans
+    are `GROUP BY` over every event and message in the store and measured 7–11 s on a busy
+    WSL fleet, all to read one cwd. With `only` set, the six per-fleet SQL aggregates are
+    scoped to that agent — the event scans, which dominated the profile, hit
+    `idx_events_agent` instead of grouping the whole table (the smaller `messages` scans on
+    `from_agent` have no index and still walk that table) — so the row the caller asked for
+    is built with its OWN counts, activity, block reason and summary intact
+    — every other row is still built, but from empty aggregates, because nothing reads them.
+    That partial data is exactly why `only` also forces `reap` off: `gone`/`stalled`/
+    `turn_doubted` for the OTHER rows are now wrong (their idle clock reads from creation),
+    and acting on them would end healthy agents. Reaping is the collector's job on the full
+    snapshot anyway, so a single-agent read giving it up costs nothing. `only` narrows what
+    is COMPUTED for the unread rows, never what is shown: `_filter` still returns the whole
+    fleet, and a caller that wants correct drift for everyone must not pass it.
     """
     from . import store                      # local: keeps this module importable alone
 
@@ -1315,12 +1332,12 @@ def collect(
     consulted = h is not None and herdr_error is None
 
     rows = db.execute("SELECT * FROM agents ORDER BY created_at, name").fetchall()
-    unread = _unread_counts(db)
-    pending = _undelivered_counts(db)
-    activity = _last_activity(db)
-    awaiting_reply = _awaiting_reply(db)
-    why = _block_reasons(db)
-    summaries = _last_summaries(db)
+    unread = _unread_counts(db, only)
+    pending = _undelivered_counts(db, only)
+    activity = _last_activity(db, only)
+    awaiting_reply = _awaiting_reply(db, only)
+    why = _block_reasons(db, only)
+    summaries = _last_summaries(db, only)
 
     # THE CAPABILITY SIDE OF EVERY ROW, in two reads for the whole fleet rather than two
     # per agent: this runs on every draw of a board that redraws every two seconds.
@@ -1572,7 +1589,16 @@ def collect(
     # stamps. It goes here, after the loop, because it needs the finished `stalled` verdict
     # to know who to ask about — and it asks about nobody on a fleet where nothing is
     # stalled, which is the normal case and the reason this is affordable at all.
-    _mark_awaiting_keypress(h if consulted else None, agents, now)
+    # On the single-agent fast path only the asked-for row has a trustworthy idle clock, so
+    # only it may be a keypress candidate — every other row's empty activity would read as
+    # stalled and fan `explain_agent` out across the fleet, which is the cost `only` exists
+    # to avoid. NOTE: `_mark_awaiting_keypress` prunes the module-global `_KEYPRESS_SEEN` to
+    # the names it is handed, so this hands it only the target. That is safe ONLY because
+    # `only` has a single caller — the one-shot `sb inspect` CLI process, whose cache is
+    # empty and dies at exit. A long-running caller passing `only` would evict every other
+    # agent from that cache each call; give this its own path before adding one.
+    keypress_rows = [a for a in agents if a.name == only] if only is not None else agents
+    _mark_awaiting_keypress(h if consulted else None, keypress_rows, now)
 
     # THE LEAD-ROW AGGREGATE (§2.5). A divergence three rows down is still divergence the
     # lead answering for that subtree has to know about, and at 20+ siblings finding it by
@@ -1597,7 +1623,9 @@ def collect(
     # the process that remembers an absence and the process that acts on it have to be the
     # same one, or the debounce has a writer with no reader. A `reap=False` caller — the
     # board, the collector — holds a read-only connection and cannot write either half.
-    if consulted and reap:
+    # `only` forces reap off: the other rows were built from empty aggregates, so their
+    # drift is not real and must not be acted on (see the `only` note above).
+    if consulted and reap and only is None:
         absent = [a.name for a in agents if a.gone]
         if tracks_absence:
             absent = _confirmed_gone(db, absent, absent_since, now)
@@ -2007,7 +2035,7 @@ def _failure_note(name: str, task: Optional[str]) -> str:
             + (f"It was: {clip(task)}" if task else "No task was ever recorded for it."))
 
 
-def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
+def _unread_counts(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, int]:
     """`store.unread_for(..., mark=False)` for everyone at once.
 
     Aggregated rather than looped so status stays one pass, and read-only for the same
@@ -2029,8 +2057,14 @@ def _unread_counts(db: sqlite3.Connection) -> dict[str, int]:
     where = "read_at IS NULL"
     if _has_column(db, "messages", "undeliverable_at"):
         where += " AND undeliverable_at IS NULL"
+    # `only` scopes the whole aggregate to one agent so a single-agent reader (`inspect`)
+    # can use `idx_msgs_inbox` instead of scanning the whole mailbox. See `collect`'s note.
+    params: tuple = ()
+    if only is not None:
+        where += " AND to_agent = ?"
+        params = (only,)
     return {r["to_agent"]: r["n"] for r in db.execute(
-        f"SELECT to_agent, COUNT(*) n FROM messages WHERE {where} GROUP BY to_agent"
+        f"SELECT to_agent, COUNT(*) n FROM messages WHERE {where} GROUP BY to_agent", params
     )}
 
 
@@ -2038,7 +2072,8 @@ def _has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})"))
 
 
-def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int, bool]]:
+def _undelivered_counts(db: sqlite3.Connection,
+                        only: Optional[str] = None) -> dict[str, tuple[int, int, bool]]:
     """Per agent: how much mail it cannot know about, when the oldest arrived, and
     whether any of it is the human's.
 
@@ -2064,15 +2099,19 @@ def _undelivered_counts(db: sqlite3.Connection) -> dict[str, tuple[int, int, boo
     and the collector's doorbell is why it has to be in the snapshot rather than a second
     query — see `collector.ring_doorbell`.
     """
+    # `only` scopes to one agent so a single-agent reader (`inspect`) uses
+    # `idx_msgs_undelivered` rather than scanning every mailbox. See `collect`'s note.
+    scope = " AND to_agent = ?" if only is not None else ""
+    params = (HUMAN, HUMAN) + ((only,) if only is not None else ())
     return {r["to_agent"]: (r["n"], r["oldest"], bool(r["answer"])) for r in db.execute(
         "SELECT to_agent, COUNT(*) n, MIN(created_at) oldest, "
         "       MAX(from_agent = ?) answer FROM messages "
-        "WHERE delivered_at IS NULL AND read_at IS NULL AND to_agent <> ? "
-        "GROUP BY to_agent", (HUMAN, HUMAN)
+        f"WHERE delivered_at IS NULL AND read_at IS NULL AND to_agent <> ?{scope} "
+        "GROUP BY to_agent", params
     )}
 
 
-def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
+def _last_activity(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, int]:
     """When each agent last *did* something.
 
     Three signals, because no single one covers a working agent: events (every `sb` call
@@ -2093,21 +2132,33 @@ def _last_activity(db: sqlite3.Connection) -> dict[str, int]:
     """
     seen: dict[str, int] = {}
     kinds = ",".join("?" * len(DONE_TO_THE_AGENT))
-    for sql in (
-        "SELECT agent a, MAX(created_at) t FROM events "
-        f"  WHERE agent IS NOT NULL AND kind NOT IN ({kinds}) GROUP BY agent",
-        "SELECT from_agent a, MAX(created_at) t FROM messages GROUP BY from_agent",
-        "SELECT to_agent a, MAX(read_at) t FROM messages "
-        "  WHERE read_at IS NOT NULL GROUP BY to_agent",
+    # `only` scopes each of the three signals to one agent so a single-agent reader
+    # (`inspect`) reads one agent's rows instead of grouping the whole fleet's events and
+    # mail. The column differs per query — the agent that ACTED is the event's `agent`, the
+    # sender's `from_agent`, then the reader's `to_agent`. The events scan and the read scan
+    # hit an index (`idx_events_agent`, `idx_msgs_inbox`); the sender scan has no
+    # `from_agent` index, so it still walks `messages`, but that table is far smaller than
+    # the events table this exists to stop grouping. See `collect`'s note.
+    ev_scope = " AND agent = ?" if only is not None else ""
+    sent_scope = " WHERE from_agent = ?" if only is not None else ""
+    read_scope = " AND to_agent = ?" if only is not None else ""
+    one = (only,) if only is not None else ()
+    for sql, params in (
+        ("SELECT agent a, MAX(created_at) t FROM events "
+         f"  WHERE agent IS NOT NULL AND kind NOT IN ({kinds}){ev_scope} GROUP BY agent",
+         DONE_TO_THE_AGENT + one),
+        (f"SELECT from_agent a, MAX(created_at) t FROM messages{sent_scope} "
+         "  GROUP BY from_agent", one),
+        ("SELECT to_agent a, MAX(read_at) t FROM messages "
+         f"  WHERE read_at IS NOT NULL{read_scope} GROUP BY to_agent", one),
     ):
-        params = DONE_TO_THE_AGENT if "events" in sql else ()
         for r in db.execute(sql, params):
             if r["t"] and r["t"] > seen.get(r["a"], 0):
                 seen[r["a"]] = r["t"]
     return seen
 
 
-def _awaiting_reply(db: sqlite3.Connection) -> set[str]:
+def _awaiting_reply(db: sqlite3.Connection, only: Optional[str] = None) -> set[str]:
     """Agents that asked a question and have not been answered. -> their names.
 
     The sharpest case the eager stall got wrong. `sb tell <who> "..." --needs-reply` is how
@@ -2153,19 +2204,25 @@ def _awaiting_reply(db: sqlite3.Connection) -> set[str]:
         return set()
     deliverable = ("AND q.undeliverable_at IS NULL "
                    if _has_column(db, "messages", "undeliverable_at") else "")
+    # `only` scopes to the one asker a single-agent reader (`inspect`) cares about, so the
+    # question is "is THIS agent waiting on a reply" rather than the whole fleet's. See
+    # `collect`'s note.
+    scope = "AND q.from_agent = ? " if only is not None else ""
+    params = (only,) if only is not None else ()
     return {r["from_agent"] for r in db.execute(
         "SELECT DISTINCT q.from_agent FROM messages q "
         "  JOIN agents a ON a.name = q.to_agent "
-        f" WHERE q.needs_reply = 1 {deliverable}"
+        f" WHERE q.needs_reply = 1 {deliverable}{scope}"
         "   AND a.ended_at IS NULL "
         "   AND NOT EXISTS (SELECT 1 FROM messages r "
         "                    WHERE r.from_agent = q.to_agent "
         "                      AND r.to_agent = q.from_agent "
-        "                      AND r.id <> q.id AND r.created_at >= q.created_at)"
+        "                      AND r.id <> q.id AND r.created_at >= q.created_at)",
+        params
     )}
 
 
-def _block_reasons(db: sqlite3.Connection) -> dict[str, str]:
+def _block_reasons(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:
     """Why each blocked agent stopped — the thing the human actually needs.
 
     SQLite's min/max aggregate hands back the rest of the row it came from, so this is one
@@ -2173,10 +2230,15 @@ def _block_reasons(db: sqlite3.Connection) -> dict[str, str]:
     `created_at`: timestamps are whole seconds, and two blocks in the same second would
     make "the latest" a coin toss.
     """
+    # `only` scopes to one agent so a single-agent reader (`inspect`) filters on
+    # `idx_events_agent` rather than grouping every blocked event in the fleet. See
+    # `collect`'s note.
+    scope = " AND agent = ?" if only is not None else ""
+    params = (only,) if only is not None else ()
     out = {}
     for r in db.execute(
         "SELECT agent, payload, MAX(id) FROM events "
-        "WHERE kind='blocked' AND agent IS NOT NULL GROUP BY agent"
+        f"WHERE kind='blocked' AND agent IS NOT NULL{scope} GROUP BY agent", params
     ):
         try:
             out[r["agent"]] = (json.loads(r["payload"] or "{}") or {}).get("why") or ""
@@ -2185,7 +2247,7 @@ def _block_reasons(db: sqlite3.Connection) -> dict[str, str]:
     return {k: v for k, v in out.items() if v}
 
 
-def _last_summaries(db: sqlite3.Connection) -> dict[str, str]:
+def _last_summaries(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:
     """What each agent said when it last called `sb done`.
 
     Two sources, and the mailbox wins where it has one: the message is the summary the
@@ -2198,10 +2260,17 @@ def _last_summaries(db: sqlite3.Connection) -> dict[str, str]:
     That record is the point — this is where a root agent's summary reaches you, on its
     row here and in full in `sb inspect`.
     """
+    # `only` scopes both sources to one agent so a single-agent reader (`inspect`) reads one
+    # agent's `done` rows rather than grouping every `done` in the fleet. The events scan
+    # hits `idx_events_agent`; the message scan has no `from_agent` index and still walks
+    # `messages`, which is far smaller than the events table. See `collect`'s note.
+    ev_scope = " AND agent = ?" if only is not None else ""
+    msg_scope = " AND from_agent = ?" if only is not None else ""
+    params = (only,) if only is not None else ()
     out = {}
     for r in db.execute(
         "SELECT agent, payload, MAX(id) FROM events "
-        "WHERE kind='done' AND agent IS NOT NULL GROUP BY agent"
+        f"WHERE kind='done' AND agent IS NOT NULL{ev_scope} GROUP BY agent", params
     ):
         try:
             body = ((json.loads(r["payload"] or "{}") or {}).get("summary") or "").strip()
@@ -2210,7 +2279,8 @@ def _last_summaries(db: sqlite3.Connection) -> dict[str, str]:
         if body:
             out[r["agent"]] = body
     for r in db.execute(
-        "SELECT from_agent, body, MAX(id) FROM messages WHERE kind='done' GROUP BY from_agent"
+        "SELECT from_agent, body, MAX(id) FROM messages "
+        f"WHERE kind='done'{msg_scope} GROUP BY from_agent", params
     ):
         body = (r["body"] or "").strip()
         if body.startswith(DONE_PREFIX):
@@ -2970,7 +3040,10 @@ def inspect(
     if row is None:
         raise KeyError(f"no such agent: {name}")
 
-    snap = collect(db, h, now=now, repo=repo)
+    # `only=name` is the whole point of #227: inspect wants ONE row, and collect used to
+    # scan every event and message in the fleet to hand it over (7–11 s on a busy store).
+    # Scoped, it builds this row from indexed single-agent aggregates; see collect's `only`.
+    snap = collect(db, h, now=now, repo=repo, only=name)
     agent = next((a for a in snap.agents if a.name == name), None)
     if agent is None:                       # _tree drops nothing, so this cannot normally happen
         raise KeyError(f"no such agent: {name}")
