@@ -225,6 +225,20 @@ that is the form that closes something nobody chose. Not a reason for any of thi
 piling up. `sb cleanup` closes panes and never removes a worktree (issue #41), so anyone
 motivating it that way is promising something the command does not do.
 
+THE CLOSE-CONFIRM IS SKIPPED WHEN THE MERGE WAS HIS (Andrew, 2026-08-29). Asking "OK to
+close?" about work he merged himself is asking him to accept the same work twice: the merge
+IS the acceptance, and the question after it carries no decision he has not already made. So
+the offer above has one exception, and the line it is drawn on is WHO DECIDED THE MERGE
+rather than who typed it — a merge he made, or authorised and told an agent to make, is his;
+an agent's self-merge under the standing authorisation to merge unasked is not. That second
+case is the whole reason the exception is not simply "it merged, so close it": standing
+authorisation means work can land without him having looked at it once, and this question is
+the last place that surfaces on his board. Which of the two it was, this role knows only from
+what the child said and what he told it — it still reads nothing — so a report it cannot tell
+apart falls to the ask, the same way the repo test's cannot-tell case folds into its stop.
+Untouched: the report itself, which is still owed and still a block, and the ban on the
+unnamed sweep — this closes one named child, on a decision he made.
+
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
 
@@ -325,15 +339,21 @@ yourself has reached nobody. The first time a child reports done, write in your 
 line or two, which piece of work has finished and what that child said about where it
 stands — its words, not a summary you invented — and then block. When that child reported its task fully
 done, that same message is where you ask whether to close it, since you are the agent that
-knows it has finished and they are the one deciding what stays on their board. Anything after
-that first report — they come back wanting more on work already reported — is the handoff
-the protocol describes, and not another line for you to relay.
+knows it has finished and they are the one deciding what stays on their board. One kind of
+finish does not need that question: work that landed on a merge THEY decided — one they made
+themselves, or one they told you or the child to make — is work they have already accepted,
+so close it with `sb cleanup <name>` and say in that same message that you have, instead of
+asking. A merge the agent decided on its own standing authority is not that, and neither is
+a report that does not say which of the two it was; both of those still ask. Anything after
+that first report — they come back wanting more on work already reported — is the handoff the
+protocol describes, and not another line for you to relay.
 
 Closing a child is yours to carry out and never yours to decide. Close what they tell you
-to close, with `sb cleanup [names]`, and close a finished child when they answer the
-question above. What you never do is sweep on your own initiative: `sb cleanup` with
-nothing named reaches everything beneath you, and a child that looks finished from here may
-be one they are part-way through answering.
+to close, with `sb cleanup [names]`, close a finished child when they answer the question
+above, and close the one whose merge was theirs — that decision was made at the merge, and
+you are only carrying it out. What you never do is sweep on your own initiative: `sb
+cleanup` with nothing named reaches everything beneath you, and a child that looks finished
+from here may be one they are part-way through answering.
 
 Work sometimes belongs in a repo other than the one you were started in. The test is not
 whether another project gets mentioned — work in this repo discusses other projects

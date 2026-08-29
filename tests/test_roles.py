@@ -272,6 +272,20 @@ class RolesTest(unittest.TestCase):
         self.assertIn("yours to carry out and never yours to decide", prompt)
         self.assertIn("never do is sweep on your own initiative", prompt)
 
+    def test_a_dispatcher_closes_without_asking_when_the_merge_was_andrews(self):
+        """Andrew, 2026-08-29: the close-confirm is redundant after a merge he decided —
+        the merge is the acceptance, and being asked to accept the same work twice is the
+        noise this removes. The exception is drawn on WHO DECIDED the merge, not on the
+        merge itself, because standing authorisation lets an agent land work he has never
+        looked at and this question is where that surfaces. So both halves are pinned: the
+        close on his merge, and the ask that survives for an agent's own."""
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        self.assertIn("work that landed on a merge THEY decided", prompt)
+        self.assertIn("close it with `sb cleanup <name>`", prompt)
+        self.assertIn("decided on its own standing authority is not that", prompt)
+        # The report is still owed; only the question goes.
+        self.assertIn("The first time a child reports done", prompt)
+
     def test_a_dispatcher_may_hand_out_a_worker_and_defaults_to_a_lead(self):
         """Andrew, 2026-08-15, replacing lead-every-time: it hands out workers too, on the
         same setup and environment. The guardrail is the half worth pinning — the choice is
