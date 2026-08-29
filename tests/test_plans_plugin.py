@@ -14,8 +14,8 @@ shipped-plugin tests do and then assert only what this plugin decided:
 2. Ids are monotonic and never reused, across plans and across steps — a spawn prompt
    citing `s-2` has to stay true even after somebody hand-deletes a row.
 3. `list` is scoped to this worktree, matched on the checkout path.
-4. The workspace is resolved once, at `create`, and a branch change in the same checkout
-   does not move it — the key is the workspace, and the branch is not the workspace.
+4. The workspace is stored at `create`, a transient miss repairs itself on a later read,
+   and a branch change in the same checkout does not move an answered key.
 5. A checkout that is no workspace says so rather than being filed under a guess, and an
    sb that cannot be reached is a different answer again — `workspace_from` carries which,
    and resolution is bounded so a wedged sb cannot hold the plans lock for a minute.
@@ -350,10 +350,10 @@ class PlansTest(PlansSandbox):
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
                          ["p-1"])
 
-    def test_the_workspace_is_resolved_once_and_survives_a_branch_change(self):
+    def test_the_resolved_workspace_survives_a_branch_change(self):
         """The key is the WORKSPACE, which is what the board groups by and what a later PR
         reads to decide a worktree is gone — not the branch, which moves under a checkout
-        that has not. Filed once at `create`, and neither recomputed nor re-attached: a
+        that has not. Once answered it is neither recomputed nor re-attached: a
         `git checkout -b` in the same directory used to make `list` go blind to the plan
         that was made there, with nothing recording that it had.
 
@@ -396,8 +396,8 @@ class PlansTest(PlansSandbox):
         """Both store a null workspace, and PR4 reads that field to decide a plan is
         abandoned. `none` is sb saying this checkout belongs to nowhere; `unavailable` is
         sb not saying anything, at one instant, about a job that may be perfectly healthy —
-        and nothing recomputes the field afterwards, so the distinction has to be written
-        down when the plan is made or it is never recoverable.
+        and a later read can therefore distinguish a transient miss worth retrying from a
+        final answer of no workspace.
 
         The whole resolution is bounded, too: it happens with the plans lock held, so an
         sb that has wedged must cost seconds rather than wedge every other plans command in
@@ -415,7 +415,50 @@ class PlansTest(PlansSandbox):
         self.assertIsNone(made["workspace"])
         self.assertEqual(made["workspace_from"], "unavailable")
         self.assertIn("workspace unresolved", made["changelog"][0]["detail"])
-        self.assertIn("(unresolved)", self.ok("plugin", "plans", "show", "p-1"))
+        with mock.patch("shutil.which",
+                        lambda name, *a, **k: None if name == "sb" else real(name, *a, **k)):
+            self.assertIn("(unresolved)", self.ok("plugin", "plans", "show", "p-1"))
+
+    def test_an_unavailable_workspace_repairs_and_persists_on_read(self):
+        """A creation-time outage is transient state. Once sb answers, `show` resolves
+        from the plan's stored checkout and creator and writes the answer back, so later
+        reads do not pay for it again."""
+        (Path(self.tmp.name) / "bin").unlink()
+        real = shutil.which
+        with mock.patch("shutil.which",
+                        lambda name, *a, **k: None if name == "sb" else real(name, *a, **k)):
+            made = self.data("plugin", "plans", "create", "during an outage",
+                             "--display", "board: during an outage")
+        self.assertEqual(made["workspace_from"], "unavailable")
+
+        (Path(self.tmp.name) / "bin").symlink_to(Path(__file__).resolve().parent.parent / "bin")
+        self.workspace("recovered", self.repo)
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual((shown["workspace"], shown["workspace_from"]),
+                         ("recovered", "workspace-list"))
+        stored = self._doc()["plans"][0]
+        self.assertEqual((stored["workspace"], stored["workspace_from"]),
+                         ("recovered", "workspace-list"))
+
+        (Path(self.tmp.name) / "bin").unlink()
+        with mock.patch("shutil.which",
+                        lambda name, *a, **k: None if name == "sb" else real(name, *a, **k)):
+            self.assertEqual(self.data("plugin", "plans", "show", "p-1")["workspace"],
+                             "recovered")
+
+    def test_a_failed_lazy_workspace_repair_never_breaks_the_read(self):
+        """If sb still cannot answer, both human and machine views remain readable and
+        the stored transient marker remains available for a future read to retry."""
+        (Path(self.tmp.name) / "bin").unlink()
+        real = shutil.which
+        with mock.patch("shutil.which",
+                        lambda name, *a, **k: None if name == "sb" else real(name, *a, **k)):
+            self.data("plugin", "plans", "create", "during an outage",
+                      "--display", "board: during an outage")
+            self.assertIn("(unresolved)", self.ok("plugin", "plans", "show", "p-1"))
+            self.assertEqual(self.data("plugin", "plans", "show", "p-1")["workspace_from"],
+                             "unavailable")
+        self.assertEqual(self._doc()["plans"][0]["workspace_from"], "unavailable")
 
     def test_ids_are_monotonic_and_never_reused(self):
         """PLAN ids are monotonic across the store and never reused — a hand-deleted plan
@@ -2969,6 +3012,14 @@ class CompletenessTest(PlansSandbox):
         self.assertIn("fix red CI: rich assertions on main",
                       self.ok("plugin", "plans", "list"), "the listing draws the display")
 
+    def test_show_header_falls_back_to_display_when_title_is_absent(self):
+        """Records may intentionally have only the required board name. `show`, `list`,
+        and the board all use that display before declaring the record untitled."""
+        self.data("plugin", "plans", "record", "--display", "repair workspace labels")
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertEqual(shown.splitlines()[0], "p-1  repair workspace labels")
+        self.assertIn("repair workspace labels", self.ok("plugin", "plans", "list"))
+
     def test_name_step_hangs_what_it_adds_off_the_plans_current_tail(self):
         """The flagship path: work, then `name-step merge`, and nothing complains.
 
@@ -3442,8 +3493,8 @@ class LivenessTest(PlansSandbox):
     def test_an_sb_that_cannot_be_reached_is_unknown_and_never_abandoned(self):
         """The bug this was written against. PR1 stores a null workspace for BOTH `none`
         and `unavailable`, so a derivation that read the null would let one timeout, at one
-        instant, mark a healthy job abandoned for the rest of its life — nothing recomputes
-        `workspace_from`, so the verdict would never lift. The worktree question is asked
+        instant, mark a healthy job abandoned for the rest of its life. Until a later read
+        repairs `workspace_from`, the worktree question is asked
         of the checkout PATH, which needs nobody's cooperation to answer."""
         (Path(self.tmp.name) / "bin").unlink()          # no build beside the plugin
         real = shutil.which

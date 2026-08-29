@@ -1266,6 +1266,22 @@ class PlanBlockTest(unittest.TestCase):
             self.assertNotIn("s-1", " ".join(body))
             self.assertNotIn("s-2", " ".join(body))
 
+    def test_an_unresolved_plan_never_shells_out_on_the_board_read(self):
+        """Workspace repair belongs to `show`/`list`, not the twice-a-second board path.
+        Until one of those reads persists an answer, the board leaves the stored transient
+        marker untouched and draws the plan in no workspace group."""
+        plan = self.plan("p-1", None, "guardrails",
+                         [{"id": "s-1", "name": "build", "progress": "open"}])
+        plan["workspace_from"] = "unavailable"
+        plan["created_by"] = "lead"
+        self.write(plan)
+        [(_, hook, _, _)] = board.board_hooks(self.repo)
+        with mock.patch("subprocess.run", side_effect=AssertionError("board must not ask")):
+            self.assertEqual(hook(self.state, "api", [agent("lead")]), [])
+        stored = json.loads((self.state / "p-1.json").read_text())
+        self.assertEqual((stored["workspace"], stored["workspace_from"]),
+                         (None, "unavailable"))
+
     def test_a_plans_condition_is_read_off_the_rows_the_board_already_has(self):
         """The rule the design turns on: liveness is read off the agent rows and never
         copied onto the plan. The chart shows no owners, so the CONDITION is where that
