@@ -110,6 +110,7 @@ KEYS = "click a row · ↑↓ pick · ⏎ focus · ←→ pan plans · a archive
 # `split_panels` spends it on, and the only place it is read.
 SECTION_MIN = 4
 _SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+_INSPECT_TIMEOUT = config.setting("timeouts.board_inspect")  # and see `_inspect`
 _EDITOR = config.setting("editor.command")   # `[editor]`, and see `open_report_files`
 
 # How much of the width the board takes when it opens beside an agent — THE ONLY
@@ -2759,13 +2760,22 @@ def _sb() -> Optional[str]:
 
 
 def _inspect(name: str) -> Optional[dict]:
-    """One agent's row, as JSON, from a separate process. None if anything went wrong."""
+    """One agent's row, as JSON, from a separate process. None if anything went wrong.
+
+    `timeouts.board_inspect` and NOT the flat `timeouts.subprocess` the two `herdr` calls
+    in this module use, because this fork is not that kind of call: `sb inspect` answers
+    about one agent by collecting the whole fleet, and it overran ten seconds on a third
+    of the calls measured. Every failure below returns None and they all mean the same
+    thing to `locate` — which is exactly why the deadline mattered more than it looks. A
+    slow-but-working `inspect` came back as "could not read this agent", and `ww` and `oo`
+    stop there, so the editor was never reached and the keystroke opened nothing at all.
+    """
     sb = _sb()
     if not sb:
         return None
     try:
         p = subprocess.run([sb, "inspect", name, "--json", "-n", "1", "--events", "1"],
-                           capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT)
+                           capture_output=True, text=True, timeout=_INSPECT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode != 0:
