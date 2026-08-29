@@ -59,9 +59,10 @@ from pathlib import Path
 from typing import Any
 
 from switchboard.board import _visible_len
+from switchboard.plugins import locked
 
-from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _defective, _flat, _is_record, _lib,
-               _num, _read, _shown, _viewed, _Live)
+from . import (CLOSED, DONE, OPEN, SKIPPED, UNAVAILABLE, _STEP_ID, _defective, _flat,
+               _is_record, _lib, _num, _read, _repair_workspaces, _shown, _viewed, _Live)
 
 
 # A SECTION OF THE BOARD'S OWN, under the tree, rather than a block hanging off the last
@@ -121,8 +122,9 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
     Matched on the WORKSPACE NAME and not on the checkout path, which is the one place
     this differs from `list`: the board groups by the name the store holds, that name is
     what `create` filed the plan under, and the board has no checkout path to offer. A
-    plan whose workspace is null — a plain clone, or an sb that was unreachable when it
-    was made — is in no group and so is drawn by nobody, which is the honest answer.
+    plan whose workspace is definitively null — a plain clone — is in no group and so is
+    drawn by nobody. A transiently unresolved plan gets one bounded repair attempt in the
+    group containing its creator; success stores the group key before anything is drawn.
 
     Every failure here is silence, enforced on the board's side as well as this one: a
     board is what a human looks at to find out that something has gone wrong, and a plugin
@@ -130,8 +132,25 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
     """
     if not workspace:
         return []
-    plans = [p for p in _read(Path(state_dir))[0]["plans"]
-             if p.get("workspace") == workspace]
+    d = Path(state_dir)
+    # An unresolved plan has no workspace group yet. Its creator's existing board row is
+    # the cheap, unambiguous group in which to retry the same bounded resolver; the repair
+    # itself uses the plan's stored checkout and persists only a successful answer.
+    creators = {str(getattr(r, "name")) for r in rows if getattr(r, "name", None)}
+    doc, _ = _read(d)
+    candidates = [p for p in doc["plans"]
+                  if p.get("workspace_from") == UNAVAILABLE
+                  and not p.get("workspace") and p.get("created_by") in creators]
+    if candidates:
+        # Re-read after taking the writer's lock: another command may have repaired the
+        # same record between the board's cheap read and this mutation path.
+        with locked(d):
+            doc, seal = _read(d)
+            candidates = [p for p in doc["plans"]
+                          if p.get("workspace_from") == UNAVAILABLE
+                          and not p.get("workspace") and p.get("created_by") in creators]
+            _repair_workspaces(d, doc, seal, candidates)
+    plans = [p for p in doc["plans"] if p.get("workspace") == workspace]
     if not plans:
         return []
     lib, bad = _lib(plans)
