@@ -337,6 +337,22 @@ CREATE TABLE events (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX idx_events_agent ON events(agent, id);
+-- The board's per-agent aggregates over ALL history. `idx_events_agent` orders a group-by
+-- but still fetches every row (its key is `agent` alone), so on a large events table the
+-- collector's tick paid three full scans — `_block_reasons` and `_last_summaries` reading
+-- 28 MB of payload to find one `blocked`/`done` per agent, `_last_activity` reading every
+-- row for a `MAX(created_at)`. Measured at ~8.5 s a tick on a 94 k-row store on a DrvFs
+-- mount, which is why the board updated once every ~14 s instead of every 0.5 s.
+--   idx_events_kind_agent_id  — seek straight to one `kind`, then MAX(id) per agent, for
+--                               `_block_reasons` (kind='blocked') and `_last_summaries`
+--                               (kind='done'): a handful of rows instead of the whole table.
+--   idx_events_agent_created  — COVERS `_last_activity`: MAX(created_at) per agent with the
+--                               `kind NOT IN (...)` filter satisfied from the index itself,
+--                               so no row (and no payload) is fetched at all.
+-- Added to an EXISTING table, so `_reconcile` ensures them on a store that predates the
+-- declaration — `_deficit` reports missing tables and columns but never a missing index.
+CREATE INDEX idx_events_kind_agent_id ON events(kind, agent, id);
+CREATE INDEX idx_events_agent_created ON events(agent, created_at, kind);
 
 CREATE TABLE workspaces (
     name          TEXT PRIMARY KEY,   -- the workspace NAME, and identity is nothing else.
@@ -691,6 +707,13 @@ def _reconcile(db: sqlite3.Connection, cwd: Optional[Path] = None) -> None:
             fill = _BACKFILLS.get((table, name))
             if fill:
                 fill(db, cwd)
+        # Indexes on tables that already existed, which the table/column deficit above never
+        # sees. Idempotent and cheap once the index is there; the one-time build on a large
+        # table is paid here, by the first writer to connect after the index was declared —
+        # the same connect that stamps the new hash, so it runs once and not every tick. See
+        # `_index_ddl`.
+        for stmt in _index_ddl():
+            db.execute(stmt)
         db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_hash', ?)",
                    (_SCHEMA_HASH,))
         db.commit()
@@ -1038,6 +1061,25 @@ def _table_ddl(table: str) -> list[str]:
                           lambda m: f"CREATE {m.group(1) or ''}INDEX IF NOT EXISTS ",
                           i.group(0), count=1))
     return out
+
+
+def _index_ddl() -> list[str]:
+    """Every index SCHEMA declares, as `CREATE INDEX IF NOT EXISTS`, across all tables.
+
+    Separate from `_table_ddl` because indexes are ensured on tables that ALREADY exist.
+    `_deficit` reports a missing table or a missing column and nothing else — a new index
+    on an existing table is neither — so an index ADDED to an established table's
+    declaration would otherwise reach only stores built from scratch (`_create` runs the
+    whole SCHEMA; `_create_table` runs only for a whole missing table). `_reconcile` runs
+    these so it reaches a store that predates the index too. `IF NOT EXISTS` for
+    `_table_ddl`'s reason: the loser of a concurrent create finds nothing to do.
+    """
+    return [
+        re.sub(r"^CREATE (UNIQUE )?INDEX ",
+               lambda m: f"CREATE {m.group(1) or ''}INDEX IF NOT EXISTS ",
+               i.group(0), count=1)
+        for i in re.finditer(r"CREATE (?:UNIQUE )?INDEX \w+\s+ON \w+\(.*?\);", SCHEMA)
+    ]
 
 
 def _create_table(db: sqlite3.Connection, table: str) -> None:

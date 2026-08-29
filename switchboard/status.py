@@ -777,10 +777,35 @@ class AgentStatus:
         if self.alive is False:
             return "idle"
         if self.turn is not None:
-            return self.state if self.turn == TURN_WORKING else "idle"
+            return self.state if self.turn == TURN_WORKING else self._idle_word
         if self.alive is None:
             return self.state
-        return self.state if self.herdr_state not in IDLE_LIKE else "idle"
+        return self.state if self.herdr_state not in IDLE_LIKE else self._idle_word
+
+    @property
+    def _idle_word(self) -> str:
+        """`waiting` when a live wait is in force, otherwise `idle`. The one place the STATE
+        column says an idle turn is deliberate.
+
+        Andrew asked for `waiting` to be a real STATUS that OVERRIDES idle, not only a note
+        in the info column — where it already lives, as `wait_excuse` drawn by `board.marker`.
+        A `waiting` word and a `WAITING — …` marker are the same fact at two widths, the way
+        `idle` and `STALLED — …` are: the column says WHICH of the idle-shaped states this is,
+        the marker says why.
+
+        A READING like the rest of `display_state`, and it inherits that method's guards
+        rather than adding its own. `wait_excuse` is set in `collect` only for a live,
+        non-expired declaration (`wait_is_fresh`), and this is reached only where the row is
+        already idle — never for a `working` turn (that returns above), a terminal or blocked
+        row (handled first), or one herdr has dropped (`alive is False` returns `idle`, since
+        a pane that is gone is not waiting for anything). So it can only ever turn an `idle`
+        into a `waiting`, which is exactly the override that was asked for.
+
+        `idle` stays the fallback whenever the wait has lapsed: past `WAIT_EXCUSE_GRACE`
+        `collect` clears `wait_excuse`, and the row is an ordinary idle one that `stalled`
+        can then reach — the same lapse the marker already honours.
+        """
+        return "waiting" if self.wait_excuse else "idle"
 
     @property
     def signal_drift(self) -> bool:

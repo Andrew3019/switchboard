@@ -43,7 +43,7 @@ HAVE_RICH = richboard.available()
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
           summary=None, parent=None, archived=False, undelivered=0, undelivered_age=0,
-          idle_excuse=None, wait_excuse=None, pane_id=None, workspace="api"):
+          idle_excuse=None, wait_excuse=None, pane_id=None, workspace="api", turn=None):
     """One agent. `archived=True` sets what being absent from herdr past the spawn
     grace actually looks like, so the real `AgentStatus.archived` decides — nothing
     here mocks the predicate."""
@@ -56,7 +56,7 @@ def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
         idle=5, last_activity=0, workspace=workspace, task=task,
         blocked_why=blocked_why, summary=summary,
         undelivered=undelivered, undelivered_age=undelivered_age,
-        idle_excuse=idle_excuse, wait_excuse=wait_excuse, pane_id=pane_id,
+        idle_excuse=idle_excuse, wait_excuse=wait_excuse, pane_id=pane_id, turn=turn,
     )
 
 
@@ -180,10 +180,37 @@ class RowSaysOneThingTest(unittest.TestCase):
                 a = agent("w", state="working", herdr_state="idle",
                           idle_excuse=label, wait_excuse=label)
                 line = self.line(a)
-                self.assertIn("idle", line)
+                # `waiting` is a real STATE word overriding `idle`, not only a marker in the
+                # info column — the STATE column says WHICH idle-shaped state this is, the
+                # marker says why. See `status.AgentStatus._idle_word`.
+                self.assertIn("waiting", line)
+                self.assertNotIn("idle", line)
                 self.assertIn(label, line)
                 self.assertEqual(line.count(label), 1)
                 self.assertEqual(board.marker(a), label)
+
+    def test_waiting_overrides_idle_in_the_state_column(self):
+        """`display_state` reads `waiting`, not `idle`, exactly when a live wait is in
+        force — and only turns an idle into a waiting, never a working or a gone one."""
+        wait = "WAITING — background work"
+        # herdr-idle fallback and our own turn signal both promote idle -> waiting.
+        self.assertEqual(
+            agent("w", state="working", herdr_state="idle", wait_excuse=wait).display_state,
+            "waiting")
+        self.assertEqual(
+            agent("w", state="working", turn="idle", wait_excuse=wait).display_state,
+            "waiting")
+        # A working turn is working, wait or no wait; a pane herdr has dropped is idle.
+        self.assertEqual(
+            agent("w", state="working", turn="working", wait_excuse=wait).display_state,
+            "working")
+        self.assertEqual(
+            agent("w", state="working", turn="idle", alive=False,
+                  wait_excuse=wait).display_state,
+            "idle")
+        # No wait, no override.
+        self.assertEqual(
+            agent("w", state="working", herdr_state="idle").display_state, "idle")
 
     def test_an_expired_broker_wait_has_no_waiting_headline(self):
         a = agent("w", state="working", herdr_state="idle", stalled=True)

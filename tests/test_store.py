@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -182,6 +183,43 @@ class StoreTest(unittest.TestCase):
             self.assertIn("newcol", {r[1] for r in d2.execute("PRAGMA table_info(agents)")})
             self.assertEqual(store.schema_deficit(d2), [])     # and is fully caught up
             d2.close()
+
+    def test_a_new_index_reaches_a_store_that_predates_it(self):
+        """An index ADDED to an existing table's declaration must be created on an old
+        store, not only on ones built from scratch. `_deficit` reports missing tables and
+        columns and never a missing index, so without `_reconcile` ensuring the declared
+        indexes an old store would keep paying the full-table scans the index exists to
+        remove. This is the migration behind the collector-tick fix."""
+        idx = "CREATE INDEX idx_events_agent_created ON events(agent, created_at, kind);\n"
+        self.assertIn(idx, store.SCHEMA, "the index anchor no longer matches")
+        p = Path(self.tmp.name) / "idxmig.db"
+        # An OLD store: the same code minus this one index declaration.
+        with self._schema(idx, ""):
+            d1 = store.connect(path=p)
+            store.create_agent(d1, name="w", role="worker")
+            names = {r[0] for r in d1.execute("SELECT name FROM sqlite_master "
+                                              "WHERE type='index'")}
+            self.assertNotIn("idx_events_agent_created", names)
+            d1.close()
+        # Current code (the real SCHEMA declares it) migrates it in.
+        d2 = store.connect(path=p)
+        names = {r[0] for r in d2.execute("SELECT name FROM sqlite_master "
+                                          "WHERE type='index'")}
+        self.assertIn("idx_events_agent_created", names)
+        self.assertIsNotNone(store.get_agent(d2, "w"))       # data survived
+        self.assertEqual(store.schema_deficit(d2), [])       # and is fully caught up
+        d2.close()
+
+    def test_index_ddl_emits_every_declared_index(self):
+        """`_index_ddl` parses SCHEMA with a regex, and a declaration it fails to match is
+        dropped SILENTLY — an index that would then never migrate onto an existing store.
+        Pin the emitted set against the indexes SCHEMA actually declares, so a future
+        declaration the regex cannot read fails here instead of on a slow board."""
+        declared = re.findall(r"CREATE (?:UNIQUE )?INDEX (\w+)", store.SCHEMA)
+        emitted = [re.search(r"INDEX IF NOT EXISTS (\w+)", s).group(1)
+                   for s in store._index_ddl()]
+        self.assertEqual(sorted(emitted), sorted(declared))
+        self.assertTrue(all("IF NOT EXISTS" in s for s in store._index_ddl()))
 
     # -- the branch column -----------------------------------------------
     #
