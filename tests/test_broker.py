@@ -187,7 +187,40 @@ class RestoreCleanupTest(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
+    def _agent(self, name="agent", pane="w1:p1", board=None):
+        """The two ids a restore is entitled to close, recorded the way a spawn records
+        them: the agent's own pane on the row, its board's in `meta`."""
+        if board:
+            self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                            (f"board_pane:{name}", board))
+            self.db.commit()
+        return {"name": name, "pane_id": pane}
+
+    def test_restore_cleanup_takes_this_agent_s_own_panes_and_no_others(self):
+        """The tightening, and the whole reason it matters now: an idle shell in the same
+        workspace and checkout may be an unrelated agent's leftover — or Andrew's own
+        terminal parked in that checkout — and a herdr restart now runs this cleanup with
+        nobody watching it (`collector.run_auto_restore`).
+
+        Pane ids survive a herdr restart (measured against an isolated herdr 0.8.2:
+        `kill -9` the server, restart, every pane back with its id, workspace and cwd, only
+        `terminal_id` new), so the ids we recorded still name the panes to take.
+        """
+        cwd = str(self.repo)
+        self.h.restore_panes = [
+            {"pane_id": "w1:p1", "workspace_id": "ws", "cwd": cwd},   # the agent's
+            {"pane_id": "w1:p2", "workspace_id": "ws", "cwd": cwd},   # its board
+            {"pane_id": "w1:p9", "workspace_id": "ws", "cwd": cwd},   # somebody else's
+        ]
+        self.h.restore_shells = {"w1:p1": 101, "w1:p2": 102, "w1:p9": 103}
+
+        self.b._close_restore_panes(self._agent(board="w1:p2"), "ws", cwd)
+
+        self.assertEqual(sorted(self.h.closed), ["w1:p1", "w1:p2"])
+
     def test_restore_cleanup_closes_only_idle_matching_workspace_cwd(self):
+        """The three checks that stand between a recorded id and a pane herdr has since
+        handed to somebody else. Each refuses on its own."""
         cwd = str(self.repo)
         self.h.restore_panes = [
             {"pane_id": "idle", "workspace_id": "ws", "cwd": cwd},
@@ -198,7 +231,8 @@ class RestoreCleanupTest(unittest.TestCase):
         self.h.restore_shells = {"idle": 101, "live": None, "wrong-cwd": 102,
                                  "wrong-workspace": 103}
 
-        self.b._close_restore_panes("agent", "ws", cwd)
+        for pane in ("idle", "live", "wrong-cwd", "wrong-workspace"):
+            self.b._close_restore_panes(self._agent(pane=pane), "ws", cwd)
 
         self.assertEqual(self.h.closed, ["idle"])
 
@@ -211,7 +245,7 @@ class RestoreCleanupTest(unittest.TestCase):
             raise HerdrError("connection_refused", "herdr unavailable")
 
         self.h.close_pane = refuse
-        self.b._close_restore_panes("agent", "ws", cwd)
+        self.b._close_restore_panes(self._agent(pane="idle"), "ws", cwd)
 
         self.assertEqual(self.h.closed, [])
         event = store.recent_events(self.db, agent="agent")[0]

@@ -7666,19 +7666,60 @@ class Broker:
                 frontier.extend(k["name"] for k in kids)
         return out
 
-    def _close_restore_panes(self, name: str, workspace_id: str, cwd: str) -> None:
-        """Close the dead shells a restore is about to replace.
+    def _restore_pane_targets(self, a) -> set:
+        """The panes a restore is entitled to close: this agent's own, and its board's.
 
-        Pane ids die with herdr, so the stored agent and board ids cannot identify their
-        post-restart panes.  The durable facts left are the workspace (re-resolved by
-        name in `_restore_tab`) and the checkout cwd.  Within those two bounds, only a
-        pane that `pane_shell` proves is an idle shell is safe to take.
+        Both are ids WE recorded — `agents.pane_id` from the spawn, and the
+        `board_pane:<name>` meta row `_open_board` writes — so a pane that is not one of
+        them is nobody's business of ours, however much it looks like a leftover.
 
-        This deliberately closes every match.  There is no durable per-agent pane label,
-        so one of them may be an unrelated closed agent's leftover—or a human's own idle
-        terminal parked there—when several users or agents share a workspace and checkout.
-        A live process is never closed: `None` is the conservative answer from `pane_shell`,
-        including when herdr cannot answer.
+        The board pane is in here for a second reason beyond tidiness: `_open_board` skips
+        opening one when the recorded id is still in `pane_ids()`, so a surviving board
+        pane left standing would cost the restored agent the board half of its pair — the
+        two-pane layout is the thing this whole path is trying to come back into.
+
+        Never raises. A meta table that will not read is one fewer pane to close, which is
+        the direction that leaves a shell behind rather than taking somebody's terminal.
+        """
+        panes = {a["pane_id"]} if a["pane_id"] else set()
+        try:
+            row = self.db.execute("SELECT value FROM meta WHERE key=?",
+                                  (f"board_pane:{a['name']}",)).fetchone()
+        except Exception:                      # noqa: BLE001 — a missing/locked meta table
+            return panes
+        if row and row["value"]:
+            panes.add(row["value"])
+        return panes
+
+    def _close_restore_panes(self, a, workspace_id: str, cwd: str) -> None:
+        """Close the dead shells a restore is about to replace — ONLY this agent's own.
+
+        Pane ids survive a herdr restart, and that is the fact this is built on. Measured
+        against an isolated instance on herdr 0.8.2 (`kill -9` the server, restart it
+        against the same session): every pane came back with the id and the workspace id
+        it had, sitting in the cwd it had, and only `terminal_id` was new. So the two ids
+        we recorded before the crash still name the two panes this agent left behind, and
+        the cleanup can be aimed at them by name rather than swept over a directory.
+
+        That is the whole difference from the version this replaces, and it is a safety
+        one rather than a tidiness one. Aiming by workspace-and-cwd closed EVERY idle
+        shell in the checkout, which on a shared workspace is also where an unrelated
+        closed agent's leftover sits — and where a human's own idle terminal sits. That
+        was a documented limitation while a person typed `sb restore --sweep` and watched
+        it; it is not one worth keeping now that a herdr restart runs this by itself
+        (`collector.run_auto_restore`).
+
+        The other three checks stay exactly as they were, and each still refuses on its
+        own: the pane must be in the workspace this restore is landing in, its cwd must be
+        the agent's checkout, and `pane_shell` must prove it is an idle shell. Together
+        with the recorded id they are what stands between this and a pane id that herdr
+        handed to somebody else — ids are reused, so a recorded id is an aim, never a
+        proof.
+
+        Closing nothing is an accepted outcome. A pane created after herdr's last session
+        snapshot does not come back at all, and one whose id did not survive is one we
+        cannot attribute; both leave an empty shell on screen, which is a mess somebody
+        can close and not a loss.
 
         The capability check keeps older adapters usable.  In particular, the broker's
         test fake does not model pane listing or process inspection; teaching it those
@@ -7688,16 +7729,22 @@ class Broker:
         pane_shell = getattr(self.h, "pane_shell", None)
         if not workspace_id or not callable(pane_list) or not callable(pane_shell):
             return
+        targets = self._restore_pane_targets(a)
+        if not targets:
+            return
+        name = a["name"]
         target_cwd = _resolved(str(cwd))
         if target_cwd is None:
             return
         for entry in pane_list():
+            pane = entry["pane_id"]
+            if pane not in targets:
+                continue
             if entry.get("workspace_id") != workspace_id:
                 continue
             pane_cwd = entry.get("cwd")
             if not pane_cwd or _resolved(pane_cwd) != target_cwd:
                 continue
-            pane = entry["pane_id"]
             if pane_shell(pane) is None:
                 continue
             try:
@@ -7742,7 +7789,7 @@ class Broker:
         # Close first, then recreate.  When the recorded id is still valid this is the
         # target workspace; after a herdr restart it selects nothing, and the by-name
         # retry below performs the same cleanup against the new run's id.
-        self._close_restore_panes(a["name"], wsid, str(where))
+        self._close_restore_panes(a, wsid, str(where))
         pane, landed = self._tab_for(wsid, where, env=env)
         if not wsid or landed or not a["workspace"]:
             # Nothing was recorded, or what was recorded still works: no second guess.
@@ -7754,7 +7801,7 @@ class Broker:
             self.h.close_pane(pane)
         except HerdrError as e:
             store.log_event(self.db, kind="orphan_pane", agent=a["name"], error=str(e))
-        self._close_restore_panes(a["name"], byname, str(where))
+        self._close_restore_panes(a, byname, str(where))
         pane, landed = self._tab_for(byname, where, env=env)
         store.log_event(self.db, kind="restore_workspace_reresolved", agent=a["name"],
                         workspace=a["workspace"], was=wsid, now=landed or "")
@@ -7952,8 +7999,8 @@ class Broker:
                                f"If you still need one, ask for it: "
                                f"sb tell parent \"...\".")
 
-    def restore_sweep(self, *, dry_run: bool = False,
-                      me: Optional[str] = None) -> "RestoreSweepResult":
+    def restore_sweep(self, *, dry_run: bool = False, me: Optional[str] = None,
+                      auto: bool = False) -> "RestoreSweepResult":
         """Bring back everything a herdr restart just took out, in one call.
 
         The whole command is a scope, a selection and an order; every agent it restores
@@ -7989,6 +8036,13 @@ class Broker:
         running and is skipped by name. Nothing about that is new machinery — `restore`
         refuses a live agent on its own — but the sweep classifies it up front so the
         second run reports `already running` rather than a list of failures.
+
+        **`auto` is a label on the event and nothing else.** The collector runs this
+        command by itself once a herdr restart's deaths have been confirmed
+        (`collector.run_auto_restore`), and everything it gets is what a person typing the
+        command gets — same scope, same cohort, same order, same refusals. What the flag
+        buys is that `sb log` can tell a fleet that came back on its own from one somebody
+        asked for, which is the first question about a restore nobody remembers ordering.
 
         **One herdr check, at the top, and never read as an empty cohort.** A herdr that
         cannot be asked fails identically for every candidate, so it refuses the whole
@@ -8052,6 +8106,7 @@ class Broker:
                 continue
             out.append(name)
         store.log_event(self.db, kind="restore_sweep", dry_run=dry_run, by=me,
+                        auto=auto,
                         restored=list(out), skipped=[n for n, _ in out.skipped],
                         unrestorable=[n for n, _ in out.unrestorable],
                         failed=[n for n, _ in out.failed])

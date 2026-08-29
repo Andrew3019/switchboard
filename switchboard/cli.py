@@ -514,9 +514,16 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("name", nargs="?", help="the agent to bring back")
     r.add_argument("--sweep", action="store_true",
                    help="bring back everything in your scope that recently went down, "
-                        "parents before children (a second run is a no-op)")
+                        "parents before children (a second run is a no-op). A herdr "
+                        "restart also runs this by itself, once the deaths it caused are "
+                        "confirmed — see `[restore] auto`")
     r.add_argument("--dry-run", action="store_true",
                    help="with --sweep: classify the cohort and print it, restore nothing")
+    # The collector's automatic sweep, and nothing else, says this. It changes no
+    # behaviour: it marks the `restore_sweep` event as unattended, so a fleet that came
+    # back on its own can be told in `sb log` from one somebody typed. Hidden because it
+    # is a fact about the caller rather than an option anybody has a reason to choose.
+    r.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
 
     ins = cmd(
         "inspect", help="everything about ONE agent, including its recent terminal output",
@@ -1778,7 +1785,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "restore" and args.sweep:
-        r = b.restore_sweep(dry_run=args.dry_run, me=me)
+        r = b.restore_sweep(dry_run=args.dry_run, me=me, auto=args.auto)
         _emit(args, _sweep_restored(r, dry_run=args.dry_run),
               {"restored": list(r),
                "skipped": [{"name": n, "reason": why} for n, why in r.skipped],

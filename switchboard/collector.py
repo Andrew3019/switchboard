@@ -90,7 +90,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from . import config
 from . import panel
@@ -139,6 +139,18 @@ RECONCILE_SWEEP = 600.0
 # the numbers being unknown for the rest of this process's life. A thread every tick to
 # fail the same `connect` twice a second is not worth a number that is a minute late.
 STATS_RETRY_GAP = 30.0
+# Whether a herdr restart brings the fleet back by itself, and the floor between two
+# attempts at it. The switch is configuration (`[restore] auto`, which carries the whole
+# argument for and against); the floor is not, for `DOORBELL_GAP`'s reason — it is the one
+# number that decides what a fleet nothing can restore costs, and a minute is already far
+# below the `GONE_CONFIRM_GRACE` a death takes to be confirmed in the first place.
+AUTO_RESTORE = config.flag("restore.auto")
+RESTORE_GAP = 60.0
+# The environment variables that name WHO is running an `sb` command — `broker.whoami`
+# reads them in this order. They have to come off the automatic sweep's environment, and
+# `tests/test_panel.py` pins this list against `cli._AGENT_SESSION_ENV` so the copy cannot
+# drift from the original. See `fleet_env`.
+AGENT_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "SB_AGENT", "HERDR_PANE_ID")
 
 
 @dataclass
@@ -183,6 +195,16 @@ class State:
     reconciles: int = 0
     last_reconcile: Optional[float] = None
     reconcile_error: Optional[str] = None
+    # The auto-restore, counted like the two triggers above because it is the same shape
+    # again — and published for a reason they do not have: this is the one trigger that
+    # brings whole agents back, so "did it fire, and did the command it ran work" is a
+    # question somebody will ask about a fleet that came back wrong. `restored` is the
+    # memory that keeps it to ONE offer per name (`run_auto_restore`), and it is a list
+    # rather than a set because this goes out as JSON.
+    restores: int = 0
+    last_restore: Optional[float] = None
+    restore_error: Optional[str] = None
+    restored: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -431,6 +453,81 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
     return True
 
 
+def fleet_env() -> dict:
+    """The environment the automatic sweep runs in: this one, minus who we are.
+
+    A collector inherits the environment of the pane the renderer that started it was
+    drawing in, and a board pane is split off an AGENT's pane — so `SB_AGENT` and the rest
+    of `AGENT_ENV` can name a live agent all the way down here. Left in, `sb restore
+    --sweep` would resolve that agent as its caller and sweep its SUBTREE, which for a
+    herdr restart is precisely the wrong scope: a crash cohort is spread across every tree
+    that existed, because a restart does not respect tree boundaries, and the sweep only
+    means "everything" when nobody's tree bounds it (`Broker.restore_sweep`).
+
+    Taken off rather than overridden, because there is nothing to override it WITH: the
+    human is not an env var, it is the absence of all of these.
+    """
+    return {k: v for k, v in os.environ.items() if k not in AGENT_ENV}
+
+
+def run_auto_restore(snap, state: State, db_path: Optional[Path]) -> bool:
+    """Bring back what a herdr restart took out, with nobody there to type it.
+    -> whether one started.
+
+    The third trigger on this loop and the same shape as the other two: one question of
+    the snapshot already in hand, then one `sb` command that decides everything else. What
+    a crash cohort IS — how far back a death counts as recent, which rows are mid-debounce,
+    what order parents and children come back in, what to do about a checkout that is gone
+    — is all `Broker.restore_sweep`'s, running in a process on current code. Nothing about
+    that policy is re-decided here, and this must never grow a second opinion about it.
+
+    **Why the trigger is a CONFIRMED death and not `gone`.** `gone` is one reading of
+    herdr, and the reconciler is what turns a sustained one into a recorded death
+    (`status._record_gone`, after `GONE_CONFIRM_GRACE` of continuous absence). Waiting for
+    that record buys two things. A herdr that hiccups, or an `agent list` that came back
+    short, never restores anything — the absence has to hold for a minute first. And the
+    two triggers stop racing over the same rows: a row already written `failed` is out of
+    `REAPABLE`, so no later reap can land on the agent this sweep is bringing back and
+    record it dead again. `tick` keeps them a tick apart for the same reason.
+
+    **Once per name, per collector.** An agent whose session cannot be resumed dies, is
+    confirmed dead, is restored, and dies again — which without a memory is a restore loop
+    spawning a pane a minute for as long as anybody is watching a board. So a name this
+    collector has already offered is not offered again, and the escape hatch is the command
+    itself: `sb restore <name>`, typed, with a person deciding. A replacement collector
+    starts with an empty memory and may offer each name once more, which is the same cost
+    the doorbell and the reconciler already pay for keeping their memory in the process.
+
+    **`alive is False` and not `not alive`.** None is "we could not reach herdr", and a
+    fleet that looks dead because nothing could be asked is the one reading this must never
+    act on. `restore_sweep` refuses on it too; this declines to spend the process.
+    """
+    if not AUTO_RESTORE:
+        return False
+    now = panel.now()
+    dead = sorted(a.name for a in snap.agents
+                  if a.state == status_mod.GONE_STATE and a.alive is False)
+    if not [n for n in dead if n not in state.restored]:
+        return False
+    if state.last_restore is not None and now - state.last_restore < RESTORE_GAP:
+        return False
+    sb = doorbell_sb()
+    if sb is None:
+        state.restore_error = ("no `sb` in this checkout's `bin/` and none on PATH — "
+                               "nothing can restore the fleet")
+        return False
+    state.last_restore = now
+    state.restores += 1
+    # Marked BEFORE the command runs, and marked whatever it goes on to say. The memory is
+    # "this name has had its automatic attempt", not "this name came back" — a sweep that
+    # fails on a row is exactly the case that must not be retried in a loop.
+    state.restored.extend(n for n in dead if n not in state.restored)
+    threading.Thread(target=_run_sb, args=(sb, "restore", db_path, state, "restore"),
+                     kwargs={"flags": ("--sweep", "--auto"), "env": fleet_env()},
+                     daemon=True).start()
+    return True
+
+
 def doorbell_sb() -> Optional[str]:
     """Which `sb` the doorbell runs — THIS build's, not whatever is installed.
 
@@ -557,21 +654,27 @@ def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
 
 
 def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
-            which: str = "doorbell") -> None:
-    """The spawned half, shared by both triggers. Swallows everything: a trigger that fails
-    is a line in the counters, never a collector that dies.
+            which: str = "doorbell", *, flags: Sequence[str] = (),
+            env: Optional[dict] = None) -> None:
+    """The spawned half, shared by all three triggers. Swallows everything: a trigger that
+    fails is a line in the counters, never a collector that dies.
 
-    `which` names the counter the failure lands in — the two are kept apart for the reason
-    `doorbell_error` is kept apart from `last_error`: a reconciler that will not run is a
-    different fact from a doorbell that will not, and reporting either as the other would
-    be a lie on forty screens."""
+    `which` names the counter the failure lands in — the three are kept apart for the
+    reason `doorbell_error` is kept apart from `last_error`: a reconciler that will not run
+    is a different fact from a doorbell that will not, and reporting either as the other
+    would be a lie on forty screens.
+
+    `env` is None for the two triggers whose command does not care who is asking, and the
+    fleet environment for the one that does — see `fleet_env`."""
     cwd = _doorbell_cwd(db_path)
     field = f"{which}_error"
+    argv = [sb, verb, *flags]
     try:
-        p = subprocess.run([sb, verb], cwd=cwd, capture_output=True, text=True,
-                           timeout=DOORBELL_TIMEOUT)
+        p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                           timeout=DOORBELL_TIMEOUT, env=env)
         setattr(state, field, None if p.returncode == 0 else
-                (p.stderr or p.stdout or f"sb {verb} exited {p.returncode}").strip()[:200])
+                (p.stderr or p.stdout
+                 or f"sb {' '.join(argv[1:])} exited {p.returncode}").strip()[:200])
     except Exception as e:                     # noqa: BLE001 — never fatal, by design
         setattr(state, field, str(e)[:200])
 
@@ -621,7 +724,15 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         # The second trigger on the same loop. Independent of the first: a fleet with a
         # dead pane in it usually has no mail pending, so a shared gate would mean each
         # mechanism only ran when the other had work.
-        run_reconciler(snap, state, db_path)
+        reaping = run_reconciler(snap, state, db_path)
+        # And the third, which is the only one of the three that must not run BESIDE
+        # another: the reconciler is what records a death, this brings the dead back, and
+        # two `sb` processes doing those at once over the same rows can write the second
+        # answer after the first. A tick is half a second and a confirmed death stays
+        # restorable for `Broker.SWEEP_RECENT`, so waiting for a quieter one costs nothing
+        # anybody can measure.
+        if not reaping:
+            run_auto_restore(snap, state, db_path)
 
     state.wrote_at = at
     panel.publish(paths, panel.envelope(last_good or {}, state.as_dict(),

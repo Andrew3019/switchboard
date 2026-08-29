@@ -287,6 +287,28 @@ min_subject = 12
 ignored_content_holds = false
 
 
+[restore]
+# Bringing a fleet back after a herdr restart — `collector.run_auto_restore` for the
+# trigger, `Broker.restore_sweep` for what it runs. A herdr restart leaves the panes and
+# the layout on screen with nothing alive in them, and every agent in the fleet dead at
+# once; this is what puts them back without somebody having to notice, work out the
+# command and type it (issue #222).
+
+# Whether a confirmed death brings the fleet back by itself. False leaves
+# `sb restore --sweep` working when typed by hand, and is how a machine opts out of the
+# automatic half without editing code — the same shape as `[sweep] enabled`.
+#
+# What the automatic half costs, said plainly because it is the argument against it: a
+# sweep spawns a pane and resumes a session per dead agent, and a restore is not undone
+# by one command. Three things bound it and all three are deliberate. It waits for the
+# death to be CONFIRMED (`timeouts.gone_confirm_grace` of continuous absence), so a herdr
+# hiccup or a reading that came back short never triggers one. It only reaches what
+# `Broker.SWEEP_RECENT` calls recent, so it is "whatever just went down", never a week of
+# old failures. And it offers each name ONCE per collector, so an agent that dies on
+# every resume cannot be restored in a loop.
+auto = true
+
+
 [limits]
 # Caps, in characters. None of these is a buffer limit; they are smell detectors.
 #
