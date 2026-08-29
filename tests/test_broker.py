@@ -160,6 +160,64 @@ class FakeHerdrAPI:
     def close_pane(self, pane): self.closed.append(pane)
 
 
+class RestoreCleanupHerdr(FakeHerdrAPI):
+    """Pane topology/process answers for restore-cleanup decision tests."""
+
+    def __init__(self):
+        super().__init__()
+        self.restore_panes: list[dict] = []
+        self.restore_shells: dict[str, Optional[int]] = {}
+
+    def pane_list(self):
+        return list(self.restore_panes)
+
+    def pane_shell(self, pane):
+        return self.restore_shells.get(pane)
+
+
+class RestoreCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db = store.connect(path=self.repo / "state.db")
+        self.h = RestoreCleanupHerdr()
+        self.b = Broker(self.db, self.h, repo=self.repo)
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def test_restore_cleanup_closes_only_idle_matching_workspace_cwd(self):
+        cwd = str(self.repo)
+        self.h.restore_panes = [
+            {"pane_id": "idle", "workspace_id": "ws", "cwd": cwd},
+            {"pane_id": "live", "workspace_id": "ws", "cwd": cwd},
+            {"pane_id": "wrong-cwd", "workspace_id": "ws", "cwd": "/other"},
+            {"pane_id": "wrong-workspace", "workspace_id": "other", "cwd": cwd},
+        ]
+        self.h.restore_shells = {"idle": 101, "live": None, "wrong-cwd": 102,
+                                 "wrong-workspace": 103}
+
+        self.b._close_restore_panes("agent", "ws", cwd)
+
+        self.assertEqual(self.h.closed, ["idle"])
+
+    def test_restore_cleanup_close_failure_is_nonfatal(self):
+        cwd = str(self.repo)
+        self.h.restore_panes = [{"pane_id": "idle", "workspace_id": "ws", "cwd": cwd}]
+        self.h.restore_shells = {"idle": 101}
+
+        def refuse(_pane):
+            raise HerdrError("connection_refused", "herdr unavailable")
+
+        self.h.close_pane = refuse
+        self.b._close_restore_panes("agent", "ws", cwd)
+
+        self.assertEqual(self.h.closed, [])
+        event = store.recent_events(self.db, agent="agent")[0]
+        self.assertEqual(event["kind"], "restore_stale_pane_close_failed")
+
+
 class EvictingHerdr(FakeHerdrAPI):
     """A herdr that charges the real price for reporting state.
 

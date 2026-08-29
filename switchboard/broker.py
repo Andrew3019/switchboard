@@ -7666,6 +7666,51 @@ class Broker:
                 frontier.extend(k["name"] for k in kids)
         return out
 
+    def _close_restore_panes(self, name: str, workspace_id: str, cwd: str) -> None:
+        """Close the dead shells a restore is about to replace.
+
+        Pane ids die with herdr, so the stored agent and board ids cannot identify their
+        post-restart panes.  The durable facts left are the workspace (re-resolved by
+        name in `_restore_tab`) and the checkout cwd.  Within those two bounds, only a
+        pane that `pane_shell` proves is an idle shell is safe to take.
+
+        This deliberately closes every match.  There is no durable per-agent pane label,
+        so one of them may be an unrelated closed agent's leftover—or a human's own idle
+        terminal parked there—when several users or agents share a workspace and checkout.
+        A live process is never closed: `None` is the conservative answer from `pane_shell`,
+        including when herdr cannot answer.
+
+        The capability check keeps older adapters usable.  In particular, the broker's
+        test fake does not model pane listing or process inspection; teaching it those
+        behaviours would make a fake claim to exercise the real restart path.
+        """
+        pane_list = getattr(self.h, "pane_list", None)
+        pane_shell = getattr(self.h, "pane_shell", None)
+        if not workspace_id or not callable(pane_list) or not callable(pane_shell):
+            return
+        target_cwd = _resolved(str(cwd))
+        if target_cwd is None:
+            return
+        for entry in pane_list():
+            if entry.get("workspace_id") != workspace_id:
+                continue
+            pane_cwd = entry.get("cwd")
+            if not pane_cwd or _resolved(pane_cwd) != target_cwd:
+                continue
+            pane = entry["pane_id"]
+            if pane_shell(pane) is None:
+                continue
+            try:
+                self.h.close_pane(pane)
+            except HerdrError as e:
+                kind = ("restore_stale_pane_gone" if e.code == "pane_not_found"
+                        else "restore_stale_pane_close_failed")
+                store.log_event(self.db, kind=kind, agent=name, pane=pane,
+                                error=str(e))
+                continue
+            store.log_event(self.db, kind="restore_stale_pane_closed", agent=name,
+                            pane=pane)
+
     def _restore_tab(self, a, wsid: str, where, *, env: Optional[dict] = None) -> str:
         """The pane a restore comes back into — in the space it came from, by NAME once the
         recorded id has died with the herdr that issued it.
@@ -7694,6 +7739,10 @@ class Broker:
         tier 4), good enough to aim a tab at and never good enough to write down as where
         this agent is.
         """
+        # Close first, then recreate.  When the recorded id is still valid this is the
+        # target workspace; after a herdr restart it selects nothing, and the by-name
+        # retry below performs the same cleanup against the new run's id.
+        self._close_restore_panes(a["name"], wsid, str(where))
         pane, landed = self._tab_for(wsid, where, env=env)
         if not wsid or landed or not a["workspace"]:
             # Nothing was recorded, or what was recorded still works: no second guess.
@@ -7705,6 +7754,7 @@ class Broker:
             self.h.close_pane(pane)
         except HerdrError as e:
             store.log_event(self.db, kind="orphan_pane", agent=a["name"], error=str(e))
+        self._close_restore_panes(a["name"], byname, str(where))
         pane, landed = self._tab_for(byname, where, env=env)
         store.log_event(self.db, kind="restore_workspace_reresolved", agent=a["name"],
                         workspace=a["workspace"], was=wsid, now=landed or "")
