@@ -150,9 +150,10 @@ own store, which is empty, while herdr enforces names machine-wide — so a seco
 refused with `agent_name_taken` pointing at a worktree you thought was gone. Date-stamp the
 topic, or read `herdr agent list` first.
 
-**Poll `./bin/sb status` to learn a planner has finished; there is no other route.** A human
-has no inbox, `sb board` refuses outside a tty, and a planner's `sb tell parent` reaches the
-throwaway lead rather than you. Watch the row go idle, then read the file it was told to
+**Poll `./bin/sb status --all` to learn a planner has finished; there is no other route.** A
+human has no inbox, `sb board` refuses outside a tty, and a planner's `sb tell parent` reaches
+the throwaway lead rather than you. `--all` because a finished planner is dropped from the
+default (active-only) status. Watch the row go idle, then read the file it was told to
 write.
 
 Hand each planner its case brief by **path**, and hand over the `Brief` section only.
@@ -254,7 +255,7 @@ pass has.
 ### 7. Teardown
 
 ```
-./bin/sb status                                          # read it: every agent, every workspace
+./bin/sb status --all                                    # read it: every agent, every workspace
 ./bin/sb cleanup <the lead> --force
 ./bin/sb workspace close <each workspace the run created> --yes
 ```

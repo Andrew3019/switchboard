@@ -491,6 +491,16 @@ database = 10.0
 # this flat number: they get their own deadline plus this as the margin to return within.
 subprocess = 10
 
+# The per-pane `agent explain` probe `status._mark_awaiting_keypress` runs — SHORT, and
+# deliberately far below `subprocess`. It runs on the collector's every-tick critical path,
+# one subprocess per stalled agent, and a slow herdr answering it is what ballooned a tick
+# to 32 s on a loaded WSL fleet — which `_gap` then turned into a minute-and-a-half board
+# freeze. The probe only decorates a STALLED row with the narrower `awaiting_keypress`, so a
+# reading nobody got in time is no loss: the row keeps its last answer or degrades to plain
+# STALLED. Short here, and bounded in total by `status.KEYPRESS_PROBE_BUDGET`, keeps the tick
+# fast so the board and its RIGHT NOW numbers stay fresh.
+keypress_probe = 1.5
+
 # The board's `sb inspect --json` fork, which is the whole of what `ww` and `oo` have to
 # get past before either reaches the editor. Deliberately not the flat number above:
 # `status.inspect` answers about ONE agent by running the entire fleet's `collect`, which

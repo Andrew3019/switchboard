@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from typing import Any, Collection, Optional
 
@@ -192,6 +193,15 @@ NO_RULE_FALLBACK = "default_known_agent_idle_fallback"
 #   opinion, by a tick or two.
 KEYPRESS_PROBE_MAX = 8
 KEYPRESS_PROBE_GAP = 30
+# The WALL-CLOCK backstop the count above is not. `KEYPRESS_PROBE_MAX` bounds the number of
+# probes, which is the right cap when each is the ~8 ms the comment above assumes; it says
+# nothing about their total time, and a herdr that is slow to read a pane (measured making a
+# single probe take seconds on a loaded WSL fleet) turns "eight rows is ~64 ms" into tens of
+# seconds — the tick that `collector._gap` then stretched into a minute-and-a-half board
+# freeze. So the loop also stops once it has spent this long probing, whichever cap it hits
+# first. Below `board_refresh` so the probes cannot dominate a tick; the first probe always
+# runs so a quiet fleet still makes progress, one row per tick, through the same rotation.
+KEYPRESS_PROBE_BUDGET = 0.4
 
 # The answers, and when they were asked for — the memory that makes the gap above mean
 # anything. Process-local and deliberately not a column: the collector is one process
@@ -715,8 +725,49 @@ class AgentStatus:
         of our own, herdr reading a working agent as idle (its busy detector is a known
         upstream weak point) shows `idle` here rather than `working`, which is what the row
         is entitled to claim from what it observed. It never shows two answers at once.
+
+        A `done` or `blocked` row that is TAKING A TURN AGAIN reads `working`, and that is the
+        bug Andrew reported: an agent marks `done`, is then spoken to, and works — yet its
+        STATE column stays `done` the whole time. `state` is a self-report about the TASK and
+        it stays terminal until the agent's next `sb` command reopens it (`broker._revive`),
+        which is lazy and may never come. But the turn edge is not lazy: `UserPromptSubmit`
+        wrote `turn=working` the moment the agent was poked, and that is the same signal this
+        method already trusts over herdr for a running row. So a terminal or blocked row with
+        our own turn signal live — `turn == working` AND herdr confirming the pane is there
+        (`alive is True`) — is drawn `working`, exactly as the resumed agent is. `alive is
+        True`, not merely truthy: with herdr unreachable (`alive is None`) nothing confirms the
+        pane, so the stored terminal word stands. This is a READING only: `state` is not
+        touched, so `stop_gate` still sees the report it wrote, `sb cleanup` still closes the
+        finished row, and `_revive` still does the real reopen when the agent acts.
+
+        TWO HONEST LIMITS, because in this repo the docstring is the record and both are real.
+
+        The claim above that the STATE word never disagrees with the row's other signals has
+        one exception, and it is the `blocked` case: this reconciles the WORD only, not the
+        summons flags. `blocked` (and so the `<< BLOCKED` marker, the `1 blocked` count and the
+        NEEDS YOU line) reads the raw `state`, which is still `blocked` until `_revive` clears
+        it, so a block just answered in its own pane shows `working` beside a lingering BLOCKED
+        until the agent runs one `sb` command. Transient, and arguably still true — the store
+        has not yet confirmed the answer landed — but it is one word saying `working` and
+        another saying blocked, so it is named rather than claimed away. (A `done` resume has
+        no such flag, so it reads clean.)
+
+        And the lost-`Stop`-right-after-`sb done` corner is WIDER than `alive is True` would
+        suggest, so do not read that guard as bounding it. `sb done` deliberately does not
+        report to herdr, so a finished agent stays in herdr's list — `alive is True` — until
+        `sb cleanup` closes it, which on this fleet is days. If that agent's `Stop` was the one
+        that got lost, its `turn` is stuck at `working` and this draws it `working` for the
+        whole of that time, and nothing repairs it: `stalled`, `signal_drift` and `turn_doubted`
+        all begin `state in RUNNING`, which a `done` row is not. It is a real and potentially
+        long-lived misread — but a strictly smaller and rarer one than the stale terminal word
+        it replaces (which was EVERY resume, Andrew's daily workflow, not a lost-hook corner),
+        and there is no cheap safe bound: gating on the idle clock breaks the fix (a chat turn
+        runs no `sb`, so idle is already old), and leaning on herdr undoes it whenever herdr
+        misreads the resumed pane. So it is stated, not chased.
         """
         if self.state not in RUNNING:
+            if self.turn == TURN_WORKING and self.alive is True:
+                return TURN_WORKING
             return self.state
         if self.alive is False:
             return "idle"
@@ -1153,14 +1204,20 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus],
     # state, which is exactly the flicker qa-10 caught. Name breaks the tie so two rows
     # asked about in the same second still have a fixed order.
     spent = 0
+    started = time.monotonic()
     for a in sorted(candidates, key=lambda x: (_KEYPRESS_SEEN.get(x.name, (0, False))[0],
                                                x.name)):
         asked_at, answer = _KEYPRESS_SEEN.get(a.name, (0, False))
-        # Inside the gap, and over budget outside it, both answer from what was last seen.
-        # Over budget is the load-bearing one: a row that HAS an answer keeps it rather
+        # Inside the gap, and over either budget outside it, all answer from what was last
+        # seen. Over budget is the load-bearing one: a row that HAS an answer keeps it rather
         # than reverting to "no opinion", so a busy tick can delay a first reading but can
-        # never take a label off a row that already earned one.
-        if now - asked_at < KEYPRESS_PROBE_GAP or spent >= KEYPRESS_PROBE_MAX:
+        # never take a label off a row that already earned one. The wall-clock budget is
+        # checked with `spent` so it never trips before the first probe of a tick — a quiet
+        # fleet still makes progress one row at a time — and stops the rest the moment a slow
+        # herdr has cost this tick its share.
+        over_budget = spent >= KEYPRESS_PROBE_MAX or (
+            spent and time.monotonic() - started >= KEYPRESS_PROBE_BUDGET)
+        if now - asked_at < KEYPRESS_PROBE_GAP or over_budget:
             a.awaiting_keypress = answer
             continue
         spent += 1
@@ -1169,9 +1226,18 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus],
         except (HerdrError, OSError):
             # No answer is not an answer, and it is not the OLD answer either: a herdr that
             # has stopped answering must not leave a row telling a human to go and press a
-            # key on the strength of a reading nothing can confirm any more. Forgotten, so
-            # the row degrades to plain STALLED for as long as the outage lasts.
-            _KEYPRESS_SEEN.pop(a.name, None)
+            # key on the strength of a reading nothing can confirm any more. The row degrades
+            # to plain STALLED for as long as the outage lasts (`answer` False).
+            #
+            # RECORDED, not forgotten — `(now, False)`, so `KEYPRESS_PROBE_GAP` throttles the
+            # RETRY. Popping the row made it "never asked", which sorts it first and passes the
+            # gap check, so it was re-probed every single tick — and once the probe deadline is
+            # short (`timeouts.keypress_probe`), a herdr slow enough to miss it makes every
+            # such probe fail, so every tick paid the full deadline on that row forever. That
+            # was the collector cost this whole change exists to cut. Recording the failure
+            # costs one thing and it is worth naming: recovery is up to a gap slower once herdr
+            # answers again, which for a label this incidental is the right trade.
+            _KEYPRESS_SEEN[a.name] = (now, False)
             a.awaiting_keypress = False
             continue
         _KEYPRESS_SEEN[a.name] = (now, a.awaiting_keypress)
@@ -2664,7 +2730,9 @@ def summary_bits(snap: Snapshot) -> list[str]:
         bits.append(f"{c['undelivered']} undelivered")
     bits.append(f"{c['agents']} agents")
     if c["hidden"]:
-        bits.append(f"{c['hidden']} hidden")
+        # Name the flag: the finished rows are dropped by default now, and a reader who did
+        # not know that would take the smaller tree for the whole of it.
+        bits.append(f"{c['hidden']} hidden (--all)")
     return bits
 
 

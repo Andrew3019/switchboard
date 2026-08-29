@@ -822,6 +822,19 @@ class WhatAFasterBoardMayCost(PanelTest):
         worst = 1.11                                     # the slowest live tick sampled
         self.assertLess(worst + collector._gap(0.5, worst), panel.STALE_AFTER)
 
+    def test_a_pathologically_slow_tick_cannot_freeze_the_board_for_minutes(self):
+        """The bug Andrew reported. A tick that BLOCKS on a slow herdr — 32 s measured on a
+        loaded WSL fleet — used to back off to `32 * 3 = 96 s`, freezing the board for a
+        minute and a half and aging every panel's snapshot to ~100 s past `stale_after`. The
+        duty arithmetic was sized against a tens-of-milliseconds tick, not a blocked one. The
+        gap is now capped at `stale_after`, so however slow the tick, the sleep after it never
+        pushes the next publish past the staleness line."""
+        self.assertLessEqual(collector._gap(0.5, 32.0), panel.STALE_AFTER)
+        self.assertLessEqual(collector._gap(0.5, 600.0), panel.STALE_AFTER)
+        # A deliberately slow board (interval above stale_after) is still honoured, not
+        # clamped under its own floor.
+        self.assertGreaterEqual(collector._gap(10.0, 32.0), 10.0)
+
 
 class TheCollectorNoticingItsOwnCodeChanged(PanelTest):
     """It holds the repo's one lock for hours and loads its code once, so a fix could be on

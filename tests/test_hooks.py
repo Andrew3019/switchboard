@@ -203,6 +203,20 @@ class ActivitySignalTest(unittest.TestCase):
         self.assertEqual(store.get_agent(self.db, "w1")["state"], "blocked")
         self.assertEqual(self.turn(), store.TURN_IDLE)
 
+    def test_a_new_turn_leaves_the_terminal_state_column_untouched(self):
+        """The STATE-column bug Andrew reported is fixed at the READING (see
+        `AgentStatus.display_state`), not by rewriting `state`: a `done` row spoken to keeps
+        `state='done'` in the store — so `stop_gate` still sees the report and `sb cleanup`
+        still closes it — while the board reads it as `working` off the live turn edge. This
+        pins the half that lives here: the turn edge is written and the terminal word is
+        left alone."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        store.set_state(self.db, "w1", "done")               # the report landed; turn ended
+        hooks.run_activity(json.dumps(self.payload()), db_path=self.path)  # spoken to again
+        row = store.get_agent(self.db, "w1")
+        self.assertEqual(row["state"], "done")               # the self-report is untouched
+        self.assertEqual(row["turn"], store.TURN_WORKING)    # but the turn edge says working
+
     def test_a_session_that_is_not_ours_is_never_written(self):
         """The isolation, from the writing end. Only agents we spawned are handed the
         settings file at all, and an unresolvable caller writes nothing even so."""

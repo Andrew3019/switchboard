@@ -717,11 +717,30 @@ def _gap(interval: float, elapsed: float) -> float:
     three seconds of quiet for every second it spends, and the board goes slower exactly
     when the machine is busy — which is the direction a person would choose.
 
-    `stale_after` is above the worst of this on purpose (see defaults/settings.toml), so
-    backing off shows up as a board that updates a little less often, never as forty panes
-    announcing that the snapshot is stale.
+    THE BACKOFF IS CAPPED AT `stale_after`, and that bounds the FREEZE — not, on its own, the
+    staleness. The duty arithmetic multiplies a slow tick — `elapsed * 3` at `MAX_DUTY = 0.25`
+    — and it was sized against a tick of tens of milliseconds. A tick that BLOCKS instead, on a
+    herdr subprocess slow to answer (measured at 32 s on a loaded WSL fleet), turned that into
+    a ~96 s sleep: the board froze for a minute and a half, every panel reading `snapshot
+    ~100s old` — the "updating very slowly" Andrew reported. Capping the gap at `stale_after`
+    turns that 96 s into 5: the collector keeps ticking at least that often, whatever one tick
+    costs.
+
+    What it does NOT do is keep the snapshot itself fresh once a tick gets slow. Age at the
+    next publish is `elapsed + gap`, and while the backoff is uncapped that is `elapsed * 4`
+    (gap = elapsed*3), so it crosses `stale_after` at `elapsed = stale_after * MAX_DUTY` — ~1.25
+    s with today's constants, well below `stale_after` itself. So a 1.5 s tick (what a single
+    timed-out probe now produces) already publishes a ~6 s snapshot, and the reported 32 s tick
+    a ~37 s one; a tick that slow cannot be hidden by sleeping less. The fix for THAT is
+    upstream, keeping the tick short (`status.KEYPRESS_PROBE_BUDGET`, the short probe deadline,
+    and the failed-probe throttle). The cap's job is narrower and real: turn a would-be 96 s
+    freeze into a 5 s one, so a pathological tick costs seconds off the board rather than
+    minutes. Below ~1.25 s the existing invariant still holds (`worst + gap < stale_after`, the
+    test at tests/test_panel.py). The floor stays `interval`, and a deliberately slow
+    `board_refresh` above `stale_after` is honoured, not clamped under it.
     """
-    return max(0.0, max(interval, elapsed * (1 - MAX_DUTY) / MAX_DUTY))
+    gap = max(interval, elapsed * (1 - MAX_DUTY) / MAX_DUTY)
+    return max(0.0, min(gap, max(interval, panel.STALE_AFTER)))
 
 
 def _nobody_is_looking(paths: panel.Paths, state: State, idle_exit: float) -> bool:

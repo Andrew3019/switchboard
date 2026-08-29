@@ -4658,7 +4658,14 @@ class _Live:
         anything about a death or a dormancy.
         """
         if self._agents is _UNASKED:
-            snap = _ask(self.ctx, "status", clock=self.clock)
+            # `--all`, because dormancy is a fact ABOUT finished agents: a plan is dormant
+            # once every agent on its worktree has closed, so the closed ones must be in the
+            # snapshot for `condition` to see them at all. `sb status` now defaults to the
+            # working set — finished rows dropped — which is right for a person reading a
+            # board and wrong for this, the one reader that is asking precisely so it can
+            # count the finished. `owner` reads the same snapshot and wants the closed rows
+            # too, for the same reason.
+            snap = _ask(self.ctx, "status", "--all", clock=self.clock)
             rows = (snap or {}).get("agents")
             self._agents = ({str(a.get("name")): a for a in rows if isinstance(a, dict)}
                             if isinstance(rows, list) else None)

@@ -209,7 +209,7 @@ class Clone:
         store_line = next((l for l in doctor.text.splitlines() if l.startswith("store")), "")
         if str(self.path) not in store_line:
             raise RuntimeError(f"clone is not on its own store: {store_line!r}")
-        status = self.sb("status", "--json").json() or {}
+        status = self.sb("status", "--all", "--json").json() or {}
         if status.get("agents"):
             raise RuntimeError("fresh clone already has agents — not an isolated store")
         self.log.write(self.name, f"clone {self.path} @ {self.branch} {self.head}")
@@ -223,7 +223,12 @@ class Clone:
         return r
 
     def status(self) -> dict:
-        return self.sb("status", "--json", timeout=120.0).json() or {"agents": []}
+        # `--all`: acceptance verifies OUTCOMES, and most of them are finished agents — a
+        # child that reached `done`, a blocker that closed. `sb status` now defaults to the
+        # working set (finished rows dropped), which is right for a board and wrong for a
+        # harness whose checks are almost all `state == "done"`. This one reader wants the
+        # whole tree, so it asks for it.
+        return self.sb("status", "--all", "--json", timeout=120.0).json() or {"agents": []}
 
     def agent(self, name: str) -> Optional[dict]:
         return next((a for a in self.status().get("agents", []) if a["name"] == name), None)
