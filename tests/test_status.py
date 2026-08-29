@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -226,6 +227,44 @@ class StatusTest(unittest.TestCase):
         a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "working")]),
                                         now=at))["w1"]
         self.assertFalse(a.stalled)
+
+    def test_a_done_or_blocked_row_taking_a_turn_again_reads_working(self):
+        """Andrew's bug: an agent marks `done`, is then spoken to and works — and the STATE
+        column stays `done` the whole time, because `state` is a self-report about the task
+        and nothing had reopened it yet (`broker._revive` is lazy). The turn edge is not lazy,
+        so the READING follows it: a terminal or blocked row whose own turn signal is live and
+        whose pane herdr still lists reads `working`.
+
+        Crucially this is a reading, not a rewrite: `state` in the store is untouched (pinned
+        in `test_hooks.py`), so the report the agent wrote still stands for `stop_gate` and
+        `sb cleanup`.
+        """
+        for word in ("done", "blocked", "failed"):
+            store.create_agent(self.db, name=word, role="worker", session_id=f"s-{word}")
+            store.set_state(self.db, word, word)
+        # Spoken to: the turn edge fires for each. herdr still lists the pane (alive True).
+        for word in ("done", "blocked", "failed"):
+            store.set_turn(self.db, word, store.TURN_WORKING)
+        rows = self.by_name(status.collect(self.db, FakeHerdr(
+            [alive(w, "working") for w in ("done", "blocked", "failed")])))
+        for word in ("done", "blocked", "failed"):
+            self.assertEqual(rows[word].display_state, "working", word)
+            self.assertEqual(rows[word].state, word, "the stored self-report is untouched")
+
+    def test_a_finished_row_at_rest_still_reads_its_terminal_word(self):
+        """The other half: the reading only follows a LIVE turn edge. A `done` row whose turn
+        has ended (the ordinary finished agent) reads `done`, not `working` — the fix must not
+        make every finished agent look busy."""
+        store.create_agent(self.db, name="d", role="worker", session_id="s-d")
+        store.set_state(self.db, "d", "done")
+        store.set_turn(self.db, "d", store.TURN_IDLE)        # its Stop fired: turn is over
+        rows = self.by_name(status.collect(self.db, FakeHerdr([alive("d", "idle")])))
+        self.assertEqual(rows["d"].display_state, "done")
+        # And a done row herdr no longer lists (alive False) is not dragged to working by a
+        # turn edge that was never closed — the lost-Stop-after-done corner.
+        store.set_turn(self.db, "d", store.TURN_WORKING)
+        rows = self.by_name(status.collect(self.db, FakeHerdr([]), reap=False))
+        self.assertEqual(rows["d"].display_state, "done")
 
     def test_a_session_that_died_mid_turn_is_surfaced_not_left_working(self):
         """The failure mode the signal introduces: no `Stop` ever fires, so `working` is
@@ -1455,6 +1494,19 @@ class StatusCliTest(unittest.TestCase):
         from switchboard.cli import build_parser
         self.assertTrue(build_parser().parse_args(["status", "--active"]).live)
 
+    def test_status_shows_the_working_set_by_default_and_all_brings_the_rest_back(self):
+        """The cleanup Andrew asked for: `sb status` — and, worse, `sb status --json` — grew
+        into a dump nobody could find the live rows in as finished agents piled up. Active is
+        the default now (finished rows dropped, except any holding unread mail); `--all` is
+        the whole tree back for a caller that wants the history too. `--active`/`--live` still
+        parse and now only restate the default; all four flags share one dest."""
+        from switchboard.cli import build_parser
+        self.assertTrue(build_parser().parse_args(["status"]).live)              # the default
+        self.assertTrue(build_parser().parse_args(["status", "--active"]).live)
+        self.assertTrue(build_parser().parse_args(["status", "--live"]).live)
+        self.assertFalse(build_parser().parse_args(["status", "--all"]).live)
+        self.assertFalse(build_parser().parse_args(["status", "--everything"]).live)
+
     def test_every_subcommand_takes_json_on_either_side(self):
         """cli.py has always documented `--json` as per-command. It was global-only, and
         the first three spawn attempts of the QA run died on `sb delegate ... --json`.
@@ -2285,6 +2337,34 @@ class AwaitingKeypressTest(unittest.TestCase):
         status._mark_awaiting_keypress(Spy(), [restored], 1000)
         self.assertEqual(asked, [])
         self.assertFalse(restored.awaiting_keypress)
+
+    def test_a_slow_herdr_cannot_run_the_probe_past_its_wall_clock_budget(self):
+        """The tick that froze the board. `KEYPRESS_PROBE_MAX` caps the NUMBER of probes,
+        which is the right cap only when each is the few milliseconds the healthy fleet pays.
+        A herdr slow to read a pane makes one probe take seconds, and eight of them a tick of
+        tens of seconds — which `collector._gap` then turned into a minute-and-a-half board
+        freeze and a permanently stale RIGHT NOW. So the loop also stops once it has spent
+        `KEYPRESS_PROBE_BUDGET` probing: the first row is still read (a quiet fleet makes
+        progress), the rest keep their last answer, and the tick stays bounded whatever herdr
+        costs."""
+        asked = []
+
+        class Slow:
+            def explain_agent(_, name):
+                asked.append(name)
+                time.sleep(status.KEYPRESS_PROBE_BUDGET)     # one probe blows the whole budget
+                return AwaitingKeypressTest.MODAL
+
+        rows = [self.row(f"stuck-{i}", stalled=True) for i in range(5)]
+        status._mark_awaiting_keypress(Slow(), rows, 1000)
+        # First row read; the budget stops the rest this tick rather than paying 5× the wait.
+        self.assertEqual(len(asked), 1)
+
+        # And it is a DELAY, never a lost label: the unread rows are asked about on later
+        # ticks (least-recently-asked first), so every candidate is reached in the end.
+        for extra in range(1, 6):
+            status._mark_awaiting_keypress(Slow(), rows, 1000 + extra)
+        self.assertEqual(set(asked), {f"stuck-{i}" for i in range(5)})
 
     def test_no_row_s_label_depends_on_who_else_is_stalled(self):
         """The other one qa-10 caught: with a small cap over `agents` order, an unrelated

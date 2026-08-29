@@ -84,6 +84,10 @@ BASE_BRANCH = config.setting("vocabulary.base_branch")
 # minute-plus `sb delegate` hang turned out to be. `[timeouts]`, same knob every other
 # module bounds a `git`/`herdr` call with.
 SUBPROCESS_TIMEOUT = config.setting("timeouts.subprocess")
+# The short deadline for the every-tick `agent explain` probe — see `explain_agent` and
+# `timeouts.keypress_probe`. Far below `subprocess` on purpose: it is on the collector's
+# critical path and a slow answer is no answer worth waiting for.
+KEYPRESS_PROBE_TIMEOUT = config.setting("timeouts.keypress_probe")
 
 # Spawn is genuinely flaky: `agent start` fails outright if the pane has not yet reached an
 # interactive shell prompt. `[timeouts]` and `[retries]`.
@@ -1172,8 +1176,15 @@ class Herdr:
         Raises like every other call here — a caller that wants "no opinion" out of a
         failure has to say so, because silently returning an empty verdict from a timeout
         would make "herdr is down" indistinguishable from "herdr looked and saw nothing".
+
+        A SHORT timeout (`KEYPRESS_PROBE_TIMEOUT`), not the flat `subprocess` ceiling: this is
+        the one call on the collector's every-tick critical path, and a herdr that is slow to
+        read a pane must not be allowed to hold a tick — and the whole fleet's board — open
+        for ten seconds per stalled row. A probe that times out raises like any other, and
+        `_mark_awaiting_keypress` turns that into "no opinion", which is the right answer.
         """
-        return self._call("agent", "explain", name, "--json")
+        return self._call("agent", "explain", name, "--json",
+                           timeout=KEYPRESS_PROBE_TIMEOUT)
 
     # -- state authority -------------------------------------------------
 

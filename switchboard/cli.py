@@ -337,10 +337,21 @@ def build_parser() -> argparse.ArgumentParser:
                                 "your own chat, which is what the human reads")
 
     ss = cmd("status", help="the agent tree, with drift and what needs you")
-    # `--live` is the older spelling of the same want and stays forever: it is in scripts,
-    # and in muscle memory. One dest, so they can never disagree.
-    ss.add_argument("--active", "--live", dest="live", action="store_true",
-                    help="hide finished agents")
+    # ACTIVE IS THE DEFAULT. A finished agent is history the moment its summary is read, and
+    # a fleet accumulates them until `sb status` — and worse, `sb status --json` — is a dump
+    # nobody can find the live rows in. So the tree, and the JSON, are the working set: rows
+    # that are not finished, plus any finished one still holding unread mail nobody else will
+    # read (that is `_filter`'s live branch, and `hidden` reports how many were dropped).
+    # `--all` is the whole tree back, for a script or a person who wants the history too.
+    #
+    # `--live` is the older spelling of `--active` and stays forever: it is in scripts and in
+    # muscle memory. All three flags share one dest, so they can never disagree — `--active`
+    # and `--live` now only restate the default, and `--all` is the one that changes it.
+    ss.add_argument("--active", "--live", dest="live", action="store_true", default=True,
+                    help="only unfinished agents, plus any holding unread mail (the default)")
+    ss.add_argument("--all", "--everything", dest="live", action="store_false",
+                    help="every agent, finished ones included (the whole tree, and the "
+                         "whole --json dump)")
     ss.add_argument("--needs-me", dest="needs_me", action="store_true",
                     help="only agents that are blocked, at a prompt, stalled, or holding "
                          "unread mail")
@@ -350,9 +361,11 @@ def build_parser() -> argparse.ArgumentParser:
     ss.add_argument("--mine", action="store_true",
                     help="only your own subtree (a human has no subtree: every agent is "
                          "theirs, and `sb board` is their view of them)")
-    # Not a filter, unlike the three above: they drop rows and say so in `hidden`, this
-    # only stops fully-archived subtrees being drawn as one line each. `--json` is
-    # unaffected either way and always carries every row.
+    # Not a filter, unlike the row-droppers above: they drop rows and say so in `hidden`,
+    # this only stops fully-archived subtrees being drawn as one line each. It is a DISPLAY
+    # collapse, so `--json` ignores it and never collapses — but `--json` does honour
+    # `--active`/`--all` like the tree does, because that is a filter on the data and not on
+    # the drawing.
     ss.add_argument("--archived", action="store_true",
                     help="draw archived agents individually instead of collapsing them "
                          "(the default is display.show_archived)")

@@ -298,7 +298,8 @@ cohort to watch. `--name` is two or three words for the SUBJECT — the agent is
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,
 because `worker-7` on the board tells the person watching nothing at all.
-`sb status` lists your children, and `sb cleanup [names]` closes finished
+`sb status` lists your active children (finished ones are dropped from it now —
+`sb status --all` shows them), and `sb cleanup [names]` closes finished
 ones beneath you, plus any whose turn switchboard gave up on — closing costs
 only the pane: session, summary, messages and transcript survive, and
 `sb restore` brings an agent back.
