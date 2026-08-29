@@ -135,6 +135,48 @@ DEFAULT_ROLE = config.setting("vocabulary.default_role")
 # readouts use, so "finished" cannot come to mean two different things in two files.
 FINISHED = tuple(config.setting("states.finished"))
 
+# THE MESSAGES AN AGENT GETS AFTER ITS SPAWN, and the event that sends each one. Read by
+# the effective-prompt renderer only (`Broker._lifecycle_segments`); nothing dispatches
+# from it, so a row going stale costs a wrong line in an inspection tool rather than a
+# wrong delivery.
+#
+# It is a TABLE OF CONDITIONS, not a table of text: the wording lives in `prompts.toml`
+# where a repo may override it, and the keys are read back from there so a repo's own
+# doorbell shows up too. What cannot be read off that file is WHEN each one is sent —
+# that is a fact about the code that sends it, and the second column is the only place
+# the manifest can get it from.
+LIFECYCLE_PROMPTS = (
+    ("spawn.start_task",
+     "`sb start` with no task typed — the human types the real one into the pane"),
+    ("spawn.delegate_task",
+     "`sb delegate` with no task — the real one arrives later as a tagged message"),
+    ("notify.mail",
+     "a message too large or too mixed to travel inline; the fetch is `sb inbox`"),
+    ("notify.child_done",
+     "a child finished and its report could not be delivered inline"),
+    ("notify.wait_expired",
+     "a declared `sb waiting` outlived `timeouts.wait_excuse_grace`"),
+    ("notify.interrupt",
+     "`sb tell --interrupt` cancels what this agent is doing, mid-turn"),
+    ("notify.needs_reply",
+     "a message arrived with `--needs-reply`; the sender wants an answer eventually"),
+    ("notify.preset",
+     "`sb presets <name> --apply` pastes a preset into this agent's own session"),
+    ("notify.granted",
+     "`sb grant` gives this agent a capability it was not seeded with"),
+    ("notify.granted_held",
+     "the granted capability is held: every gate asking for it now lets this agent through"),
+    ("notify.granted_delegable",
+     "the granted capability is pass-through only: spawnable, not usable"),
+    ("notify.attached",
+     "`sb workspace attach` moves this agent to another checkout"),
+    ("notify.promoted_child",
+     "this agent's parent finished with `sb done --preserve-children`"),
+    ("notify.promoted_to_you",
+     "a child of this agent finished with `--preserve-children`, handing its own "
+     "children up to report here"),
+)
+
 # How far back `restore_sweep` calls a death RECENT, in seconds. This is what makes the
 # sweep need no argument: it means "whatever went down just now and has not been dealt
 # with", never "everything that has ever failed" — resurrecting a week of ordinary crashed
@@ -4719,6 +4761,254 @@ class Broker:
                 })
         return out
 
+    # -- the two things a spawn carries that are not prompt text ------------
+    #
+    # `_binding_segments` above is the end of the STANDING PAYLOAD. Everything below is
+    # inventory: what the previewed agent would be ABLE to do, and what it would be TOLD
+    # later. Neither is a fragment in `rendered`, and that is exactly why both were
+    # missing — the manifest was built around the concatenation and stopped where the
+    # concatenation stops. Spec §8 names both ("capability seed and later grants",
+    # "relevant guidance and lifecycle state"), and a prompt inventory that lists only the
+    # text an agent is handed at second zero describes about half of what reaches it.
+
+    def _preview_capabilities(self, role: str, *, parent: str, name: str) -> dict:
+        """What the previewed spawn would be able to do, and where each half comes from.
+
+        Read through `seed_for`, so this is THE SEED THE SPAWN WOULD ACTUALLY WRITE rather
+        than a second derivation of it. The ∩-rule (§2.1: a role's template narrowed by
+        what the spawner may pass down) is the whole of the difference between a bundle
+        and what a child of THIS parent gets, and a preview that showed the raw template
+        would be wrong for exactly the case anybody previews for — a `lead` spawned by a
+        `worker` comes out short, and the point of asking is to see that.
+
+        `top` is DERIVED, because a preview has no stamp to read: `sb start` is the only
+        path that stamps one (`_top`) and it always spawns `MAIN` for `HUMAN`, so that
+        pair is the top's shape and nothing else is. It is reported as a field rather than
+        assumed silently — a reader who thinks the answer is wrong can see which answer
+        the seed was computed from.
+
+        LATER GRANTS are real whenever `--name` happens to name an agent this store has. A
+        grant is a ROW, not a template property (`sb grant`, irrevocable, provenance and
+        all), so the only honest way to preview one is to read the rows of an agent that
+        has some; for the ordinary nameless preview there are none, and an empty list says
+        that rather than letting the seed pass for the whole story.
+        """
+        is_top = role == MAIN and parent == HUMAN
+        template = roles_mod.template_capabilities(self.roles, role, is_top, self.repo)
+        seed = self.seed_for(role, is_top, spawner=parent)
+        passable = self.passable_for(parent)
+        # A STAMPED TOP'S SET IS NOT ITS ROLE FILE'S (§2.0, `roles.TOP_CAPABILITIES`): it is
+        # fixed in python, unlayerable, and pointing a reader at `roles/dispatcher.md` for
+        # it would send them to edit a file that cannot change the answer.
+        role_source, role_owner = (
+            ("switchboard.roles.TOP_CAPABILITIES (fixed; not layerable)", "switchboard-owned")
+            if is_top else self._role_capability_source(role))
+        out = {
+            "top": is_top,
+            "template": sorted(template),
+            "template_source": role_source,
+            "template_ownership": role_owner,
+            # `None` is "this spawner bounds nothing" — the human, or a caller with no row
+            # — and it is not the same statement as an empty list, which is a spawner that
+            # may pass nothing down. `seed_for` branches on exactly that difference.
+            "spawner": parent,
+            "spawner_passes": None if passable is None else sorted(passable),
+            "withheld_by_spawner": sorted(set(template) - set(seed)),
+            "seed": list(seed),
+            "grants": [],
+            "held": list(seed),
+            "delegable_only": [],
+            "live": False,
+        }
+        # An existing row overrides the whole derivation: what an agent under this name may
+        # do NOW is a fact, and a preview standing beside a fact should report the fact.
+        held = self.held_for(name)
+        if held is not None:
+            passable_now = self.passable_for(name) or set()
+            out["live"] = True
+            out["held"] = sorted(held)
+            out["delegable_only"] = sorted(passable_now - held)
+            out["grants"] = [
+                {"capability": r["cap"], "granted_by": store._value(r, "granted_by"),
+                 "held": bool(r["held"]), "reason": store._value(r, "reason")}
+                for r in store.capability_rows(self.db, name)
+                if store._value(r, "granted_by")
+            ]
+        return out
+
+    def _role_capability_source(self, role: str) -> tuple[str, str]:
+        """Which layer supplied this role's capability bundle.
+
+        Not `_role_prompt_source`: that one follows the PROMPT BODY, and a repo may state a
+        role's bundle in `roles.toml` while the prose still comes from a markdown file (or
+        the other way round). Same precedence as `config.roles`, asked about the field this
+        manifest is actually reporting.
+        """
+        def states_a_bundle(fields) -> bool:
+            # BOTH SPELLINGS, because `config._bundled` accepts both: a repo file still
+            # saying `delegate = true` is stating this role's bundle just as much as one
+            # naming `capabilities`, and a source read that only saw the modern spelling
+            # would credit the shipped file for a bundle the repo actually decided.
+            return isinstance(fields, dict) and ("capabilities" in fields
+                                                 or "delegate" in fields)
+
+        def front(path: Path) -> dict:
+            return config.front_matter(path.read_text())[0] if path.is_file() else {}
+
+        role_dir = config.path_for("roles_dir", self.repo)
+        if role_dir is not None and states_a_bundle(front(role_dir / f"{role}.md")):
+            return str(role_dir / f"{role}.md"), "external-to-switchboard"
+        role_file = config.path_for("roles_file", self.repo)
+        if role_file is not None:
+            if states_a_bundle(config.read_toml(role_file).get(role)):
+                return f"{role_file}:[{role}]", "external-to-switchboard"
+        available = plugins_mod.available(self.repo)
+        for plug in sorted(set(plugins_mod.enabled(self.repo)) & set(available), reverse=True):
+            path = available[plug] / "roles" / f"{role}.md"
+            if states_a_bundle(front(path)):
+                return str(path), self._owned_source(path)
+        return str(config.defaults_dir() / "roles" / f"{role}.md"), "switchboard-owned"
+
+    def _guidance_segments(self, role: str, caps: Collection[str]) -> list[dict]:
+        """The ledger rows this agent could ever hear, and which of them fire at turn one.
+
+        THE LEDGER IS NOT IN THE SPAWN PROMPT and that is its whole design (`guidance.py`):
+        a rule is bought by the agent the state describes, at the turn it describes it. So
+        these are never concatenated into `rendered` — they are a second list, and the
+        `included` flag here means "would be delivered on this agent's FIRST turn", not
+        "is in the standing payload".
+
+        FOUR KEYS, three of them answerable at spawn-preview time and one not. The manifest
+        says which is which per row rather than dropping the rows it cannot decide:
+
+        * `role` — resolvable, and a row keyed on ANOTHER role is left out entirely. It is
+          not part of this agent's inventory in any state it can reach.
+        * `holds`/`lacks` — resolvable against the capability set this same preview just
+          computed, which is the join that makes the two halves of this change one change.
+          A row excluded by it is still listed: capabilities GROW (`sb grant`), so
+          "excluded by the seed" is a statement about now, not about ever.
+        * `command` — the rule fires under one `sb` verb's own output (`cli._state_output`)
+          and never at turn start, so it is real but not a first-turn delivery.
+        * `when` — DETERMINISTIC over live store facts (children, worktrees, mail) that a
+          spawn preview has no agent to ask. Reported turn-conditional with the clauses
+          spelled out, rather than guessed at from "a fresh agent has no children".
+        """
+        mine = set(caps)
+        repo_ids = self._repo_guidance_ids()
+        shipped = str(config.defaults_dir() / "guidance.toml")
+        repo_file = config.path_for("guidance_file", self.repo)
+        out = []
+        for rule in guidance.ledger(self.repo):
+            if rule.role and rule.role != role:
+                continue
+            keys = []
+            if rule.role:
+                keys.append(f"role:{rule.role}")
+            if rule.command:
+                keys.append(f"command:{rule.command}")
+            keys += [f"holds {c}" for c in rule.holds]
+            keys += [f"lacks {c}" for c in rule.lacks]
+            keys += [f"{fact} {op} {value}" for fact, op, value in rule.when]
+            capable = (all(c in mine for c in rule.holds)
+                       and not any(c in mine for c in rule.lacks))
+            if not capable:
+                resolution = "excluded by the capability seed"
+            elif rule.when:
+                resolution = "turn-conditional: live store facts, no agent to ask yet"
+            elif rule.command:
+                resolution = f"command-conditional: fires under `sb {rule.command}`"
+            else:
+                resolution = "resolved at spawn: delivered on the first turn"
+            local = rule.id in repo_ids
+            out.append({
+                "kind": "guidance",
+                "rule": rule.id,
+                "source": (str(repo_file) if local and repo_file is not None
+                           else f"{shipped}:{rule.id}"),
+                "condition": "; ".join(keys) or "every agent, every turn",
+                "ownership": "external-to-switchboard" if local else "switchboard-owned",
+                "included": capable and not rule.when and not rule.command,
+                "resolution": resolution,
+                "channel": ("command output" if rule.command
+                            else "turn-start hook (UserPromptSubmit)"),
+                "category": rule.category,
+                "repeat": rule.repeat,
+                "text": f"{guidance.MARK} {rule.text}",
+            })
+        return out
+
+    def _repo_guidance_ids(self) -> set:
+        """Rule ids this repo's own ledger declares — provenance for a JOINED table.
+
+        `guidance.ledger` merges shipped rows with the repo's and a `Rule` carries no
+        source field, so the only way to say which file a row came from is to ask the repo
+        file which ids it names. Cheap (`config.read_toml` caches on mtime) and it stays
+        right for the `"!reset"` case, where the shipped rows are gone and every surviving
+        id is the repo's.
+        """
+        p = config.path_for("guidance_file", self.repo)
+        if p is None:
+            return set()
+        return {raw.get("id") for raw in (config.read_toml(p).get("rule") or [])
+                if isinstance(raw, dict) and raw.get("id")}
+
+    def _lifecycle_segments(self, *, is_top: bool, task: Optional[str]) -> list[dict]:
+        """The messages this agent gets LATER — every `[notify]` doorbell, plus the
+        placeholder task a spawn with no work hands over.
+
+        These are the other half of "what actually reaches an agent" and they reach it the
+        way a message does: tagged (`broker.tag`, `guidance.MARK`'s sibling promise),
+        one at a time, at a moment the spawn cannot know. So the text is shown WITH ITS
+        PLACEHOLDERS UNFILLED — `{who}`, `{cap}` — because filling them would mean
+        inventing a granter and a capability, and an inspection tool that invents its
+        inputs is worse than one that says it cannot resolve them.
+
+        The KEYS come from the effective `prompts.toml` rather than a list in this file, so
+        a repo that adds a doorbell sees it here; the CONDITIONS come from
+        `LIFECYCLE_PROMPTS` at the top of this module, which is the one half that cannot be
+        derived — when a message is sent is a fact about the code that sends it, not about
+        the file holding its wording. A key that table has never heard of is still listed,
+        as a repository-added notification, rather than dropped.
+
+        The two task placeholders ARE resolvable, and this is the only place the manifest
+        says which one a taskless spawn would get: `sb start` hands over `start_task`, a
+        `sb delegate` with no task hands over `delegate_task`, and a spawn that carries a
+        task gets neither (`_first_task`).
+        """
+        effective = config.prompts(self.repo)
+        out = []
+        for key, when in LIFECYCLE_PROMPTS:
+            section, _, entry = key.partition(".")
+            table = effective.get(section) or {}
+            if entry not in table:
+                continue                      # a repo reset it away; nothing is delivered
+            source, ownership = self._configured_prompt_source(key)
+            included = (task is None and key == ("spawn.start_task" if is_top
+                                                 else "spawn.delegate_task"))
+            out.append({
+                "kind": "lifecycle", "prompt": key,
+                "source": source, "condition": when, "ownership": ownership,
+                "included": included,
+                "resolution": ("resolved at spawn: this spawn's first message" if included
+                               else "turn-conditional: sent when the event happens"),
+                "channel": ("first user message" if key.startswith("spawn.")
+                            else "tagged message (`[sb: from ...]`)"),
+                "text": table[entry],
+            })
+        seen = {k for k, _ in LIFECYCLE_PROMPTS}
+        for entry, text in sorted((effective.get("notify") or {}).items()):
+            if f"notify.{entry}" in seen:
+                continue
+            source, ownership = self._configured_prompt_source(f"notify.{entry}")
+            out.append({
+                "kind": "lifecycle", "prompt": f"notify.{entry}",
+                "source": source, "condition": "sent by a repository-added notification",
+                "ownership": ownership, "included": False,
+                "resolution": "turn-conditional: switchboard ships no sender for this key",
+                "channel": "tagged message (`[sb: from ...]`)", "text": text,
+            })
+        return out
+
     def effective_instructions(
         self, *, role: str = DEFAULT_ROLE, name: str = "preview", parent: str = HUMAN,
         model: Optional[str] = None, as_prompt: Optional[str] = None,
@@ -4731,6 +5021,18 @@ class Broker:
         This is development observability, not a second composition path: ``delegate``
         consumes these same ordered segments. External provider/account instructions are
         named as boundaries because switchboard cannot inspect their contents.
+
+        THREE LISTS, and they are three because what reaches an agent arrives on three
+        different channels (spec §8). `segments` is the standing payload and the only one
+        `rendered` is built from — that identity is what makes this a preview of the real
+        assembly rather than a description of it. `capabilities` is what the spawn would
+        make the agent ABLE to do, which is not text at all and so had nowhere to go in a
+        list of fragments. `just_in_time` is what it would be TOLD later: ledger rows
+        resolved at the turn they apply to, and the lifecycle messages sent when their
+        event happens. Neither of the last two is concatenated into anything, and
+        `included` on a `just_in_time` row means "delivered on this agent's first turn",
+        not "in the standing prompt" — a row's `resolution` says which of the two it is
+        and why.
         """
         requested_role = role
         resolved_role = roles_mod.get(self.roles, role, self.repo)
@@ -4796,14 +5098,30 @@ class Broker:
         else:
             delivery = "--append-system-prompt-file; one space between flat fragments"
             rendered = herdr_mod.render_instructions(active)
+        capabilities = self._preview_capabilities(role, parent=parent, name=name)
+        just_in_time = (self._guidance_segments(role, capabilities["held"])
+                        + self._lifecycle_segments(is_top=capabilities["top"], task=task))
+        for order, segment in enumerate(just_in_time, 1):
+            segment["order"] = order
+            segment["characters"] = len(segment["text"])
+            # NOT the standing prompt's flattening note. These are already one line each —
+            # `config.flatten` runs at load for both ledger rows and prompt entries — and
+            # they are never joined to anything, so saying "before provider assembly"
+            # here would describe an assembly they do not go through.
+            segment["flattening"] = ("already one line; delivered on its own, "
+                                     "never concatenated")
         return {
             "resolved": {"role": role, "requested_role": requested_role,
                          "tier": spec.tier, "provider": spec.provider,
                          "model": spec.model, "effort": spec.effort},
             "delivery": {"standing_instructions": delivery,
                          "initial_task": "separate first user message",
+                         "just_in_time": "turn-start hook, command output, or a tagged "
+                                         "message — never part of the standing prompt",
                          "characters": len(rendered)},
             "segments": segments,
+            "capabilities": capabilities,
+            "just_in_time": just_in_time,
             "rendered": rendered,
             "task": task,
             "external_boundaries": [

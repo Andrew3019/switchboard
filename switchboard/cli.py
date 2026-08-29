@@ -1602,6 +1602,40 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 f"{segment['ownership']}; {segment['characters']} chars]")
             if segment["included"]:
                 lines.append(f"     {segment['text']}")
+        caps = manifest["capabilities"]
+        lines.append("capabilities:")
+        lines.append(
+            f"  seed {', '.join(caps['seed']) or 'nothing'} "
+            f"[template {', '.join(caps['template']) or 'nothing'} via "
+            f"{caps['template_source']}; {caps['template_ownership']}]")
+        # The ∩-rule, printed only when it actually took something away. A "withheld:
+        # nothing" line under every preview would train the reader past the one preview
+        # where a lead comes out crippled because a worker spawned it.
+        if caps["withheld_by_spawner"]:
+            lines.append(f"  withheld by spawner {caps['spawner']}: "
+                         + ", ".join(caps["withheld_by_spawner"]))
+        if caps["live"]:
+            lines.append(f"  live now: may do {', '.join(caps['held']) or 'nothing'}"
+                         + (f"; may pass down only {', '.join(caps['delegable_only'])}"
+                            if caps["delegable_only"] else ""))
+        for g in caps["grants"]:
+            lines.append(f"  granted {g['capability']} by {g['granted_by']}"
+                         + (f" — {g['reason']}" if g["reason"] else ""))
+        lines.append("just-in-time (not in the standing prompt): "
+                     + delivery["just_in_time"])
+        for segment in manifest["just_in_time"]:
+            marker = "+" if segment["included"] else "-"
+            named = segment.get("rule") or segment.get("prompt")
+            lines.append(
+                f"  {segment['order']:02d} {marker} {segment['kind']} {named} "
+                f"[{segment['source']}; {segment['condition']}; "
+                f"{segment['ownership']}; {segment['characters']} chars]")
+            lines.append(f"     {segment['resolution']} -> {segment['channel']}")
+            # Same convention as the segments block above: the text of what is actually
+            # delivered, for the rows that would be. A `-` row's text is in the JSON —
+            # printing all twenty of them would bury the two that fire.
+            if segment["included"]:
+                lines.append(f"     {segment['text']}")
         lines.append("external boundaries:")
         lines.extend(
             f"  - {boundary['source']} [{boundary['ownership']}; "

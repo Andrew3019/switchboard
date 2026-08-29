@@ -794,6 +794,125 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(local["ownership"], "external-to-switchboard")
         self.assertEqual(local["source"], str(preset_dir / "local-rule.md"))
 
+    # -- the inventory that is not prompt text (spec §8) --------------------
+
+    def rules(self, *, kind: str = "guidance", key: str = "rule", **kw) -> dict:
+        """The just-in-time rows of one preview, keyed by rule id or prompt name."""
+        manifest = self.b.effective_instructions(**kw)
+        return {r[key]: r for r in manifest["just_in_time"] if r["kind"] == kind}
+
+
+    def test_the_manifest_reports_the_capability_seed_the_spawn_actually_writes(self):
+        """A prompt inventory that lists only text describes half of what a spawn carries:
+        the other half is what the agent may DO, and nothing in the manifest said. The
+        assertion is against the seed the real spawn WROTE, not against a role bundle —
+        a preview that agreed with the template and disagreed with the row would be worse
+        than no preview at all."""
+        store.create_agent(self.db, name="orch", role="lead", workspace="ws",
+                           branch="ws", cwd=str(self.repo))
+        manifest = self.b.effective_instructions(
+            role="worker", name="worker-t", parent="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch")
+        self.assertEqual(manifest["capabilities"]["seed"],
+                         sorted(store.held_capabilities(self.db, "worker-t")))
+        self.assertFalse(manifest["capabilities"]["top"])
+        self.assertEqual(manifest["capabilities"]["spawner"], "orch")
+
+    def test_the_manifest_shows_what_the_spawner_narrowed_away(self):
+        """The ∩-rule (§2.1) is the whole difference between a role's bundle and what a
+        child of THIS parent gets, and it is the reason anyone previews a spawn: a `lead`
+        commissioned by a `worker` comes out crippled, and the manifest has to say so
+        rather than reciting the lead template."""
+        store.create_agent(self.db, name="w", role="worker", cwd=str(self.repo))
+        caps = self.b.effective_instructions(
+            role="lead", name="lead-x", parent="w")["capabilities"]
+        self.assertEqual(caps["seed"], self.b.seed_for("lead", False, spawner="w"))
+        self.assertNotEqual(caps["seed"], caps["template"])
+        self.assertEqual(caps["withheld_by_spawner"],
+                         sorted(set(caps["template"]) - set(caps["seed"])))
+        self.assertIn("spawn", caps["withheld_by_spawner"])
+
+    def test_the_manifest_reports_later_grants_for_an_agent_that_has_them(self):
+        """"Capability seed AND LATER GRANTS" — and a grant is a row with provenance, not
+        a property of any template, so the only honest preview of one reads the rows of an
+        agent that has it. `--name` naming a live agent is what makes that reachable."""
+        store.create_agent(self.db, name="orch", role="lead", workspace="ws",
+                           branch="ws", cwd=str(self.repo))
+        self.b.delegate("t", topic="t", role="worker", me="orch")
+        self.b.grant("worker-t", "spawn", me="orch", reason="needs one helper")
+        caps = self.b.effective_instructions(
+            role="worker", name="worker-t", parent="orch")["capabilities"]
+        self.assertTrue(caps["live"])
+        self.assertIn("spawn", caps["held"])
+        self.assertNotIn("spawn", caps["seed"])
+        self.assertEqual(
+            [(g["capability"], g["granted_by"], g["reason"]) for g in caps["grants"]],
+            [("spawn", "orch", "needs one helper")])
+
+    def test_the_manifest_lists_guidance_and_says_which_rows_can_reach_this_agent(self):
+        """The ledger is deliberately NOT in the spawn prompt (`guidance.py`), which is
+        exactly why it went missing from an inventory built around the concatenation. Four
+        rows, one per way a row resolves at preview time: global fires on turn one, a
+        capability key is answerable from the seed this same preview computed, a live-state
+        key is not answerable at all, and another role's row is not this agent's business."""
+        sw = self.repo / ".switchboard"
+        sw.mkdir(parents=True, exist_ok=True)
+        (sw / "guidance.toml").write_text(
+            '[[rule]]\nid = "always"\ntext = "Global rule."\n\n'
+            '[[rule]]\nid = "needs-fork"\nholds = ["fork"]\ntext = "Fork rule."\n\n'
+            '[[rule]]\nid = "on-children"\n'
+            'when = [{fact = "live_children", op = ">=", value = 1}]\n'
+            'text = "Cohort rule."\n\n'
+            '[[rule]]\nid = "lead-only"\nrole = "lead"\ntext = "Lead rule."\n')
+        rows = self.rules(role="lead")
+        self.assertTrue(rows["always"]["included"])
+        self.assertEqual(rows["always"]["source"], str(sw / "guidance.toml"))
+        self.assertEqual(rows["always"]["ownership"], "external-to-switchboard")
+        self.assertTrue(rows["needs-fork"]["included"])        # a lead is seeded `fork`
+        self.assertFalse(rows["on-children"]["included"])
+        self.assertIn("turn-conditional", rows["on-children"]["resolution"])
+        self.assertIn("live_children >= 1", rows["on-children"]["condition"])
+        self.assertIn("lead-only", rows)
+        worker = self.rules(role="worker")
+        self.assertFalse(worker["needs-fork"]["included"])
+        self.assertIn("capability seed", worker["needs-fork"]["resolution"])
+        self.assertNotIn("lead-only", worker)
+
+    def test_just_in_time_rows_never_enter_the_standing_prompt(self):
+        """The one property the whole addition rests on. Guidance and doorbells are bought
+        at the turn they apply to; a renderer that folded them into `rendered` would be
+        describing the prompt the redesign exists to have stopped sending."""
+        manifest = self.b.effective_instructions(role="lead")
+        self.assertTrue(manifest["just_in_time"])
+        for row in manifest["just_in_time"]:
+            self.assertNotIn(row["text"], manifest["rendered"])
+        self.assertEqual([s["order"] for s in manifest["just_in_time"]],
+                         list(range(1, len(manifest["just_in_time"]) + 1)))
+
+    def test_the_manifest_names_the_placeholder_task_a_taskless_spawn_hands_over(self):
+        """`_first_task`'s two placeholders are lifecycle text an agent really receives,
+        and which of the two it gets is one of the few things a preview CAN resolve: a top
+        is told to wait for a person, a delegated child for a message, and a spawn carrying
+        a task is told neither."""
+        def fired(**kw):
+            return [s["prompt"] for s in
+                    self.b.effective_instructions(**kw)["just_in_time"]
+                    if s["kind"] == "lifecycle" and s["included"]]
+        self.assertEqual(fired(role="worker"), ["spawn.delegate_task"])
+        self.assertEqual(fired(role="worker", task="do the thing"), [])
+        self.assertEqual(fired(role=MAIN, parent=HUMAN), ["spawn.start_task"])
+
+    def test_lifecycle_doorbells_are_listed_with_their_placeholders_unfilled(self):
+        """An inspection tool that invented a granter and a capability to make
+        `notify.granted` render would be reporting a message nobody will ever send. The
+        template is shown as it stands, and the row says it is turn-conditional."""
+        rows = self.rules(role="worker", kind="lifecycle", key="prompt")
+        granted = rows["notify.granted"]
+        self.assertIn("{cap}", granted["text"])
+        self.assertFalse(granted["included"])
+        self.assertIn("prompts.toml", granted["source"])
+        self.assertEqual(granted["ownership"], "switchboard-owned")
+
     # -- what a spawn is told exists ---------------------------------------
 
     def test_every_spawn_is_told_what_roles_exist(self):

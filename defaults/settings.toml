@@ -434,12 +434,19 @@ gone_confirm_grace = 60.0
 stalled_floor = 3.0
 
 # How long an explicit `sb waiting` remains quiet before Switchboard asks the agent to
-# check again. Thirty minutes clears ordinary background work without turning a forgotten
+# check again. Sixty minutes clears ordinary background work without turning a forgotten
 # wait into permanent immunity from STALLED. On expiry the unattended reconciler sends one
 # targeted nudge; the agent checks status and either continues or declares waiting again.
 # This is not the retired general stall nudge — only a wait the agent explicitly set earns
 # it, once per declaration.
-wait_excuse_grace = 1800.0
+#
+# RAISED FROM 30 MINUTES (2026-08-29). Thirty was short for the wait this actually guards: a
+# parent on `sb waiting --all` behind a cohort that is each running tests or a build gets
+# nudged mid-cohort, checks status, learns nothing new and re-declares — a turn spent to
+# arrive back where it started. The expiry is the escape hatch from a wait nobody will ever
+# clear, not a progress check, so it is sized to the longest ordinary wait, not the typical
+# one.
+wait_excuse_grace = 3600.0
 
 # How long a `working` turn edge must have NOTHING behind it before that edge is doubted at
 # all (`status.TURN_STALE_GRACE`). Measured, not guessed: across 406 real agent sessions in
