@@ -56,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
+from .status import GONE_CONFIRM_GRACE, GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -146,6 +146,26 @@ FINISHED = tuple(config.setting("states.finished"))
 # visible — an unrelated crash inside the same ten minutes is offered, named on its own
 # line, and `--dry-run` shows the whole list before anything spawns.
 SWEEP_RECENT = 600
+
+# What tells a fleet-wide herdr restart from a single pane dying, for the AUTOMATIC sweep
+# only (`restore_sweep(auto=True)`; a human typing the command is trusted to mean it and is
+# never gated). A restart takes out every agent at one instant; a pane closed in herdr's UI,
+# a lone `kill`, or one dropped binding takes out exactly one — and those two look identical
+# to `_crash_cohort`, which is why the automatic half must not act on cohort membership
+# alone. So it acts only on a CLUSTER: at least `RESTART_MIN_COHORT` agents whose crash
+# moments (`_crash_time`) fall inside one `RESTART_WINDOW`. This is the "several simultaneous
+# deaths" narrowing, not a herdr process-identity check — it needs no new herdr call and no
+# new snapshot field, and its cost is a rare false negative (a genuine restart of a fleet
+# that happened to hold a single agent is left for `sb restore --sweep`, typed) far cheaper
+# than the false positive it removes (a hand-closed pane silently resumed a minute later).
+#
+# `RESTART_WINDOW` is wider than a tick on purpose: at the moment the sweep runs, a real
+# restart's cohort is part still mid-debounce and part already confirmed, and `_crash_time`
+# puts both back on the crash-instant clock to within about a `gone_confirm_grace`. Two
+# minutes absorbs that spread while staying far under `SWEEP_RECENT`, so two unrelated
+# deaths minutes apart inside the same ten-minute window do not read as one event.
+RESTART_MIN_COHORT = 2
+RESTART_WINDOW = 120.0
 
 # The protocol travels as a system prompt, NOT a file.
 #   - ~/.claude/CLAUDE.md would leak into every ordinary Claude session
@@ -7666,19 +7686,60 @@ class Broker:
                 frontier.extend(k["name"] for k in kids)
         return out
 
-    def _close_restore_panes(self, name: str, workspace_id: str, cwd: str) -> None:
-        """Close the dead shells a restore is about to replace.
+    def _restore_pane_targets(self, a) -> set:
+        """The panes a restore is entitled to close: this agent's own, and its board's.
 
-        Pane ids die with herdr, so the stored agent and board ids cannot identify their
-        post-restart panes.  The durable facts left are the workspace (re-resolved by
-        name in `_restore_tab`) and the checkout cwd.  Within those two bounds, only a
-        pane that `pane_shell` proves is an idle shell is safe to take.
+        Both are ids WE recorded — `agents.pane_id` from the spawn, and the
+        `board_pane:<name>` meta row `_open_board` writes — so a pane that is not one of
+        them is nobody's business of ours, however much it looks like a leftover.
 
-        This deliberately closes every match.  There is no durable per-agent pane label,
-        so one of them may be an unrelated closed agent's leftover—or a human's own idle
-        terminal parked there—when several users or agents share a workspace and checkout.
-        A live process is never closed: `None` is the conservative answer from `pane_shell`,
-        including when herdr cannot answer.
+        The board pane is in here for a second reason beyond tidiness: `_open_board` skips
+        opening one when the recorded id is still in `pane_ids()`, so a surviving board
+        pane left standing would cost the restored agent the board half of its pair — the
+        two-pane layout is the thing this whole path is trying to come back into.
+
+        Never raises. A meta table that will not read is one fewer pane to close, which is
+        the direction that leaves a shell behind rather than taking somebody's terminal.
+        """
+        panes = {a["pane_id"]} if a["pane_id"] else set()
+        try:
+            row = self.db.execute("SELECT value FROM meta WHERE key=?",
+                                  (f"board_pane:{a['name']}",)).fetchone()
+        except Exception:                      # noqa: BLE001 — a missing/locked meta table
+            return panes
+        if row and row["value"]:
+            panes.add(row["value"])
+        return panes
+
+    def _close_restore_panes(self, a, workspace_id: str, cwd: str) -> None:
+        """Close the dead shells a restore has just replaced — ONLY this agent's own.
+
+        Pane ids survive a herdr restart, and that is the fact this is built on. Measured
+        against an isolated instance on herdr 0.8.2 (`kill -9` the server, restart it
+        against the same session): every pane came back with the id and the workspace id
+        it had, sitting in the cwd it had, and only `terminal_id` was new. So the two ids
+        we recorded before the crash still name the two panes this agent left behind, and
+        the cleanup can be aimed at them by name rather than swept over a directory.
+
+        That is the whole difference from the version this replaces, and it is a safety
+        one rather than a tidiness one. Aiming by workspace-and-cwd closed EVERY idle
+        shell in the checkout, which on a shared workspace is also where an unrelated
+        closed agent's leftover sits — and where a human's own idle terminal sits. That
+        was a documented limitation while a person typed `sb restore --sweep` and watched
+        it; it is not one worth keeping now that a herdr restart runs this by itself
+        (`collector.run_auto_restore`).
+
+        The other three checks stay exactly as they were, and each still refuses on its
+        own: the pane must be in the workspace this restore is landing in, its cwd must be
+        the agent's checkout, and `pane_shell` must prove it is an idle shell. Together
+        with the recorded id they are what stands between this and a pane id that herdr
+        handed to somebody else — ids are reused, so a recorded id is an aim, never a
+        proof.
+
+        Closing nothing is an accepted outcome. A pane created after herdr's last session
+        snapshot does not come back at all, and one whose id did not survive is one we
+        cannot attribute; both leave an empty shell on screen, which is a mess somebody
+        can close and not a loss.
 
         The capability check keeps older adapters usable.  In particular, the broker's
         test fake does not model pane listing or process inspection; teaching it those
@@ -7688,16 +7749,22 @@ class Broker:
         pane_shell = getattr(self.h, "pane_shell", None)
         if not workspace_id or not callable(pane_list) or not callable(pane_shell):
             return
+        targets = self._restore_pane_targets(a)
+        if not targets:
+            return
+        name = a["name"]
         target_cwd = _resolved(str(cwd))
         if target_cwd is None:
             return
         for entry in pane_list():
+            pane = entry["pane_id"]
+            if pane not in targets:
+                continue
             if entry.get("workspace_id") != workspace_id:
                 continue
             pane_cwd = entry.get("cwd")
             if not pane_cwd or _resolved(pane_cwd) != target_cwd:
                 continue
-            pane = entry["pane_id"]
             if pane_shell(pane) is None:
                 continue
             try:
@@ -7739,13 +7806,19 @@ class Broker:
         tier 4), good enough to aim a tab at and never good enough to write down as where
         this agent is.
         """
-        # Close first, then recreate.  When the recorded id is still valid this is the
-        # target workspace; after a herdr restart it selects nothing, and the by-name
-        # retry below performs the same cleanup against the new run's id.
-        self._close_restore_panes(a["name"], wsid, str(where))
+        # CREATE FIRST, THEN CLOSE, and that order is load-bearing: a workspace whose
+        # last pane closes is destroyed by herdr, so closing this agent's pair before
+        # making its new tab empties the very space the restore is aiming at. Measured on
+        # herdr 0.8.2 with a real agent: both panes closed, then `tab create --workspace
+        # w6A` came back `workspace_not_found`, the id was purged from every row holding
+        # it and the agent came back in a bare tab — the placement this whole method
+        # exists to keep. Creating first leaves the space occupied throughout, and it is
+        # the safer order for the cleanup too: the new pane is live when the old ids are
+        # matched, so herdr cannot have handed one of them to it.
         pane, landed = self._tab_for(wsid, where, env=env)
         if not wsid or landed or not a["workspace"]:
             # Nothing was recorded, or what was recorded still works: no second guess.
+            self._close_restore_panes(a, landed or wsid, str(where))
             return pane
         byname = self._workspace_id(a["workspace"])
         if not byname or byname == wsid:
@@ -7754,8 +7827,10 @@ class Broker:
             self.h.close_pane(pane)
         except HerdrError as e:
             store.log_event(self.db, kind="orphan_pane", agent=a["name"], error=str(e))
-        self._close_restore_panes(a["name"], byname, str(where))
         pane, landed = self._tab_for(byname, where, env=env)
+        # The same cleanup against the new run's id, and after the tab for the same
+        # reason as above.
+        self._close_restore_panes(a, byname, str(where))
         store.log_event(self.db, kind="restore_workspace_reresolved", agent=a["name"],
                         workspace=a["workspace"], was=wsid, now=landed or "")
         return pane
@@ -7952,8 +8027,8 @@ class Broker:
                                f"If you still need one, ask for it: "
                                f"sb tell parent \"...\".")
 
-    def restore_sweep(self, *, dry_run: bool = False,
-                      me: Optional[str] = None) -> "RestoreSweepResult":
+    def restore_sweep(self, *, dry_run: bool = False, me: Optional[str] = None,
+                      auto: bool = False) -> "RestoreSweepResult":
         """Bring back everything a herdr restart just took out, in one call.
 
         The whole command is a scope, a selection and an order; every agent it restores
@@ -7990,6 +8065,17 @@ class Broker:
         refuses a live agent on its own — but the sweep classifies it up front so the
         second run reports `already running` rather than a list of failures.
 
+        **`auto` is the label on the event AND the one gate a person's sweep does not
+        get.** The collector runs this command by itself once a death has been confirmed
+        (`collector.run_auto_restore`), but a confirmed death is not yet a restart: a pane
+        closed by hand looks identical to `_crash_cohort`. So the automatic half acts only
+        on a cohort that is restart-SHAPED — several agents down together, `_looks_like_restart`
+        — and restores nothing otherwise, while a person typing `sb restore --sweep` is
+        trusted to mean it and reaches the same scope, cohort, order and refusals with no
+        such gate. What the flag also buys is that `sb log` can tell a fleet that came back
+        on its own from one somebody asked for, the first question about a restore nobody
+        remembers ordering.
+
         **One herdr check, at the top, and never read as an empty cohort.** A herdr that
         cannot be asked fails identically for every candidate, so it refuses the whole
         sweep once instead of N identical per-row errors. `_agent_states()` returning None
@@ -8012,7 +8098,19 @@ class Broker:
             scope = self._descendants(me)
 
         out = RestoreSweepResult()
-        for a in self._crash_cohort(scope):
+        cohort = self._crash_cohort(scope)
+        if auto and not self._looks_like_restart(cohort):
+            # The automatic half declines a cohort that is not restart-shaped and restores
+            # NOTHING — see `_looks_like_restart` and `[restore] auto`. Logged so a fleet
+            # that did not come back on its own is a recorded decision, not silence: the
+            # question after a restart nobody remembers is "did it try", and this answers
+            # it. A human's sweep never reaches here; `auto` is the whole gate.
+            store.log_event(self.db, kind="restore_sweep", dry_run=dry_run, by=me,
+                            auto=auto, restored=[], skipped=[], unrestorable=[],
+                            failed=[], declined="not a fleet-wide restart",
+                            cohort=[a["name"] for a in cohort])
+            return out
+        for a in cohort:
             name = a["name"]
             if not a["session_id"]:
                 # Excluded from the attempt and never from the report. A row that silently
@@ -8052,6 +8150,7 @@ class Broker:
                 continue
             out.append(name)
         store.log_event(self.db, kind="restore_sweep", dry_run=dry_run, by=me,
+                        auto=auto,
                         restored=list(out), skipped=[n for n, _ in out.skipped],
                         unrestorable=[n for n, _ in out.unrestorable],
                         failed=[n for n, _ in out.failed])
@@ -8076,6 +8175,43 @@ class Broker:
                   if (a["ended_at"] is None and _column(a, "absent_since"))
                   or (a["state"] == GONE_STATE and (a["ended_at"] or 0) >= cutoff)]
         return self._parents_first(picked)
+
+    def _crash_time(self, a) -> Optional[float]:
+        """When this cohort member actually went missing, on ONE clock — or None.
+
+        A cohort is racing the collector (see `_crash_cohort`), so its members carry the
+        crash moment in two different columns on two different clocks, and telling a
+        simultaneous event from a coincidence needs them on one. A row still mid-debounce
+        has `absent_since` — the moment herdr first stopped listing it, which IS the crash
+        instant. A row already confirmed has that cleared and an `ended_at` set at
+        CONFIRMATION, about a `gone_confirm_grace` later; subtracting the grace puts it back
+        beside the mid-debounce rows, so a fleet whose deaths are half confirmed and half
+        still debouncing still reads as the one instant it was.
+        """
+        absent = _column(a, "absent_since")
+        if a["ended_at"] is None:
+            return float(absent) if absent else None
+        return float(a["ended_at"]) - GONE_CONFIRM_GRACE
+
+    def _looks_like_restart(self, cohort) -> bool:
+        """Whether this crash cohort is a fleet-wide restart rather than a lone death.
+
+        The narrowing the automatic sweep needs and a human's does not (`restore_sweep`,
+        `RESTART_MIN_COHORT`). True when some `RESTART_WINDOW`-long span holds at least
+        `RESTART_MIN_COHORT` of the cohort's crash moments — a burst of deaths at one
+        instant, which is what a restart is and what a single pane closing can never be.
+
+        Rows whose crash moment cannot be placed on the clock (`_crash_time` is None) are
+        left out of the count rather than treated as now: a row that cannot prove it went
+        down with the others is not evidence of a restart.
+        """
+        times = sorted(t for t in (self._crash_time(a) for a in cohort) if t is not None)
+        if len(times) < RESTART_MIN_COHORT:
+            return False
+        for i in range(len(times) - RESTART_MIN_COHORT + 1):
+            if times[i + RESTART_MIN_COHORT - 1] - times[i] <= RESTART_WINDOW:
+                return True
+        return False
 
     def _parents_first(self, rows) -> list:
         """Root-first, so a restored child's mail has somewhere live to land.

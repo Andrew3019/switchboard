@@ -1105,6 +1105,130 @@ class TheReconcilerTrigger(PanelTest):
         self.assertEqual(self.sb_runs(), [["/bin/sb", "reconcile"]])
 
 
+class TheAutoRestoreTrigger(PanelTest):
+    """T4 — the third trigger on the same loop, and the reason issue #222 is closed.
+
+    A herdr restart leaves the panes and the layout on screen with nothing alive in them.
+    Everything needed to put the fleet back was already there (`Broker.restore_sweep`);
+    what was missing was anything to run it without a person noticing the empty board,
+    working out the command and typing it.
+
+    Same subject as the two trigger classes above: WHEN a process is spawned, never what it
+    then decides. What a sweep restores is `Broker.restore_sweep`'s and is tested where the
+    store is (`tests/test_broker.py`).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ran: list[list[str]] = []
+        self.envs: list = []
+        # Forwards kwargs, unlike the other triggers' stub: this is the one spawn that
+        # carries any, and a stub that dropped them would test the wrong command.
+        self.enterContext(mock.patch.object(
+            collector.threading, "Thread",
+            lambda target, args=(), kwargs=None, **kw:
+                mock.Mock(start=lambda: target(*args, **(kwargs or {})))))
+
+        def record(argv, **kw):
+            self.ran.append(argv)
+            self.envs.append(kw.get("env"))
+            return mock.Mock(returncode=0)
+
+        self.enterContext(mock.patch.object(collector.subprocess, "run", record))
+        self.enterContext(mock.patch.object(collector, "doorbell_sb", lambda: "/bin/sb"))
+        # The switch ships OFF (`[restore] auto = false`), so every test here that means to
+        # watch the trigger FIRE turns it on; `test_the_switch...` covers both positions.
+        self.enterContext(mock.patch.object(collector, "AUTO_RESTORE", True))
+
+    def _dead(self, *names, alive=False):
+        """The fleet a herdr restart leaves once the reconciler has recorded the deaths."""
+        snap = a_snapshot(*names)
+        for a in snap.agents:
+            a.state, a.alive, a.herdr_state = status.GONE_STATE, alive, None
+        return snap
+
+    def test_a_confirmed_death_runs_the_sweep_at_fleet_scope(self):
+        from switchboard import cli
+        state = collector.State(pid=1, started_at=0.0)
+
+        self.assertTrue(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
+        self.assertEqual(self.ran, [["/bin/sb", "restore", "--sweep", "--auto"]])
+        self.assertEqual((state.restores, state.restore_error), (1, None))
+        self.assertEqual(sorted(state.restored), ["w1", "w2"])
+        # Spawned by name and by flag, so a rename would fail silently in a thread nobody
+        # watches.
+        parsed = cli.build_parser().parse_args(["restore", "--sweep", "--auto"])
+        self.assertEqual((parsed.cmd, parsed.sweep, parsed.auto), ("restore", True, True))
+        # And run as nobody: an inherited `SB_AGENT` would scope the sweep to that agent's
+        # own subtree, which is not what a crash cohort is.
+        self.assertFalse(set(cli._AGENT_SESSION_ENV) & set(self.envs[0]))
+        self.assertNotIn("HERDR_PANE_ID", self.envs[0])
+
+    def test_a_death_that_is_not_confirmed_yet_restores_nothing(self):
+        """`gone` is one reading of herdr; the reconciler is what turns a sustained one
+        into a recorded death. Restoring off the reading would bring a fleet back on a
+        herdr hiccup — and would race the reap over the same rows."""
+        state = collector.State(pid=1, started_at=0.0)
+        snap = a_snapshot("w1")
+        snap.agents[0].gone, snap.agents[0].alive = True, False
+
+        self.assertFalse(collector.run_auto_restore(snap, state, None))
+        self.assertEqual((self.ran, state.restores), ([], 0))
+
+    def test_a_herdr_nobody_could_reach_is_not_a_dead_fleet(self):
+        """`alive is None` is "we could not tell", and a fleet that looks dead because
+        nothing could be asked is the one reading this must never act on."""
+        state = collector.State(pid=1, started_at=0.0)
+
+        self.assertFalse(collector.run_auto_restore(self._dead("w1", alive=None),
+                                                    state, None))
+        self.assertEqual(self.ran, [])
+
+    def test_each_name_is_offered_once_per_collector(self):
+        """An agent whose session cannot be resumed dies, is restored, and dies again —
+        without this memory that is a pane spawned every minute for as long as anybody is
+        watching a board."""
+        state = collector.State(pid=1, started_at=0.0)
+        self.assertTrue(collector.run_auto_restore(self._dead("w1"), state, None))
+
+        for _ in range(3):
+            state.last_restore -= collector.RESTORE_GAP + 1
+            self.assertFalse(collector.run_auto_restore(self._dead("w1"), state, None))
+        self.assertEqual(len(self.ran), 1)
+
+        # A name it has not offered yet still fires, in the same sweep as the old one.
+        state.last_restore -= collector.RESTORE_GAP + 1
+        self.assertTrue(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
+        self.assertEqual(len(self.ran), 2)
+
+    def test_the_switch_governs_the_automatic_half_both_ways(self):
+        """It ships OFF (`[restore] auto = false`), and `sb restore --sweep` typed by hand
+        is untouched by it either way. Off restores nothing; on runs the sweep."""
+        state = collector.State(pid=1, started_at=0.0)
+        with mock.patch.object(collector, "AUTO_RESTORE", False):
+            self.assertFalse(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
+        self.assertEqual((self.ran, state.restores), ([], 0))
+
+        with mock.patch.object(collector, "AUTO_RESTORE", True):
+            self.assertTrue(collector.run_auto_restore(self._dead("w1", "w2"), state, None))
+        self.assertEqual([a[1] for a in self.ran], ["restore"])
+
+    def test_it_never_starts_in_the_same_tick_as_a_reap(self):
+        """The reconciler records a death and this brings the dead back. Two `sb`
+        processes doing that at once over the same rows can write the second answer after
+        the first, so a tick that spawned a reap spawns nothing else."""
+        state = collector.State(pid=1, started_at=0.0)
+        snap = self._dead("w1")
+        snap.agents[0].gone = True             # a reap is due for the same row
+
+        with mock.patch.object(collector, "snapshot", lambda db: (snap, None)), \
+             mock.patch.object(collector.panel, "publish", lambda *a, **kw: None):
+            collector.tick(self.paths, state, None, None)
+
+        self.assertEqual([a[1] for a in self.ran], ["reconcile"])
+        self.assertEqual(state.restores, 0)
+
+
 class WhichSbTheDoorbellRuns(PanelTest):
     """WHICH `sb` binary the doorbell spawns — the last environment fact it depended on.
 

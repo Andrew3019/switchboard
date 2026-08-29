@@ -187,7 +187,40 @@ class RestoreCleanupTest(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
+    def _agent(self, name="agent", pane="w1:p1", board=None):
+        """The two ids a restore is entitled to close, recorded the way a spawn records
+        them: the agent's own pane on the row, its board's in `meta`."""
+        if board:
+            self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                            (f"board_pane:{name}", board))
+            self.db.commit()
+        return {"name": name, "pane_id": pane}
+
+    def test_restore_cleanup_takes_this_agent_s_own_panes_and_no_others(self):
+        """The tightening, and the whole reason it matters now: an idle shell in the same
+        workspace and checkout may be an unrelated agent's leftover — or Andrew's own
+        terminal parked in that checkout — and a herdr restart now runs this cleanup with
+        nobody watching it (`collector.run_auto_restore`).
+
+        Pane ids survive a herdr restart (measured against an isolated herdr 0.8.2:
+        `kill -9` the server, restart, every pane back with its id, workspace and cwd, only
+        `terminal_id` new), so the ids we recorded still name the panes to take.
+        """
+        cwd = str(self.repo)
+        self.h.restore_panes = [
+            {"pane_id": "w1:p1", "workspace_id": "ws", "cwd": cwd},   # the agent's
+            {"pane_id": "w1:p2", "workspace_id": "ws", "cwd": cwd},   # its board
+            {"pane_id": "w1:p9", "workspace_id": "ws", "cwd": cwd},   # somebody else's
+        ]
+        self.h.restore_shells = {"w1:p1": 101, "w1:p2": 102, "w1:p9": 103}
+
+        self.b._close_restore_panes(self._agent(board="w1:p2"), "ws", cwd)
+
+        self.assertEqual(sorted(self.h.closed), ["w1:p1", "w1:p2"])
+
     def test_restore_cleanup_closes_only_idle_matching_workspace_cwd(self):
+        """The three checks that stand between a recorded id and a pane herdr has since
+        handed to somebody else. Each refuses on its own."""
         cwd = str(self.repo)
         self.h.restore_panes = [
             {"pane_id": "idle", "workspace_id": "ws", "cwd": cwd},
@@ -198,9 +231,34 @@ class RestoreCleanupTest(unittest.TestCase):
         self.h.restore_shells = {"idle": 101, "live": None, "wrong-cwd": 102,
                                  "wrong-workspace": 103}
 
-        self.b._close_restore_panes("agent", "ws", cwd)
+        for pane in ("idle", "live", "wrong-cwd", "wrong-workspace"):
+            self.b._close_restore_panes(self._agent(pane=pane), "ws", cwd)
 
         self.assertEqual(self.h.closed, ["idle"])
+
+    def test_the_new_tab_is_made_before_the_old_panes_are_closed(self):
+        """A workspace whose last pane closes is destroyed by herdr, so closing this
+        agent's pair first empties the space the restore is aiming at.
+
+        Measured on herdr 0.8.2 with a real agent, before this order was fixed: both panes
+        closed, `tab create --workspace w6A` came back `workspace_not_found`, the id was
+        purged from every row holding it, and the agent came back in a bare tab — losing
+        the placement `_restore_tab` exists to keep.
+        """
+        cwd = str(self.repo)
+        order: list = []
+        self.h.restore_panes = [{"pane_id": "w1:p1", "workspace_id": "w1", "cwd": cwd},
+                                {"pane_id": "w1:p2", "workspace_id": "w1", "cwd": cwd}]
+        self.h.restore_shells = {"w1:p1": 101, "w1:p2": 102}
+        create, close = self.h.create_tab, self.h.close_pane
+        self.h.create_tab = lambda **kw: (order.append("create"), create(**kw))[1]
+        self.h.close_pane = lambda pane: (order.append(f"close {pane}"), close(pane))[1]
+
+        row = self._agent(pane="w1:p1", board="w1:p2")
+        row["workspace"] = "space"
+        self.b._restore_tab(row, "w1", cwd)
+
+        self.assertEqual(order, ["create", "close w1:p1", "close w1:p2"])
 
     def test_restore_cleanup_close_failure_is_nonfatal(self):
         cwd = str(self.repo)
@@ -211,7 +269,7 @@ class RestoreCleanupTest(unittest.TestCase):
             raise HerdrError("connection_refused", "herdr unavailable")
 
         self.h.close_pane = refuse
-        self.b._close_restore_panes("agent", "ws", cwd)
+        self.b._close_restore_panes(self._agent(pane="idle"), "ws", cwd)
 
         self.assertEqual(self.h.closed, [])
         event = store.recent_events(self.db, agent="agent")[0]
@@ -4742,3 +4800,81 @@ class RestoreSweepTest(unittest.TestCase):
         r = self.b.restore_sweep(me=HUMAN, dry_run=True)
 
         self.assertEqual(list(r), ["mid-debounce"])
+
+    # --- The automatic half only: a confirmed death is not yet a restart -----------------
+
+    def test_the_automatic_sweep_declines_a_lone_death(self):
+        """The whole point of narrowing the trigger: a pane closed by hand, a single kill,
+        or one dropped binding is one confirmed death and looks exactly like a restart
+        casualty to the cohort query. The automatic sweep restores NOTHING unless the
+        cohort is restart-shaped, and says so in the log rather than in silence."""
+        self._agent("solo", is_top=True)
+        self._crashed("solo")
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(list(r), [])
+        self.assertEqual(self.h.started, [])
+        self.assertEqual(store.get_agent(self.db, "solo")["state"], status.GONE_STATE)
+        ev = next(json.loads(e["payload"]) for e in store.recent_events(self.db, limit=50)
+                  if e["kind"] == "restore_sweep")
+        self.assertEqual(ev["declined"], "not a fleet-wide restart")
+        self.assertEqual(ev["cohort"], ["solo"])
+
+    def test_a_human_sweep_still_restores_a_lone_death(self):
+        """`auto` is the whole gate. A person typing `sb restore --sweep` is trusted to
+        mean it, so the same lone death the automatic half declines still comes back."""
+        self._agent("solo", is_top=True)
+        self._crashed("solo")
+
+        r = self.b.restore_sweep(me=HUMAN)
+
+        self.assertEqual(list(r), ["solo"])
+        self.assertIn("solo", [s["name"] for s in self.h.started])
+
+    def test_the_automatic_sweep_restores_a_simultaneous_cohort(self):
+        """Several agents down together inside one window IS a restart, and is the case the
+        automatic half exists for — parents first, exactly as a human's sweep."""
+        self._agent("alpha", is_top=True)
+        self._agent("alpha-kid", parent="alpha")
+        self._crashed("alpha", "alpha-kid")           # set_state stamps ended_at ≈ now
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(sorted(r), ["alpha", "alpha-kid"])
+        order = [s["name"] for s in self.h.started]
+        self.assertLess(order.index("alpha"), order.index("alpha-kid"))
+
+    def test_the_automatic_sweep_declines_two_deaths_spread_past_the_window(self):
+        """Two unrelated deaths minutes apart inside the same ten-minute `SWEEP_RECENT`
+        window are a coincidence, not one event — `_crash_time` places them far enough
+        apart that the cluster test rejects them."""
+        self._agent("early", is_top=True)
+        self._agent("late", is_top=True)
+        self._crashed("early", "late")
+        self.db.execute("UPDATE agents SET ended_at=? WHERE name=?",
+                        (store.now() - broker_mod.RESTART_WINDOW - 30, "early"))
+        self.db.commit()
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(list(r), [])
+        self.assertEqual(self.h.started, [])
+
+    def test_the_automatic_sweep_clusters_mid_debounce_and_confirmed_together(self):
+        """The two halves of a real restart cohort ride different clocks — `absent_since`
+        for a row still debouncing, `ended_at` (about a grace later) for one confirmed.
+        `_crash_time` puts both back on the crash instant, so a fleet caught half-confirmed
+        still reads as the one event it was."""
+        self._agent("confirmed", is_top=True)
+        self._agent("debouncing", is_top=True)
+        self._crashed("confirmed")                    # ended_at ≈ now (confirmed just now)
+        # The other went absent at the same instant but is not confirmed yet: absent_since
+        # is the crash moment, ~a grace BEFORE this confirmation landed.
+        self.db.execute("UPDATE agents SET absent_since=? WHERE name=?",
+                        (store.now() - status.GONE_CONFIRM_GRACE, "debouncing"))
+        self.db.commit()
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(sorted(r), ["confirmed", "debouncing"])
