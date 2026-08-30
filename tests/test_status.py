@@ -240,7 +240,12 @@ class StatusTest(unittest.TestCase):
         `sb cleanup`.
         """
         for word in ("done", "blocked", "failed"):
-            store.create_agent(self.db, name=word, role="worker", session_id=f"s-{word}")
+            # `pane_id` set: a row that is taking a turn again has an OPEN pane — that is what
+            # herdr is listing and what lets the reading follow the turn edge. A finished row
+            # whose pane WE closed carries no id and reads its terminal word instead (see
+            # `test_a_pane_we_closed_archives_though_herdr_still_lists`).
+            store.create_agent(self.db, name=word, role="worker", session_id=f"s-{word}",
+                               pane_id=f"{word}:p1")
             store.set_state(self.db, word, word)
         # Spoken to: the turn edge fires for each. herdr still lists the pane (alive True).
         for word in ("done", "blocked", "failed"):
@@ -1851,12 +1856,40 @@ class ArchivedTest(unittest.TestCase):
         self.assertTrue(a.archived)
 
     def test_an_agent_herdr_still_lists_is_never_archived(self):
-        """Including one that has reported done: it is on herdr, so it can still be
-        clicked, read and talked to."""
-        store.create_agent(self.db, name="w1", role="worker")
+        """Including one that has reported done: its pane is still OPEN, so it is on herdr
+        and can still be clicked, read and talked to. `pane_id` set is what says the pane
+        is open — a `done` agent keeps its pane until `cleanup` closes it, and only that
+        close clears the id (see `test_a_pane_we_closed_archives_though_herdr_still_lists`
+        for the other half)."""
+        store.create_agent(self.db, name="w1", role="worker", pane_id="w1:p1")
         store.set_state(self.db, "w1", "done")
         a = self.by_name(self.collect(FakeHerdr([alive("w1", "idle")]), now=self.old()))["w1"]
         self.assertFalse(a.archived)
+
+    def test_a_pane_we_closed_archives_though_herdr_still_lists(self):
+        """The lore mass-force-close bug: `cleanup` ends the row and clears `pane_id` in
+        the same breath it closes the pane, but herdr's reaper lagged the close by minutes
+        and kept the agent in `agent list` — so `alive` stayed True and the closed row sat
+        on the board until herdr caught up. The store's own record of the close outranks
+        that stale listing: an ended row with no pane is gone whatever herdr says."""
+        store.create_agent(self.db, name="w1", role="worker", pane_id="w1:p1")
+        store.set_state(self.db, "w1", "done")       # ended_at set, still holds its pane
+        store.update_agent(self.db, "w1", pane_id=None)  # cleanup closed the pane
+        a = self.by_name(self.collect(FakeHerdr([alive("w1", "idle")]), now=self.old()))["w1"]
+        self.assertIs(a.alive, False)                # herdr lists it; we decline the match
+        self.assertTrue(a.archived)
+
+    def test_a_closed_leaf_leaves_the_board_at_cleanup_not_when_herdr_reaps(self):
+        """End to end: a live parent whose finished child herdr still lists no longer
+        draws that child. Without the fix the child stayed under `loremain` for minutes."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="lead:p1")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           pane_id="w1:p1")
+        store.set_state(self.db, "w1", "done")
+        store.update_agent(self.db, "w1", pane_id=None)   # cleaned up
+        snap = self.collect(FakeHerdr([alive("lead"), alive("w1", "idle")]), now=self.old())
+        drawn = {a.name for a in status.board_rows(snap.agents)}
+        self.assertEqual(drawn, {"lead"})
 
     def test_an_agent_mid_spawn_is_not_archived_and_stays_on_the_board(self):
         """herdr does not list an agent until it has started, and a spawn is retried for
