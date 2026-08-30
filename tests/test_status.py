@@ -1545,7 +1545,7 @@ class StatusCliTest(unittest.TestCase):
             # Both arguments optional: with none it prints what the caller is tuned to.
             "configure": [],
             "merge": ["w1"],
-            "inspect": ["w1"], "log": [],
+            "inspect": ["w1"], "log": [], "usage": [],
             "board": [], "flush": [], "reconcile": [], "sweep": [],
             # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
             # so it can print that instead of an argparse usage dump.

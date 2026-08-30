@@ -1028,7 +1028,7 @@ class IsolationTest(Sandbox):
     LEVEL_0 = {
         "status": [], "done": ["finished"],
         "tell": ["w1", "hi"], "inbox": [], "waiting": [],
-        "block": ["why"], "log": [], "cleanup": [],
+        "block": ["why"], "log": [], "usage": [], "cleanup": [],
         "inspect": ["w1"], "init": [],
         "restore": ["w1"], "board": [], "models": [], "instructions": [],
         # `models`' two siblings: config reads and nothing else — no store write, no spawn,

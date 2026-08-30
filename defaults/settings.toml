@@ -319,7 +319,8 @@ auto = false
 
 
 [limits]
-# Caps, in characters. None of these is a buffer limit; they are smell detectors.
+# Limits. The caps below are in characters; none is a buffer limit, and they are smell
+# detectors. The retention entry at the end is a calendar-day limit instead.
 #
 # RAISED DELIBERATELY, and the reasoning is worth keeping because the old numbers were not
 # wrong so much as premature. They were set as style advice with an exception behind it: a
@@ -399,6 +400,10 @@ event_clip = 200
 # How much of a herdr call's stdout/stderr is copied into the event log. Bigger than
 # event_clip because this is what a spawn failure is diagnosed from.
 herdr_log_clip = 500
+
+# Daily cross-repository `sb` usage files older than this are removed opportunistically.
+# Andrew fixed this at 30 days; it lives here so retention is documented, not a magic literal.
+usage_retention_days = 30
 
 
 [timeouts]

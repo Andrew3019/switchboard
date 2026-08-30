@@ -23,6 +23,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from typing import Any, NamedTuple, Optional
 
 from . import config
@@ -34,6 +35,7 @@ from . import presets as presets_mod
 from . import roles as roles_mod
 from . import status as status_mod
 from . import store
+from . import usage as usage_mod
 from . import validate
 from . import broker as broker_mod
 from .broker import HUMAN, Broker
@@ -543,6 +545,13 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("--agent")
     lg.add_argument("-n", type=int, default=config.setting("display.log_events"))
 
+    us = cmd("usage", help="cross-repository sb call counts, outcomes, latency, and output")
+    us.add_argument("--days", type=int, default=config.setting("limits.usage_retention_days"),
+                    help="report this many recent days (default: retained 30 days)")
+    us.add_argument("--repo", help="only the exact shared .git repo identity")
+    us.add_argument("--cmd", dest="usage_cmd",
+                    help="only a core command or plugin:<name>:<subcommand>")
+
     # argparse builds this from every registered choice, hidden ones included, and
     # `add_parser(help=SUPPRESS)` does not suppress a subcommand — it prints a
     # literal "==SUPPRESS==" instead. So the list is rewritten from `visible`.
@@ -714,6 +723,9 @@ def _validate(args) -> None:
         if args.agent is not None:
             args.agent = validate.agent_name(args.agent, "--agent")
         args.n = validate.positive_int(args.n, "-n")
+
+    elif cmd == "usage":
+        args.days = validate.positive_int(args.days, "--days")
 
     elif cmd == "plugin":
         _validate_plugin(args)
@@ -1014,11 +1026,98 @@ def _degraded(deficit: list[str], cmd: str) -> str:
               "      sb doctor --reset-store --force")
 
 
+# Commands the usage log deliberately skips. `board` is the interactive TUI: it is
+# human-only, its `wall_ms` would be the whole session's dwell time rather than a command's
+# cost, and its screen output goes straight to the fd (`board.py` uses `os.write`), bypassing
+# the counter — so a `board` row would pair a huge latency with ~zero counted output and skew
+# the fleet-wide max/p95 this report exists to make legible. Nothing is lost: efficiency
+# analysis is about command cost, not how long a person left a dashboard open.
+_USAGE_SKIP = {"board"}
+
+
+def _usage_command(argv: list[str]) -> Optional[str]:
+    """Best available command name before argparse has produced a namespace."""
+    return next((word for word in argv if not word.startswith("-")), None)
+
+
+def _usage_args(capture: dict[str, Any], args) -> None:
+    """Copy only invocation vocabulary, never any argument or message bodies."""
+    capture["command"] = getattr(args, "cmd", capture.get("command"))
+    if capture["command"] != "plugin":
+        return
+    plugin = getattr(args, "plugin", None)
+    command = getattr(args, "command", None)
+    # `name` is the single plugin-name token; safe. `plugin_command` is taken ONLY from the
+    # RESOLVED subcommand (`command.name`), never from raw `rest` — `rest` is the argparse
+    # REMAINDER, so `rest[0]` on a call that fails validation is whatever body text the
+    # caller typed after the plugin name, and this is a sizes-only log that must never keep
+    # a message body. A call that never resolves a subcommand simply logs none.
+    capture["plugin"] = getattr(plugin, "name", None) or getattr(args, "name", None)
+    capture["plugin_command"] = getattr(command, "name", None)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    """Run one command and append its measurements without changing its behaviour."""
+    actual_argv = list(argv) if argv is not None else sys.argv[1:]
+    capture: dict[str, Any] = {
+        "command": _usage_command(actual_argv),
+        "plugin": None,
+        "plugin_command": None,
+        "repo": None,
+        "worktree": None,
+        "repo_path": None,
+        "caller": None,
+        "caller_kind": "unknown",
+        "role": None,
+    }
+    original_stdout = sys.stdout
+    counted = usage_mod.CountingStdout(original_stdout)
+    started = time.monotonic()
+    code = 1
+    sys.stdout = counted
+    try:
+        code = _main(argv, capture)
+        return code
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+        raise
+    finally:
+        sys.stdout = original_stdout
+        # This is deliberately one broad best-effort boundary: even constructing the
+        # record can touch config or paths, and observability may never change sb's result.
+        # Never `return`/`break` here: a finally that returns would swallow the SystemExit
+        # this block re-raises. Guard with a plain condition instead.
+        try:
+            if capture["command"] not in _USAGE_SKIP:
+                # Validation and parser failures happen before the store is opened. They
+                # still get repo identity when git can resolve it; outside a repo, null.
+                if capture["repo"] is None:
+                    worktree = store.worktree_root()
+                    capture.update(
+                        repo=str(store.repo_root(worktree)), worktree=str(worktree),
+                        repo_path=worktree,
+                    )
+                record = usage_mod.build_record(
+                    timestamp=store.now(), repo=capture["repo"],
+                    worktree=capture["worktree"], caller=capture["caller"],
+                    caller_kind=capture["caller_kind"], role=capture["role"],
+                    command=capture["command"], plugin=capture["plugin"],
+                    plugin_command=capture["plugin_command"], code=code,
+                    wall_ms=(time.monotonic() - started) * 1000,
+                    stdout_bytes=counted.bytes, stdout_chars=counted.chars,
+                )
+                usage_mod.record_best_effort(record, repo=capture["repo_path"])
+        except Exception:                       # noqa: BLE001 — logging is never fatal
+            pass
+
+
+def _main(argv: Optional[list[str]], capture: dict[str, Any]) -> int:
     args = build_parser().parse_args(argv)
+    _usage_args(capture, args)
 
     try:
         _validate(args)
+        _usage_args(capture, args)
     except validate.Invalid as e:
         # 2, like argparse's own usage errors: nothing ran, and nothing is wrong with the
         # system — only with what was typed.
@@ -1059,6 +1158,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     # which is deliberately identical from every worktree.
     repo = store.worktree_root()
     b = Broker(db, h, repo=repo)
+
+    # Caller/repo enrichment is part of telemetry, not command execution.  Keep it behind
+    # its own best-effort boundary so a missing old-schema column cannot break `sb done`.
+    try:
+        repo_identity = store.repo_root(repo)
+        me = b.whoami()
+        capture.update(
+            repo=str(repo_identity), worktree=str(repo), repo_path=repo,
+            caller=None if me == HUMAN else me,
+            caller_kind="human" if me == HUMAN else "agent",
+        )
+        if me != HUMAN:
+            row = db.execute("SELECT role FROM agents WHERE name=?", (me,)).fetchone()
+            capture["role"] = row["role"] if row is not None else None
+    except Exception:                           # noqa: BLE001 — logging is never fatal
+        pass
 
     # Every `sb` invocation is also a tick of the doorbell. A message to an agent that was
     # mid-turn is held back rather than injected into its turn (see Broker._ring), and
@@ -1185,6 +1300,18 @@ def _needs_reply(m) -> bool:
 
 def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     cmd = args.cmd
+
+    if cmd == "usage":
+        directory = usage_mod.usage_dir(b.repo)
+        retention = int(config.setting("limits.usage_retention_days", repo=b.repo))
+        if directory.is_dir():
+            usage_mod.prune(directory, retention_days=retention)
+        rows = usage_mod.read_records(
+            directory=directory, days=args.days, repo=args.repo, command=args.usage_cmd,
+        )
+        report = usage_mod.aggregate(rows, days=args.days)
+        _emit(args, usage_mod.format_report(report), report)
+        return 0
 
     if cmd == "doctor":
         if args.reset_store:
