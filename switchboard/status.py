@@ -1443,6 +1443,21 @@ def collect(
                 or (row["session_id"] and agent.session_id
                     and agent.session_id != row["session_id"])):
             agent = None
+        # A PANE WE CLOSED is gone whatever herdr still lists, and this is the second way
+        # the store outranks `agent list`. `cleanup` and `_stop_panes` end the row and clear
+        # its `pane_id` in the same breath they close the pane (`broker._stop_panes`,
+        # `broker.cleanup`), so `ended_at set AND pane_id NULL` is precisely "we took this
+        # agent's pane away". herdr's own reaper can lag that close by minutes — measured at
+        # ~5 min after a mass force-close on the lore fleet, where every closed row kept
+        # `alive` and stayed drawn on the board the whole time, then vanished together the
+        # instant herdr finally reaped the batch. We hold the more authoritative fact, so we
+        # decline the stale match exactly as the identity guard above does: `alive` reads
+        # False and the row archives on the NEXT tick rather than waiting on herdr. It can
+        # only ever be a finished, pane-cleared row — a live agent always carries a `pane_id`
+        # (spawn and `restore` both set it) and a null `ended_at` — so this never hides
+        # anything still running.
+        if agent is not None and row["ended_at"] is not None and row["pane_id"] is None:
+            agent = None
         hstate = agent.state if agent else None
         alive = (agent is not None) if consulted else None
         running = row["state"] in RUNNING and row["ended_at"] is None
