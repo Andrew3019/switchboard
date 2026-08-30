@@ -10,7 +10,36 @@ from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
 
-from switchboard import usage
+from switchboard import cli, usage
+
+
+class PluginCaptureLeakTests(unittest.TestCase):
+    """The sizes-only log must never keep a message body typed after a plugin name."""
+
+    def test_body_text_in_the_remainder_is_never_captured_as_subcommand(self):
+        # `sb plugin todo "buy milk before it's too late"`: the body sits in the argparse
+        # REMAINDER (`rest`). `plugin_command` is taken only from a RESOLVED subcommand, so
+        # before/without validation none is captured — the body cannot reach the log even
+        # when `_validate` then fails and the second capture pass never runs.
+        args = cli.build_parser().parse_args(
+            ["plugin", "todo", "buy milk before it's too late"])
+        capture = {"command": None, "plugin": None, "plugin_command": None}
+        cli._usage_args(capture, args)
+        self.assertEqual(capture["command"], "plugin")
+        self.assertEqual(capture["plugin"], "todo")
+        self.assertIsNone(capture["plugin_command"])
+
+
+class MainLevelSinkFailureTests(unittest.TestCase):
+    """The load-bearing invariant, pinned at `main()`: logging never changes the result."""
+
+    def test_a_raising_record_builder_does_not_change_the_exit_code(self):
+        # `sb plugins` is retired and returns 2 before the store is even opened. Even if the
+        # usage record blows up inside `main()`'s finally, that 2 must still come back.
+        with mock.patch.object(cli.usage_mod, "build_record",
+                               side_effect=RuntimeError("boom")):
+            code = cli.main(["plugins"])
+        self.assertEqual(code, 2)
 
 
 class CountingStdoutTests(unittest.TestCase):

@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Optional, TextIO
 
 from . import config
+
+# Points the sink at an explicit directory, overriding `paths.user_state`. It exists so a
+# test run never writes into a developer's or CI box's real `~/.local/state/switchboard/usage/`
+# (that pollutes the very cross-repo analytics this feature produces), and so an operator can
+# relocate the sink. It names the usage directory itself, not the `user_state` base.
+USAGE_DIR_ENV = "SWITCHBOARD_USAGE_DIR"
 
 
 class CountingStdout:
@@ -44,7 +51,14 @@ class CountingStdout:
 
 
 def usage_dir(repo: Optional[Path] = None) -> Path:
-    """The user-scoped sink, optionally honoring this repository's settings layer."""
+    """The user-scoped sink, optionally honoring this repository's settings layer.
+
+    ``SWITCHBOARD_USAGE_DIR`` wins outright when set, so tests and operators can redirect the
+    sink away from the real per-machine location.
+    """
+    override = os.environ.get(USAGE_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
     base = Path(config.setting("paths.user_state", repo=repo)).expanduser()
     return base / "usage"
 

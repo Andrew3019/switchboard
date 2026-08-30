@@ -1026,6 +1026,15 @@ def _degraded(deficit: list[str], cmd: str) -> str:
               "      sb doctor --reset-store --force")
 
 
+# Commands the usage log deliberately skips. `board` is the interactive TUI: it is
+# human-only, its `wall_ms` would be the whole session's dwell time rather than a command's
+# cost, and its screen output goes straight to the fd (`board.py` uses `os.write`), bypassing
+# the counter — so a `board` row would pair a huge latency with ~zero counted output and skew
+# the fleet-wide max/p95 this report exists to make legible. Nothing is lost: efficiency
+# analysis is about command cost, not how long a person left a dashboard open.
+_USAGE_SKIP = {"board"}
+
+
 def _usage_command(argv: list[str]) -> Optional[str]:
     """Best available command name before argparse has produced a namespace."""
     return next((word for word in argv if not word.startswith("-")), None)
@@ -1038,11 +1047,13 @@ def _usage_args(capture: dict[str, Any], args) -> None:
         return
     plugin = getattr(args, "plugin", None)
     command = getattr(args, "command", None)
+    # `name` is the single plugin-name token; safe. `plugin_command` is taken ONLY from the
+    # RESOLVED subcommand (`command.name`), never from raw `rest` — `rest` is the argparse
+    # REMAINDER, so `rest[0]` on a call that fails validation is whatever body text the
+    # caller typed after the plugin name, and this is a sizes-only log that must never keep
+    # a message body. A call that never resolves a subcommand simply logs none.
     capture["plugin"] = getattr(plugin, "name", None) or getattr(args, "name", None)
     capture["plugin_command"] = getattr(command, "name", None)
-    if capture["plugin_command"] is None:
-        rest = getattr(args, "rest", [])
-        capture["plugin_command"] = rest[0] if rest and not rest[0].startswith("-") else None
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1074,24 +1085,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         sys.stdout = original_stdout
         # This is deliberately one broad best-effort boundary: even constructing the
         # record can touch config or paths, and observability may never change sb's result.
+        # Never `return`/`break` here: a finally that returns would swallow the SystemExit
+        # this block re-raises. Guard with a plain condition instead.
         try:
-            # Validation and parser failures happen before the store is opened.  They still
-            # get repo identity when git can resolve it; outside a repo these stay null.
-            if capture["repo"] is None:
-                worktree = store.worktree_root()
-                capture.update(
-                    repo=str(store.repo_root(worktree)), worktree=str(worktree),
-                    repo_path=worktree,
+            if capture["command"] not in _USAGE_SKIP:
+                # Validation and parser failures happen before the store is opened. They
+                # still get repo identity when git can resolve it; outside a repo, null.
+                if capture["repo"] is None:
+                    worktree = store.worktree_root()
+                    capture.update(
+                        repo=str(store.repo_root(worktree)), worktree=str(worktree),
+                        repo_path=worktree,
+                    )
+                record = usage_mod.build_record(
+                    timestamp=store.now(), repo=capture["repo"],
+                    worktree=capture["worktree"], caller=capture["caller"],
+                    caller_kind=capture["caller_kind"], role=capture["role"],
+                    command=capture["command"], plugin=capture["plugin"],
+                    plugin_command=capture["plugin_command"], code=code,
+                    wall_ms=(time.monotonic() - started) * 1000,
+                    stdout_bytes=counted.bytes, stdout_chars=counted.chars,
                 )
-            record = usage_mod.build_record(
-                timestamp=store.now(), repo=capture["repo"], worktree=capture["worktree"],
-                caller=capture["caller"], caller_kind=capture["caller_kind"],
-                role=capture["role"], command=capture["command"],
-                plugin=capture["plugin"], plugin_command=capture["plugin_command"],
-                code=code, wall_ms=(time.monotonic() - started) * 1000,
-                stdout_bytes=counted.bytes, stdout_chars=counted.chars,
-            )
-            usage_mod.record_best_effort(record, repo=capture["repo_path"])
+                usage_mod.record_best_effort(record, repo=capture["repo_path"])
         except Exception:                       # noqa: BLE001 — logging is never fatal
             pass
 
