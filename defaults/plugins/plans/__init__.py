@@ -240,11 +240,11 @@ traversed, which is why a cycle in it is REFUSED where a cycle in a plan's `deps
 `dep` nothing walks is a lead's mistake to read, and a composite that composes itself is a
 hang. Expansion mints fresh ids from the plan's own counter, like every step in it.
 
-A definition may also OBLIGE another — `create-pr` obliges `merge-human-review` — and naming
+A definition may also OBLIGE another — `create-pr` obliges `change-approval` — and naming
 it adds both. The obliged step carries `obliged_by`, the id of the step that brought it, and it can
 be skipped with a reason like any other. What it cannot be is omitted: the obligation is a
 property of the definition rather than a rule an agent remembers, so there is no way to name
-a create-PR step and end up without its human checklist on the board. A skip is a state with a sentence
+a create-PR step and end up without the approved contract it must land against. A skip is a state with a sentence
 beside it and a bad call can be questioned; an omission is invisible, which is enforcement in
 appearance only. An on-the-fly step called "merge the PR" obliges nothing, and that is not a
 hole — it is a word-only step, and the obligation belongs to the definition, not to the word.
@@ -288,7 +288,7 @@ blind (`_written`) — a gate, an owner, a checkpoint, a skip and its reason hav
 so a template that could carry only a name could not show what a step really looks like.
 
 The catalogue is deliberately nearly empty — `change-approval`, `create-pr`, `merge`,
-`merge-human-review`, `review` and one template — because the design says what to promote
+`plan-review`, `review` and one template — because the design says what to promote
 into it is read off real runs rather than decided up front, and the system has to work
 with it almost bare. It does: with no `library` directory at all every verb here still
 works and only `name-step` has nothing to offer.
@@ -837,8 +837,10 @@ WHEN A PLAN EXISTS
   record --request "..."` as soon as it is clear the work is direct and heading for a landing
   change — the same moment a shaped change is born with its record, not reconstructed once
   the PR is already open. That record is born with a fixed execution+landing STEP SKELETON —
-  implementation, review, the human-only checklist, the PR, merge — so a direct change shows
+  implementation, review, the PR, merge — so a direct change shows
   its progress on the board and its PR exactly as a plan does, without a plan's shaping half.
+  (The human-only checklist is not a step of its own: `create-pr` writes it onto the record's
+  `human_checks` as it opens the PR.)
   What the skeleton is NOT is a plan: it is a fixed list, not a shaped DAG, and it is not
   extended step by step — a job that needs more than the skeleton is a shaped change. The
   first call costs one line; verification, review, the PR and the human's approval fill the
@@ -1073,9 +1075,10 @@ WHAT TO BUILD IT FROM
   plan must not truncate; `implementation` is the work step itself — the first step of the
   fixed skeleton a DIRECT change is born with, and available to name where a shaped plan
   wants the library's version rather than its own freetext work steps. The two flags above
-  land seven steps, because `create-pr` obliges the change approval, which obliges the
-  implementation review, AND the human-review list; `merge` is the landing step itself.
-  `create-pr` on its own lands four of those and the plan ends at the open PR, which is right
+  land six steps, because `create-pr` obliges the change approval, which obliges the
+  implementation review; `merge` is the landing step itself. (The human-only checklist a PR
+  carries is not a step — `create-pr` writes it onto the change record as it opens.)
+  `create-pr` on its own lands three of those and the plan ends at the open PR, which is right
   for a job that ends there — and nothing downstream can tell that plan from one
   which meant to land and lost its merge, so the naming is where it has to be got right.
   Naming an obliged step as well gets you a SECOND copy of it: nothing is ever
@@ -1826,7 +1829,7 @@ def record(ctx, args) -> Result:
     plan.
 
     BORN WITH THE SKELETON. The record is born on the `direct` path AND with the fixed
-    execution+landing skeleton (`_skeleton`) — implementation, review, the human checklist,
+    execution+landing skeleton (`_skeleton`) — implementation, review,
     the PR, merge — so the change is legible on the board and its PR the moment it exists,
     without a plan's shaping half. `--request` seeds the human ask it exists to carry to the
     PR; everything else — the verification, the review, the PR head, the approval, the
@@ -1970,6 +1973,37 @@ def show(ctx, args) -> Result:
     return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md)
 
 
+def _review_before_pr(plan: dict) -> Optional[Result]:
+    """Refuse to OPEN a plan's PR comment before the independent review is recorded.
+
+    DESIGN-TRUTH is firm that "the PR opens only when applicable verification is current and
+    no major review issue remains", and `create-pr`'s own definition says it waits on the
+    completed review — but nothing in the tooling enforced it, so an agent could push, open
+    the PR and post this comment with the review step still open. This mirrors `merge`'s
+    fail-closed pattern one gate earlier: `merge` refuses to LAND without a review covering
+    the approved head; this refuses to OPEN without a review recorded at all.
+
+    Only the FIRST post is gated — an existing comment refreshes unconditionally, so a
+    reviewer's fix, a moved head or a landing decision still updates the one comment, and
+    `merge`'s own post-merge refresh (where the review is long since recorded) is never
+    blocked. And only a landing CHANGE RECORD is gated: a legacy plan with no `change` has no
+    review field to read and is left alone. "No unresolved major" stays the owner's judgement
+    in `change.review.findings` prose — unreadable by a machine and unchecked here exactly as
+    `merge` leaves it; what this checks is that a review was done and recorded at all.
+    """
+    change = plan.get("change")
+    if not isinstance(change, dict):
+        return None
+    review = change.get("review")
+    if isinstance(review, dict) and _some(review.get("commit")):
+        return None
+    why = (f"{plan['id']}: refusing to open the PR comment before the independent review is "
+           f"recorded. `change.review` needs the commit a fresh reviewer covered — run the "
+           f"review, record it, and open the PR then. Once the comment exists it refreshes "
+           f"freely; this gate is only the open.")
+    return Result(ok=False, human=why, data={"error": why, "plan": plan["id"]})
+
+
 def comment(ctx, args) -> Result:
     """Create or update this plan's one durable pull-request comment.
 
@@ -2057,6 +2091,12 @@ def comment(ctx, args) -> Result:
         changed, bad = _github(ctx, ["--method", "PATCH", target, "--input", "-"],
                                body=body)
     else:
+        # PR-OPEN GATES ON A RECORDED REVIEW. The first time this comment lands on a PR is
+        # the PR-open the design gates — nothing else in the tooling mediates the raw push
+        # and `gh pr create` that create the PR itself, so this is the moment to fail closed.
+        bad = _review_before_pr(plan)
+        if bad:
+            return bad
         action = "created"
         changed, bad = _github(ctx, ["--method", "POST", endpoint, "--input", "-"],
                                body=body)
@@ -3124,8 +3164,8 @@ def _next(plan: dict, moved: dict) -> list[dict]:
 
     THE MOMENT A STEP IS PICKED UP is the only moment its instructions are worth printing,
     and it is the moment nothing used to mark. A definition's `about` — the two-section
-    contract a change approval is written in, what a human-review list may and may not
-    hold — is the whole of how that step is done right, and `_resolve` never carried it
+    contract a change approval is written in, what a review must and must not
+    check — is the whole of how that step is done right, and `_resolve` never carried it
     onto the step, so an agent met the step and not the instruction unless it already knew
     to go and read the definition. Which is a thing you only know to do once you have got
     it wrong. So it arrives here instead, unasked, at the tick or the skip that hands the
@@ -3441,18 +3481,19 @@ def _change(path: str) -> dict:
 # landing change passes through these same acts, so a direct change stops being stepless and
 # carries them as real, tickable steps — the same step vocabulary a shaped plan uses, minus
 # the shaping half (a direct change has no change-approval). This is what makes a direct
-# change legible: the board draws these as a flowchart exactly as it draws a plan's, and
-# `merge-human-review`'s output populates the PR checklist with no wiring of its own.
+# change legible: the board draws these as a flowchart exactly as it draws a plan's, and the
+# change record's `human_checks` field populates the PR checklist with no step of its own.
 #
-# A FIXED LIST AND NOT A COMPOSER. The five are named as library defs and chained linearly,
+# A FIXED LIST AND NOT A COMPOSER. The four are named as library defs and chained linearly,
 # minted DIRECTLY rather than through `_mint`/oblige: `create-pr` obliges `change-approval`,
 # and composing it the obliged way would drag that shaping step into a change that must not
 # have one. So the skeleton is spelled out here, in anchor order — implementation (`build`),
-# then review and the human-only checklist (`review`), then the PR (`pr`), then merge
-# (`merge`) — and nothing about it is configurable. `merge-human-review` sits BEFORE
-# `create-pr`: the checklist a human meets must exist when the PR opens, which is the order
-# `create-pr` already obliges and the order the anchors already produce.
-_SKELETON = ("implementation", "review", "merge-human-review", "create-pr", "merge")
+# then review (`review`), then the PR (`pr`), then merge (`merge`) — and nothing about it is
+# configurable. THE HUMAN-ONLY CHECKLIST IS NOT A STEP: it is `create-pr`'s own job, written
+# onto the change record's `human_checks` before the PR opens and rendered in the one PR
+# comment, so there is no separate `human review` row for a reader to misread as Andrew's own
+# review slot.
+_SKELETON = ("implementation", "review", "create-pr", "merge")
 
 
 def _skeleton(rec: dict) -> None:
@@ -3559,8 +3600,8 @@ def _kept() -> tuple[dict, Optional[Result]]:
 def _names(key: str, spec: dict, field: str) -> list[str]:
     """A definition's list of names, refused rather than misread if it is a bare string.
 
-    `"obliges": "merge-human-review"` iterates one letter at a time, and what came out of that
-    was a refusal saying `'merge' obliges 'm', which is not in the step library` — technically
+    `"obliges": "change-approval"` iterates one letter at a time, and what came out of that
+    was a refusal saying `'merge' obliges 'c', which is not in the step library` — technically
     a refusal, and useless to whoever has to fix the file.
     """
     given = spec.get(field)
@@ -6137,31 +6178,15 @@ def _change_of(p: dict) -> dict:
     return c if isinstance(c, dict) else {}
 
 
-def _def_output(steps: list, key: str) -> Optional[str]:
-    """The finished `output` text of the step naming definition `key`, if any.
-
-    The human-first sections read from the change record, but the CONTENT a shaped plan
-    writes as it runs lands in step outputs — the human checks in `merge-human-review`, the
-    contract in `change-approval`. Where the record does not carry a summary of its own, the
-    step that produced the thing is the fallback, so a plan that filled its outputs and not
-    its record still renders something a human can act on.
-    """
-    for s in steps or ():
-        if s.get("def") == key and isinstance(s.get("output"), str) and _some(s["output"]):
-            return s["output"]
-    return None
-
-
 # WHAT §1 SAYS WHEN THERE IS NOTHING IN IT, and why that is two sentences rather than one.
 # "Nothing for you" is the single most consequential line in this comment — it is the one a
 # person acts on by closing the tab — so it may only be said where somebody actually said
-# it. An ANSWERED change is one whose record carries `human_checks` (the list, or the `none`
-# sentinel), or whose `merge-human-review` step wrote its output or was skipped: in every
-# one of those a person's work was considered and the answer was none. A record carrying
-# none of them has not been asked yet — a legacy plan from before the change record existed,
-# or a comment posted before the list was written, which `create-pr` says outright is a
-# thing that happens — and saying "agent verification covers this" there is the record
-# claiming an assurance nobody gave.
+# it. An ANSWERED change is one whose record carries `human_checks` — the list, or the `none`
+# sentinel — which is `create-pr`'s job to write before the PR opens: a person's work was
+# considered and the answer, if that is what it is, was none. A record carrying nothing there
+# has not been asked yet — a legacy plan from before the change record existed, or a comment
+# somehow posted before the list was written — and saying "agent verification covers this"
+# there is the record claiming an assurance nobody gave.
 _NO_HUMAN_WORK = "Nothing—agent verification covers this change."
 _NO_HUMAN_ANSWER = ("Not recorded — nobody has written down what a human still has to "
                     "check, so this is unanswered rather than empty.")
@@ -6172,20 +6197,13 @@ def _need_section(p: dict, steps: list) -> list[str]:
 
     Always drawn, because the one thing a person must not have to hunt for is whether the
     change is waiting on them. Empty is itself the answer, said outright — but only where the
-    record answered it; see `_NO_HUMAN_ANSWER` above for the case where nobody has.
+    record answered it; see `_NO_HUMAN_ANSWER` above for the case where nobody has. The checks
+    are the change record's `human_checks`, written by `create-pr` before the PR opens; the
+    open gates (below) are read off the steps.
     """
     c = _change_of(p)
     checks = c.get("human_checks")
     answered = _some(checks)
-    if not answered:
-        checks = _def_output(steps, "merge-human-review")
-        answered = _some(checks)
-    if not answered:
-        # A SKIPPED human-review step is itself the answer, whether or not it wrote the
-        # output its definition asks for: skipping it is a person's work being considered
-        # and found unnecessary, and the reason is on the step's `why` for the board.
-        answered = any(s.get("def") == "merge-human-review" and s.get("progress") == SKIPPED
-                       for s in (steps or ()))
     # `none` is the sentinel a change with nothing for a human writes into `human_checks`;
     # it means the same as an empty list, and it renders as the sentence below, not the word.
     if isinstance(checks, str) and checks.strip().lower() == "none":
@@ -7130,7 +7148,7 @@ def _col(text: str, n: int) -> str:
     """A value in its column, with a gap even when the value overruns the column.
 
     `f"{text:<16}"` pads a short value and does nothing at all to a long one, which glued
-    `merge-human-review` to its name in the library listing and a long workspace name to
+    `change-approval` to its name in the library listing and a long workspace name to
     its plan's title in `list --all`. Two spaces is the floor, the column is the aim.
     """
     return f"{text:<{n}}" if len(text) < n else f"{text}  "
