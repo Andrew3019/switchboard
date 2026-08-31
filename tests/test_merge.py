@@ -276,6 +276,10 @@ class ConflictTest(Fixture, unittest.TestCase):
         trip over."""
         path = self._worktree("worker-solo")
         me = self._agent("worker-solo", role="worker", branch="worker-solo", path=path)
+        # Seeded explicitly, because the `worker` TEMPLATE has named `spawn` since
+        # 2026-08-31: this is the ∩-narrowed row that template produces under a spawner
+        # which could not pass `spawn` down, and it is the row this refusal is about.
+        store.seed_capabilities(self.db, me, ["write-tracked"])
         self.lead_path = path
         self._child("worker-one", file="shared.txt", text="one's answer\n",
                     parent=me)

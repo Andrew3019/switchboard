@@ -19,10 +19,15 @@ Four things are deliberate:
     used to open "run it yourself rather than delegating the running of it", which was
     written for an orchestrator and was true for exactly one kind of reader. Every round of this procedure is a spawn, so an agent
     without delegate rights is told to run something `sb delegate` refuses it — and briefs
-    routinely point workers here to self-review. The named cases fix it: whoever cannot spawn
-    asks its parent for a lead instead of attempting rounds it cannot start, and whoever
-    can spawn either runs the loop itself or puts up ONE lead that owns the whole of it.
-    That second half changed on 2026-08-27 — it used to say delegate, full stop, which was
+    routinely point workers here to self-review. The named cases fix it: whoever can spawn
+    either runs the loop itself or puts up ONE lead that owns the whole of it, and whoever
+    cannot says so where it will be read instead of attempting rounds it cannot start.
+    The second case USED to end "ask your parent for an adversarial-review lead", and that
+    line went on 2026-08-31 with the seed change that gave every writing leaf `spawn`: a
+    worker asking its parent to arrange the review of its own change is how a reviewer gets
+    spawned by an agent whose checkout is not the one the change is in. A worker now falls
+    into the can-spawn case and delegates the lead itself. That case's own second half
+    changed on 2026-08-27 — it used to say delegate, full stop, which was
     the last surface still telling an agent to hand out work it could do; the reason to
     delegate now has to be a real one (context, or a loop long enough to want an owner)
     rather than the availability of the verb. The lead that
@@ -70,17 +75,19 @@ decides what you do, and there are three cases:
 
 - You were spawned to run this review. You are that lead: the loop below is yours, and you
   do not put up another lead for it.
-- You were asked for one while doing something else, and you can spawn. Run the rounds
-  yourself if you have the room for them — you already hold the artifact, and a lead put up
-  to type the same spawns is a boundary that buys nothing. Delegate one lead when the loop
-  would eat the context your own job needs, or when it will run long enough to want its own
-  owner: give it the artifact, where it is, and "read `sb presets adversarial` and run it".
-  It then owns the rounds, you report from what it reports, and you do not run rounds of
-  your own beside it.
-- You cannot spawn — you are a worker, or any role without delegate rights. Then you cannot
-  run this and should not try: `sb delegate` refuses you, and there is nothing left of the
-  procedure once the spawns are removed. Ask your parent for an adversarial-review lead
-  over the artifact, naming where it is, and get on with the rest of your task.
+- You were asked for one while doing something else, and you can spawn — which includes a
+  worker or a builder mid-change, because the review of your own work is arranged by you
+  and not asked of your parent. Run the rounds yourself if you have the room for them: you
+  already hold the artifact, and a lead put up to type the same spawns is a boundary that
+  buys nothing. Delegate one lead when the loop would eat the context your own job needs,
+  or when it will run long enough to want its own owner — `sb delegate --role lead`, giving
+  it the artifact, where it is, and "read `sb presets adversarial` and run it". It then owns
+  the rounds, you report from what it reports, and you do not run rounds of your own beside
+  it.
+- You genuinely cannot spawn — a role seeded without it, or a spawner that could not pass
+  it down. Then you cannot run this and should not try: `sb delegate` refuses you, and
+  there is nothing left of the procedure once the spawns are removed. Say so where it will
+  be read, naming the artifact and where it is, and get on with the rest of your task.
 
 The loop, for the lead running it. Keep one proposer for the whole review: the agent that
 produced the artifact, or a fresh one handed it, whose job across every round is to defend

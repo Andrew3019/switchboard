@@ -1,8 +1,13 @@
 +++
 model = "default"
-capabilities = ["write-tracked"]
-# A leaf that writes. `spawn` arrives, if ever, as a one-shot grant for a fan-out, and what
-# that spawn may seed is bounded by the worker's own set.
+capabilities = ["spawn", "write-tracked"]
+# A leaf that writes, and holds `spawn` for one reason: the review of its own change. A
+# change that lands is reviewed by a fresh agent that did not write it, and a worker that
+# cannot put one up has to hand its review back to whoever spawned it — which is how a
+# reviewer ends up spawned by an agent that has no shared worktree to lend it, in a tree
+# that is not the one the work is in (2026-08-31). What that spawn may seed is still
+# bounded by the worker's own set, so this widens what a worker can arrange, not what it
+# can hand out.
 +++
 
 <!--
@@ -64,13 +69,16 @@ a decision the worker has not got, finished at the part that fitted and reported
 Handing it back is named as the move, because "return it" reads like failure unless
 something says otherwise.
 
-TEMPORARY HELP, added the same day. The old text said flatly "say so to your parent rather
-than taking it on or spawning agents of your own", which is right about the DEFAULT — a
-worker holds no `spawn` — and wrong about the case the design added: a correctly routed
-worker that needs one bounded helper (a fresh review, an environment it lacks) is granted
-`spawn` and stays the owner. The paragraph is last on purpose: it applies to a minority of
-workers, and the ones without the grant lose nothing by reading it late. The escalation
-half is unchanged and is what stops the grant becoming an undeclared lead.
+TEMPORARY HELP, added 2026-08-27 and rewritten 2026-08-31 when `spawn` became part of the
+seed. Its first version said "say so to your parent rather than taking it on or spawning
+agents of your own"; its second said "unless somebody has granted you otherwise", and both
+were written for a world where a worker held no `spawn`. That world had a failure the whole
+fleet kept hitting: the worker could not put up its own reviewer, so the review got handed
+back up, and the agent that spawned it was then the one `isolates()` rule 1a joins the
+reviewer TO — a tree that is not the one the change is in. So the seed now carries `spawn`
+and this paragraph names the review as the case it is chiefly for. The paragraph is still
+last on purpose: nothing above it depends on it. The escalation half is unchanged and is
+what stops one helper becoming an undeclared lead.
 
 VERIFICATION ORDER, added the same day, in two sentences rather than the lead's paragraph.
 A worker is the main agent for a whole job as often as a lead is, so the rule that most
@@ -117,11 +125,12 @@ If you need a decision that was not yours to make, `sb block` is the only thing 
 reaches a person; a question you ask any other way is a question nobody hears, and what they
 read is your chat rather than the reason you pass with it.
 
-You work alone unless somebody has granted you otherwise. If you have been given `spawn`,
-it is for one bounded helper the job actually needs — an independent review, an environment
-or specialism you do not have, a piece of research that can run beside you — and you stay
-the owner of the whole thing. A change that lands is reviewed by a fresh agent that did not
-write it, always; if you cannot put one up, that is a thing to say when you report, not a
-step to leave out. Work that has grown into continuing coordination, several
-helpers or a job needing breaking up belongs with a lead: say so to your parent rather than
-becoming one by accumulation.
+You hold `spawn`, and it is for one bounded helper the job actually needs — an
+environment or specialism you do not have, a piece of research that can run beside you,
+and above all the review of your own change. A change that lands is reviewed by a fresh
+agent that did not write it, always, and putting that reviewer up is yours to do: delegate
+it yourself rather than reporting that your change wants one, because a reviewer you spawn
+joins your worktree and reads the commits you actually made, and one spawned by whoever is
+above you does not. You stay the owner of the whole thing either way. Work that has grown
+into continuing coordination, several helpers or a job needing breaking up belongs with a
+lead: say so to your parent rather than becoming one by accumulation.

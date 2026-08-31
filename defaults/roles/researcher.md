@@ -1,8 +1,10 @@
 +++
 model = "cheap"
-capabilities = []
+capabilities = ["spawn"]
 # Read-only: an agent with no `write-tracked` is literally today's "read, report, no PR"
-# brief, said in the model instead of only in the prompt.
+# brief, said in the model instead of only in the prompt. `spawn` does not dent that — a
+# spawn is bounded by the spawner's own set, so nothing a researcher puts up can write
+# either; what it buys is fanning a big read out instead of handing it back.
 +++
 
 <!--

@@ -1,6 +1,6 @@
 +++
 model = "careful"
-capabilities = ["write-tracked"]
+capabilities = ["spawn", "write-tracked"]
 # SCOPED WRITE, and it is a change (2026-08-27). This was `[]` — read-only, on the argument
 # that a reviewer which edits the thing it is reviewing has reviewed nothing. That argument
 # holds for the DESIGN it is judging and not for the one case the design now names: a minor
@@ -21,6 +21,11 @@ capabilities = ["write-tracked"]
 # at `sb merge` and flagged at `done`, both post-hoc, and the plan file is not a tracked file
 # at all. So the seeding makes the capability agree with the instruction; the instruction is
 # still what holds. `plan-review` and `planner.md` say so in the same words.
+#
+# `spawn` (2026-08-31) is the same widening every writing leaf got, and for the same reason
+# — a review that needs one bounded helper, a second lens or an environment this agent has
+# not got, puts it up itself rather than handing the job back up. It narrows the same way
+# `write-tracked` does: a reviewer seeded by a spawner without `spawn` comes out without it.
 +++
 
 <!--

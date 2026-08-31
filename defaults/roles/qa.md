@@ -1,8 +1,10 @@
 +++
 model = "careful"
-capabilities = []
+capabilities = ["spawn"]
 # READ-ONLY by default. `write-tracked` is a grant, not a default: a qa agent that reports
 # what it found is the job, and one that fixes what it found is a change nobody reviewed.
+# `spawn` is not a write: it buys one bounded helper — a second pair of eyes, an
+# environment this agent has not got — and cannot seed `write-tracked` it does not hold.
 +++
 
 <!--

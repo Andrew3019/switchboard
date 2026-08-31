@@ -45,13 +45,26 @@ class Fixture:
                            cwd=str(self.repo), pane_id="w1:p1", is_top=True)
         return name
 
+    def _nonspawning_role(self, name: str = "drone") -> str:
+        """A role holding no `spawn`, and it has to be declared to get one: since
+        2026-08-31 every SHIPPED role holds it, so that a leaf can put up the review of
+        its own change instead of handing the review back up. The refusal side of the
+        gate still has to be tested, and a repo's own `roles.toml` is how a deployment
+        declares a role without it — which is now the only way such a role exists."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "roles.toml").write_text(
+            f"[{name}]\ndelegate = false\n")
+        self.b = Broker(self.db, self.h, repo=self.repo)   # roles.toml is read on build
+        return name
+
 
 class SpawnGateParityTest(Fixture, unittest.TestCase):
     """The spawn gate decides the same way through the seeded set and through the derived
     fallback — which is the claim "no behaviour changed" reduced to one assertion."""
 
     def test_a_bare_role_is_still_refused_in_the_same_words(self):
-        store.create_agent(self.db, name="w", role="worker", parent=self._top(),
+        role = self._nonspawning_role()
+        store.create_agent(self.db, name="w", role=role, parent=self._top(),
                            workspace="api", branch="api")
         with self.assertRaises(ValueError) as cm:
             self.b.require_capability("w", CAP_SPAWN)
@@ -67,8 +80,10 @@ class SpawnGateParityTest(Fixture, unittest.TestCase):
         """A spawned agent HAS capability rows; a row written straight to the table has
         none. Both must answer the same, or the substrate refuses somebody it used to
         allow the first time an old store meets this code."""
-        seeded = self.b.delegate("t", topic="t", role="worker", me=self._top())
-        store.create_agent(self.db, name="derived", role="worker", parent="top",
+        top = self._top()
+        role = self._nonspawning_role()
+        seeded = self.b.delegate("t", topic="t", role=role, me=top)
+        store.create_agent(self.db, name="derived", role=role, parent="top",
                            workspace="api", branch="api")
         self.assertIsNotNone(store.get_agent(self.db, seeded)["seed_capabilities"])
         self.assertIsNone(store.get_agent(self.db, "derived")["seed_capabilities"])
@@ -94,7 +109,8 @@ class RowlessCallerFailsOpenTest(Fixture, unittest.TestCase):
     def test_a_row_present_with_the_cap_absent_is_the_refusal_case(self):
         """The middle value, stated apart from the other two: it is row-presence that
         turns the check from allow into refuse, not the empty table."""
-        store.create_agent(self.db, name="w", role="worker", parent=self._top())
+        store.create_agent(self.db, name="w", role=self._nonspawning_role(),
+                           parent=self._top())
         self.assertFalse(self.b.holds_capability("w", CAP_SPAWN))
 
 
@@ -159,11 +175,11 @@ class RoleBundleTest(Fixture, unittest.TestCase):
         expected = {
             "dispatcher": ["dispatch", "spawn", "write-tracked"],
             "lead":       ["dispatch", "fork", "spawn", "write-tracked"],
-            "worker":     ["write-tracked"],
-            "builder":    ["write-tracked"],           # a worker that writes code
-            "researcher": [],
-            "reviewer":   ["write-tracked"],   # scoped minor fixes, 2026-08-27
-            "qa":         [],                                       # read-only by default
+            "worker":     ["spawn", "write-tracked"],
+            "builder":    ["spawn", "write-tracked"],   # a worker that writes code
+            "researcher": ["spawn"],                    # read-only; a spawn cannot widen it
+            "reviewer":   ["spawn", "write-tracked"],   # scoped minor fixes, 2026-08-27
+            "qa":         ["spawn"],                    # read-only by default
         }
         for role, caps in expected.items():
             with self.subTest(role=role):
@@ -215,13 +231,15 @@ class RoleBundleTest(Fixture, unittest.TestCase):
         (self.repo / ".switchboard" / "roles.toml").write_text(
             "[qa]\ndelegate = true\n[lead]\ndelegate = false\n")
         b = Broker(self.db, self.h, repo=self.repo)
-        self.assertIn(CAP_SPAWN, b.seed_for("qa", is_top=False))          # widened
+        self.assertIn(CAP_SPAWN, b.seed_for("qa", is_top=False))          # kept
         self.assertNotIn(CAP_SPAWN, b.seed_for("lead", is_top=False))     # and narrowed
-        # `planner` is a shipped role again since the plans plugin began contributing one,
-        # and it is seeded with `spawn` for the fresh plan review its specialty commissions.
-        # This repo overrode `qa` and `lead`; it said nothing about the planner, so the
-        # listing keeps it.
-        self.assertEqual(b._delegating_roles(), ["dispatcher", "planner", "qa"])
+        # Every shipped role holds `spawn` since 2026-08-31, so `true` over `qa` is the
+        # no-op direction now and `false` over `lead` is the whole assertion: the bool
+        # REPLACES the bundle underneath it, so it must be able to take `spawn` away from
+        # a role whose own file names it. The listing is therefore everything but `lead`.
+        self.assertEqual(b._delegating_roles(),
+                         ["builder", "dispatcher", "planner", "qa", "researcher",
+                          "reviewer", "worker"])
 
     def test_delegating_roles_is_capability_membership_and_names_the_same_roles(self):
         """`_delegating_roles()` filtered `.delegate`; it filters `spawn` in the bundle.
@@ -231,8 +249,13 @@ class RoleBundleTest(Fixture, unittest.TestCase):
 
         The list is a listing of the EFFECTIVE vocabulary, so a role arriving from an
         enabled plugin belongs in it: an agent refused `spawn` is told which roles hold it,
-        and naming two when three do sends it to ask for the wrong one."""
-        self.assertEqual(self.b._delegating_roles(), ["dispatcher", "lead", "planner"])
+        and naming two when three do sends it to ask for the wrong one. Since 2026-08-31
+        that is every shipped role — the seed change that lets a leaf put up the review of
+        its own change — so the only agent this listing is ever shown to holds a role some
+        repo declared without `spawn` in its own `roles.toml`."""
+        self.assertEqual(self.b._delegating_roles(),
+                         ["builder", "dispatcher", "lead", "planner", "qa", "researcher",
+                          "reviewer", "worker"])
         self.assertEqual(
             self.b._delegating_roles(),
             sorted(n for n, r in self.b.roles.items()
