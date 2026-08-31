@@ -2505,17 +2505,46 @@ class CatalogueTest(PlansSandbox):
         self.assertEqual(got["create-pr"], "done")
 
     def test_a_plan_with_no_change_record_opens_its_pr_comment_ungated(self):
-        """The gate reads `change.review`; a legacy plan that predates the change record has
-        no `change` to read, so the open is left alone rather than refused on a field that
-        was never going to be there."""
-        self.data(*_create("a job", "write it"))
+        """The gate reads the change record; a legacy plan that predates it has no `change` to
+        read, so the open is left alone rather than refused on fields that were never going to
+        be there. AND NOTHING IS DERIVED FROM IT: the gate waved this post through without
+        reading anything, so there is no confirmed fact behind it and a `done` written here
+        would be the exact invention `tick`'s rule forbids."""
+        self.data("plugin", "plans", "record", "an older direct change",
+                  "--display", "board: an older direct change")
         doc = self._doc()
         doc["plans"][0].pop("change", None)
         self._save(doc)
         with self.github_comments() as comments:
             made = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
-            self.assertEqual(made["action"], "created")
-            self.assertTrue(comments)
+
+        self.assertEqual(made["action"], "created")
+        self.assertTrue(comments)
+        self.assertEqual(made["auto_ticked"], [])
+        self.assertEqual([s["progress"] for s in self.steps()], ["open"] * 4)
+
+    def test_two_steps_of_one_def_are_left_for_somebody_to_tick(self):
+        """One recorded review does not say WHICH of two review steps is finished. A shaped
+        plan can carry two — obligations are never deduplicated, so two chains each bring
+        one — and closing both off the single `change.review` would be inferring from an
+        ambiguous signal, which is the judgement this narrowing does not take. The
+        unambiguous defs beside them still derive."""
+        self.data(*_create("a job", "write it"))
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")   # obliges a 2nd review
+        defs = [s["def"] for s in self.steps()]
+        self.assertEqual(defs.count("review"), 2)                       # the premise
+        self.ready_to_open("p-1")
+        with self.github_comments():
+            made = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
+
+        by_def = {}
+        for step in self.steps():
+            by_def.setdefault(step["def"], []).append(step["progress"])
+        self.assertEqual(by_def["review"], ["open", "open"])     # ambiguous: neither closes
+        self.assertEqual(by_def["create-pr"], ["done"])          # names one step, so it does
+        self.assertEqual(made["auto_ticked"], [s["id"] for s in self.steps()
+                                               if s["def"] == "create-pr"])
 
     # -- where a named step runs, which is not what it obliges ------------------
 
@@ -5975,6 +6004,25 @@ class LandingMergeTest(PlansSandbox):
         # The ORDER, proved by the rendering: the comment posted after the derivation reads
         # the closed board, not the one landing began with.
         self.assertIn("**Status:** finished · 4/4 done", gh.comments[0]["body"])
+
+    def test_the_post_merge_comment_is_never_refused_by_the_pr_open_gate(self):
+        """The regression the widened gate could have caused, pinned. `merge` never checks
+        `change.human_checks` — it is a PR-OPEN precondition, not a landing one — so a record
+        can pass every check `merge` makes with it unset. If that record has no plan comment
+        yet, `merge`'s own trailing refresh is a FIRST post, and gating it would refuse the
+        one comment saying the change landed, after GitHub had already taken the merge, with
+        an instruction to `open the PR then` that cannot be followed. The merge itself is a
+        later and strictly stronger gate, so its refresh is not an open."""
+        self.approved(human_checks=None)
+        with self.github() as gh:
+            data = self.data("plugin", "plans", "merge", "p-1", "--pr", "42")
+
+        self.assertTrue(data["merged"])
+        self.assertEqual(data["landing"]["comment"], "updated")
+        self.assertEqual(len(gh.comments), 1)
+        self.assertIn("merged", gh.comments[0]["body"])
+        # And it still closed the skeleton — off the landing, which IS what merge confirmed.
+        self.assertEqual(self.progress(), ["done"] * 4)
 
     def test_a_refused_merge_closes_no_step_at_all(self):
         """Derived from a fact, so no fact means nothing derived. A merge refused on a moved

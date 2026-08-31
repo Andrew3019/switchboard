@@ -2137,6 +2137,7 @@ def comment(ctx, args) -> Result:
                       data={"error": why, "pr": int(pr), "plan": plan["id"],
                             "comment_ids": [row.get("id") for row in matches]})
 
+    opening = False
     if matches:
         comment_id = matches[0].get("id")
         if not isinstance(comment_id, int) or comment_id <= 0:
@@ -2150,9 +2151,19 @@ def comment(ctx, args) -> Result:
         # PR-OPEN GATES ON THE RECORDED EVIDENCE. The first time this comment lands on a PR
         # is the PR-open the design gates — nothing else in the tooling mediates the raw push
         # and `gh pr create` that create the PR itself, so this is the moment to fail closed.
-        bad = _preconditions_before_pr(plan)
-        if bad:
-            return bad
+        #
+        # EXCEPT WHEN THE PR HAS ALREADY LANDED. `merge` sets `landed` on its own trailing
+        # refresh, and that post is not an open: by then GitHub has taken the merge, and a
+        # later and strictly stronger gate — every recorded head against the one a person
+        # approved — has already passed. Refusing there would leave a landed change with no
+        # comment saying so and an instruction to "open the PR then" that cannot be followed.
+        # It is an internal argument and not a flag: `comment`'s parser declares none, so an
+        # argparse namespace never carries it and nothing typed at a terminal can set it.
+        opening = not getattr(args, "landed", False)
+        if opening:
+            bad = _preconditions_before_pr(plan)
+            if bad:
+                return bad
         action = "created"
         changed, bad = _github(ctx, ["--method", "POST", endpoint, "--input", "-"],
                                body=body)
@@ -2166,14 +2177,17 @@ def comment(ctx, args) -> Result:
         why = f"GitHub {action} the plan comment but returned no numeric comment id"
         return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
 
-    # THE OPEN IS THE FACT. This call refused to make it until the record carried the
-    # verification and the review — the exit conditions of the two skeleton steps that run
-    # before this one — and the human checklist, which is this step's OWN job; and the PR now
-    # demonstrably carries the comment, which is the rest of it. So three steps are closed
-    # here rather than left for somebody to transcribe a second time. A refresh derives
-    # nothing, because a refresh confirms nothing new.
+    # THE OPEN IS THE FACT, AND ONLY WHERE IT WAS ACTUALLY CHECKED. This call refused to make
+    # it until the record carried the verification and the review — the exit conditions of the
+    # two skeleton steps that run before this one — and the human checklist, which is this
+    # step's OWN job; and the PR now demonstrably carries the comment, which is the rest of it.
+    #
+    # A REFRESH DERIVES NOTHING, because it confirms nothing new. Neither does a post the gate
+    # did not run on: `merge`'s own landed refresh above, and a legacy plan with no `change`,
+    # which the gate waves through WITHOUT READING ANYTHING. Deriving there would mark
+    # `implementation` done off no fact at all, which is the one thing this must never do.
     derived: list[str] = []
-    if action == "created":
+    if action == "created" and opening and isinstance(plan.get("change"), dict):
         derived = _derive(ctx, plan["id"], ("implementation", "review", "create-pr"),
                           f"PR {pr} opened, which this refused to do until the record carried "
                           f"the verification, the review and the human checklist")
@@ -2352,7 +2366,7 @@ def merge(ctx, args) -> Result:
 
     # Last, and after the writes above, so the one authoritative comment renders the state the
     # change ended in rather than the state it was in when landing began.
-    posted = comment(ctx, SimpleNamespace(plan=plan["id"], pr=str(pr)))
+    posted = comment(ctx, SimpleNamespace(plan=plan["id"], pr=str(pr), landed=True))
     outcome["comment"] = "updated" if posted.ok else f"failed: {_flat(posted.human)}"
     _record_landing(ctx, plan["id"], who, None, outcome=outcome, cleanup=cleanup,
                     log=False)
@@ -3265,6 +3279,14 @@ def _derive(ctx, plan_id: str, defs: tuple, why: str) -> list[str]:
     step already `done` or `skipped` either — this is idempotent, and it never overrides a
     skip somebody made with a reason.
 
+    AND ONLY WHERE THE DEF NAMES ONE STEP. There is exactly one `change.review` on a record
+    and exactly one `review` step in the skeleton, so the fact and the step are the same
+    thing. A SHAPED plan can carry two — obligations are never deduplicated, so two chains can
+    each bring one — and then one recorded review does not say which of them is finished.
+    That is an ambiguous signal wearing a mechanical fact's clothes, so both are left for
+    somebody to tick: the rule this narrows is exactly the rule that says so. The skeleton
+    itself is minted one step per def and never trips this.
+
     LOGGED AS `DERIVED`, its own action, so the record honestly says which progress was
     asserted and which was worked out. Re-reads the store rather than reusing the caller's
     document, exactly as `_record_landing` does and for the same reason: `comment` writes
@@ -3274,11 +3296,14 @@ def _derive(ctx, plan_id: str, defs: tuple, why: str) -> list[str]:
     plan = _find(doc, plan_id)
     if plan is None:
         return []
+    steps = [s for s in (plan.get("steps") or ()) if isinstance(s, dict)]
     who = ctx.agent or "human"
     moved: list[str] = []
-    for step in (plan.get("steps") or ()):
-        if not isinstance(step, dict) or str(step.get("def") or "") not in defs:
-            continue
+    for key in defs:
+        carrying = [s for s in steps if str(s.get("def") or "") == key]
+        if len(carrying) != 1:
+            continue                # nothing to close, or nothing that says which one
+        step = carrying[0]
         if str(step.get("progress") or "") != OPEN:
             continue
         moved.append(str(step.get("id")))
