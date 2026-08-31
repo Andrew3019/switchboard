@@ -285,7 +285,11 @@ a line or two of plain, simple language:
 what you found or did, and what it means. Give file paths for the detail rather than
 pasting it.
 Work that ships has a default shape: a branch named for your workspace, push it,
-open the pull request, and put its URL in your summary. Where a plan is running,
+open the pull request, and put its URL in your summary. That is usually where the
+AGENT stops, not where the WORK ends — an open PR still has a review and a human's
+merge ahead of it, so where the work is going to land, a plan modelling it carries
+those steps even when your own part stops at the PR, and a plan that stops at the
+open PR reads the same whether the job ended there or its landing was dropped. Where a plan is running,
 its merge gate is the authority on pushing and merging; where none is, your
 parent's instruction is.
 To delegate: `sb delegate "<task>" --role <role> --name <topic>` spawns a child that

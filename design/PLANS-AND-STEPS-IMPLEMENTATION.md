@@ -31,8 +31,8 @@ as settled; they are recommendations Andrew confirms by approving this plan.
 - **D5 — The bullet-format preset ships as a nameable-but-unbound preset.**
   Enforcement that it is spawn-only is convention, not code — consistent with the spec's
   "no stop hook, not doing enforcement yet." It is shared machinery rather than one gate's:
-  it owns the bullet mechanics, `merge-human-review` uses the same format, and a step that
-  names it may name its own two sections.
+  it owns the bullet mechanics, `create-pr`'s human-only checklist uses the same format, and
+  a step that names it may name its own two sections.
 - **D6 — The `DESIGN-TRUTH.md` cut (PR6) is an Andrew-only edit.** The PR supplies the
   exact diff; Andrew applies it. It gates the merge gate (PR7).
 
@@ -134,7 +134,7 @@ Verify: assign an owner, tick, skip with reason, add a note, bump a try count.
 Depends: PR1, PR2
 Files: `defaults/plugins/plans/__init__.py`, `defaults/plugins/plans/library/*`,
 `defaults/plugins/plans/templates/*`, `tests/test_plans_plugin.py`
-Verify: name a library step; copy a template; add a merge step and see merge-human-review appear.
+Verify: name a library step; copy a template; name create-pr and see its approval and review appear.
 
 ### Problem
 
@@ -158,7 +158,7 @@ Verify: name a library step; copy a template; add a merge step and see merge-hum
 - Nothing links a copy back to its template; named steps inside stay names.
 - `template list` browses templates; the lead finds one once the work is shaped.
 ---
-- Adding a merge step automatically adds its merge-human-review step; this is obliged, not optional.
+- Naming create-pr automatically adds its change-approval and review steps; this is obliged, not optional. (The human-only checklist is create-pr's own job on the change record, not a step.)
 - An obliged step may be skipped with a reason, never silently omitted.
 - The catalogue may be nearly empty and the system still works.
 

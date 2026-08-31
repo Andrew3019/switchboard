@@ -11,7 +11,7 @@ the format the answer is written in.
 
 RE-SECTIONED: the format and the example are now separate, because the sections are NOT
 this file's to name. `change-approval` heads its two Scope & Objectives and Change
-Contract; `merge-human-review` heads its list for what it is; the worked example below is
+Contract; `create-pr` heads the human-only checklist for what it is; the worked example below is
 one gate's sections and is an example of the shape, not a set of headings to copy. What is
 shared, and the only reason this file exists, is the bullet mechanics. The file keeps its
 name because plans in flight name it, and a preset is renamed by breaking every step that
@@ -59,8 +59,9 @@ Headed sections, and no more of them than the step asks for. Read the `about` of
 that sent you here: WHICH ones is the step's own to say, not this file's. An approval gate
 has TWO — `change-approval` heads its two Scope & Objectives and Change Contract, and the
 design gate this file is named after headed its two "what is causing it" and "what the fix
-will be". The pre-merge human-check list is ONE: `merge-human-review` heads its own for
-what it is. The bullets are the same in every case, and that is what this file is for.
+will be". The pre-merge human-check list is ONE: `create-pr` heads its own for
+what it is, writing it onto the change record's `human_checks`. The bullets are the same in
+every case, and that is what this file is for.
 
 ## The bullets
 
