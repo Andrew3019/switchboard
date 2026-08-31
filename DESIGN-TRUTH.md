@@ -61,19 +61,22 @@ solution. — confirmed 2026-08-27
 a clearly bounded outcome with no expected orchestration. A lead is suitable when the shape
 is uncertain, the work may need planning or coordination, or one owner needs broader
 authority. Neither choice predetermines delegation. A lead may complete the entire job
-itself; a worker may receive explicitly bounded temporary help authority when that is the
-smallest useful exception. — confirmed 2026-08-27
+itself; a worker arranges its own bounded temporary help — chiefly the review of its own
+change — and stays the owner of the whole job. — confirmed 2026-08-27, that help authority
+made a seeded default rather than an exception 2026-08-31
 
 **Only `sb start` ever creates a TOP — that is the only path.** Being a top is stamped at
 that moment, and `sb delegate` still branches on the stamp: a top's spawn gets a new space
 and worktree, anyone else's gets a tab in the caller's space unless that spawn asks for
-isolation. A bare agent's delegate is refused outright. That stamp, not the prompt, is what
-decides where an agent's children land by default. What an agent may do *itself* is a
-different question, and the answer to it is no longer the role alone: a role is a TEMPLATE
-that seeds a live per-agent capability set, and that set is what every gate reads — see
-Capabilities and isolation below. Dispatcher and lead are still two roles with two prompts,
-not one role told its scope. — confirmed 2026-08-09, the second half confirmed 2026-08-14,
-corrected against the merged capability and isolation code 2026-08-23
+isolation. A bare agent's delegate is refused outright — and since 2026-08-31 no SHIPPED
+role is bare, so that refusal is now for a role a repo declared without `spawn`. That
+stamp, not the prompt, is what decides where an agent's children land by default. What an
+agent may do *itself* is a different question, and the answer to it is no longer the role
+alone: a role is a TEMPLATE that seeds a live per-agent capability set, and that set is
+what every gate reads — see Capabilities and isolation below. Dispatcher and lead are
+still two roles with two prompts, not one role told its scope. — confirmed 2026-08-09, the
+second half confirmed 2026-08-14, corrected against the merged capability and isolation
+code 2026-08-23
 
 **The dispatcher ROLE is not gated, and saying "only `sb start` makes a dispatcher" would
 be false.** `dispatcher` is a name `--role` takes like any other, the roles fragment every
@@ -97,8 +100,9 @@ Andrew's own checkout. `sb start` run inside a worktree is refused too, naming t
 checkout to run it from. — confirmed 2026-08-09
 
 **Where each spawn lands.** `sb start` = new bare space + dispatcher. A dispatcher spawns
-a bare agent = new worktree/space and agent, and that agent does not spawn other agents
-unless something above it granted `spawn`. A dispatcher spawns a lead = same thing. A lead
+a bare agent = new worktree/space and agent, and that agent spawns from its own role's
+template — which since 2026-08-31 names `spawn` for every shipped role, so a grant from
+above is no longer what unlocks it. A dispatcher spawns a lead = same thing. A lead
 spawning anything = new tab in the same exact space, unless that spawn asks for isolation.
 So by default a sub-lead a lead spawns is a tab in the lead's space, and its whole subtree
 stays in that one space — but the dispatcher is no longer the only agent that can create
@@ -466,6 +470,18 @@ seeds its children from the full template even for capabilities it does not itse
 because commissioning fully-capable leads while holding none of their rights is precisely
 its job. What the role name still decides on its own is the prompt, the model tier, and how
 far the agent may tune its own reminders. — confirmed 2026-08-23, against the merged code
+
+**Every shipped role is seeded `spawn`, and that is an EXPERIMENT rather than a settled
+rule.** A change that lands is reviewed by a fresh agent that did not write it, and until
+now a leaf could not put that agent up: its template held no `spawn`, a spawn only ever
+narrows, and so the review got handed back to whoever spawned it — which spawned the
+reviewer into the PARENT's checkout, a tree with none of the work in it. So `worker`,
+`builder`, `reviewer`, `qa` and `researcher` now carry `spawn` in their templates and a
+leaf arranges the review of its own change. It is deliberately broad and we are trying it
+out: "we can tighten later", and what to watch is whether a leaf starts growing a tree
+instead of putting up one reviewer. Nothing else moved — a spawn still narrows, so what a
+leaf may hand down is still bounded by what it holds, and neither `qa` nor `researcher`
+gained `write-tracked`. — confirmed 2026-08-31, as an experiment
 
 **The top dispatcher's capability set is fixed, and it holds no `write-tracked`.** It is
 the one bundle that is not data: not editable by a repo's role files, not derived from any
