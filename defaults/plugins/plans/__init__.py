@@ -88,12 +88,20 @@ an agent followed it. Every other field on a step is as open as it ever was.
 Moving a step
 -------------
 
-`tick` is the one verb that writes progress, and what it writes is `done`. Nothing infers
-it, `sb done` does not touch it, no verb moves it as a side effect of doing something else,
-and nothing in this file ever writes `done` on a step's behalf — which is the design's
-first rule about progress and the reason `tick` exists as a verb at all when the field
-beside it is edited by hand. The other two moves are the file: `skipped` with the reason in
-`why`, and back to `open` with `tries` bumped for a step being redone.
+`tick` is the verb that ASSERTS progress, and what it writes is `done`. Nothing infers it
+and `sb done` does not touch it — which is the design's first rule about progress and the
+reason `tick` exists as a verb at all when the field beside it is edited by hand. The other
+two moves are the file: `skipped` with the reason in `why`, and back to `open` with `tries`
+bumped for a step being redone.
+
+The one thing this file writes on a step's behalf is `_derive`, and it is that rule narrowed
+rather than dropped. `comment` and `merge` mechanically refuse to open a PR or land one until
+the change record carries the very facts the fixed skeleton's four steps exist to produce; so
+having refused without them, they close those four steps themselves rather than asking
+somebody to transcribe what the tool has just checked. It touches `_SKELETON`'s own defs and
+no freeform step, never a step already done or skipped, and it writes `auto-tick` and never
+`tick` — so the changelog still says which progress was somebody's judgement and which was
+this file's arithmetic. An AMBIGUOUS signal is still a judgement and is still typed by hand.
 
 Complete-or-skipped-but-never-both is structural rather than checked: `progress` is ONE
 string, so a skip written over a ticked step replaces the tick instead of joining it. What
@@ -499,11 +507,19 @@ LEGACY_FORMAT = 1
 # which is why nothing below compares against this list to decide whether a move is allowed.
 OPEN, DONE, SKIPPED = "open", "done", "skipped"
 
-# The two changelog ACTIONS that close a step, and so the only two that stamp when one was
+# What `comment` and `merge` write when they DERIVE a skeleton step's completion from a fact
+# they have already refused to proceed without, rather than being told it. Its own action and
+# not a second `tick`, so a reader of the changelog can always tell the progress somebody
+# asserted from the progress this file worked out for itself. See `_derive`.
+DERIVED = "auto-tick"
+
+# The changelog ACTIONS that close a step, and so the only ones that stamp when one was
 # finished. A separate list from the three words above on purpose: those are what a step
 # SAYS and are an open vocabulary a hand-edit may add to, these are what this plugin's own
 # verbs WROTE, which is a closed list and is the only thing a timestamp can be trusted from.
-CLOSING = ("tick", "skip")
+# A derived tick closes a step exactly as a typed one does — it is stamped by the call that
+# made it and would otherwise vanish from every timing the changelog is the only source for.
+CLOSING = ("tick", "skip", DERIVED)
 
 # How a plan's workspace was decided, stored as `workspace_from`. Four values and no more,
 # because this one IS a closed vocabulary: it describes what this code did, not what a job
@@ -841,6 +857,10 @@ WHEN A PLAN EXISTS
   its progress on the board and its PR exactly as a plan does, without a plan's shaping half.
   (The human-only checklist is not a step of its own: `create-pr` writes it onto the record's
   `human_checks` as it opens the PR.)
+  YOU DO NOT TICK THE SKELETON BY HAND. `comment` refuses to open the PR until the record
+  carries the verification, the review and the human checklist, and `merge` refuses to land
+  until every recorded head covers the one a person approved — so each closes the skeleton
+  steps it has just confirmed, logged as `auto-tick`. Fill the record and the board follows.
   What the skeleton is NOT is a plan: it is a fixed list, not a shaped DAG, and it is not
   extended step by step — a job that needs more than the skeleton is a shaped change. The
   first call costs one line; verification, review, the PR and the human's approval fill the
@@ -1973,35 +1993,71 @@ def show(ctx, args) -> Result:
     return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md)
 
 
-def _review_before_pr(plan: dict) -> Optional[Result]:
-    """Refuse to OPEN a plan's PR comment before the independent review is recorded.
+# WHAT OPENING A PR WAITS ON, in the order `create-pr`'s own definition names them: the key
+# on the change record, what it is called in a refusal, and what has to be there.
+_BEFORE_PR = (
+    ("verification", "the agent verification",
+     "`change.verification` needs the commit the evidence covers"),
+    ("review", "the independent review",
+     "`change.review` needs the commit a fresh reviewer covered"),
+    ("human_checks", "the human-only checks",
+     "`change.human_checks` needs the list a person must run by hand, or the explicit "
+     "answer that none remain"),
+)
+
+
+def _preconditions_before_pr(plan: dict) -> Optional[Result]:
+    """Refuse to OPEN a plan's PR comment before the record carries what the PR promises.
 
     DESIGN-TRUTH is firm that "The PR opens only when applicable verification is current and
-    no major review issue remains", and `create-pr`'s own definition says it waits on the
-    completed review — but nothing in the tooling enforced it, so an agent could push, open
-    the PR and post this comment with the review step still open. This mirrors `merge`'s
-    fail-closed pattern one gate earlier: `merge` refuses to LAND without a review covering
-    the approved head; this refuses to OPEN without a review recorded at all.
+    no major review issue remains", and `create-pr`'s own definition spells out three
+    preconditions in so many words — a CURRENT verification, a RESOLVED review, and the
+    human-only checks or the explicit answer that none remain — but nothing in the tooling
+    enforced any of them, so an agent could push, open the PR and post this comment with the
+    review step still open. This mirrors `merge`'s fail-closed pattern one gate earlier:
+    `merge` refuses to LAND without evidence covering the approved head; this refuses to OPEN
+    without that evidence recorded at all.
+
+    ALL THREE, AND NOT JUST THE REVIEW. The gate checked the review alone for a while, which
+    is the quiet half of the same bug it was written to fix: the prose promised three
+    preconditions and the code enforced one, and a reader had no way to see the difference.
+    An unverified change could open a PR, and — worse, because it is the line a person acts
+    on by closing the tab — one could open with nobody having written down what a human still
+    has to check, which is exactly what `_NO_HUMAN_ANSWER` exists to admit after the fact.
 
     Only the FIRST post is gated — an existing comment refreshes unconditionally, so a
     reviewer's fix, a moved head or a landing decision still updates the one comment, and
-    `merge`'s own post-merge refresh (where the review is long since recorded) is never
+    `merge`'s own post-merge refresh (where all three are long since recorded) is never
     blocked. And only a landing CHANGE RECORD is gated: a legacy plan with no `change` has no
-    review field to read and is left alone. "No unresolved major" stays the owner's judgement
-    in `change.review.findings` prose — unreadable by a machine and unchecked here exactly as
-    `merge` leaves it; what this checks is that a review was done and recorded at all.
+    fields to read and is left alone. "No unresolved major" stays the owner's judgement in
+    `change.review.findings` prose — unreadable by a machine and unchecked here exactly as
+    `merge` leaves it; what this checks is that each of the three was done and recorded at all.
     """
     change = plan.get("change")
     if not isinstance(change, dict):
         return None
-    review = change.get("review")
-    if isinstance(review, dict) and _some(review.get("commit")):
+    missing = []
+    for key, what, how in _BEFORE_PR:
+        got = change.get(key)
+        # The two evidence fields are objects naming the commit they cover; `human_checks` is
+        # a list or the sentence saying none remain, so anything there at all is an answer —
+        # WHAT it says is the writer's judgement and is not read here, exactly as the review's
+        # findings prose is not.
+        answered = (_some(got) if key == "human_checks"
+                    else isinstance(got, dict) and _some(got.get("commit")))
+        if not answered:
+            missing.append((key, what, how))
+    if not missing:
         return None
-    why = (f"{plan['id']}: refusing to open the PR comment before the independent review is "
-           f"recorded. `change.review` needs the commit a fresh reviewer covered — run the "
-           f"review, record it, and open the PR then. Once the comment exists it refreshes "
-           f"freely; this gate is only the open.")
-    return Result(ok=False, human=why, data={"error": why, "plan": plan["id"]})
+    why = "\n".join(
+        [f"{plan['id']}: refusing to open the PR comment — the change record does not yet "
+         f"carry what `create-pr` requires before a PR opens:"]
+        + [f"  - {what}: {how}" for _, what, how in missing]
+        + ["Record what is missing and open the PR then. Once the comment exists it refreshes "
+           "freely; this gate is only the open."])
+    return Result(ok=False, human=why,
+                  data={"error": why, "plan": plan["id"],
+                        "missing": [key for key, _, _ in missing]})
 
 
 def comment(ctx, args) -> Result:
@@ -2091,10 +2147,10 @@ def comment(ctx, args) -> Result:
         changed, bad = _github(ctx, ["--method", "PATCH", target, "--input", "-"],
                                body=body)
     else:
-        # PR-OPEN GATES ON A RECORDED REVIEW. The first time this comment lands on a PR is
-        # the PR-open the design gates — nothing else in the tooling mediates the raw push
+        # PR-OPEN GATES ON THE RECORDED EVIDENCE. The first time this comment lands on a PR
+        # is the PR-open the design gates — nothing else in the tooling mediates the raw push
         # and `gh pr create` that create the PR itself, so this is the moment to fail closed.
-        bad = _review_before_pr(plan)
+        bad = _preconditions_before_pr(plan)
         if bad:
             return bad
         action = "created"
@@ -2109,10 +2165,28 @@ def comment(ctx, args) -> Result:
     if not isinstance(comment_id, int) or comment_id <= 0:
         why = f"GitHub {action} the plan comment but returned no numeric comment id"
         return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+
+    # THE OPEN IS THE FACT. This call refused to make it until the record carried the
+    # verification and the review — the exit conditions of the two skeleton steps that run
+    # before this one — and the human checklist, which is this step's OWN job; and the PR now
+    # demonstrably carries the comment, which is the rest of it. So three steps are closed
+    # here rather than left for somebody to transcribe a second time. A refresh derives
+    # nothing, because a refresh confirms nothing new.
+    derived: list[str] = []
+    if action == "created":
+        derived = _derive(ctx, plan["id"], ("implementation", "review", "create-pr"),
+                          f"PR {pr} opened, which this refused to do until the record carried "
+                          f"the verification, the review and the human checklist")
+
     long_id = f"plan-{number}"
-    return Result(human=f"{action} {long_id} comment {comment_id} on PR {pr}",
+    said = f"{action} {long_id} comment {comment_id} on PR {pr}"
+    if derived:
+        said += (f"\n  auto-ticked {', '.join(derived)} — the PR-open gate confirmed what "
+                 f"they were waiting on")
+    return Result(human=said,
                   data={"action": action, "plan": plan["id"], "pr": int(pr),
-                        "comment_id": comment_id, "marker": marker})
+                        "comment_id": comment_id, "marker": marker,
+                        "auto_ticked": derived})
 
 
 def merge(ctx, args) -> Result:
@@ -2267,7 +2341,16 @@ def merge(ctx, args) -> Result:
 
     _record_landing(ctx, plan["id"], who, args.reason, outcome=outcome, cleanup=cleanup)
 
-    # Last, and after the write above, so the one authoritative comment renders the state the
+    # THE MERGE IS THE FACT, and it is the skeleton's last step. Every head on the record was
+    # compared against the one a person approved before a single mutation was made, so `merge`
+    # is true rather than claimed. The three before it are derived too, as the safety net for
+    # a record whose PR opened before this shipped or that had a step named onto it after the
+    # PR existed — the same evidence was reconfirmed above, so the same justification holds.
+    # Before the comment below, so the one authoritative rendering carries the ticks.
+    derived = _derive(ctx, plan["id"], _SKELETON,
+                      f"PR {pr} merged at the approved head {live[:12]}")
+
+    # Last, and after the writes above, so the one authoritative comment renders the state the
     # change ended in rather than the state it was in when landing began.
     posted = comment(ctx, SimpleNamespace(plan=plan["id"], pr=str(pr)))
     outcome["comment"] = "updated" if posted.ok else f"failed: {_flat(posted.human)}"
@@ -2275,7 +2358,8 @@ def merge(ctx, args) -> Result:
                     log=False)
 
     data = {"plan": plan["id"], "pr": pr, "merged": True, "method": method,
-            "head": live, "sha": outcome["sha"], "landing": outcome, "cleanup": cleanup}
+            "head": live, "sha": outcome["sha"], "landing": outcome, "cleanup": cleanup,
+            "auto_ticked": derived}
     if not posted.ok:
         return Result(ok=False, data=dict(data, error=posted.data.get("error")),
                       human=f"{plan['id']}: PR {pr} IS MERGED, and the plan comment was not "
@@ -2283,6 +2367,8 @@ def merge(ctx, args) -> Result:
                             f"{plan['id']} --pr {pr}`; do not merge again.")
     lines = [f"merged PR {pr} ({method}) at the approved head {live[:12]} — "
              f"{plan['id']} comment updated"]
+    if derived:
+        lines.append(f"  auto-ticked {', '.join(derived)} — the landing confirmed them")
     if cleanup and not cleanup.get("deleted"):
         lines.append(f"  branch {_flat(cleanup.get('branch') or '?')} was NOT deleted: "
                      f"{_flat(cleanup.get('error') or 'unknown')}")
@@ -2604,12 +2690,19 @@ def _path(ctx, plan: dict) -> Optional[str]:
 
 
 def tick(ctx, args) -> Result:
-    """Done. The only verb that writes it, and nothing in sb writes it for a step.
+    """Done, ASSERTED. The verb somebody types, and the only place a judgement is made.
 
-    `sb done` does not reach this, no report ticks anything, and no verb here ticks a step
-    as a side effect of another. A lead reads a child's report and decides; a confident
-    child ticks its own. Both of those are a person or an agent typing this command, which
-    is the whole point of progress never being inferred.
+    `sb done` does not reach this and no report ticks anything. A lead reads a child's report
+    and decides; a confident child ticks its own. Both are a person or an agent typing this
+    command, which is the whole point of progress never being inferred: an ambiguous
+    signal — a report, a step that looks finished — is a judgement, and it is made here.
+
+    THE ONE NARROWING, and it is not that rule repealed. `comment` and `merge` DERIVE the
+    fixed skeleton's own four steps from facts they have already mechanically refused to
+    proceed without — see `_derive`. Nothing is being guessed there: the tool is closing a
+    step whose exit condition it just checked, rather than asking somebody to transcribe the
+    check. It writes `DERIVED` and never `tick`, so the changelog still says which of the two
+    happened, and it touches no step outside that skeleton.
     """
     bad = _cap(args.reason)
     if bad:
@@ -3152,6 +3245,47 @@ def _progress(step: dict, to: str, why: Optional[str]) -> str:
     step["progress"] = to
     step["why"] = (why or "").strip() or None
     return f"{step['id']} {was} → {to}"
+
+
+def _derive(ctx, plan_id: str, defs: tuple, why: str) -> list[str]:
+    """Close the fixed skeleton's own steps off a fact the calling verb has just confirmed.
+
+    THE NARROWING OF `tick`'S RULE, and a narrowing rather than a repeal. Progress is never
+    INFERRED here: an ambiguous signal — a child's report, a step that looks finished — is a
+    judgement, and a judgement is somebody typing `tick`. What this does is DERIVE, from a
+    fact the same call has already mechanically refused to proceed without, for the four
+    steps of the fixed skeleton whose exit conditions ARE those facts. `comment` cannot open
+    the PR until the record carries the verification, the review and the human checklist;
+    `merge` cannot land until every recorded head covers the one a person approved. Asking an
+    agent to then transcribe what the tool just checked is the second, disconnected action
+    that left accurate records sitting behind boards where nothing was ever ticked.
+
+    ONLY `_SKELETON`'S OWN DEFS, and never a freeform step: a hand-authored work step has no
+    mechanical fact behind it, and inventing one is exactly what `tick` refuses to do. Never a
+    step already `done` or `skipped` either — this is idempotent, and it never overrides a
+    skip somebody made with a reason.
+
+    LOGGED AS `DERIVED`, its own action, so the record honestly says which progress was
+    asserted and which was worked out. Re-reads the store rather than reusing the caller's
+    document, exactly as `_record_landing` does and for the same reason: `comment` writes
+    between that read and this one, and that write has to survive.
+    """
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, plan_id)
+    if plan is None:
+        return []
+    who = ctx.agent or "human"
+    moved: list[str] = []
+    for step in (plan.get("steps") or ()):
+        if not isinstance(step, dict) or str(step.get("def") or "") not in defs:
+            continue
+        if str(step.get("progress") or "") != OPEN:
+            continue
+        moved.append(str(step.get("id")))
+        _log(plan, who, DERIVED, why, _progress(step, DONE, None))
+    if moved:
+        _write(ctx.state_dir, doc, seal)
+    return moved
 
 
 def _add_note(step: dict, text: str, who: str) -> str:
