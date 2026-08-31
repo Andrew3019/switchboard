@@ -1083,7 +1083,12 @@ WHAT TO BUILD IT FROM
   first and name the ones nothing else brings.
 
   A definition carries its own account of how that step is run — what it obliges, what it
-  gates, what finishing it means. Read it there. Nothing about any particular step is
+  gates, what finishing it means. Read it there, AND READ IT AGAIN WHEN THE STEP COMES DUE:
+  that account is an instruction that falls due at run time, not a description read once at
+  compose time and then worked from memory. `tick` and `skip` print the next step's
+  definition in full as they unblock it, and `show <step>` asks for one on purpose — a step
+  worked from a compose-time memory of its definition is where the gate gets run after the
+  code and the plan comment never gets posted. Nothing about any particular step is
   repeated here, so that nothing here can be out of date about one. The one exception is
   the section below, and it is an exception for a reason: an EDGE between two definitions
   belongs to neither of them, so no definition can be the only place it is written down.
@@ -4103,6 +4108,23 @@ def _wrong(plan: dict) -> list[tuple[str, str]]:
             out.append((sid, "marked a deliberate root and given a dep — a step that waits "
                              "for something is not a start. Drop the `root` or drop the "
                              "`deps`, whichever one is not true."))
+        # A DONE TICK THAT RAN AHEAD OF ITS ORDER. A dep is the plan's only statement of
+        # order, so a step ticked done while a step it waits on is still open reads as
+        # mis-ticked or mis-deped, and a human catches it only by seeing green downstream of
+        # grey on the board. This is about the TICK — a claim the step is finished — not
+        # about when work happened: running a step early is legitimate and warns on nothing
+        # (the guide's DEPS SAY WHEN A STEP RUNS section), and a dep that is itself done or
+        # skipped is in order. Advisory like everything in this door: it names it, refuses
+        # nothing, and never auto-ticks the predecessor into a finish it did not reach.
+        if str(step.get("progress") or "") == DONE:
+            for d in step.get("deps") or ():
+                dep = at.get(_num(_STEP_ID, d))
+                if dep is not None and str(dep.get("progress") or "") not in (DONE, SKIPPED):
+                    out.append((sid, f"ticked done while {_flat(str(d))}, which it waits on, "
+                                     f"is still open — a dep is the plan's statement of "
+                                     f"order, so a step finished before the one it follows "
+                                     f"is either mis-ticked or mis-deped. Reopen this step, "
+                                     f"or point the dep at the step it really follows."))
         if str(step.get("gate") or "").strip() and str(step.get("progress") or "") == DONE:
             out.append((sid, "a gate on a step that is already done — a gate is reached "
                              "before the work it guards, so a plan does not get to mark "
@@ -6576,20 +6598,27 @@ def _graph(steps: list) -> list[str]:
     out += [f'    {_node(s.get("id"))}["{_label(s)}"]' for s in steps]
     out += [f'    {_node(d)} --> {_node(s.get("id"))}'
             for s in steps for d in (s.get("deps") or ()) if d in ids]
-    styled: dict = {"done": [], "skipped": [], "gate": []}
+    # Every step gets a class, so nothing falls through to mermaid's default fill — which
+    # is the grey the legend spends on `skipped`, and a step still TO DO is not a skip. The
+    # not-done states each get their own colour and each is named in the legend: `todo`
+    # (blue, still to do), `skipped` (grey, deliberately not done), `gate` (amber, waits on
+    # a person). Amber is the one that must stay unmistakable — it is the only state needing
+    # a human — so `todo`'s blue is calm and does not compete with it.
+    styled: dict = {"done": [], "todo": [], "skipped": [], "gate": []}
     for s in steps:
         which = (DONE if s.get("progress") == DONE else
                  SKIPPED if s.get("progress") == SKIPPED else
-                 "gate" if _some(s.get("gate")) else None)
-        if which:
-            styled[which].append(_node(s.get("id")))
+                 "gate" if _some(s.get("gate")) else "todo")
+        styled[which].append(_node(s.get("id")))
     out += ["    classDef done fill:#dafbe1,stroke:#2da44e,color:#0a3622",
+            "    classDef todo fill:#ddf4ff,stroke:#54aeff,color:#0a3069",
             "    classDef skipped fill:#eaeef2,stroke:#8c959f,color:#57606a",
             "    classDef gate fill:#fff8c5,stroke:#bf8700,color:#4d2d00"]
     out += [f"    class {','.join(nodes)} {name}"
             for name, nodes in styled.items() if nodes]
     return out + ["```", "",
-                  "_green = done · grey = skipped · amber = waits on a human · "
+                  "_green = done · blue = still to do · grey = skipped · "
+                  "amber = waits on a human · "
                   "an arrow points from a step to what runs after it._"]
 
 

@@ -1442,6 +1442,27 @@ class StepsTest(PlansSandbox):
         self.assertNotIn("not a step in this plan", said)
         self.assertIn("after step-2", self.ok("plugin", "plans", "show", "p-1"))
 
+    def test_a_done_step_whose_dep_is_still_open_is_reported(self):
+        """A dep is the plan's only statement of order, so a step TICKED done while a step
+        it waits on is still open is either mis-ticked or mis-deped — the shape a human
+        catches only by seeing green downstream of grey on the board, which nothing named
+        before this. Reported, never refused, like everything in that door.
+
+        It is about the TICK — a claim the step is finished — and not about WHEN work
+        happened: running a step ahead of its deps is legitimate and warns on nothing (the
+        guide's DEPS SAY WHEN A STEP RUNS), and a dep that is itself done or skipped is in
+        order and reported on nothing."""
+        self.plan("build", "review", "merge")
+        self.edit_step("s-2", progress="done")          # review done, build (its dep) open
+        said = self.ok("plugin", "plans", "validate", "p-1")
+        self.assertIn("ticked done while step-1, which it waits on, is still open", said)
+
+        # A dep that is itself done or skipped is in order, and nothing is reported.
+        self.edit_step("s-1", progress="done")
+        self.assertNotIn("ticked done while", self.ok("plugin", "plans", "validate", "p-1"))
+        self.edit_step("s-1", progress="skipped", why="folded into the review")
+        self.assertNotIn("ticked done while", self.ok("plugin", "plans", "validate", "p-1"))
+
     # -- what every one of them owes -------------------------------------------
 
     def test_every_step_verb_logs_and_none_rewrites_the_plan(self):
@@ -4583,6 +4604,34 @@ class MarkdownTest(PlansSandbox):
         # defect is not hidden, and it is not linked, because there is no row to land on.
         self.assertIn("| step-9 |", loose)
         self.assertNotIn("[step-9]", loose)
+
+    def test_an_open_step_is_coloured_apart_from_a_skipped_one(self):
+        """The state most worth seeing on a live plan is what REMAINS, and before this it
+        was the one state with no class — so it fell through to mermaid's default fill,
+        which is the grey the legend already spends on `skipped`. A step still to do then
+        read as one deliberately abandoned, which is close to the opposite.
+
+        Every step now carries a class, the three not-done states are each distinct, and
+        the legend names all four and matches what the nodes render as. Amber stays the one
+        salient state — it is the only one needing a person — so `todo`'s blue is calm."""
+        self.ok("plugin", "plans", "list")          # loads the plugin module for `_plans`
+        plan = {"id": "p-1", "title": "t", "steps": [
+            {"id": "s-1", "name": "write it", "progress": "done"},
+            {"id": "s-2", "name": "do it", "deps": ["s-1"]},                      # open
+            {"id": "s-3", "name": "drop it", "progress": "skipped", "why": "n/a",
+             "deps": ["s-2"]},
+            {"id": "s-4", "name": "merge", "gate": "Andrew: merge?", "deps": ["s-3"]}]}
+        graph = _plans()._markdown(plan).split("```mermaid", 1)[1].split("```", 1)[0]
+
+        # The open step is classed, and classed apart from the skipped one.
+        self.assertIn("classDef todo", graph)
+        self.assertIn("class n_s_2 todo", graph)
+        self.assertIn("class n_s_3 skipped", graph)
+        self.assertNotIn("class n_s_2 skipped", graph)
+        # And every not-done state is named in the legend that follows the fence.
+        legend = _plans()._markdown(plan).split("```", 2)[2]
+        for named in ("done", "still to do", "skipped", "waits on a human"):
+            self.assertIn(named, legend)
 
     def test_the_status_line_counts_what_is_settled_and_names_the_gate(self):
         """The one line at the top, and the two things it has to get right: the counts, and
