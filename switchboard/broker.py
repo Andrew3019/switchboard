@@ -131,6 +131,10 @@ LINKED_CONFIG = tuple(config.setting("paths.linked_config"))
 # there is nothing to check out.
 BASE_BRANCH = config.setting("vocabulary.base_branch")
 DEFAULT_ROLE = config.setting("vocabulary.default_role")
+# The role that reviews existing work and so never forks a worktree of its own (see
+# `Broker.isolates`). A name, not behaviour: the never-fork rule is in Python and reads
+# this to know which role it applies to.
+REVIEW_ROLE = config.setting("vocabulary.review_role")
 # States an agent will never move out of on its own — the same `[states]` grouping the
 # readouts use, so "finished" cannot come to mean two different things in two files.
 FINISHED = tuple(config.setting("states.finished"))
@@ -4307,7 +4311,7 @@ class Broker:
             return True                 # unknown provenance is not a checkout to spawn into
         return bool(_column(row, "is_top"))
 
-    def isolates(self, me: str, *, inherited: bool, isolation: str) -> bool:
+    def isolates(self, me: str, *, inherited: bool, isolation: str, role: str) -> bool:
         """Does this spawn get a worktree of its own? THE FORK RULE, as one ordered
         decision (spec §2.2, three rules in this exact order).
 
@@ -4315,6 +4319,15 @@ class Broker:
            lead's placement — `inherited` is False, so nothing below is asked, WHOEVER
            the caller is. The caller has already said where this agent goes, and forking
            over that would ignore the instruction.
+        1a. **A REVIEWER NEVER GETS RULE 2's FORK.** A reviewer reviews work that already
+           exists (`defaults/roles/reviewer.md`: "usually a tab in the author's workspace
+           on the author's branch"), so a fresh empty worktree of its own has nothing in
+           it to review. Under a top — the one caller rule 2 forks unconditionally — that
+           forked a reviewer away from the very changes it was spawned to read, off
+           `origin/main` with none of the top's work on it. So a reviewer skips rule 2 and
+           joins the caller's checkout. It still honours an explicit named workspace
+           (rule 1, above) and an explicit `isolation=own` (rule 3, which this falls
+           through to) — only the automatic fork is carved out.
         2. **Otherwise `inherited AND mints_space(caller)` ⇒ own**, exactly as before this
            parameter existed, INCLUDING the `inherited` guard: a caller with no space to
            lend — the top, the human, a caller we hold no row for — forks its child
@@ -4322,10 +4335,10 @@ class Broker:
            into whatever checkout `sb` happened to run in.
         3. **Otherwise the explicit `isolation` parameter, default `shared`.**
 
-        Ordered, and not three independent conditions: rule 1 answers False before rule 2
-        is asked (a top delegating `--workspace api` joins that workspace, it does not
-        fork over it), and rule 2 answers True before rule 3 is asked (a top's spawn forks
-        whether or not `shared` was typed, which is what "kept verbatim" means).
+        Ordered, and not independent conditions: rule 1 answers False before rule 1a is
+        asked, rule 1a answers before rule 2 (a top's reviewer joins its checkout, it does
+        not fork over it), and rule 2 answers True before rule 3 is asked (a top's ordinary
+        spawn forks whether or not `shared` was typed, which is what "kept verbatim" means).
 
         The `fork` gate for rule 3 is NOT here: it is checked at the request site in
         `delegate`, on the CALLER, and only when `own` was actually asked for — so a
@@ -4334,6 +4347,8 @@ class Broker:
         """
         if not inherited:                       # (1) a named workspace wins
             return False
+        if role == REVIEW_ROLE:                 # (1a) a reviewer joins, never forks by rule 2
+            return isolation == ISOLATION_OWN   #      but an explicit `own` still isolates
         if self.mints_space(me):                # (2) kept verbatim, `inherited` guard and all
             return True
         return isolation == ISOLATION_OWN       # (3) the explicit parameter
@@ -5476,7 +5491,7 @@ class Broker:
             # how a caller comes to believe a child is isolated when it is sharing.
             print(f"sb: --isolation own ignored for {name}: it was placed in workspace "
                   f"{ws!r} by name, and a named workspace wins", file=sys.stderr)
-        if self.isolates(me, inherited=inherited, isolation=isolation):
+        if self.isolates(me, inherited=inherited, isolation=isolation, role=role):
             forked = self._fork_for(name, parent=me)
             ws, branch = forked["workspace"], forked["branch"]
             workspace_id = workspace_id or forked["workspace_id"]
@@ -6086,15 +6101,39 @@ class Broker:
                 "reads this job by — name the subject, not the approach."
             )
         stem = validate.slug_name(f"{role}-{topic}", reserve=len("-99"))
-        if not store.get_agent(self.db, stem):
+        # herdr's OWN names too, not just this store's. The store is per-clone; herdr
+        # enforces names machine-wide across every clone on the box. A fresh clone's store
+        # is empty, so a bare stem looked free here while herdr already held it from another
+        # clone — and `Herdr._start` does not retry `agent_name_taken` (it is the one error
+        # a retry only repeats), so the composed name spawned straight into a dead `failed`
+        # row and only a manual respawn, seeing that row, picked a `-2`. Consulting herdr
+        # here picks the suffix on the first try instead. Reported 2026-08-25 on the eval
+        # runner, whose fixed case-topic names collide on every pass from a clone.
+        herdr_names = self._herdr_names()
+        taken = lambda n: store.get_agent(self.db, n) is not None or n in herdr_names
+        if not taken(stem):
             return stem
         # A collision is a second job on the same subject, so the number counts THOSE and
         # starts at 2 — it reads as "the second triage", where the old global counter read
         # as nothing at all.
         n = 2
-        while store.get_agent(self.db, f"{stem}-{n}"):
+        while taken(f"{stem}-{n}"):
             n += 1
         return f"{stem}-{n}"
+
+    def _herdr_names(self) -> set[str]:
+        """The names herdr enforces machine-wide right now — the OTHER namespace this
+        clone's store cannot see.
+
+        Best-effort: an unreachable herdr returns the empty set, leaving the old
+        store-only check rather than blocking a spawn on a herdr that cannot answer. A
+        herdr-held name that appears between here and the spawn still surfaces as
+        `agent_name_taken` there; this only removes the case that was hitting on every pass.
+        """
+        try:
+            return {a.name for a in self.h.list_agents()}
+        except HerdrError:
+            return set()
 
     # -- messaging -------------------------------------------------------
 

@@ -127,6 +127,14 @@ main_name = "main"
 # What `sb delegate` uses when no `--role` is given.
 default_role = "worker"
 
+# The role that reviews existing work. It is named here, not as a literal in Python, for
+# one behaviour: a reviewer reviews what is already in a checkout, so a fresh worktree of
+# its own has nothing in it to review. A spawn of this role therefore joins the caller's
+# checkout even when the caller is a top — the one caller whose every other spawn forks
+# (`Broker.isolates` rule 1a). A repo that renames its reviewer keeps the behaviour by
+# renaming it here too; behaviour stays in Python, the name stays here.
+review_role = "reviewer"
+
 # Retained for compatibility, and it is no longer what an undefined `--role` inherits:
 # selection is strict now and an unknown name is refused with the near ones listed. What
 # still reads this is `roles.get_or_fallback`, the path that reads rows ALREADY IN THE
