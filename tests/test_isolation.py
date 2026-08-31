@@ -136,14 +136,48 @@ class OrderedNotIndependentTest(_Isolation, unittest.TestCase):
         lives — a named workspace (`inherited=False`) answers False for a top asking for
         `own`, and a top answers True while asking for `shared`."""
         top = self._root()
-        self.assertFalse(self.b.isolates(top, inherited=False, isolation="own"))
-        self.assertTrue(self.b.isolates(top, inherited=True, isolation="shared"))
+        self.assertFalse(self.b.isolates(top, inherited=False, isolation="own",
+                                         role="worker"))
+        self.assertTrue(self.b.isolates(top, inherited=True, isolation="shared",
+                                        role="worker"))
         lead = self.b.delegate("t", topic="a", role="lead", me=top)
-        self.assertFalse(self.b.isolates(lead, inherited=True, isolation="shared"))
-        self.assertTrue(self.b.isolates(lead, inherited=True, isolation="own"))
+        self.assertFalse(self.b.isolates(lead, inherited=True, isolation="shared",
+                                         role="worker"))
+        self.assertTrue(self.b.isolates(lead, inherited=True, isolation="own",
+                                        role="worker"))
         # And holding `fork` is NOT what answers rule 2: this lead holds it and still
         # shares by default, which is the whole reason seeding it is safe.
         self.assertTrue(self.b.holds_capability(lead, CAP_FORK))
+
+
+class ReviewerNeverForksTest(_Isolation, unittest.TestCase):
+    """Rule 1a: a reviewer reviews existing work, so it joins the caller's checkout rather
+    than forking an empty worktree with nothing in it to review — even under a top, the one
+    caller rule 2 forks unconditionally."""
+
+    def test_a_tops_reviewer_joins_its_checkout_while_a_worker_forks(self):
+        """The bug: a top's reviewer forked off `origin/main`, away from the very changes
+        it was spawned to read. A worker spawned the same way still forks — the carve-out
+        is the reviewer's alone."""
+        top = self._root()
+        worker = self.b.delegate("t", topic="w", role="worker", me=top)
+        reviewer = self.b.delegate("t", topic="r", role="reviewer", me=top)
+        self.assertTrue(self._forked(worker))
+        self.assertFalse(self._forked(reviewer))
+
+    def test_the_predicate_carves_out_only_rule_2_not_rule_1_or_3(self):
+        """A reviewer skips rule 2's automatic fork but still honours an explicit named
+        workspace (rule 1) and an explicit `isolation=own` (rule 3)."""
+        top = self._root()
+        # Rule 2 is what is carved out: a top's inheriting reviewer does not fork.
+        self.assertFalse(self.b.isolates(top, inherited=True, isolation="shared",
+                                         role="reviewer"))
+        # Rule 1 still wins: a named workspace is not inherited, so it is honoured.
+        self.assertFalse(self.b.isolates(top, inherited=False, isolation="shared",
+                                         role="reviewer"))
+        # Rule 3 is still reachable: an explicit `own` isolates the reviewer anyway.
+        self.assertTrue(self.b.isolates(top, inherited=True, isolation="own",
+                                        role="reviewer"))
 
 
 class TheForkGateTest(_Isolation, unittest.TestCase):
