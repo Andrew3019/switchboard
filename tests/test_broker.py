@@ -830,7 +830,10 @@ class BrokerTest(unittest.TestCase):
         self.assertNotEqual(caps["seed"], caps["template"])
         self.assertEqual(caps["withheld_by_spawner"],
                          sorted(set(caps["template"]) - set(caps["seed"])))
-        self.assertIn("spawn", caps["withheld_by_spawner"])
+        # `dispatch` and not `spawn`: a worker has held `spawn` since 2026-08-31 and so
+        # passes it down, and what a worker-commissioned lead is still short of is the
+        # orchestrating half of the template.
+        self.assertIn("dispatch", caps["withheld_by_spawner"])
 
     def test_the_manifest_reports_later_grants_for_an_agent_that_has_them(self):
         """"Capability seed AND LATER GRANTS" — and a grant is a row with provenance, not
@@ -839,15 +842,17 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead", workspace="ws",
                            branch="ws", cwd=str(self.repo))
         self.b.delegate("t", topic="t", role="worker", me="orch")
-        self.b.grant("worker-t", "spawn", me="orch", reason="needs one helper")
+        # `dispatch` and not `spawn`: `spawn` is in the worker SEED since 2026-08-31, and
+        # a grant of it would be indistinguishable from the seed in this manifest.
+        self.b.grant("worker-t", "dispatch", me="orch", reason="needs one helper")
         caps = self.b.effective_instructions(
             role="worker", name="worker-t", parent="orch")["capabilities"]
         self.assertTrue(caps["live"])
-        self.assertIn("spawn", caps["held"])
-        self.assertNotIn("spawn", caps["seed"])
+        self.assertIn("dispatch", caps["held"])
+        self.assertNotIn("dispatch", caps["seed"])
         self.assertEqual(
             [(g["capability"], g["granted_by"], g["reason"]) for g in caps["grants"]],
-            [("spawn", "orch", "needs one helper")])
+            [("dispatch", "orch", "needs one helper")])
 
     def test_the_manifest_lists_guidance_and_says_which_rows_can_reach_this_agent(self):
         """The ledger is deliberately NOT in the spawn prompt (`guidance.py`), which is

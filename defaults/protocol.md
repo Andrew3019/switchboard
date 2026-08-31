@@ -23,10 +23,11 @@ nobody can read.
 Scope and hand-back are universal, so they live here rather than only in a role prompt:
 do only what you were asked (a change nobody asked for is a change nobody reviews), and
 hand back a decision or authority you do not hold instead of absorbing it. SIZE is not a
-universal hand-back rule: leads and planners hold `spawn`, and a worker may be granted it;
-each role says what delegation is for. `worker` is the default role and also carries a
-short finishing prompt. Undefined role names are refused; an explicit custom prompt uses
-`--as` with a configured role as its profile.
+universal hand-back rule: every shipped role holds `spawn` since 2026-08-31, a leaf so it
+can put up the review of its own change rather than hand that job back up; what separates
+them is what each role's prompt says delegation is FOR, not who has the verb. `worker` is
+the default role and also carries a short finishing prompt. Undefined role names are
+refused; an explicit custom prompt uses `--as` with a configured role as its profile.
 
 Worded around the TASK, not the capability. The old role said "do not spawn agents of your
 own", which is flatly wrong for an orchestrator, and orchestrators read this file too.

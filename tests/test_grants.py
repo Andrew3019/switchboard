@@ -93,10 +93,12 @@ class IntersectionSeedingTest(Fixture, unittest.TestCase):
         top = self.top()
         w = self.spawn(self.spawn(top, "lead", "l"), "worker", "w")
         rows = store.capability_rows(self.db, w)
-        self.assertEqual([r["cap"] for r in rows], [CAP_WRITE_TRACKED])
-        self.assertTrue(rows[0]["held"])
-        self.assertFalse(rows[0]["delegable"])
-        self.assertIsNone(rows[0]["granted_by"])       # a seed is nobody's decision
+        self.assertEqual([r["cap"] for r in rows], [CAP_SPAWN, CAP_WRITE_TRACKED])
+        for row in rows:                               # both halves of the 2026-08-31 seed
+            with self.subTest(cap=row["cap"]):
+                self.assertTrue(row["held"])
+                self.assertFalse(row["delegable"])
+                self.assertIsNone(row["granted_by"])   # a seed is nobody's decision
         self.b.require_capability(w, CAP_WRITE_TRACKED)               # and it can write
 
     def test_only_the_top_seeds_from_the_full_template(self):
@@ -208,11 +210,13 @@ class GrantCommandTest(Fixture, unittest.TestCase):
         w = self.spawn(self.spawn(top, "lead", "l"), "worker", "w")
         self.b.require_capability(HUMAN, CAP_SPAWN)            # the gate: allowed
         with self.assertRaises(ValueError) as cm:
-            self.b.grant(w, CAP_SPAWN, me=HUMAN)               # the grant: refused
+            self.b.grant(w, CAP_DISPATCH, me=HUMAN)            # the grant: refused
         self.assertIn("no row for you", str(cm.exception))
         with self.assertRaises(ValueError):
-            self.b.grant(w, CAP_SPAWN, me="ghost-not-in-store")
-        self.assertNotIn(CAP_SPAWN, self.held(w))
+            self.b.grant(w, CAP_DISPATCH, me="ghost-not-in-store")
+        # `dispatch` and not `spawn`: a worker is seeded `spawn` since 2026-08-31, so
+        # granting it would leave nothing for the refusal to be visible in.
+        self.assertNotIn(CAP_DISPATCH, self.held(w))
 
     def test_an_unknown_capability_is_refused_rather_than_written(self):
         """Fail-closed on an ill-formed grant: a typo that wrote a row would be a right
@@ -222,7 +226,7 @@ class GrantCommandTest(Fixture, unittest.TestCase):
         for bad in ("wrte-tracked", "start", "sudo"):
             with self.subTest(cap=bad), self.assertRaises(ValueError):
                 self.b.grant(w, bad, delegable=True, me=top)
-        self.assertEqual(self.passable(w), {CAP_WRITE_TRACKED})
+        self.assertEqual(self.passable(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
 
     def test_the_top_is_never_a_target(self):
         top = self.top()
@@ -277,10 +281,11 @@ class DelegableTest(Fixture, unittest.TestCase):
         write, while the researcher itself still cannot."""
         top = self.top()
         r = self.spawn(top, "researcher", "r")
-        self.b.grant(r, CAP_SPAWN, me=top)
+        # No `sb grant <r> spawn` any more: a researcher is seeded `spawn` since
+        # 2026-08-31, which is what makes fanning a read out its own decision.
         self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=top)
         w = self.spawn(r, "worker", "w")
-        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
         self.b.require_capability(w, CAP_WRITE_TRACKED)               # the child may write
         with self.assertRaises(ValueError):
             self.b.require_capability(r, CAP_WRITE_TRACKED)           # the hub may not
@@ -292,7 +297,7 @@ class DelegableTest(Fixture, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         w = self.spawn(lead, "worker", "w")
-        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
         self.b.grant(w, CAP_WRITE_TRACKED, delegable=True, me=lead)   # over a held cap
         self.assertIn(CAP_WRITE_TRACKED, self.held(w))                # still held
         self.assertIn(CAP_WRITE_TRACKED, self.passable(w))            # and now passable
@@ -347,7 +352,7 @@ class TopExemptionTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             self.b.grant(r, CAP_WRITE_TRACKED, me=top)     # held, and the top holds none
         self.assertIn("--delegable", str(cm.exception))
-        self.assertEqual(self.passable(r), set())
+        self.assertEqual(self.passable(r), {CAP_SPAWN})   # its seed, and nothing added
 
     def test_a_non_top_granter_is_unchanged_by_the_exemption(self):
         """Hold-or-delegable, subtree reach — no widening for anyone below the top.
@@ -401,12 +406,15 @@ class RestoreTest(Fixture, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         w = self.spawn(lead, "worker", "w")
-        self.b.grant(w, CAP_SPAWN, reason="fan out", me=lead)
-        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED, CAP_SPAWN})
+        # `dispatch` and not `spawn`: a worker is SEEDED `spawn` since 2026-08-31, and a
+        # grant of a cap the seed already carries would survive the restore for the wrong
+        # reason — the test needs a cap only the grant put there.
+        self.b.grant(w, CAP_DISPATCH, reason="fan out", me=lead)
+        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED, CAP_SPAWN, CAP_DISPATCH})
         self._closed(w)
         self.b.restore(w)
-        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED})
-        self.assertEqual(self.passable(w), {CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED, CAP_SPAWN})
+        self.assertEqual(self.passable(w), {CAP_WRITE_TRACKED, CAP_SPAWN})
 
     def test_reseeding_is_from_the_seed_not_the_template(self):
         """The subtler bug: a ∩-narrowed lead must not come back as a full one. That would
@@ -429,7 +437,7 @@ class RestoreTest(Fixture, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         w = self.spawn(lead, "worker", "w")
-        self.b.grant(w, CAP_SPAWN, me=lead)
+        self.b.grant(w, CAP_DISPATCH, me=lead)         # not `spawn`: that is now seeded
         self._closed(w)
         self.b.restore(w)
         self.assertIn("not carried over", self.b.restore_note or "")
@@ -444,7 +452,7 @@ class RestoreTest(Fixture, unittest.TestCase):
         self._closed(w)
         self.b.restore(w)
         self.assertIsNone(self.b.restore_note)
-        self.assertEqual(self.held(w), {CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
         self.assertEqual(store.unread_for(self.db, w), [])
 
 

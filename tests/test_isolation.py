@@ -25,7 +25,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import store  # noqa: E402
-from switchboard.broker import CAP_FORK, HUMAN, Broker  # noqa: E402
+from switchboard.broker import (  # noqa: E402
+    CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED, HUMAN, Broker,
+)
 from switchboard.herdr import HerdrError  # noqa: E402
 
 from test_workspace import Fixture  # noqa: E402
@@ -44,11 +46,12 @@ class _Isolation(Fixture):
         return lead
 
     def _spawner_without_fork(self, me: str) -> str:
-        """A caller that may spawn and may NOT isolate: a worker granted `spawn`, which is
-        §2.1's own fan-out case. It is no longer a lead, because a lead arrives holding
-        `fork`; what is under test is the gate, not which role trips it."""
+        """A caller that may spawn and may NOT isolate: a worker, which since 2026-08-31
+        arrives holding `spawn` and has never held `fork`. It is not a lead, because a
+        lead arrives holding both; what is under test is the gate, not which role trips
+        it."""
         w = self.b.delegate("t", topic="fan", role="worker", me=me)
-        self.b.grant(w, "spawn", me=me)
+        self.assertTrue(self.b.holds_capability(w, CAP_SPAWN))     # seeded, not granted
         return w
 
     def _forked(self, agent: str) -> bool:
@@ -164,6 +167,30 @@ class ReviewerNeverForksTest(_Isolation, unittest.TestCase):
         reviewer = self.b.delegate("t", topic="r", role="reviewer", me=top)
         self.assertTrue(self._forked(worker))
         self.assertFalse(self._forked(reviewer))
+
+    def test_a_workers_own_reviewer_joins_the_workers_worktree(self):
+        """WHAT SEEDING `spawn` TO EVERY WRITING LEAF IS FOR (2026-08-31). A worker holds
+        `spawn` with no `sb grant` anywhere, so the review of its change is put up BY the
+        worker — and rule 1a then joins that reviewer to the WORKER's checkout, which is
+        the one the change is in.
+
+        Handed back up instead, the same rule fires with the wrong caller: the parent
+        spawns the reviewer, so the reviewer joins the PARENT's checkout, and under a top
+        (which mints its own space and has none to lend) that is a tree with none of the
+        work in it. The mechanism was already right; what was missing was the worker
+        being able to be the caller."""
+        top = self._root()
+        worker = self.b.delegate("t", topic="w", role="worker", me=top)
+        self.assertTrue(self.b.holds_capability(worker, CAP_SPAWN))
+        reviewer = self.b.delegate("t", topic="rv", role="reviewer", me=worker)
+        self.assertFalse(self._forked(reviewer))
+        w_row = store.get_agent(self.db, worker)
+        r_row = store.get_agent(self.db, reviewer)
+        self.assertEqual((r_row["workspace"], r_row["branch"], r_row["cwd"]),
+                         (w_row["workspace"], w_row["branch"], w_row["cwd"]))
+        # And it comes out able to make its scoped minor fixes: the worker holds
+        # `write-tracked`, so the ∩-rule passes the reviewer template's copy of it down.
+        self.assertIn(CAP_WRITE_TRACKED, store.held_capabilities(self.db, reviewer))
 
     def test_the_predicate_carves_out_only_rule_2_not_rule_1_or_3(self):
         """A reviewer skips rule 2's automatic fork but still honours an explicit named

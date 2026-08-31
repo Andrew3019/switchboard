@@ -1,9 +1,9 @@
 +++
 model = "gpt-5.6-sol"
-capabilities = ["write-tracked"]
-# A leaf that writes, and the same bundle as `worker` for the same reason: `spawn` arrives,
-# if ever, as a one-shot grant for a fan-out, and what that spawn may seed is bounded by
-# this set.
+capabilities = ["spawn", "write-tracked"]
+# A leaf that writes, and the same bundle as `worker` for the same reason: `spawn` is here
+# so a builder can put up the review of its own change instead of handing that job back,
+# and what that spawn may seed is still bounded by this set.
 +++
 
 <!--

@@ -269,10 +269,28 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
 
     Nothing enforced this before, and it was not hypothetical: a `worker`-role agent in the
     live store had spawned 17 children, orchestrators among them.
+
+    WHAT A BARE AGENT IS CHANGED ON 2026-08-31, and the rule did not. Every shipped role
+    now seeds `spawn`, so that a leaf puts up the review of its own change instead of
+    handing that job back to whoever spawned it — a review arranged by the parent gets
+    spawned into the parent's checkout, which is not the one the change is in. So `worker`
+    is no longer an example of a bare role; a bare role is one a repo declared without
+    `spawn`, and the gate below is tested through one of those. The 17-children incident
+    is still what the gate is for: what stops it now is the ∩-rule and the prompts, not
+    the absence of the verb.
     """
 
-    def test_a_worker_is_refused(self):
-        store.create_agent(self.db, name="w", role="worker", parent=self._top(),
+    def _bare_role(self, name: str = "dogsbody") -> str:
+        """A role declared without `spawn`, which is now the only way one exists."""
+        (self.repo / ".switchboard").mkdir(exist_ok=True)
+        (self.repo / ".switchboard" / "roles.toml").write_text(
+            f"[{name}]\ndelegate = false\n")
+        self.b = Broker(self.db, self.h, repo=self.repo)   # roles.toml is read on build
+        return name
+
+    def test_a_bare_role_is_refused(self):
+        role = self._bare_role()
+        store.create_agent(self.db, name="w", role=role, parent=self._top(),
                            workspace="api", branch="api")
         with self.assertRaises(ValueError) as cm:
             self.b.delegate("t", topic="t", role="worker", me="w")
@@ -280,7 +298,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         self.assertIn("lead", str(cm.exception))          # and what CAN, by name
 
     def test_the_refusal_costs_no_row_and_no_pane(self):
-        store.create_agent(self.db, name="w", role="worker", parent=self._top())
+        store.create_agent(self.db, name="w", role=self._bare_role(), parent=self._top())
         with self.assertRaises(ValueError):
             self.b.delegate("t", role="worker", name="kid", me="w")
         self.assertIsNone(store.get_agent(self.db, "kid"))
@@ -305,13 +323,21 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             b.delegate("t", topic="t", role="dogsbody", me="d")
 
-    def test_an_undefined_role_cannot_delegate(self):
-        """A role nobody thought about is a leaf. Being wrong that way costs a refusal a
-        person can lift; the other way costs a tree of agents nobody meant to exist."""
+    def test_an_undefined_role_takes_the_fallback_roles_bundle(self):
+        """A role nobody thought about is shaped like `vocabulary.fallback_role`, which is
+        `worker` — so since 2026-08-31 it spawns, because `worker` does.
+
+        It USED to be refused, on "being wrong that way costs a refusal a person can lift;
+        the other way costs a tree of agents nobody meant to exist". That reasoning did not
+        change; what changed is the role it inherits from. The reachable case is narrow —
+        a typed `--role` that names nothing is still refused outright, so this is only a
+        STORED row carrying a role name the vocabulary has since retired — and tightening
+        it means pointing `vocabulary.fallback_role` at a role declared without `spawn`,
+        not putting a second rule beside the bundle."""
         store.create_agent(self.db, name="x", role="invented-yesterday",
-                           parent=self._top())
-        with self.assertRaises(ValueError):
-            self.b.delegate("t", topic="t", role="worker", me="x")
+                           parent=self._top(), workspace="api", branch="api",
+                           cwd=str(self.repo))
+        self.assertTrue(self.b.delegate("t", topic="t", role="worker", me="x"))
 
     def test_a_row_that_still_says_orchestrator_may_still_delegate(self):
         """The rename reaches the role table, never the rows already written. Every agent

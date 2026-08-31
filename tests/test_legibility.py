@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import board, status as status_mod, store  # noqa: E402
 from switchboard.broker import (  # noqa: E402
-    CAP_DISPATCH, CAP_SPAWN, CAP_WRITE_TRACKED,
+    CAP_DISPATCH, CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED,
 )
 
 from test_grants import Fixture  # noqa: E402
@@ -108,11 +108,12 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         reviewer = self.spawn(lead, "reviewer", "rv")
-        self.b.grant(reviewer, CAP_SPAWN, me=lead)
-        self.assertEqual(self.cell(reviewer), "reviewer +spawn")
+        # `dispatch` and not `spawn`: every shipped template names `spawn` since
+        # 2026-08-31, so a granted `spawn` is no longer a divergence to draw.
+        self.b.grant(reviewer, CAP_DISPATCH, me=lead)
+        self.assertEqual(self.cell(reviewer), "reviewer +dispatch")
 
         worker = self.spawn(lead, "worker", "w")
-        self.b.grant(worker, CAP_SPAWN, me=lead)
         crippled = self.spawn(worker, "lead", "sub")          # ∩-seeded: no dispatch
         self.assertNotIn(CAP_DISPATCH, store.held_capabilities(self.db, crippled))
         self.assertEqual(self.cell(crippled), "lead−")
@@ -143,9 +144,9 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
         worker = self.spawn(lead, "worker", "w")
         quiet = self.spawn(lead, "worker", "w2")
         self.assertEqual(self.cell(lead), "lead")             # nothing below it yet
-        self.b.grant(worker, CAP_SPAWN, me=lead)
+        self.b.grant(worker, CAP_DISPATCH, me=lead)           # `spawn` is seeded, so no news
 
-        self.assertEqual(self.cell(worker), "worker +spawn")
+        self.assertEqual(self.cell(worker), "worker +dispatch")
         self.assertEqual(self.cell(lead), "lead ↓")      # aggregated, not its own
         self.assertEqual(self.cell(top), "dispatcher ↓")  # all the way up
         self.assertEqual(self.cell(quiet), "worker")          # and never sideways
@@ -156,9 +157,9 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         reviewer = self.spawn(lead, "reviewer", "rv")
-        self.b.grant(reviewer, CAP_SPAWN, me=lead)
+        self.b.grant(reviewer, CAP_DISPATCH, me=lead)         # `spawn` is seeded, so no news
         text = status_mod.render(self.snap())
-        self.assertIn("reviewer +spawn", text)
+        self.assertIn("reviewer +dispatch", text)
 
     def test_the_names_are_dropped_for_a_bare_sign_before_the_line_wraps(self):
         """A heavily granted row must not push every other column off a terminal. The
@@ -166,12 +167,14 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
 
         Built on `qa` since 2026-08-27, and it was `reviewer` before: the reviewer template
         now seeds `write-tracked` for its scoped minor fixes, so granting it all three left
-        only two names and a mark short enough to draw. `qa` is the shipped role that still
-        seeds nothing, which is what makes three grants overflow the width."""
+        only two names and a mark short enough to draw. `qa` is the leanest shipped role,
+        which is what makes three grants overflow the width. The three are no longer
+        `spawn`-inclusive: every template names `spawn` since 2026-08-31, so granting it
+        adds no name, and `fork` takes its place in the overflowing set."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         agent = self.spawn(lead, "qa", "q")
-        for cap in (CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED):
+        for cap in (CAP_FORK, CAP_DISPATCH, CAP_WRITE_TRACKED):
             self.b.grant(agent, cap, me=lead)
         self.assertEqual(self.cell(agent), "qa+")
 
@@ -192,7 +195,7 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         worker = self.spawn(lead, "worker", "w")
-        self.b.grant(worker, CAP_SPAWN, me=lead)
+        self.b.grant(worker, CAP_DISPATCH, me=lead)           # `spawn` is seeded, so no news
         rows = {a.name: a for a in self.snap().agents}
         self.assertEqual(board.marker(rows[worker]), "")
         self.assertEqual(board.marker(rows[lead]), "")

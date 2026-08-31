@@ -183,17 +183,20 @@ class InstructionRendererTest(ListingSandbox):
         db = store.connect()
         self.addCleanup(db.close)
         store.create_agent(db, name="preview", role="lead", parent="human")
-        store.seed_capabilities(db, "preview", ["spawn", "write-tracked"])
+        # `dispatch` and not `spawn`: the `worker` template has named `spawn` since
+        # 2026-08-31, so a planted `spawn` would show up in the preview honestly and the
+        # leak this test is about would be invisible.
+        store.seed_capabilities(db, "preview", ["dispatch", "write-tracked"])
         # Nameless preview: the DERIVED seed, not the planted agent's caps, and not "live".
         got = self.data("instructions", "--role", "worker")["capabilities"]
         self.assertFalse(got["live"])
         self.assertEqual(got["held"], got["seed"])
-        self.assertNotIn("spawn", got["held"])       # the planted agent had it; the preview must not
+        self.assertNotIn("dispatch", got["held"])    # the planted agent had it; the preview must not
         self.assertEqual(got["grants"], [])
         # The live-preview feature still works when the name is asked for explicitly.
         named = self.data("instructions", "--role", "worker", "--name", "preview")["capabilities"]
         self.assertTrue(named["live"])
-        self.assertEqual(named["held"], ["spawn", "write-tracked"])
+        self.assertEqual(named["held"], ["dispatch", "write-tracked"])
 
     def test_a_repository_guidance_row_is_reported_against_the_file_that_added_it(self):
         """Provenance for a JOINED table. The ledger merges shipped rows with the repo's

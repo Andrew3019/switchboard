@@ -30,7 +30,7 @@ from switchboard import broker as broker_mod  # noqa: E402
 from switchboard import status as status_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import (  # noqa: E402
-    CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED, HUMAN, INTERRUPT, SIGNAL,
+    CAP_DISPATCH, CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED, HUMAN, INTERRUPT, SIGNAL,
 )
 
 from test_grants import Fixture  # noqa: E402
@@ -81,10 +81,12 @@ class RecipientIsToldTest(SignalFixture, unittest.TestCase):
         """The distinction #163 was filed over: a `--delegable` grant widens only what the
         recipient's CHILDREN are seeded with. Said plainly, or the recipient tries the
         action itself and reads the refusal as a bug."""
-        self.b.grant(self.w1, CAP_SPAWN, me=self.lead, delegable=True)
+        # `dispatch` and not `spawn`: a worker is seeded `spawn` since 2026-08-31, so a
+        # pass-through grant of it would leave nothing for the last line to assert.
+        self.b.grant(self.w1, CAP_DISPATCH, me=self.lead, delegable=True)
         [m] = self.mail(self.w1)
         self.assertIn("PASS-THROUGH ONLY", m["body"])
-        self.assertNotIn(CAP_SPAWN, store.held_capabilities(self.db, self.w1))
+        self.assertNotIn(CAP_DISPATCH, store.held_capabilities(self.db, self.w1))
 
     def test_the_signal_does_not_count_as_being_given_a_task(self):
         """`put_message` clears `awaiting_task` — "somebody gave this agent something".
@@ -105,8 +107,9 @@ class AtomicWithTheMutationTest(SignalFixture, unittest.TestCase):
         prevent."""
         with mock.patch.object(store, "put_message", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                self.b.grant(self.w1, CAP_SPAWN, me=self.lead)
-        self.assertEqual(store.held_capabilities(self.db, self.w1), {CAP_WRITE_TRACKED})
+                self.b.grant(self.w1, CAP_DISPATCH, me=self.lead)
+        self.assertEqual(store.held_capabilities(self.db, self.w1),
+                         {CAP_WRITE_TRACKED, CAP_SPAWN})     # the seed, and nothing added
         self.assertEqual(self.mail(self.w1), [])
         self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent=self.w1)
                           if e["kind"] == "grant"], [])
