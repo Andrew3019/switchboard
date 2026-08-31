@@ -4289,9 +4289,9 @@ class GateTest(PlansSandbox):
         that stops `--with design-gate`, and nothing asserting there is.
 
         The preset is now the FORMAT and not one gate's sections — `change-approval` and
-        `merge-human-review` both name it and head their messages differently — so what is
-        pinned about the sections is that the file says they are the step's to name, and
-        that the worked example still carries the two it was written around."""
+        `create-pr`'s human-only checklist both name it and head their messages differently —
+        so what is pinned about the sections is that the file says they are the step's to
+        name, and that the worked example still carries the two it was written around."""
         listed = json.loads(self.ok("presets", "--json"))
         self.assertIn("design-gate", listed["presets"])
         self.assertNotIn("design-gate", listed["all"])
@@ -4317,9 +4317,9 @@ class GateTest(PlansSandbox):
         # below reads as two headings to copy, which is what it stopped being.
         self.assertIn("WHICH ones is the step's own to say", body)
         # And the count is the step's too: the approval gate has two, the human-check list
-        # has one, and a file insisting on two contradicted the step that
+        # `create-pr` heads has one, and a file insisting on two contradicted the step that
         # sends it the second reader.
-        self.assertIn("merge-human-review", body)
+        self.assertIn("create-pr", body)
         self.assertIn("Scope & Objectives", body)
         # And the worked example keeps the two it was written around, as an example.
         self.assertIn("What is causing it", body)

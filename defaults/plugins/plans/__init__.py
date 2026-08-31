@@ -1976,7 +1976,7 @@ def show(ctx, args) -> Result:
 def _review_before_pr(plan: dict) -> Optional[Result]:
     """Refuse to OPEN a plan's PR comment before the independent review is recorded.
 
-    DESIGN-TRUTH is firm that "the PR opens only when applicable verification is current and
+    DESIGN-TRUTH is firm that "The PR opens only when applicable verification is current and
     no major review issue remains", and `create-pr`'s own definition says it waits on the
     completed review — but nothing in the tooling enforced it, so an agent could push, open
     the PR and post this comment with the review step still open. This mirrors `merge`'s
