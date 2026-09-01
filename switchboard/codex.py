@@ -236,6 +236,18 @@ def write_home(
     except OSError as e:
         raise CodexHomeError(f"could not create {name}'s codex home at {d}: {e}") from e
 
+    # bwrap refuses to bind-mount a writable root that does not exist. The resolved path
+    # is also what `_writable_roots` grants, so create it before generating config.toml;
+    # a repo without a worktree root simply has no `.switchboard` tree to grant.
+    switchboard_root = _switchboard_root(cwd)
+    if switchboard_root is not None:
+        try:
+            switchboard_root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise CodexHomeError(
+                f"could not create {name}'s .switchboard directory at "
+                f"{switchboard_root}: {e}") from e
+
     # Created here rather than left to first use, because a `$TMPDIR` that is not there
     # when codex starts is FATAL — it panics resolving its own synthetic mount registry
     # temp dir (`linux-sandbox/src/linux_run_main.rs`: "failed to resolve synthetic mount
@@ -320,6 +332,15 @@ def render_instructions(prompts: Sequence[str]) -> str:
     return "\n\n".join(p.strip() for p in prompts if p and p.strip()) + "\n"
 
 
+def _switchboard_root(cwd: Optional[Path]) -> Optional[Path]:
+    """The resolved `.switchboard` tree for ``cwd``, or None outside a worktree."""
+    from . import store
+    try:
+        return (store.worktree_root(cwd) / ".switchboard").resolve()
+    except Exception:                    # noqa: BLE001 — no worktree to grant
+        return None
+
+
 def _writable_roots(cwd: Optional[Path]) -> list[str]:
     """The directories outside its own worktree a codex agent must be able to write to.
 
@@ -371,12 +392,12 @@ def _writable_roots(cwd: Optional[Path]) -> list[str]:
     sock = os.environ.get("HERDR_SOCKET_PATH")
     roots.append(str(Path(sock).expanduser().parent if sock
                      else Path(HERDR_CONFIG_DIR).expanduser()))
-    try:
-        # Not `.exists()`-guarded: granting the intended location costs nothing and a tree
-        # created after the spawn (a first note, a first brief) is still inside the grant.
-        roots.append(str((store.worktree_root(cwd) / ".switchboard").resolve()))
-    except Exception:                    # noqa: BLE001 — same as above: not in a repo
-        pass
+    # `write_home` ensures this resolved directory exists before the spawn. Keep granting
+    # it unconditionally there so notes and briefs created after spawn stay inside the
+    # grant, including when the checkout has a symlink at `.switchboard`.
+    switchboard_root = _switchboard_root(cwd)
+    if switchboard_root is not None:
+        roots.append(str(switchboard_root))
     try:
         roots.append(str(Path(config.setting("paths.user_state", repo=cwd))
                          .expanduser().resolve()))
