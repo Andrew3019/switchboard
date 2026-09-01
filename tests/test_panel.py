@@ -1229,6 +1229,50 @@ class TheAutoRestoreTrigger(PanelTest):
         self.assertEqual(state.restores, 0)
 
 
+class TheUsageLimitResumeTrigger(PanelTest):
+    def setUp(self):
+        super().setUp()
+        self.path = Path(self.tmp.name) / "state.db"
+        self.db = store.connect(path=self.path)
+        self.addCleanup(self.db.close)
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+        self.ran = []
+        self.enterContext(mock.patch.object(
+            collector.threading, "Thread",
+            lambda target, args=(), kwargs=None, **kw:
+                mock.Mock(start=lambda: target(*args, **(kwargs or {})))))
+        self.enterContext(mock.patch.object(
+            collector.subprocess, "run",
+            lambda argv, **kw: (self.ran.append(argv), mock.Mock(returncode=0))[1]))
+        self.enterContext(mock.patch.object(collector, "doorbell_sb", lambda: "/bin/sb"))
+
+    def set_reset(self, reset_at):
+        self.db.execute("UPDATE agents SET usage_limit_reset_at=? WHERE name='w1'",
+                        (reset_at,))
+        self.db.commit()
+
+    def test_a_due_reset_is_cleared_and_told_once(self):
+        state = collector.State(pid=1, started_at=0.0)
+        now = int(collector.panel.now())
+        self.set_reset(now - collector.USAGE_RESUME_BUFFER)
+
+        self.assertTrue(collector.run_usage_resume(a_snapshot("w1"), state, self.path))
+        self.assertEqual(self.ran, [["/bin/sb", "tell", "w1",
+                                    collector.USAGE_RESUME_MESSAGE]])
+        self.assertIsNone(store.get_agent(self.db, "w1")["usage_limit_reset_at"])
+        self.assertEqual(state.usage_resumes, 1)
+        self.assertFalse(collector.run_usage_resume(a_snapshot("w1"), state, self.path))
+        self.assertEqual(len(self.ran), 1)
+
+    def test_the_two_minute_buffer_is_required(self):
+        state = collector.State(pid=1, started_at=0.0)
+        self.set_reset(int(collector.panel.now()) - collector.USAGE_RESUME_BUFFER + 1)
+
+        self.assertFalse(collector.run_usage_resume(a_snapshot("w1"), state, self.path))
+        self.assertEqual(self.ran, [])
+        self.assertIsNotNone(store.get_agent(self.db, "w1")["usage_limit_reset_at"])
+
+
 class WhichSbTheDoorbellRuns(PanelTest):
     """WHICH `sb` binary the doorbell spawns — the last environment fact it depended on.
 

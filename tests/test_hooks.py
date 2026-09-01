@@ -109,8 +109,11 @@ class StopGateTest(unittest.TestCase):
     def test_a_new_provider_turn_spends_the_previous_wait(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         store.set_wait(self.db, "w1", "background")
+        self.db.execute("UPDATE agents SET usage_limit_reset_at=123 WHERE name='w1'")
+        self.db.commit()
         hooks.mark_turn(self.payload(), self.db, store.TURN_WORKING)
         self.assertIsNone(store.wait_for(self.db, "w1"))
+        self.assertIsNone(store.get_agent(self.db, "w1")["usage_limit_reset_at"])
 
     def test_the_answer_ends_the_excuse(self):
         """Any message back from whoever was asked, and the next silent end is a silence
@@ -242,7 +245,7 @@ class ActivitySignalTest(unittest.TestCase):
 
 
 class SpawnCarriesTheHookTest(unittest.TestCase):
-    def test_every_spawn_passes_the_settings_file_and_it_holds_both_hooks(self):
+    def test_every_spawn_passes_the_settings_file_and_it_holds_all_claude_hooks(self):
         """Wiring, in the one place every spawn and restore passes through.
 
         `--settings` merges into that session only and `--bare` is absent, which is what
@@ -261,10 +264,69 @@ class SpawnCarriesTheHookTest(unittest.TestCase):
         self.assertTrue(cmd.split()[0].endswith("bin/sb-stop-hook"), cmd)
         start = body["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         self.assertTrue(start.split()[0].endswith("bin/sb-activity-hook"), start)
-        # Both hooks name the same store explicitly, rather than resolving it from
+        failure = body["hooks"]["StopFailure"][0]
+        self.assertEqual(failure["matcher"], "rate_limit")
+        limit = failure["hooks"][0]["command"]
+        self.assertTrue(limit.split()[0].endswith("bin/sb-usage-limit-hook"), limit)
+        # Every hook names the same store explicitly, rather than resolving it from
         # wherever the agent happens to be standing when they fire.
         self.assertIn("--db", cmd)
         self.assertIn("--db", start)
+        self.assertIn("--db", limit)
+
+
+class UsageLimitStopFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "state.db"
+        self.transcript = Path(self.tmp.name) / "session.jsonl"
+        self.db = store.connect(path=self.path)
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def payload(self, error="rate_limit"):
+        return {
+            "session_id": "sess-1",
+            "hook_event_name": "StopFailure",
+            "error": error,
+            "transcript_path": str(self.transcript),
+        }
+
+    def write_limit(self, kind="five_hour", reset_at=1788044400):
+        record = {
+            "type": "assistant",
+            "quotaLimits": {"resetsAt": reset_at, "rateLimitType": kind},
+            "error": "rate_limit",
+            "isApiErrorMessage": True,
+        }
+        self.transcript.write_text(json.dumps({"type": "user"}) + "\n" +
+                                   json.dumps(record) + "\n")
+
+    def test_five_hour_limit_is_persisted_and_logged(self):
+        self.write_limit()
+        hooks.run_usage_limit(json.dumps(self.payload()), db_path=self.path)
+        row = store.get_agent(self.db, "w1")
+        self.assertEqual(row["usage_limit_reset_at"], 1788044400)
+        event = self.db.execute(
+            "SELECT kind, payload FROM events WHERE agent='w1' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(event["kind"], "usage_limit_recorded")
+        self.assertEqual(json.loads(event["payload"])["rate_limit_type"], "five_hour")
+
+    def test_weekly_limit_is_ignored_entirely(self):
+        self.write_limit(kind="seven_day")
+        hooks.run_usage_limit(json.dumps(self.payload()), db_path=self.path)
+        self.assertIsNone(store.get_agent(self.db, "w1")["usage_limit_reset_at"])
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM events WHERE kind='usage_limit_recorded'"
+        ).fetchone()[0], 0)
+
+    def test_non_rate_limit_stop_failure_is_ignored(self):
+        self.write_limit()
+        hooks.run_usage_limit(json.dumps(self.payload(error="overloaded")), db_path=self.path)
+        self.assertIsNone(store.get_agent(self.db, "w1")["usage_limit_reset_at"])
 
 
 class CodexHookShapeTest(unittest.TestCase):
