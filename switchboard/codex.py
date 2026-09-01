@@ -239,6 +239,18 @@ def write_home(
     # bwrap refuses to bind-mount a writable root that does not exist. The resolved path
     # is also what `_writable_roots` grants, so create it before generating config.toml;
     # a repo without a worktree root simply has no `.switchboard` tree to grant.
+    #
+    # NARROW EDGE, deliberately not handled here: in a BRAND-NEW repo whose primary
+    # checkout has never had a `.switchboard` (no note/brief/preset written yet), a spawn
+    # forked into a NEW worktree runs after `Broker.link_config`, which only symlinks a
+    # LINKED_CONFIG entry that already exists in the main checkout — so `.switchboard` is
+    # not yet a symlink, and this mkdir makes a REAL directory local to the worktree rather
+    # than one shared with the primary. That orphaning is NOT codex-specific and NOT
+    # introduced here: `.switchboard` and `CLAUDE.md` are both LINKED_CONFIG, so a Claude
+    # agent writing the first note in that same fresh-repo/early-fork case orphans it too.
+    # This fix only stops codex CRASHING there (bwrap on a missing source); the systemic
+    # cure is `link_config` establishing the tree when the main checkout lacks it, tracked
+    # as a follow-up rather than duplicated onto the codex spawn path.
     switchboard_root = _switchboard_root(cwd)
     if switchboard_root is not None:
         try:
