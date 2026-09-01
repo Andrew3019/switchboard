@@ -242,16 +242,20 @@ def _pr_labelled(step: dict, pr: Any) -> dict:
     A COPY, never the step in place: `_viewed` hands back dicts that other renderings share,
     and stamping the number onto one would leak `#123` into `show` and the store. Only a step
     anchored at the open-PR or merge band is touched; everything else is returned unchanged,
-    so the annotation is confined to the two steps the number is actually about. The label is
-    the step's own board name with ` #<n>` after it — the display, so `_label` draws it
-    straight — and falls back to the bare tag only for the degenerate step with no name at
-    all, which is already drawn `?` and is a defect the number does not make worse.
+    so the annotation is confined to the two steps the number is actually about.
+
+    A NAMELESS STEP IS LEFT ALONE. A PR/merge step with neither `display` nor `name` is a
+    defect — `_label` draws it `?` and the header is already red — and this is best-effort
+    visual sugar, so it does not stamp a number onto that `?` and hide the one cue on the
+    board that the step has no name. It returns the step untouched; the number simply does
+    not appear on a broken step, which is exactly what "best effort, not load-bearing" means.
     """
     if str(step.get("anchor") or "").strip() not in _PR_STEPS:
         return step
     base = _flat(step.get("display") or step.get("name") or "")
-    tag = f"#{pr}"
-    return {**step, "display": f"{base} {tag}" if base else tag}
+    if not base:
+        return step
+    return {**step, "display": f"{base} #{pr}"}
 
 
 def _header(p: dict, bad: bool = False) -> str:

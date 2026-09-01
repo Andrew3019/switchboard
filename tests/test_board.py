@@ -1410,6 +1410,16 @@ class PlanBlockTest(unittest.TestCase):
         self.assertIn("open PR", chart)
         self.assertIn("merge PR", chart)
         self.assertNotIn("#", chart)
+        # A nameless PR step keeps its `?` defect cue rather than being masked by the tag:
+        # the number is best effort and never hides that a step has no name.
+        p["change"] = {"path": "direct", "pr": {"number": 9, "head": "x"}}
+        p["steps"] = [{"id": "s-1", "anchor": "pr", "progress": "open"}]
+        self.write(p)
+        with self.hooks():
+            chart = board._ANSI.sub("", " ".join(
+                t for t, _ in board.section_extras([agent("lead")])[0][1]))
+        self.assertIn("?", chart, "a nameless PR step still shows its defect marker")
+        self.assertNotIn("#9", chart, "and the number is not stamped onto it")
 
     @unittest.skipUnless(HAVE_RICH, "rich is not installed here")
     def test_a_plan_is_highlighted_for_the_agent_whose_workspace_it_is(self):
