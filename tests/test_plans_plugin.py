@@ -1152,6 +1152,35 @@ class StepsTest(PlansSandbox):
         self.assertEqual(entries[1]["by"], "lead-1")
         self.assertIn("open → done", entries[1]["detail"])
 
+    def test_re_ticking_a_done_step_is_a_no_op(self):
+        """The cascade the prompts describe ticks one step more than once by design — the
+        doer ticks its own, and whoever next sees it done-but-`open` ticks it too — so a
+        second tick on an already-`done` step has to cost nothing. It writes no changelog
+        line, and it does not rewrite the `why` the first tick left. `_derive` (the
+        auto-tick path) already carried this guard; the hand `tick` verb now carries the
+        same one, which is what makes the prompts' 'a redundant tick is a no-op' true."""
+        self.plan("write it")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "the first reason")
+        self.assertEqual(self.step("s-1")["progress"], "done")
+        self.assertEqual(self.step("s-1").get("why"), "the first reason")
+
+        again = self.ok("plugin", "plans", "tick", "s-1", "--reason", "a different reason")
+        self.assertIn("already done", again)
+        self.assertEqual(self.step("s-1")["progress"], "done")
+        self.assertEqual(self.step("s-1").get("why"), "the first reason")   # not overwritten
+        self.assertEqual(self.actions(), ["create", "tick"])               # no second entry
+
+    def test_ticking_over_a_skip_is_a_correction_and_still_lands(self):
+        """The guard is on `done` alone, never on `skipped`: a skip is a state somebody
+        wrote a reason beside, and ticking over it is a real correction, not a redundant
+        tick. So it lands, moves the step to `done`, and clears the stale skip reason."""
+        self.plan("write it")
+        self.edit_step("s-1", progress="skipped", why="thought unnecessary")
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "turned out to be needed")
+        self.assertEqual(self.step("s-1")["progress"], "done")
+        self.assertEqual(self.step("s-1").get("why"), "turned out to be needed")
+
     def test_reassigning_overwrites_and_tells_nobody(self):
         """The design's rule, and the reason it is a rule: there is no core verb that can
         tell a running agent anything, so a notification here would be a promise this
@@ -3043,6 +3072,9 @@ class CatalogueTest(PlansSandbox):
         self.data(*_create("a job", "write it"))
         self.data("plugin", "plans", "name-step", "p-1", "review")
         out = json.loads(self.ok("plugin", "plans", "tick", "s-1", "--json"))
+        # Reopen before the second tick: re-ticking an already-`done` step is now a no-op
+        # that unblocks nothing, so land it again from `open` to see the human rendering.
+        self.edit_step("s-1", progress="open")
         said = " ".join(self.ok("plugin", "plans", "tick", "s-1").split())
 
         self.assertEqual([s["def"] for s in out["data"]["next"]], ["review"])

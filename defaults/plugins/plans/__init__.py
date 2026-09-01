@@ -2727,12 +2727,25 @@ def tick(ctx, args) -> Result:
     step whose exit condition it just checked, rather than asking somebody to transcribe the
     check. It writes `DERIVED` and never `tick`, so the changelog still says which of the two
     happened, and it touches no step outside that skeleton.
+
+    IDEMPOTENT ON AN ALREADY-`done` STEP, the same guard `_derive` carries. The cascade the
+    prompts describe — a doer ticks its own step, and anyone who then sees it done-but-`open`
+    ticks it too — means one step is ticked more than once as a matter of course, so a
+    re-tick has to cost nothing: a step already `done` is left exactly as it is, with no
+    changelog line and no `why` rewritten, and the caller is told it was already done. A
+    `skip` is NOT a `done`, so ticking over a skip is a real correction and still lands.
     """
     bad = _cap(args.reason)
     if bad:
         return bad
-    return _on_step(ctx, args.step, "tick", args.reason,
-                    lambda step, who: _progress(step, DONE, args.reason), unblocked=True)
+
+    def _tick(step, who):
+        if str(step.get("progress") or "") == DONE:
+            return Result(human=f"{step['id']} already done — nothing to tick",
+                          data={"plan": None, "step": step.get("id"), "already_done": True})
+        return _progress(step, DONE, args.reason)
+
+    return _on_step(ctx, args.step, "tick", args.reason, _tick, unblocked=True)
 
 
 def skip(ctx, args) -> Result:
