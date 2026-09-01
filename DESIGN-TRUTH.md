@@ -141,11 +141,18 @@ an idle dispatcher. — confirmed 2026-08-27
 
 **When the work lands.** Landing compares the expected and current target once. If approval
 and evidence still apply, it merges without automatically rerunning tests, builds, reviews
-or manual checks. Unexpected head changes, unresolved major review state, relevant red
-checks, cancellation or concrete landing failures remain visible and unfinished. Cleanup
-then follows the existing ownership rules: a lead cleans its children on its judgment, a
-dispatcher cleans its direct child on Andrew's, and isolated child branches are folded in
-before the assembled branch is pushed. — confirmed 2026-08-27
+or manual checks. The authority it compares against has two shapes and the merge verb records
+which on `change.landing.kind`: Andrew's per-head approval ("human", the default), or an
+agent-decided landing authorised down the tree ("standing" — the plan's merge gate, or a
+parent's instruction under the standing authorisation to merge unasked), which anchors on the
+recorded PR head. `--standing` relaxes only the requirement that a human named the head; every
+head-and-evidence comparison is unchanged, so it opens no gap in the one check that must fail
+closed. Unexpected head changes, unresolved major review state, relevant red checks,
+cancellation or concrete landing failures remain visible and unfinished. Cleanup then follows
+the existing ownership rules: a lead cleans its children on its judgment, a dispatcher cleans
+its direct child on Andrew's, and isolated child branches are folded in before the assembled
+branch is pushed. — confirmed 2026-08-27, the two landing authorities and `landing.kind`
+confirmed 2026-09-01
 
 **A follow-up on a child's report is a handoff, not another relay.** A parent may report a
 child's work once; it may not become the channel for the conversation about it. "When work
@@ -588,7 +595,8 @@ worktree, changelog and kept record. It is semi-structured, changeable and inter
 agent rather than executed by anything. A **template** is a copied starting plan with no
 live link back to its source. A **change record** is the durable landing record shared by
 direct and shaped work: path, task owner, intent or approved contract, solution, evidence,
-independent review, human-only checks, PR/head identity, landing approval and final outcome.
+independent review, human-only checks, PR/head identity, landing authority (human or standing)
+and final outcome.
 A direct change has a change record when it heads toward a PR and no plan; the record carries
 a fixed execution+landing step skeleton (implementation, review, the PR, merge) so the change
 is legible on the board and its PR — a fixed list, not the shaped DAG a plan is. The human-only
@@ -844,12 +852,17 @@ be brought up again.** — confirmed 2026-08-09
 **A workspace forks from `origin/main` by default.** — confirmed 2026-08-09
 
 **Pushing and PR landing follow the change record's authority.** The task owner may push and
-open the PR after implementation, applicable verification and fresh review are complete.
-Andrew's landing approval covers the current reviewed head. Landing compares that head and
-its evidence once, then merges directly when they still apply; it does not automatically
-repeat tests, builds, reviews or manual checks. The default branch/workspace shape remains
-unchanged. `sb merge` is a separate act: it folds an isolated child's branch into the
-caller's branch and reaches no push, `main` or pull request. — confirmed 2026-08-27
+open the PR after implementation, applicable verification and fresh review are complete. The
+landing authority covers the current reviewed head and is one of two: Andrew's per-head
+approval — the default — or an agent-decided standing landing authorised down the tree (the
+plan's merge gate, or a parent's instruction). `sb plugin plans merge` records which on
+`change.landing.kind`; the standing case anchors on the recorded PR head and relaxes only the
+requirement that a human named it. Landing compares that head and its evidence once, then
+merges directly when they still apply; it does not automatically repeat tests, builds, reviews
+or manual checks. The default branch/workspace shape remains unchanged. `sb merge` is a
+separate act: it folds an isolated child's branch into the caller's branch and reaches no
+push, `main` or pull request. — confirmed 2026-08-27, the standing landing authority confirmed
+2026-09-01
 
 **`sb workspace new` is deleted, provided the other commands cover it fully and it is
 clear how to use them.** — confirmed 2026-08-09
