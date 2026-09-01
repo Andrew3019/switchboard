@@ -857,10 +857,14 @@ WHEN A PLAN EXISTS
   its progress on the board and its PR exactly as a plan does, without a plan's shaping half.
   (The human-only checklist is not a step of its own: `create-pr` writes it onto the record's
   `human_checks` as it opens the PR.)
-  YOU DO NOT TICK THE SKELETON BY HAND. `comment` refuses to open the PR until the record
+  THE VERBS TICK THE SKELETON WHEN THEY LAND IT, so you do not transcribe those ticks by
+  hand. `comment` refuses to open the PR until the record
   carries the verification, the review and the human checklist, and `merge` refuses to land
   until every recorded head covers the one a person approved — so each closes the skeleton
   steps it has just confirmed, logged as `auto-tick`. Fill the record and the board follows.
+  What that does NOT mean is that the skeleton is never ticked by hand: a step you take to
+  done some other way — landing through `gh` instead of `merge`, say — is one no verb
+  closed, and an open step whose work is done is yours to tick like any other.
   What the skeleton is NOT is a plan: it is a fixed list, not a shaped DAG, and it is not
   extended step by step — a job that needs more than the skeleton is a shaped change. The
   first call costs one line; verification, review, the PR and the human's approval fill the
@@ -1002,9 +1006,15 @@ WHO WRITES TO IT
   `sb plugin plans planner`, and the vocabulary it plans against is `sb plugin plans
   catalog`.
 
-  TICKING IS NOT THAT. Any agent ticks the step it did, and is trusted to tick only that
-  one. An agent that reports back without ticking leaves the tick to the lead, who does it
-  on the report — or, if the step is not actually done, does something else about it.
+  TICKING IS NOT THAT. You tick the step you did the WORK of — holding the plan's shape
+  neither makes another agent's step yours to tick nor exempts you from your own. Tick it
+  the moment its work is done; the plans verbs tick the skeleton for you as they land it
+  (`comment` the implementation, review and open-PR steps, `merge` the merge step), so a
+  step a verb already closed needs nothing — but a step finished any other way is yours,
+  and re-ticking one already ticked is a verified no-op, so check rather than assume. THE
+  CASCADE IS THE BACKSTOP: a step whose work is done but still `open` is a lie on the board,
+  so whoever next sees it that way ticks it — the lead reading a child's report, the owner
+  reconciling the plan — or, if it is not actually done, does something else about it.
 
   A dispatcher is never involved in a plan. It relays work and makes agents and worktrees;
   it does not plan, own, tick or read one.

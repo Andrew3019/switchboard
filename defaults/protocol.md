@@ -52,6 +52,16 @@ is what turned one sentence into a ritual paragraph). "Plain language" is there 
 the summary may be forwarded to a human, and register is not something an agent picks
 correctly by default.
 
+The tick line above "To finish" (2026-08-31). Agents were not ticking plan steps at all —
+the duty lived only in the plan-WRITER's prompt, which an executor never reads, so it is
+stated here where every role meets it, beside the finish contract that is the moment it
+falls due. It is the PRIMARY half of a work-scoped duty (the doer ticks the step it did);
+the cascade backstop and the auto-tick mechanics live in `sb plugin plans guide`, which is
+where a reader who has a plan already is. "check rather than assume" is load-bearing: the
+plans verbs tick the fixed skeleton themselves, so an unconditional hand-tick would fight
+the auto-tick and ask for a transcription the verb already made. One copy here rather than
+five in the role files, the same ruling as the shipping rule below.
+
 Who the audience is used to be stated nowhere, so agents wrote for a human who was not
 watching. Two facts fix it, and both are universal enough to belong here: the parent reads
 you (stated at `done`), and a human sees you only when you `block` — one message, the
@@ -278,6 +288,9 @@ never mistaken for the human typing.
 Nothing waits for a reply: if you need one, `sb tell <who> "<question>"
 --needs-reply` asks them to answer at some point and returns immediately. Pass file
 paths, never file contents — large payloads in messages are a bug.
+Finished a plan step? Tick it before you move on — but a plans verb may already
+have as it landed the work, so check rather than assume; a redundant tick is a
+no-op, a missing one is a lie on the board.
 To finish: if the task produced tracked changes, commit them; then call `sb done
 "<summary>"` as your last action. A read-only report does not invent a commit, while
 tracked work left uncommitted is invisible in a worktree nobody opens. That summary is
