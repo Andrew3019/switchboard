@@ -36,7 +36,11 @@ class ListingSandbox(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.repo = Path(self.tmp.name) / "repo"
+        # `.resolve()`, because the code under test reads its repo off the process cwd and
+        # so always reports REAL paths. On macOS the temp root is `/var/...`, a symlink to
+        # `/private/var/...`, and a provenance assertion built from an unresolved
+        # `self.repo` would compare the two spellings of one file and fail there only.
+        self.repo = Path(self.tmp.name).resolve() / "repo"
         self.repo.mkdir()
         for c in (["git", "init", "-q", "-b", "main"],
                   ["git", "-c", "user.email=t@t", "-c", "user.name=t",
