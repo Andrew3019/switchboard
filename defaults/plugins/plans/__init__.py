@@ -51,13 +51,14 @@ draw.
             "limitations"?: …, "baseline"?: …,
             "human_checks": […]|"none"|null, "pr": {number, head},
             "approval": {plan_revision, contract_digest, by, at},
-            "landing": {head, by, at, outcome, cleanup}, "handoff"?: {from, to, at}}
+            "landing": {head, by, kind, at, outcome, cleanup}, "handoff"?: {from, to, at}}
 
 THE CHANGE RECORD is a document-level object — never a step field, so the step schema above
 is untouched — carrying the landing lifecycle every change has whether or not a plan exists:
 the human request or approved contract, the combined change approval, the verification
 evidence and the commit it covers, the independent review and its target, the human-only
-checks, the PR head, the human's landing approval and the head it covers, and the outcome. A
+checks, the PR head, the landing authority and the head it covers (a human's approval or an
+agent-decided standing landing, told apart by `kind`), and the outcome. A
 SHAPED change (a plan) is born with one at `create`; a DIRECT change gets one from `record`,
 only when landing metadata is needed. The identity-bound fields name the commit or head they
 cover — `approval` binds the plan REVISION and contract DIGEST it was approved against — so
@@ -749,6 +750,12 @@ def register(reg):
               reg.arg("--delete-branch", flag=True,
                       help="delete the head branch once the merge lands, recorded as "
                            "`change.landing.cleanup`"),
+              reg.arg("--standing", flag=True,
+                      help="land on your own authority — a merge authorised down the tree "
+                           "(the plan's merge gate, or a parent's instruction) rather than a "
+                           "per-head human approval; recorded as `change.landing.kind = "
+                           "\"standing\"`, anchored on the recorded PR head, with every "
+                           "head-agreement check unchanged"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "changelog", changelog, audience="both", help="what has been done to one plan",
@@ -903,7 +910,7 @@ WHEN A PLAN EXISTS
   THE VERBS TICK THE SKELETON WHEN THEY LAND IT, so you do not transcribe those ticks by
   hand. `comment` refuses to open the PR until the record
   carries the verification, the review and the human checklist, and `merge` refuses to land
-  until every recorded head covers the one a person approved — so each closes the skeleton
+  until every recorded head covers the one the landing authority names — so each closes the skeleton
   steps it has just confirmed, logged as `auto-tick`. Fill the record and the board follows.
   What that does NOT mean is that the skeleton is never ticked by hand: a step you take to
   done some other way — landing through `gh` instead of `merge`, say — is one no verb
@@ -971,10 +978,14 @@ THE CHANGE RECORD, WHICH BOTH PATHS HAVE
                  Written BEFORE the PR opens, so the human meets it the first time they read
                  the comment.
     pr           `{number, head}`.
-    landing      `{head, by, at, outcome, cleanup}`. You write the first three — the human's
-                 landing approval and the head it covers. `merge` writes the last two, and
-                 REFUSES to land until the head it is about to merge is the one those and the
-                 evidence above all name.
+    landing      `{head, by, kind, at, outcome, cleanup}`. For a HUMAN approval you write the
+                 first four — the person's landing approval, the head it covers, and
+                 `kind="human"` (absent reads as human). For an agent-decided STANDING landing
+                 you write none of them: `merge --standing` records `head` (the recorded PR
+                 head), `by` (the agent) and `kind="standing"` itself. Either way `merge` writes
+                 the outcome and cleanup, and REFUSES to land until the head it is about to
+                 merge is the one the authority head and the evidence above all name —
+                 `--standing` relaxes only that a HUMAN named the head, no head-agreement check.
     scope, limitations, baseline, handoff
                  optional, absent until used: important scope boundaries, known relevant
                  limitations, evidenced pre-existing failures, and `{from, to, at}` when a
@@ -2276,10 +2287,20 @@ def merge(ctx, args) -> Result:
     Rerunning a passing check to make the merge feel safer is the failure this verb was
     written to remove, not a precaution it forgot.
 
-    WHAT IT COMPARES, all against `change.landing.head` — the head the human approved:
+    THE LANDING AUTHORITY comes in two shapes and the comparisons are identical for both; the
+    difference is only where the head is read off, and `change.landing.kind` records which.
+    A HUMAN landing approval is a person's `head` + `by` written onto the record — the default,
+    Andrew's per-head gate. A STANDING landing (`--standing`) is agent-decided — a merge
+    authorised down the tree (the plan's merge gate, or a parent's instruction under the
+    standing authorisation to merge unasked) — where no person named a head, so the recorded PR
+    head is the anchor and `by` is the agent. `--standing` relaxes ONLY "a human named the
+    head"; it loosens none of the head-agreement checks below.
 
-      change.landing        a human landing approval, with a `head` and a `by`. Absent, and
-                            there is nothing to land against and no merge.
+    WHAT IT COMPARES, all against `change.landing.head` — the head the authority covers:
+
+      change.landing        the landing authority, with a `head`, a `by` and a `kind`
+                            ("human" | "standing"; absent reads as "human"). Absent and no
+                            `--standing`, there is nothing to land against and no merge.
       change.approval       on the SHAPED path, the combined change approval naming the plan
                             revision and the contract digest it covered. Not a head, so not
                             compared to one — checked for being THERE, because a shaped
@@ -2321,14 +2342,48 @@ def merge(ctx, args) -> Result:
                                "evidence to land against. Landing facts live on `change`; "
                                "record them before merging.")
 
-    # The human's landing approval, which is the identity everything else is compared to.
+    # THE LANDING AUTHORITY, the identity everything else is compared to. It comes in two
+    # shapes and the head-agreement checks below are identical for both — what differs is only
+    # WHERE the head is read off, and the record says which via `landing.kind`.
+    #
+    #   HUMAN   a person wrote a landing approval onto the record: the `head` they approved and
+    #           the `by` who approved it. This is the default and Andrew's per-head gate.
+    #   STANDING an agent-decided landing (`--standing`) — a merge authorised DOWN THE TREE (the
+    #           plan's merge gate, or a parent's instruction under the standing authorisation to
+    #           merge unasked), which the agent takes on itself. No person named a head, so the
+    #           head the PR was recorded at is the anchor and the evidence checks below prove it
+    #           is still the reviewed one. `by` is the agent; `kind` marks it agent-decided.
+    #
+    # This does NOT loosen the safety the verb exists for: `--standing` only relaxes "a HUMAN
+    # named the head", never any of the head-agreement comparisons. And `merge()` never checked
+    # that `by` actually named a person — that was prompt convention only — so `kind` turns an
+    # unenforced convention into an explicit, auditable field rather than opening a new gap.
+    standing = bool(getattr(args, "standing", False))
     landing = change.get("landing") if isinstance(change.get("landing"), dict) else None
     approved = _sha(landing.get("head")) if landing else None
-    if landing is None or not _some(landing.get("by")) or approved is None:
-        return _unlanded(plan, "no human landing approval to merge against: "
-                               "`change.landing` needs the `head` a person approved and the "
-                               "`by` who approved it. Get the approval, record it, merge "
-                               "then.", landing=landing)
+    human_landing = landing is not None and _some(landing.get("by")) and approved is not None
+
+    if human_landing:
+        kind = "human"
+    elif standing:
+        recorded_pr = change.get("pr") if isinstance(change.get("pr"), dict) else {}
+        approved = _sha(recorded_pr.get("head"))
+        if approved is None:
+            return _unlanded(plan, "a standing (agent-decided) landing has no head to anchor "
+                                   "the evidence check against: `change.pr.head`, the head the "
+                                   "PR was recorded at, is missing. Record the PR, then merge "
+                                   "`--standing`.", landing=landing)
+        kind = "standing"
+        # Persist the agent-decided approval before the mutation, so the record shows on whose
+        # authority the merge was attempted even if the merge itself then fails.
+        _record_approval(ctx, plan["id"], head=approved, by=(ctx.agent or "agent"),
+                         kind="standing")
+    else:
+        return _unlanded(plan, "no landing authority to merge against: record a human landing "
+                               "approval on `change.landing` (the `head` a person approved and "
+                               "the `by` who approved it), or pass `--standing` to land it on "
+                               "your own authority — a merge authorised down the tree, recorded "
+                               "as an agent-decided landing.", landing=landing)
 
     # The design-time sanction, on the shaped path only — a direct change has no plan and
     # no contract and never claims one. `validate` already draws a record at or past
@@ -2412,7 +2467,7 @@ def merge(ctx, args) -> Result:
     _record_landing(ctx, plan["id"], who, args.reason, outcome=outcome, cleanup=cleanup)
 
     # THE MERGE IS THE FACT, and it is the skeleton's last step. Every head on the record was
-    # compared against the one a person approved before a single mutation was made, so `merge`
+    # compared against the one the landing authority names before a single mutation was made, so `merge`
     # is true rather than claimed. The three before it are derived too, as the safety net for
     # a record whose PR opened before this shipped or that had a step named onto it after the
     # PR existed — the same evidence was reconfirmed above, so the same justification holds.
@@ -2563,6 +2618,33 @@ def _delete_branch(ctx, pull: dict, at: int) -> dict:
         return {"deleted": False, "branch": ref, "at": at,
                 "error": _flat(bad.data.get("error") or "delete failed")}
     return {"deleted": True, "branch": ref, "at": at}
+
+
+def _record_approval(ctx, plan_id: str, *, head: str, by: str, kind: str) -> None:
+    """Persist an agent-decided (standing) landing's `head`, `by` and `kind` before the merge.
+
+    The HUMAN path writes these onto the record by hand, ahead of time. A STANDING landing is
+    decided at merge, so the verb records it here — before the mutation — so the record shows
+    on whose authority the merge was attempted even if the merge then fails. Re-reads first,
+    like `_record_landing`, and writes only these three fields plus `at`; `outcome`/`cleanup`
+    are `_record_landing`'s and are left untouched.
+    """
+    doc, seal = _read(ctx.state_dir)
+    plan = _find(doc, plan_id)
+    if plan is None:
+        return
+    change = plan.get("change")
+    if not isinstance(change, dict):
+        return
+    landing = change.get("landing")
+    if not isinstance(landing, dict):
+        landing = {}
+        change["landing"] = landing
+    landing["head"] = head
+    landing["by"] = by
+    landing["kind"] = kind
+    landing.setdefault("at", int(time.time()))
+    _write(ctx.state_dir, doc, seal)
 
 
 def _record_landing(ctx, plan_id: str, who: str, reason: Optional[str], *,
@@ -3355,7 +3437,7 @@ def _derive(ctx, plan_id: str, defs: tuple, why: str) -> list[str]:
     fact the same call has already mechanically refused to proceed without, for the four
     steps of the fixed skeleton whose exit conditions ARE those facts. `comment` cannot open
     the PR until the record carries the verification, the review and the human checklist;
-    `merge` cannot land until every recorded head covers the one a person approved. Asking an
+    `merge` cannot land until every recorded head covers the one the landing authority names. Asking an
     agent to then transcribe what the tool just checked is the second, disconnected action
     that left accurate records sitting behind boards where nothing was ever ticked.
 
@@ -3697,12 +3779,13 @@ def _change(path: str) -> dict:
       verification  `{commit, check, environment, result, at}`.
       review        `{commit, reviewer, findings, fixes}`.
       pr            `{number, head}`.
-      landing       the merge-time `{head, by, at, outcome, cleanup}` — the human landing
-                    approval on the reviewed head, and the outcome. The first three are
-                    written by hand when the approval is given; `outcome` and `cleanup` are
-                    written by `merge`, which refuses to run at all until `head` here, the
-                    PR head, the verification and the review commits and the LIVE head are
-                    all the same commit.
+      landing       the merge-time `{head, by, kind, at, outcome, cleanup}` — the landing
+                    authority on the reviewed head, and the outcome. `kind` is "human" (a
+                    person's approval, written by hand, absent reads as human) or "standing"
+                    (an agent-decided landing authorised down the tree, written by `merge
+                    --standing` itself). `outcome` and `cleanup` are written by `merge`, which
+                    refuses to run at all until `head` here, the PR head, the verification and
+                    the review commits and the LIVE head are all the same commit.
 
     `scope`, `limitations`, `baseline`, and `handoff` are NOT born here. They are optional
     and recorded only when used, so — like `planner` on a plan — they are ABSENT rather than

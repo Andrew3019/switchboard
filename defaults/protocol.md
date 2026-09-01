@@ -145,6 +145,19 @@ that decides it, and the inbox is named alongside the task because that is where
 later-granted permission arrives. `house-rules` was loosened the same way; it still says
 this repo's default is that the orchestrator integrates.
 
+A MOVED MAIN IS NOT NEWS WHILE A PR WAITS (2026-09-01). A suggestion asked for the
+open-PR-awaiting-merge case to be dropped from the escalation list entirely; Andrew declined
+that — he still gives the merge its go-ahead — but named the real friction underneath it: agents
+were spending whole turns re-verifying and re-reporting shared repo state ("main has moved below
+me", mergeable, CI) to the human every turn a PR sat waiting, one PR staying open for days
+across a needless rebase and a conflict a same-day merge would have missed. So the churn is
+addressed where the wait is, not by removing the wait: the sentence added to the shipping
+paragraph says a main that moved below a waiting PR is not to be chased or re-reported, because
+the landing's own head comparison catches a real divergence at merge time. It leans on the
+evidence rule already in this file — a check is not rerun because ownership moved or a review
+happened, only when your own edit changed its inputs — and applies it to the one place that was
+generating the noise. The escalation list and the human merge gate are both unchanged.
+
 CUT BACK TO A POINTER (2026-08-16, PLANS-AND-STEPS). The prohibition itself — never merge
 without that say-so, ask the parent, stop and ask if that parent is the human — is gone,
 replaced by one clause naming who decides: the merge gate where a plan is running, the
@@ -305,7 +318,10 @@ merge ahead of it, so where the work is going to land, a plan modelling it carri
 those steps even when your own part stops at the PR, and a plan that stops at the
 open PR reads the same whether the job ended there or its landing was dropped. Where a plan is running,
 its merge gate is the authority on pushing and merging; where none is, your
-parent's instruction is.
+parent's instruction is. While a PR waits on that merge, a main that has moved below it is
+not yours to chase or keep reporting: the landing compares heads at merge time and catches a
+real divergence there, so re-verify only when your own edit changed the inputs — never
+because main moved or a review happened.
 To delegate: `sb delegate "<task>" --role <role> --name <topic>` spawns a child that
 runs independently. End your turn rather than polling: `sb waiting --all` wakes once
 the current live-child cohort has finished, and `--any` wakes on its first result; name
