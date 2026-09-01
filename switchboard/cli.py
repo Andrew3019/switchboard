@@ -1788,22 +1788,39 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # last is legal config — models.py keeps `provider` real ahead of its backend — so
         # it is reported per row rather than allowed to take the whole listing down, since
         # finding out WHICH tier is unspawnable is why anyone runs this.
+        #
+        # A TIER'S GATES ARE PART OF THE ROW, for the same reason the unwired note is: the
+        # question this command answers is "what would I get if I named this", and a tier
+        # switched off at `enabled_by`, or kept away from some roles, would otherwise list
+        # as ordinarily available and then be refused at the spawn. They are reported
+        # rather than hidden — a switched-off tier is still config somebody wrote and the
+        # listing is where they find out which key turns it on.
         out: dict[str, dict] = {}
         lines = []
+        width = max((len(n) for n, _ in rows), default=0) + 2
         for n, s in rows:
             try:
                 flags, note = s.cli_args(), ""
             except models_mod.ModelConfigError as e:
                 flags, note = [], f"UNAVAILABLE — {e}"
             out[n] = {"provider": s.provider, "model": s.model, "effort": s.effort,
-                      "cli_args": flags, "error": note or None}
+                      "cli_args": flags, "error": note or None,
+                      "enabled": s.enabled, "enabled_by": s.enabled_by,
+                      "forbidden_roles": list(s.forbidden_roles)}
             settings = " ".join(
                 x for x in (f"model {s.model}" if s.model else "",
                             f"effort {s.effort}" if s.effort else "") if x)
             shown = note or " ".join(flags) or (
                 f"{settings} (in the agent's codex home)" if settings
                 else "(provider default)")
-            lines.append(f"  {n:12}{s.provider:10}{shown}")
+            gates = []
+            if not s.enabled:
+                gates.append(f"OFF — set `{s.enabled_by} = true` to enable")
+            if s.forbidden_roles:
+                gates.append("not for " + ", ".join(s.forbidden_roles))
+            if gates:
+                shown = f"{shown}  [{'; '.join(gates)}]"
+            lines.append(f"  {n:{width}}{s.provider:10}{shown}")
         _emit(args, "\n".join(lines),
               {"default_provider": tiers.default_provider, "tiers": out})
         return 0

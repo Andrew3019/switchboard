@@ -21,10 +21,12 @@ provider = "claude"
 # -- the shipped tiers ---------------------------------------------------------
 #
 # Small on purpose: this only has to be good enough that switchboard works with no config
-# file at all. Seven shipped roles: five name a claude tier other than `default`, `worker`
+# file at all. Seven shipped roles, and every one of them now names a claude tier: `worker`
 # is on `default` — a pinned choice now like any other, no longer an unmade one — and
-# `builder` is on `gpt-5.6-sol` in the codex section below, the one role on a non-claude
-# provider. See `notes/model-selection.md` for the role-by-role reasoning and what it costs.
+# `builder`, which used to be the one role on a non-claude provider, is on `opus-5-medium`
+# since the codex tier it pinned was retired (see that tier, and `gpt-luna-max-effort` in
+# the codex section, for why). See `notes/model-selection.md` for the role-by-role
+# reasoning and what it costs.
 #
 # PINNED IDS on the Claude tiers. `claude --help` documents --model as taking "an alias for
 # the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
@@ -84,6 +86,21 @@ provider = "claude"
 model    = "claude-opus-5"
 effort   = "high"
 
+[tiers.opus-5-medium]
+# The middle notch of the flagship, and `builder`'s tier since its codex pin was retired
+# (Andrew, 2026-09-01). `default` is this model at the CLI's own effort and `strong` is it
+# at `high`; this is the level between them, named because a role wanted it. Same shape as
+# `strong`, one word different.
+#
+# WHY BUILDER MOVED HERE rather than keeping `gpt-5.6-sol` as a switchable option: what
+# that tier was for — good code cheaply, on work whose requirements are already clear — is
+# what `gpt-luna-max-effort` below now covers, at less. So the codex pin stopped being
+# worth carrying as a runtime choice and became a one-time role edit. `gpt-5.6-sol` is
+# still a tier and still reachable by name; nothing is on it.
+provider = "claude"
+model    = "claude-opus-5"
+effort   = "medium"
+
 # No tier pins `xhigh`. A `deep` tier here did — opus at xhigh, for workers — and lasted a
 # day (Andrew, 2026-08-16: "i dont want anything to ever use xhigh"). Left as a note rather
 # than enforced anywhere: `xhigh` is still a level the CLI takes and still reachable per call
@@ -114,10 +131,12 @@ effort   = "medium"
 # slug is retired, spawns on this tier fail outright. That is the correct failure. It asks
 # the question again rather than sliding silently onto a different model.
 #
-# Both verified live against the installed codex-cli 0.147.0 (`codex debug models`): both
-# slugs exist and both list `medium` among their supported reasoning levels. The tier NAME
-# is the slug, because for codex there is no more human word available — `gpt-5.5` is what
-# a person picking one would say.
+# All verified live against the installed codex-cli (`codex debug models`): every slug
+# exists and every one lists the effort its tier asks for among its supported reasoning
+# levels. The tier NAME is the slug for the two that are chosen as models — for codex there
+# is no more human word available, and `gpt-5.5` is what a person picking one would say.
+# `gpt-luna-max-effort` is the exception and says why at its own definition: it is chosen
+# for a KIND OF WORK rather than for its model, so it is named after that instead.
 
 [tiers."gpt-5.5"]
 provider = "codex"
@@ -128,9 +147,55 @@ effort   = "medium"
 # The newer frontier model. Its own default reasoning level is `low`; `medium` here is the
 # deliberate override, matching `gpt-5.5` so the choice between the two tiers is a choice
 # of model and not secretly also a choice of effort (Andrew, 2026-08-22).
+#
+# NO ROLE IS ON IT any more — `builder` was, and moved to `opus-5-medium` above on
+# 2026-09-01. Kept as a tier because retiring a name people type is a separate decision
+# from retiring the pin that used it.
 provider = "codex"
 model    = "gpt-5.6-sol"
 effort   = "medium"
+
+[tiers.gpt-luna-max-effort]
+# THE DIRECT-PATH TIER, and the only tier in this file with either gate on it. Named for
+# what it is FOR rather than for its slug, unlike the two above: a person choosing it is
+# choosing "the cheap model, thinking as hard as it can, on work whose requirements are
+# already settled", and the slug is the least interesting half of that.
+#
+# `gpt-5.6-luna` at `max`, both verified live against the installed codex-cli
+# (`codex debug models`): the slug exists and `max` is among its supported reasoning
+# levels. Its own default is `medium`; `max` here is the whole point of the tier.
+#
+# WHEN IT IS THE RIGHT TIER (the judgment half, which no code can check): the work is a
+# DIRECT-path change per the plans guide — behaviour, scope and a reasonable approach
+# already clear, going straight to implement/verify/review/land — or a change too small to
+# reach a review at all. Never work still being shaped, never an open design question,
+# never investigation. A direct change that turns out to need shaping moves off this tier
+# when it moves onto the shaped path, by the guide's own rule.
+#
+# WHAT THE GATES BELOW DO (the mechanical half, which is a closed fact and therefore code):
+#
+#   forbidden_roles — refused outright for `lead`, `dispatcher` and `reviewer`, whoever
+#     names it. This tier is for an implementation leaf; an agent that splits work, routes
+#     it, or gives a verdict on somebody else's change is not that, and `--model
+#     gpt-luna-max-effort` on one of those roles is an error rather than a judgment call.
+#     `worker` and `builder` are what it is for, and they are not listed here because the
+#     list is what is REFUSED — a repo's own leaf role gets the tier without editing this.
+#     Role names, so a repo that renames its reviewer renames it here too; the behavioural
+#     half of that name lives at `[vocabulary] review_role` in settings.toml.
+#
+#   enabled_by — the tier resolves only while `[routing] gpt_luna_direct_enabled` is true
+#     in settings.toml, and it ships FALSE. One line to turn the whole thing on or off,
+#     which is what makes this a routing experiment somebody can end rather than a tier
+#     that has to be deleted.
+#
+# Selection stays EXPLICIT: nothing infers "this work is direct" from a change record and
+# swaps a role's model underneath it. Whoever spawns the worker or builder passes
+# `--model gpt-luna-max-effort` by hand, the way `--role builder` is asked for by name.
+provider        = "codex"
+model           = "gpt-5.6-luna"
+effort          = "max"
+forbidden_roles = ["lead", "dispatcher", "reviewer"]
+enabled_by      = "routing.gpt_luna_direct_enabled"
 
 
 # -- the deepseek tiers --------------------------------------------------------

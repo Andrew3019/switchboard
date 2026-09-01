@@ -101,7 +101,8 @@ def _default_provider() -> str:
 
 # The fields a tier table may set. Anything else is a typo, and saying so beats resolving
 # to a spec that quietly ignores it.
-TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args", "codex_provider"})
+TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args", "codex_provider",
+                       "forbidden_roles", "enabled_by"})
 
 # Per-user, between the shipped tiers and the repo's — what `strong` means on YOUR machine.
 ENV_GLOBAL_CONFIG = "SWITCHBOARD_MODELS_CONFIG"
@@ -148,12 +149,54 @@ class ModelSpec:
     # a person meets it.
     codex_provider: Optional[str] = None
 
+    # THE TWO GATES ON A TIER, and both are DATA for the reason every other name in this
+    # module is: no model name appears in Python, so neither may the name of the one tier
+    # that happens to want gating. A tier that sets neither is every tier that predates
+    # them and resolves exactly as before.
+    #
+    # `forbidden_roles` — the roles this tier may never run. Checked in `Role.spec()`,
+    # which is the one place a tier and the role about to run on it are both in hand;
+    # `Tiers.resolve()` knows no role and stays a pure lookup, so `sb models` still lists
+    # a gated tier instead of failing on it. It is a check on the ROLE, not on the caller:
+    # `--model X` on a forbidden role is refused whoever typed it, and the tier being the
+    # role's own default would be refused just the same.
+    #
+    # `enabled_by` names a SETTINGS key that must be true for this tier to be usable, and
+    # `enabled` is that key's value, read once at `load()` where the repo is in hand. Two
+    # fields rather than one because the refusal has to name the key a person would edit.
+    forbidden_roles: tuple[str, ...] = ()
+    enabled_by: Optional[str] = None
+    enabled: bool = True
+
     # The providers whose per-agent settings travel as CLI FLAGS. Everything else delivers
     # them some other way and must get an empty list here rather than Claude Code's flag
     # names — see `cli_args`. A tuple in Python rather than a config key because it is a
     # fact about which code path exists, not a preference: adding a provider to it without
     # writing that path would produce flags no binary accepts.
     _FLAG_PROVIDERS = ("claude",)
+
+    def gate(self, role: Optional[str] = None) -> None:
+        """Refuse this tier if it is switched off, or forbidden to `role`.
+
+        The other half of `cli_args()`'s unwired check, and here for the same reason it is
+        there: a refusal that can still say what is wrong. Both of these are questions
+        about CONFIG, so the answer is known before a pane exists — where the message can
+        name the settings key to edit or the roles the tier is kept away from, rather than
+        surfacing as an agent that ran on a tier nobody meant it to have.
+
+        Called by `Role.spec()`, which is every spawn path and the `sb instructions`
+        preview. Deliberately NOT called by `stored_spec()`: that reads a tier already
+        recorded against a live agent, and a restore must bring an agent back on the tier
+        it was actually running rather than re-litigate a config decision made since.
+        """
+        if not self.enabled:
+            raise ModelConfigError(
+                f"tier '{self.tier}' is switched off; set `{self.enabled_by} = true` in "
+                f"settings.toml to enable it")
+        if role and role in self.forbidden_roles:
+            raise ModelConfigError(
+                f"tier '{self.tier}' may not be used by role '{role}' — it is kept off "
+                f"{', '.join(self.forbidden_roles)}")
 
     def cli_args(self) -> list[str]:
         """The provider's CLI flags for this tier — which for one provider is none at all.
@@ -265,7 +308,8 @@ def _lookup_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", name.casefold())
 
 
-def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
+def _spec(name: str, cfg: dict, default_provider: str,
+          repo: Optional[Path] = None) -> ModelSpec:
     unknown = set(cfg) - TIER_KEYS
     if unknown:
         raise ModelConfigError(
@@ -277,6 +321,11 @@ def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
             f"tier '{name}' has effort '{effort}'; valid levels are "
             f"{', '.join(levels)}"
         )
+    forbidden = cfg.get("forbidden_roles") or ()
+    if isinstance(forbidden, str) or not all(isinstance(r, str) for r in forbidden):
+        raise ModelConfigError(
+            f"tier '{name}' must name `forbidden_roles` as a list of role names, "
+            f"got {forbidden!r}")
     return ModelSpec(
         tier=name,
         provider=cfg.get("provider") or default_provider,
@@ -284,7 +333,27 @@ def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
         effort=effort,
         extra_args=tuple(cfg.get("extra_args") or ()),
         codex_provider=cfg.get("codex_provider"),
+        forbidden_roles=tuple(forbidden),
+        enabled_by=cfg.get("enabled_by"),
+        enabled=_enabled(name, cfg.get("enabled_by"), repo),
     )
+
+
+def _enabled(tier: str, key: Optional[str], repo: Optional[Path]) -> bool:
+    """Is the settings switch this tier hangs off turned on? No switch means always on.
+
+    Read at LOAD, where the repo whose settings layer applies is in hand — `ModelSpec` is
+    frozen and a spec that re-read config every time it was asked would be a second place
+    the answer could differ from the one the spawn used.
+    """
+    if not key:
+        return True
+    try:
+        return config.flag(key, repo=repo)
+    except config.ConfigError as e:
+        raise ModelConfigError(
+            f"tier '{tier}' is gated on setting '{key}', which is not a usable "
+            f"true/false: {e}") from e
 
 
 def _read(path: Path) -> dict:
@@ -326,7 +395,7 @@ def load(repo: Optional[Path] = None, *, global_config: Optional[Path] = None) -
         _layer(merged, raw)
 
     return Tiers(
-        tiers={n: _spec(n, cfg, provider) for n, cfg in merged.items()},
+        tiers={n: _spec(n, cfg, provider, repo) for n, cfg in merged.items()},
         default_provider=provider,
     )
 

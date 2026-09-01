@@ -42,6 +42,10 @@ class ModelsTest(unittest.TestCase):
     def write_global(self, toml: str):
         self.global_cfg.write_text(toml)
 
+    def write_settings(self, toml: str):
+        """The repo's settings layer — what `enabled_by` tiers are read against."""
+        (self.repo / ".switchboard" / "settings.toml").write_text(toml)
+
     # -- shipped defaults ------------------------------------------------
 
     def test_works_with_no_config_at_all(self):
@@ -67,7 +71,8 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(t.resolve("strong").model, "claude-opus-5")
         pinned = {n for n in t.names()
                   if (t.resolve(n).model or "").startswith("claude-")}
-        self.assertEqual(pinned, {"cheap", "careful", "strong", "default", "prose"})
+        self.assertEqual(pinned, {"cheap", "careful", "strong", "default", "prose",
+                                  "opus-5-medium"})
         self.assertIsNone(t.resolve("standard").model)
 
     # -- what the spawn layer gets ---------------------------------------
@@ -185,6 +190,52 @@ class ModelsTest(unittest.TestCase):
                 spec = self.load().resolve(tier)
                 self.assertEqual((spec.provider, spec.model, spec.effort),
                                  ("codex", model, "medium"))
+
+    # -- the gates a tier can carry ---------------------------------------
+
+    def test_a_switched_off_tier_resolves_but_refuses_to_be_used(self):
+        """`enabled_by` is a switch on USE, not on existence, and that split is the point.
+
+        The tier still resolves — `sb models` lists it, and a person can see what it would
+        be — and `gate()` is what refuses, naming the settings key to edit. Resolving it
+        away instead would make the listing fail on the one row somebody ran the listing to
+        look at.
+
+        `gpt-luna-max-effort` is the shipped instance and ships OFF, which is what this
+        asserts against: nothing lands on it until someone turns it on deliberately.
+        """
+        spec = self.load().resolve("gpt-luna-max-effort")
+        self.assertEqual((spec.provider, spec.model, spec.effort),
+                         ("codex", "gpt-5.6-luna", "max"))
+        self.assertFalse(spec.enabled)
+        with self.assertRaises(models.ModelConfigError) as cm:
+            spec.gate("worker")
+        self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
+
+        self.write_settings("[routing]\ngpt_luna_direct_enabled = true\n")
+        on = self.load().resolve("gpt-luna-max-effort")
+        self.assertTrue(on.enabled)
+        self.assertIsNone(on.gate("worker"))
+
+    def test_a_tier_can_be_kept_off_named_roles(self):
+        """`forbidden_roles` is checked against the role, not against who typed the name.
+
+        The shipped instance keeps the direct-path tier off the roles that orchestrate or
+        judge rather than implement. Asserted through `gate()` directly here; `test_roles`
+        pins that `Role.spec()` is what calls it, which is the half that makes it reach a
+        spawn.
+        """
+        self.write_settings("[routing]\ngpt_luna_direct_enabled = true\n")
+        spec = self.load().resolve("gpt-luna-max-effort")
+        self.assertEqual(spec.forbidden_roles, ("lead", "dispatcher", "reviewer"))
+        for role in spec.forbidden_roles:
+            with self.subTest(role=role), \
+                    self.assertRaises(models.ModelConfigError) as cm:
+                spec.gate(role)
+            self.assertIn(role, str(cm.exception))
+        for role in ("worker", "builder"):
+            with self.subTest(role=role):
+                self.assertIsNone(spec.gate(role))
 
     def test_the_deepseek_tier_points_the_same_binary_at_another_api(self):
         """`provider` is the BINARY and stays `codex` — which is what keeps the tier past

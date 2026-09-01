@@ -871,6 +871,19 @@ WHICH PATH THIS WORK IS ON
   makes a plan and gets the approval it skipped — rather than carrying on and mentioning it
   in the summary at the end.
 
+  THE PATH ALSO PICKS A MODEL TIER, where `gpt-luna-max-effort` is switched on (it ships
+  off; `sb models` says whether it resolves here). That tier is the cheap model thinking as
+  hard as it can, and it is for the two buckets above it — a DIRECT change, or a change too
+  small for a record at all — spawned onto a `worker` or a `builder` with an explicit
+  `--model gpt-luna-max-effort`. Nothing infers it: whoever decides the work is direct is
+  who names the tier.
+
+  It is not for the shaped path, and not for anything before the path is decided —
+  investigation, an open design question, review-only work. `lead`, `dispatcher` and
+  `reviewer` are refused it outright rather than trusted to judge, so what is left to judge
+  is only whether the WORK is direct, which is the same call this section already asks for.
+  A direct change that moves onto the shaped path mid-flight moves off this tier with it.
+
 WHEN A PLAN EXISTS
 
   A plan exists when the work is heading for a change that will land AND that change was

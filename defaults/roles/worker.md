@@ -94,6 +94,16 @@ worker gets is not a thing to decide for every worker ever spawned.
 The reasoning that survives is the per-call half. Which work repays a better model is a real
 fact, and `sb delegate --model strong` acts on it where the evidence for it is, instead of
 charging every worker spawn for the one that needed it.
+
+THE PER-CALL HALF NOW POINTS BOTH WAYS (2026-09-01). `--model strong` was the only example
+and it only went up. `--model gpt-luna-max-effort` is the other direction — the cheap model
+at maximum effort — and `worker` is one of the two roles it is not refused for, the other
+being `builder`. It is for DIRECT-path work: requirements already settled, straight to
+implement/verify/review/land. The refusal that is mechanical covers `lead`, `dispatcher`
+and `reviewer` (`forbidden_roles` in `defaults/models.toml`); whether a given job is
+actually direct is judgment, and it is written in the plan guide's "WHICH PATH THIS WORK IS
+ON" — where this file already sends a worker — rather than repeated in the prompt below.
+The tier ships off behind `[routing] gpt_luna_direct_enabled`.
 -->
 
 You are given one outcome and you own it: gather your own context, work out how, and carry
