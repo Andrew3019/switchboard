@@ -183,10 +183,11 @@ effort   = "medium"
 #     Role names, so a repo that renames its reviewer renames it here too; the behavioural
 #     half of that name lives at `[vocabulary] review_role` in settings.toml.
 #
-#   enabled_by — the tier resolves only while `[routing] gpt_luna_direct_enabled` is true
-#     in settings.toml, and it ships FALSE. One line to turn the whole thing on or off,
-#     which is what makes this a routing experiment somebody can end rather than a tier
-#     that has to be deleted.
+#   enabled_by — the tier resolves only while `[routing] gpt_luna_direct_enabled` is true.
+#     The SHIPPED answer is false, so a fresh install of switchboard does not silently
+#     acquire a codex dependency; a repo that wants the tier says so in one line of its own
+#     `.switchboard/settings.toml`, and this repo does. One line either way is what makes
+#     this a routing experiment somebody can end rather than a tier that has to be deleted.
 #
 # Selection stays EXPLICIT: nothing infers "this work is direct" from a change record and
 # swaps a role's model underneath it. Whoever spawns the worker or builder passes

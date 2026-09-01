@@ -173,8 +173,14 @@ done_prefix = "[done] "
 # false. Adding a switched tier of your own is two lines in two files and no code.
 
 # The direct-path tier, `gpt-luna-max-effort` — the cheap model at maximum effort, for
-# implementation work whose requirements are already settled. FALSE as shipped, so nothing
-# lands on it until somebody turns it on deliberately.
+# implementation work whose requirements are already settled.
+#
+# FALSE HERE AND TRUE IN THIS REPO'S OWN LAYER, which is the split the layering exists for
+# (Andrew, 2026-09-01). This file is what every checkout of switchboard gets, and a routing
+# experiment is not something to switch on inside somebody else's fleet by shipping it; a
+# tier bound to one provider's slug, on by default, is a codex-cli dependency an install
+# never asked for. So the shipped answer is off, and `.switchboard/settings.toml` turns it
+# on where it is actually wanted — one line, per repo, exactly as with any other setting.
 #
 # The other half of its rule is not here and cannot be, because it is not a switch: WHICH
 # WORK the tier is for is a judgment about content, written where the agent deciding it

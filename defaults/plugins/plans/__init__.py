@@ -871,12 +871,12 @@ WHICH PATH THIS WORK IS ON
   makes a plan and gets the approval it skipped — rather than carrying on and mentioning it
   in the summary at the end.
 
-  THE PATH ALSO PICKS A MODEL TIER, where `gpt-luna-max-effort` is switched on (it ships
-  off; `sb models` says whether it resolves here). That tier is the cheap model thinking as
+  THE PATH ALSO PICKS A MODEL TIER. `gpt-luna-max-effort` is the cheap model thinking as
   hard as it can, and it is for the two buckets above it — a DIRECT change, or a change too
   small for a record at all — spawned onto a `worker` or a `builder` with an explicit
   `--model gpt-luna-max-effort`. Nothing infers it: whoever decides the work is direct is
-  who names the tier.
+  who names the tier. Whether a repo has it at all is that repo's own setting, so check
+  `sb models` rather than assuming: it says whether the tier resolves here.
 
   It is not for the shaped path, and not for anything before the path is decided —
   investigation, an open design question, review-only work. `lead`, `dispatcher` and
