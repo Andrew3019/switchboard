@@ -559,9 +559,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     Two offsets because there are two panels, each scrolling inside its own share of the
     pane: `board.split_panels` divides the pane and `board.section_window` windows the
     lower half of it, and both are shared with the plain renderer for `stats_rows`'s
-    reason. A section line is owned by `board.SECTION_ZONE`, which is what tells a wheel
-    which of the two it is over — and is false, so every caller that asks `if a` for an
-    agent still sees none there.
+    reason. A section line is owned by a `_SectionZone` — the plain sentinel for chrome, a
+    `_PlanZone` naming a workspace for a plan's own rows — which is what tells a wheel which
+    of the two panels it is over, and is false, so every caller that asks `if a` for an agent
+    still sees none there while a click on a plan still finds its main agent.
 
     `cursor` is the SECOND highlight: the agent the arrow keys are over, or None. `here`
     says where the human's own pane is and is always drawn; this one says where their
@@ -621,7 +622,7 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # Sized here with the other fixed blocks because it is what the body has to share the
     # pane with, and it carries its own blank line above so that the padding travels with
     # the section rather than being remembered separately where it is drawn.
-    section = _plugin_sections(rows, inner, pan)
+    section = _plugin_sections(rows, inner, pan, here, cursor)
     # What a plugin draws under each worktree GROUP, which is part of the tree and not of
     # the section. Read once — the hooks go to disk — and used twice: for what the tree
     # would cost in full, which is what it bids with, and for the blocks themselves.
@@ -785,24 +786,26 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     for _ in range(pad):
         emit(Text(""))
     # The plugin sections, windowed into the share of the pane they were given: the two
-    # scroll lines are theirs to spend, exactly as the tree spends its own. Owned by
-    # `board.SECTION_ZONE` — a click on a plan is still a miss, because that sentinel is
-    # false and every caller asks `if a`, and a WHEEL over one now scrolls the section
-    # rather than the tree. Already carrying their own blank line above, so there is
-    # nothing to remember here about padding.
-    below: list[Any] = []
+    # scroll lines are theirs to spend, exactly as the tree spends its own. Each carries the
+    # owner `_plugin_sections` built for it — the section sentinel for chrome and the two
+    # scroll lines, a `_PlanZone` for a plan's own rows — so a WHEEL over any of them scrolls
+    # the section (every one is a `_SectionZone`) while a CLICK on a plan row focuses its
+    # main agent and a click on chrome still misses. Already carrying their own blank line
+    # above, so there is nothing to remember here about padding.
+    below: list[tuple[Any, object]] = []
     if section_room > 0:
         first_s, last_s = board.section_window(len(section), max(0, section_top),
                                                section_room)
         if first_s:
-            below.append(Text(_clip(f"  ↑ {first_s} above", inner), style=DIM,
-                              no_wrap=True, overflow="crop"))
+            below.append((Text(_clip(f"  ↑ {first_s} above", inner), style=DIM,
+                               no_wrap=True, overflow="crop"), board.SECTION_ZONE))
         below.extend(section[first_s:last_s])
         if last_s < len(section):
-            below.append(Text(_clip(f"  + {len(section) - last_s} more below", inner),
-                              style=DIM, no_wrap=True, overflow="crop"))
-    for line in below:
-        emit(line, board.SECTION_ZONE)
+            below.append((Text(_clip(f"  + {len(section) - last_s} more below", inner),
+                               style=DIM, no_wrap=True, overflow="crop"),
+                          board.SECTION_ZONE))
+    for line, owner in below:
+        emit(line, owner)
     # What is actually left once the tree has been drawn, and the hint is paid for out
     # of it or not at all: it goes when taking its lines would eat the blank line NEEDS
     # YOU is entitled to, or push the footer off the pane.
@@ -1037,8 +1040,25 @@ def _stats_block(stats: Optional[dict], inner: int):
     return out
 
 
-def _plugin_sections(rows: list[Any], inner: int, pan: int = 0) -> list[Any]:
-    """Every plugin section as rich lines: a blank, a bar, and the plugin's own lines.
+def _plugin_sections(rows: list[Any], inner: int, pan: int = 0,
+                     here: Optional[str] = None,
+                     cursor: Optional[str] = None) -> list[tuple[Any, object]]:
+    """Every plugin section as `(line, owner)` pairs: a blank, a bar, and the plugin's lines.
+
+    THE OWNER IS WHAT MAKES A PLAN ROW MORE THAN CHROME. The blank and the bar own the
+    section sentinel — a wheel scrolls, a click misses. A plan's own line owns a `_PlanZone`
+    naming its workspace (`board._section_owner`), so a click on it focuses that workspace's
+    main agent (item 1) and a wheel over it still scrolls the plans (`_PlanZone` is a
+    `_SectionZone`).
+
+    AND IT IS WHERE ITEM 3 IS DRAWN. `here` — the agent this board sits beside — and
+    `cursor` — the one the arrow keys are over — each resolve to a workspace, and a plan
+    line whose workspace matches gets the same wash the matching agent row does: the cursor
+    colour when the keys are on it, the here colour otherwise, cursor winning where both
+    land, exactly as `_row` decides it. So landing on any agent lights the plan that is
+    theirs, which is the whole of "on any agent, if they have a plan, we know which one".
+    Nothing is drawn when the plugin is off — there are no sections to draw — so the board
+    with plans turned off is byte for byte the one before this.
 
     A BAR IN `SECTION_STYLE`, like `STATS`, `AGENTS` and `NEEDS YOU`, because that is what
     a section looks like on this board and one drawn any other way reads as a section that
@@ -1057,11 +1077,19 @@ def _plugin_sections(rows: list[Any], inner: int, pan: int = 0) -> list[Any]:
     """
     from rich.text import Text
 
-    out: list[Any] = []
+    # An agent's name resolved to the workspace it is in, so a plan line's workspace can be
+    # matched against where `here` and `cursor` are. The main agent's name IS its workspace,
+    # so this maps it to itself; a child working in the workspace maps to the same string —
+    # either way a plan filed under that workspace lights for it.
+    name_ws = {getattr(r, "name", None): getattr(r, "workspace", None) for r in rows}
+    here_ws = name_ws.get(here) if here else None
+    cursor_ws = name_ws.get(cursor) if cursor else None
+
+    out: list[tuple[Any, object]] = []
     for title, lines in board.section_extras(rows):
-        out.append(Text(""))
-        out.append(_bar(" " + title, inner, SECTION_STYLE))
-        for text in lines:
+        out.append((Text(""), board.SECTION_ZONE))
+        out.append((_bar(" " + title, inner, SECTION_STYLE), board.SECTION_ZONE))
+        for text, assoc in lines:
             # `_clipw`'s rule: a plugin's spaces are columns it lined up on purpose, so
             # nothing here flattens whitespace. Truncated by rich rather than by a string
             # clip so the colour spans survive the cut.
@@ -1071,7 +1099,13 @@ def _plugin_sections(rows: list[Any], inner: int, pan: int = 0) -> list[Any]:
             line = Text.from_ansi("  " + board.pan_columns(text, pan),
                                   no_wrap=True, overflow="crop")
             line.truncate(inner, overflow="crop")
-            out.append(line)
+            # Item 3, after the truncate so the wash covers the whole row: cursor wins over
+            # here where a plan is both, the same order `_row` gives the two highlights.
+            if assoc and cursor_ws is not None and assoc == cursor_ws:
+                _wash(line, inner, CURSOR_STYLE)
+            elif assoc and here_ws is not None and assoc == here_ws:
+                _wash(line, inner, HIGHLIGHT_STYLE)
+            out.append((line, board._section_owner(assoc)))
     return out
 
 

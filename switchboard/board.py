@@ -1021,8 +1021,17 @@ def group_extras(rows: list) -> list[list[str]]:
     return out
 
 
-def section_extras(rows: list) -> list[tuple[str, list[str]]]:
+def section_extras(rows: list) -> list[tuple[str, list[tuple[str, Optional[str]]]]]:
     """The sections plugins draw BELOW the tree: `[(title, lines), ...]`, in plugin order.
+
+    A LINE IS `(text, assoc)`, not a bare string, and `assoc` is the workspace this line's
+    plan belongs to or None. That is the whole of items 1 and 3: a plugin that wants a line
+    to point at an agent returns it as `(text, workspace)` and the board turns the workspace
+    into a `_PlanZone` owner (`_section_owner`) — clickable to the workspace's main agent,
+    and matchable against `here`/`cursor` for the highlight. A plain string from any plugin
+    still reads as `(text, None)` (`_hook_lines_owned`), so a section owns nobody exactly as
+    before unless its plugin opted in. `group_extras` never needs an owner and still gets
+    plain strings through `_hook_lines`.
 
     The same hook and the same per-workspace questions `group_extras` asks — see
     `BOARD_SECTION` for why one hook serves both placements. What differs is only where
@@ -1045,11 +1054,11 @@ def section_extras(rows: list) -> list[tuple[str, list[str]]]:
     if not hooks or not rows:
         return []
     groups = _by_workspace(rows)
-    out: list[tuple[str, list[str]]] = []
+    out: list[tuple[str, list[tuple[str, Optional[str]]]]] = []
     for _name, hook, state, section in hooks:
-        lines: list[str] = []
+        lines: list[tuple[str, Optional[str]]] = []
         for ws, idx in groups.items():
-            lines.extend(_hook_lines(hook, state, ws, [rows[i] for i in idx]))
+            lines.extend(_hook_lines_owned(hook, state, ws, [rows[i] for i in idx]))
         if lines:
             out.append((str(section), lines))
     return out
@@ -1093,6 +1102,27 @@ def _hook_lines(hook: Callable, state: Path, workspace: str, group: list) -> lis
     synchronous in-process call without a thread per frame. The contract is that a drawer
     is cheap, and it is a contract rather than an enforcement.
     """
+    return [t for t, _ in _hook_lines_owned(hook, state, workspace, group)]
+
+
+def _hook_lines_owned(hook: Callable, state: Path, workspace: str,
+                      group: list) -> list[tuple[str, Optional[str]]]:
+    """`_hook_lines` plus the per-line ASSOCIATION a section carries: `[(text, assoc), ...]`.
+
+    A plugin line may be a bare `str` — every plugin that never heard of associations, and
+    the only shape `group_extras` ever wants — or a `(str, assoc)` pair, where `assoc` is
+    the workspace the line's plan belongs to (`board_lines`' opt-in for items 1 and 3). The
+    pair is vetted exactly as strictly as the string is: a two-tuple of a string and a
+    string, anything else dropped, so a plugin cannot smuggle a control object into an owner
+    the way it cannot smuggle a cursor move into a line. `assoc` is kept only when it is a
+    non-empty string; anything else becomes None, which owns nobody.
+
+    Everything the string half goes through is unchanged — the `HOOK_LINES` cap, the split
+    on embedded newlines, and `_colour_only` flattening every escape but SGR — and the
+    association rides through the split so a plugin that returns `("a\\nb", ws)` gets two
+    lines both pointing at `ws`. `_hook_lines` is this with the association thrown away, so
+    the under-group placement pays nothing for a feature only the section uses.
+    """
     try:
         given = hook(state, workspace, group)
     except KeyboardInterrupt:
@@ -1101,16 +1131,21 @@ def _hook_lines(hook: Callable, state: Path, workspace: str, group: list) -> lis
         return []
     if not isinstance(given, (list, tuple)):
         return []
-    out: list[str] = []
+    out: list[tuple[str, Optional[str]]] = []
     for item in given[:HOOK_LINES]:
-        if not isinstance(item, str):
+        if isinstance(item, str):
+            text, assoc = item, None
+        elif (isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)):
+            text = item[0]
+            assoc = item[1] if isinstance(item[1], str) and item[1].strip() else None
+        else:
             continue
         # Split rather than refused: one line is one row here, and a plugin that put a
         # newline in a string is describing two rows however it meant it. Then everything
         # left with no glyph becomes ONE SPACE — one rule, and the only one that keeps the
         # count of columns honest: a dropped character would shift a plugin's own alignment
         # and a kept one is a character this board cannot measure.
-        out.extend(_colour_only(part) for part in item.splitlines() or [""])
+        out.extend((_colour_only(part), assoc) for part in text.splitlines() or [""])
     return out[:HOOK_LINES]
 
 
@@ -1198,6 +1233,47 @@ class _SectionZone:
 
 
 SECTION_ZONE = _SectionZone()
+
+
+class _PlanZone(_SectionZone):
+    """A section line that ALSO points at an agent — a plan row, and the whole of items 1&3.
+
+    A plugin section is drawn under the tree and owned by `SECTION_ZONE`, which says two
+    things at once: a wheel over it scrolls the section, and a click on it misses. A plan
+    row wants the first and not the second — it is a picture OF a job, and the job has a
+    main agent a human should be able to jump to. So a plan line carries one of these
+    instead: still a `_SectionZone`, so the wheel that asks `isinstance(a, _SectionZone)`
+    finds it and scrolls the plans; still FALSY, so every caller that asks `if a` for an
+    agent (`drawn_names`, the cursor) skips it exactly as it skipped `SECTION_ZONE`; but
+    carrying the WORKSPACE the plan belongs to, which the click reads to focus that
+    workspace's main agent and the rich renderer reads to light the plan of whichever agent
+    is here or under the cursor.
+
+    THE WORKSPACE IS THE HANDLE, not a stored plan-to-agent pointer, because the two are the
+    same string: `sb delegate` names an agent and the workspace it mints after each other, so
+    a workspace's main agent is the agent whose NAME equals the workspace, and a plan is filed
+    under that workspace name (`plans` keys on it). So `focus(workspace)` lands on the main
+    agent, and a highlight matches when an agent's own `workspace` equals this one — which is
+    true for the main agent (its name is the workspace) and for any child working in it.
+
+    Everything degrades to silence rather than to a wrong jump: a workspace with no live
+    agent of that name focuses nothing (`focus` says so and moves nobody), and a plan on a
+    board with the plugin OFF is never drawn, so none of this is reached at all.
+    """
+
+    __slots__ = ("workspace",)
+
+    def __init__(self, workspace: str) -> None:
+        self.workspace = workspace
+
+    def __repr__(self) -> str:                   # only ever seen in a test failure
+        return f"<plan {self.workspace}>"
+
+
+def _section_owner(assoc: Optional[str]) -> object:
+    """The owner a section line is drawn with: a plan zone when it names a workspace, else
+    the plain section sentinel. One place, so both renderers build the owner the same way."""
+    return _PlanZone(assoc) if assoc else SECTION_ZONE
 
 
 def split_panels(avail: int, want_agents: int, n_section: int) -> tuple[int, int]:
@@ -1392,10 +1468,17 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # board, sits under its own heading, and is drawn at the shallow indent every other
     # section's body uses. Undimmed also means a plugin's own colours land at full
     # strength, which is the point of having let them through the seam at all.
-    section: list[str] = []
+    # Each line paired with the owner a click and a wheel read off it: the blank and the
+    # heading own the section sentinel, a plan's own lines own a `_PlanZone` naming their
+    # workspace (`_section_owner`). This renderer has no background to draw a highlight
+    # with — `here` is accepted and not drawn here for the same reason — so items 1 (the
+    # click) and the wheel work on this path while the item-3 highlight is the rich board's.
+    section: list[tuple[str, object]] = []
     for title, lines in section_extras(agents):
-        section.extend([""] + [_c(" " + title, DIM)]
-                       + ["  " + pan_columns(x, pan) for x in lines])
+        section.append(("", SECTION_ZONE))
+        section.append((_c(" " + title, DIM), SECTION_ZONE))
+        for text, assoc in lines:
+            section.append(("  " + pan_columns(text, pan), _section_owner(assoc)))
     # How many SCREEN LINES each display row costs: its own, plus the break above it if
     # it opens a first-level group. Everything that windows or counts below reads this
     # rather than assuming one line each, the failure otherwise being a row pushed off
@@ -1428,12 +1511,12 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # what it comes to: the AGENTS panel is `capacity` lines whether or not the tree fills
     # them, which is what stops the section moving up the pane as agents finish.
     first_s, last_s = section_window(len(section), max(0, section_top), section_room)
-    below: list[str] = []
+    below: list[tuple[str, object]] = []
     if first_s:
-        below.append(_c(f"  ↑ {first_s} above", DIM))
+        below.append((_c(f"  ↑ {first_s} above", DIM), SECTION_ZONE))
     below.extend(section[first_s:last_s])
     if last_s < len(section):
-        below.append(_c(f"  + {len(section) - last_s} more below", DIM))
+        below.append((_c(f"  + {len(section) - last_s} more below", DIM), SECTION_ZONE))
     top = max(0, min(top, _max_top(costs, capacity)))
     window: list[tuple[object, bool, list[str]]] = []   # (row, break above it, its block)
     used = 0
@@ -1564,9 +1647,10 @@ def layout(snap, *, top: int, height: int, width: int, msg: str,
     # so a click on a plan is still a miss (`agent_at`'s callers ask `if a`, and the
     # sentinel is false), and a wheel over one scrolls the section rather than the tree.
     # Already carrying their own blank line above (see `section`), so there is nothing to
-    # remember here about padding.
-    for line in below:
-        emit(line, SECTION_ZONE)
+    # remember here about padding. Each line carries the owner built when the section was
+    # laid out: the sentinel for chrome, a `_PlanZone` for a plan's own rows.
+    for line, owner in below:
+        emit(line, owner)
 
     # The `oo`/`ww` hint, above the footer and only when there is something to open —
     # see `hint_lines`. It takes its lines out of the slack rather than off the tree, and
@@ -3294,7 +3378,9 @@ def main() -> int:
                         # screen rather than computed from a row number: the owner was
                         # recorded as the line was drawn, which is the same answer a click
                         # gets and cannot drift from what the human is looking at.
-                        if agent_at(rows, ev["row"]) is SECTION_ZONE:
+                        # `_PlanZone` is a `_SectionZone` too, so a wheel over a plan row
+                        # scrolls the plans exactly as one over a plain section line does.
+                        if isinstance(agent_at(rows, ev["row"]), _SectionZone):
                             section_top = scroll(section_top, step * 3, section=True)
                         else:
                             top = scroll(top, step * 3)
@@ -3302,15 +3388,17 @@ def main() -> int:
                         continue
                     if is_left_click(ev):
                         a = agent_at(rows, ev["row"])
-                        # A click still focuses, and now that is ALL it does: the row
-                        # background stopped meaning "the one you just touched" and
-                        # started meaning "the one beside you", and one board cannot
-                        # have two meanings for one mark. What a click did that was
-                        # worth keeping — jumping to the pane — is here, and what it
-                        # said on screen is said by the status line. Every row that
-                        # carries an owner is an agent now (`status.board_rows`), so
-                        # there is nothing else a click can land on but chrome.
-                        msg = focus(a.name) if a else ""
+                        # A click focuses, and now there are two things it can land on. An
+                        # AGENT row focuses that agent — the row background stopped meaning
+                        # "the one you just touched" and started meaning "the one beside
+                        # you", so what a click keeps is the jump. A PLAN row (a `_PlanZone`,
+                        # falsy so `a` above reads as no agent) focuses the plan's main
+                        # agent — the agent whose name is the plan's workspace — which is
+                        # item 1. Everything else is chrome and a click on it misses.
+                        if isinstance(a, _PlanZone):
+                            msg = focus(a.workspace) if a.workspace else ""
+                        else:
+                            msg = focus(a.name) if a else ""
                         dirty[0] = True
 
             if time.time() - last >= REFRESH:
