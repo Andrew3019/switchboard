@@ -135,6 +135,13 @@ default_role = "worker"
 # renaming it here too; behaviour stays in Python, the name stays here.
 review_role = "reviewer"
 
+# The read-and-report role. Named here, not as a literal in Python, for one behaviour: a
+# researcher spawned DIRECTLY by the top dispatcher is one the person spawned on their own
+# instruction and reads directly, so it gets a nudge (`spawn.researcher_direct`) to report
+# in its own chat and `sb block` rather than reporting done back up the tree. The nudge keys
+# off this name; a repo that renames its researcher keeps the behaviour by renaming it here.
+researcher_role = "researcher"
+
 # Retained for compatibility, and it is no longer what an undefined `--role` inherits:
 # selection is strict now and an unknown name is refused with the near ones listed. What
 # still reads this is `roles.get_or_fallback`, the path that reads rows ALREADY IN THE
