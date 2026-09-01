@@ -2641,12 +2641,14 @@ def set_wait(db: sqlite3.Connection, name: str, mode: str,
     stored-state recheck below closes for an ordinary live child.
 
     ONE NARROWER WINDOW SURVIVES, and it is stated rather than chased. `sb done` writes the
-    state; the `Stop` hook writes `turn` a moment later. A resumed child that reports inside
-    the few hundred microseconds between the caller's check and this one therefore still
-    reads `working` here, the wait is accepted, and its result is already under the
-    watermark — so nothing wakes the parent until `wake_expired_waits` pings it. Recoverable,
-    sub-millisecond, and cheaper than the alternative; DESIGN-TRUTH: a rare low-impact issue
-    does not justify a large complex fix merely because it can be imagined.
+    state synchronously; the `Stop` hook writes `turn` afterwards, from its own process, so
+    the two are never one edge. A resumed child that reports between the caller's check and
+    this one therefore still reads `working` here, the wait is accepted, and its result is
+    already under the watermark — so nothing wakes the parent until `wake_expired_waits`
+    pings it. How wide that window is has not been measured and no number is claimed for it;
+    what bounds the cost is that it is self-healing, which is why the cheaper recheck is
+    taken. DESIGN-TRUTH: a rare low-impact issue does not justify a large complex fix merely
+    because it can be imagined.
     """
     if mode not in ("background", "any", "all"):
         raise ValueError(f"bad wait mode: {mode}")
