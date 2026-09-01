@@ -115,8 +115,13 @@ RED = "\x1b[31m"
 MAX_STEPS = 40
 
 
-def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
-    """This worktree's plans, as lines, or nothing at all.
+def board_lines(state_dir: Path, workspace: str, rows: list) -> list:
+    """This worktree's plans, as `(line, workspace)` pairs, or nothing at all.
+
+    The pair is the seam's opt-in for an associated agent (`board._hook_lines_owned`): every
+    line here is paired with the workspace it belongs to, which the board reads as a click
+    target and a highlight key. A bare list of strings would still be accepted and own
+    nobody; this plugin pairs so its rows point at their plan's main agent.
 
     Matched on the WORKSPACE NAME and not on the checkout path, which is the one place
     this differs from `list`: the board groups by the name the store holds, that name is
@@ -150,6 +155,12 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
         plan_bad, bad = _defective(v)
         out.append(_header(v, plan_bad or bool(bad)))
         steps = v.get("steps") or []
+        # Item 2, best effort: where a single PR number is on the change record, the open-PR
+        # and merge-PR steps carry it in their board label. A visual nicety only — it never
+        # decides anything, so a record with no number just draws the labels it always did.
+        pr = _pr_number(v)
+        if pr is not None and steps:
+            steps = [_pr_labelled(s, pr) for s in steps]
         if steps:
             # One space, not two: a chart's own cells are padded (`_cell`), so the first name
             # already sits a column in from wherever this block starts.
@@ -162,7 +173,14 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list[str]:
             line = _empty_line(v)
             if line:
                 out.append(" " + line)
-    return out
+    # ITEMS 1 & 3, THE ASSOCIATION. Every line of every plan on this worktree is paired with
+    # the WORKSPACE it was drawn for — the one string this hook is handed, and the one every
+    # plan here was filtered to. That workspace is the plan's main agent's name (`sb delegate`
+    # names an agent and its workspace after each other), so the board turns it into a click
+    # that focuses that agent and a highlight that lights the plan of whichever agent is here
+    # or under the cursor. A plugin that returns bare strings is unchanged; this one opts in
+    # by pairing, and the board reads the pair (`board._hook_lines_owned`).
+    return [(line, workspace) for line in out]
 
 
 def _empty_line(p: dict) -> str:
@@ -187,6 +205,53 @@ def _empty_line(p: dict) -> str:
     if not bits:
         return ""
     return DIM + "  ·  ".join(bits) + PLAIN
+
+
+# The two skeleton steps a single PR number is stamped onto — the open-PR step and the
+# merge step, by their `anchor` (`create-pr` anchors `pr`, `merge` anchors `merge`). Read
+# off the anchor and not the def name, so a hand-authored step anchored the same way is
+# labelled the same way, and a rename of a library def never silently drops the number.
+_PR_STEPS = ("pr", "merge")
+
+
+def _pr_number(p: dict) -> Any:
+    """The single PR number on a change record, or None. Best effort and single-PR only.
+
+    `change.pr` is one `{number, head}` and never a list, so "single PR" is what the record
+    can even hold — there is no multi-PR case to guard against here. Every lookup is guarded
+    because this draws on a board and a malformed record may never be the reason a plan stops
+    drawing; anything but a real number or a non-empty string reads as "no number", and the
+    labels render exactly as they did before the number existed. A bool is refused explicitly
+    — `True` is an `int` to Python and `#True` is not a PR.
+    """
+    change = p.get("change") if isinstance(p.get("change"), dict) else {}
+    pr = change.get("pr") if isinstance(change.get("pr"), dict) else {}
+    n = pr.get("number")
+    if isinstance(n, bool):
+        return None
+    if isinstance(n, int):
+        return n
+    if isinstance(n, str) and n.strip():
+        return n.strip()
+    return None
+
+
+def _pr_labelled(step: dict, pr: Any) -> dict:
+    """A copy of `step` with the PR number appended to its display, if it is a PR step.
+
+    A COPY, never the step in place: `_viewed` hands back dicts that other renderings share,
+    and stamping the number onto one would leak `#123` into `show` and the store. Only a step
+    anchored at the open-PR or merge band is touched; everything else is returned unchanged,
+    so the annotation is confined to the two steps the number is actually about. The label is
+    the step's own board name with ` #<n>` after it — the display, so `_label` draws it
+    straight — and falls back to the bare tag only for the degenerate step with no name at
+    all, which is already drawn `?` and is a defect the number does not make worse.
+    """
+    if str(step.get("anchor") or "").strip() not in _PR_STEPS:
+        return step
+    base = _flat(step.get("display") or step.get("name") or "")
+    tag = f"#{pr}"
+    return {**step, "display": f"{base} {tag}" if base else tag}
 
 
 def _header(p: dict, bad: bool = False) -> str:
