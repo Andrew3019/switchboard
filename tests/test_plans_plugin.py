@@ -5544,6 +5544,37 @@ class HumanFirstCommentTest(PlansSandbox):
         self.assertNotIn("2. Re-read", need)
         self.assertNotIn("3. Decide", need)
 
+    def test_a_single_check_with_a_mid_sentence_number_is_not_shredded(self):
+        """The inline-enumeration split is conservative: it fires only after a sentence
+        boundary, so ONE check whose own prose contains `heading 2.` or `(ticket 4.)` stays a
+        single box rather than being torn into subject-less fragments."""
+        self.data("plugin", "plans", "create", "a styled job",
+                  "--display", "board: a styled job", "--step", "impl = style it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = [
+            "Confirm heading 2. is styled correctly",
+            "Deploy to prod (see ticket 4. section)"]
+        self._save(doc)
+        need = self._md().split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("- [ ] Confirm heading 2. is styled correctly", need)
+        self.assertIn("- [ ] Deploy to prod (see ticket 4. section)", need)
+        # Two checks in, two boxes out — the mid-sentence numbers made no extra box.
+        self.assertEqual(2, need.count("- [ ] "))
+
+    def test_hand_written_checkbox_syntax_is_not_double_boxed(self):
+        """A lead who writes markdown checkbox syntax into a prose string — a bullet then a
+        `[ ]` — gets ONE clean box, not `- [ ] [ ] …`; empty items make no blank box."""
+        self.data("plugin", "plans", "create", "a boxed job",
+                  "--display", "board: a boxed job", "--step", "impl = box it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = ["- [ ] Confirm X", "", "  "]
+        self._save(doc)
+        need = self._md().split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("- [ ] Confirm X", need)
+        self.assertNotIn("[ ] [ ]", need)
+        self.assertNotIn("[ ] -", need)
+        self.assertEqual(1, need.count("- [ ] "))       # the two empty items made no box
+
     def test_nothing_needed_says_so_outright(self):
         """A change whose record ANSWERED the question with none says so, in as many words,
         rather than leaving the section empty for a reader to interpret."""

@@ -6354,31 +6354,36 @@ _NO_HUMAN_ANSWER = ("Not recorded — nobody has written down what a human still
 def _checklist(checks) -> list[str]:
     """`human_checks` as tickable `- [ ]` boxes, whatever shape it was written in.
 
-    A LIST is one box an item, which is the shape `create-pr` is told to write. A STRING is
-    NOT dumped as a markdown block — that was the wall Andrew met at the top of every PR — but
-    split into boxes too: on its newlines first, then on any inline `2.`/`3.`-style
-    enumeration a lead ran together on one line, with the leading bullet or number marker
-    stripped off each piece and the empties dropped. A paragraph in, a checklist out; a lead
-    who ignores the list shape still cannot put prose back in §1. Per-item BREVITY is not this
+    A LIST is one box an item, which is the shape `create-pr` is told to write; empty items
+    are dropped so a stray `""` is not a blank box. A STRING is NOT dumped as a markdown
+    block — that was the wall Andrew met at the top of every PR — but split into boxes too:
+    on its newlines first, then on any inline `2.`/`3.`-style enumeration a lead ran together
+    on one line. That inline split is CONSERVATIVE ON PURPOSE: it fires only where a number
+    follows a SENTENCE BOUNDARY (`reviewer. 2. …`), never mid-clause, so a check whose own
+    prose reads `styled on heading 2.` or `(see ticket 4.)` is left whole rather than
+    shredded into subject-less fragments — §1 is the one section a person walks item by item,
+    and a misleading half-box is worse than one that failed to split. Each piece then loses a
+    single leading bullet, number or `[ ]` marker (a bullet AND a `[ ]` together, for a lead
+    who hand-wrote checkbox syntax) and the empties go. Per-item BREVITY is not this
     function's to enforce — a box holding a run-on sentence is still a box — that is the
     authoring discipline `create-pr` states and `sb presets design-gate` prints.
     """
     if isinstance(checks, list):
-        items = [_flat(x) for x in checks]
+        raw = [str(x) for x in checks]
     else:
-        items = []
+        raw = []
         for line in str(checks).split("\n"):
-            # A single line may still carry `... 2. ... 3. ...` inline; split before each
-            # `N.`/`N)` that follows whitespace, so a leading unnumbered clause keeps its box.
-            for piece in re.split(r"\s+(?=\d+[.)]\s)", line):
-                piece = re.sub(r"^\s*(?:[-*+]|\d+[.)]|\[[ xX]?\])\s*", "", piece).strip()
-                if piece:
-                    items.append(_flat(piece))
+            raw += re.split(r"(?<=[.!?)])\s+(?=\d+[.)]\s)", line)
+    items: list[str] = []
+    for piece in raw:
+        piece = re.sub(r"^\s*(?:[-*+]|\d+[.)])?\s*(?:\[[ xX]?\]\s*)?", "", piece).strip()
+        if piece:
+            items.append(_flat(piece))
     return [f"- [ ] {it}" for it in items]
 
 
 def _need_section(p: dict, steps: list) -> list[str]:
-    """`## What you need to do` — the human-only checks and the open gates, or that none remain.
+    """`## ✅ What you need to do` — the human-only checks and open gates, or that none remain.
 
     Always drawn, because the one thing a person must not have to hunt for is whether the
     change is waiting on them. Empty is itself the answer, said outright — but only where the
@@ -6515,7 +6520,7 @@ def _change_remainder(p: dict, steps: list) -> list[str]:
 
 
 def _detail_record(p: dict, steps: list) -> list[str]:
-    """`## Detailed record` — everything else, collapsed: the shaped plan, and the record's rest.
+    """`## 📋 Detailed record` — everything else, collapsed: the shaped plan, and the record's rest.
 
     The whole of the rendering that used to be the comment, moved under one fold so nothing a
     human could want is gone — only out of the first screenful. A plan brings its status, its
