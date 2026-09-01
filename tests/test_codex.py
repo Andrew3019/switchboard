@@ -59,6 +59,20 @@ class HomeFixture:
 
 
 class CodexHomeTest(HomeFixture, unittest.TestCase):
+    def test_a_fresh_checkout_gets_a_real_switchboard_root_before_spawn(self):
+        """A missing source path makes codex-linux-sandbox reject the whole spawn.
+
+        `write_home` must create the same resolved path that the generated writable-roots
+        grant names, so the first note or brief can be written after the agent starts.
+        """
+        self.assertFalse((self.repo / ".switchboard").exists())
+        home = self.write()
+        resolved = (store.worktree_root(self.repo) / ".switchboard").resolve()
+        roots = [Path(r) for r in self.config(home)["sandbox_workspace_write"]
+                 ["writable_roots"]]
+        self.assertTrue(resolved.is_dir())
+        self.assertIn(resolved, roots)
+
     def test_the_home_carries_everything_a_spawn_needs(self):
         """One directory in place of five Claude Code flags. Every key here was verified
         to parse under `codex --strict-config` and to take effect, not merely be accepted:
