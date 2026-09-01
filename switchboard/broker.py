@@ -135,6 +135,10 @@ DEFAULT_ROLE = config.setting("vocabulary.default_role")
 # `Broker.isolates`). A name, not behaviour: the never-fork rule is in Python and reads
 # this to know which role it applies to.
 REVIEW_ROLE = config.setting("vocabulary.review_role")
+# The read-and-report role. A name, not behaviour: the direct-comm nudge
+# (`spawn.researcher_direct`) is in Python and reads this to know which role, spawned by a
+# top, it applies to.
+RESEARCHER_ROLE = config.setting("vocabulary.researcher_role")
 # States an agent will never move out of on its own — the same `[states]` grouping the
 # readouts use, so "finished" cannot come to mean two different things in two files.
 FINISHED = tuple(config.setting("states.finished"))
@@ -5109,6 +5113,19 @@ class Broker:
             "condition": "dispatcher role and non-empty operator registry",
             "ownership": menu_owner, "included": bool(skills),
             "text": self._say("spawn.operator_menu", menu=menu) if skills else "",
+        })
+        # A researcher spawned by the top dispatcher was spawned on the person's own
+        # instruction and is read directly, so it is nudged to report in its own chat and
+        # `sb block` rather than `done` back up the tree. `is_top(parent)` reads the spawner's
+        # stamp on the live path; on a nameless preview the parent defaults to HUMAN, which is
+        # not top, so the segment shows as a not-included conditional boundary there.
+        direct_source, direct_owner = self._configured_prompt_source("spawn.researcher_direct")
+        direct = role == RESEARCHER_ROLE and self.is_top(parent)
+        segments.append({
+            "kind": "researcher-direct", "source": direct_source,
+            "condition": "researcher role spawned by the top dispatcher",
+            "ownership": direct_owner, "included": direct,
+            "text": self._say("spawn.researcher_direct") if direct else "",
         })
         prompt = as_prompt if as_prompt is not None else resolved_role.prompt
         segments.append({

@@ -74,6 +74,40 @@ roles = "The roles that exist are: {roles}. That is the list `--role` takes. If 
 #   {menu} the registry as one flat "; "-separated line, `description — command`
 operator_menu = "Open your very first message to the human with this offer, whatever else you say. Ask, in these words — Would you like to run any of these? — then list each procedure on its own bulleted line, named by what it does in plain words rather than its raw command, so the person can choose one by meaning; when they choose, run it for them. The procedures, given as name then command: {menu}. Afterwards, raise it again only if someone asks — repeating it unprompted is noise."
 
+# Told ONLY to a researcher spawned DIRECTLY by the top dispatcher — the read-and-report
+# role, spawned by the one agent that acts on nobody's instruction but the person's, so a
+# researcher it spawns is one the person spawned on their own instruction and reads directly.
+# Gated in `effective_instructions` on `role == RESEARCHER_ROLE and is_top(parent)`; a
+# researcher spawned by a lead or worker is an ordinary sub-research and never sees this.
+#
+# A NUDGE, NOT A RULE (Andrew, 2026-09-01: "this shouldn't be a 'hard guideline' but a strong
+# encouragement/nudge ... not load bearing but would be nice if it did what i wanted"). So it
+# is worded as the easy default rather than a prohibition, and it deliberately does not fight
+# the protocol's "finish with `sb done`" line — it says the chat-plus-block shape is what the
+# person wants here, and leaves the agent free. The behaviour it encourages: report findings
+# in the agent's OWN chat and `sb block` so the person reads them directly, skip the `.md`
+# report and the `sb done`/`sb tell` back up to the dispatcher, and — the one thing worth
+# telling the dispatcher — mention it if a worker or lead was spawned to carry out a fix.
+#
+# The person reads a `block` and the parent reads a `done` summary and nothing else, so a
+# researcher that `done`s here has reported to the dispatcher, which then relays to the
+# person: two hops for something the person asked for and will read directly. This closes that.
+#
+# No placeholders — the parent's name is already in the identity fragment and repeating it
+# here would only be one more thing to keep true.
+researcher_direct = """
+The top dispatcher spawned you on the person's own instruction, and they tend to read you
+directly — so the easy default here is to report to THEM, in your own chat, rather than back
+through the dispatcher. Do the research, then write your findings as a message in your own
+chat in the human-facing shape — plain and skimmable — and call `sb block`, so they read it
+there and you wait on them. You need not write a report file; the chat summary is the
+deliverable. You need not `sb done` or `sb tell` the dispatcher your findings either — the
+person handles this with you directly, and after each thing they ask, answering in chat and
+`sb block`ing again fits better than reporting done; they close you when they are finished.
+The one thing worth telling the dispatcher, just for its own information, is if you spawned
+your own worker or lead to carry out a fix the person confirmed.
+"""
+
 # Added only when the agent is being placed in a named workspace.
 #
 # The last sentence came from the deleted `own-files` preset, which every agent used to pay
