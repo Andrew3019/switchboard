@@ -64,6 +64,7 @@ import json
 import os
 import shlex
 import sqlite3
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -101,7 +102,7 @@ def _entry_point(script: str = "sb-stop-hook") -> Path:
 
 
 def settings_file(cwd: Optional[Path] = None) -> Path:
-    """Write (idempotently) the settings JSON that carries both hooks, and return it.
+    """Write (idempotently) the settings JSON that carries our hooks, and return it.
 
     Under the store directory, which is the shared `.git` — never in a worktree, never
     anywhere near `~/.claude`. Keyed by a hash of the gate's absolute path because that
@@ -114,6 +115,7 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
     """
     gate = _entry_point()
     activity = _entry_point("sb-activity-hook")
+    usage_limit = _entry_point("sb-usage-limit-hook")
     tag = hashlib.sha256(str(gate).encode()).hexdigest()[:8]
     d = store.store_dir(cwd) / _SETTINGS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
@@ -160,6 +162,24 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
                                 "statusMessage": "checking for a report…",
                             }
                         ]
+                    }
+                ],
+                # An API-error turn fires StopFailure INSTEAD of Stop. Only rate-limit
+                # failures reach this side-effect hook; it reads the transcript's
+                # structured quota record and records five-hour limits for the collector.
+                "StopFailure": [
+                    {
+                        "matcher": "rate_limit",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f"{shlex.quote(str(usage_limit))} --db {db}"
+                                ),
+                                "timeout": 10,
+                                "statusMessage": "recording usage-limit reset…",
+                            }
+                        ],
                     }
                 ],
             }
@@ -403,10 +423,59 @@ def mark_turn(payload: dict, db: sqlite3.Connection, turn: str) -> Optional[str]
     # survive that turn would waive its later silent stop for work it is no longer doing.
     if turn == store.TURN_WORKING:
         store.clear_wait(db, name)
+        db.execute("UPDATE agents SET usage_limit_reset_at=NULL WHERE name=?", (name,))
+        db.commit()
     store.set_turn(db, name, turn)
     store.log_event(db, kind=("turn_start" if turn == store.TURN_WORKING else "turn_end"),
                     target=name)
     return name
+
+
+def _usage_limit_record(payload: dict) -> Optional[tuple[int, str]]:
+    """The five-hour quota record at the end of this StopFailure transcript."""
+    transcript = payload.get("transcript_path")
+    if not transcript:
+        return None
+    try:
+        with Path(str(transcript)).open(errors="replace") as fh:
+            lines = deque(fh, maxlen=8)
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("isApiErrorMessage") is not True or record.get("error") != "rate_limit":
+            continue
+        limits = record.get("quotaLimits")
+        if not isinstance(limits, dict) or limits.get("rateLimitType") != "five_hour":
+            return None
+        reset_at = limits.get("resetsAt")
+        if isinstance(reset_at, bool) or not isinstance(reset_at, (int, float)):
+            return None
+        return int(reset_at), "five_hour"
+    return None
+
+
+def record_usage_limit(payload: dict, db: sqlite3.Connection) -> Optional[str]:
+    """Persist a Claude five-hour reset from a rate-limit StopFailure. -> agent name."""
+    if payload.get("error") != "rate_limit":
+        return None
+    a = _agent_row(db, payload)
+    if a is None:
+        return None
+    found = _usage_limit_record(payload)
+    if found is None:
+        return None
+    reset_at, rate_limit_type = found
+    db.execute("UPDATE agents SET usage_limit_reset_at=? WHERE name=?",
+               (reset_at, a["name"]))
+    store.log_event(db, kind="usage_limit_recorded", agent=a["name"],
+                    reset_at=reset_at, rate_limit_type=rate_limit_type)
+    return a["name"]
 
 
 def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
@@ -566,6 +635,19 @@ def run_activity(stdin_text: str, db_path: Optional[Path] = None) -> str:
         return guidance.deliver(db, name, repo=_repo()) if name else ""
     except Exception:                            # noqa: BLE001 — a nudge is never worth a turn
         return ""
+    finally:
+        db.close()
+
+
+def run_usage_limit(stdin_text: str, db_path: Optional[Path] = None) -> None:
+    """The Claude StopFailure hook: record a pending five-hour reset, if present."""
+    payload, db = _open(stdin_text, db_path)
+    if db is None:
+        return
+    try:
+        record_usage_limit(payload, db)
+    except Exception:                            # noqa: BLE001 — never trap an agent
+        return
     finally:
         db.close()
 

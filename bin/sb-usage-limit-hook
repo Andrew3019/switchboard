@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Claude StopFailure hook: remember a five-hour reset, and always exit 0."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+
+
+def main() -> int:
+    db = None
+    argv = sys.argv[1:]
+    if "--db" in argv:
+        i = argv.index("--db")
+        if i + 1 < len(argv):
+            db = argv[i + 1]
+    try:
+        from switchboard import hooks
+        hooks.run_usage_limit(sys.stdin.read(), db_path=db)
+    except Exception as e:                       # noqa: BLE001 — never trap an agent
+        print(f"sb-usage-limit-hook: {e}", file=sys.stderr)
+    return 0
+
+
+raise SystemExit(main())

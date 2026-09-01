@@ -61,6 +61,11 @@ an unrelated build being installed. Nothing is imported to do it and no state is
 snapshot it already has says whether anything is waiting, and `DOORBELL_GAP` keeps a
 target that stays busy from costing a process a tick.
 
+The usage-limit resumer is the one narrow exception to that read-only rule: it clears one
+known nullable column before spawning `sb tell`, so a failed tell is not retried every
+tick. It uses raw sqlite against an existing store — never `store.connect`, never schema
+reconciliation — so the long-lived collector still cannot migrate or rebuild the store.
+
 **It cannot become a daemon nobody owns.** Renderers stamp `panel/demand` as they draw,
 and this exits once nothing has looked for `panel.collector_idle_exit` seconds. Closing
 the last panel retires the collector within a minute; opening one starts another.
@@ -84,6 +89,7 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -146,6 +152,8 @@ STATS_RETRY_GAP = 30.0
 # below the `GONE_CONFIRM_GRACE` a death takes to be confirmed in the first place.
 AUTO_RESTORE = config.flag("restore.auto")
 RESTORE_GAP = 60.0
+USAGE_RESUME_BUFFER = 120
+USAGE_RESUME_MESSAGE = "Your 5-hour usage limit has reset — continue where you left off."
 # The environment variables that name WHO is running an `sb` command — `broker.whoami`
 # reads them in this order. They have to come off the automatic sweep's environment, and
 # `tests/test_panel.py` pins this list against `cli._AGENT_SESSION_ENV` so the copy cannot
@@ -205,6 +213,8 @@ class State:
     last_restore: Optional[float] = None
     restore_error: Optional[str] = None
     restored: list = dataclasses.field(default_factory=list)
+    usage_resumes: int = 0
+    usage_resume_error: Optional[str] = None
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -540,6 +550,63 @@ def run_auto_restore(snap, state: State, db_path: Optional[Path]) -> bool:
     return True
 
 
+def run_usage_resume(snap, state: State, db_path: Optional[Path]) -> bool:
+    """Tell agents whose recorded Claude five-hour reset has passed. -> any spawned.
+
+    The pending reset is durable store state, so the collector can disappear while no
+    panel is open and pick the work up on its next tick. Each row is cleared before its
+    tell runs: one failed delivery costs one missed best-effort wake, not a tight loop.
+    """
+    if db_path is None:
+        return False
+    db = None
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True)
+        db.row_factory = sqlite3.Row
+        now = int(panel.now())
+        due = db.execute(
+            "SELECT name, usage_limit_reset_at FROM agents "
+            "WHERE usage_limit_reset_at IS NOT NULL "
+            "AND ? >= usage_limit_reset_at + ? ORDER BY name",
+            (now, USAGE_RESUME_BUFFER),
+        ).fetchall()
+        if not due:
+            return False
+        sb = doorbell_sb()
+        if sb is None:
+            state.usage_resume_error = (
+                "no `sb` in this checkout's `bin/` and none on PATH — "
+                "nothing can resume usage-limited agents"
+            )
+            return False
+        claimed = []
+        for row in due:
+            cur = db.execute(
+                "UPDATE agents SET usage_limit_reset_at=NULL "
+                "WHERE name=? AND usage_limit_reset_at=?",
+                (row["name"], row["usage_limit_reset_at"]),
+            )
+            if cur.rowcount:
+                claimed.append(row["name"])
+        db.commit()
+    except Exception as e:                       # noqa: BLE001 — never fatal to a tick
+        state.usage_resume_error = str(e)[:200]
+        return False
+    finally:
+        if db is not None:
+            db.close()
+
+    state.usage_resumes += len(claimed)
+    for name in claimed:
+        threading.Thread(
+            target=_run_sb,
+            args=(sb, "tell", db_path, state, "usage_resume"),
+            kwargs={"flags": (name, USAGE_RESUME_MESSAGE)},
+            daemon=True,
+        ).start()
+    return bool(claimed)
+
+
 def doorbell_sb() -> Optional[str]:
     """Which `sb` the doorbell runs — THIS build's, not whatever is installed.
 
@@ -668,10 +735,10 @@ def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
 def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
             which: str = "doorbell", *, flags: Sequence[str] = (),
             env: Optional[dict] = None) -> None:
-    """The spawned half, shared by all three triggers. Swallows everything: a trigger that
+    """The spawned half, shared by the collector's triggers. Swallows everything: a trigger that
     fails is a line in the counters, never a collector that dies.
 
-    `which` names the counter the failure lands in — the three are kept apart for the
+    `which` names the counter the failure lands in — they are kept apart for the
     reason `doorbell_error` is kept apart from `last_error`: a reconciler that will not run
     is a different fact from a doorbell that will not, and reporting either as the other
     would be a lie on forty screens.
@@ -745,6 +812,7 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         # anybody can measure.
         if not reaping:
             run_auto_restore(snap, state, db_path)
+        run_usage_resume(snap, state, db_path)
 
     state.wrote_at = at
     panel.publish(paths, panel.envelope(last_good or {}, state.as_dict(),

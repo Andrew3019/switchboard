@@ -221,6 +221,8 @@ CREATE TABLE agents (
     wait_started_at INTEGER,          -- when this wait intent replaced the previous one.
     wait_after_id INTEGER,            -- highest message id already present when the wait
                                       -- was declared; only later mail can satisfy it.
+    usage_limit_reset_at INTEGER,     -- Claude's pending five-hour reset, as epoch seconds.
+                                      -- NULL unless a StopFailure hook recorded one.
     absent_since  INTEGER,            -- epoch of the FIRST reading that found herdr no
                                       -- longer listing this agent, cleared the moment it
                                       -- is listed again. One absent reading is a hiccup;
