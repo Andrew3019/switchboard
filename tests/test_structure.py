@@ -276,10 +276,10 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
     now seeds `spawn`, so that a leaf puts up the review of its own change instead of
     handing that job back to whoever spawned it — a review arranged by the parent gets
     spawned into the parent's checkout, which is not the one the change is in. So `worker`
-    is no longer an example of a bare role; a bare role is one a repo declared without
-    `spawn`, and the gate below is tested through one of those. The 17-children incident
-    is still what the gate is for: what stops it now is the ∩-rule and the prompts, not
-    the absence of the verb.
+    is no longer an example of a bare role, and the gate below is tested through one of
+    the declared kind the entry now points at. The 17-children incident is still what the
+    gate is for: what stops it now is the ∩-rule and the prompts, not the absence of the
+    verb.
     """
 
     def _bare_role(self, name: str = "dogsbody") -> str:
