@@ -36,8 +36,8 @@ DIRECT-path work, requirements already settled, going straight to implement/veri
 land. Not work still being shaped, not an open design question, not investigation. If your
 job turns out to need shaping after all, it moves onto the shaped path and off this tier
 with it. `defaults/models.toml` has the rest at `[tiers.gpt-luna-max-effort]`, and it
-resolves while `[routing] gpt_luna_direct_enabled` is true — false as shipped, true
-in this repo.
+resolves while `[routing] gpt_luna_direct_enabled` is true, which is the shipped
+default.
 
 The prompt below is worker's, deliberately and almost word for word. What a leaf needs
 teaching is how it ENDS, not how to write code — that was worker.md's whole finding and it

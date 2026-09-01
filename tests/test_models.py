@@ -201,21 +201,50 @@ class ModelsTest(unittest.TestCase):
         away instead would make the listing fail on the one row somebody ran the listing to
         look at.
 
-        `gpt-luna-max-effort` is the shipped instance and ships OFF, which is what this
-        asserts against: nothing lands on it until someone turns it on deliberately.
+        `gpt-luna-max-effort` is the shipped instance and ships ON — every repo using sb
+        gets the tier — so what this pins is that a repo can take it away again in one
+        line, and that the refusal names the key to put it back.
         """
         spec = self.load().resolve("gpt-luna-max-effort")
         self.assertEqual((spec.provider, spec.model, spec.effort),
                          ("codex", "gpt-5.6-luna", "max"))
+        self.assertTrue(spec.enabled)
+        self.assertIsNone(spec.gate("worker"))
+
+        self.write_settings("[routing]\ngpt_luna_direct_enabled = false\n")
+        off = self.load().resolve("gpt-luna-max-effort")
+        self.assertFalse(off.enabled)
+        with self.assertRaises(models.ModelConfigError) as cm:
+            off.gate("worker")
+        self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
+
+    def test_a_gate_key_nobody_has_written_reads_as_off_rather_than_failing(self):
+        """FEATURE-FLAG semantics, and the one place this codebase does not raise on a
+        missing setting.
+
+        Every other key raises when absent, because switchboard cannot run not knowing
+        where the store lives. The answer to "is this experiment switched on here" when
+        nobody has said is NO: the tier stops resolving and whoever named it falls back to
+        the role's own tier — what they had before the flag existed. A settings file older
+        than the flag, or one that reset the table, must lose the TIER, not fail to load
+        the whole table.
+
+        A key that IS present and is not a boolean stays an error — that is somebody who
+        wrote the flag and is not getting what they think, and `"false"` in quotes is a
+        non-empty string and therefore true.
+        """
+        self.write_repo('[tiers.mine]\nmodel = "sonnet"\n'
+                        'enabled_by = "routing.nobody_wrote_this"\n')
+        spec = self.load().resolve("mine")
         self.assertFalse(spec.enabled)
         with self.assertRaises(models.ModelConfigError) as cm:
             spec.gate("worker")
-        self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
+        self.assertIn("routing.nobody_wrote_this", str(cm.exception))
 
-        self.write_settings("[routing]\ngpt_luna_direct_enabled = true\n")
-        on = self.load().resolve("gpt-luna-max-effort")
-        self.assertTrue(on.enabled)
-        self.assertIsNone(on.gate("worker"))
+        self.write_settings('[routing]\nnobody_wrote_this = "false"\n')
+        with self.assertRaises(models.ModelConfigError) as cm:
+            self.load()
+        self.assertIn("true or false", str(cm.exception))
 
     def test_a_tier_can_be_kept_off_named_roles(self):
         """`forbidden_roles` is checked against the role, not against who typed the name.

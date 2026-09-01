@@ -355,15 +355,31 @@ def _enabled(tier: str, key: Optional[str], repo: Optional[Path]) -> bool:
     Read at LOAD, where the repo whose settings layer applies is in hand — `ModelSpec` is
     frozen and a spec that re-read config every time it was asked would be a second place
     the answer could differ from the one the spawn used.
+
+    A MISSING KEY IS OFF, not an error, and that is the whole shape of a feature flag: the
+    tier stops resolving and whoever named it falls back to the role's own tier, which is
+    what they would have had before the flag existed. Every other setting in this codebase
+    raises when it is absent, and rightly — switchboard cannot run without knowing where
+    the store lives. This one it can: the answer to "is this experiment switched on here"
+    when nobody has said is NO. That matters for a config file older than the flag, a
+    `SWITCHBOARD_DEFAULTS` pointed somewhere else, or a repo that `"!reset"` the table —
+    none of which should take the whole tier table down with a ConfigError.
+
+    A key that IS there and is not a boolean is still an error, and a separate one: someone
+    wrote the flag and it is not doing what they think. `"false"` in quotes is a non-empty
+    string and therefore true, which is the exact trap `config.flag` exists to name.
     """
     if not key:
         return True
-    try:
-        return config.flag(key, repo=repo)
-    except config.ConfigError as e:
+    value = config.setting(key, None, repo=repo)
+    if value is None:                       # nobody has said; TOML has no null, so absent
+        return False
+    if not isinstance(value, bool):
         raise ModelConfigError(
-            f"tier '{tier}' is gated on setting '{key}', which is not a usable "
-            f"true/false: {e}") from e
+            f"tier '{tier}' is gated on setting '{key}', which must be true or false, got "
+            f"{value!r} — a quoted \"true\"/\"no\" is a string, and every non-empty "
+            f"string is true")
+    return value
 
 
 def _read(path: Path) -> dict:
