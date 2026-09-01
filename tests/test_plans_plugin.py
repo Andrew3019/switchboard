@@ -6075,9 +6075,59 @@ class LandingMergeTest(PlansSandbox):
             code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42", "--json")
 
         self.assertNotEqual(code, 0)
-        self.assertIn("no human landing approval", json.loads(out)["data"]["error"])
+        self.assertIn("no landing authority to merge against", json.loads(out)["data"]["error"])
         self.assertFalse(gh.box["merged"])
         # It refused before it even asked GitHub anything.
+        self.assertFalse([c for c in gh.seen if list(c[:2]) == ["gh", "api"]])
+
+    def test_standing_merge_lands_without_human_approval_and_records_its_authority(self):
+        """A standing landing needs no human approval: the recorded PR head becomes the
+        anchor, and the record says which agent took that authority."""
+        self.approved(landing=None)
+        self.as_agent("standing-agent")
+        with self.github() as gh:
+            data = self.data("plugin", "plans", "merge", "p-1", "--pr", "42",
+                             "--standing")
+
+        self.assertTrue(data["merged"])
+        self.assertTrue(gh.box["merged"])
+        landing = self.landing()
+        self.assertEqual(landing["kind"], "standing")
+        self.assertEqual(landing["by"], "standing-agent")
+        self.assertEqual(landing["head"], self.HEAD)
+
+    def test_standing_merge_still_refuses_when_the_live_head_moved(self):
+        """Standing authority relaxes only the missing human approval; a live PR head that
+        moved away from the recorded head still fails closed before GitHub merges it."""
+        self.approved(landing=None)
+        self.as_agent("standing-agent")
+        with self.github(head=self.OTHER) as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42",
+                                   "--standing", "--json")
+
+        self.assertNotEqual(code, 0)
+        data = json.loads(out)["data"]
+        self.assertFalse(data["merged"])
+        self.assertEqual(data["expected"], self.HEAD)
+        self.assertEqual(data["found"], self.OTHER)
+        self.assertIn("REFUSING TO MERGE", data["error"])
+        self.assertFalse(gh.box["merged"])
+        self.assertFalse([c for c in gh.seen if "PUT" in [str(a) for a in c]])
+
+    def test_standing_merge_refuses_without_a_recorded_pr_head(self):
+        """Without `change.pr.head`, standing authority has no anchor for its evidence
+        checks, so it refuses before asking GitHub anything."""
+        self.approved(landing=None, pr={"number": 42})
+        self.as_agent("standing-agent")
+        with self.github() as gh:
+            code, out, _ = self.sb("plugin", "plans", "merge", "p-1", "--pr", "42",
+                                   "--standing", "--json")
+
+        self.assertNotEqual(code, 0)
+        error = json.loads(out)["data"]["error"]
+        self.assertIn("a standing (agent-decided) landing has no head to anchor", error)
+        self.assertIn("`change.pr.head`, the head the PR was recorded at, is missing", error)
+        self.assertFalse(gh.box["merged"])
         self.assertFalse([c for c in gh.seen if list(c[:2]) == ["gh", "api"]])
 
     # -- it lands --------------------------------------------------------------
@@ -6106,6 +6156,7 @@ class LandingMergeTest(PlansSandbox):
         # The landing approval a human gave is untouched; only the outcome was added.
         self.assertEqual(self.landing()["by"], "andrew")
         self.assertEqual(self.landing()["head"], self.HEAD)
+        self.assertEqual(self.landing().get("kind", "human"), "human")
 
     def test_merging_closes_the_skeleton_it_has_just_confirmed(self):
         """The landing half of the same fix. By this point every head on the record has been
