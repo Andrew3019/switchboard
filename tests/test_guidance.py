@@ -322,6 +322,37 @@ class DiscoverabilityTest(Fixture, unittest.TestCase):
         store.seed_capabilities(self.db, "w1", ["spawn"])
         self.assertNotIn("isolation-at-the-spawn", ids("w1", command="delegate"))
 
+    def test_the_direct_path_tier_is_offered_at_the_spawn_and_only_to_a_spawner(self):
+        """`gpt-luna-max-effort` is chosen at a spawn or never — the model is written
+        before the child's shell launches and `restore` reuses the stored tier — so the
+        one moment this can be acted on is `sb delegate`, and an agent that cannot spawn
+        is never told about a tier it has no way to name."""
+        self.agent("lead-x", role="lead")
+        store.seed_capabilities(self.db, "lead-x", ["spawn"])
+        ids = lambda who, **kw: [r.id for r in guidance.resolve(self.db, who, **kw)]  # noqa: E731
+        self.assertNotIn("direct-path-tier-at-the-spawn", ids("lead-x"))
+        self.assertIn("direct-path-tier-at-the-spawn", ids("lead-x", command="delegate"))
+
+        self.agent("r1", role="researcher")
+        store.seed_capabilities(self.db, "r1", [])
+        self.assertNotIn("direct-path-tier-at-the-spawn", ids("r1", command="delegate"))
+
+    def test_the_direct_path_tier_is_said_at_every_delegate_and_not_just_the_first(self):
+        """`every-time`, against the ledger's own default, and the decision worth pinning:
+        a dispatcher makes this choice once per issue it hands out, so a rule that fired
+        on its first-ever delegate and never again would be the weak version of it. The
+        rows keyed on the same verb beside it are `once`; this one is deliberately not."""
+        self.agent("d1", role="dispatcher")
+        store.seed_capabilities(self.db, "d1", ["spawn"])
+        said = lambda: guidance.deliver(self.db, "d1", command="delegate", repo=self.repo)  # noqa: E731
+        first, second = said(), said()
+        self.assertIn("gpt-luna-max-effort", first)
+        self.assertIn("gpt-luna-max-effort", second)
+        # The `once` row keyed on the same verb, for contrast: said on the first delegate
+        # of this agent's life and never again.
+        self.assertIn("WHO OWNS IT", first)
+        self.assertNotIn("WHO OWNS IT", second)
+
     def test_a_command_keyed_rule_names_a_verb_that_actually_carries_the_key(self):
         """The failure mode the ledger header warns about: a rule keyed on a verb outside
         `cli.STATE_COMMANDS` never fires, and nobody notices because a nudge that is never

@@ -210,3 +210,48 @@ command = "delegate"
 holds = ["spawn"]
 repeat = "once"
 text = "`sb delegate` takes the task as an argument, and that is right whenever you have the task. When you do NOT — somebody said they would give this agent its context themselves, or you are spawning ahead of a brief you are still waiting on — omit the argument entirely: `sb delegate --role lead --name <topic>` spawns the child holding an instruction to wait, and it stays out of STALLED until your first `sb tell` reaches it. Never pass a bare topic label as the task; a child reads whatever you pass as the whole of its instruction and starts on it."
+
+
+# THE DIRECT-PATH TIER, SAID AT THE ONE MOMENT IT CAN BE ACTED ON (2026-09-01, Andrew).
+# `gpt-luna-max-effort` shipped on by default for every sb repo (PR #255) and nobody used
+# it, for a structural reason rather than a wording one: the model is written before the
+# child's shell launches (`Broker._spawn_env`), never re-read, and `restore` deliberately
+# reuses the STORED tier — so a model is fixed at a spawn, by the actor with the least
+# context, and no later turn can move an agent onto the tier. Selection stays explicit by
+# design (nothing infers "this work is direct" and swaps a model); this row is what tells
+# the spawner the choice is theirs and is available now or not at all.
+#
+# A NEW ROW RATHER THAN A REWORD OF `delegate-to-a-lead`, which the header's prefer-
+# rewording rule would otherwise ask for — that row fires at exactly this moment and
+# already covers "role and model names come from this repo". The reword fails silently:
+# it is `repeat = "once"` and its own comment says the id is deliberately never renamed,
+# because renaming re-arms it for every agent already told it. So an edit to its text
+# would reach only agents that have not yet run their first `sb delegate` — nearly none of
+# a running fleet. A new id is the only way this arms at all, and it fires on the same
+# moment rather than adding one.
+#
+# `every-time`, which the header warns about and which is bought here by keeping the text
+# to three sentences and no longer than the rows around it. `once` would tell a long-lived
+# dispatcher on its first-ever delegate and never again, while the choice recurs on every
+# issue it dispatches; that is the weak version of the nudge Andrew asked to be strong.
+# `holds = ["spawn"]` keeps it off every agent that could not act on it, and
+# `category = "models"` is its own dial, so an agent that genuinely never picks a tier
+# can turn this one down without turning down the rest of the ledger.
+#
+# IT FIRES AFTER THE SPAWN, like every `command` row (`cli._state_output`), so the text is
+# written to land on the NEXT one and says so in its first four words. That is the right
+# trade for an agent that spawns repeatedly — dispatchers and leads — and it costs a
+# one-shot spawner one line.
+#
+# WHAT THE TEXT WILL NOT SAY: that the tier is available. A repo can switch it off in one
+# line (`[routing] gpt_luna_direct_enabled = false`) and would then be told to type a name
+# that refuses, so it points at `sb models` the way the row above does. It names `worker`
+# and `builder` positively instead of reciting the refused roles — `--role reviewer
+# --model gpt-luna-max-effort` is refused by the gate, so nobody has to remember it.
+[[rule]]
+id = "direct-path-tier-at-the-spawn"
+command = "delegate"
+holds = ["spawn"]
+repeat = "every-time"
+category = "models"
+text = "At your next spawn, the model: it is fixed there and nowhere else — `restore` reuses the stored tier, so nothing moves an agent onto another one later. A plainly DIRECT implementation job — behaviour, scope and a reasonable approach already clear, or a change too small to reach a review — is what `--model gpt-luna-max-effort` is for, on a `worker` or `builder`: the cheap model at maximum effort (`sb models` for what this repo offers). Shaped work, an open design question, an investigation, or any spawn you are unsure of stays on the default."
