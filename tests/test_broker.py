@@ -1244,6 +1244,94 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(len(self.h.prompts), 1)
         self.assertIn("new run", self.h.prompts[0][1])
 
+    def _resumed_child(self, parent: str, name: str, summary: str = "first pass") -> None:
+        """A child that reported `done`, was told something, and is taking a turn again.
+
+        The exact shape both bug reports were filed about, driven rather than hand-stamped
+        so it carries the fault the real one does: `done` writes the terminal row, the
+        `Stop` hook closes that turn, the `tell` pokes it, and `UserPromptSubmit` starts the
+        next. Nothing rewrites `state` or `ended_at` until the child itself runs an `sb`
+        command (`_revive`), so the row still reads `done` with an `ended_at` on it while the
+        agent works — which is the whole of the bug.
+        """
+        from switchboard import hooks
+        p = {"session_id": f"sess-{name}"}
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+        self.b.done(summary, me=name)
+        hooks.mark_turn(p, self.db, store.TURN_IDLE)
+        self.b.tell([name], "one more thing", me=parent)
+        hooks.mark_turn(p, self.db, store.TURN_WORKING)
+        self.h.prompts.clear()
+
+    def test_a_child_working_again_after_a_tell_is_waitable(self):
+        """The bug: `sb status` drew the child `working` and `sb waiting --all` refused it
+        as "needs at least one live child" in the same second, so the parent that had just
+        revived it had no legal way to end its turn on it."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p1", session_id="sess-kid")
+        self.h.states_by_name = {"lead": "idle", "kid": "working"}
+        self._resumed_child("lead", "kid")
+
+        self.assertEqual(store.get_agent(self.db, "kid")["state"], "done")   # still stale
+        self.assertEqual(self.b.waiting(mode="all", me="lead")["cohort"], ["kid"])
+
+        self.b.done("second pass", me="kid")
+        self.assertEqual(len(self.h.prompts), 1)          # and the wait wakes on it
+        self.assertIn("[done] second pass", self.message_bodies("lead"))
+        self.assertIsNone(store.wait_for(self.db, "lead"))
+
+    def test_a_child_that_finished_and_stayed_finished_is_still_refused(self):
+        """The guard the fix must not spend. A terminal row whose turn really ended is a
+        child nothing is coming from, and naming it is still a wait on nothing."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p1", session_id="sess-kid")
+        self.h.states_by_name = {"lead": "idle", "kid": "idle"}
+        self._resumed_child("lead", "kid")
+        from switchboard import hooks
+        hooks.mark_turn({"session_id": "sess-kid"}, self.db, store.TURN_IDLE)
+
+        with self.assertRaises(ValueError) as e:
+            self.b.waiting(mode="any", cohort=["kid"], me="lead")
+        self.assertIn("already finished", str(e.exception))
+
+    def test_all_holds_while_a_resumed_member_is_still_working(self):
+        """The other half, and the one a cohort of one cannot show: with the stale row read
+        as terminal, the sibling's result alone satisfied `--all` and woke the parent over a
+        child that was still going."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        for name in ("resumed", "live"):
+            store.create_agent(self.db, name=name, role="worker", parent="lead",
+                               pane_id=f"w1:{name}", session_id=f"sess-{name}")
+        self.h.states_by_name = {"lead": "idle", "resumed": "working", "live": "working"}
+        self._resumed_child("lead", "resumed")
+
+        self.assertEqual(sorted(self.b.waiting(mode="all", me="lead")["cohort"]),
+                         ["live", "resumed"])
+        self.b.done("sibling first", me="live")
+        self.assertEqual(self.h.prompts, [])              # `resumed` has not reported
+        self.b.done("and me", me="resumed")
+        self.assertEqual(len(self.h.prompts), 1)
+        self.assertIn("[done] and me", self.h.prompts[0][1])
+
+    def test_the_wait_snapshot_refuses_a_resumed_member_whose_turn_has_since_ended(self):
+        """`set_wait`'s recheck, on the one signal it can trust while holding the write
+        lock. The broker validated against herdr a moment earlier; a resumed child whose
+        `Stop` has landed since has already written its result under the watermark, and a
+        wait declared on it would never wake."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p1", session_id="sess-kid")
+        self.h.states_by_name = {"lead": "idle", "kid": "working"}
+        self._resumed_child("lead", "kid")
+        store.set_turn(self.db, "kid", store.TURN_IDLE)     # the race the recheck closes
+
+        with self.assertRaises(ValueError) as e:
+            store.set_wait(self.db, "lead", "all", ["kid"], resumed=["kid"])
+        self.assertIn("no longer a live direct child", str(e.exception))
+        self.assertIsNone(store.wait_for(self.db, "lead"))
+
     def test_an_ordinary_instruction_supersedes_a_cohort_wait(self):
         store.create_agent(self.db, name="lead", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="lead")

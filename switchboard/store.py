@@ -2624,10 +2624,36 @@ def mark_delivered(db: sqlite3.Connection, to_agent: str) -> int:
 
 
 def set_wait(db: sqlite3.Connection, name: str, mode: str,
-             cohort: Optional[Iterable[str]] = None) -> None:
+             cohort: Optional[Iterable[str]] = None,
+             resumed: Optional[Iterable[str]] = None) -> None:
+    """Record one wait, rechecking the cohort under the watermark's own write lock.
+
+    `resumed` names the members the CALLER proved are working again despite a terminal row
+    — a child that reported `done` and was then told something, whose row nothing rewrites
+    until the child itself runs an `sb` command (`Broker._still_going` is where that proof
+    is made, and why it cannot be made here: it needs herdr, and this holds a write lock).
+    For those names the state columns are known to be stale, so judging them by the two
+    columns below would refuse exactly the cohort the caller just validated.
+
+    They are still rechecked, on the one signal this transaction can trust: `turn`, which
+    the agent's own `Stop` hook writes at the end of a turn. A resumed child whose turn has
+    since ended reads `idle` here and the wait is refused, which is the same race the
+    stored-state recheck below closes for an ordinary live child.
+
+    ONE NARROWER WINDOW SURVIVES, and it is stated rather than chased. `sb done` writes the
+    state synchronously; the `Stop` hook writes `turn` afterwards, from its own process, so
+    the two are never one edge. A resumed child that reports between the caller's check and
+    this one therefore still reads `working` here, the wait is accepted, and its result is
+    already under the watermark — so nothing wakes the parent until `wake_expired_waits`
+    pings it. How wide that window is has not been measured and no number is claimed for it;
+    what bounds the cost is that it is self-healing, which is why the cheaper recheck is
+    taken. DESIGN-TRUTH: a rare low-impact issue does not justify a large complex fix merely
+    because it can be imagined.
+    """
     if mode not in ("background", "any", "all"):
         raise ValueError(f"bad wait mode: {mode}")
     cohort_names = list(cohort or ())
+    resumed_names = set(resumed or ())
     members = None if mode == "background" else json.dumps(cohort_names)
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -2636,11 +2662,15 @@ def set_wait(db: sqlite3.Connection, name: str, mode: str,
         # fail, not become an old result the new wait can never observe.
         for child_name in cohort_names:
             child = db.execute(
-                "SELECT parent, state, ended_at FROM agents WHERE name=?",
+                "SELECT parent, state, ended_at, turn FROM agents WHERE name=?",
                 (child_name,),
             ).fetchone()
-            if (child is None or child["parent"] != name
-                    or child["state"] not in LIVE_STATES or child["ended_at"] is not None):
+            if child is None or child["parent"] != name:
+                raise ValueError(f"{child_name} is no longer a live direct child of {name}")
+            still_live = (child["turn"] == TURN_WORKING if child_name in resumed_names
+                          else (child["state"] in LIVE_STATES
+                                and child["ended_at"] is None))
+            if not still_live:
                 raise ValueError(f"{child_name} is no longer a live direct child of {name}")
         watermark = db.execute("SELECT COALESCE(MAX(id), 0) n FROM messages").fetchone()["n"]
         db.execute(
