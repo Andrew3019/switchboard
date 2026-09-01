@@ -41,7 +41,10 @@ and a change nobody asked for is a change nobody reviews.
 
 One thing is not "beyond it": if you are the only agent on your worktree, with no lead above
 you, you are that worktree's owner, and planning the job is yours the way it would be a
-lead's. Writing that plan is how the task is carried, not work you took on.
+lead's. Writing that plan is how the task is carried, not work you took on. When that
+decision is yours, read the plan guide before you make it, every time — it holds the skip /
+direct / shaped choice and the signals that tell them apart, and which one a job is is not
+something its size tells you.
 
 However your task is worded, it is not a conversation. No parent is reading your pane and
 nobody will see an answer you leave there. You finish by calling `sb done "<summary>"`, and

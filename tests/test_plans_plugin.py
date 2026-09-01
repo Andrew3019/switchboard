@@ -2129,6 +2129,9 @@ class CatalogueTest(PlansSandbox):
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "change-approval")
         self.assertIsNone(self.steps()[0]["gate"])
+        # The approved contract goes in `output` before the step can be ticked — see
+        # test_a_change_approval_cannot_be_ticked_with_an_empty_output below.
+        self.edit_step("s-1", output="the approved change contract")
         self.ok("plugin", "plans", "tick", "s-1", "--reason", "he approved it")
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
 
@@ -2151,13 +2154,47 @@ class CatalogueTest(PlansSandbox):
 
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "change-approval")
-        self.edit_step("s-1", gate="Andrew approves the change contract for this job.")
+        self.edit_step("s-1", gate="Andrew approves the change contract for this job.",
+                       output="the approved change contract")
         self.ok("plugin", "plans", "tick", "s-1", "--reason", "he approved it")
         self.assertIn("already done", self.ok("plugin", "plans", "validate", "p-1"))
 
         # And the emptying the definition asks for is what clears it.
         self.edit_step("s-1", gate=None)
         self.assertIn("no defects", self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_a_change_approval_cannot_be_ticked_with_an_empty_output(self):
+        """`skip`'s `--why` rule from the other side, and the enforcement Andrew asked for.
+
+        The approved contract lives in `output`, put there as the gate clears, so an empty
+        `output` on a change-approval step is a change approval that never happened — and
+        two of four eval plans shipped exactly that, a step ticked with nobody's sign-off in
+        it. `tick` refuses it at the door, where the message says what to write, the same way
+        `skip` refuses with no reason. The refusal is for THIS def alone: a freeform step
+        ticks with no `output`, and a trivially small change SKIPS the gate with a reason."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
+        self.data("plugin", "plans", "name-step", "p-1", "change-approval")
+        self.edit_step("s-1", gate="Andrew approves the change contract for this job.")
+
+        code, out, _ = self.sb("plugin", "plans", "tick", "s-1", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("output", json.loads(out)["data"]["error"])
+        self.assertEqual(self.steps()[0]["progress"], "open")   # and nothing moved
+
+        # With the approved text in `output`, the same tick lands.
+        self.edit_step("s-1", output="the approved change contract")
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "he approved it")
+        self.assertEqual(self.steps()[0]["progress"], "done")
+
+    def test_the_output_refusal_is_for_the_approval_def_alone(self):
+        """The refusal is scoped to `change-approval`, not to `output` in general: a freeform
+        work step ticks with an empty `output` exactly as it always has, and only the shaped
+        path's approval step is held to having the approved text on it before it closes."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job",
+                "--step", "impl = build it")
+        self.assertIsNone(self.steps()[0]["output"])
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "built it")
+        self.assertEqual(self.steps()[0]["progress"], "done")
 
     def test_a_definition_that_both_composes_and_obliges_is_refused(self):
         """An obligation attaches to a step, and a composite is not a step in a plan — only
@@ -2716,6 +2753,9 @@ class CatalogueTest(PlansSandbox):
                                       by_def["review"]["id"], "--json"))
         self.assertEqual(released["data"].get("next", []), [],
                          "the review alone does not release the PR")
+        # The approval carries its approved text before it can be ticked — see
+        # test_a_change_approval_cannot_be_ticked_with_an_empty_output.
+        self.edit_step(approval, output="the approved change contract")
         after = json.loads(self.ok("plugin", "plans", "tick", approval, "--json"))
         self.assertEqual([s["def"] for s in after["data"]["next"]], ["create-pr"],
                          "the PR is released only once BOTH the review and the approval are done")

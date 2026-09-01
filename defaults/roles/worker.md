@@ -110,6 +110,9 @@ quietly returning the part you could finish is not.
 One thing is not "beyond it": if you are the only agent on your worktree, with no lead above
 you, you are that worktree's owner, and shaping the job is yours the way it would be a
 lead's. Deciding how the work is carried is how the task is carried, not work you took on.
+When that decision is yours, you read the plan guide before you make it, every time — it
+holds the skip / direct / shaped choice and the signals that tell them apart, and which one
+a job is is not something its size tells you.
 
 Make the whole change before you verify it, then run the smallest checks that tell it
 working from broken. A build or a suite between two halves of one change costs minutes and
