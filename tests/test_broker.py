@@ -322,11 +322,11 @@ def reap_gone(db, h):
 class BrokerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        # `.resolve()`, because the code under test resolves the paths it reports (see
-        # `_refuse_outside_main_checkout`). On macOS the temp root is `/var/...`, a
-        # symlink to `/private/var/...`, so an assertion built from an unresolved
-        # `self.repo` compares the two spellings of one path — and only passes there
-        # because `/var/X` happens to be a substring of `/private/var/X`.
+        # `.resolve()`, because the code under test resolves the main checkout before it
+        # names it (see `_refuse_outside_main_checkout`). On macOS the temp root is
+        # `/var/...`, a symlink to `/private/var/...`, so an assertion built from an
+        # unresolved `self.repo` compares the two spellings of one path — and only passes
+        # there because `/var/X` happens to be a substring of `/private/var/X`.
         self.repo = Path(self.tmp.name).resolve()
         # Point the global model config at a path inside the temp repo, i.e. at nothing.
         # Without this, a models.toml in the developer's own ~/.config decides what tier
