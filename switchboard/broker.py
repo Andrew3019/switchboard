@@ -56,7 +56,8 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import GONE_CONFIRM_GRACE, GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE, fmt_age
+from .status import (GONE_CONFIRM_GRACE, GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE,
+                     fmt_age, working_again)
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -6218,6 +6219,41 @@ class Broker:
         """
         return store.unread_for(self.db, me or self.whoami(), mark=not peek)
 
+    def _still_going(self, row) -> bool:
+        """Is this child still going — asked of the LIVE reading, not of the stored word.
+
+        THE WHOLE OF THE WAITING FIX, and it is one sentence: `sb tell` to a child that has
+        reported `done` wakes it and it works again, but nothing writes that down until the
+        child itself runs an `sb` command (`_revive`, deliberately lazy). Between the poke
+        and that command the row still says `done` with an `ended_at` on it, and a cohort
+        built from those two columns refuses the one child that is demonstrably working —
+        so the parent that was told to `sb waiting --all` had no legal way to end its turn
+        at all. `sb status` had already stopped believing the stored word for exactly this
+        case (`status.display_state`); this is the same reading, from the same function, so
+        the two cannot say different things about one row.
+
+        Cheap in the common case: a row that is `working` or `blocked` and unended answers
+        without asking herdr anything. Only a terminal row costs the probe, and
+        `_agent_states` is cached per `sb` process.
+
+        `pane_id` is required before herdr's list is consulted, the guard `_alive` makes:
+        `cleanup` clears the pane id in the same breath it closes the pane, and herdr's own
+        reaper can lag that by minutes, so a closed row must not be read back as alive off a
+        stale listing.
+
+        NOT the identity guard `status.collect` runs — herdr's `agent list` is
+        machine-global and a name can belong to another checkout's fleet. Two coincidences
+        are needed to be wrong here rather than one (our own `turn` stuck at `working` AND a
+        stranger wearing the name), and the cost is a wait that the 30-minute expiry ping
+        clears, so the cheaper reading is taken deliberately.
+        """
+        if row["state"] not in FINISHED and row["ended_at"] is None:
+            return True
+        states = self._agent_states()
+        alive = None if states is None else (
+            bool(row["pane_id"]) and row["name"] in states)
+        return working_again(row["state"], _column(row, "turn"), alive)
+
     def waiting(self, *, mode: str = "background", cohort: Iterable[str] = (),
                 me: Optional[str] = None) -> dict:
         """Record an intentional end-of-turn wait without blocking a person.
@@ -6225,6 +6261,11 @@ class Broker:
         A background wait has no Switchboard wake condition: the provider or background
         task will produce the next turn. ``any`` and ``all`` snapshot live direct children
         now, so an old result or an unrelated agent cannot satisfy a later wait.
+
+        LIVE children, and `_still_going` is what that word means: a child that reported
+        `done` and has since been told something is working again, and is waitable, however
+        stale its row still reads. See that method for why the stored word is not the
+        answer.
         """
         me = me or self.whoami()
         if me == HUMAN or store.get_agent(self.db, me) is None:
@@ -6232,13 +6273,14 @@ class Broker:
         if mode not in ("background", "any", "all"):
             raise ValueError(f"no such wait mode: {mode}")
         members: list[str] = []
+        resumed: list[str] = []
         if mode != "background":
             requested = list(cohort)
             if requested:
                 members = [self._resolve(name, me) for name in requested]
             else:
                 members = [r["name"] for r in store.children_of(self.db, me)
-                           if r["state"] not in FINISHED and r["ended_at"] is None]
+                           if self._still_going(r)]
             if not members:
                 raise ValueError(f"`sb waiting --{mode}` needs at least one live child")
             if len(set(members)) != len(members):
@@ -6247,16 +6289,37 @@ class Broker:
                 child = store.get_agent(self.db, name)
                 if child is None or child["parent"] != me:
                     raise ValueError(f"{name} is not a direct child of {me}")
-                if child["state"] in FINISHED or child["ended_at"] is not None:
+                if not self._still_going(child):
                     raise ValueError(f"{name} is already finished; declare a live cohort")
+                # Which members passed on the LIVE reading rather than on the stored word.
+                # `set_wait` re-checks the cohort under its own write lock and cannot ask
+                # herdr from there, so it is told which names it must not judge by the two
+                # columns that are, for these, known to be stale.
+                if child["state"] in FINISHED or child["ended_at"] is not None:
+                    resumed.append(name)
         elif list(cohort):
             raise ValueError("plain `sb waiting` takes no cohort; use --any or --all")
-        store.set_wait(self.db, me, mode, members)
-        store.log_event(self.db, kind="waiting", agent=me, mode=mode, cohort=members)
+        store.set_wait(self.db, me, mode, members, resumed=resumed)
+        store.log_event(self.db, kind="waiting", agent=me, mode=mode, cohort=members,
+                        resumed=resumed or None)
         return {"mode": mode, "cohort": members}
 
     def _wait_ready(self, who: str, mine: Sequence[sqlite3.Row]) -> tuple[bool, Optional[dict]]:
-        """Whether pending mail causally satisfies this agent's explicit wait."""
+        """Whether pending mail causally satisfies this agent's explicit wait.
+
+        `--all` needs every member finished, and "finished" is `_still_going`'s question
+        read the other way round, for `waiting`'s reason: a member that reported `done`,
+        was told something and is working again has a stale terminal row, and counting it
+        as finished wakes the parent while that child is still going.
+
+        A CAUSAL RESULT SETTLES IT FIRST, and that ordering is load-bearing rather than an
+        optimisation. A child's `done` reaches here from inside `done` itself, before its
+        `Stop` hook has written `turn=idle`, so the live reading still says "working" for
+        the second or two in between — and the member that just reported would not count
+        towards its own cohort. Its result is the strongest evidence there is that it
+        finished, so it is believed, and `_still_going` is only asked about the members
+        that have said nothing.
+        """
         wait = store.wait_for(self.db, who)
         if wait is None:
             return True, None
@@ -6276,7 +6339,9 @@ class Broker:
         terminal = set()
         for name in cohort:
             row = store.get_agent(self.db, name)
-            if row is not None and (row["state"] in FINISHED or row["ended_at"] is not None):
+            if row is None:
+                continue
+            if name in results or not self._still_going(row):
                 terminal.add(name)
         return bool(cohort) and terminal == cohort and bool(results), wait
 
@@ -8233,8 +8298,18 @@ class Broker:
             # already running, all three attempts, and the tab created ahead of that was
             # left behind — one orphan empty pane per attempt to restore something that
             # never went away.
+            # THE WORD "running" IS ABOUT THE PANE, and the message says so because the
+            # three liveness readouts reading as though they disagreed is a thing Andrew
+            # filed. `sb status` answers about the TURN, `sb waiting` about whether a
+            # child's result is still to come, and this one about whether there is a
+            # session to bring back — so a `done` row with its pane still open truthfully
+            # gets `done`, a waitable cohort seat and `already running`, all at once.
+            # Naming which question this is costs a clause and stops the reader having to
+            # work it out from three commands.
             raise ValueError(
-                f"{name} is already running — nothing to restore. "
+                f"{name} is already running — nothing to restore. Its pane is still open, "
+                f"whatever its STATE column says: a terminal word there is a report about "
+                f"the task, not a missing session. "
                 f"To reach it: sb inspect {name}, or sb tell {name} \"...\""
             )
         # And never back into a workspace that is being taken apart. Restoring is the

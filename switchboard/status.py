@@ -440,6 +440,35 @@ DONE_TO_THE_AGENT = (
 HUMAN = config.setting("vocabulary.human")
 
 
+def working_again(state: Optional[str], turn: Optional[str],
+                  alive: Optional[bool]) -> bool:
+    """Is a row whose stored word is TERMINAL OR BLOCKED taking a turn right now?
+
+    The one definition of "the store's word is stale and the agent is working again", read
+    by everything that has to tell a revived agent from a finished one. `display_state`
+    drew this reading and `Broker.waiting` did not — it went on believing the stored word —
+    and that is exactly the disagreement Andrew reported: `sb status` said `working`, `sb
+    waiting --all` said "needs at least one live child", about the same child in the same
+    second. It is a function so that there is nowhere left for a third reader to disagree
+    from.
+
+    `state` is a SELF-REPORT about the task and it stays terminal until the agent's next
+    `sb` command reopens it (`broker._revive`), which is lazy and may never come. `turn` is
+    not lazy: `UserPromptSubmit` wrote `working` the moment the agent was poked. So our own
+    turn edge, corroborated by herdr still having the pane, outranks the stale word.
+
+    `alive is True`, not merely truthy: `None` is "herdr could not be asked", and nothing
+    unobserved may contradict what the agent itself wrote down.
+
+    THE ONE MISREAD IT INHERITS, stated because `display_state` states it: a `Stop` lost
+    right after `sb done` leaves `turn` stuck at `working` on a finished row, and `sb done`
+    does not evict the pane, so this reads that row as working until `sb cleanup` closes
+    it. That was already the STATE column's answer; this only makes the other readers agree
+    with it rather than inventing a second, quieter wrongness of their own.
+    """
+    return state not in RUNNING and turn == TURN_WORKING and alive is True
+
+
 @dataclass
 class AgentStatus:
     """One agent, as the store and herdr *jointly* describe it."""
@@ -741,7 +770,11 @@ class AgentStatus:
         our own turn signal live — `turn == working` AND herdr confirming the pane is there
         (`alive is True`) — is drawn `working`, exactly as the resumed agent is. `alive is
         True`, not merely truthy: with herdr unreachable (`alive is None`) nothing confirms the
-        pane, so the stored terminal word stands. This is a READING only: `state` is not
+        pane, so the stored terminal word stands. That test is `working_again`, and it is a
+        module function rather than three lines here because `Broker._still_going` asks the
+        same question of the same row — a waiting cohort that read the stored word while this
+        column read the live one is how one child came to be `working` here and "already
+        finished" there. This is a READING only: `state` is not
         touched, so `stop_gate` still sees the report it wrote, `sb cleanup` still closes the
         finished row, and `_revive` still does the real reopen when the agent acts.
 
@@ -771,7 +804,7 @@ class AgentStatus:
         misreads the resumed pane. So it is stated, not chased.
         """
         if self.state not in RUNNING:
-            if self.turn == TURN_WORKING and self.alive is True:
+            if working_again(self.state, self.turn, self.alive):
                 return TURN_WORKING
             return self.state
         if self.alive is False:
