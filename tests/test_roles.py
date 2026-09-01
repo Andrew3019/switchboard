@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import config, roles  # noqa: E402
+from switchboard import config, models, roles  # noqa: E402
 
 
 class RolesTest(unittest.TestCase):
@@ -651,10 +651,12 @@ class RolesTest(unittest.TestCase):
         part of the table the spawn layer actually sees.
 
         Asserted as (provider, model, effort) and not as CLI flags, because a tier can name
-        a provider whose flags are not Claude's — codex takes none, so `cli_args()` is []
-        for `builder` by design and would make "pins gpt-5.6-sol" and "pins nothing" the
-        same assertion. The flags are still checked underneath, on one tier of each
-        provider, since that is what the spawn layer appends.
+        a provider whose flags are not Claude's. The flags are still checked underneath, on
+        the two tiers that differ in shape.
+
+        NO SHIPPED ROLE IS ON CODEX any more: `builder` was, on `gpt-5.6-sol`, and moved to
+        `opus-5-medium` on 2026-09-01 when that pin was retired in favour of naming
+        `gpt-luna-max-effort` per spawn. The codex tiers still exist and nothing pins one.
 
         Pinned as a DECISION, not as behaviour.
         """
@@ -666,7 +668,7 @@ class RolesTest(unittest.TestCase):
             "qa":         ("claude", "claude-sonnet-5", "high"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
             "worker":     ("claude", "claude-opus-5",   None),
-            "builder":    ("codex",  "gpt-5.6-sol",     "medium"),
+            "builder":    ("claude", "claude-opus-5",   "medium"),
             "planner":    ("claude", "claude-opus-5",   "high"),
         }
         got = {}
@@ -679,7 +681,38 @@ class RolesTest(unittest.TestCase):
                          ["--model", "claude-sonnet-5", "--effort", "high"])
         self.assertEqual(roles.get(r, "worker").spec().cli_args(),
                          ["--model", "claude-opus-5"])
-        self.assertEqual(roles.get(r, "builder").spec().cli_args(), [])
+
+    def test_a_gated_tier_is_refused_at_the_role_that_asked_for_it(self):
+        """`Role.spec()` is where a tier and the role about to run it are both in hand.
+
+        Two refusals, and they are different kinds. The SWITCH is config — the tier ships
+        ON, and a repo that sets `[routing] gpt_luna_direct_enabled` false takes it away
+        from every role at once. The ROLE list is the mechanical half of the direct-path
+        rule: an agent that splits work, routes it or judges somebody else's change may not
+        have this tier, whoever names it, while the two implementation leaves may.
+
+        The judgment half — whether a job actually IS direct-path — is deliberately not
+        here and cannot be: it is a fact about content, written in the plan guide.
+        """
+        tier = "gpt-luna-max-effort"
+        settings = self.repo / ".switchboard" / "settings.toml"
+        settings.write_text("[routing]\ngpt_luna_direct_enabled = false\n")
+        with self.assertRaises(models.ModelConfigError) as cm:
+            roles.load(self.repo)["worker"].spec(tier)      # switched off repo-wide
+        self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
+
+        settings.unlink()                                   # back to the shipped ON
+        r = roles.load(self.repo)
+        for role in ("lead", "dispatcher", "reviewer"):
+            with self.subTest(role=role), \
+                    self.assertRaises(models.ModelConfigError) as cm:
+                roles.get(r, role).spec(tier)
+            self.assertIn(role, str(cm.exception))
+        for role in ("worker", "builder"):
+            with self.subTest(role=role):
+                spec = roles.get(r, role).spec(tier)
+                self.assertEqual((spec.provider, spec.model, spec.effort),
+                                 ("codex", "gpt-5.6-luna", "max"))
 
     def test_an_override_replaces_the_roles_tier(self):
         """`sb delegate --model <tier>` picks another tier, not another mechanism."""

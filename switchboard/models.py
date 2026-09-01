@@ -101,7 +101,8 @@ def _default_provider() -> str:
 
 # The fields a tier table may set. Anything else is a typo, and saying so beats resolving
 # to a spec that quietly ignores it.
-TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args", "codex_provider"})
+TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args", "codex_provider",
+                       "forbidden_roles", "enabled_by"})
 
 # Per-user, between the shipped tiers and the repo's — what `strong` means on YOUR machine.
 ENV_GLOBAL_CONFIG = "SWITCHBOARD_MODELS_CONFIG"
@@ -148,12 +149,54 @@ class ModelSpec:
     # a person meets it.
     codex_provider: Optional[str] = None
 
+    # THE TWO GATES ON A TIER, and both are DATA for the reason every other name in this
+    # module is: no model name appears in Python, so neither may the name of the one tier
+    # that happens to want gating. A tier that sets neither is every tier that predates
+    # them and resolves exactly as before.
+    #
+    # `forbidden_roles` — the roles this tier may never run. Checked in `Role.spec()`,
+    # which is the one place a tier and the role about to run on it are both in hand;
+    # `Tiers.resolve()` knows no role and stays a pure lookup, so `sb models` still lists
+    # a gated tier instead of failing on it. It is a check on the ROLE, not on the caller:
+    # `--model X` on a forbidden role is refused whoever typed it, and the tier being the
+    # role's own default would be refused just the same.
+    #
+    # `enabled_by` names a SETTINGS key that must be true for this tier to be usable, and
+    # `enabled` is that key's value, read once at `load()` where the repo is in hand. Two
+    # fields rather than one because the refusal has to name the key a person would edit.
+    forbidden_roles: tuple[str, ...] = ()
+    enabled_by: Optional[str] = None
+    enabled: bool = True
+
     # The providers whose per-agent settings travel as CLI FLAGS. Everything else delivers
     # them some other way and must get an empty list here rather than Claude Code's flag
     # names — see `cli_args`. A tuple in Python rather than a config key because it is a
     # fact about which code path exists, not a preference: adding a provider to it without
     # writing that path would produce flags no binary accepts.
     _FLAG_PROVIDERS = ("claude",)
+
+    def gate(self, role: Optional[str] = None) -> None:
+        """Refuse this tier if it is switched off, or forbidden to `role`.
+
+        The other half of `cli_args()`'s unwired check, and here for the same reason it is
+        there: a refusal that can still say what is wrong. Both of these are questions
+        about CONFIG, so the answer is known before a pane exists — where the message can
+        name the settings key to edit or the roles the tier is kept away from, rather than
+        surfacing as an agent that ran on a tier nobody meant it to have.
+
+        Called by `Role.spec()`, which is every spawn path and the `sb instructions`
+        preview. Deliberately NOT called by `stored_spec()`: that reads a tier already
+        recorded against a live agent, and a restore must bring an agent back on the tier
+        it was actually running rather than re-litigate a config decision made since.
+        """
+        if not self.enabled:
+            raise ModelConfigError(
+                f"tier '{self.tier}' is switched off; set `{self.enabled_by} = true` in "
+                f"settings.toml to enable it")
+        if role and role in self.forbidden_roles:
+            raise ModelConfigError(
+                f"tier '{self.tier}' may not be used by role '{role}' — it is kept off "
+                f"{', '.join(self.forbidden_roles)}")
 
     def cli_args(self) -> list[str]:
         """The provider's CLI flags for this tier — which for one provider is none at all.
@@ -265,7 +308,8 @@ def _lookup_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", name.casefold())
 
 
-def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
+def _spec(name: str, cfg: dict, default_provider: str,
+          repo: Optional[Path] = None) -> ModelSpec:
     unknown = set(cfg) - TIER_KEYS
     if unknown:
         raise ModelConfigError(
@@ -277,6 +321,21 @@ def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
             f"tier '{name}' has effort '{effort}'; valid levels are "
             f"{', '.join(levels)}"
         )
+    # A LIST OF STRINGS, checked as one. `isinstance(list)` first and not merely "is it
+    # iterable": a bare string is iterable and would pass as its own characters, and a
+    # scalar is not iterable at all and would leave this function as a TypeError from the
+    # comprehension rather than as the refusal this module promises. Both are the same
+    # mistake in a repo's own `models.toml`, so both get the same sentence.
+    forbidden = cfg.get("forbidden_roles") or []
+    if not isinstance(forbidden, list) or not all(isinstance(r, str) for r in forbidden):
+        raise ModelConfigError(
+            f"tier '{name}' must name `forbidden_roles` as a list of role names, "
+            f"got {forbidden!r}")
+    gate_key = cfg.get("enabled_by")
+    if gate_key is not None and not isinstance(gate_key, str):
+        raise ModelConfigError(
+            f"tier '{name}' must name `enabled_by` as a dotted settings key, e.g. "
+            f"\"routing.<something>_enabled\", got {gate_key!r}")
     return ModelSpec(
         tier=name,
         provider=cfg.get("provider") or default_provider,
@@ -284,7 +343,43 @@ def _spec(name: str, cfg: dict, default_provider: str) -> ModelSpec:
         effort=effort,
         extra_args=tuple(cfg.get("extra_args") or ()),
         codex_provider=cfg.get("codex_provider"),
+        forbidden_roles=tuple(forbidden),
+        enabled_by=gate_key,
+        enabled=_enabled(name, gate_key, repo),
     )
+
+
+def _enabled(tier: str, key: Optional[str], repo: Optional[Path]) -> bool:
+    """Is the settings switch this tier hangs off turned on? No switch means always on.
+
+    Read at LOAD, where the repo whose settings layer applies is in hand — `ModelSpec` is
+    frozen and a spec that re-read config every time it was asked would be a second place
+    the answer could differ from the one the spawn used.
+
+    A MISSING KEY IS OFF, not an error, and that is the whole shape of a feature flag: the
+    tier stops resolving and whoever named it falls back to the role's own tier, which is
+    what they would have had before the flag existed. Every other setting in this codebase
+    raises when it is absent, and rightly — switchboard cannot run without knowing where
+    the store lives. This one it can: the answer to "is this experiment switched on here"
+    when nobody has said is NO. That matters for a config file older than the flag, a
+    `SWITCHBOARD_DEFAULTS` pointed somewhere else, or a repo that `"!reset"` the table —
+    none of which should take the whole tier table down with a ConfigError.
+
+    A key that IS there and is not a boolean is still an error, and a separate one: someone
+    wrote the flag and it is not doing what they think. `"false"` in quotes is a non-empty
+    string and therefore true, which is the exact trap `config.flag` exists to name.
+    """
+    if not key:
+        return True
+    value = config.setting(key, None, repo=repo)
+    if value is None:                       # nobody has said; TOML has no null, so absent
+        return False
+    if not isinstance(value, bool):
+        raise ModelConfigError(
+            f"tier '{tier}' is gated on setting '{key}', which must be true or false, got "
+            f"{value!r} — a quoted \"true\"/\"no\" is a string, and every non-empty "
+            f"string is true")
+    return value
 
 
 def _read(path: Path) -> dict:
@@ -326,7 +421,7 @@ def load(repo: Optional[Path] = None, *, global_config: Optional[Path] = None) -
         _layer(merged, raw)
 
     return Tiers(
-        tiers={n: _spec(n, cfg, provider) for n, cfg in merged.items()},
+        tiers={n: _spec(n, cfg, provider, repo) for n, cfg in merged.items()},
         default_provider=provider,
     )
 

@@ -215,11 +215,32 @@ class Role:
         tier gets that tier's effort too, and neither path can hand a raw tier name to a
         provider CLI. There is deliberately no `model_id()` shortcut any more — it existed,
         it dropped effort silently, and every caller of it was a bug.
+
+        THE ROLE GATE LIVES HERE, and here is the only place it can: a tier that names
+        `forbidden_roles`, or that hangs off a settings switch, is refused for THIS role,
+        and this method is the one point in the tree where a tier and the role about to run
+        on it are both in hand. Every spawn path funnels through it — `Broker.delegate`,
+        `sb start`'s top, and the `sb instructions` preview — so the refusal lands before a
+        pane exists rather than as an agent already running on a tier meant to be kept away
+        from it. It applies to the role's OWN tier as much as to an override: "this role
+        may never run on that tier" is a fact about the pair, not about who typed the name.
         """
-        return (self.tiers or models.load()).resolve(override or self.model)
+        spec = (self.tiers or models.load()).resolve(override or self.model)
+        spec.gate(self.name)
+        return spec
 
     def stored_spec(self, override: Optional[str] = None) -> models.ModelSpec:
-        """Resolve an override read from an existing agent row."""
+        """Resolve an override read from an existing agent row.
+
+        NO GATE, unlike `spec()` above, and the difference is what the two are for. This
+        reads a tier already recorded against an agent that exists — a restore, or the
+        codex stickiness read in `Broker.delegate` — and a tier only got into that column
+        by passing the gate on the way in. Re-checking it here would mean a settings switch
+        flipped off, or a role added to `forbidden_roles`, made a live agent unrestorable;
+        a restore should bring an agent back on the tier it was actually running. The
+        stickiness read re-resolves through `spec()` before anything spawns, so nothing
+        reaches a pane ungated.
+        """
         tiers = self.tiers or models.load()
         return tiers.resolve_stored(override) if override else tiers.resolve(self.model)
 

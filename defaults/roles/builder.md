@@ -1,5 +1,5 @@
 +++
-model = "gpt-5.6-sol"
+model = "opus-5-medium"
 capabilities = ["spawn", "write-tracked"]
 # A leaf that writes, and the same bundle as `worker` for the same reason: `spawn` is here
 # so a builder can put up the review of its own change instead of handing that job back,
@@ -7,30 +7,41 @@ capabilities = ["spawn", "write-tracked"]
 +++
 
 <!--
-THE CODE-WRITING LEAF, and the only shipped role on a non-claude provider.
+THE CODE-WRITING LEAF: a worker that writes code, asked for by name.
 
-WHY IT IS A ROLE AND NOT JUST WORKER'S TIER. The tier is the whole difference: a builder is
-a worker that writes code, on the model Andrew wants writing most of it (GPT-5.6-sol — the
-best agentic-coding scores going, Terminal-Bench 2.1 and the Coding Agent Index, at less
-than the Opus tiers cost). The obvious move was to put `worker` itself on that tier. It was
-tried, and it fails for a reason that has nothing to do with models: `worker` is
-`default_role` AND `fallback_role` (`defaults/settings.toml`), so every spawn that names no
-role, and every ad-hoc `--role archaeologist`, resolves through it. Moving it to a codex
-tier drags a codex-cli dependency onto ordinary spawns that never asked for one.
+WHY IT IS A ROLE AND NOT JUST WORKER'S TIER. The tier was the whole difference, and the
+argument survives the tier it was written for. A builder is a worker on the model wanted
+for writing code, and the obvious move — putting `worker` itself on that tier — fails for a
+reason that has nothing to do with which model it is: `worker` is `default_role` AND
+`fallback_role` (`defaults/settings.toml`), so every spawn that names no role, and every
+ad-hoc `--role archaeologist`, resolves through it. A tier chosen for code work would be
+what everything that never asked for one lands on. So it goes on a role you have to ASK
+for. `sb delegate --role builder` is how code work gets handed out; `worker` stays the
+generic writer, and stays what an undefined role falls back to.
 
-So the codex tier goes on a role you have to ASK for. `sb delegate --role builder` is how
-code work gets handed out; `worker` stays the generic writer on a claude tier, and stays
-what an undefined role falls back to.
+IT IS NO LONGER ON CODEX (2026-09-01). It was on `gpt-5.6-sol` — the best agentic-coding
+scores going at less than the Opus tiers cost — and that pin is retired, not switched: the
+role now names `opus-5-medium`, and there is no flag to put it back. What changed is that
+`gpt-luna-max-effort` covers what the codex pin was for, cheap good code on work whose
+requirements are already clear, at less again — and it covers it PER SPAWN, chosen by
+whoever knows the work is direct-path, rather than by a role file deciding for every
+builder ever spawned. So the two halves separated: the role keeps the claude tier, and the
+cheap-and-hard-thinking option becomes something you name when the work earns it.
 
-WHAT FOLLOWS FROM THE PROVIDER RATHER THAN FROM THE ROLE, and is worth knowing before you
-debug a builder spawn: it takes its model and effort from a private `CODEX_HOME/config.toml`
-that `switchboard/codex.py` writes, not from CLI flags, so this tier resolves to no
-`--model` argument at all; and the machine running it needs codex-cli installed.
-`defaults/models.toml` has the rest at `[tiers."gpt-5.6-sol"]`.
+WHICH MEANS THIS ROLE IS WHERE `--model gpt-luna-max-effort` IS AIMED. A builder and a
+worker are the two roles it is not refused for (`defaults/models.toml` carries the refusal
+as `forbidden_roles`, and it covers `lead`, `dispatcher` and `reviewer`). The mechanical
+half stops there; the judgment half is yours and the plan guide holds it — the tier is for
+DIRECT-path work, requirements already settled, going straight to implement/verify/review/
+land. Not work still being shaped, not an open design question, not investigation. If your
+job turns out to need shaping after all, it moves onto the shaped path and off this tier
+with it. `defaults/models.toml` has the rest at `[tiers.gpt-luna-max-effort]`, and it
+resolves while `[routing] gpt_luna_direct_enabled` is true, which is the shipped
+default.
 
 The prompt below is worker's, deliberately and almost word for word. What a leaf needs
 teaching is how it ENDS, not how to write code — that was worker.md's whole finding and it
-does not change because the provider did. Coding instruction belongs in the task or in a
+does not change with the tier. Coding instruction belongs in the task or in a
 preset; this file is read by every builder ever spawned, including the one whose job turns
 out not to be code at all.
 -->
