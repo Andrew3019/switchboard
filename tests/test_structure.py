@@ -265,7 +265,9 @@ class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
 
 
 class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
-    """DESIGN-TRUTH: "A bare agent's delegate is refused outright."
+    """DESIGN-TRUTH: "A bare agent's delegate is refused outright — and since 2026-08-31
+    no SHIPPED role is bare, so that refusal is now for a role a repo declared without
+    `spawn`."
 
     Nothing enforced this before, and it was not hypothetical: a `worker`-role agent in the
     live store had spawned 17 children, orchestrators among them.

@@ -1273,9 +1273,10 @@ class Broker:
         ONE function for every gated action, and a new gated action is a new capability
         STRING — not a new refusal function beside this one. That is the whole reason the
         set is data: `spawn` (a bare agent does not spawn — DESIGN-TRUTH: "A bare agent's
-        delegate is refused outright.") and `fork` (whose spawn mints a space of its own)
-        were two hardcoded checks reading two different columns, and every rule added
-        beside them would have been a third.
+        delegate is refused outright — and since 2026-08-31 no SHIPPED role is bare, so
+        that refusal is now for a role a repo declared without `spawn`.") and `fork`
+        (whose spawn mints a space of its own) were two hardcoded checks reading two
+        different columns, and every rule added beside them would have been a third.
 
         THREE-VALUED, and that is not a boolean read with a default. *No row for this
         caller* ⇒ allow; *row present, cap held* ⇒ allow; *row present, cap absent* ⇒
