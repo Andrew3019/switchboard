@@ -237,6 +237,26 @@ class ModelsTest(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertIsNone(spec.gate(role))
 
+    def test_a_malformed_gate_is_refused_by_name_rather_than_crashing(self):
+        """Both new fields are hand-authored in a repo's own `models.toml`, so both get
+        the refusal this module promises for a typo rather than a TypeError from further in.
+
+        The four shapes that actually reach here: a scalar where a list belongs (not
+        iterable), a bare string (iterable, and would silently pass as its characters), a
+        list holding a non-string, and a non-string settings key (which would otherwise
+        surface as an AttributeError from inside `config.setting`).
+        """
+        for bad, field in (('forbidden_roles = 5', "forbidden_roles"),
+                           ('forbidden_roles = "lead"', "forbidden_roles"),
+                           ('forbidden_roles = ["lead", 5]', "forbidden_roles"),
+                           ('enabled_by = 5', "enabled_by")):
+            with self.subTest(bad=bad):
+                self.write_repo(f'[tiers.mine]\nmodel = "sonnet"\n{bad}\n')
+                with self.assertRaises(models.ModelConfigError) as cm:
+                    self.load()
+                self.assertIn(field, str(cm.exception))
+                self.assertIn("mine", str(cm.exception))
+
     def test_the_deepseek_tier_points_the_same_binary_at_another_api(self):
         """`provider` is the BINARY and stays `codex` — which is what keeps the tier past
         the wired-providers gate — while `codex_provider` says which API that binary is

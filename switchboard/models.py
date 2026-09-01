@@ -321,11 +321,21 @@ def _spec(name: str, cfg: dict, default_provider: str,
             f"tier '{name}' has effort '{effort}'; valid levels are "
             f"{', '.join(levels)}"
         )
-    forbidden = cfg.get("forbidden_roles") or ()
-    if isinstance(forbidden, str) or not all(isinstance(r, str) for r in forbidden):
+    # A LIST OF STRINGS, checked as one. `isinstance(list)` first and not merely "is it
+    # iterable": a bare string is iterable and would pass as its own characters, and a
+    # scalar is not iterable at all and would leave this function as a TypeError from the
+    # comprehension rather than as the refusal this module promises. Both are the same
+    # mistake in a repo's own `models.toml`, so both get the same sentence.
+    forbidden = cfg.get("forbidden_roles") or []
+    if not isinstance(forbidden, list) or not all(isinstance(r, str) for r in forbidden):
         raise ModelConfigError(
             f"tier '{name}' must name `forbidden_roles` as a list of role names, "
             f"got {forbidden!r}")
+    gate_key = cfg.get("enabled_by")
+    if gate_key is not None and not isinstance(gate_key, str):
+        raise ModelConfigError(
+            f"tier '{name}' must name `enabled_by` as a dotted settings key, e.g. "
+            f"\"routing.<something>_enabled\", got {gate_key!r}")
     return ModelSpec(
         tier=name,
         provider=cfg.get("provider") or default_provider,
@@ -334,8 +344,8 @@ def _spec(name: str, cfg: dict, default_provider: str,
         extra_args=tuple(cfg.get("extra_args") or ()),
         codex_provider=cfg.get("codex_provider"),
         forbidden_roles=tuple(forbidden),
-        enabled_by=cfg.get("enabled_by"),
-        enabled=_enabled(name, cfg.get("enabled_by"), repo),
+        enabled_by=gate_key,
+        enabled=_enabled(name, gate_key, repo),
     )
 
 
