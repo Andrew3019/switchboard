@@ -5114,19 +5114,6 @@ class Broker:
             "ownership": menu_owner, "included": bool(skills),
             "text": self._say("spawn.operator_menu", menu=menu) if skills else "",
         })
-        # A researcher spawned by the top dispatcher was spawned on the person's own
-        # instruction and is read directly, so it is nudged to report in its own chat and
-        # `sb block` rather than `done` back up the tree. `is_top(parent)` reads the spawner's
-        # stamp on the live path; on a nameless preview the parent defaults to HUMAN, which is
-        # not top, so the segment shows as a not-included conditional boundary there.
-        direct_source, direct_owner = self._configured_prompt_source("spawn.researcher_direct")
-        direct = role == RESEARCHER_ROLE and self.is_top(parent)
-        segments.append({
-            "kind": "researcher-direct", "source": direct_source,
-            "condition": "researcher role spawned by the top dispatcher",
-            "ownership": direct_owner, "included": direct,
-            "text": self._say("spawn.researcher_direct") if direct else "",
-        })
         prompt = as_prompt if as_prompt is not None else resolved_role.prompt
         segments.append({
             "kind": "ad-hoc-prompt" if as_prompt is not None else "role-prompt",
@@ -5134,6 +5121,24 @@ class Broker:
             "condition": "non-empty prompt",
             "ownership": ("external-to-switchboard" if as_prompt is not None else role_owner),
             "included": bool(prompt), "text": prompt or "",
+        })
+        # A researcher spawned by the top dispatcher was spawned on the person's own
+        # instruction and is read directly, so it is nudged to report in its own chat and
+        # `sb block` rather than write a notes file and `done` back up the tree. Placed AFTER
+        # the role prompt on purpose: researcher.md unconditionally tells every researcher to
+        # write that file and name its path, so the nudge has to be the LAST word and to say
+        # out loud that it relaxes the rule just given, rather than contradicting it silently
+        # from above (a fix over `spawn.researcher_direct`'s original pre-role position).
+        # `is_top(parent)` reads the spawner's stamp on the live path; on a nameless preview
+        # the parent defaults to HUMAN, which is not top, so the segment shows as a
+        # not-included conditional boundary there.
+        direct_source, direct_owner = self._configured_prompt_source("spawn.researcher_direct")
+        direct = role == RESEARCHER_ROLE and self.is_top(parent)
+        segments.append({
+            "kind": "researcher-direct", "source": direct_source,
+            "condition": "researcher role spawned by the top dispatcher",
+            "ownership": direct_owner, "included": direct,
+            "text": self._say("spawn.researcher_direct") if direct else "",
         })
         segments.extend(self._binding_segments(role, with_, report=_report_bindings))
 

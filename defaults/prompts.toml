@@ -85,27 +85,36 @@ operator_menu = "Open your very first message to the human with this offer, what
 # is worded as the easy default rather than a prohibition, and it deliberately does not fight
 # the protocol's "finish with `sb done`" line — it says the chat-plus-block shape is what the
 # person wants here, and leaves the agent free. The behaviour it encourages: report findings
-# in the agent's OWN chat and `sb block` so the person reads them directly, skip the `.md`
-# report and the `sb done`/`sb tell` back up to the dispatcher, and — the one thing worth
+# in the agent's OWN chat and `sb block` so the person reads them directly, skip the notes
+# file and the `sb done`/`sb tell` back up to the dispatcher, and — the one thing worth
 # telling the dispatcher — mention it if a worker or lead was spawned to carry out a fix.
 #
 # The person reads a `block` and the parent reads a `done` summary and nothing else, so a
 # researcher that `done`s here has reported to the dispatcher, which then relays to the
 # person: two hops for something the person asked for and will read directly. This closes that.
 #
+# IT NAMES THE RULE IT RELAXES, because it is rendered right after researcher.md, which tells
+# every researcher unconditionally to write its findings to a `.switchboard/notes/` file and
+# name that path (`roles/researcher.md`). Left implicit, the two would contradict each other
+# in one prompt on every top-spawned researcher (PR #258 review). So this fragment is placed
+# LAST (`effective_instructions`) and says out loud that the file is optional HERE — the base
+# role prompt stays untouched, and the common sub-research case never sees this override.
+#
 # No placeholders — the parent's name is already in the identity fragment and repeating it
 # here would only be one more thing to keep true.
 researcher_direct = """
-The top dispatcher spawned you on the person's own instruction, and they tend to read you
-directly — so the easy default here is to report to THEM, in your own chat, rather than back
-through the dispatcher. Do the research, then write your findings as a message in your own
-chat in the human-facing shape — plain and skimmable — and call `sb block`, so they read it
-there and you wait on them. You need not write a report file; the chat summary is the
-deliverable. You need not `sb done` or `sb tell` the dispatcher your findings either — the
-person handles this with you directly, and after each thing they ask, answering in chat and
+The top dispatcher spawned you on the person's own instruction, and they read you directly —
+so one easy default here overrides what your researcher role just told you. Your role says to
+write your findings to a `.switchboard/notes/` file and to name that path in your summary;
+here that file is optional rather than required, because the person reads your CHAT. So the
+natural shape is to put your findings in a message in your own chat — plain and skimmable, the
+human-facing shape — and call `sb block`, so they read it there and you wait on them; write a
+file only if you want somewhere to keep detail for later. And rather than `sb done`-ing or
+`sb tell`-ing the dispatcher your findings, let that `sb block` be the report — the person
+handles this with you directly, and after each thing they ask, answering in chat and
 `sb block`ing again fits better than reporting done; they close you when they are finished.
-The one thing worth telling the dispatcher, just for its own information, is if you spawned
-your own worker or lead to carry out a fix the person confirmed.
+The one thing still worth telling the dispatcher, just for its own information, is if you
+spawned your own worker or lead to carry out a fix the person confirmed.
 """
 
 # Added only when the agent is being placed in a named workspace.

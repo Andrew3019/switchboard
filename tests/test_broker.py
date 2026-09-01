@@ -958,11 +958,18 @@ class BrokerTest(unittest.TestCase):
         top-ness, read from its stamp — not the researcher's own role alone."""
         store.create_agent(self.db, name="disp", role="dispatcher", is_top=True,
                            cwd=str(self.repo))
-        seg = self._direct(self.b.effective_instructions(
-            role="researcher", name="r-t", parent="disp"))
+        manifest = self.b.effective_instructions(
+            role="researcher", name="r-t", parent="disp")
+        seg = self._direct(manifest)
         self.assertTrue(seg["included"])
         self.assertIn("in your own chat", seg["text"])
         self.assertIn("sb block", seg["text"])
+        # It renders AFTER the role prompt: researcher.md tells every researcher to write a
+        # notes file, so the nudge that relaxes that has to be the last word, not a silent
+        # contradiction from above (PR #258 review).
+        role_order = next(s["order"] for s in manifest["segments"]
+                          if s["kind"] == "role-prompt")
+        self.assertGreater(seg["order"], role_order)
         # And it is really in the prompt the live spawn hands over, not just the preview.
         self.b.delegate("t", topic="t", role="researcher", me="disp")
         self.assertIn(seg["text"], " ".join(self.h.started[-1]["prompts"]))
