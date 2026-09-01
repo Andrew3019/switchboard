@@ -945,6 +945,55 @@ class BrokerTest(unittest.TestCase):
         self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertIn("archaeologist", " ".join(self.h.started[0]["prompts"]))
 
+    # -- the directly-spawned researcher's nudge, and nobody else's --------
+
+    def _direct(self, manifest) -> dict:
+        return next(s for s in manifest["segments"]
+                    if s["kind"] == "researcher-direct")
+
+    def test_a_researcher_spawned_by_the_top_is_nudged_to_report_in_chat(self):
+        """A researcher the top dispatcher spawns was spawned on the person's own
+        instruction and is read directly, so it is nudged to summarise in its own chat and
+        `sb block` rather than `sb done` back up the tree. The condition is the SPAWNER's
+        top-ness, read from its stamp — not the researcher's own role alone."""
+        store.create_agent(self.db, name="disp", role="dispatcher", is_top=True,
+                           cwd=str(self.repo))
+        manifest = self.b.effective_instructions(
+            role="researcher", name="r-t", parent="disp")
+        seg = self._direct(manifest)
+        self.assertTrue(seg["included"])
+        self.assertIn("in your own chat", seg["text"])
+        self.assertIn("sb block", seg["text"])
+        # It renders AFTER the role prompt: researcher.md tells every researcher to write a
+        # notes file, so the nudge that relaxes that has to be the last word, not a silent
+        # contradiction from above (PR #258 review).
+        role_order = next(s["order"] for s in manifest["segments"]
+                          if s["kind"] == "role-prompt")
+        self.assertGreater(seg["order"], role_order)
+        # And it is really in the prompt the live spawn hands over, not just the preview.
+        self.b.delegate("t", topic="t", role="researcher", me="disp")
+        self.assertIn(seg["text"], " ".join(self.h.started[-1]["prompts"]))
+
+    def test_a_researcher_spawned_by_a_non_top_gets_no_direct_nudge(self):
+        """A researcher a lead or worker spawns is an ordinary sub-research: it reports to
+        the parent that owns the larger task, so the direct-comm nudge must not appear."""
+        store.create_agent(self.db, name="orch", role="lead", cwd=str(self.repo),
+                           workspace="ws", branch="ws")
+        seg = self._direct(self.b.effective_instructions(
+            role="researcher", name="r-t", parent="orch"))
+        self.assertFalse(seg["included"])
+        self.assertEqual(seg["text"], "")
+
+    def test_a_non_researcher_spawned_by_the_top_gets_no_direct_nudge(self):
+        """The nudge is the researcher's alone. A worker or lead the top spawns owns its
+        work and reports done in the ordinary way, so top-ness of the spawner is not on its
+        own enough to fire it."""
+        store.create_agent(self.db, name="disp", role="dispatcher", is_top=True,
+                           cwd=str(self.repo))
+        seg = self._direct(self.b.effective_instructions(
+            role="worker", name="w-t", parent="disp"))
+        self.assertFalse(seg["included"])
+
     # -- the operator menu: the dispatcher's, and nobody else's ------------
 
     def _started_prompts(self) -> str:
