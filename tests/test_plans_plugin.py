@@ -4932,19 +4932,19 @@ class LayoutTest(PlansSandbox):
         md = _plans()._markdown(plan)
 
         order = [md.index(x) for x in
-                 ("## What you need to do", "## What changed and why", "## Agent evidence",
-                  "## Detailed record")]
+                 ("## ✅ What you need to do", "## What changed and why", "## Agent evidence",
+                  "## 📋 Detailed record")]
         self.assertEqual(order, sorted(order), md)
         # `What you need to do` is the first section: nothing but the heading above it.
-        head = md.split("## What you need to do", 1)[0]
+        head = md.split("## ✅ What you need to do", 1)[0]
         self.assertNotIn("##", head)
         # The human's questions are up top: the manual check and the open gate.
-        need = md.split("## What you need to do", 1)[1].split("## What changed", 1)[0]
+        need = md.split("## ✅ What you need to do", 1)[1].split("## What changed", 1)[0]
         self.assertIn("Upload a 20MB file", need)
         self.assertIn("Andrew: merge it?", need)
         # And the shaped plan itself — graph, contract, steps — is COLLAPSED under the
         # detailed record, not above it. The mermaid graph appears only down there.
-        above, below = md.split("## Detailed record", 1)
+        above, below = md.split("## 📋 Detailed record", 1)
         self.assertNotIn("```mermaid", above)
         self.assertIn("<details>", below)
         self.assertIn("```mermaid", below)
@@ -5499,11 +5499,11 @@ class HumanFirstCommentTest(PlansSandbox):
         self._save(doc)
         md = self._md()
         order = [md.index(x) for x in
-                 ("## What you need to do", "## What changed and why", "## Agent evidence",
-                  "## Detailed record")]
+                 ("## ✅ What you need to do", "## What changed and why", "## Agent evidence",
+                  "## 📋 Detailed record")]
         self.assertEqual(order, sorted(order), md)
         self.assertIn("Upload a 20MB file", md.split("## What changed", 1)[0])
-        self.assertNotIn("```mermaid", md.split("## Detailed record", 1)[0])
+        self.assertNotIn("```mermaid", md.split("## 📋 Detailed record", 1)[0])
 
     def test_human_checks_render_as_tickable_checkboxes(self):
         """A list of human checks renders as GitHub checkboxes (`- [ ]`), so a person reading
@@ -5517,12 +5517,32 @@ class HumanFirstCommentTest(PlansSandbox):
             {"id": "s-9", "name": "merge it", "display": "merge", "progress": "open",
              "gate": "Andrew: land it?"})
         self._save(doc)
-        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        need = self._md().split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
         self.assertIn("- [ ] Upload a 50MB file on a real device", need)
         self.assertIn("- [ ] Confirm the progress bar reaches 100%", need)
         # The open gate is in the list too, and it is a checkbox as well.
         gate_line = next(ln for ln in need.splitlines() if "Andrew: land it?" in ln)
         self.assertTrue(gate_line.startswith("- [ ] "), gate_line)
+
+    def test_a_prose_string_of_human_checks_is_coerced_to_checkboxes_not_dumped(self):
+        """The wall Andrew met: a lead writes `human_checks` as one prose paragraph with
+        inline `2.`/`3.` enumeration. §1 must never dump that as a block — it is split into
+        one tickable box per item, leading markers stripped, so §1 is a checklist however it
+        was authored."""
+        self.data("plugin", "plans", "create", "seed spawn",
+                  "--display", "board: seed spawn", "--step", "impl = seed it")
+        doc = self._doc()
+        doc["plans"][0]["change"]["human_checks"] = (
+            "Confirm qa and researcher should hold spawn. 2. Re-read the role-spawn note, "
+            "now stale. 3. Decide whether to tighten the broad seed later.")
+        self._save(doc)
+        need = self._md().split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
+        self.assertIn("- [ ] Confirm qa and researcher should hold spawn.", need)
+        self.assertIn("- [ ] Re-read the role-spawn note, now stale.", need)
+        self.assertIn("- [ ] Decide whether to tighten the broad seed later.", need)
+        # The inline "2."/"3." markers are consumed by the split, not left in the box text.
+        self.assertNotIn("2. Re-read", need)
+        self.assertNotIn("3. Decide", need)
 
     def test_nothing_needed_says_so_outright(self):
         """A change whose record ANSWERED the question with none says so, in as many words,
@@ -5533,7 +5553,7 @@ class HumanFirstCommentTest(PlansSandbox):
         doc["plans"][0]["change"]["human_checks"] = "none"
         self._save(doc)
         md = self._md()
-        need = md.split("## What you need to do", 1)[1].split("## ", 1)[0]
+        need = md.split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
         self.assertIn("Nothing—agent verification covers this change.", need)
 
     def test_an_unanswered_change_is_not_told_agent_verification_covers_it(self):
@@ -5543,7 +5563,7 @@ class HumanFirstCommentTest(PlansSandbox):
         unrecorded instead of claiming an assurance nobody gave."""
         self.data("plugin", "plans", "create", "a tidy job",
                   "--display", "board: a tidy job", "--step", "impl = do it")
-        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        need = self._md().split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
         self.assertNotIn("agent verification covers", need)
         self.assertIn("Not recorded", need)
 
@@ -5554,7 +5574,7 @@ class HumanFirstCommentTest(PlansSandbox):
         doc = self._doc()
         doc["plans"][0]["change"]["human_checks"] = "none"
         self._save(doc)
-        need = self._md().split("## What you need to do", 1)[1].split("## ", 1)[0]
+        need = self._md().split("## ✅ What you need to do", 1)[1].split("## ", 1)[0]
         self.assertIn("Nothing—agent verification covers this change.", need)
         self.assertNotIn("- none", need)
 
@@ -5572,15 +5592,15 @@ class HumanFirstCommentTest(PlansSandbox):
         self._save(doc)
         md = self._md()
         self.assertTrue(md.lstrip().startswith("#"))
-        self.assertIn("## What you need to do", md)
+        self.assertIn("## ✅ What you need to do", md)
         self.assertIn("uploads over 10MB time out", md)          # the request
         self.assertIn("raise the timeout to 60s", md)            # the solution
         self.assertIn("def5678", md)                             # the evidence
         # The human-first sections come before the detailed record; the skeleton graph is
         # collapsed under it, not in the first screenful.
-        above = md.split("## Detailed record", 1)[0]
+        above = md.split("## 📋 Detailed record", 1)[0]
         self.assertNotIn("## how it runs", above)
-        below = md.split("## Detailed record", 1)[1]
+        below = md.split("## 📋 Detailed record", 1)[1]
         self.assertIn("## how it runs", below)                   # the real skeleton graph
         self.assertIn("implementation", below)
 
@@ -5595,7 +5615,7 @@ class HumanFirstCommentTest(PlansSandbox):
             "review": {"commit": "c0ffee1", "reviewer": "reviewer-y",
                        "findings": "one minor, fixed"}})
         self._save(doc)
-        ev = self._md().split("## Agent evidence", 1)[1].split("## Detailed record", 1)[0]
+        ev = self._md().split("## Agent evidence", 1)[1].split("## 📋 Detailed record", 1)[0]
         self.assertIn("Reviewed commit", ev)
         self.assertIn("c0ffee1", ev)
         self.assertIn("reviewer-y", ev)
@@ -5631,7 +5651,7 @@ class HumanFirstCommentTest(PlansSandbox):
         doc = self._doc()
         doc["plans"][0]["steps"][0]["output"] = "Change Contract\n\n- the thing"
         self._save(doc)
-        below = self._md().split("## Detailed record", 1)[1]
+        below = self._md().split("## 📋 Detailed record", 1)[1]
         self.assertIn("<details>", below)
         self.assertIn("```mermaid", below)
         self.assertIn("## steps", below)
@@ -5653,7 +5673,7 @@ class HumanFirstCommentTest(PlansSandbox):
             "landing": {"head": "def5678", "by": "andrew", "outcome": "merged"},
             "handoff": {"from": "lead-1", "to": "main-2"}})
         self._save(doc)
-        below = self._md().split("## Detailed record", 1)[1]
+        below = self._md().split("## 📋 Detailed record", 1)[1]
         self.assertIn("change record", below)                 # the collapsed remainder block
         self.assertIn("Change Contract", below)               # the approved contract, whole
         self.assertIn("sha256:aa", below)                     # the approval identity
@@ -5685,9 +5705,10 @@ class HumanFirstCommentTest(PlansSandbox):
         self._save(doc)
         md = self._md()
         why = md.split("## What changed and why", 1)[1].split("## Agent evidence", 1)[0]
-        self.assertIn("Scope boundaries", why)
+        self.assertIn("**Scope**", why)                       # the 2-column table row
+        self.assertIn("| --- | --- |", why)                   # rendered as a table, not bullets
         self.assertIn("server config only", why)
-        ev = md.split("## Agent evidence", 1)[1].split("## Detailed record", 1)[0]
+        ev = md.split("## Agent evidence", 1)[1].split("## 📋 Detailed record", 1)[0]
         self.assertIn("ci ubuntu-22", ev)                     # verification environment
         self.assertIn("tightened a log line", ev)             # reviewer fixes
         self.assertIn("does not cover chunked uploads", ev)   # known limitations
@@ -5725,7 +5746,7 @@ class HumanFirstCommentTest(PlansSandbox):
         md = _plans()._markdown(p)
         # The legitimate step is not dropped, and the human-first sections are not drawn.
         self.assertIn("the real step", md)
-        self.assertNotIn("## What you need to do", md)
+        self.assertNotIn("## ✅ What you need to do", md)
 
     def test_create_pr_says_the_comment_is_refreshed_on_material_change(self):
         """Phase 4: the authoritative comment is updated when review fixes, the head, or
