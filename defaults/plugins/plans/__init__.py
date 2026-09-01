@@ -841,6 +841,36 @@ def register(reg):
 GUIDE = """\
 Plan-making — read this when a job comes up, not before.
 
+WHICH PATH THIS WORK IS ON
+
+  Decide this once you have enough context and not before, and read this section when you
+  do — it is the one place the decision is written, and lead, worker and builder are each
+  sent here for it rather than carrying their own copy. The test is what the work needs
+  before it can land, never how big the diff is:
+
+  - NEITHER, no record and no plan: nothing lands. Investigation, a question answered,
+    review-only work, scouting, anything one agent reports without committing. Also a
+    change so small it will never reach a review or a PR — a typo, a one-line comment fix.
+    If it WILL reach a review or a PR, it is not this: it makes a record.
+
+  - DIRECT, a change record and no plan: behaviour, scope and a reasonable approach are
+    already clear, and the work goes straight to it — implement, verify, review, land.
+
+  - SHAPED, one plan whose approval precedes the code: something has to be worked out
+    before the change can be written. ANY ONE of these signals puts a job here rather than
+    on the direct path — none of them is about size:
+      the approach cannot yet be named, because investigation or a design choice comes
+      first; the work turns on narrowing or reasoning about an already-stated invariant or
+      guarantee; more than one real design question is in play, or a first review round
+      surfaces one; the change asserts a NEW cross-cutting guarantee other code or prompts
+      will come to rely on; it touches code another in-flight change is also editing, and
+      that coordination is the shaped path's — one plan, rather than two direct changes
+      discovering each other.
+
+  A direct change that reveals one of these mid-flight moves onto the shaped path THEN — it
+  makes a plan and gets the approval it skipped — rather than carrying on and mentioning it
+  in the summary at the end.
+
 WHEN A PLAN EXISTS
 
   A plan exists when the work is heading for a change that will land AND that change was
@@ -870,7 +900,10 @@ WHEN A PLAN EXISTS
   first call costs one line; verification, review, the PR and the human's approval fill the
   record in as the work actually produces them. Small is still the direct path and not a
   short plan: work so small it will never reach review or a PR — a typo, a one-line comment
-  fix — makes no record at all, and so no skeleton.
+  fix — makes no record at all, and so no skeleton. The bar for making no record is that low
+  on purpose: if a change will reach a review or a PR at all, it is a direct change with a
+  record, not a skip — defaulting to skip because the diff looks small is how work lands
+  unreviewed.
 
   Everything else runs without either — investigation, questions, scouting, review-only
   work, anything a single agent answers and reports, and everything a dispatcher does.
@@ -2734,6 +2767,13 @@ def tick(ctx, args) -> Result:
     re-tick has to cost nothing: a step already `done` is left exactly as it is, with no
     changelog line and no `why` rewritten, and the caller is told it was already done. A
     `skip` is NOT a `done`, so ticking over a skip is a real correction and still lands.
+
+    ONE REFUSAL, and it is `skip`'s `--why` rule from the other side: a `change-approval` step
+    cannot be ticked while its `output` is empty. The approved contract lives in `output`, put
+    there as the gate clears, so an empty `output` is a change approval that never happened —
+    and a change approval that never happened is not a step you get to close. Refused at the
+    door like a skip with no reason, where the message can say what to write. A trivially small
+    change still SKIPS the step with a reason; only a `tick` is refused, and only for this def.
     """
     bad = _cap(args.reason)
     if bad:
@@ -2743,6 +2783,15 @@ def tick(ctx, args) -> Result:
         if str(step.get("progress") or "") == DONE:
             return Result(human=f"{step['id']} already done — nothing to tick",
                           data={"plan": None, "step": step.get("id"), "already_done": True})
+        if (str(step.get("def") or "") == _APPROVAL_DEF
+                and not str(step.get("output") or "").strip()):
+            why = (f"{step['id']} is a change approval and its `output` is empty — the "
+                   f"approved contract goes in `output` as the gate clears, so an empty one "
+                   f"is an approval that never happened. Put the full approved text in "
+                   f"`output`, then tick; a trivially small change skips this with a reason "
+                   f"instead.")
+            return Result(ok=False, human=why,
+                          data={"error": why, "step": step.get("id"), "missing": "output"})
         return _progress(step, DONE, args.reason)
 
     return _on_step(ctx, args.step, "tick", args.reason, _tick, unblocked=True)
@@ -3676,6 +3725,12 @@ def _change(path: str) -> dict:
 # comment, so there is no separate `human review` row for a reader to misread as Andrew's own
 # review slot.
 _SKELETON = ("implementation", "review", "create-pr", "merge")
+
+# The shaped path's approval step, named where a check needs to recognise one. `tick` refuses
+# to close a step of this def with an empty `output`: the approved contract lives in `output`,
+# put there as the gate clears, so an empty one is an approval that never happened — and a
+# change approval that never happened is not a step you get to close.
+_APPROVAL_DEF = "change-approval"
 
 
 def _skeleton(rec: dict) -> None:

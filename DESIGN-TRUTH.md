@@ -590,10 +590,12 @@ live link back to its source. A **change record** is the durable landing record 
 direct and shaped work: path, task owner, intent or approved contract, solution, evidence,
 independent review, human-only checks, PR/head identity, landing approval and final outcome.
 A direct change has a change record when it heads toward a PR and no plan; the record carries
-a fixed execution+landing step skeleton (implementation, review, human checklist, PR, merge)
-so the change is legible on the board and its PR — a fixed list, not the shaped DAG a plan
-is. A shaped change attaches its plan to the same record. Research or discussion creates
-neither until it becomes landing work. — confirmed 2026-08-27
+a fixed execution+landing step skeleton (implementation, review, the PR, merge) so the change
+is legible on the board and its PR — a fixed list, not the shaped DAG a plan is. The human-only
+checklist is not a step of its own: `create-pr` writes it onto the record's `human_checks` as
+it opens the PR. A shaped change attaches its plan to the same record. Research or discussion
+creates neither until it becomes landing work. — confirmed 2026-08-27, the skeleton corrected
+to four steps against the merged fold 2026-08-31
 
 **A shaped plan has one accountable task owner and may grant bounded shape ownership to a
 planner.** The first task-owning agent creates the lightweight record and remains

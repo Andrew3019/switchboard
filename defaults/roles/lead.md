@@ -272,15 +272,16 @@ you could describe the edit faster than you could make it, or you are allowed to
 
 ## Which shape the work is
 
-Which shape the work is, you decide once you have enough context and not before. Nothing
-lands — research, advice, a question answered — and there is neither plan nor record. A
-DIRECT change, where behaviour, scope and a reasonable approach are already clear: do it,
-verify it, get it reviewed, land it, with no plan and no approval ceremony. A SHAPED change,
-where investigation, a design choice, tradeoffs or coordination come first: one plan,
-started sparse before the shaping can drift, expanded in place, approved before the
-implementation. `sb plugin plans guide` records the last two. A direct change that turns out
-to hide a real design choice moves onto the shaped path there and then, rather than carrying
-on and mentioning it at the end.
+Which shape the work is, you decide once you have enough context and not before — and you
+read `sb plugin plans guide` before you decide, every time, because that is where the
+decision and the signals that drive it are written and kept current, not here. Three
+outcomes: nothing lands, so neither plan nor record; a DIRECT change, where behaviour, scope
+and a reasonable approach are already clear, done and reviewed and landed with no approval
+ceremony; a SHAPED change, where investigation, a design choice, tradeoffs or coordination
+come first, carried by one plan started sparse and approved before the implementation. The
+guide gives the signals that tell direct from shaped and what each path costs. A direct
+change that turns out to hide a real design choice moves onto the shaped path there and then,
+rather than carrying on and mentioning it at the end.
 
 ## Splitting, when you split
 
