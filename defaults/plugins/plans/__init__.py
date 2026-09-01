@@ -6351,8 +6351,39 @@ _NO_HUMAN_ANSWER = ("Not recorded — nobody has written down what a human still
                     "check, so this is unanswered rather than empty.")
 
 
+def _checklist(checks) -> list[str]:
+    """`human_checks` as tickable `- [ ]` boxes, whatever shape it was written in.
+
+    A LIST is one box an item, which is the shape `create-pr` is told to write; empty items
+    are dropped so a stray `""` is not a blank box. A STRING is NOT dumped as a markdown
+    block — that was the wall Andrew met at the top of every PR — but split into boxes too:
+    on its newlines first, then on any inline `2.`/`3.`-style enumeration a lead ran together
+    on one line. That inline split is CONSERVATIVE ON PURPOSE: it fires only where a number
+    follows a SENTENCE BOUNDARY (`reviewer. 2. …`), never mid-clause, so a check whose own
+    prose reads `styled on heading 2.` or `(see ticket 4.)` is left whole rather than
+    shredded into subject-less fragments — §1 is the one section a person walks item by item,
+    and a misleading half-box is worse than one that failed to split. Each piece then loses a
+    single leading bullet, number or `[ ]` marker (a bullet AND a `[ ]` together, for a lead
+    who hand-wrote checkbox syntax) and the empties go. Per-item BREVITY is not this
+    function's to enforce — a box holding a run-on sentence is still a box — that is the
+    authoring discipline `create-pr` states and `sb presets design-gate` prints.
+    """
+    if isinstance(checks, list):
+        raw = [str(x) for x in checks]
+    else:
+        raw = []
+        for line in str(checks).split("\n"):
+            raw += re.split(r"(?<=[.!?)])\s+(?=\d+[.)]\s)", line)
+    items: list[str] = []
+    for piece in raw:
+        piece = re.sub(r"^\s*(?:[-*+]|\d+[.)])?\s*(?:\[[ xX]?\]\s*)?", "", piece).strip()
+        if piece:
+            items.append(_flat(piece))
+    return [f"- [ ] {it}" for it in items]
+
+
 def _need_section(p: dict, steps: list) -> list[str]:
-    """`## What you need to do` — the human-only checks and the open gates, or that none remain.
+    """`## ✅ What you need to do` — the human-only checks and open gates, or that none remain.
 
     Always drawn, because the one thing a person must not have to hunt for is whether the
     change is waiting on them. Empty is itself the answer, said outright — but only where the
@@ -6369,22 +6400,20 @@ def _need_section(p: dict, steps: list) -> list[str]:
         checks = None
     body: list[str] = []
     if _some(checks):
-        if isinstance(checks, list):
-            # TICKABLE, so a human reading the PR on a phone runs the list by ticking it —
-            # GitHub renders `- [ ]` as a checkbox where a plain `-` is an inert bullet, and
-            # a manual-verification list is the one thing on this comment a person acts on
-            # item by item. (State does not persist across a comment refresh — the body is
-            # regenerated each time — so this is a legible checklist, not a saved one.)
-            body += [f"- [ ] {_flat(x)}" for x in checks]
-        else:
-            body += _lines(checks)      # a markdown block, rendered as itself
+        # ALWAYS CHECKBOXES, whatever shape it arrived in. A list becomes one box a line;
+        # a prose string is COERCED into boxes rather than dumped as a markdown block, which
+        # was the single leak that put a wall of text back at the top of this comment — a
+        # lead who writes "confirm X. 2. check Y. 3. decide Z" gets three boxes, not a
+        # paragraph. See `_checklist`. This is the one thing on the comment a person acts on
+        # item by item, so it must be tickable no matter how it was written.
+        body += _checklist(checks)
     # Open gates are the other thing a human still owes, and they tick the same way.
     body += [f"- [ ] **{_cell('id', s.get('id'))}** — {_cell('gate', s['gate'])}"
              for s in (steps or ())
              if _some(s.get("gate")) and s.get("progress") not in (DONE, SKIPPED)]
     if not body:
         body = [_NO_HUMAN_WORK if answered else _NO_HUMAN_ANSWER]
-    return ["", "## What you need to do", ""] + body
+    return ["", "## ✅ What you need to do", ""] + body
 
 
 def _why_section(p: dict) -> list[str]:
@@ -6394,19 +6423,23 @@ def _why_section(p: dict) -> list[str]:
     click away in the detailed record. Omitted when the record carries none of it, rather
     than drawn empty: a legacy plan that never filled its record has nothing to summarise
     here, and its contract is still under the fold.
+
+    A TWO-COLUMN TABLE, one field a row, because the old one-fat-bullet-a-field put a
+    paragraph after every label and read as the prose wall this comment exists to kill. Each
+    value goes through `_cell`, so a newline someone stored is the `\\n` it is and forges no
+    row — the value stays whole in its cell (which wraps) rather than being truncated, so a
+    verbose author is structured, never dropped; the brevity itself is the authoring
+    discipline `change-approval` states, not this renderer's to impose.
     """
     c = _change_of(p)
-    rows = [(label, c[key]) for key, label in
-            (("request", "Request"), ("cause", "Root cause / intent"),
-             ("solution", "Selected solution"), ("scope", "Scope boundaries"))
+    rows = [(label, key) for key, label in
+            (("request", "Ask"), ("cause", "Cause"),
+             ("solution", "Fix"), ("scope", "Scope"))
             if _some(c.get(key))]
     if not rows:
         return []
-    lines = ["", "## What changed and why", ""]
-    for label, val in rows:
-        vlines = _lines(val)
-        lines.append(f"- **{label}:** {vlines[0] if vlines else ''}")
-        lines += [f"  {x}" for x in vlines[1:]]
+    lines = ["", "## What changed and why", "", "| | |", "| --- | --- |"]
+    lines += [f"| **{label}** | {_cell(key, c[key])} |" for label, key in rows]
     return lines
 
 
@@ -6435,13 +6468,12 @@ def _evidence_section(p: dict) -> list[str]:
             parts.append((label, c[key]))
     if not parts:
         return []
-    lines = ["", "## Agent evidence", ""]
-    for label, val in parts:
-        if _scalar(val):
-            lines.append(f"- **{label}:** {_cell(label.lower(), val)}")
-        else:
-            lines.append(f"- **{label}:**")
-            lines += [f"  {x}" for x in _bullets(val, depth=1)]
+    # A `Check | Result` TABLE. `_cell` flattens a structured value — `review`'s
+    # `{commit, reviewer, findings}` — into one `key: value; …` cell rather than a nested
+    # bullet tree, which keeps the case-that-it-is-sound to a few scannable rows instead of
+    # the indented block it used to unfold into. Whole, not truncated: a cell wraps.
+    lines = ["", "## Agent evidence", "", "| Check | Result |", "| --- | --- |"]
+    lines += [f"| {label} | {_cell(label.lower(), val)} |" for label, val in parts]
     return lines
 
 
@@ -6488,7 +6520,7 @@ def _change_remainder(p: dict, steps: list) -> list[str]:
 
 
 def _detail_record(p: dict, steps: list) -> list[str]:
-    """`## Detailed record` — everything else, collapsed: the shaped plan, and the record's rest.
+    """`## 📋 Detailed record` — everything else, collapsed: the shaped plan, and the record's rest.
 
     The whole of the rendering that used to be the comment, moved under one fold so nothing a
     human could want is gone — only out of the first screenful. A plan brings its status, its
@@ -6519,7 +6551,7 @@ def _detail_record(p: dict, steps: list) -> list[str]:
         inner += _metadata(p)
     if not any(str(x).strip() for x in inner):
         return []
-    return (["", "## Detailed record", "", "<details>", "<summary>the full record</summary>",
+    return (["", "## 📋 Detailed record", "", "<details>", "<summary>the full record</summary>",
              ""] + inner + ["", "</details>"])
 
 
