@@ -265,7 +265,9 @@ class WorktreeIsNotTopnessTest(Fixture, unittest.TestCase):
 
 
 class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
-    """DESIGN-TRUTH: "A bare agent's delegate is refused outright."
+    """DESIGN-TRUTH: "A bare agent's delegate is refused outright — and since 2026-08-31
+    no SHIPPED role is bare, so that refusal is now for a role a repo declared without
+    `spawn`."
 
     Nothing enforced this before, and it was not hypothetical: a `worker`-role agent in the
     live store had spawned 17 children, orchestrators among them.
@@ -274,10 +276,10 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
     now seeds `spawn`, so that a leaf puts up the review of its own change instead of
     handing that job back to whoever spawned it — a review arranged by the parent gets
     spawned into the parent's checkout, which is not the one the change is in. So `worker`
-    is no longer an example of a bare role; a bare role is one a repo declared without
-    `spawn`, and the gate below is tested through one of those. The 17-children incident
-    is still what the gate is for: what stops it now is the ∩-rule and the prompts, not
-    the absence of the verb.
+    is no longer an example of a bare role, and the gate below is tested through one of
+    the declared kind the entry now points at. The 17-children incident is still what the
+    gate is for: what stops it now is the ∩-rule and the prompts, not the absence of the
+    verb.
     """
 
     def _bare_role(self, name: str = "dogsbody") -> str:
