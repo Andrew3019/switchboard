@@ -604,10 +604,14 @@ capability, independence or scale reason. Ordinary step owners update their own 
 evidence; material reshaping returns to the current plan owner. Shape writes remain
 serialized through the plan's single write path. — confirmed 2026-08-27
 
-**Ticking a step is not a shape edit.** Any agent ticks the step it did, and is trusted to
-tick that one and no other. An agent that reports back without ticking leaves the decision
-to the current plan owner, which closes it from the report or leaves it open when the outcome
-is not complete. — confirmed 2026-08-27
+**Ticking a step is not a shape edit, and the duty is work-scoped.** An agent ticks the step
+it did the WORK of; holding a plan's shape neither makes another agent's step its to tick nor
+exempts it from its own. The plans verbs tick the fixed skeleton themselves as they land it,
+so a step a verb closed needs no hand-tick, while a step finished any other way is the doer's
+and re-ticking one already done is an idempotent no-op. A cascade is the backstop for a step
+whose work is done but left open: whoever next sees it that way — the plan owner reading a
+report, the next agent up — ticks it, or acts on it when the outcome is not complete.
+— confirmed 2026-08-31
 
 **A dispatcher is never involved in a plan.** It does not plan one, own one, tick one or read
 one. It relays work and orchestrates the creation of agents and worktrees, which is the same
