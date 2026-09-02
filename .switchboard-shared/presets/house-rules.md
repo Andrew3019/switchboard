@@ -107,12 +107,10 @@ code.
 - `sb inspect`'s pane view is not a reliable liveness signal — it has repeatedly shown an
   empty pane or a shell error for an agent that was working fine. Use the agent tree.
 
-**Landing work.** Commit on your own branch. After the change is verified and freshly
-reviewed, the task owner pushes and opens the PR itself — a sole agent with no parent
-included — and only the MERGE is gated: where a plan is running its merge gate is the
-authority on landing, where none is this repo's default is that the lead integrates and your
-parent's instruction overrides it, and where you are the sole owner with no parent the merge
-is Andrew's to authorise.
+**Landing work.** Commit on your own branch. Only the MERGE is gated: where a plan is
+running its merge gate is the authority on landing, where none is this repo's default is
+that the lead integrates and your parent's instruction overrides it, and where you are the
+sole owner with no parent the merge is Andrew's to authorise.
 
 - Anything you left unproven belongs in your summary. Unproven and stated is fine; unproven
   and silent is not.
