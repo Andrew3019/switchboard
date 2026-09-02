@@ -61,7 +61,8 @@ from typing import Any
 from switchboard.board import _visible_len
 
 from . import (CLOSED, DONE, OPEN, SKIPPED, _STEP_ID, _defective, _flat, _is_record, _lib,
-               _num, _read, _shown, _some, _tier, _viewed, _Live)
+               _num, _pr_comment_pending, _pr_comment_text, _read, _shown, _some, _tier,
+               _viewed, _Live)
 
 
 # A SECTION OF THE BOARD'S OWN, under the tree, rather than a block hanging off the last
@@ -173,6 +174,16 @@ def board_lines(state_dir: Path, workspace: str, rows: list) -> list:
             line = _empty_line(v)
             if line:
                 out.append(" " + line)
+        # A signal only: a ready PR whose durable comment has not been posted yet. Keep the
+        # line dim like the empty-chart placeholder, and let any malformed record fail closed
+        # to silence so a board redraw is never lost to a hand-edit.
+        try:
+            if _pr_comment_pending(v):
+                reminder = _pr_comment_text(v)
+                if reminder:
+                    out.append(" " + DIM + reminder + PLAIN)
+        except Exception:                       # noqa: BLE001 — board is best effort
+            pass
     # ITEMS 1 & 3, THE ASSOCIATION. Every line of every plan on this worktree is paired with
     # the WORKSPACE it was drawn for — the one string this hook is handed, and the one every
     # plan here was filtered to. That workspace is the plan's main agent's name (`sb delegate`
