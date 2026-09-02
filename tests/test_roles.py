@@ -121,8 +121,9 @@ class RolesTest(unittest.TestCase):
 
     def test_the_merge_gate_gates_the_merge_not_the_push_or_pr(self):
         """2026-09-01: a sole worker committed a fix and stopped, reading "its merge gate is
-        the authority on pushing AND merging" as leaving push/PR to a parent. DESIGN-TRUTH
-        (line "The task owner may push and open the PR after ... fresh review") has said the
+        the authority on pushing AND merging" as leaving push/PR to a parent. DESIGN-TRUTH:
+        "The task owner may push and open the PR after implementation, applicable
+        verification and fresh review are complete." has said the
         gate covers only the merge since 2026-08-27, so the protocol is reconciled to it: the
         owner pushes and opens the PR itself after review, a sole agent with no parent
         included, and only the merge is gated."""
