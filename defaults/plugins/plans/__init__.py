@@ -6083,8 +6083,10 @@ def _pr_comment_text(plan: dict) -> str:
     """The exact reminder shared by terminal `show` and the plans board."""
     try:
         number = plan["change"]["pr"]["number"]
+        plan_id = plan["id"]
         return (f"PR #{_flat(number)}: change-record comment not posted — run "
-                f"`plans comment --pr {_flat(number)}` (ignore if already posted)")
+                f"`sb plugin plans comment {_flat(plan_id)} --pr {_flat(number)}` "
+                f"(ignore if already posted)")
     except Exception:                           # noqa: BLE001 — board is best effort
         return ""
 

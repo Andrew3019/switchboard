@@ -5477,8 +5477,8 @@ class ChangeRecordLifecycleTest(PlansSandbox):
         from defaults.plugins.plans import board
 
         plan = self._ready_pr()
-        reminder = ("PR #42: change-record comment not posted — run `plans comment --pr 42` "
-                     "(ignore if already posted)")
+        reminder = ("PR #42: change-record comment not posted — run "
+                     "`sb plugin plans comment p-1 --pr 42` (ignore if already posted)")
         self.assertTrue(_plans()._pr_comment_pending(plan))
 
         shown = self.ok("plugin", "plans", "show", "p-1")
