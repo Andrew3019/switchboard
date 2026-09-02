@@ -8570,10 +8570,11 @@ class Broker:
             scope = self._descendants(me)
 
         out = RestoreSweepResult()
-        # A human's typed sweep also passes `live_now`, which lets `_crash_cohort` add rows
-        # the store still thinks are alive but herdr no longer lists — the whole-machine
-        # crash case, where the collector died before it could mark any death. `auto` never
-        # passes it: the automatic half keeps the confirmed-death debounce (see below).
+        # A typed sweep (human or agent — anything but the automatic half) also passes
+        # `live_now`, which lets `_crash_cohort` add rows the store still thinks are alive
+        # but herdr no longer lists — the whole-machine crash case, where the collector
+        # died before it could mark any death. `auto` never passes it: the automatic half
+        # keeps the confirmed-death debounce (see below).
         cohort = self._crash_cohort(scope, live_now=None if auto else live_now)
         if auto and not self._looks_like_restart(cohort):
             # The automatic half declines a cohort that is not restart-shaped and restores
@@ -8643,18 +8644,21 @@ class Broker:
         the collector last ticked — a distinction the person typing the command has no
         way to know and no reason to care about.
 
-        A THIRD source, for a human's typed sweep only (`live_now` passed): a row the store
-        still thinks is alive (`REAPABLE`, `ended_at` NULL) that herdr no longer lists. Both
-        halves above are things the COLLECTOR wrote, and a whole-machine crash kills the
-        collector before it writes either — so after a reboot the dead agents sit `working`
-        with no `absent_since` and no `failed`, and the two-half union finds an empty fleet
-        on a board full of dead panes. Herdr not listing a REAPABLE row IS that death, seen
-        directly (`REAPABLE` is the same "could this be alive" set `_record_gone` acts on).
-        It skips the collector's debounce, which the automatic half must not — so `auto`
-        passes no `live_now` and never reaches this branch; a person typing the command is
-        asserting the crash and is trusted to (`restore_sweep`). `live_now` is only ever a
-        real herdr reading here: `restore_sweep` raises on `_agent_states()` == None before
-        building any cohort, so an unreachable herdr never round-trips to "restore them all".
+        A THIRD source, for a typed sweep only (`live_now` passed — human or agent, never
+        `auto`): a row the store still thinks is alive (`REAPABLE`, `ended_at` NULL) that
+        herdr no longer lists. Both halves above are things the COLLECTOR wrote, and a
+        whole-machine crash kills the collector before it writes either — so after a reboot
+        the dead agents sit `working` with no `absent_since` and no `failed`, and the
+        two-half union finds an empty fleet on a board full of dead panes. Herdr not listing
+        a REAPABLE row IS that death, seen directly (`REAPABLE` is the same "could this be
+        alive" set `_record_gone` acts on). It skips the collector's debounce, which the
+        automatic half must not — so `auto` passes no `live_now` and never reaches this
+        branch; whoever typed the command is asserting the crash and is trusted to
+        (`restore_sweep`). An agent's own typed sweep reaches this branch too, bounded by
+        the same `scope` (`_descendants(me)`) that already keeps it out of other trees.
+        `live_now` is only ever a real herdr reading here: `restore_sweep` raises on
+        `_agent_states()` == None before building any cohort, so an unreachable herdr never
+        round-trips to "restore them all".
 
         Rows with no session id stay IN: they cannot be restored, and the caller has to
         name them rather than skip them, which it can only do if they are here.
