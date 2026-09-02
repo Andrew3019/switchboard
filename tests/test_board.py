@@ -3329,6 +3329,33 @@ class BoardCommandTest(unittest.TestCase):
             self.assertIn("not a tty", p.stderr)
             self.assertEqual(p.returncode, 2)
 
+    def test_module_mode_shares_plan_owner_classes_with_rich_renderer(self):
+        """The live board runs as ``__main__`` while richboard imports its package name.
+
+        Section owners are classes, not plain data: the click loop uses their type to tell a
+        plan row from other section chrome.  Module-mode loading must leave one class object
+        on both sides or a plan click falls through the falsy-owner path.
+        """
+        script = """
+import runpy
+import sys
+
+original_exit = sys.exit
+sys.exit = lambda code=0: None
+try:
+    board_main = runpy.run_module("switchboard.board", run_name="__main__",
+                                 alter_sys=True)
+finally:
+    sys.exit = original_exit
+
+from switchboard import richboard
+assert richboard.board._PlanZone is board_main["_PlanZone"]
+assert richboard.board._SectionZone is board_main["_SectionZone"]
+"""
+        p = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                           text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

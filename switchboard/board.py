@@ -71,6 +71,14 @@ from . import panel
 from . import status as status_mod
 from . import sweep as sweep_mod
 
+# ``python -m switchboard.board`` executes this file as ``__main__``.  The rich renderer
+# imports ``switchboard.board`` for the shared layout helpers and section owners; aliasing
+# the running module keeps those classes identical to the ones in the input loop.  Without
+# this, a plan owner made by richboard is falsy but fails this module's ``isinstance`` check,
+# so clicking a plan silently does nothing in a real board pane.
+if __name__ == "__main__":
+    sys.modules["switchboard.board"] = sys.modules[__name__]
+
 # 1000h = press/release reporting. 1006h = SGR encoding, which is the only one
 # that survives past column 223 and the only one 05-mouse saw herdr emit.
 MOUSE_ON = "\033[?1000h\033[?1006h"
