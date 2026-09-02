@@ -3352,8 +3352,12 @@ from switchboard import richboard
 assert richboard.board._PlanZone is board_main["_PlanZone"]
 assert richboard.board._SectionZone is board_main["_SectionZone"]
 """
+        # `main()` still runs (only the `SystemExit` it would raise is swallowed), and
+        # `main()` reads `sys.stdin.isatty()` before anything else. Pin stdin to DEVNULL,
+        # as the sibling subprocess test above does, so this exits on that check rather
+        # than inheriting a real tty and dropping the pane into raw mode.
         p = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                           text=True, timeout=60)
+                           text=True, timeout=60, stdin=subprocess.DEVNULL)
         self.assertEqual(p.returncode, 0, p.stderr)
 
 
