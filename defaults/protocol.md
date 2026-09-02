@@ -158,6 +158,26 @@ evidence rule already in this file — a check is not rerun because ownership mo
 happened, only when your own edit changed its inputs — and applies it to the one place that was
 generating the noise. The escalation list and the human merge gate are both unchanged.
 
+THE MERGE GATE GATES THE MERGE, NOT THE PUSH OR THE PR (2026-09-01). A sole worker fixed a
+board bug, committed on its own branch, and stopped — it did not push or open the PR,
+reading "PR/merge left to the owner" as leaving that to a parent. Andrew expected the PR
+opened automatically after review; his gate is only on merging. Two words in this paragraph
+caused it: "its merge gate is the authority on pushing AND merging" bundled the push under
+the same gate as the merge, and "where none is, your parent's instruction is" handed a sole
+agent an authority to a parent it does not have. DESIGN-TRUTH has said the opposite since
+2026-08-27 — the task owner pushes and opens the PR after implementation, verification and
+fresh review, and the landing authority covers only the merge — so this is reconciling the
+prompt to settled design, not new design. The fix does three things: it orders push/PR AFTER
+the review (the old "an open PR still has a review ahead of it" had the review following the
+open, which is backwards — the fresh review is a plan step before `create-pr`); it says
+outright that pushing and opening the PR are the owner's own act and a sole agent with no
+parent still does them itself; and it scopes the gate to landing, naming the sole-owner case
+where the merge authority is Andrew's rather than a parent's. Who the owner IS was already
+right everywhere else — the plans guide's "the lead, or the sole worker where there is no
+lead", worker.md's sole-owner paragraph, and DESIGN-TRUTH's "A dispatcher is never involved
+in a plan" — so nothing there needed touching; the leak was only here, in the one paragraph
+every role reads about shipping.
+
 CUT BACK TO A POINTER (2026-08-16, PLANS-AND-STEPS). The prohibition itself — never merge
 without that say-so, ask the parent, stop and ask if that parent is the human — is gone,
 replaced by one clause naming who decides: the merge gate where a plan is running, the
@@ -311,14 +331,19 @@ the only thing your parent ever sees of you; it never reads your transcript. Kee
 a line or two of plain, simple language:
 what you found or did, and what it means. Give file paths for the detail rather than
 pasting it.
-Work that ships has a default shape: a branch named for your workspace, push it,
-open the pull request, and put its URL in your summary. That is usually where the
-AGENT stops, not where the WORK ends — an open PR still has a review and a human's
-merge ahead of it, so where the work is going to land, a plan modelling it carries
-those steps even when your own part stops at the PR, and a plan that stops at the
-open PR reads the same whether the job ended there or its landing was dropped. Where a plan is running,
-its merge gate is the authority on pushing and merging; where none is, your
-parent's instruction is. While a PR waits on that merge, a main that has moved below it is
+Work that ships has a default shape: once the change is implemented, verified and
+freshly reviewed, push a branch named for your workspace, open the pull request,
+and put its URL in your summary. Pushing and opening that PR are yours — after the
+review, not before — and you do them yourself rather than hand them up, the sole
+agent on a job with no parent above it included: a sole owner still pushes and
+opens its own PR. That is usually where the AGENT stops, not where the WORK ends —
+an open PR still has a human's merge ahead of it, so where the work is going to
+land, a plan modelling it carries those steps even when your own part stops at the
+PR, and a plan that stops at the open PR reads the same whether the job ended there
+or its landing was dropped. What is gated is the MERGE, not the push or the PR:
+where a plan is running its merge gate is the authority on landing; where none is,
+your parent's instruction is, or Andrew's where you are the sole owner with no
+parent to grant it. While a PR waits on that merge, a main that has moved below it is
 not yours to chase or keep reporting: the landing compares heads at merge time and catches a
 real divergence there, so re-verify only when your own edit changed the inputs — never
 because main moved or a review happened.

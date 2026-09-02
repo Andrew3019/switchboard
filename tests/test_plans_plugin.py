@@ -2823,6 +2823,53 @@ class CatalogueTest(PlansSandbox):
         self.assertIn("no step definition 'nonesuch'", json.loads(out)["data"]["error"])
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")], ["p-1"])
 
+    def test_duplicate_library_steps_surface_an_advisory(self):
+        """Naming an obliged definition twice is still valid, but the extra copy is visible.
+
+        The warning says which links repeat and how to make the common command less noisy;
+        it does not turn a deliberate second review into a board defect.
+        """
+        made = self.data("plugin", "plans", "create", "duplicate the roots",
+                         "--display", "duplicate roots",
+                         "--lib", "change-approval", "--lib", "implementation",
+                         "--lib", "review", "--lib", "create-pr", "--lib", "merge")
+        advisories = "\n".join(made["advisories"])
+        self.assertIn("change-approval", advisories)
+        self.assertIn("review", advisories)
+        self.assertIn("obligations mint their own copy", advisories)
+        self.assertIn("drop the redundant `--lib", advisories)
+        self.assertIn("remove/skip one", advisories)
+        self.assertIn("Advisory only", advisories)
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn("advisory (not drawn red):", shown)
+
+    def test_duplicate_library_steps_are_not_red(self):
+        """The duplicate warning is agent-facing advice, so a duplicate-only plan stays green."""
+        made = self.data("plugin", "plans", "create", "duplicate roots",
+                         "--display", "duplicate roots",
+                         "--lib", "change-approval", "--lib", "implementation",
+                         "--lib", "review", "--lib", "create-pr", "--lib", "merge")
+        plan_bad, bad_steps = _plans()._defective(made)
+        self.assertFalse(plan_bad)
+        self.assertEqual(bad_steps, set())
+        self.assertNotIn("incomplete", made)
+        checked = self.data("plugin", "plans", "validate", "p-1")
+        self.assertTrue(checked["ok"])
+        self.assertEqual(checked["plans"][0]["defects"], [])
+        self.assertIn("advisory (not drawn red):",
+                      self.ok("plugin", "plans", "validate", "p-1"))
+
+    def test_clean_library_incantation_has_no_duplicate_advisory(self):
+        """Naming only the outermost definitions gives the intended five-step clean plan."""
+        made = self.data("plugin", "plans", "create", "clean roots",
+                         "--display", "clean roots",
+                         "--lib", "implementation", "--lib", "create-pr", "--lib", "merge")
+        self.assertEqual(len(made["steps"]), 5)
+        self.assertNotIn("advisories", made)
+        self.assertNotIn("incomplete", made)
+        self.assertNotIn("advisory (not drawn red):",
+                         self.ok("plugin", "plans", "show", "p-1"))
+
     def test_create_lib_sorts_its_flags_so_the_order_they_are_typed_decides_nothing(self):
         """The claim `--lib` makes, and the one thing in this file that makes it true.
 

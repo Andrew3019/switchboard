@@ -263,8 +263,10 @@ obliging reviews are two reviewed results, whether they arrive in one act or two
 would let one step's obligation be satisfied by a step it has nothing to do with, which is
 the door round the obligation in a tidier coat — and a lead who thinks one review covers
 both skips the second with that as the reason, which is visible where a dedupe was not.
-Composition may repeat a definition; obligation never merges one. What stops obligation
-running forever is not a dedupe but a cycle check, the same one composition gets.
+Composition may repeat a definition; obligation never merges one. The duplicate-definition
+advisory makes that deliberate rule visible when a definition was also named explicitly, but
+it never changes the graph or reddens the plan. What stops obligation running forever is not
+a dedupe but a cycle check, the same one composition gets.
 
 A definition that both composes and obliges is REFUSED when it is expanded. An obligation
 attaches to a step, and a composite is not a step in a plan — only its parts ever appear —
@@ -1169,8 +1171,10 @@ WHAT TO BUILD IT FROM
   for a job that ends there — and nothing downstream can tell that plan from one
   which meant to land and lost its merge, so the naming is where it has to be got right.
   Naming an obliged step as well gets you a SECOND copy of it: nothing is ever
-  deduplicated, since two obliging steps represent two outcomes and get two checks. Read `library`
-  first and name the ones nothing else brings.
+  deduplicated, since two obliging steps represent two outcomes and get two checks. The
+  duplicate-definition advisory makes that second copy visible without reddening the plan;
+  drop the redundant `--lib`, or remove/skip one, unless the duplication is intentional. Read
+  `library` first and name the ones nothing else brings.
 
   A definition carries its own account of how that step is run — what it obliges, what it
   gates, what finishing it means. Read it there, AND READ IT AGAIN WHEN THE STEP COMES DUE:
@@ -2808,9 +2812,14 @@ def validate(ctx, args) -> Result:
             found.append({"id": plan["id"], "file": _path(ctx, plan),
                           "defects": [str(bad.human)]})
             continue
-        defects = _defects(_shown(plan, lib))
-        found.append({"id": plan["id"], "file": _path(ctx, plan), "defects": defects})
-        lines.extend(defects)
+        shown = _shown(plan, lib)
+        defects = _red_defects(shown)
+        advisories = _dupes(shown)
+        found_entry = {"id": plan["id"], "file": _path(ctx, plan), "defects": defects}
+        if advisories:
+            found_entry["advisories"] = advisories
+        found.append(found_entry)
+        lines.extend(_defects(shown))
     bad_ones = [f for f in found if f["defects"]] + list(doc.get("broken") or ())
     if not lines:
         n = len(found)
@@ -4030,7 +4039,8 @@ def _mint(plan: dict, lib: dict, key: str, after: tuple = ()) -> list[dict]:
     for the same reason naming it twice in two separate acts does: two independently named
     units are two outcomes, and one check covering both is a lead's judgement to make by
     skipping one with a reason. Dedupe would make a step's obligation satisfiable by a step it has nothing to do
-    with, which is the door round the obligation wearing a tidier shape.
+    with, which is the door round the obligation wearing a tidier shape. The duplicate-step
+    advisory is added after this walk for visibility only; it must not alter the minted graph.
 
     What stops that running forever is a cycle check rather than a dedupe: each step carries
     the chain of definitions that obliged it, an obligation reaching back into its own chain
@@ -4130,6 +4140,9 @@ def _place(plan: dict, lib: dict, steps: list, after: tuple) -> None:
     the deps of the step that obliged it — the PR waits on the approval AND on the review,
     the approval stays a marked early root, and "no PR without an approved contract" is in
     the graph again rather than in a field nothing reads.
+
+    This placement never deduplicates those steps. `_dupes` reports repeated definitions
+    after the graph is complete, for the agent's benefit, and does not edit or redden it.
 
     Two guards on that. It writes only onto steps THIS COMMAND MINTED, never onto a step
     already in the plan, which is the same line every other write here keeps. And it is
@@ -4579,12 +4592,47 @@ def _schema_problems(value: Any, schema: dict, path: str) -> list[str]:
     return out
 
 
+def _dupes(plan: dict) -> list[str]:
+    """The duplicate-definition advisories on a RESOLVED plan, one per definition.
+
+    A named step's `def` survives `_shown` unchanged, so this can compare the live links
+    without looking back into the catalogue. Freetext steps have `def == None` and are
+    deliberately absent: only repeated library links are the composition footgun this
+    advisory explains.
+
+    This is an ADVISORY and never a board defect. A second copy can be intentional — for
+    example, two independent reviews — and a false positive is cheaper than a plan silently
+    hiding the duplicate. As long as the agent sees it, they can remove or skip the extra
+    step; the board must keep working while they decide.
+    """
+    by_def: dict[str, list[str]] = {}
+    for step in plan.get("steps") or ():
+        key = _defkey(step)
+        if key:
+            by_def.setdefault(key, []).append(str(step.get("id") or "?"))
+    out: list[str] = []
+    for key, ids in by_def.items():
+        if len(ids) < 2:
+            continue
+        out.append(
+            f"duplicate definition `{_flat(key)}` on steps {', '.join(_flat(i) for i in ids)} "
+            f"— obligations mint their own copy, so explicitly naming an obliged definition "
+            f"gets a second copy. Fix: drop the redundant `--lib {_flat(key)}`, or remove/skip "
+            f"one. Advisory only: ignore if intentional, for example two genuinely "
+            f"independent reviews.")
+    return out
+
+
 def _defective(plan: dict) -> tuple[bool, set[str]]:
     """`_faults` as the board wants it: is the plan itself short, and which steps are.
 
     One set and not two, because red is red — a step drawn wrong is drawn wrong, and a
     board that coloured a missing display differently from a missing dep would be asking
     a glance to tell two shades apart to learn something the plan says in words.
+
+    Duplicate definitions are intentionally NOT part of this result. They are agent-facing
+    advice, and a legitimate repeated review must not brick the board while an agent decides
+    whether to keep it.
     """
     short, nameless, rootless = _faults(plan)
     # A change-record lifecycle defect is not tied to a step, so it reddens the plan itself
@@ -4593,12 +4641,13 @@ def _defective(plan: dict) -> tuple[bool, set[str]]:
     return short or changed, set(nameless) | set(rootless) | {sid for sid, _ in _wrong(plan)}
 
 
-def _defects(plan: dict) -> list[str]:
-    """The same faults as lines to print under whatever the verb was doing.
+def _red_defects(plan: dict) -> list[str]:
+    """The board defects as lines to print under whatever the verb was doing.
 
     Names the ids and the fix, because a warning that says only "incomplete" is a warning
     whose reader has to go and diff the file against a rule they have not read. Every line
-    is one thing wrong and the command that puts it right.
+    is one thing wrong and the command that puts it right. Duplicate-definition advisories
+    stay out of this list so callers can report them without marking a plan defective.
     """
     short, nameless, rootless = _faults(plan)
     wrong = _wrong(plan)
@@ -4633,6 +4682,25 @@ def _defects(plan: dict) -> list[str]:
     return out
 
 
+def _defects(plan: dict) -> list[str]:
+    """The red faults and non-reddening advisories, as lines for the fault door.
+
+    The advisory gets its own block so it is visible beside the red faults without being
+    mistaken for one. Its wording never says "incomplete": a clean plan with an intentional
+    duplicate must remain clean in the existing result shape as well as on the board.
+    """
+    defects = _red_defects(plan)
+    advisories = _dupes(plan)
+    if not advisories:
+        return defects
+    out = list(defects)
+    if out:
+        out.append("")
+    out.append("advisory (not drawn red):")
+    out.extend(f"    {line}" for line in advisories)
+    return out
+
+
 def _plan_result(shown: dict, markdown: bool = False,
                  path: Optional[str] = None) -> Result:
     """A whole plan, printed, with anything incomplete about it said underneath.
@@ -4642,20 +4710,28 @@ def _plan_result(shown: dict, markdown: bool = False,
     id alone leaves it deriving a filename from a convention it has to have read first —
     so the command that made the file says where the file is, once, where the plan is.
 
-    `ok` stays TRUE and `data` keeps its shape with one key added, which is the whole
-    contract of the second door: a caller that was ticking a step ticked it, and a caller
-    reading `--json` gets `incomplete` beside the plan rather than in place of it.
+    `ok` stays TRUE and `data` keeps its shape with warning keys added only when needed,
+    which is the whole contract of the second door: a caller that was ticking a step ticked
+    it, and a caller reading `--json` gets red `incomplete` faults and non-reddening
+    `advisories` beside the plan rather than in place of it.
 
     `markdown` swaps the terminal rendering for the one that goes on a pull request, and
     swaps nothing else: `data` is the same record either way, so `--json` means what it
-    always meant and a reader of it cannot tell which rendering was asked for. What is
-    incomplete follows the plan into the markdown too — it is a key on the record by then,
-    and the comment draws it high up (`_defect_lines`), because somebody at a merge is who
-    it was written for. The signal that a ready PR still lacks its comment is terminal-only:
-    the markdown is the comment itself and never carries a reminder to post it.
+    always meant and a reader of it cannot tell which rendering was asked for. Red
+    `incomplete` faults and non-reddening `advisories` follow the plan into the markdown
+    too — they are keys on the record by then, and the comment draws separate blocks high up
+    (`_defect_lines`), because somebody at a merge is who it was written for. The signal that
+    a ready PR still lacks its comment is terminal-only: the markdown is the comment itself
+    and never carries a reminder to post it.
     """
     lines = _defects(shown)
-    doc = dict(shown, incomplete=lines) if lines else shown
+    red = _red_defects(shown)
+    advisories = _dupes(shown)
+    doc = dict(shown)
+    if red:
+        doc["incomplete"] = red
+    if advisories:
+        doc["advisories"] = advisories
     if path:
         doc = dict(doc, file=path)
     if markdown:
@@ -6498,7 +6574,7 @@ def _walked(p: dict, skip: set, level: int = 2) -> list[str]:
 # or a table of its own inside that section, and that is what it is for; what it cannot do
 # is forge a row of a step's own table, because it is in no such table at all.
 
-_SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete",
+_SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete", "advisories",
                          # Put on the copy by `_viewed` and drawn by name above: the token
                          # total on its own line, and `roles` inside each step's fold. Named
                          # here so neither also lands in the metadata block below the fold —
@@ -7120,10 +7196,18 @@ def _gates(steps: list) -> list[str]:
 
 
 def _defect_lines(p: dict) -> list[str]:
-    """What `_plan_result` found incomplete, kept where somebody at a merge will see it."""
-    if not _some(p.get("incomplete")):
-        return []
-    return ["", "## incomplete", ""] + [f"- {_flat(x)}" for x in p["incomplete"]]
+    """What `_plan_result` found, kept in separate blocks where a merge sees it.
+
+    Red faults keep the existing `incomplete` heading. Duplicate definitions are advisory
+    only, so they get their own heading and never borrow the red block's language.
+    """
+    lines: list[str] = []
+    if _some(p.get("incomplete")):
+        lines += ["", "## incomplete", ""] + [f"- {_flat(x)}" for x in p["incomplete"]]
+    if _some(p.get("advisories")):
+        lines += ["", "## advisory (not drawn red)", ""]
+        lines += [f"- {_flat(x)}" for x in p["advisories"]]
+    return lines
 
 
 def _folds(p: dict, steps: list) -> list[str]:
@@ -7500,13 +7584,19 @@ def _changed(plan: dict, step: dict, lib: dict, nxt: list = ()) -> Result:
     # THE SECOND DOOR: recomputed over the whole plan after the write, appended, and never
     # a refusal. A step verb that refused a plan for a rendering rule would be a `tick`
     # that does not land, which is worse than the rendering it was protecting.
-    defects = _defects(_shown(plan, lib))
+    shown_plan = _shown(plan, lib)
+    reported = _defects(shown_plan)
+    defects = _red_defects(shown_plan)
+    advisories = _dupes(shown_plan)
     data: dict = {"plan": plan["id"], "step": shown}
     if ready:
         data["next"] = [dict(s, about=_instructions(r, lib)) for s, r in zip(ready, nxt)]
+    if reported:
+        lines.extend(["", *reported])
     if defects:
-        lines.extend(["", *defects])
         data["incomplete"] = defects
+    if advisories:
+        data["advisories"] = advisories
     return Result(human="\n".join(lines), data=data)
 
 
@@ -7545,11 +7635,17 @@ def _added(plan: dict, steps: list, lib: dict) -> Result:
     shown = [_resolve(s, lib) for s in steps]
     lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
     lines.extend(f"  {ln}" for ln in _step_lines(shown))
-    defects = _defects(_shown(plan, lib))       # the second door; see `_changed`
+    shown_plan = _shown(plan, lib)
+    reported = _defects(shown_plan)             # the second door; see `_changed`
+    defects = _red_defects(shown_plan)
+    advisories = _dupes(shown_plan)
     data: dict = {"plan": plan["id"], "steps": shown}
+    if reported:
+        lines.extend(["", *reported])
     if defects:
-        lines.extend(["", *defects])
         data["incomplete"] = defects
+    if advisories:
+        data["advisories"] = advisories
     return Result(human="\n".join(lines), data=data)
 
 

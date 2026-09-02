@@ -116,8 +116,23 @@ class RolesTest(unittest.TestCase):
         every = " ".join([config.protocol(self.repo)]
                          + [r.prompt for r in roles.load(self.repo).values()])
         self.assertNotIn("ever merge without", every)        # "Never"/"never merge without"
-        self.assertIn("its merge gate is the authority on pushing and merging", every)
+        self.assertIn("its merge gate is the authority on landing", every)
         self.assertIn("where none is, your parent's instruction is", every)
+
+    def test_the_merge_gate_gates_the_merge_not_the_push_or_pr(self):
+        """2026-09-01: a sole worker committed a fix and stopped, reading "its merge gate is
+        the authority on pushing AND merging" as leaving push/PR to a parent. DESIGN-TRUTH:
+        "The task owner may push and open the PR after implementation, applicable
+        verification and fresh review are complete." has said the
+        gate covers only the merge since 2026-08-27, so the protocol is reconciled to it: the
+        owner pushes and opens the PR itself after review, a sole agent with no parent
+        included, and only the merge is gated."""
+        p = config.protocol(self.repo)
+        # the gate is scoped to the merge, not the push or the PR
+        self.assertIn("What is gated is the MERGE, not the push or the PR", p)
+        self.assertNotIn("authority on pushing and merging", p)
+        # a sole agent with no parent still pushes and opens its own PR
+        self.assertIn("a sole owner still pushes and opens its own PR", p)
 
     def test_the_protocol_asks_for_skimmable_human_facing_output(self):
         """DESIGN-TRUTH.md's "Skimming it is the test." rules, 2026-08-14. Skimming is what
