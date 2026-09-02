@@ -24,7 +24,13 @@ that said never were guessing which one won. On 2026-08-16 the prohibition was c
 entirely and replaced by a pointer at the plans plugin's merge gate, matching the same cut
 in `defaults/protocol.md` — the gate tells an agent to merge, and it may not ship while
 anything here still says never. With the plugin off there is no gate and this is the
-default minus the prohibition, which is weaker and honest.
+default minus the prohibition, which is weaker and honest. On 2026-09-01 the gate's scope
+was corrected the same way it was in the protocol: it read "the authority on pushing,
+opening a PR and merging", which bundled the owner's own push and PR under the landing gate
+and let a sole worker stop at a commit waiting on a parent to push. The gate covers the
+MERGE only; the task owner pushes and opens the PR itself after review, a sole agent with no
+parent included, and the sole-owner merge is Andrew's — matching DESIGN-TRUTH's landing rule
+and the protocol's shipping paragraph.
 
 The one clause that looks like a repeat and is not: "unproven and stated is fine, silent is
 not". The protocol says what a summary is FOR; it does not say that an unfinished proof
@@ -101,9 +107,10 @@ code.
 - `sb inspect`'s pane view is not a reliable liveness signal — it has repeatedly shown an
   empty pane or a shell error for an agent that was working fine. Use the agent tree.
 
-**Landing work.** Commit on your own branch. Where a plan is running, its merge gate is
-the authority on pushing, opening a PR and merging; where none is, this repo's default is
-that the lead integrates and your parent's instruction overrides it.
+**Landing work.** Commit on your own branch. Only the MERGE is gated: where a plan is
+running its merge gate is the authority on landing, where none is this repo's default is
+that the lead integrates and your parent's instruction overrides it, and where you are the
+sole owner with no parent the merge is Andrew's to authorise.
 
 - Anything you left unproven belongs in your summary. Unproven and stated is fine; unproven
   and silent is not.
