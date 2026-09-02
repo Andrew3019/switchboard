@@ -341,28 +341,32 @@ ignored_content_holds = false
 # once; this is what puts them back without somebody having to notice, work out the
 # command and type it (issue #222).
 
-# Whether a herdr restart brings the fleet back by itself. OFF by default and opt-in:
-# turn it on where the machine's herdr restarts are the thing you want covered, the same
-# shape as `[sweep] enabled`. `sb restore --sweep` typed by hand works either way — the
+# Whether a herdr restart brings the fleet back by itself. ON by default: a herdr or
+# machine restart taking the whole fleet out is a normal event in this fleet's life, and a
+# board full of dead panes that nobody restores is a worse default than the cost of a
+# resume nobody asked for. Turn it off where a machine's restarts are not something you
+# want the fleet resumed for. `sb restore --sweep` typed by hand works either way — the
 # switch only governs the automatic half.
 #
-# OFF BY DEFAULT because a restore is not undone by one command and the automatic half
-# runs unattended: shipping it on would resume sessions on machines whose owner never
-# asked for it. What the automatic half costs when it is on, said plainly because it is
-# the argument for keeping it opt-in: a sweep spawns a pane and resumes a session per
-# dead agent in the cohort.
+# What the automatic half costs when it is on, said plainly: a sweep spawns a pane and
+# resumes a session per dead agent in the cohort. Four things bound that cost and all four
+# are deliberate. It waits for the death to be CONFIRMED (`timeouts.gone_confirm_grace` of
+# continuous absence), so a herdr hiccup or a reading that came back short never triggers
+# one. It fires only on a FLEET-WIDE RESTART, not a lone death: the automatic sweep
+# restores nothing unless the crash cohort is at least `Broker.RESTART_MIN_COHORT` agents
+# that went down together inside one `Broker.RESTART_WINDOW` — so a pane closed by hand, a
+# single kill, or one dropped binding is left alone (`Broker._looks_like_restart`). It only
+# reaches what `Broker.SWEEP_RECENT` calls recent, so it is "whatever just went down", never
+# a week of old failures. And it offers each name ONCE per collector, so an agent that dies
+# on every resume cannot be restored in a loop.
 #
-# Four things bound it and all four are deliberate. It waits for the death to be
-# CONFIRMED (`timeouts.gone_confirm_grace` of continuous absence), so a herdr hiccup or a
-# reading that came back short never triggers one. It fires only on a FLEET-WIDE RESTART,
-# not a lone death: the automatic sweep restores nothing unless the crash cohort is at
-# least `Broker.RESTART_MIN_COHORT` agents that went down together inside one
-# `Broker.RESTART_WINDOW` — so a pane closed by hand, a single kill, or one dropped
-# binding is left alone (`Broker._looks_like_restart`). It only reaches what
-# `Broker.SWEEP_RECENT` calls recent, so it is "whatever just went down", never a week of
-# old failures. And it offers each name ONCE per collector, so an agent that dies on
-# every resume cannot be restored in a loop.
-auto = false
+# One thing the automatic half CANNOT do, and why the typed command still matters: the
+# collector is what confirms a death, and a whole-machine crash kills the collector too, so
+# after a reboot nothing is running to notice, confirm and auto-restore until a board is
+# open again. `sb restore --sweep` typed by hand does not wait for any of that — it reads
+# herdr directly and brings back every row the store still thinks is live but herdr no
+# longer lists (`Broker.restore_sweep`).
+auto = true
 
 
 [limits]

@@ -56,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import (GONE_CONFIRM_GRACE, GONE_STATE, RUNNING, WAIT_EXCUSE_GRACE,
+from .status import (GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING, WAIT_EXCUSE_GRACE,
                      fmt_age, working_again)
 from . import live
 
@@ -8570,7 +8570,11 @@ class Broker:
             scope = self._descendants(me)
 
         out = RestoreSweepResult()
-        cohort = self._crash_cohort(scope)
+        # A human's typed sweep also passes `live_now`, which lets `_crash_cohort` add rows
+        # the store still thinks are alive but herdr no longer lists — the whole-machine
+        # crash case, where the collector died before it could mark any death. `auto` never
+        # passes it: the automatic half keeps the confirmed-death debounce (see below).
+        cohort = self._crash_cohort(scope, live_now=None if auto else live_now)
         if auto and not self._looks_like_restart(cohort):
             # The automatic half declines a cohort that is not restart-shaped and restores
             # NOTHING — see `_looks_like_restart` and `[restore] auto`. Logged so a fleet
@@ -8628,7 +8632,7 @@ class Broker:
                         failed=[n for n, _ in out.failed])
         return out
 
-    def _crash_cohort(self, scope) -> list:
+    def _crash_cohort(self, scope, live_now=None) -> list:
         """The rows a sweep offers to bring back, parents first. See `restore_sweep`.
 
         Two halves, unioned, because the cohort is racing the collector: a row is either
@@ -8639,6 +8643,19 @@ class Broker:
         the collector last ticked — a distinction the person typing the command has no
         way to know and no reason to care about.
 
+        A THIRD source, for a human's typed sweep only (`live_now` passed): a row the store
+        still thinks is alive (`REAPABLE`, `ended_at` NULL) that herdr no longer lists. Both
+        halves above are things the COLLECTOR wrote, and a whole-machine crash kills the
+        collector before it writes either — so after a reboot the dead agents sit `working`
+        with no `absent_since` and no `failed`, and the two-half union finds an empty fleet
+        on a board full of dead panes. Herdr not listing a REAPABLE row IS that death, seen
+        directly (`REAPABLE` is the same "could this be alive" set `_record_gone` acts on).
+        It skips the collector's debounce, which the automatic half must not — so `auto`
+        passes no `live_now` and never reaches this branch; a person typing the command is
+        asserting the crash and is trusted to (`restore_sweep`). `live_now` is only ever a
+        real herdr reading here: `restore_sweep` raises on `_agent_states()` == None before
+        building any cohort, so an unreachable herdr never round-trips to "restore them all".
+
         Rows with no session id stay IN: they cannot be restored, and the caller has to
         name them rather than skip them, which it can only do if they are here.
         """
@@ -8646,6 +8663,13 @@ class Broker:
         picked = [a for a in scope
                   if (a["ended_at"] is None and _column(a, "absent_since"))
                   or (a["state"] == GONE_STATE and (a["ended_at"] or 0) >= cutoff)]
+        if live_now is not None:
+            seen = {a["name"] for a in picked}
+            picked += [a for a in scope
+                       if a["name"] not in seen
+                       and a["ended_at"] is None
+                       and a["state"] in REAPABLE
+                       and a["name"] not in live_now]
         return self._parents_first(picked)
 
     def _crash_time(self, a) -> Optional[float]:
