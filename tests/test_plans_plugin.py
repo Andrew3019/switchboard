@@ -5499,6 +5499,77 @@ class ChangeRecordLifecycleTest(PlansSandbox):
     here polices when a step ran, only what the record claims about itself.
     """
 
+    def _ready_pr(self, plan: str = "p-1", *, review: bool = True,
+                  comment_id: int | None = None, landing: dict | None = None) -> dict:
+        """A record ready for the PR-comment reminder, with optional suppressors."""
+        self.data("plugin", "plans", "create", f"job {plan}",
+                  "--display", f"board: job {plan}", "--step", "impl = write it")
+        self.ready_to_open(plan)
+        doc = self._doc()
+        shown = next(p for p in doc["plans"] if p["id"] == plan)
+        shown["workspace"] = "ws-1"
+        shown["change"]["pr"] = {"number": 42, "head": "abc1234"}
+        if not review:
+            shown["change"]["review"] = None
+        if comment_id is not None:
+            shown["change"]["pr"]["comment_id"] = comment_id
+        if landing is not None:
+            shown["change"]["landing"] = landing
+        self._save(doc)
+        return shown
+
+    def test_a_ready_pr_without_a_comment_is_signalled_on_show_and_the_board(self):
+        """A ready, unmerged PR with no stored comment id gets one identical signal in both
+        human views, while the markdown body stays suitable for posting as-is."""
+        from defaults.plugins.plans import board
+
+        plan = self._ready_pr()
+        reminder = ("PR #42: change-record comment not posted — run "
+                     "`sb plugin plans comment p-1 --pr 42` (ignore if already posted)")
+        self.assertTrue(_plans()._pr_comment_pending(plan))
+
+        shown = self.ok("plugin", "plans", "show", "p-1")
+        self.assertIn(reminder, shown)
+        self.assertNotIn(reminder, self.ok("plugin", "plans", "show", "p-1", "--markdown"))
+
+        lines = board.board_lines(self._dir(), "ws-1", [])
+        self.assertTrue(any(reminder in line and workspace == "ws-1"
+                            for line, workspace in lines))
+
+    def test_a_stored_comment_id_suppresses_the_reminder(self):
+        """The persisted GitHub comment id, rather than a step tick, silences both signals."""
+        from defaults.plugins.plans import board
+
+        plan = self._ready_pr(comment_id=100)
+        reminder = "PR #42: change-record comment not posted"
+        self.assertFalse(_plans()._pr_comment_pending(plan))
+        self.assertNotIn(reminder, self.ok("plugin", "plans", "show", "p-1"))
+        self.assertFalse(any(reminder in line for line, _ in
+                             board.board_lines(self._dir(), "ws-1", [])))
+
+    def test_the_reminder_is_absent_without_a_recorded_gate_or_after_landing(self):
+        """No change record, an incomplete PR-open gate, and a merged landing each stay
+        silent, including across the board's whole workspace block."""
+        from defaults.plugins.plans import board
+
+        self.data("plugin", "plans", "create", "job p-1",
+                  "--display", "board: job p-1", "--step", "impl = write it")
+        doc = self._doc()
+        no_change = next(p for p in doc["plans"] if p["id"] == "p-1")
+        no_change.pop("change", None)
+        no_change["workspace"] = "ws-1"
+        self._save(doc)
+
+        gate_fails = self._ready_pr("p-2", review=False)
+        landed = self._ready_pr("p-3", landing={"outcome": "merged"})
+        reminder = "PR #42: change-record comment not posted"
+        for plan in (no_change, gate_fails, landed):
+            with self.subTest(plan=plan["id"]):
+                self.assertFalse(_plans()._pr_comment_pending(plan))
+                self.assertNotIn(reminder, self.ok("plugin", "plans", "show", plan["id"]))
+        self.assertFalse(any(reminder in line for line, _ in
+                             board.board_lines(self._dir(), "ws-1", [])))
+
     def test_the_combined_approval_is_an_identity_and_round_trips(self):
         """The approved change approval binds a plan revision and a contract digest, recorded
         by hand into `change.approval`, and it round-trips and renders."""

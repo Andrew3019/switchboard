@@ -2248,6 +2248,14 @@ def comment(ctx, args) -> Result:
         why = f"GitHub {action} the plan comment but returned no numeric comment id"
         return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
 
+    # THE STORED ID IS THE SUPPRESSOR for the board and terminal reminder. A refresh proves
+    # the comment exists just as a creation does, so both successful upsert branches persist
+    # it; malformed legacy records without a change/pr remain untouched.
+    change = plan.get("change")
+    if isinstance(change, dict) and isinstance(change.get("pr"), dict):
+        change["pr"]["comment_id"] = comment_id
+        _write(ctx.state_dir, doc, seal)
+
     # THE OPEN IS THE FACT, AND ONLY WHERE IT WAS ACTUALLY CHECKED. This call refused to make
     # it until the record carried the verification and the review — the exit conditions of the
     # two skeleton steps that run before this one — and the human checklist, which is this
@@ -4712,7 +4720,9 @@ def _plan_result(shown: dict, markdown: bool = False,
     always meant and a reader of it cannot tell which rendering was asked for. Red
     `incomplete` faults and non-reddening `advisories` follow the plan into the markdown
     too — they are keys on the record by then, and the comment draws separate blocks high up
-    (`_defect_lines`), because somebody at a merge is who it was written for.
+    (`_defect_lines`), because somebody at a merge is who it was written for. The signal that
+    a ready PR still lacks its comment is terminal-only: the markdown is the comment itself
+    and never carries a reminder to post it.
     """
     lines = _defects(shown)
     red = _red_defects(shown)
@@ -4726,7 +4736,9 @@ def _plan_result(shown: dict, markdown: bool = False,
         doc = dict(doc, file=path)
     if markdown:
         return Result(human=_markdown(_dumped(doc)), data=doc)
-    human = _full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
+    reminder = _pr_comment_text(shown) if _pr_comment_pending(shown) else ""
+    human = (_full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
+             + (f"\n\n{reminder}" if reminder else ""))
     if path:
         human += f"\n\nthe plan is {path} — edit it there, then `sb plugin plans validate`"
     return Result(human=human, data=doc)
@@ -6115,6 +6127,44 @@ def _change_defects(plan: dict) -> list[str]:
                    f"(`change.pr`) — a change cannot be landing before it is on a pull "
                    f"request. Record the PR, or move the phase back.")
     return out
+
+
+def _pr_comment_pending(plan: dict) -> bool:
+    """Whether a ready, unmerged PR still lacks its durable plan comment.
+
+    This is deliberately a signal rather than a gate. It reuses the exact PR-open
+    precondition helper, and every lookup is defensive because hand-edited change records
+    must cost a reminder rather than take down a plan or the board.
+    """
+    try:
+        if not isinstance(plan, dict):
+            return False
+        change = plan.get("change")
+        if not isinstance(change, dict):
+            return False
+        pr = change.get("pr")
+        if not isinstance(pr, dict) or not pr.get("number"):
+            return False
+        if _preconditions_before_pr(plan) is not None:
+            return False
+        if pr.get("comment_id"):
+            return False
+        landing = change.get("landing")
+        return not (isinstance(landing, dict) and _some(landing.get("outcome")))
+    except Exception:                           # noqa: BLE001 — hand-mangled record
+        return False
+
+
+def _pr_comment_text(plan: dict) -> str:
+    """The exact reminder shared by terminal `show` and the plans board."""
+    try:
+        number = plan["change"]["pr"]["number"]
+        plan_id = plan["id"]
+        return (f"PR #{_flat(number)}: change-record comment not posted — run "
+                f"`sb plugin plans comment {_flat(plan_id)} --pr {_flat(number)}` "
+                f"(ignore if already posted)")
+    except Exception:                           # noqa: BLE001 — board is best effort
+        return ""
 
 
 def _change_section(p: dict) -> list[str]:
