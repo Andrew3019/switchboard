@@ -5098,6 +5098,51 @@ class RestoreSweepTest(unittest.TestCase):
         self.assertEqual(list(r), ["solo"])
         self.assertIn("solo", [s["name"] for s in self.h.started])
 
+    # --- The whole-machine crash: the collector died before it marked anything ------------
+
+    def test_a_typed_sweep_restores_a_live_row_herdr_no_longer_lists(self):
+        """The incident's real shape: a whole-machine crash kills the collector too, so the
+        agents alive at the crash never get `absent_since` or a `failed` state — they sit
+        `working`. Both collector-written halves of the cohort are empty, and the fleet is
+        still dead. A human's typed sweep reads herdr directly: a REAPABLE row herdr no
+        longer lists is a crash casualty, brought back parents first."""
+        self._agent("sbmain", is_top=True)
+        self._agent("worker", parent="sbmain")
+        # No _crashed(): nothing marked them. herdr lists nobody (states_by_name empty).
+
+        r = self.b.restore_sweep(me=HUMAN)
+
+        self.assertEqual(sorted(r), ["sbmain", "worker"])
+        started = [s["name"] for s in self.h.started]
+        self.assertLess(started.index("sbmain"), started.index("worker"))
+
+    def test_the_automatic_sweep_does_not_act_on_the_live_reading(self):
+        """`auto` must keep the confirmed-death debounce: a single herdr reading that came
+        back short is exactly what it must never resume on. The same unmarked `working`
+        rows the human's typed sweep brings back are invisible to the automatic half — it
+        has no confirmed death to act on, so it restores nothing and leaves the rows be."""
+        self._agent("sbmain", is_top=True)
+        self._agent("worker", parent="sbmain")
+
+        r = self.b.restore_sweep(me=HUMAN, auto=True)
+
+        self.assertEqual(list(r), [])
+        self.assertEqual(self.h.started, [])
+        self.assertEqual(store.get_agent(self.db, "sbmain")["state"], "working")
+
+    def test_a_typed_sweep_leaves_a_live_row_herdr_still_lists_alone(self):
+        """The survivor, and the one outcome no command undoes: an agent herdr still has a
+        pane for is alive. The new live reading is the guard — a `working` row present in
+        herdr's list is excluded from the cohort, never resumed into a second pane."""
+        self._agent("alive", is_top=True)
+        self._agent("dead", is_top=True)
+        self.h.states_by_name = {"alive": "idle"}      # herdr lists 'alive', not 'dead'
+
+        r = self.b.restore_sweep(me=HUMAN)
+
+        self.assertEqual(list(r), ["dead"])
+        self.assertNotIn("alive", [s["name"] for s in self.h.started])
+
     def test_the_automatic_sweep_restores_a_simultaneous_cohort(self):
         """Several agents down together inside one window IS a restart, and is the case the
         automatic half exists for — parents first, exactly as a human's sweep."""
