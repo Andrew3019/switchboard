@@ -201,22 +201,23 @@ class ModelsTest(unittest.TestCase):
         away instead would make the listing fail on the one row somebody ran the listing to
         look at.
 
-        `gpt-luna-max-effort` is the shipped instance and ships ON — every repo using sb
-        gets the tier — so what this pins is that a repo can take it away again in one
-        line, and that the refusal names the key to put it back.
+        `gpt-luna-max-effort` is the shipped instance and ships OFF (Andrew, 2026-09-03) —
+        so what this pins is that the tier is still there to be listed, that using it is
+        refused until a repo switches it on in one line, and that the refusal names the key
+        to put it back.
         """
-        spec = self.load().resolve("gpt-luna-max-effort")
-        self.assertEqual((spec.provider, spec.model, spec.effort),
-                         ("codex", "gpt-5.6-luna", "max"))
-        self.assertTrue(spec.enabled)
-        self.assertIsNone(spec.gate("worker"))
-
-        self.write_settings("[routing]\ngpt_luna_direct_enabled = false\n")
         off = self.load().resolve("gpt-luna-max-effort")
+        self.assertEqual((off.provider, off.model, off.effort),
+                         ("codex", "gpt-5.6-luna", "max"))
         self.assertFalse(off.enabled)
         with self.assertRaises(models.ModelConfigError) as cm:
             off.gate("worker")
         self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
+
+        self.write_settings("[routing]\ngpt_luna_direct_enabled = true\n")
+        spec = self.load().resolve("gpt-luna-max-effort")
+        self.assertTrue(spec.enabled)
+        self.assertIsNone(spec.gate("worker"))
 
     def test_a_gate_key_nobody_has_written_reads_as_off_rather_than_failing(self):
         """FEATURE-FLAG semantics, and the one place this codebase does not raise on a

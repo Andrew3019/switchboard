@@ -884,7 +884,7 @@ WHICH PATH THIS WORK IS ON
   hard as it can, and it is for the two buckets above it — a DIRECT change, or a change too
   small for a record at all — spawned onto a `worker` or a `builder` with an explicit
   `--model gpt-luna-max-effort`. Nothing infers it: whoever decides the work is direct is
-  who names the tier. It is on by default; a repo can switch it off, so `sb models` is what
+  who names the tier. It is off by default; a repo can switch it on, so `sb models` is what
   says whether the tier resolves here.
 
   It is not for the shaped path, and not for anything before the path is decided —

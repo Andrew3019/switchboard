@@ -182,9 +182,10 @@ done_prefix = "[done] "
 # The direct-path tier, `gpt-luna-max-effort` — the cheap model at maximum effort, for
 # implementation work whose requirements are already settled.
 #
-# TRUE, so every repo using sb gets the tier (Andrew, 2026-09-01). Turning it off is one
-# line in a repo's own `.switchboard/settings.toml`; the tier stays defined either way and
-# `sb models` says which it is here.
+# FALSE: Andrew turned this default off on 2026-09-03 — he does not want the luna-max
+# direct tier on by default. Turning it back on is one line in a repo's own
+# `.switchboard/settings.toml`; the tier stays defined either way and `sb models` says
+# which it is here.
 #
 # A MISSING KEY IS OFF, which is the other half and the reason this reads as a feature flag
 # rather than as an ordinary setting. Every other key here raises when absent — switchboard
@@ -199,7 +200,7 @@ done_prefix = "[done] "
 # already looks — the plans guide's "WHICH PATH THIS WORK IS ON", and `worker.md` /
 # `builder.md`. What IS mechanical is which roles may never have it, and that is data on
 # the tier (`forbidden_roles`) rather than a second flag here.
-gpt_luna_direct_enabled = true
+gpt_luna_direct_enabled = false
 
 
 [capabilities.side_effects]
