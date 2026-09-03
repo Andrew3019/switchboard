@@ -148,11 +148,19 @@ parent's instruction under the standing authorisation to merge unasked), which a
 recorded PR head. `--standing` relaxes only the requirement that a human named the head; every
 head-and-evidence comparison is unchanged, so it opens no gap in the one check that must fail
 closed. Unexpected head changes, unresolved major review state, relevant red checks,
-cancellation or concrete landing failures remain visible and unfinished. Cleanup then follows
-the existing ownership rules: a lead cleans its children on its judgment, a dispatcher cleans
-its direct child on Andrew's, and isolated child branches are folded in before the assembled
-branch is pushed. — confirmed 2026-08-27, the two landing authorities and `landing.kind`
+cancellation or concrete landing failures remain visible and unfinished. Isolated child
+branches are folded in before the assembled branch is pushed, and what cleanup then follows
+is the entry below. — confirmed 2026-08-27, the two landing authorities and `landing.kind`
 confirmed 2026-09-01
+
+**Cleanup follows a merge's authority, not who is above it.** A child closes when its work
+lands — except a merge it decided on its own standing authority, which stays open until
+whoever is above it has reviewed it. That carve-out applies at every level: a worker's own
+spawned helper, a lead's child, a dispatcher's direct child, a researcher's own spawned
+child. Below that: a lead closes on its own judgment, a dispatcher on Andrew's. Which of the
+two a merge was is decided by WHO DECIDED IT rather than who typed it, and an agent that
+cannot tell from what it was told treats it as the standing one and keeps the child open.
+— confirmed 2026-09-02
 
 **A follow-up on a child's report is a handoff, not another relay.** A parent may report a
 child's work once; it may not become the channel for the conversation about it. "When work
@@ -547,6 +555,24 @@ its children parentless and unhook the fleet from the row everything else resolv
 It is a different thing from the reporting handoff under CUJs, which moves a conversation
 and leaves the tree where it is. — confirmed 2026-08-23, against the merged code
 
+**A researcher hands execution over in one of two shapes: a child of its own, or a sibling its
+parent spawns.** It may spawn the lead or worker that does the work as its own child; that
+child is seeded read-only exactly as the researcher is, and may write files git tracks only on
+an explicit `sb grant` from above, given once Andrew has approved the task the researcher
+scoped. Nothing about grants changes here: the grant entry above is the whole of that
+mechanism, and the seeding rule under Capabilities is what decides whether a given grant
+reaches a child already spawned or only the next one. Or the researcher asks its OWN parent to
+spawn that agent as its SIBLING instead: Andrew approves that dispatch himself, so the
+approval is in it by construction, and the researcher is closed by its parent once the sibling
+is up and working — a close tied to the sibling existing, and not to whether or when that
+sibling's own PR later merges. The second shape is not the promote above and must not be
+collapsed into it: `--preserve-children` re-homes the researcher's own EXISTING children onto
+its parent as the researcher drops out of the chain, whereas here the parent spawns a NEW
+agent and no child moves. The first shape is the one promote is written for, and may well end
+in one. A researcher that simply finishes stays open by default, for follow-up, with no
+staleness rule and nothing that expires: Andrew closes it when he wants it gone. — confirmed
+2026-09-02
+
 **Guidance is a ledger of situational rules, delivered at the turn they apply to.** A rule
 is data — `defaults/guidance.toml`, joined with a repo's own and re-read every turn, so an
 edit reaches agents already running — keyed by role, by the `sb` verb just run, by the
@@ -726,21 +752,25 @@ Both receive the same top-level workspace setup; their role templates differ in 
 — confirmed 2026-08-27
 
 **The lead handles cleanup itself, and it should do this aggressively** — probably
-literally every agent that is done. Cleaning up a lead always cleans its children. What
-stays open below a dispatcher is still decided by the person watching the board, and never
-by the dispatcher sweeping on its own judgement — what changes is that the dispatcher
-carries that decision out. It closes children when Andrew tells it to, and when a child
-reports its task fully done it may ask him to approve closing it. For landing work, cleanup
-follows the recorded landing approval and does not create another routine gate, so a
-finished task owner is not a separate ask. The automatic worktree sweep is not an exception
-to that and not a judgement anybody is making: it closes whole workspaces
-rather than agents, it only reaches one where every agent has already finished, and an
-agent still working or blocked holds its worktree open. The agent rows under a workspace
-it takes go with the workspace, which is that same whole-workspace act and not a decision
-about any agent. — confirmed 2026-08-09, the dispatcher half 2026-08-15, superseding the
-2026-08-14 wording that left closing below a dispatcher entirely off it; the sweep's place
-in it 2026-08-16 and its agent rows 2026-08-25; landing cleanup authority updated
-2026-08-27
+literally every agent that is done, save the one carve-out below. Cleaning up a lead always
+cleans its children. What stays open below a dispatcher is still decided by the person
+watching the board, and never by the dispatcher sweeping on its own judgement — what changes
+is that the dispatcher carries that decision out. It closes children when Andrew tells it
+to, and when a child reports its task fully done it may ask him to approve closing it. For
+landing work, cleanup follows the recorded landing approval and does not create another
+routine gate, so a finished task owner is not a separate ask — except where the landing was
+the child's own standing-authority merge, which stays open until whoever is above it has
+reviewed it. That carve-out is not a dispatcher speciality and is stated once for every
+level under **Cleanup follows a merge's authority, not who is above it** in the CUJs above.
+The automatic worktree sweep is not an exception to that and not a judgement anybody is
+making: it closes whole workspaces rather than agents, it only reaches one where every agent
+has already finished, and an agent still working or blocked holds its worktree open. The
+agent rows under a workspace it takes go with the workspace, which is that same
+whole-workspace act and not a decision about any agent. — confirmed 2026-08-09, the
+dispatcher half 2026-08-15, superseding the 2026-08-14 wording that left closing below a
+dispatcher entirely off it; the sweep's place in it 2026-08-16 and its agent rows
+2026-08-25; landing cleanup authority updated 2026-08-27; the standing-authority carve-out
+2026-09-02
 
 **`sb done` keeps the agent open.** It is just a status update and a message for the
 parent, which then decides whether to close it. It always uses the **when idle**
