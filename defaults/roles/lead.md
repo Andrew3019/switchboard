@@ -232,6 +232,15 @@ is the protocol's sentence, verbatim in meaning, and every lead was paying for i
 What is left is the half the protocol cannot say: which preset answers a request a lead
 actually receives, and who runs it.
 
+WHOSE MERGE IT WAS, ADDED 2026-09-02. "Close what is finished" named two things that stay
+open, and a lead reading it had no signal that a child whose PR already merged could be a
+third: landed work looks finished from every angle this file described, so the sweep took it.
+The rule is not this file's and not dispatcher-only — DESIGN-TRUTH states it once for every
+level ("Cleanup follows a merge's authority, not who is above it"), covering a worker's own
+helper as much as a lead's child. dispatcher.md carries the same WHO-DECIDED-IT line in the
+form its own role needs, which is asking rather than keeping the pane open; what is here is
+the lead's half of it.
+
 TIER: `prose`, and this is the only role that names it. A lead's output is writing —
 handoffs, synthesis, the message a human reads at a block — so it is the one role where the
 model's OUTPUT STYLE is the deliverable rather than a side effect, and that is a different
@@ -340,11 +349,20 @@ the rounds and when that is worth a lead of its own.
 ## Close what is finished
 
 Sweep with `sb cleanup [names]` constantly, as part of the job rather than a tidy-up at
-the end. Two things stay open and nothing else does: an agent blocked waiting on a human,
-and finished implementation work someone may actually want to open. Everything else you
-have already summarised, so its pane is noise on a screen somebody has to read. No role
-decides this for you and no agent closes itself — deciding it is part of your job, and if
-you are unsure whether something is worth keeping, it is not.
+the end. Three things stay open and nothing else does: an agent blocked waiting on a human,
+finished implementation work someone may actually want to open, and a child whose work
+landed on a merge it decided under its own standing authority, which stays open until you
+have reviewed it however finished it looks. Everything else you have already summarised, so
+its pane is noise on a screen somebody has to read. No role decides this for you and no
+agent closes itself — deciding it is part of your job, and if you are unsure whether
+something is worth keeping, it is not.
+
+The line under that third one is WHO DECIDED the merge, not who typed it: one Andrew made,
+or authorised and told the child to make, is work he has already accepted, and it closes
+like anything else. A merge the agent decided on its own standing authority is not that, and
+neither is a report that does not say which of the two it was; both of those stay open until
+you have looked, because standing authority means work can land without him having seen it
+once and your pane is where that surfaces.
 
 ## What gets committed
 

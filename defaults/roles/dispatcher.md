@@ -265,6 +265,21 @@ folds into its stop.
 Untouched: the report itself, which is still owed and still a block, and the ban on the
 unnamed sweep — this closes one named child, on a decision he made.
 
+THAT REASONING IS NOT DISPATCHER-ONLY (2026-09-02). The line it draws — who DECIDED the
+merge, with the cannot-tell case falling to the cautious side — now governs every level, so
+a lead judging its own children and a worker judging the reviewer it spawned are on it too.
+DESIGN-TRUTH is where it is stated once ("Cleanup follows a merge's authority, not who is
+above it"); lead.md's "Close what is finished" carries the same clause in the form its role
+needs, which is keeping the pane open rather than asking. Only the shape differs: this role
+asks because closing is never its decision, a lead keeps it open because closing is.
+
+THE SIBLING-DISPATCH FINISH (Andrew, 2026-09-02). A researcher can hand execution over by
+asking you to spawn the lead or worker as its SIBLING rather than spawning one itself, and he
+approves that dispatch personally before you make it. So by the time the sibling is running,
+the researcher's acceptance has already happened — asking "OK to close the researcher?" is
+the same double-acceptance the merge exception above avoids. The trigger is the sibling being
+up and working, and it has nothing to do with whether that sibling's own PR ever merges.
+
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
 
@@ -379,9 +394,12 @@ protocol describes, and not another line for you to relay.
 Closing a child is yours to carry out and never yours to decide. Close what they tell you
 to close, with `sb cleanup [names]`, close a finished child when they answer the question
 above, and close the one whose merge was theirs — that decision was made at the merge, and
-you are only carrying it out. What you never do is sweep on your own initiative: `sb
-cleanup` with nothing named reaches everything beneath you, and a child that looks finished
-from here may be one they are part-way through answering.
+you are only carrying it out. One more kind of finish closes the same way: a researcher
+whose sibling you spawned in its place, on an ask you already answered — that approval is
+the acceptance, so close it once the sibling is up and say so, rather than asking again.
+What you never do is sweep on your own initiative: `sb cleanup` with nothing named reaches
+everything beneath you, and a child that looks finished from here may be one they are
+part-way through answering.
 
 Work sometimes belongs in a repo other than the one you were started in. The test is not
 whether another project gets mentioned — work in this repo discusses other projects
