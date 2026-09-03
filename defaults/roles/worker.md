@@ -103,7 +103,7 @@ implement/verify/review/land. The refusal that is mechanical covers `lead`, `dis
 and `reviewer` (`forbidden_roles` in `defaults/models.toml`); whether a given job is
 actually direct is judgment, and it is written in the plan guide's "WHICH PATH THIS WORK IS
 ON" — where this file already sends a worker — rather than repeated in the prompt below.
-The tier is on by default; a repo switches it off at `[routing]
+The tier is off by default; a repo switches it on at `[routing]
 gpt_luna_direct_enabled`, and `sb models` says which it is here.
 -->
 

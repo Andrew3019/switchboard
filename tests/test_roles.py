@@ -701,22 +701,22 @@ class RolesTest(unittest.TestCase):
         """`Role.spec()` is where a tier and the role about to run it are both in hand.
 
         Two refusals, and they are different kinds. The SWITCH is config — the tier ships
-        ON, and a repo that sets `[routing] gpt_luna_direct_enabled` false takes it away
-        from every role at once. The ROLE list is the mechanical half of the direct-path
-        rule: an agent that splits work, routes it or judges somebody else's change may not
-        have this tier, whoever names it, while the two implementation leaves may.
+        OFF, and a repo that sets `[routing] gpt_luna_direct_enabled` true hands it to
+        every role allowed it at once. The ROLE list is the mechanical half of the
+        direct-path rule: an agent that splits work, routes it or judges somebody else's
+        change may not have this tier, whoever names it, while the two implementation
+        leaves may.
 
         The judgment half — whether a job actually IS direct-path — is deliberately not
         here and cannot be: it is a fact about content, written in the plan guide.
         """
         tier = "gpt-luna-max-effort"
         settings = self.repo / ".switchboard" / "settings.toml"
-        settings.write_text("[routing]\ngpt_luna_direct_enabled = false\n")
         with self.assertRaises(models.ModelConfigError) as cm:
-            roles.load(self.repo)["worker"].spec(tier)      # switched off repo-wide
+            roles.load(self.repo)["worker"].spec(tier)      # off, the shipped default
         self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
 
-        settings.unlink()                                   # back to the shipped ON
+        settings.write_text("[routing]\ngpt_luna_direct_enabled = true\n")  # opted in
         r = roles.load(self.repo)
         for role in ("lead", "dispatcher", "reviewer"):
             with self.subTest(role=role), \

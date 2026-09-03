@@ -184,8 +184,8 @@ effort   = "medium"
 #     half of that name lives at `[vocabulary] review_role` in settings.toml.
 #
 #   enabled_by — the tier resolves only while `[routing] gpt_luna_direct_enabled` is true,
-#     and it ships TRUE: every repo using sb gets this tier. A repo turns it off in one
-#     line of its own `.switchboard/settings.toml`, which is what makes this a routing
+#     and it ships FALSE (Andrew, 2026-09-03): a repo that wants this tier turns it on in
+#     one line of its own `.switchboard/settings.toml`, which is what makes this a routing
 #     experiment somebody can end rather than a tier that has to be deleted. A MISSING key
 #     reads as off rather than as an error, so a settings file older than the flag loses
 #     the tier instead of failing to load — `defaults/settings.toml` has the argument.
