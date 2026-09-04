@@ -5606,12 +5606,12 @@ class Broker:
         # inventing a warning path; the command footer below shares its cursor, so a rule
         # said here is not repeated after the spawn. `--isolation own` is an explicit choice
         # that must suppress this nudge even when older shared writers remain live.
-        if (emit_guidance and isolation != ISOLATION_OWN
-                and CAP_WRITE_TRACKED in store.held_capabilities(self.db, name)):
+        if emit_guidance and isolation != ISOLATION_OWN:
             try:
-                nudge = guidance.deliver(self.db, me, command="delegate", repo=self.repo)
-                if nudge:
-                    print(nudge)
+                if CAP_WRITE_TRACKED in store.held_capabilities(self.db, name):
+                    nudge = guidance.deliver(self.db, me, command="delegate", repo=self.repo)
+                    if nudge:
+                        print(nudge)
             except Exception:                         # noqa: BLE001 — guidance never gates spawn
                 pass
 
