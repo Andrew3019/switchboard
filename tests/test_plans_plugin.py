@@ -5484,6 +5484,7 @@ class RecordTest(PlansSandbox):
         the spawn-side test pins."""
         out = " ".join(self.ok("plugin", "plans", "guide").split())
         self.assertIn("heading for a change that will land", out)   # still pinned
+        self.assertIn('sb plugin plans record --request "..." --display "..."', out)
         for token in ("DIRECT change", "CHANGE RECORD", "sb plugin plans record",
                       "SHAPING first"):
             self.assertIn(token, out)
@@ -6043,7 +6044,8 @@ class LibrarySemanticsTest(PlansSandbox):
         """`create-pr` requires current verification and a resolved review, read from the
         record by identity; and a direct change reaches its PR here with no plan."""
         about = self._about("create-pr")
-        for token in ("verification", "RESOLVED review", "DIRECT change", "comment <record>"):
+        for token in ("verification", "RESOLVED review", "DIRECT change", "comment <record>",
+                      "run command", "already verified: ..."):
             self.assertIn(token, about)
 
     def test_merge_consumes_an_identity_without_rerunning(self):
