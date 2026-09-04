@@ -175,10 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("task", nargs="?",
                    help="what the child is to do. Omit it ONLY when the real task is "
                         "coming next as a message — the child spawns idle and waits "
-                        "for it instead of guessing from its --name")
+                        "for it instead of guessing from its --name. With --task-file, "
+                        "this is an optional one-line summary")
     d.add_argument("--task-file", metavar="PATH",
-                   help="read the task body from this file instead of the TASK argument "
-                        "(for a multi-line brief)")
+                   help="validate this file and give the child a pointer to read and "
+                        "follow it; contents are not injected. TASK may be a one-line "
+                        "summary")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
     d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
@@ -591,23 +593,33 @@ def _validate(args) -> None:
 
     elif cmd == "delegate":
         # None is a taskless spawn and is legal (#145) — the broker substitutes the
-        # placeholder that tells the child to wait. A task may come from the positional
-        # argument or a file, but never both: silently choosing one would make a typo look
-        # like a successful spawn with the wrong instructions.
-        if args.task is not None and args.task_file is not None:
-            raise validate.Invalid(
-                "`sb delegate` accepts either TASK or --task-file PATH, not both")
+        # placeholder that tells the child to wait. A file is deliberately a POINTER, not
+        # an inline payload: herdr rejects newline-bearing agent arguments, and the child
+        # can read the actual brief from the absolute path in its own checkout context.
         if args.task_file is not None:
             args.task_file = validate.line(args.task_file, "--task-file")
+            path = Path(args.task_file).expanduser()
             try:
-                args.task = Path(args.task_file).read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as e:
+                path = path.resolve(strict=True)
+            except (OSError, RuntimeError) as e:
                 raise validate.Invalid(
                     f"cannot read --task-file {args.task_file!r}: {e}") from e
-            # A file-backed task is intentionally allowed to contain newlines. It still
-            # gets the ordinary free-text length/control-character checks before it reaches
-            # the broker, and the broker receives the content rather than a path pointer.
-            args.task = validate.text(args.task, "--task-file")
+            if not path.is_file():
+                raise validate.Invalid(
+                    f"cannot read --task-file {args.task_file!r}: path is not a file")
+            try:
+                with path.open("rb"):
+                    pass
+            except OSError as e:
+                raise validate.Invalid(
+                    f"cannot read --task-file {args.task_file!r}: {e}") from e
+            args.task_file = str(path)
+            summary = validate.line(args.task, "task") if args.task is not None else None
+            if summary:
+                args.task = f"{summary} — full brief: {path}"
+            else:
+                args.task = f"Read and follow the full brief in {path}."
+            args.task = validate.line(args.task, "task")
         elif args.task is not None:
             args.task = validate.line(args.task, "task")
         # Not slugified here: the role is a user-facing lookup key. The resolver accepts
