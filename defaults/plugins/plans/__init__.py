@@ -2234,6 +2234,10 @@ def comment(ctx, args) -> Result:
         if opening:
             bad = _preconditions_before_pr(plan)
             if bad:
+                path = _path(ctx, plan)
+                if path:
+                    bad.human += (f"\n\nthe plan is {path} — edit it there, then `sb plugin "
+                                  "plans validate`")
                 return bad
         action = "created"
         changed, bad = _github(ctx, ["--method", "POST", endpoint, "--input", "-"],
