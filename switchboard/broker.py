@@ -5369,6 +5369,7 @@ class Broker:
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
         isolation: str = ISOLATION_SHARED,      # own|shared — see `isolates`
+        emit_guidance: bool = True,             # prose output; false for JSON callers
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
         is_top: bool = False,           # `sb start` only — see `_top`
     ) -> str:
@@ -5605,7 +5606,7 @@ class Broker:
         # inventing a warning path; the command footer below shares its cursor, so a rule
         # said here is not repeated after the spawn. `--isolation own` is an explicit choice
         # that must suppress this nudge even when older shared writers remain live.
-        if (isolation != ISOLATION_OWN
+        if (emit_guidance and isolation != ISOLATION_OWN
                 and CAP_WRITE_TRACKED in store.held_capabilities(self.db, name)):
             try:
                 nudge = guidance.deliver(self.db, me, command="delegate", repo=self.repo)
@@ -5873,7 +5874,8 @@ class Broker:
         try:
             integrator = self.delegate(
                 self._integrator_task(child, branch, into, where, conflicts),
-                role=DEFAULT_ROLE, topic=f"merge {child}", me=me)
+                role=DEFAULT_ROLE, topic=f"merge {child}", me=me,
+                emit_guidance=False)
         except Exception as e:
             # We could not spawn, so nobody is coming to finish it: leave no half-merged
             # checkout behind for the next command to trip over.

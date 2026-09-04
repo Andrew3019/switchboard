@@ -1417,7 +1417,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           topic=args.name, isolation=args.isolation,
-                          model=args.model, with_=args.with_, me=me, **join)
+                          model=args.model, with_=args.with_, me=me,
+                          emit_guidance=not args.json, **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
         # agent is plainly running (this note), or raised. The middle one is a name plus a
