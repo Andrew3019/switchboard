@@ -357,6 +357,10 @@ cohort to watch. `--name` is two or three words for the SUBJECT — the agent is
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,
 because `worker-7` on the board tells the person watching nothing at all.
+`Agent` always means a switchboard agent, spawned with `sb delegate` — one that lives in
+its own pane, reports through `sb`, and is visible on the board. It never means your own
+built-in subagent or task tool: nobody can see those, message them, or resume them, and a
+review or a piece of work spawned that way is invisible to everyone but you.
 `sb status` lists your active children (finished ones are dropped from it now —
 `sb status --all` shows them), and `sb cleanup [names]` closes finished
 ones beneath you, plus any whose turn switchboard gave up on — closing costs

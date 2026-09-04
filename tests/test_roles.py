@@ -515,6 +515,21 @@ class RolesTest(unittest.TestCase):
         # The one delegation nothing may make optional.
         self.assertIn("reviewed by a fresh agent that did not write it", lead)
 
+    def test_a_worker_gates_done_on_the_fresh_review(self):
+        prompt = " ".join(roles.load(self.repo)["worker"].prompt.split())
+        self.assertIn("reviewed by a fresh agent that did not write it", prompt)
+        self.assertIn("before you call `sb done`", prompt)
+
+    def test_a_lead_messages_parent_only_for_actionable_results(self):
+        prompt = " ".join(roles.load(self.repo)["lead"].prompt.split())
+        for phrase in (
+            "Message your parent only when something is parent-actionable",
+            "Routine sub-progress",
+            "final `sb done` rather than sending them one at a time",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, prompt)
+
     def test_the_protocol_forbids_quietly_doing_less_than_was_asked(self):
         """The other direction of scope, and the one that was ungoverned: "do only what you
         were asked" was read as the whole rule, so deferring a phase, dropping a contract
@@ -629,6 +644,21 @@ class RolesTest(unittest.TestCase):
         rows = (config.defaults_dir() / "guidance.toml").read_text()
         self.assertIn("isolation-at-the-spawn", rows)
         self.assertIn("merge-finished-isolated-child", rows)
+
+    def test_the_agent_tool_warning_is_universal_and_not_repeated_in_lead(self):
+        p = config.protocol(self.repo)
+        for phrase in (
+            "always means a switchboard agent",
+            "built-in subagent or task tool",
+            "invisible to everyone but you",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, p)
+        texts = [p] + [r.prompt for r in roles.load(self.repo).values()]
+        self.assertEqual(1, sum(t.count("nobody can see those, message them, or resume them")
+                                for t in texts))
+        lead = roles.load(self.repo)["lead"].prompt
+        self.assertIn("switchboard meaning defined in the protocol", lead)
 
     def test_a_reviewers_fixes_stop_at_a_commit(self):
         """Seeding `write-tracked` made the reviewer the first role that produces commits,
