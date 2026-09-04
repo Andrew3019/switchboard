@@ -107,6 +107,19 @@ class RolesTest(unittest.TestCase):
             with self.subTest(part=part):
                 self.assertIn(part, p)
 
+    def test_the_protocol_keeps_upward_messages_to_actionable_needs(self):
+        """Every role gets the same rule: routine progress belongs in the agent's own
+        work, and upward messages are reserved for a parent that must act."""
+        p = " ".join(config.protocol(self.repo).split())
+        for phrase in (
+            "Do not narrate your progress to your parent",
+            "learns what you did from your `sb done` summary",
+            "Message your parent before you finish only when it must act",
+            "A progress FYI that asks nothing of the reader is noise",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, p)
+
     def test_no_shipped_prompt_forbids_merging(self):
         """PLANS-AND-STEPS, 2026-08-16: the plans plugin's merge gate tells an agent to
         merge, so the prohibition is cut back to a pointer at it — a gate saying merge and
@@ -520,15 +533,17 @@ class RolesTest(unittest.TestCase):
         self.assertIn("reviewed by a fresh agent that did not write it", prompt)
         self.assertIn("before you call `sb done`", prompt)
 
-    def test_a_lead_messages_parent_only_for_actionable_results(self):
+    def test_a_lead_keeps_routine_upward_messages_in_its_subtree(self):
         prompt = " ".join(roles.load(self.repo)["lead"].prompt.split())
         for phrase in (
-            "Message your parent only when something is parent-actionable",
-            "Routine sub-progress",
+            "universal rule against progress narration governs what you send upward",
+            "Routine fan-out arrivals",
+            "merge-order coordination you resolved with your own children",
             "final `sb done` rather than sending them one at a time",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, prompt)
+        self.assertNotIn("Message your parent only when something is parent-actionable", prompt)
 
     def test_the_protocol_forbids_quietly_doing_less_than_was_asked(self):
         """The other direction of scope, and the one that was ungoverned: "do only what you
