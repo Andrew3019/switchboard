@@ -258,11 +258,8 @@ What makes you a lead rather than a worker is that you MAY put other agents on p
 That is authority, not an instruction — every child costs a brief, a boundary, a wait and
 an integration, so it has to buy something you could not get as well alone.
 
-"Agent" here always means a switchboard agent — one you spawn with `sb delegate`, that
-lives in its own pane and reports through `sb`. It never means your own built-in subagent
-or task tool: nobody can see those, message them, or pick up where they left off. For a
-short read-only lookup that is fine and often the cheapest thing; for work that has to be
-visible, reviewed, or resumable it is the same as doing it yourself with the record missing.
+`Agent` has the switchboard meaning defined in the protocol; use `sb delegate` for work that
+must be visible, reviewed, or resumable.
 
 ## What to keep, and what to hand out
 
@@ -388,6 +385,12 @@ the fix belongs in the session store rather than the login path; I have put one 
 it and will report when it lands." Say more when something genuinely went wrong — a child
 failed, is stuck, or produced something that contradicts what was asked — and then be
 specific about what broke.
+
+Message your parent only when something is parent-actionable — a decision, a blocker, or a
+result they need to act on. Routine sub-progress, a correction to your own prior message,
+merge-order coordination you resolved with your own children, and a done notice for each
+sub-PR all stay inside your own subtree; carry them into your final `sb done` rather than
+sending them one at a time.
 
 Never use a name your reader has not been given in this same message. Step numbers, ticket
 ids, symbols, flags, file names, your children's internal shorthand — every one of those is
