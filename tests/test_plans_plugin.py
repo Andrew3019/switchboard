@@ -2499,6 +2499,30 @@ class CatalogueTest(PlansSandbox):
             again = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
             self.assertEqual(again["action"], "updated")
 
+    def test_pr_open_refusal_names_the_store_file_to_edit(self):
+        """A human can find the hand-edited change record from the refusal itself."""
+        self.data(*_create("a job", "write it"))
+        with self.github_comments() as comments:
+            code, out, err = self.sb("plugin", "plans", "comment", "p-1", "--pr", "42")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn(str(self._stored()[0]), err)
+        self.assertIn("edit it there", err)
+        self.assertEqual(comments, [])
+
+    def test_pr_open_refusal_keeps_missing_fields_payload_unchanged(self):
+        """The store-path guidance stays out of the machine-readable missing-fields data."""
+        self.data(*_create("a job", "write it"))
+        with self.github_comments():
+            code, out, _ = self.sb(
+                "plugin", "plans", "comment", "p-1", "--pr", "42", "--json")
+
+        self.assertEqual(code, 1)
+        data = json.loads(out)["data"]
+        self.assertEqual(data["missing"], ["verification", "review", "human_checks"])
+        self.assertNotIn(str(self._stored()[0]), data["error"])
+
     def test_the_pr_open_gate_refuses_on_each_precondition_one_at_a_time(self):
         """The bug this generalization fixes: `create-pr`'s prose promised three
         preconditions and the code enforced only the review, so an unverified change — or one
