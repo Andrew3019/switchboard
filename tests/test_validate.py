@@ -171,6 +171,37 @@ class CliBoundaryTest(unittest.TestCase):
     def test_delegate_rejects_a_multi_line_task(self):
         self.bad(["delegate", "step one\nstep two"])
 
+    def test_delegate_reads_a_task_file_as_multiline_task_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "brief.md"
+            path.write_text("step one\nstep two\n", encoding="utf-8")
+            args = parse(["delegate", "--task-file", str(path)])
+            _validate(args)
+            self.assertEqual(args.task, "step one\nstep two")
+
+            missing = Path(directory) / "missing.md"
+            with self.assertRaises(validate.Invalid) as error:
+                _validate(parse(["delegate", "--task-file", str(missing)]))
+            self.assertIn("--task-file", str(error.exception))
+            self.assertIn("cannot read", str(error.exception))
+
+    def test_delegate_refuses_a_positional_task_with_a_task_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "brief.md"
+            path.write_text("the file task", encoding="utf-8")
+            with self.assertRaises(validate.Invalid) as error:
+                _validate(parse(["delegate", "inline task", "--task-file", str(path)]))
+            self.assertIn("TASK", str(error.exception))
+            self.assertIn("--task-file", str(error.exception))
+
+    def test_delegate_name_help_explains_one_quoted_argument(self):
+        parser = build_parser()
+        subparsers = next(action for action in parser._actions
+                          if "delegate" in (getattr(action, "choices", None) or {}))
+        help_text = " ".join(subparsers.choices["delegate"].format_help().split())
+        self.assertIn("ONE quoted argument", help_text)
+        self.assertIn('--name "api client"', help_text)
+
     def test_delegate_takes_a_topic_in_prose_and_refuses_only_a_multi_line_one(self):
         """`--name` is the SUBJECT, not the name — `Broker._compose_name` puts the role in
         front of it and slugs the pair, so spaces and capitals are its job and not this
