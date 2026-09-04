@@ -24,6 +24,7 @@ import os
 import sqlite3
 import sys
 import time
+from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from . import config
@@ -174,7 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("task", nargs="?",
                    help="what the child is to do. Omit it ONLY when the real task is "
                         "coming next as a message — the child spawns idle and waits "
-                        "for it instead of guessing from its --name")
+                        "for it instead of guessing from its --name. With --task-file, "
+                        "this is an optional one-line summary")
+    d.add_argument("--task-file", metavar="PATH",
+                   help="validate this file and give the child a pointer to read and "
+                        "follow it; contents are not injected. TASK may be a one-line "
+                        "summary")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
     d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
@@ -182,7 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
                         f"fragment (repeatable); an unknown BARE value is used as a literal "
                         f"instruction, but @ is reserved and an unknown @name is an error")
     d.add_argument("--name", metavar="TOPIC",
-                   help="two or three words for the subject — the agent is named "
+                   help="two or three words for the subject, passed as ONE quoted argument "
+                        '(e.g. --name "api client") — the agent is named '
                         "<role>-<topic>, and that is also its workspace and its branch. "
                         "Required: a spawn with nothing to be named for is refused")
     d.add_argument("--workspace", metavar="NAME",
@@ -586,9 +593,34 @@ def _validate(args) -> None:
 
     elif cmd == "delegate":
         # None is a taskless spawn and is legal (#145) — the broker substitutes the
-        # placeholder that tells the child to wait. Only a task that was actually typed is
-        # checked, the same shape the `start` branch above already has for the same reason.
-        if args.task is not None:
+        # placeholder that tells the child to wait. A file is deliberately a POINTER, not
+        # an inline payload: herdr rejects newline-bearing agent arguments, and the child
+        # can read the actual brief from the absolute path in its own checkout context.
+        if args.task_file is not None:
+            args.task_file = validate.line(args.task_file, "--task-file")
+            path = Path(args.task_file).expanduser()
+            try:
+                path = path.resolve(strict=True)
+            except (OSError, RuntimeError) as e:
+                raise validate.Invalid(
+                    f"cannot read --task-file {args.task_file!r}: {e}") from e
+            if not path.is_file():
+                raise validate.Invalid(
+                    f"cannot read --task-file {args.task_file!r}: path is not a file")
+            try:
+                with path.open("rb"):
+                    pass
+            except OSError as e:
+                raise validate.Invalid(
+                    f"cannot read --task-file {args.task_file!r}: {e}") from e
+            args.task_file = str(path)
+            summary = validate.line(args.task, "task") if args.task is not None else None
+            if summary:
+                args.task = f"{summary} — full brief: {path}"
+            else:
+                args.task = f"Read and follow the full brief in {path}."
+            args.task = validate.line(args.task, "task")
+        elif args.task is not None:
             args.task = validate.line(args.task, "task")
         # Not slugified here: the role is a user-facing lookup key. The resolver accepts
         # unique case/punctuation variants and refuses unknown or ambiguous values.
