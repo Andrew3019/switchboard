@@ -5270,14 +5270,9 @@ class Broker:
         # (`store.open_worktree_counts`), which is why no counter and no new column were
         # added for it: the fact was already being recorded here.
         #
-        # TODO(E1 — guidance ledger): past a soft threshold
-        # (`status.WORKTREE_SOFT_THRESHOLD`) a ledger RULE nudges the lead that its
-        # fan-out is holding a lot of worktrees. There is deliberately nothing here to
-        # fire it — E1 is not built, and a refusal or a printed warning invented in its
-        # place would be the hard cap §2.2 rejects, in the very function that would have
-        # to raise it. NOTHING on this path counts, compares or refuses: a 20-way fan-out
-        # forks twenty times and is told nothing, which is the specified behaviour and not
-        # an omission.
+        # A worktree count is surfaced by status and the guidance ledger owns its soft
+        # threshold. There is deliberately nothing here to count, compare or refuse: a
+        # 20-way fan-out still forks twenty times, which is the specified behaviour.
         store.record_workspace(self.db, ws["workspace"], ws["path"] or None,
                                branch=ws.get("branch"), base_ref=ws.get("base"),
                                created_by=parent)
@@ -5502,13 +5497,10 @@ class Broker:
         # is no path from here to "spawned in the parent's checkout after all" — and that
         # path now has a wider audience, because a non-top asking for `own` reaches it too.
         #
-        # TODO(E1 — guidance ledger): the usability mitigation for a big shared fan-out is
-        # a guidance-ledger RULE, fired when an agent delegates its Nth `write-tracked`
-        # child in a turn without `isolation=own` ("confirm shared is intended"). It is a
-        # JIT nudge on E1's existing channel, not a wall and not a new mechanism, so there
-        # is deliberately nothing here to fire it: E1 is not built, and a fake nudge
-        # invented here is the mechanism the spec says not to add. Nothing caps or refuses
-        # a fan-out either way (spec §2.2).
+        # The shared write fan-out nudge is delivered through the guidance ledger after
+        # this child is claimed and seeded, immediately before the provider spawn. This
+        # placement keeps the warning JIT without putting a second warning mechanism in
+        # the fork rule. Nothing caps or refuses a fan-out either way (spec §2.2).
         if isolation == ISOLATION_OWN and not inherited:
             # Rule 1 already decided, and it decided the other way. Said out loud on the
             # channel the fork notes use, because a request that was silently outranked is
@@ -5606,6 +5598,21 @@ class Broker:
         # the result is PERSISTED on the row because `restore` reseeds from it and must
         # never re-widen back to the raw template.
         store.seed_capabilities(self.db, name, self.seed_for(role, is_top, spawner=me))
+
+        # A SHARED WRITE FAN-OUT IS A JIT GUIDANCE MOMENT. The child is claimed and seeded
+        # before the provider is started, so the existing ledger fact can see the candidate
+        # alongside any earlier shared writers. Ask through guidance.deliver rather than
+        # inventing a warning path; the command footer below shares its cursor, so a rule
+        # said here is not repeated after the spawn. `--isolation own` is an explicit choice
+        # that must suppress this nudge even when older shared writers remain live.
+        if (isolation != ISOLATION_OWN
+                and CAP_WRITE_TRACKED in store.held_capabilities(self.db, name)):
+            try:
+                nudge = guidance.deliver(self.db, me, command="delegate", repo=self.repo)
+                if nudge:
+                    print(nudge)
+            except Exception:                         # noqa: BLE001 — guidance never gates spawn
+                pass
 
         # `model` is a TIER name (`sb delegate --model strong`), not a model id, and it
         # only overrides which tier — the table still decides what that tier means.

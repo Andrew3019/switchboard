@@ -359,18 +359,12 @@ TASK_CLIP = config.setting("limits.task_clip")
 # usually one grant, and the sign — never the names — is the half that must survive.
 ROLE_MARK_MAX = 24
 
-# THE SOFT WORKTREE THRESHOLD (D4, spec §2.2) — a number with deliberately NOTHING behind
-# it in this build. Past it, a guidance-ledger rule nudges the lead; the judgement stays
-# with the operator and NOTHING here refuses, caps or marks a row for exceeding it. A hard
-# ceiling would refuse a legitimate 20-way fan-out at exactly the moment the fleet is doing
-# its most valuable work, so the chosen answer is visibility, not policing.
-#
-# TODO(E1 — guidance ledger): the rule that reads this is ledger DATA keyed on the live
-# state `worktrees > threshold`, fired at turn start on E1's existing channel
-# (`hooks.run_activity`). E1 is not built, so there is no consumer here and no fake nudge
-# invented in its place — a reminder printed from a renderer would be a second guidance
-# mechanism, which is precisely what the ledger exists to avoid. The count it fires on is
-# `AgentStatus.worktrees`, computed below and already on the row.
+# THE SOFT WORKTREE THRESHOLD (D4, spec §2.2) — a number consumed by the guidance ledger.
+# Past it, a ledger rule nudges the lead; the judgement stays with the operator and NOTHING
+# here refuses, caps or marks a row for exceeding it. A hard ceiling would refuse a
+# legitimate 20-way fan-out at exactly the moment the fleet is doing its most valuable work,
+# so the chosen answer is visibility, not policing. The status renderer only surfaces the
+# count that the ledger's live-state fact independently reads from the store.
 WORKTREE_SOFT_THRESHOLD = 8
 
 # Whether whole archived subtrees are drawn row by row or collapsed to one line. Read here

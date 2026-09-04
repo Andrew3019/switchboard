@@ -11,8 +11,8 @@ Two claims, and the second is the larger one:
    sharing spawns still share, named workspaces are still honoured. The only new behaviour
    is that isolation is now AVAILABLE to a non-top that holds `fork` — the #163-B unblock.
 
-The nudge that mitigates a big shared fan-out is a guidance-ledger rule and E1 is not
-built; there is nothing here to test and a stub comment at the fork rule says so.
+The nudge that mitigates a big shared fan-out is a guidance-ledger rule exercised in the
+broker/guidance tests; these isolation tests keep to placement and capability behavior.
 """
 
 from __future__ import annotations

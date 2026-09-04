@@ -10,9 +10,9 @@ else:
   `workspaces.created_by` the fork already records — no new counter, no new column;
 * a **lead's row aggregates its subtree**, the way C3's divergence marker already does, so
   a twenty-way fan-out's cost is one cell rather than twenty leaf rows added up by eye;
-* **nothing refuses, caps or warns.** The soft-threshold nudge is a guidance-ledger rule
-  and E1 is not built; the threshold is a number with no consumer and a `TODO(E1)` beside
-  every place one would go.
+* **nothing refuses or caps.** A soft fan-out nudge is delivered through the guidance
+  ledger before a shared write-tracked child is started; status itself remains a quiet
+  count and never grows a warning or refusal.
 """
 
 from __future__ import annotations
@@ -143,22 +143,16 @@ class NoHardCapTest(Backpressure, unittest.TestCase):
         self.assertGreater(20, status_mod.WORKTREE_SOFT_THRESHOLD)   # well past it
         self.assertEqual(self.cell(root), "scratch wt20")
 
-    def test_past_the_soft_threshold_nothing_fires_and_nothing_is_marked(self):
-        """Objective 3, as far as this build can honestly go: E1 is not built, so the
-        nudge is a marked stub and no fake one stands in for it. The count past the
-        threshold is drawn exactly like a count below it — a renderer that started shouting
-        would be the hard cap in a different hat."""
+    def test_past_the_soft_threshold_status_stays_a_quiet_count(self):
+        """Objective 3: the nudge belongs to the spawn path, not the status renderer. The
+        count past the threshold is drawn exactly like a count below it — a renderer that
+        started shouting would be the hard cap in a different hat."""
         root = self._root()
         self.fan_out(root, status_mod.WORKTREE_SOFT_THRESHOLD + 1)
         text = status_mod.render(self.snap())
         self.assertIn(f"scratch wt{status_mod.WORKTREE_SOFT_THRESHOLD + 1}", text)
         for shout in ("threshold", "too many", "worktrees!", "WARNING"):
             self.assertNotIn(shout, text)
-        # And the stub says so where the rule would fire, so the deferral is discoverable
-        # from the code rather than only from the plan.
-        src = Path(__file__).resolve().parent.parent / "switchboard"
-        self.assertIn("TODO(E1", (src / "broker.py").read_text())
-        self.assertIn("TODO(E1", (src / "status.py").read_text())
 
     def test_nothing_competes_for_the_boards_one_trouble_slot(self):
         """Objective 7. A worktree count is news to read, not a row a human must act on
