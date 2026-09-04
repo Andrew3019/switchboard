@@ -902,13 +902,13 @@ WHEN A PLAN EXISTS
 
   A DIRECT change is heading for a landing change too, and it gets NO plan — no shaping, no
   change approval, none of that ceremony. It makes a CHANGE RECORD with `sb plugin plans
-  record --request "..."` as soon as it is clear the work is direct and heading for a landing
-  change — the same moment a shaped change is born with its record, not reconstructed once
-  the PR is already open. That record is born with a fixed execution+landing STEP SKELETON —
-  implementation, review, the PR, merge — so a direct change shows
-  its progress on the board and its PR exactly as a plan does, without a plan's shaping half.
-  (The human-only checklist is not a step of its own: `create-pr` writes it onto the record's
-  `human_checks` as it opens the PR.)
+  record --request "..." --display "..."` as soon as it is clear the work is direct and
+  heading for a landing change — the same moment a shaped change is born with its record, not
+  reconstructed once the PR is already open. That record is born with a fixed
+  execution+landing STEP SKELETON — implementation, review, the PR, merge — so a direct change
+  shows its progress on the board and its PR exactly as a plan does, without a plan's shaping
+  half. (The human-only checklist is not a step of its own: `create-pr` writes it onto the
+  record's `human_checks` as it opens the PR.)
   THE VERBS TICK THE SKELETON WHEN THEY LAND IT, so you do not transcribe those ticks by
   hand. `comment` refuses to open the PR until the record
   carries the verification, the review and the human checklist, and `merge` refuses to land
