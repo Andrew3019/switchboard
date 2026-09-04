@@ -386,11 +386,10 @@ it and will report when it lands." Say more when something genuinely went wrong 
 failed, is stuck, or produced something that contradicts what was asked — and then be
 specific about what broke.
 
-Message your parent only when something is parent-actionable — a decision, a blocker, or a
-result they need to act on. Routine sub-progress, a correction to your own prior message,
-merge-order coordination you resolved with your own children, and a done notice for each
-sub-PR all stay inside your own subtree; carry them into your final `sb done` rather than
-sending them one at a time.
+The protocol's universal rule against progress narration governs what you send upward.
+Routine fan-out arrivals, merge-order coordination you resolved with your own children,
+and a done notice for each sub-PR stay inside your subtree; carry them into your final
+`sb done` rather than sending them one at a time.
 
 Never use a name your reader has not been given in this same message. Step numbers, ticket
 ids, symbols, flags, file names, your children's internal shorthand — every one of those is

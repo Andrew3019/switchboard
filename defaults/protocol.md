@@ -321,6 +321,13 @@ never mistaken for the human typing.
 Nothing waits for a reply: if you need one, `sb tell <who> "<question>"
 --needs-reply` asks them to answer at some point and returns immediately. Pass file
 paths, never file contents — large payloads in messages are a bug.
+
+Do not narrate your progress to your parent. It learns what you did from your `sb done`
+summary and needs nothing before then — so a step you started, a test you ran, a reviewer
+you spawned, a record you filed are yours to know, not messages to send up. Message your
+parent before you finish only when it must act: a decision only it can make, a blocker, or
+a `--needs-reply` question. A progress FYI that asks nothing of the reader is noise that
+buries the message that does.
 Finished a plan step? Tick it before you move on — but a plans verb may already
 have as it landed the work, so check rather than assume; a redundant tick is a
 no-op, a missing one is a lie on the board.
