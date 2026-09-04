@@ -411,6 +411,57 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(a["session_id"], f"sess-{name}")
         self.assertIn((name, "compute 2+2"), self.h.prompts)
 
+    def _shared_writer_parent(self) -> str:
+        """A non-top lead with the capabilities needed for a shared writer fan-out."""
+        store.create_agent(self.db, name="fanout-lead", role="lead",
+                           workspace="fanout-lead", branch="fanout-lead",
+                           cwd=str(self.repo))
+        store.seed_capabilities(self.db, "fanout-lead", [
+            broker_mod.CAP_SPAWN, broker_mod.CAP_FORK, broker_mod.CAP_WRITE_TRACKED,
+        ])
+        return "fanout-lead"
+
+    def _capture_delegate(self, *, parent: str, topic: str, isolation=None) -> str:
+        out = io.StringIO()
+        kwargs = dict(task="t", topic=topic, role="worker", me=parent)
+        if isolation is not None:
+            kwargs["isolation"] = isolation
+        with contextlib.redirect_stdout(out):
+            self.b.delegate(**kwargs)
+        return out.getvalue()
+
+    def test_the_second_shared_writer_gets_a_nudge_before_provider_spawn(self):
+        parent = self._shared_writer_parent()
+        self._capture_delegate(parent=parent, topic="first")
+        out = io.StringIO()
+        seen_at_provider = []
+        start = self.h.start_agent
+
+        def start_after_nudge(*args, **kwargs):
+            seen_at_provider.append("shared work may clobber" in out.getvalue())
+            return start(*args, **kwargs)
+
+        self.h.start_agent = start_after_nudge
+        with contextlib.redirect_stdout(out):
+            self.b.delegate("t", topic="second", role="worker", me=parent)
+
+        self.assertIn("Separate PRs need separate branches", out.getvalue())
+        self.assertEqual(seen_at_provider, [True])
+
+    def test_a_single_shared_writer_gets_no_fan_out_nudge(self):
+        out = self._capture_delegate(parent=self._shared_writer_parent(), topic="only")
+        self.assertNotIn("Separate PRs need separate branches", out)
+
+    def test_an_explicitly_isolated_writer_suppresses_the_fan_out_nudge(self):
+        parent = self._shared_writer_parent()
+        for topic in ("shared-one", "shared-two"):
+            child = f"worker-{topic}"
+            store.create_agent(self.db, name=child, role="worker", parent=parent,
+                               workspace=parent, branch=parent, cwd=str(self.repo))
+            store.seed_capabilities(self.db, child, [broker_mod.CAP_WRITE_TRACKED])
+        out = self._capture_delegate(parent=parent, topic="isolated", isolation="own")
+        self.assertNotIn("Separate PRs need separate branches", out)
+
     def test_role_selects_a_model_tier(self):
         """A role names a tier; what reaches the CLI is that tier's resolved flags.
 

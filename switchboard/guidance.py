@@ -34,13 +34,14 @@ directly touches no command, and a dispatch-time hook would miss exactly it.
 this file existed, which is what makes the whole mechanism free on the turns it has nothing
 to say.
 
-**The second moment is a COMMAND** (`state_note`, and `cli._state_output`). A handful of
-verbs — the ones that spend a capability or a resource — print the caller's own state under
-their output, and resolve the ledger with the verb in hand, which is what a `command`-keyed
-rule is keyed on. It is a complement to the turn-start channel and not a replacement: the
-hook reaches an agent that never talks to sb, this reaches an agent at the instant it acts,
-and both go through one ledger and one cursor, so a `once` rule spent at either is spent at
-both.
+**The second moment is a COMMAND** (`state_note`, `cli._state_output`, and the delegate
+pre-spawn hook). A handful of verbs — the ones that spend a capability or a resource —
+print the caller's own state under their output, and resolve the ledger with the verb in
+hand, which is what a `command`-keyed rule is keyed on. `delegate` may ask the same ledger
+before its provider spawn when a newly claimed child makes a live-state nudge true. It is a
+complement to the turn-start channel and not a replacement: the hook reaches an agent that
+never talks to sb, command handling reaches it at the action, and all paths go through one
+ledger and one cursor, so a `once` rule spent at either is spent at both.
 
 **The subtractive rule.** A rule that moves here is DELETED from the spawn prompt. A rule
 in both places is paid for twice and drifts, and the only win being claimed is the one that
@@ -215,7 +216,8 @@ def _shared_write_tracked_children(f: Facts) -> int:
     `isolation=own`". Switchboard counts no turns and this file will not invent a counter
     to fake one; what it can see is how many children are, right now, holding the
     side-effect capability while sharing the caller's branch — which is the state the nudge
-    is actually about.
+    is actually about. Broker.delegate claims the candidate before asking this fact, making
+    the second shared writer visible at the pre-provider-spawn point.
     """
     mine = f.branch
     n = 0

@@ -96,16 +96,15 @@ repeat = "once-until-clear"
 text = "You are holding more open worktrees than usual for one agent. That is not a limit and nothing is refused — but each one is a checkout on disk, so close the workspaces whose work has already landed (`sb workspace close <name>`) before you fork more, or say plainly why they all need to stay open."
 
 
-# D2's fan-out nudge (spec §2.2), the second rule the plan gives a home here. The spec's
-# wording is "the Nth `write-tracked` child in a turn without `isolation=own`"; switchboard
-# counts no turns, so what is actually observed is the standing fact underneath it — how
-# many children hold `write-tracked` and are working in the caller's own checkout right now.
-# That is the state the nudge is about, and it is observable; "in a turn" is not.
+# D2's fan-out nudge (spec §2.2), the second rule the plan gives a home here. Broker.delegate
+# asks the ledger after claiming a candidate child and before the provider spawn, so the
+# second shared writer is already visible when this row resolves. The same row remains
+# useful at turn start or command output: it describes the observable state, not a hard cap.
 [[rule]]
 id = "shared-write-tracked-fan-out"
-when = [{fact = "shared_write_tracked_children", op = ">=", value = 3}]
+when = [{fact = "shared_write_tracked_children", op = ">=", value = 2}]
 repeat = "once-until-clear"
-text = "Several of your children are writing tracked files in YOUR checkout at the same time (`isolation shared`, the default). That is allowed and often right for small edits — but if they are editing the same files, spawn them with `--isolation own` and fold each one back with `sb merge <child>` instead."
+text = "Several of your children are writing tracked files in YOUR checkout at the same time (`isolation shared`, the default). Separate PRs need separate branches: if they are editing the same files, spawn them with `--isolation own` and fold each one back with `sb merge <child>` instead, or shared work may clobber."
 
 
 # THE POLICY/MECHANISM SPLIT, as a row (spec §2.1, "policy/mechanism split"). The hard wall
@@ -142,10 +141,9 @@ text = "Two things to get right at a spawn. WHO OWNS IT: a `worker` for a bounde
 # `config.protocol` names `sb delegate`, `--name`, `sb waiting` and the roles, and never the
 # flag). `protocol.md`'s own rationale note used to claim the opposite — "the delegate
 # paragraph above keeps `--isolation own` itself", describing a paragraph that was not there
-# — and now says what is true and points at this row by name. Until this row, the ONLY thing
-# that ever said the word to an agent was `shared-write-tracked-fan-out` below, which fires
-# after the third child is already sharing the checkout, and the `fork` refusal, which fires
-# after the flag has been typed. Both teach it by correction; neither teaches it in time.
+# — and now says what is true and points at this row by name. The correction row below is
+# delivered on the second shared write-tracked child, before its provider starts, while this
+# row remains the one-time choice reminder for every fork-capable caller.
 #
 # KEYED ON THE COMMAND, not on a count, for the same reason `delegate-to-a-lead` is: "own
 # checkout or mine?" is a question that exists at the moment of spawning and at no other
