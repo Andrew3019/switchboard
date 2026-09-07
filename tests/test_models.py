@@ -193,6 +193,26 @@ class ModelsTest(unittest.TestCase):
 
     # -- the gates a tier can carry ---------------------------------------
 
+    def test_a_context_budget_is_refused_on_a_provider_that_cannot_carry_it(self):
+        """These are codex config keys, and only the codex path writes a config file.
+
+        Refused rather than dropped: a claude tier naming one would otherwise resolve
+        fine and do nothing, and a context window that did not take effect is invisible
+        until an agent compacts at the wrong size. Positive whole numbers for the same
+        reason — `true` is an `int` in Python and would mean a one-token window.
+        """
+        with self.assertRaises(models.ModelConfigError) as cm:
+            models._spec("t", {"provider": "claude", "model": "m",
+                               "model_context_window": 872000}, "claude")
+        self.assertIn("codex", str(cm.exception))
+
+        for bad in (True, 0, -1, "872000"):
+            with self.subTest(bad=bad), \
+                    self.assertRaises(models.ModelConfigError) as cm:
+                models._spec("t", {"provider": "codex", "model": "m",
+                                   "model_context_window": bad}, "claude")
+            self.assertIn("positive whole number", str(cm.exception))
+
     def test_a_switched_off_tier_resolves_but_refuses_to_be_used(self):
         """`enabled_by` is a switch on USE, not on existence, and that split is the point.
 
@@ -201,11 +221,13 @@ class ModelsTest(unittest.TestCase):
         away instead would make the listing fail on the one row somebody ran the listing to
         look at.
 
-        `gpt-luna-max-effort` is the shipped instance and ships OFF (Andrew, 2026-09-03) —
-        so what this pins is that the tier is still there to be listed, that using it is
-        refused until a repo switches it on in one line, and that the refusal names the key
-        to put it back.
+        `gpt-luna-max-effort` is the shipped instance and ships ON since 2026-09-07, so the
+        switch is pinned from the OFF side by a repo turning it off in one line — the same
+        one line, the other way. What this pins is that the tier is there to be listed
+        either way, that using it is refused while the key is false, and that the refusal
+        names the key to put it back.
         """
+        self.write_settings("[routing]\ngpt_luna_direct_enabled = false\n")
         off = self.load().resolve("gpt-luna-max-effort")
         self.assertEqual((off.provider, off.model, off.effort),
                          ("codex", "gpt-5.6-luna", "max"))

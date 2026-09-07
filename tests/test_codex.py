@@ -59,6 +59,28 @@ class HomeFixture:
 
 
 class CodexHomeTest(HomeFixture, unittest.TestCase):
+    def test_a_tiers_context_budget_reaches_the_agents_config_as_numbers(self):
+        """The tier keys are only worth carrying if codex reads them as a budget.
+
+        TOML types, not just presence: codex rejects `model_context_window` as a string,
+        so quoting these the way `model` is quoted would produce a config.toml that parses
+        here and fails at the spawn nobody is watching.
+        """
+        cfg = self.config(self.write(context_window=872000,
+                                     auto_compact_limit=650000))
+        self.assertEqual(cfg["model_context_window"], 872000)
+        self.assertEqual(cfg["model_auto_compact_token_limit"], 650000)
+
+    def test_a_tier_without_a_context_budget_writes_neither_key(self):
+        """Absent means "whatever the model's own catalog entry says", not zero.
+
+        Every tier but one sets neither, and writing them as 0 would cap those agents at
+        no context at all rather than leaving the model's default alone.
+        """
+        cfg = self.config(self.write())
+        self.assertNotIn("model_context_window", cfg)
+        self.assertNotIn("model_auto_compact_token_limit", cfg)
+
     def test_a_fresh_checkout_gets_a_real_switchboard_root_before_spawn(self):
         """A missing source path makes codex-linux-sandbox reject the whole spawn.
 
@@ -619,6 +641,28 @@ class CodexSpawnTest(unittest.TestCase):
         self.assertEqual(cfg["model_provider"], "deepseek")
         self.assertIn("deepseek", cfg["model_providers"])
         self.assertEqual(cfg["model"], "deepseek-v4-flash")
+
+    def test_a_tiers_context_budget_reaches_the_written_config(self):
+        """The same JOIN the deepseek test above drives, for the other pair of tier keys.
+
+        Both ends are covered on their own — models.py puts the budget on the spec,
+        codex.py writes the keys when handed them — and the two lines of `_codex_args`
+        between them are all that connects a resolved tier to the file. Dropping them
+        leaves every other test green while a builder spawns on the model's default
+        window, which is exactly the failure the budget exists to prevent and is invisible
+        until that agent compacts at the wrong size.
+
+        Drives the SHIPPED tier rather than a hand-built spec, so the numbers in
+        `defaults/models.toml` are what reaches disk.
+        """
+        spec = models.load(self.repo, global_config=self.repo / "nope.toml"
+                           ).resolve("gpt-luna-max-effort")
+        self.start(spec)
+        cfg = tomllib.loads(
+            (codex.home_path("w1", self.repo) / "config.toml").read_text())
+        self.assertEqual(cfg["model"], "gpt-5.6-luna")
+        self.assertEqual(cfg["model_context_window"], 872000)
+        self.assertEqual(cfg["model_auto_compact_token_limit"], 650000)
 
     def test_a_claude_spawn_is_untouched_by_any_of_it(self):
         """The other half of a seam is that the existing side does not move."""

@@ -714,9 +714,11 @@ class RolesTest(unittest.TestCase):
         a provider whose flags are not Claude's. The flags are still checked underneath, on
         the two tiers that differ in shape.
 
-        NO SHIPPED ROLE IS ON CODEX any more: `builder` was, on `gpt-5.6-sol`, and moved to
-        `opus-5-medium` on 2026-09-01 when that pin was retired in favour of naming
-        `gpt-luna-max-effort` per spawn. The codex tiers still exist and nothing pins one.
+        ONE SHIPPED ROLE IS ON CODEX: `builder`, on `gpt-luna-max-effort` since 2026-09-07.
+        It went `gpt-5.6-sol` -> `opus-5-medium` (2026-09-01) -> here, when the tier that
+        replaced its codex pin turned out to be what the role wants by default rather than
+        per spawn. It is also the one shipped role whose tier is GATED — `enabled_by` —
+        which is why the shipped flag defaults true.
 
         Pinned as a DECISION, not as behaviour.
         """
@@ -728,7 +730,7 @@ class RolesTest(unittest.TestCase):
             "qa":         ("claude", "claude-sonnet-5", "high"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
             "worker":     ("claude", "claude-opus-5",   None),
-            "builder":    ("claude", "claude-opus-5",   "medium"),
+            "builder":    ("codex",  "gpt-5.6-luna",   "max"),
             "planner":    ("claude", "claude-opus-5",   "high"),
         }
         got = {}
@@ -746,8 +748,8 @@ class RolesTest(unittest.TestCase):
         """`Role.spec()` is where a tier and the role about to run it are both in hand.
 
         Two refusals, and they are different kinds. The SWITCH is config — the tier ships
-        OFF, and a repo that sets `[routing] gpt_luna_direct_enabled` true hands it to
-        every role allowed it at once. The ROLE list is the mechanical half of the
+        ON since 2026-09-07, and a repo that sets `[routing] gpt_luna_direct_enabled` false
+        takes it from every role at once. The ROLE list is the mechanical half of the
         direct-path rule: an agent that splits work, routes it or judges somebody else's
         change may not have this tier, whoever names it, while the two implementation
         leaves may.
@@ -757,11 +759,12 @@ class RolesTest(unittest.TestCase):
         """
         tier = "gpt-luna-max-effort"
         settings = self.repo / ".switchboard" / "settings.toml"
+        settings.write_text("[routing]\ngpt_luna_direct_enabled = false\n")  # opted out
         with self.assertRaises(models.ModelConfigError) as cm:
-            roles.load(self.repo)["worker"].spec(tier)      # off, the shipped default
+            roles.load(self.repo)["worker"].spec(tier)
         self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
 
-        settings.write_text("[routing]\ngpt_luna_direct_enabled = true\n")  # opted in
+        settings.write_text("[routing]\ngpt_luna_direct_enabled = true\n")  # shipped default
         r = roles.load(self.repo)
         for role in ("lead", "dispatcher", "reviewer"):
             with self.subTest(role=role), \

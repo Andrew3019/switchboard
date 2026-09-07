@@ -102,7 +102,16 @@ def _default_provider() -> str:
 # The fields a tier table may set. Anything else is a typo, and saying so beats resolving
 # to a spec that quietly ignores it.
 TIER_KEYS = frozenset({"provider", "model", "effort", "extra_args", "codex_provider",
-                       "forbidden_roles", "enabled_by"})
+                       "forbidden_roles", "enabled_by",
+                       "model_context_window", "model_auto_compact_token_limit"})
+
+# The provider whose per-agent settings travel as a config FILE rather than as CLI flags,
+# and therefore the only one that can carry a context budget. Written in Python beside
+# `ModelSpec._FLAG_PROVIDERS` and for the same reason that one is: it is a fact about which
+# code path exists (`switchboard/codex.py` writes the file), not a preference a repo gets
+# to override. `codex.PROVIDER` is the same string; it is not imported because this module
+# is below that one and stays free of it.
+CODEX_PROVIDER = "codex"
 
 # Per-user, between the shipped tiers and the repo's — what `strong` means on YOUR machine.
 ENV_GLOBAL_CONFIG = "SWITCHBOARD_MODELS_CONFIG"
@@ -148,6 +157,20 @@ class ModelSpec:
     # a claude tier that set it would be silently ignored. `defaults/models.toml` is where
     # a person meets it.
     codex_provider: Optional[str] = None
+
+    # THE CONTEXT BUDGET, in tokens, and CODEX-ONLY for the same reason `codex_provider`
+    # above is: both are the names of codex config keys, written through to the agent's
+    # private `config.toml` verbatim. Claude Code has no equivalent flag and no equivalent
+    # setting, so a claude tier naming either is refused at resolution rather than
+    # silently dropped — the mistake is worth a sentence, and a context window that did
+    # not take effect is invisible until an agent compacts at the wrong size.
+    #
+    # None on both means "whatever the model's own catalog entry says", which is every
+    # tier that does not set them. They are separate keys and not one, because codex
+    # treats them separately: the window is how much the model will hold, and the
+    # auto-compact limit is the point at which codex starts summarising to stay under it.
+    model_context_window: Optional[int] = None
+    model_auto_compact_token_limit: Optional[int] = None
 
     # THE TWO GATES ON A TIER, and both are DATA for the reason every other name in this
     # module is: no model name appears in Python, so neither may the name of the one tier
@@ -336,13 +359,36 @@ def _spec(name: str, cfg: dict, default_provider: str,
         raise ModelConfigError(
             f"tier '{name}' must name `enabled_by` as a dotted settings key, e.g. "
             f"\"routing.<something>_enabled\", got {gate_key!r}")
+    # POSITIVE INTS, and `bool` excluded by hand: `isinstance(True, int)` is true in
+    # Python, so `model_context_window = true` would otherwise resolve to a window of one
+    # token and fail somewhere far from the file that said it.
+    provider = cfg.get("provider") or default_provider
+    budget = {}
+    for key in ("model_context_window", "model_auto_compact_token_limit"):
+        value = cfg.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ModelConfigError(
+                f"tier '{name}' must name `{key}` as a positive whole number of tokens, "
+                f"got {value!r}")
+        # Refused rather than dropped: these are codex config keys and nothing writes them
+        # for any other provider, so a claude tier setting one is a mistake that would
+        # otherwise be invisible until an agent compacted at the wrong size.
+        if provider != CODEX_PROVIDER:
+            raise ModelConfigError(
+                f"tier '{name}' sets `{key}`, which only the '{CODEX_PROVIDER}' provider "
+                f"can carry; this tier is '{provider}'")
+        budget[key] = value
+
     return ModelSpec(
         tier=name,
-        provider=cfg.get("provider") or default_provider,
+        provider=provider,
         model=cfg.get("model"),
         effort=effort,
         extra_args=tuple(cfg.get("extra_args") or ()),
         codex_provider=cfg.get("codex_provider"),
+        **budget,
         forbidden_roles=tuple(forbidden),
         enabled_by=gate_key,
         enabled=_enabled(name, gate_key, repo),

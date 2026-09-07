@@ -244,12 +244,16 @@ text = "`sb delegate` takes the task as an argument, and that is right whenever 
 # WHAT THE TEXT WILL NOT SAY: that the tier is available. A repo can switch it off in one
 # line (`[routing] gpt_luna_direct_enabled = false`) and would then be told to type a name
 # that refuses, so it points at `sb models` the way the row above does. It names `worker`
-# and `builder` positively instead of reciting the refused roles — `--role reviewer
-# --model gpt-luna-max-effort` is refused by the gate, so nobody has to remember it.
+# positively instead of reciting the refused roles — `--role reviewer --model
+# gpt-luna-max-effort` is refused by the gate, so nobody has to remember it.
+#
+# IT STOPPED NAMING `builder` (2026-09-07) for the opposite reason: that role now has the
+# tier as its DEFAULT, so telling a spawner to type the flag there is telling them to type
+# what they already have. The flag is now worker-only advice.
 [[rule]]
 id = "direct-path-tier-at-the-spawn"
 command = "delegate"
 holds = ["spawn"]
 repeat = "every-time"
 category = "models"
-text = "At your next spawn, the model: it is fixed there and nowhere else — `restore` reuses the stored tier, so nothing moves an agent onto another one later. A plainly DIRECT implementation job — behaviour, scope and a reasonable approach already clear, or a change too small to reach a review — is what `--model gpt-luna-max-effort` is for, on a `worker` or `builder`: the cheap model at maximum effort (`sb models` for what this repo offers). Shaped work, an open design question, an investigation, or any spawn you are unsure of stays on the default."
+text = "At your next spawn, the model: it is fixed there and nowhere else — `restore` reuses the stored tier, so nothing moves an agent onto another one later. A `builder` is already on the cheap model at maximum effort — that is `gpt-luna-max-effort`, its default — so `--role builder` is the whole choice for code work. The same tier on a `worker` is `--model gpt-luna-max-effort`, for a plainly DIRECT job: behaviour, scope and a reasonable approach already clear, or a change too small to reach a review (`sb models` for what this repo offers). Shaped work, an open design question, an investigation, or any spawn you are unsure of stays on the default."
