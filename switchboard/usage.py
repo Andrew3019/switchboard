@@ -65,7 +65,8 @@ def usage_dir(repo: Optional[Path] = None) -> Path:
 
 def build_record(
     *, timestamp: int, repo: Optional[str], worktree: Optional[str],
-    caller: Optional[str], caller_kind: str, role: Optional[str], command: Optional[str],
+    caller: Optional[str], caller_kind: str, role: Optional[str], tier: Optional[str],
+    model: Optional[str], command: Optional[str],
     plugin: Optional[str], plugin_command: Optional[str], code: int, wall_ms: float,
     stdout_bytes: int, stdout_chars: int,
 ) -> dict[str, Any]:
@@ -73,6 +74,15 @@ def build_record(
 
     ``token_estimate`` is intentionally only the documented chars/4 heuristic; adding a
     tokenizer dependency for coarse fleet accounting would cost more than it measures.
+
+    ``tier`` and ``model`` are BOTH kept, and neither substitutes for the other. A tier is
+    open vocabulary whose meaning is edited (`defaults/models.toml`), so the tier name
+    stored against a row does not say which model actually ran; a model id alone loses
+    which choice put the agent there. Recording the pair is what lets a later report answer
+    "how much of the fleet ran on which model" at all — the `agents` table drops its rows
+    at cleanup, so this log is the only place that answer survives. Neither is a body:
+    both are names this repo's own config already spells out in full, so the privacy bound
+    is unchanged.
     """
     outcome = "ok" if code == 0 else ("usage" if code == 2 else "error")
     return {
@@ -82,6 +92,8 @@ def build_record(
         "caller": caller,
         "caller_kind": caller_kind,
         "role": role,
+        "tier": tier,
+        "model": model,
         "command": command,
         "plugin": plugin,
         "plugin_command": plugin_command,
@@ -224,19 +236,31 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def aggregate(rows: list[dict[str, Any]], *, days: int) -> dict[str, Any]:
-    """Aggregate fleet, command, role, and caller-type patterns."""
+    """Aggregate fleet, command, role, model, tier, and caller-type patterns.
+
+    Rows written before models were recorded, and every row from a human caller, group
+    under "unknown" — the same fail-open the role and caller-kind groups already use. A
+    model split therefore reads as "of the calls that name one", never as a claim that the
+    fleet ran unmodelled work.
+    """
     commands: dict[str, list[dict[str, Any]]] = {}
     roles: dict[str, list[dict[str, Any]]] = {}
+    models: dict[str, list[dict[str, Any]]] = {}
+    tiers: dict[str, list[dict[str, Any]]] = {}
     caller_kinds: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         commands.setdefault(command_key(row), []).append(row)
         roles.setdefault(str(row.get("role") or "unknown"), []).append(row)
+        models.setdefault(str(row.get("model") or "unknown"), []).append(row)
+        tiers.setdefault(str(row.get("tier") or "unknown"), []).append(row)
         caller_kinds.setdefault(str(row.get("caller_kind") or "unknown"), []).append(row)
     return {
         "days": days,
         "overall": _metrics(rows),
         "commands": {key: _metrics(group) for key, group in sorted(commands.items())},
         "roles": {key: _metrics(group) for key, group in sorted(roles.items())},
+        "models": {key: _metrics(group) for key, group in sorted(models.items())},
+        "tiers": {key: _metrics(group) for key, group in sorted(tiers.items())},
         "caller_kinds": {
             key: _metrics(group) for key, group in sorted(caller_kinds.items())
         },
@@ -273,6 +297,19 @@ def format_report(report: dict[str, Any]) -> str:
             lines.append(
                 f"  {name:24} {metrics['calls']:6}  {metrics['success_rate']:6.1%} ok"
             )
+    # `.get`, unlike the groups above: a report read back from an older `--json` dump has
+    # no model or tier section, and the formatter is the one place that can meet one.
+    for section, label in (("models", "models"), ("tiers", "tiers")):
+        if report.get(section):
+            lines.append(f"{label}:")
+            for name, metrics in sorted(
+                report[section].items(), key=lambda item: (-item[1]["calls"], item[0])
+            ):
+                share = metrics["calls"] / overall["calls"] if overall["calls"] else 0.0
+                lines.append(
+                    f"  {name:24} {metrics['calls']:6}  {share:6.1%} of calls  "
+                    f"{metrics['success_rate']:6.1%} ok"
+                )
     if report["caller_kinds"]:
         lines.append("callers:")
         for name, metrics in sorted(report["caller_kinds"].items()):

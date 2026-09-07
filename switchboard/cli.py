@@ -1072,6 +1072,33 @@ def _usage_command(argv: list[str]) -> Optional[str]:
     return next((word for word in argv if not word.startswith("-")), None)
 
 
+def _usage_model(capture: dict[str, Any], b: Broker, row) -> None:
+    """Record the config this call actually ran on: the tier, and what it resolves to.
+
+    The tier in effect is the one a spawn PINNED, else the role's own — `agents.tier` is
+    NULL for everyone nobody pinned, which is most of the fleet, and the role's answer is
+    the true one there. Same rule as `_footer`'s, for the same reason.
+
+    `stored_spec` rather than `spec`: this is a tier already recorded against a live agent,
+    and it passed the role gate on the way in. Re-gating here would mean a settings switch
+    flipped off since the spawn turns every later call by that agent into an unrecorded
+    one, which is the opposite of what a log is for.
+
+    Best effort by position, not by a `try` of its own: it runs after `role` is set inside
+    the enrichment block's existing boundary, so a repo whose tier table will not load
+    loses the model and keeps everything else.
+    """
+    if row is None:
+        return
+    role = roles_mod.get_or_fallback(b.roles, row["role"], b.repo)
+    spec = role.stored_spec(store._value(row, "tier"))
+    capture["tier"] = spec.tier
+    # None where a tier names no model and defers to the provider CLI's own default. It
+    # stays None rather than becoming a guess: `sb usage` groups that as "unknown", which
+    # is exactly what is known about it.
+    capture["model"] = spec.model
+
+
 def _usage_args(capture: dict[str, Any], args) -> None:
     """Copy only invocation vocabulary, never any argument or message bodies."""
     capture["command"] = getattr(args, "cmd", capture.get("command"))
@@ -1101,6 +1128,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "caller": None,
         "caller_kind": "unknown",
         "role": None,
+        "tier": None,
+        "model": None,
     }
     original_stdout = sys.stdout
     counted = usage_mod.CountingStdout(original_stdout)
@@ -1133,6 +1162,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     timestamp=store.now(), repo=capture["repo"],
                     worktree=capture["worktree"], caller=capture["caller"],
                     caller_kind=capture["caller_kind"], role=capture["role"],
+                    tier=capture["tier"], model=capture["model"],
                     command=capture["command"], plugin=capture["plugin"],
                     plugin_command=capture["plugin_command"], code=code,
                     wall_ms=(time.monotonic() - started) * 1000,
@@ -1202,8 +1232,9 @@ def _main(argv: Optional[list[str]], capture: dict[str, Any]) -> int:
             caller_kind="human" if me == HUMAN else "agent",
         )
         if me != HUMAN:
-            row = db.execute("SELECT role FROM agents WHERE name=?", (me,)).fetchone()
+            row = store.get_agent(db, me)
             capture["role"] = row["role"] if row is not None else None
+            _usage_model(capture, b, row)
     except Exception:                           # noqa: BLE001 — logging is never fatal
         pass
 
