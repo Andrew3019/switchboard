@@ -1,8 +1,9 @@
 """Best-effort, cross-repository usage accounting for the ``sb`` CLI.
 
-The sink deliberately stores measurements rather than output bodies.  One append-only
-JSON line per process keeps writers independent across repositories and worktrees; daily
-files make retention a cheap filename operation.
+The sink stores measurements plus the full argument vector of each invocation.  It does
+NOT store command OUTPUT, which is unbounded; ``argv`` is bounded by what a caller typed.
+One append-only JSON line per process keeps writers independent across repositories and
+worktrees; daily files make retention a cheap filename operation.
 """
 
 from __future__ import annotations
@@ -68,9 +69,19 @@ def build_record(
     caller: Optional[str], caller_kind: str, role: Optional[str], tier: Optional[str],
     model: Optional[str], command: Optional[str],
     plugin: Optional[str], plugin_command: Optional[str], code: int, wall_ms: float,
-    stdout_bytes: int, stdout_chars: int,
+    stdout_bytes: int, stdout_chars: int, argv: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
-    """Build the privacy-bounded wire record written for one invocation.
+    """Build the wire record written for one invocation.
+
+    ``argv`` is the COMPLETE argument vector as typed, free-text bodies included — task
+    descriptions, ``--tell`` messages, block reasons, plugin arguments. This deliberately
+    reverses the earlier privacy bound (commit 10f7334, which kept bodies out of the
+    record) on Andrew's direct instruction: the sink is local-only, and the argument text
+    is the missing half of every "what was the fleet actually doing" question a
+    vocabulary-only row could not answer. The raw vector rather than the parsed namespace:
+    it is what was typed, it needs no per-subcommand schema, it is already JSON-
+    serializable, and it exists even for a call argparse or validation rejected — which is
+    precisely where a parsed namespace is absent.
 
     ``token_estimate`` is intentionally only the documented chars/4 heuristic; adding a
     tokenizer dependency for coarse fleet accounting would cost more than it measures.
@@ -80,9 +91,7 @@ def build_record(
     stored against a row does not say which model actually ran; a model id alone loses
     which choice put the agent there. Recording the pair is what lets a later report answer
     "how much of the fleet ran on which model" at all — the `agents` table drops its rows
-    at cleanup, so this log is the only place that answer survives. Neither is a body:
-    both are names this repo's own config already spells out in full, so the privacy bound
-    is unchanged.
+    at cleanup, so this log is the only place that answer survives.
     """
     outcome = "ok" if code == 0 else ("usage" if code == 2 else "error")
     return {
@@ -97,6 +106,7 @@ def build_record(
         "command": command,
         "plugin": plugin,
         "plugin_command": plugin_command,
+        "argv": [str(word) for word in (argv or ())],
         "code": int(code),
         "outcome": outcome,
         "wall_ms": round(max(0.0, float(wall_ms)), 3),

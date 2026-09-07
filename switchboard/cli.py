@@ -1100,17 +1100,23 @@ def _usage_model(capture: dict[str, Any], b: Broker, row) -> None:
 
 
 def _usage_args(capture: dict[str, Any], args) -> None:
-    """Copy only invocation vocabulary, never any argument or message bodies."""
+    """Copy the invocation vocabulary used to GROUP rows in a report.
+
+    Not the privacy bound it once was: the full argument vector, bodies included, is
+    captured separately in `main()`. These fields stay narrow for a different reason —
+    `usage.command_key` builds a grouping key out of them, and a key made from body text
+    would give every distinct message its own row in the report.
+    """
     capture["command"] = getattr(args, "cmd", capture.get("command"))
     if capture["command"] != "plugin":
         return
     plugin = getattr(args, "plugin", None)
     command = getattr(args, "command", None)
-    # `name` is the single plugin-name token; safe. `plugin_command` is taken ONLY from the
-    # RESOLVED subcommand (`command.name`), never from raw `rest` — `rest` is the argparse
-    # REMAINDER, so `rest[0]` on a call that fails validation is whatever body text the
-    # caller typed after the plugin name, and this is a sizes-only log that must never keep
-    # a message body. A call that never resolves a subcommand simply logs none.
+    # `plugin_command` is taken ONLY from the RESOLVED subcommand (`command.name`), never
+    # from raw `rest` — `rest` is the argparse REMAINDER, so `rest[0]` on a call that fails
+    # validation is whatever body text the caller typed after the plugin name, and that
+    # text is a grouping key nobody wants. The `argv` field keeps it verbatim instead. A
+    # call that never resolves a subcommand simply groups under the plugin alone.
     capture["plugin"] = getattr(plugin, "name", None) or getattr(args, "name", None)
     capture["plugin_command"] = getattr(command, "name", None)
 
@@ -1120,6 +1126,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     actual_argv = list(argv) if argv is not None else sys.argv[1:]
     capture: dict[str, Any] = {
         "command": _usage_command(actual_argv),
+        # The whole vector, taken before anything parses it, so a row exists for calls
+        # argparse or `_validate` rejects too — see `usage.build_record` for why in full.
+        "argv": actual_argv,
         "plugin": None,
         "plugin_command": None,
         "repo": None,
@@ -1164,7 +1173,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     caller_kind=capture["caller_kind"], role=capture["role"],
                     tier=capture["tier"], model=capture["model"],
                     command=capture["command"], plugin=capture["plugin"],
-                    plugin_command=capture["plugin_command"], code=code,
+                    plugin_command=capture["plugin_command"],
+                    argv=capture["argv"], code=code,
                     wall_ms=(time.monotonic() - started) * 1000,
                     stdout_bytes=counted.bytes, stdout_chars=counted.chars,
                 )

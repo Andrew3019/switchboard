@@ -15,14 +15,14 @@ from unittest import mock
 from switchboard import cli, models, roles, usage
 
 
-class PluginCaptureLeakTests(unittest.TestCase):
-    """The sizes-only log must never keep a message body typed after a plugin name."""
+class ArgumentCaptureTests(unittest.TestCase):
+    """Full argument capture, and the grouping keys that stay narrow around it."""
 
-    def test_body_text_in_the_remainder_is_never_captured_as_subcommand(self):
+    def test_body_text_in_the_remainder_is_still_not_a_grouping_key(self):
         # `sb plugin todo "buy milk before it's too late"`: the body sits in the argparse
-        # REMAINDER (`rest`). `plugin_command` is taken only from a RESOLVED subcommand, so
-        # before/without validation none is captured — the body cannot reach the log even
-        # when `_validate` then fails and the second capture pass never runs.
+        # REMAINDER (`rest`). It is now logged verbatim in `argv`, but `plugin_command` is
+        # still taken only from a RESOLVED subcommand — a report groups by that key, and a
+        # key made of body text gives every distinct message a row of its own.
         args = cli.build_parser().parse_args(
             ["plugin", "todo", "buy milk before it's too late"])
         capture = {"command": None, "plugin": None, "plugin_command": None}
@@ -30,6 +30,20 @@ class PluginCaptureLeakTests(unittest.TestCase):
         self.assertEqual(capture["command"], "plugin")
         self.assertEqual(capture["plugin"], "todo")
         self.assertIsNone(capture["plugin_command"])
+
+    def test_a_rejected_call_still_logs_the_argv_it_was_rejected_for(self):
+        # The case a parsed namespace cannot serve at all: argparse rejects this outright
+        # and raises SystemExit, so no namespace ever exists. `argv` is captured before
+        # parsing, so the row is still written and still carries the free text as typed.
+        with self.assertRaises(SystemExit):
+            cli.main(["plugins", "why did this stop working"])
+
+        sink = usage.usage_dir()
+        rows = [json.loads(line)
+                for path in sorted(sink.glob("*.jsonl"))
+                for line in path.read_text().splitlines()]
+        self.assertEqual([row["argv"] for row in rows],
+                         [["plugins", "why did this stop working"]])
 
 
 class ModelCaptureTests(unittest.TestCase):
@@ -101,13 +115,13 @@ class CountingStdoutTests(unittest.TestCase):
 
 
 class RecordAndSinkTests(unittest.TestCase):
-    def test_record_has_sizes_and_chars_over_four_estimate_but_no_body(self):
+    def test_record_has_sizes_the_chars_over_four_estimate_and_the_full_argv(self):
         record = usage.build_record(
             timestamp=10, repo="/r/.git", worktree="/r/w", caller="worker-x",
             caller_kind="agent", role="worker", tier="strong",
             model="a-model-id", command="tell", plugin=None,
             plugin_command=None, code=0, wall_ms=12.34567, stdout_bytes=9,
-            stdout_chars=9,
+            stdout_chars=9, argv=["tell", "parent", "the roof is on fire"],
         )
         self.assertEqual(record["outcome"], "ok")
         # The pair, because neither answers the other's question later: the tier table is
@@ -115,8 +129,10 @@ class RecordAndSinkTests(unittest.TestCase):
         self.assertEqual((record["tier"], record["model"]), ("strong", "a-model-id"))
         self.assertEqual(record["token_estimate"], 3)
         self.assertEqual(record["wall_ms"], 12.346)
+        # The reversal of 10f7334: the message body IS kept now, verbatim, as typed.
+        self.assertEqual(record["argv"], ["tell", "parent", "the roof is on fire"])
+        # Command OUTPUT still is not — that is unbounded, and only its size is recorded.
         self.assertNotIn("output", record)
-        self.assertNotIn("message", record)
 
     def test_append_serializes_one_compact_line(self):
         with tempfile.TemporaryDirectory() as tmp:
