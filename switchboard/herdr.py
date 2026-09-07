@@ -654,6 +654,8 @@ class Herdr:
             model=getattr(spec, "model", None),
             effort=getattr(spec, "effort", None),
             model_provider=getattr(spec, "codex_provider", None),
+            context_window=getattr(spec, "model_context_window", None),
+            auto_compact_limit=getattr(spec, "model_auto_compact_token_limit", None),
             hooks=hooks.codex_hook_commands(cwd),
             cwd=cwd,
         )

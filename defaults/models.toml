@@ -21,12 +21,10 @@ provider = "claude"
 # -- the shipped tiers ---------------------------------------------------------
 #
 # Small on purpose: this only has to be good enough that switchboard works with no config
-# file at all. Seven shipped roles, and every one of them now names a claude tier: `worker`
-# is on `default` — a pinned choice now like any other, no longer an unmade one — and
-# `builder`, which used to be the one role on a non-claude provider, is on `opus-5-medium`
-# since the codex tier it pinned was retired (see that tier, and `gpt-luna-max-effort` in
-# the codex section, for why). See `notes/model-selection.md` for the role-by-role
-# reasoning and what it costs.
+# file at all. Seven shipped roles, six of them on a claude tier — `worker` is on `default`,
+# a pinned choice now like any other rather than an unmade one — and one on codex:
+# `builder`, on `gpt-luna-max-effort` in the codex section since 2026-09-07. See
+# `notes/model-selection.md` for the role-by-role reasoning and what it costs.
 #
 # PINNED IDS on the Claude tiers. `claude --help` documents --model as taking "an alias for
 # the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
@@ -87,16 +85,15 @@ model    = "claude-opus-5"
 effort   = "high"
 
 [tiers.opus-5-medium]
-# The middle notch of the flagship, and `builder`'s tier since its codex pin was retired
-# (Andrew, 2026-09-01). `default` is this model at the CLI's own effort and `strong` is it
-# at `high`; this is the level between them, named because a role wanted it. Same shape as
-# `strong`, one word different.
+# The middle notch of the flagship. `default` is this model at the CLI's own effort and
+# `strong` is it at `high`; this is the level between them, named because a role wanted it.
+# Same shape as `strong`, one word different.
 #
-# WHY BUILDER MOVED HERE rather than keeping `gpt-5.6-sol` as a switchable option: what
-# that tier was for — good code cheaply, on work whose requirements are already clear — is
-# what `gpt-luna-max-effort` below now covers, at less. So the codex pin stopped being
-# worth carrying as a runtime choice and became a one-time role edit. `gpt-5.6-sol` is
-# still a tier and still reachable by name; nothing is on it.
+# NOTHING IS ON IT NOW. It was `builder`'s tier for six days — 2026-09-01, when that role's
+# `gpt-5.6-sol` pin was retired, to 2026-09-07, when the role moved to
+# `gpt-luna-max-effort` below. Kept because retiring a name people type is a separate
+# decision from retiring the pin that used it, which is the same argument `gpt-5.6-sol`
+# makes for itself.
 provider = "claude"
 model    = "claude-opus-5"
 effort   = "medium"
@@ -190,14 +187,35 @@ effort   = "medium"
 #     reads as off rather than as an error, so a settings file older than the flag loses
 #     the tier instead of failing to load — `defaults/settings.toml` has the argument.
 #
-# Selection stays EXPLICIT: nothing infers "this work is direct" from a change record and
-# swaps a role's model underneath it. Whoever spawns the worker or builder passes
-# `--model gpt-luna-max-effort` by hand, the way `--role builder` is asked for by name.
+# HOW A SPAWN LANDS HERE, which changed on 2026-09-07 and is now two ways:
+#
+#   `builder` names this tier as its DEFAULT, so `--role builder` is enough and the common
+#     case stopped needing a flag anybody had to remember. See `defaults/roles/builder.md`
+#     for what that costs — the tier no longer signals that somebody judged the work
+#     direct, so a builder makes that call itself.
+#
+#   `worker` still names it PER SPAWN, `--model gpt-luna-max-effort` by hand. That path is
+#     deliberately kept open: the two implementation leaves may both have this tier, and
+#     which one you spawn stays a choice about the ROLE rather than a way of reaching a
+#     model.
+#
+# What is still true either way: nothing INFERS "this work is direct" from a change record
+# and swaps a role's model underneath it. A tier is chosen by naming a role or naming a
+# tier, and never by reading the work.
 provider        = "codex"
 model           = "gpt-5.6-luna"
 effort          = "max"
 forbidden_roles = ["lead", "dispatcher", "reviewer"]
 enabled_by      = "routing.gpt_luna_direct_enabled"
+
+# THE CONTEXT BUDGET, overriding what the model's own catalog entry says. Codex keys,
+# written straight through to the agent's private `config.toml`, and only a codex tier may
+# carry them. The window is how much the model will hold; the auto-compact limit is where
+# codex starts summarising to stay under it, and the gap between the two is the room that
+# summarising needs. A leaf on this tier reads a lot of code before it writes any, so the
+# default entry is the wrong size for the work the tier exists for.
+model_context_window           = 872000
+model_auto_compact_token_limit = 650000
 
 
 # -- the deepseek tiers --------------------------------------------------------

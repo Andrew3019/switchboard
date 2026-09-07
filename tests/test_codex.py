@@ -59,6 +59,28 @@ class HomeFixture:
 
 
 class CodexHomeTest(HomeFixture, unittest.TestCase):
+    def test_a_tiers_context_budget_reaches_the_agents_config_as_numbers(self):
+        """The tier keys are only worth carrying if codex reads them as a budget.
+
+        TOML types, not just presence: codex rejects `model_context_window` as a string,
+        so quoting these the way `model` is quoted would produce a config.toml that parses
+        here and fails at the spawn nobody is watching.
+        """
+        cfg = self.config(self.write(context_window=872000,
+                                     auto_compact_limit=650000))
+        self.assertEqual(cfg["model_context_window"], 872000)
+        self.assertEqual(cfg["model_auto_compact_token_limit"], 650000)
+
+    def test_a_tier_without_a_context_budget_writes_neither_key(self):
+        """Absent means "whatever the model's own catalog entry says", not zero.
+
+        Every tier but one sets neither, and writing them as 0 would cap those agents at
+        no context at all rather than leaving the model's default alone.
+        """
+        cfg = self.config(self.write())
+        self.assertNotIn("model_context_window", cfg)
+        self.assertNotIn("model_auto_compact_token_limit", cfg)
+
     def test_a_fresh_checkout_gets_a_real_switchboard_root_before_spawn(self):
         """A missing source path makes codex-linux-sandbox reject the whole spawn.
 

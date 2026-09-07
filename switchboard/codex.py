@@ -215,6 +215,8 @@ def write_home(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     model_provider: Optional[str] = None,
+    context_window: Optional[int] = None,
+    auto_compact_limit: Optional[int] = None,
     hooks: Mapping[str, str] = (),      # event name -> shell command line
     cwd: Optional[Path] = None,
 ) -> Path:
@@ -229,6 +231,11 @@ def write_home(
 
     `model_provider` is the tier's `codex_provider`, and None for every tier that does not
     set one. It says the binary is the same and the API is not — see `_provider_settings`.
+
+    `context_window` and `auto_compact_limit` are the tier's `model_context_window` and
+    `model_auto_compact_token_limit`, and None for every tier that leaves the model's own
+    catalog entry alone. Named without the `model_` prefix here because this module is
+    already entirely about one model; `_config_toml` puts the codex spelling back.
     """
     d = home_path(name, cwd)
     try:
@@ -282,7 +289,8 @@ def write_home(
     if any(p and p.strip() for p in prompts):
         _write(d / "AGENTS.md", render_instructions(prompts), name)
     _write(d / "config.toml",
-           _config_toml(worktree, model, effort, model_provider, hooks, cwd), name)
+           _config_toml(worktree, model, effort, model_provider, context_window,
+                        auto_compact_limit, hooks, cwd), name)
     _link_auth(d, model_provider)
     return d
 
@@ -457,7 +465,8 @@ def _provider_settings(name: str, cwd: Optional[Path]) -> tuple[dict, dict]:
 
 
 def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional[str],
-                 model_provider: Optional[str], hooks: Mapping[str, str],
+                 model_provider: Optional[str], context_window: Optional[int],
+                 auto_compact_limit: Optional[int], hooks: Mapping[str, str],
                  cwd: Optional[Path]) -> str:
     """The one file that carries everything switchboard sets per agent for Claude Code as
     flags. Every key here parses under `--strict-config` against codex-cli 0.147.0.
@@ -491,6 +500,14 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         lines.append(f"model = {_s(model)}")
     if effort:
         lines.append(f"model_reasoning_effort = {_s(effort)}")
+    # Beside the model and not in a section, because that is where codex reads them: both
+    # are session-wide keys, and both override whatever the model's own catalog entry says
+    # about how much context it holds and when to start compacting. Bare integers, so no
+    # `_s` — quoting either would make it a string and codex would reject the type.
+    if context_window:
+        lines.append(f"model_context_window = {context_window}")
+    if auto_compact_limit:
+        lines.append(f"model_auto_compact_token_limit = {auto_compact_limit}")
     if model_provider:
         # Up here rather than beside the block below because TOML has no top level after
         # its first `[header]`: everything from `[sandbox_workspace_write]` on belongs to

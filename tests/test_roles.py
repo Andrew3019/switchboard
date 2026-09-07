@@ -714,9 +714,11 @@ class RolesTest(unittest.TestCase):
         a provider whose flags are not Claude's. The flags are still checked underneath, on
         the two tiers that differ in shape.
 
-        NO SHIPPED ROLE IS ON CODEX any more: `builder` was, on `gpt-5.6-sol`, and moved to
-        `opus-5-medium` on 2026-09-01 when that pin was retired in favour of naming
-        `gpt-luna-max-effort` per spawn. The codex tiers still exist and nothing pins one.
+        ONE SHIPPED ROLE IS ON CODEX: `builder`, on `gpt-luna-max-effort` since 2026-09-07.
+        It went `gpt-5.6-sol` -> `opus-5-medium` (2026-09-01) -> here, when the tier that
+        replaced its codex pin turned out to be what the role wants by default rather than
+        per spawn. It is also the one shipped role whose tier is GATED — `enabled_by` —
+        which is why the shipped flag defaults true.
 
         Pinned as a DECISION, not as behaviour.
         """
@@ -728,7 +730,7 @@ class RolesTest(unittest.TestCase):
             "qa":         ("claude", "claude-sonnet-5", "high"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
             "worker":     ("claude", "claude-opus-5",   None),
-            "builder":    ("claude", "claude-opus-5",   "medium"),
+            "builder":    ("codex",  "gpt-5.6-luna",   "max"),
             "planner":    ("claude", "claude-opus-5",   "high"),
         }
         got = {}
