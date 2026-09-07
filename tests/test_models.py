@@ -201,11 +201,13 @@ class ModelsTest(unittest.TestCase):
         away instead would make the listing fail on the one row somebody ran the listing to
         look at.
 
-        `gpt-luna-max-effort` is the shipped instance and ships OFF (Andrew, 2026-09-03) —
-        so what this pins is that the tier is still there to be listed, that using it is
-        refused until a repo switches it on in one line, and that the refusal names the key
-        to put it back.
+        `gpt-luna-max-effort` is the shipped instance and ships ON since 2026-09-07, so the
+        switch is pinned from the OFF side by a repo turning it off in one line — the same
+        one line, the other way. What this pins is that the tier is there to be listed
+        either way, that using it is refused while the key is false, and that the refusal
+        names the key to put it back.
         """
+        self.write_settings("[routing]\ngpt_luna_direct_enabled = false\n")
         off = self.load().resolve("gpt-luna-max-effort")
         self.assertEqual((off.provider, off.model, off.effort),
                          ("codex", "gpt-5.6-luna", "max"))

@@ -746,8 +746,8 @@ class RolesTest(unittest.TestCase):
         """`Role.spec()` is where a tier and the role about to run it are both in hand.
 
         Two refusals, and they are different kinds. The SWITCH is config — the tier ships
-        OFF, and a repo that sets `[routing] gpt_luna_direct_enabled` true hands it to
-        every role allowed it at once. The ROLE list is the mechanical half of the
+        ON since 2026-09-07, and a repo that sets `[routing] gpt_luna_direct_enabled` false
+        takes it from every role at once. The ROLE list is the mechanical half of the
         direct-path rule: an agent that splits work, routes it or judges somebody else's
         change may not have this tier, whoever names it, while the two implementation
         leaves may.
@@ -757,11 +757,12 @@ class RolesTest(unittest.TestCase):
         """
         tier = "gpt-luna-max-effort"
         settings = self.repo / ".switchboard" / "settings.toml"
+        settings.write_text("[routing]\ngpt_luna_direct_enabled = false\n")  # opted out
         with self.assertRaises(models.ModelConfigError) as cm:
-            roles.load(self.repo)["worker"].spec(tier)      # off, the shipped default
+            roles.load(self.repo)["worker"].spec(tier)
         self.assertIn("routing.gpt_luna_direct_enabled", str(cm.exception))
 
-        settings.write_text("[routing]\ngpt_luna_direct_enabled = true\n")  # opted in
+        settings.write_text("[routing]\ngpt_luna_direct_enabled = true\n")  # shipped default
         r = roles.load(self.repo)
         for role in ("lead", "dispatcher", "reviewer"):
             with self.subTest(role=role), \
