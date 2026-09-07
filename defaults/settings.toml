@@ -187,9 +187,17 @@ done_prefix = "[done] "
 # it off again is one line in a repo's own `.switchboard/settings.toml`; the tier stays
 # defined either way and `sb models` says which it is here.
 #
-# ON means AVAILABLE, not automatic. Nothing routes work onto this tier — whoever spawns a
-# `worker` or `builder` names `--model gpt-luna-max-effort` by hand — so flipping this key
-# changes what that name RESOLVES to and moves no existing spawn.
+# ON means AVAILABLE, not automatic. Nothing INFERS that a job is direct-path and moves an
+# agent onto this tier: a spawn lands here by naming the `builder` role, whose default it
+# is, or by naming the tier itself on a `worker`. Flipping this key changes what those
+# resolve to and moves no spawn already running.
+#
+# WHICH IS WHY IT SHIPS TRUE rather than being left to each repo. `builder` is the only
+# shipped role on a gated tier, so setting this false does not merely withdraw an option —
+# it takes away that role's own default, and every builder spawn then fails naming this
+# key. That is the loud failure rather than a silent fallback onto a model nobody chose,
+# but it is worth knowing before turning it off. `defaults/roles/builder.md` says the same
+# where a builder will read it.
 #
 # A MISSING KEY IS OFF, which is the other half and the reason this reads as a feature flag
 # rather than as an ordinary setting. Every other key here raises when absent — switchboard
