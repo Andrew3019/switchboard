@@ -64,6 +64,20 @@
 # turn. That is the point of it being data.
 
 
+# ISSUE #285: the plans path needs to be visible before a lead starts decomposing work.
+# Andrew chose a turn-start reminder rather than spawn-time or passive documentation. It
+# applies to every lead once: there is no deterministic "needs shaping" fact, and
+# waiting for a second child would be after the decomposition this reminder is meant to
+# influence. The wording leaves the path decision with the lead, keeps direct work direct,
+# and distinguishes a direct change record from a shaped plan.
+[[rule]]
+id = "lead-plans-at-turn-start"
+role = "lead"
+repeat = "once"
+category = "plans"
+text = "At task start, decide whether this work needs shaping before implementation; if so, consider `sb plugin plans create`. Clear bounded work stays direct; if it heads for review or a PR, use `sb plugin plans record` without a plan. `sb plugin plans guide` explains the path."
+
+
 # MOVED OUT OF `protocol.md` (2026-08-22, unit E1). This paragraph used to sit in the
 # protocol, where every agent paid for it — including every leaf worker that will never
 # spawn anything, and every agent whose children are all `shared`. It is the canonical
