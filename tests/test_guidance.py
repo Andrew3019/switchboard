@@ -380,6 +380,23 @@ class DiscoverabilityTest(Fixture, unittest.TestCase):
         self.assertNotIn("hand-children-up-when-you-step-out", ids("lead-x"))
 
 
+class PlansNudgeTest(Fixture, unittest.TestCase):
+    """Issue #285 — remind leads about plans before they decompose a task."""
+
+    def test_the_plans_nudge_is_turn_start_once_for_every_lead(self):
+        """The reminder arrives before any child exists, then stays quiet for that lead."""
+        self.agent("lead-x", role="lead", session_id="sess-1")
+        self.agent("worker-x", role="worker", session_id="sess-2")
+
+        ids = [r.id for r in guidance.resolve(self.db, "lead-x", repo=self.repo)]
+        self.assertIn("lead-plans-at-turn-start", ids)
+        first = guidance.deliver(self.db, "lead-x", repo=self.repo)
+        self.assertIn("sb plugin plans create", first)
+        self.assertEqual(guidance.deliver(self.db, "lead-x", repo=self.repo), "")
+        self.assertNotIn("lead-plans-at-turn-start", [r.id for r in guidance.resolve(
+            self.db, "worker-x", repo=self.repo)])
+
+
 class SubtractiveTest(Fixture, unittest.TestCase):
     """Obj. 11 — the prompt SHRANK. Moved, not copied, and not merely added."""
 
@@ -401,7 +418,8 @@ class SubtractiveTest(Fixture, unittest.TestCase):
         store.create_agent(self.db, name="c1", role="worker", parent="lead-x",
                            branch="lead-x")
         store.set_state(self.db, "c1", "done")
-        self.assertEqual(guidance.deliver(self.db, "lead-x", repo=self.repo), "")
+        self.assertNotIn("sb merge <child>",
+                         guidance.deliver(self.db, "lead-x", repo=self.repo))
 
     def test_what_must_be_true_from_turn_one_stayed_in_the_prompt(self):
         """Obj. 12 — the win is partial and claimed only for reminder-shaped rules.
