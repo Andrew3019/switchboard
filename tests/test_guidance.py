@@ -401,6 +401,34 @@ class PlansNudgeTest(Fixture, unittest.TestCase):
             self.db, "worker-x", repo=self.repo)])
 
 
+class StatusPollNudgeTest(Fixture, unittest.TestCase):
+    """Usage analysis — steer agents waiting on children away from status polling."""
+
+    def test_the_status_poll_nudge_is_once_per_live_child_cohort(self):
+        """A live child earns one reminder, which re-arms for a later cohort only."""
+        self.agent("lead-x", role="lead", branch="lead-x")
+        r = next(r for r in guidance.ledger() if r.id ==
+                 "wait-for-children-instead-of-status-poll")
+        self.assertEqual(r.repeat, "once-until-clear")
+        self.assertEqual(r.category, "waiting")
+        self.assertEqual(guidance.resolve(self.db, "lead-x", rules=[r]), [])
+
+        store.create_agent(self.db, name="c1", role="worker", parent="lead-x",
+                           branch="lead-x")
+        self.assertEqual(guidance.resolve(self.db, "lead-x", rules=[r]), [r])
+        first = guidance.deliver(self.db, "lead-x", rules=[r])
+        self.assertIn("sb waiting --all", first)
+        self.assertIn("sb waiting --any", first)
+        self.assertIn("repeated `sb status`", first)
+        self.assertEqual(guidance.deliver(self.db, "lead-x", rules=[r]), "")
+
+        store.set_state(self.db, "c1", "done")
+        self.assertEqual(guidance.deliver(self.db, "lead-x", rules=[r]), "")
+        store.create_agent(self.db, name="c2", role="worker", parent="lead-x",
+                           branch="lead-x")
+        self.assertIn("sb waiting --all", guidance.deliver(self.db, "lead-x", rules=[r]))
+
+
 class SubtractiveTest(Fixture, unittest.TestCase):
     """Obj. 11 — the prompt SHRANK. Moved, not copied, and not merely added."""
 

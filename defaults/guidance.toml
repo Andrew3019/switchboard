@@ -94,6 +94,19 @@ repeat = "once-until-clear"
 text = "A child of yours has finished on a branch of its own. `sb merge <child>` folds that one child's branch into YOUR branch, in your own checkout — run it as each child finishes rather than saving them up. It never pushes and never opens a pull request; landing the assembled branch is still the separate step. It refuses if your checkout has uncommitted changes, and a real conflict spawns one agent to resolve that merge."
 
 
+# USAGE ANALYSIS (2026-09-08): some agents repeatedly ran `sb status` while waiting for
+# children. `status` is intentionally not a command-context rule — readout commands stay
+# quiet — so this uses the standing child state and reaches the turn before the poll loop.
+# `once-until-clear` makes it one reminder per live cohort, rather than a nudge on every
+# legitimate status read; when no child is live, there is no reason to mention waiting.
+[[rule]]
+id = "wait-for-children-instead-of-status-poll"
+when = [{fact = "live_children", op = ">=", value = 1}]
+repeat = "once-until-clear"
+category = "waiting"
+text = "When children are what you are waiting on, end the turn with `sb waiting --all` (or `sb waiting --any` for the first result); use plain `sb waiting` for provider work, rather than polling with repeated `sb status`."
+
+
 # D4's soft worktree threshold (spec §2.2), which `status.WORKTREE_SOFT_THRESHOLD` names and
 # deliberately left with nothing behind it: the count is real, the judgement stays with the
 # operator, and this row is the consumer that TODO points at. NOTHING refuses, caps or marks
