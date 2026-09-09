@@ -1,7 +1,7 @@
 """Phase 1 — legibility: `sb who-holds` and the divergence marker (#163-A, C3).
 
-Capabilities are now fluid — seeded by intersection, widened by a grant — while the ROLE
-label is frozen at spawn. That is a readable design only if the drift between the two is
+Capabilities are now fluid — seeded by the role's full template at spawn, widened by a
+grant — while the ROLE label is frozen at spawn. That is a readable design only if the drift between the two is
 VISIBLE, and these pin the two devices that make it so (§2.5):
 
 * the **`sb status` ROLE column** carries a SIGNED marker — widened and narrowed are

@@ -266,8 +266,9 @@ class NoSelfWideningTest(Fixture, unittest.TestCase):
             self.b.require_capability(r, CAP_WRITE_TRACKED)
 
     def test_a_spawn_cannot_be_used_to_widen_the_spawner(self):
-        """The other self-widening path: mint a capable child and drive it. The child is
-        ∩-narrowed, and the spawner's own set is untouched by spawning at all."""
+        """The other self-widening path: mint a capable child and drive it. The child gets
+        its full role template (§2.1: a spawn no longer narrows), and the spawner's own
+        held set is untouched by spawning at all — that is what this actually pins."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         w = self.spawn(lead, "worker", "w")
