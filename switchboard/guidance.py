@@ -266,20 +266,39 @@ def _report_words(body: Any, *, kind: str) -> int:
         return 0
     text = str(body)
     if kind == "done" and text.startswith("[done]"):
-        # Child done messages carry the marker and, for promote, a generated second line;
-        # neither is the agent's summary and neither belongs in its word count.
-        text = text[len("[done]"):].lstrip().split("\n", 1)[0]
+        # Child done messages carry the marker. Keep every remaining line: a multiline
+        # summary is still the agent's report, and the event's uncapped word count handles
+        # the separate generated promote clause on reports written by current code.
+        text = text[len("[done]"):].lstrip()
     return len(text.split())
+
+
+def _last_done_event(f: Facts) -> Optional[sqlite3.Row]:
+    """Read the same latest done event that Broker.done uses for report identity."""
+    return f.db.execute(
+        "SELECT json_extract(payload,'$.summary_words') AS words, "
+        "json_extract(payload,'$.summary') AS body FROM events "
+        "WHERE agent=? AND kind='done' ORDER BY id DESC LIMIT 1", (f.name,)
+    ).fetchone()
+
+
+def _event_words(row: Optional[sqlite3.Row]) -> Optional[int]:
+    """Return an uncapped event word count, or None for an older event."""
+    if row is None or row["words"] is None:
+        return None
+    try:
+        return int(row["words"])
+    except (TypeError, ValueError):
+        return None
 
 
 def _last_report_words(f: Facts) -> int:
     """The word count of this agent's most recently stored done/tell body.
 
-    `Broker.done` uses the event log as its repeat anchor, but child reports also retain
-    the full body in `messages` while event payloads are clipped for diagnostics. Read the
-    full existing message when one exists, and use the event summary for parentless done.
-    The command narrows the lookup after a report command so a same-second tell/done pair
-    cannot be mistaken for one another.
+    `Broker.done` uses the event log as its repeat anchor. Current done events also retain
+    an uncapped word count alongside their clipped diagnostic summary, while older child
+    reports retain the full body in `messages`. The command narrows the lookup after a
+    report command so a same-second tell/done pair cannot be mistaken for one another.
     """
     command = f.command
     if command == "tell":
@@ -289,18 +308,18 @@ def _last_report_words(f: Facts) -> int:
         return _report_words(row["body"], kind="tell") if row else 0
 
     if command == "done":
+        event = _last_done_event(f)
+        words = _event_words(event)
+        if words is not None:
+            return words
         row = f.db.execute(
             "SELECT body FROM messages WHERE from_agent=? AND kind='done' "
             "ORDER BY id DESC LIMIT 1", (f.name,)).fetchone()
         if row:
             return _report_words(row["body"], kind="done")
-        # A root has no parent mailbox, so its summary is recorded only here. This is the
-        # same event-log lookup used by Broker.done's replay guard.
-        row = f.db.execute(
-            "SELECT json_extract(payload,'$.summary') AS body FROM events "
-            "WHERE agent=? AND kind='done' ORDER BY id DESC LIMIT 1", (f.name,)
-        ).fetchone()
-        return _report_words(row["body"], kind="done") if row else 0
+        # A root has no parent mailbox, so its summary is recorded only in this event. The
+        # fallback keeps old stores readable; new events take the uncapped count above.
+        return _report_words(event["body"], kind="done") if event else 0
 
     # Turn-start callers have no command context. A message is the only un-clipped record
     # for a child report, while the event fallback keeps parentless done observable.
@@ -308,11 +327,12 @@ def _last_report_words(f: Facts) -> int:
         "SELECT body, kind FROM messages WHERE from_agent=? AND kind IN ('done','tell') "
         "ORDER BY id DESC LIMIT 1", (f.name,)).fetchone()
     if row:
+        if row["kind"] == "done":
+            words = _event_words(_last_done_event(f))
+            if words is not None:
+                return words
         return _report_words(row["body"], kind=row["kind"])
-    row = f.db.execute(
-        "SELECT json_extract(payload,'$.summary') AS body FROM events "
-        "WHERE agent=? AND kind='done' ORDER BY id DESC LIMIT 1", (f.name,)
-    ).fetchone()
+    row = _last_done_event(f)
     return _report_words(row["body"], kind="done") if row else 0
 
 

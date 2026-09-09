@@ -251,6 +251,13 @@ class ReportNudgeTest(Fixture, unittest.TestCase):
         facts = guidance.Facts(self.db, store.get_agent(self.db, "w1"), command="tell")
         self.assertEqual(facts.get("last_report_words"), 201)
 
+    def test_a_multiline_done_body_counts_every_line(self):
+        body = "word " * 30 + "\n" + "word " * 90 + "\n" + "word " * 90
+        store.put_message(self.db, from_agent="w1", to_agent="parent", kind="done",
+                          body=body)
+        facts = guidance.Facts(self.db, store.get_agent(self.db, "w1"), command="done")
+        self.assertEqual(facts.get("last_report_words"), 210)
+
 
 # ---------------------------------------------------------------------------
 # The channel
