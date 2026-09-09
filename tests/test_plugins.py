@@ -1029,6 +1029,9 @@ class IsolationTest(Sandbox):
         "status": [], "done": ["finished"],
         "tell": ["w1", "hi"], "inbox": [], "waiting": [],
         "block": ["why"], "log": [], "usage": [], "cleanup": [],
+        # An agent closing its OWN pane — one store write on its own row and a pane
+        # teardown, no spawn and no plugin code, the same class as its own `done`.
+        "close": [],
         "inspect": ["w1"], "init": [],
         "restore": ["w1"], "board": [], "models": [], "instructions": [],
         # `models`' two siblings: config reads and nothing else — no store write, no spawn,
