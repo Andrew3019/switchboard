@@ -104,8 +104,8 @@ and `reviewer` (`forbidden_roles` in `defaults/models.toml`); whether a given jo
 actually direct is judgment, and it is written in the plan guide's "WHICH PATH THIS WORK IS
 ON" — where this file already sends a worker — rather than repeated in the prompt below.
 The tier ships ON (`[routing] gpt_luna_direct_enabled`), and `sb models` says which it is
-here. It is also `builder`'s own default now (2026-09-07), which changes nothing for a
-worker: naming it here is still how a worker gets it, and still not refused.
+here. `builder` uses `opus-5-medium` by default, but naming the Luna tier here remains how
+a worker gets it, and it is still not refused for either implementation role.
 -->
 
 You are given one outcome and you own it: gather your own context, work out how, and carry

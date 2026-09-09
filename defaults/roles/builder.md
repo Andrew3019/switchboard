@@ -1,5 +1,5 @@
 +++
-model = "gpt-luna-max-effort"
+model = "opus-5-medium"
 capabilities = ["spawn", "write-tracked"]
 # A leaf that writes, and the same bundle as `worker` for the same reason: `spawn` is here
 # so a builder can put up the review of its own change instead of handing that job back.
@@ -20,33 +20,22 @@ what everything that never asked for one lands on. So it goes on a role you have
 for. `sb delegate --role builder` is how code work gets handed out; `worker` stays the
 generic writer, and stays what an undefined role falls back to.
 
-IT IS BACK ON CODEX (Andrew, 2026-09-07), and on `gpt-luna-max-effort`. The role went
-`gpt-5.6-sol` -> `opus-5-medium` (2026-09-01, when that pin was retired) -> here. What
-changed this time is that the tier the codex pin was replaced by turned out to be what
-this role wants by DEFAULT rather than per spawn: cheap good code at maximum effort is the
-builder's ordinary case, not its special one, and asking every caller to type
-`--model gpt-luna-max-effort` made the common path the one you had to remember.
+IT IS ON OPUS, and on `opus-5-medium`. The role briefly used the codex
+`gpt-luna-max-effort` tier, but its default is now back on Claude Opus at medium effort.
 
-SO THE TIER IS NOW BOTH: this role's default, and still nameable per spawn on a `worker`.
-`--model gpt-luna-max-effort` on a worker is not refused and is not meant to be — the two
-implementation leaves may both have it, and `defaults/models.toml` carries the refusal for
-the other three as `forbidden_roles` (`lead`, `dispatcher`, `reviewer`). What is no longer
-true is that naming it is how a builder gets it.
+SO THE DEFAULT IS THE OPUS TIER: `--role builder` selects `opus-5-medium`. The
+`gpt-luna-max-effort` tier remains available as an explicit per-spawn choice on a `worker`
+or `builder`; `defaults/models.toml` carries the refusal for the other three as
+`forbidden_roles` (`lead`, `dispatcher`, `reviewer`).
 
-THE JUDGMENT HALF DID NOT MOVE, and it is worth reading as a builder now that the tier
-arrives without anyone choosing it. The tier suits DIRECT-path work — requirements
+THE JUDGMENT HALF DID NOT MOVE. The codex tier suits DIRECT-path work — requirements
 settled, going straight to implement/verify/review/land — and if your job turns out to
-need shaping, the job moves onto the shaped path even though your model does not follow it
-any more. That is a change in what the tier signals: it used to mean somebody had judged
-this work direct, and now it means nothing about your work at all. Read the plan guide and
-make that call yourself.
+need shaping, the job moves onto the shaped path. Read the plan guide and make that call
+yourself before explicitly selecting the codex tier.
 
-`defaults/models.toml` has the rest at `[tiers.gpt-luna-max-effort]`, including the
-context budget. ONE CONSEQUENCE OF IT BEING A ROLE DEFAULT: the tier still resolves only
-while `[routing] gpt_luna_direct_enabled` is true, which now ships true — so a repo that
-sets it false takes away this role's own tier and every builder spawn there fails naming
-that key. That is the loud failure rather than a silent fallback, but it is worth knowing
-before turning the key off.
+`defaults/models.toml` has this role's tier at `[tiers.opus-5-medium]`. The separate
+`[tiers.gpt-luna-max-effort]` tier remains gated by `[routing] gpt_luna_direct_enabled`;
+turning that flag off removes only explicit Luna selections, not the builder's Opus default.
 
 The prompt below is worker's, deliberately and almost word for word. What a leaf needs
 teaching is how it ENDS, not how to write code — that was worker.md's whole finding and it

@@ -704,7 +704,7 @@ class RolesTest(unittest.TestCase):
 
         Every shipped role now, where this was four: `reviewer` has a tier of its own,
         `worker`'s `default` stopped being an unmade choice once every shipped Claude tier
-        pinned a concrete id, and `builder` arrived on a codex tier.
+        pinned a concrete id, and `builder` returned to its Opus tier.
 
         `planner` is here as well and is the one entry that does not come from
         `defaults/roles/`: the plans plugin contributes it and ships enabled, so it is
@@ -714,11 +714,7 @@ class RolesTest(unittest.TestCase):
         a provider whose flags are not Claude's. The flags are still checked underneath, on
         the two tiers that differ in shape.
 
-        ONE SHIPPED ROLE IS ON CODEX: `builder`, on `gpt-luna-max-effort` since 2026-09-07.
-        It went `gpt-5.6-sol` -> `opus-5-medium` (2026-09-01) -> here, when the tier that
-        replaced its codex pin turned out to be what the role wants by default rather than
-        per spawn. It is also the one shipped role whose tier is GATED — `enabled_by` —
-        which is why the shipped flag defaults true.
+        `builder` uses the `opus-5-medium` tier, which pins Claude Opus at medium effort.
 
         Pinned as a DECISION, not as behaviour.
         """
@@ -730,7 +726,7 @@ class RolesTest(unittest.TestCase):
             "qa":         ("claude", "claude-sonnet-5", "high"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
             "worker":     ("claude", "claude-opus-5",   None),
-            "builder":    ("codex",  "gpt-5.6-luna",   "max"),
+            "builder":    ("claude", "claude-opus-5",   "medium"),
             "planner":    ("claude", "claude-opus-5",   "high"),
         }
         got = {}
