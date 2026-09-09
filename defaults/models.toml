@@ -21,10 +21,9 @@ provider = "claude"
 # -- the shipped tiers ---------------------------------------------------------
 #
 # Small on purpose: this only has to be good enough that switchboard works with no config
-# file at all. Seven shipped roles, six of them on a claude tier — `worker` is on `default`,
-# a pinned choice now like any other rather than an unmade one — and one on codex:
-# `builder`, on `gpt-luna-max-effort` in the codex section since 2026-09-07. See
-# `notes/model-selection.md` for the role-by-role reasoning and what it costs.
+# file at all. Seven shipped roles, all on Claude tiers — `worker` is on `default`, a pinned
+# choice now like any other rather than an unmade one, and `builder` is on `opus-5-medium`.
+# See `notes/model-selection.md` for the role-by-role reasoning and what it costs.
 #
 # PINNED IDS on the Claude tiers. `claude --help` documents --model as taking "an alias for
 # the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name". An alias
@@ -89,11 +88,8 @@ effort   = "high"
 # `strong` is it at `high`; this is the level between them, named because a role wanted it.
 # Same shape as `strong`, one word different.
 #
-# NOTHING IS ON IT NOW. It was `builder`'s tier for six days — 2026-09-01, when that role's
-# `gpt-5.6-sol` pin was retired, to 2026-09-07, when the role moved to
-# `gpt-luna-max-effort` below. Kept because retiring a name people type is a separate
-# decision from retiring the pin that used it, which is the same argument `gpt-5.6-sol`
-# makes for itself.
+# `builder` uses this tier. It was briefly replaced by the codex `gpt-luna-max-effort`
+# default, but the role is back here while that tier remains available by explicit choice.
 provider = "claude"
 model    = "claude-opus-5"
 effort   = "medium"
@@ -187,17 +183,11 @@ effort   = "medium"
 #     reads as off rather than as an error, so a settings file older than the flag loses
 #     the tier instead of failing to load — `defaults/settings.toml` has the argument.
 #
-# HOW A SPAWN LANDS HERE, which changed on 2026-09-07 and is now two ways:
+# HOW A SPAWN LANDS HERE:
 #
-#   `builder` names this tier as its DEFAULT, so `--role builder` is enough and the common
-#     case stopped needing a flag anybody had to remember. See `defaults/roles/builder.md`
-#     for what that costs — the tier no longer signals that somebody judged the work
-#     direct, so a builder makes that call itself.
-#
-#   `worker` still names it PER SPAWN, `--model gpt-luna-max-effort` by hand. That path is
-#     deliberately kept open: the two implementation leaves may both have this tier, and
-#     which one you spawn stays a choice about the ROLE rather than a way of reaching a
-#     model.
+#   `worker` or `builder` names it PER SPAWN, `--model gpt-luna-max-effort` by hand. That
+#     path is deliberately kept open: the two implementation leaves may both have this
+#     tier, while `builder`'s role default remains `opus-5-medium`.
 #
 # What is still true either way: nothing INFERS "this work is direct" from a change record
 # and swaps a role's model underneath it. A tier is chosen by naming a role or naming a

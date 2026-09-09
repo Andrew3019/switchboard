@@ -188,16 +188,15 @@ done_prefix = "[done] "
 # defined either way and `sb models` says which it is here.
 #
 # ON means AVAILABLE, not automatic. Nothing INFERS that a job is direct-path and moves an
-# agent onto this tier: a spawn lands here by naming the `builder` role, whose default it
-# is, or by naming the tier itself on a `worker`. Flipping this key changes what those
-# resolve to and moves no spawn already running.
+# agent onto this tier: a spawn lands here by naming the tier itself on a `worker` or
+# `builder`. Flipping this key changes what those explicit selections resolve to and moves
+# no spawn already running.
 #
-# WHICH IS WHY IT SHIPS TRUE rather than being left to each repo. `builder` is the only
-# shipped role on a gated tier, so setting this false does not merely withdraw an option —
-# it takes away that role's own default, and every builder spawn then fails naming this
-# key. That is the loud failure rather than a silent fallback onto a model nobody chose,
-# but it is worth knowing before turning it off. `defaults/roles/builder.md` says the same
-# where a builder will read it.
+# WHICH IS WHY IT SHIPS TRUE rather than being left to each repo. The tier remains an
+# explicit direct-path option for implementation roles, so setting this false withdraws
+# that option without changing `builder`'s own `opus-5-medium` default. `sb models` says
+# which tier is available, and `defaults/roles/builder.md` says where a builder normally
+# starts.
 #
 # A MISSING KEY IS OFF, which is the other half and the reason this reads as a feature flag
 # rather than as an ordinary setting. Every other key here raises when absent — switchboard
