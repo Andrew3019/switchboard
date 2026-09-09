@@ -394,6 +394,8 @@ class PlansNudgeTest(Fixture, unittest.TestCase):
         self.assertIn("sb plugin plans create", first)
         self.assertIn("sb plugin plans record", first)
         self.assertIn("without a plan", first)
+        # Points at the cheap path-decision read, not the full plan-authoring reference.
+        self.assertIn("sb plugin plans guide --short", first)
         self.assertEqual(guidance.deliver(self.db, "lead-x", repo=self.repo), "")
         self.assertNotIn("lead-plans-at-turn-start", [r.id for r in guidance.resolve(
             self.db, "worker-x", repo=self.repo)])

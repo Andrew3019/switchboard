@@ -4002,6 +4002,32 @@ class TriggerTest(PlansSandbox):
         # Reads nothing and writes nothing: no state file exists after it runs.
         self.assertEqual(self._files(), [])
 
+    def test_short_returns_only_the_path_decision_section(self):
+        """`--short` is the cheap read the turn-start nudge points at: the path decision
+        alone, and none of the plan-authoring mechanics that follow. Pinned as a prefix of
+        the full guide so the two are one text, never a second copy that could drift, and
+        the bare verb is proven unchanged in the same breath."""
+        full = self.ok("plugin", "plans", "guide")
+        short = self.ok("plugin", "plans", "guide", "--short")
+        # The decision the nudge sends a lead to make is in the short form.
+        self.assertIn("WHICH PATH THIS WORK IS ON", short)
+        for token in ("NEITHER", "DIRECT", "SHAPED"):
+            self.assertIn(token, short)
+        # The plan-authoring mechanics are NOT — that is the whole point.
+        self.assertNotIn("WHEN A PLAN EXISTS", short)
+        self.assertNotIn("SPAWNING A PLANNER", short)
+        self.assertNotIn("EDITING IT", short)
+        self.assertTrue(len(short) < len(full) / 2, "short form should be far smaller")
+        # One text, not two: the short form is exactly a prefix of the full guide.
+        self.assertTrue(full.startswith(short), "short must be a prefix of the full guide")
+        # The bare verb is untouched, and carries what short drops.
+        self.assertIn("WHEN A PLAN EXISTS", full)
+        # `--json` carries the short text too.
+        self.assertEqual(json.loads(self.ok("plugin", "plans", "guide", "--short",
+                                             "--json"))["data"]["guide"].strip(),
+                         short.strip())
+        self.assertEqual(self._files(), [])
+
     def test_a_fresh_spawn_carries_the_trigger_and_not_the_guide(self):
         """Both halves of the split, in one assertion each. A spawn that carried the guide
         would be paying for the instruction on every agent forever, which is the thing the
