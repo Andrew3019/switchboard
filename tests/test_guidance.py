@@ -201,6 +201,64 @@ class RepeatTest(Fixture, unittest.TestCase):
         self.assertEqual(store.guidance_cursors(self.db, "w1"), {})
 
 
+class ReportNudgeTest(Fixture, unittest.TestCase):
+    """Oversized report guidance reads the durable body and spends one cursor."""
+
+    def setUp(self):
+        super().setUp()
+        self.agent("parent", role="lead")
+        self.agent("w1", parent="parent")
+
+    def report_rule(self):
+        return next(r for r in guidance.ledger() if r.id == "oversized-report")
+
+    def body(self, words):
+        return "word " * words
+
+    def test_the_fact_and_rule_use_the_stored_done_body_and_once_cursor(self):
+        """The full child message is used because event summaries are clipped for logs."""
+        r = self.report_rule()
+        self.assertIn("last_report_words", guidance.FACTS)
+        self.assertEqual(r.command, "done")
+        self.assertEqual(r.repeat, "once")
+        self.assertEqual(r.category, "reports")
+
+        store.put_message(self.db, from_agent="w1", to_agent="parent", kind="done",
+                          body=self.body(201))
+        facts = guidance.Facts(self.db, store.get_agent(self.db, "w1"), command="done")
+        self.assertEqual(facts.get("last_report_words"), 201)
+        self.assertEqual(guidance.resolve(self.db, "w1", command="done", rules=[r]), [r])
+        self.assertIn("summary for your parent", guidance.deliver(
+            self.db, "w1", command="done", rules=[r]))
+
+        # A second oversized report remains observable, but the once policy keeps the
+        # reminder from becoming a per-report tax for a legitimately verbose agent.
+        store.put_message(self.db, from_agent="w1", to_agent="parent", kind="done",
+                          body=self.body(202))
+        self.assertEqual(guidance.deliver(self.db, "w1", command="done", rules=[r]), "")
+        self.assertEqual(store.guidance_cursors(self.db, "w1")[r.id]["deliveries"], 1)
+
+    def test_the_rule_stays_silent_at_the_two_hundred_word_threshold(self):
+        self.agent("w2", parent="parent")
+        r = self.report_rule()
+        store.put_message(self.db, from_agent="w2", to_agent="parent", kind="done",
+                          body=self.body(200))
+        self.assertEqual(guidance.resolve(self.db, "w2", command="done", rules=[r]), [])
+
+    def test_the_fact_reads_a_tell_body_when_that_is_the_command_context(self):
+        store.put_message(self.db, from_agent="w1", to_agent="parent", kind="tell",
+                          body=self.body(201))
+        facts = guidance.Facts(self.db, store.get_agent(self.db, "w1"), command="tell")
+        self.assertEqual(facts.get("last_report_words"), 201)
+
+    def test_a_multiline_done_body_counts_every_line(self):
+        body = "word " * 30 + "\n" + "word " * 90 + "\n" + "word " * 90
+        store.put_message(self.db, from_agent="w1", to_agent="parent", kind="done",
+                          body=body)
+        facts = guidance.Facts(self.db, store.get_agent(self.db, "w1"), command="done")
+        self.assertEqual(facts.get("last_report_words"), 210)
+
+
 # ---------------------------------------------------------------------------
 # The channel
 # ---------------------------------------------------------------------------
@@ -355,13 +413,13 @@ class DiscoverabilityTest(Fixture, unittest.TestCase):
 
     def test_a_command_keyed_rule_names_a_verb_that_actually_carries_the_key(self):
         """The failure mode the ledger header warns about: a rule keyed on a verb outside
-        `cli.STATE_COMMANDS` never fires, and nobody notices because a nudge that is never
-        delivered looks exactly like a nudge nobody needed. This is why the promote rule
-        below turns on live state instead — `done` is not one of these."""
+        the command sets never fires, and nobody notices because a nudge that is never
+        delivered looks exactly like a nudge nobody needed. State readouts and report
+        guidance have separate sets because reports do not need a capabilities footer."""
         from switchboard import cli
         for r in guidance.ledger():
             if r.command:
-                self.assertIn(r.command, cli.STATE_COMMANDS, r.id)
+                self.assertIn(r.command, cli.STATE_COMMANDS | cli.REPORT_COMMANDS, r.id)
         self.assertNotIn("done", cli.STATE_COMMANDS)
 
     def test_promote_is_taught_while_children_are_still_live_and_not_after(self):

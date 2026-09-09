@@ -159,6 +159,16 @@ class CommandRuleTest(unittest.TestCase):
         self.assertIn(guidance.STATE_MARK, note)
         self.assertNotIn("wants a `lead`", note)
 
+    def test_report_guidance_fires_after_a_done_body_is_stored(self):
+        """Report guidance shares this post-command door without adding the state footer."""
+        store.create_agent(self.db, name="child", role="worker", parent="lead-x")
+        store.put_message(self.db, from_agent="lead-x", to_agent="child", kind="done",
+                          body="word " * 201)
+        note = self.out("done", "done")
+        self.assertIn(guidance.MARK, note)
+        self.assertIn("summary for your parent", note)
+        self.assertNotIn(guidance.STATE_MARK, note)
+
 
 class QuietTest(unittest.TestCase):
     """Obj. 5 — it is not appended to everything, and `--json` stays machine-readable.

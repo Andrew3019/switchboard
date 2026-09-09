@@ -6915,7 +6915,11 @@ class Broker:
         # agent addressable — see the docstring, and `block` for the same call and the
         # same reason.
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP],
-                        commit=commit)
+                        # The displayed summary remains clipped, but guidance needs a
+                        # durable count for multiline and parentless reports. This is
+                        # metadata only: the report body and its existing delivery path
+                        # stay untouched.
+                        summary_words=len(summary.split()), commit=commit)
 
     def _burst_possible(self, parent: str) -> bool:
         """Could this parent be about to hear from a sibling too?

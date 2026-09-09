@@ -24,6 +24,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import guidance  # noqa: E402
 from switchboard import status  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard import broker as broker_mod  # noqa: E402
@@ -1528,6 +1529,17 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(a.summary, "shipped the parser")
         self.assertIn("shipped the parser",
                       status.render_detail(status.inspect(self.db, None, "root", lines=0)))
+
+    def test_a_root_done_keeps_an_uncapped_word_count_for_guidance(self):
+        """The visible event summary remains clipped, while guidance gets the full count."""
+        store.create_agent(self.db, name="root", role="worker", pane_id="w1:p1")
+        self.b.done("word " * 250, me="root")
+        facts = guidance.Facts(self.db, store.get_agent(self.db, "root"), command="done")
+        self.assertEqual(facts.get("last_report_words"), 250)
+        event = self.db.execute(
+            "SELECT payload FROM events WHERE agent='root' AND kind='done'"
+        ).fetchone()
+        self.assertEqual(json.loads(event["payload"])["summary_words"], 250)
 
     def test_a_childs_summary_still_reaches_its_parent_as_mail(self):
         """Only the human lost a mailbox. Agent-to-agent handoff is untouched."""

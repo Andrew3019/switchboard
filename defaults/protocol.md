@@ -338,6 +338,8 @@ the only thing your parent ever sees of you; it never reads your transcript. Kee
 a line or two of plain, simple language:
 what you found or did, and what it means. Give file paths for the detail rather than
 pasting it.
+If you are re-confirming a verdict you already gave and nothing has changed, say so in one
+line (for example, `unchanged: <prior verdict>`) instead of restating the full report.
 Work that ships has a default shape: once the change is implemented, verified and
 freshly reviewed, push a branch named for your workspace, open the pull request,
 and put its URL in your summary. Pushing and opening that PR are yours — after the
