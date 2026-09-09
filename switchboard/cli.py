@@ -1745,7 +1745,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                 if r["summary"] is not None else "closed (silent — nothing reported up)")
         _emit(args, note, {"agent": r["agent"], "reported": r["reported"],
                            "summary": r["summary"]})
-        b.close_own_pane(r["target"], r["wrong"], me=me)
+        b.close_own_pane(r["target"], me=me)
         return 0
 
     if cmd == "block":

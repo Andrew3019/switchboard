@@ -6982,6 +6982,15 @@ class Broker:
         with `sb cleanup <name> --force`. Not liftable from here: self-close ends YOURSELF,
         and a force that reached down into non-consenting children is a different authority
         that belongs to the parent's verb, not this one.
+
+        **It runs `done`'s repeat/replay guards but NOT its side-effect flag, deliberately.**
+        The repeat/replay guards are load-bearing — without them a self-close after a `done`
+        mails the parent a second, stale summary — so they are here. The E4 tracked-write
+        flag (`_side_effect_flags`) is not: its actual enforcement is at `sb merge`, which is
+        untouched, and the one shape self-close adds over `done` is the summary-LESS kill,
+        which has no report to hang a flag on — so flagging only the summary path would be
+        the inconsistency, not the fix. An agent that self-closes over unmerged tracked work
+        it cannot attribute still meets that refusal where it bites, at the merge.
         """
         me = me or self.whoami()
         if me == HUMAN:
@@ -7001,27 +7010,49 @@ class Broker:
 
         # The pane to close, resolved by identity BEFORE any write nulls the row's pane id
         # (`_close_target` reads `a["pane_id"]`). Held back and returned, not closed here.
+        #
+        # `wrong` REFUSES THE WHOLE CLOSE, before a single write — the same fail-closed rule
+        # every other caller of `_close_target` keeps (`cleanup`, `_stop_panes`,
+        # `_close_board`). A `wrong` means the pane cannot be proven to be this row's — herdr
+        # is unreachable, or a recycled id now holds a stranger — and going on would be worse
+        # here than in `cleanup`: it would mark this agent `done`, clear its mail and tell its
+        # parent the work finished while the caller's own pane and process keep running,
+        # unreachable (`pane_id` nulled) and untracked. So nothing is torn down; the caller
+        # retries once herdr answers, or a parent closes the row by name.
         target, wrong = self._close_target(a)
+        if wrong is not None:
+            raise ValueError(f"cannot close this pane safely: {wrong}. Nothing was changed.")
 
         # THE REPORT, when there is one. Same rows `sb done` writes — the `[done]` mail, the
         # state, the event — so the parent's mailbox and its cohort wait see an ordinary
         # completion. A summary-less close writes none of this: no mail, no ring, silent.
+        #
+        # AND THE SAME TWO GUARDS `done` runs, for the same reason: a summary that repeats an
+        # already-reported `done`, or replays one a restore carried back, must NOT be mailed a
+        # second time — it would overwrite the board's last-done summary and re-ring the
+        # parent (see `done`, "A REPEAT IS RECORDED, NOT RE-DELIVERED"). The close still
+        # happens either way; only the delivery is suppressed. `_record_done` records the
+        # repeat/replay in the log and skips the mail; the ring/surface below is gated to
+        # match, so a duplicate self-close closes the pane silently rather than lying upward.
         reported = False
         if summary is not None:
             parent = self.current_parent(me)
+            repeat = self._reported_done_and_stayed_there(me)
+            replay = not repeat and self._replayed_done_after_restore(me, summary)
             with store.mutation(self.db):
-                self._record_done(me, summary, parent, repeat=False, promoted=[],
-                                  commit=False)
+                self._record_done(me, summary, parent, repeat=repeat, replay=replay,
+                                  promoted=[], commit=False)
             # OUTSIDE the transaction — the doorbell is a herdr subprocess (see `done`).
-            if parent:
-                self._ring(parent, f"{tag(me)} {self._say('notify.child_done')}",
-                           mode=WHEN_IDLE, hold=self._burst_possible(parent))
-                reported = True
-            else:
-                # A root self-closing with a summary is the end of its run, and the human
-                # has no mailbox — the notification IS the delivery, as it is for a root
-                # `done` and for `block`. The summary is durable in the log regardless.
-                self._surface(me, f"done — {summary}")
+            if not repeat and not replay:
+                if parent:
+                    self._ring(parent, f"{tag(me)} {self._say('notify.child_done')}",
+                               mode=WHEN_IDLE, hold=self._burst_possible(parent))
+                    reported = True
+                else:
+                    # A root self-closing with a summary is the end of its run, and the human
+                    # has no mailbox — the notification IS the delivery, as it is for a root
+                    # `done` and for `block`. The summary is durable in the log regardless.
+                    self._surface(me, f"done — {summary}")
 
         # THE TEARDOWN, every write of it before the pane goes. Mirrors `cleanup`'s
         # bookkeeping; the one difference that matters is order — there the pane closes
@@ -7043,21 +7074,25 @@ class Broker:
         # NOT `_close_empty_spaces`: the caller is standing in its own workspace, which that
         # helper skips by design (you cannot delete the checkout you are running in). The
         # space is reclaimed later by a parent's `sb cleanup` or the sweep, as it always is.
-        return {"agent": me, "reported": reported, "summary": summary,
-                "target": target, "wrong": wrong}
+        #
+        # `target` may be None here only for a row that had no pane to begin with (already
+        # paneless) — the `wrong` case was refused above, so what comes back is always a
+        # pane safe to close, or nothing to close.
+        return {"agent": me, "reported": reported, "summary": summary, "target": target}
 
-    def close_own_pane(self, target: Optional[str], wrong: Optional[str], *,
-                        me: str) -> None:
+    def close_own_pane(self, target: Optional[str], *, me: str) -> None:
         """The last act of a self-close: release the name and close the caller's own pane.
 
         Split from `self_close` so the CLI can print its confirmation while there is still
         a pane to print it into — this kills the process the pane hosts, so it must run
-        after the emit and after every durable write. A `pane_not_found` is this close
-        having already happened (a human closed the tab by hand), not a failure; anything
-        else is swallowed too, because the row is already `done` with no pane id and a later
-        sweep reconciles a pane that outlived its row.
+        after the emit and after every durable write. `target` is `self_close`'s already
+        identity-checked pane (a `wrong` one was refused there, before any write), so there
+        is no ownership decision left here. A `pane_not_found` is this close having already
+        happened (a human closed the tab by hand), not a failure; anything else is swallowed
+        too, because the row is already `done` with no pane id and a later sweep reconciles a
+        pane that outlived its row.
         """
-        if wrong is not None or not target:
+        if not target:
             return
         try:
             self.h.release_agent(target, me, store.next_seq(self.db, me))
