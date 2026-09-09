@@ -347,6 +347,23 @@ def build_parser() -> argparse.ArgumentParser:
     bl.add_argument("why", help="ONE short line for the board; write the full question in "
                                 "your own chat, which is what the human reads")
 
+    cl = cmd(
+        "close", help="close your OWN pane — run it in the agent's bash, blocked or not",
+        # Says the two things that separate it from its neighbours before a caller reaches
+        # for the wrong one: it is SELF only (a parent closes a child with `sb cleanup`),
+        # and the summary is what decides whether the parent hears (see `broker.self_close`).
+        description="The close an agent runs on itself, or that you run in an agent's bash "
+                    "to end it whatever state it is in — working, blocked, idle, done. "
+                    "`sb cleanup <name>` is the other direction (a parent closing a child) "
+                    "and refuses to close the caller's own pane; this is that missing case. "
+                    "Give a summary and your parent gets it exactly as `sb done` delivers "
+                    "one, and its `sb waiting` resolves; omit it and the close is silent — "
+                    "nothing is reported up. Refused while an agent below you is still live: "
+                    "close or wait on it first, or take the subtree from your parent with "
+                    "`sb cleanup <name> --force`.")
+    cl.add_argument("summary", nargs="?",
+                    help="optional report to your parent; omit for a silent close")
+
     ss = cmd("status", help="the agent tree, with drift and what needs you")
     # ACTIVE IS THE DEFAULT. A finished agent is history the moment its summary is read, and
     # a fleet accumulates them until `sb status` — and worse, `sb status --json` — is a dump
@@ -714,6 +731,12 @@ def _validate(args) -> None:
     elif cmd == "done":
         # herdr carries the summary as `report-agent --message`, so one line.
         args.summary = validate.line(args.summary, "summary")
+
+    elif cmd == "close":
+        # Optional — a summary-less close is the kill switch. When present it is a report to
+        # the parent, carried as a one-line `[done]` message like `sb done`'s.
+        if args.summary is not None:
+            args.summary = validate.line(args.summary, "summary")
 
     elif cmd == "block":
         # Not `line`: the reason has its own rule and its own error, because the human
@@ -1706,6 +1729,23 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                            "repeat": b.done_repeat, "replay": b.done_replay,
                            "flagged": b.done_flags,
                            "promoted": b.promoted})
+        return 0
+
+    if cmd == "close":
+        # Two calls in order, and the split is deliberate: the first does every durable
+        # write and hands back the pane; the emit below is the caller's confirmation, and it
+        # has to print while there is still a pane to print into; the second closes that
+        # pane and kills the process this is running in, so it is the last thing that runs.
+        r = b.self_close(args.summary, me=me)
+        # Keyed off the summary, not `reported`: a root self-closing WITH a summary was not
+        # mailed to anybody (there is no parent mailbox) but did surface the end of its run
+        # to the human, so "reported to the human" is right and `reported` alone would miss
+        # it. A summary-less close is the silent one.
+        note = (f"closed — reported to {b.current_parent(me) or 'the human'}"
+                if r["summary"] is not None else "closed (silent — nothing reported up)")
+        _emit(args, note, {"agent": r["agent"], "reported": r["reported"],
+                           "summary": r["summary"]})
+        b.close_own_pane(r["target"], r["wrong"], me=me)
         return 0
 
     if cmd == "block":

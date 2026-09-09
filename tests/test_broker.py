@@ -1290,6 +1290,54 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(len(self.h.prompts), 1)
         self.assertIn("new run", self.h.prompts[0][1])
 
+    # -- self-close (`sb close`) ----------------------------------------
+
+    def test_self_close_with_a_summary_reports_and_closes(self):
+        """A summary makes it an `sb done` that also closes its own pane: the parent's
+        mailbox gets the report, a cohort wait on it resolves, and the pane goes."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p9")
+        self.b.waiting(mode="all", cohort=["kid"], me="lead")
+        r = self.b.self_close("shipped it", me="kid")
+        self.b.close_own_pane(r["target"], r["wrong"], me="kid")
+        self.assertTrue(r["reported"])
+        self.assertIn("[done] shipped it", self.message_bodies("lead"))
+        self.assertIsNone(store.wait_for(self.db, "lead"))   # the cohort wait resolved
+        a = store.get_agent(self.db, "kid")
+        self.assertEqual(a["state"], "done")
+        self.assertIsNone(a["pane_id"])
+        self.assertIn("w1:p9", self.h.closed)
+
+    def test_self_close_without_a_summary_is_silent_and_works_when_blocked(self):
+        """No summary, from a BLOCKED agent — Andrew's kill-switch shape. The pane closes
+        whatever the state, and NOTHING is reported up: no mail, no doorbell."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p9")
+        store.set_state(self.db, "kid", "blocked")
+        r = self.b.self_close(me="kid")
+        self.b.close_own_pane(r["target"], r["wrong"], me="kid")
+        self.assertFalse(r["reported"])
+        self.assertEqual(self.message_bodies("lead"), [])     # nothing mailed up
+        self.assertEqual(self.h.prompts, [])                  # nothing rung
+        a = store.get_agent(self.db, "kid")
+        self.assertEqual(a["state"], "done")
+        self.assertIsNone(a["pane_id"])
+        self.assertIn("w1:p9", self.h.closed)
+
+    def test_self_close_refused_while_a_descendant_is_live(self):
+        """Closing this pane over a working child would leave a dead parent above live
+        work — the `live_descendants` invariant. Refused, and nothing is closed."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p9")
+        with self.assertRaises(ValueError) as e:
+            self.b.self_close("done here", me="lead")
+        self.assertIn("kid", str(e.exception))
+        self.assertEqual(store.get_agent(self.db, "lead")["state"], "working")
+        self.assertEqual(self.h.closed, [])
+
     def _resumed_child(self, parent: str, name: str, summary: str = "first pass") -> None:
         """A child that reported `done`, was told something, and is taking a turn again.
 

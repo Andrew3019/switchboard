@@ -1535,6 +1535,8 @@ class StatusCliTest(unittest.TestCase):
             "start": [], "delegate": ["do a thing"],
             "tell": ["w1", "hi"], "inbox": [], "waiting": [],
             "done": ["finished"], "block": ["why"],
+            # Summary optional — a bare `sb close` is the silent self-close.
+            "close": [],
             "status": [], "presets": [], "models": [], "init": [], "doctor": [],
             # `models`' two siblings. The role name is optional, so a bare listing is the
             # minimal legal argv for both.
