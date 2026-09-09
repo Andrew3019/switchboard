@@ -371,6 +371,26 @@ class PlansTest(PlansSandbox):
         self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list", "--all")],
                          ["p-1"])
 
+    def test_list_help_calls_all_a_repo_wide_human_view(self):
+        parser = plugins.build_parser(plugins.load(self.repo, "plans"))
+        out = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(out):
+            parser.parse_args(["list", "--help"])
+        self.assertIn("repo-wide human view", out.getvalue())
+
+    def test_agent_json_all_warns_without_changing_the_complete_listing(self):
+        self.ok("plugin", "plans", "create", "here", "--display", "board: here")
+        human_code, human_out, human_err = self.sb("plugin", "plans", "list", "--all",
+                                                    "--json")
+        self.assertEqual((human_code, human_err), (0, ""))
+
+        self.as_agent("builder")
+        agent_code, agent_out, agent_err = self.sb("plugin", "plans", "list", "--all",
+                                                    "--json")
+        self.assertEqual(agent_code, 0)
+        self.assertIn("repo-wide human view", agent_err)
+        self.assertEqual(json.loads(agent_out), json.loads(human_out))
+
     def test_the_resolved_workspace_survives_a_branch_change(self):
         """The key is the WORKSPACE, which is what the board groups by and what a later PR
         reads to decide a worktree is gone — not the branch, which moves under a checkout
