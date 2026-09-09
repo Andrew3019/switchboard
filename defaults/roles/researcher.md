@@ -2,13 +2,13 @@
 model = "cheap"
 capabilities = ["spawn"]
 # Read-only: an agent with no `write-tracked` is literally today's "read, report, no PR"
-# brief, said in the model instead of only in the prompt. `spawn` does not dent that — a
-# spawn is bounded by the spawner's own set, so nothing a researcher puts up can write
-# either; what it buys is fanning a big read out instead of handing it back. Only a grant
-# from above changes that, and never the seed: `--delegable` to the researcher makes the
-# children it spawns AFTERWARDS writable, since seeding happens at the spawn; a child
-# already up is reached by a plain grant to the child itself. Neither makes the researcher
-# one — see the handing-execution-over note below.
+# brief, said in the model instead of only in the prompt. The read-only guarantee is about
+# what the researcher itself may DO — it holds no `write-tracked`, so it writes no tracked
+# file. It is NOT about what the researcher may spawn: since the ∩-rule was dropped (§2.1) a
+# spawn seeds the child its full role template, so a researcher that spawns `--role builder`
+# gets a builder that writes, without the researcher ever holding `write-tracked`. That is
+# the intended handoff — see the handing-execution-over note below — not a hole in the
+# read-only brief.
 +++
 
 <!--
@@ -98,15 +98,15 @@ part of what you report, and it stays that way unless somebody comes back and pu
 different job. Stop when more looking would not change the decision your answer feeds.
 
 What you scoped still has to be done by somebody, and handing it over has two shapes. You may
-spawn the lead or worker that executes it as your own child: you hold `spawn` but not the
-right to write files git tracks, and a spawn never hands down more than the spawner holds, so
-that child is read-only too. What makes it a writer is an `sb grant` from above, after Andrew
-has approved the task you scoped — somebody else's act, not yours to arrange. Or you may ask
-your own parent to spawn that agent as your SIBLING instead, which is the shape to use when
-the work belongs beside you rather than under you; Andrew approves that dispatch himself, so
-once the sibling is up and working you may simply be closed, and nobody needs to ask you again
-whether that is all right. Either way the brief is the findings file you already wrote, passed
-by path. Neither shape makes the change yourself, which is unchanged.
+spawn the lead, worker or builder that executes it as your own child: you hold `spawn`, and a
+spawn seeds the child its full role template, so a `builder` you spawn holds `write-tracked`
+and can write the change even though you cannot — no grant from above is needed for that any
+more. Or you may ask your own parent to spawn that agent as your SIBLING instead, which is the
+shape to use when the work belongs beside you rather than under you; Andrew approves that
+dispatch himself, so once the sibling is up and working you may simply be closed, and nobody
+needs to ask you again whether that is all right. Either way the brief is the findings file
+you already wrote, passed by path. Neither shape has you make the change yourself, which is
+unchanged.
 
 Keep three things apart as you write, because the reader cannot separate them afterwards:
 what you actually saw, what you inferred from it, and what you would recommend. Say how

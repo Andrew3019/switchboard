@@ -226,11 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
                    # capabilities` is the command that prints this repo's.
                    help="the capability string (see: sb capabilities)")
     # The pass-through half of the model, and the flag exists because "may do it" and "may
-    # hand it down" are two different decisions: a read-only researcher equips the workers
-    # it spawns without ever becoming a writer itself.
+    # hand it on" are two different decisions: an agent can be trusted to route a right to
+    # another agent without ever being able to exercise it itself. (Equipping what you SPAWN
+    # no longer needs this — a spawn seeds the child its full role template, §2.1; this is
+    # the re-grant path.)
     g.add_argument("--delegable", action="store_true",
-                   help="the agent may pass this DOWN to what it spawns, without being "
-                        "able to do it itself")
+                   help="the agent may grant this ON to another agent in its subtree, "
+                        "without being able to do it itself")
     g.add_argument("--reason", help="why, recorded with your name against the grant")
 
     # The other half of `--isolation own`: a fork gives a child its own branch, and this
@@ -1512,9 +1514,9 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                     reason=args.reason, me=me)
         # The two halves are said apart, because they are two different facts about the
         # recipient and confusing them is the whole reason `--delegable` exists: one says
-        # what that agent may now DO, the other says what its children may be SEEDED with
-        # while it still may not do it.
-        what = (f"may pass {r['cap']} down to agents it spawns (it still does not hold "
+        # what that agent may now DO, the other says what it may GRANT ON to another agent
+        # while it still may not do it itself.
+        what = (f"may grant {r['cap']} on to another agent (it still does not hold "
                 f"{r['cap']} itself)" if r["delegable"] else f"holds {r['cap']}")
         _emit(args, f"{r['agent']} {what} — for the rest of its life; there is no revoke",
               r)
@@ -1812,12 +1814,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             f"  seed {', '.join(caps['seed']) or 'nothing'} "
             f"[template {', '.join(caps['template']) or 'nothing'} via "
             f"{caps['template_source']}; {caps['template_ownership']}]")
-        # The ∩-rule, printed only when it actually took something away. A "withheld:
-        # nothing" line under every preview would train the reader past the one preview
-        # where a lead comes out crippled because a worker spawned it.
-        if caps["withheld_by_spawner"]:
-            lines.append(f"  withheld by spawner {caps['spawner']}: "
-                         + ", ".join(caps["withheld_by_spawner"]))
+        # No "withheld by spawner" line: a spawn seeds the child its full role template
+        # now (§2.1), so the seed above is never short of the template.
         if caps["live"]:
             lines.append(f"  live now: may do {', '.join(caps['held']) or 'nothing'}"
                          + (f"; may pass down only {', '.join(caps['delegable_only'])}"

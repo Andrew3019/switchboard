@@ -1,10 +1,12 @@
 +++
 model = "careful"
 capabilities = ["spawn"]
-# READ-ONLY by default. `write-tracked` is a grant, not a default: a qa agent that reports
-# what it found is the job, and one that fixes what it found is a change nobody reviewed.
-# `spawn` is not a write: it buys one bounded helper — a second pair of eyes, an
-# environment this agent has not got — and cannot seed `write-tracked` it does not hold.
+# READ-ONLY by default. `write-tracked` is not in this role's template: a qa agent that
+# reports what it found is the job, and one that fixes what it found is a change nobody
+# reviewed. That guarantee is about what the qa agent itself may DO. `spawn` is not a write
+# either — but since a spawn seeds the child its full role template (§2.1), a qa agent CAN
+# put up a helper of a role that writes; the read-only line is the qa agent's own, not its
+# children's.
 +++
 
 <!--

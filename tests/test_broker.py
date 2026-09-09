@@ -874,22 +874,17 @@ class BrokerTest(unittest.TestCase):
         self.assertFalse(manifest["capabilities"]["top"])
         self.assertEqual(manifest["capabilities"]["spawner"], "orch")
 
-    def test_the_manifest_shows_what_the_spawner_narrowed_away(self):
-        """The ∩-rule (§2.1) is the whole difference between a role's bundle and what a
-        child of THIS parent gets, and it is the reason anyone previews a spawn: a `lead`
-        commissioned by a `worker` comes out crippled, and the manifest has to say so
-        rather than reciting the lead template."""
+    def test_the_manifest_seed_is_the_full_template_whoever_spawns(self):
+        """A spawn seeds the full role template now (§2.1), so the manifest's seed for a
+        `lead` commissioned by a `worker` is the whole lead template — not narrowed by the
+        worker's own set — and there is no "withheld by spawner" concept left to report."""
         store.create_agent(self.db, name="w", role="worker", cwd=str(self.repo))
         caps = self.b.effective_instructions(
             role="lead", name="lead-x", parent="w")["capabilities"]
-        self.assertEqual(caps["seed"], self.b.seed_for("lead", False, spawner="w"))
-        self.assertNotEqual(caps["seed"], caps["template"])
-        self.assertEqual(caps["withheld_by_spawner"],
-                         sorted(set(caps["template"]) - set(caps["seed"])))
-        # `dispatch` and not `spawn`: a worker has held `spawn` since 2026-08-31 and so
-        # passes it down, and what a worker-commissioned lead is still short of is the
-        # orchestrating half of the template.
-        self.assertIn("dispatch", caps["withheld_by_spawner"])
+        self.assertEqual(caps["seed"], self.b.seed_for("lead", False))
+        self.assertEqual(set(caps["seed"]), set(caps["template"]))   # full template
+        self.assertNotIn("withheld_by_spawner", caps)
+        self.assertNotIn("spawner_passes", caps)
 
     def test_the_manifest_reports_later_grants_for_an_agent_that_has_them(self):
         """"Capability seed AND LATER GRANTS" — and a grant is a row with provenance, not

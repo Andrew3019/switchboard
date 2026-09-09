@@ -478,25 +478,34 @@ means adding a string rather than another refusal function beside the gate. Four
 ship — `spawn`, `fork`, `write-tracked` and `dispatch` — and the first three are the ones
 with a gate site today; `dispatch` is seeded and grantable vocabulary with nothing checking
 it yet. The set is open-ended and a repo may add to it. A
-spawn NARROWS and never widens: a child is seeded with its role template intersected with
-what its spawner may pass down, so nobody reaches past their own ceiling by spawning
-something more capable and driving it by `sb tell`. The one exception is the top, which
-seeds its children from the full template even for capabilities it does not itself hold,
-because commissioning fully-capable leads while holding none of their rights is precisely
-its job. What the role name still decides on its own is the prompt, the model tier, and how
-far the agent may tune its own reminders. — confirmed 2026-08-23, against the merged code
+spawn seeds the child its FULL role template, regardless of the spawner's own set: the
+spawner chooses the child's role and the role's template decides what the child holds, so a
+read-only `researcher` (holding only `spawn`) can spawn a `builder` that writes without
+holding `write-tracked` itself. This is deliberately not the grant rule — `sb grant` still
+hands a right, or `--delegable` passes one down, only from an agent that holds it — because
+a spawn equips a NEW agent of a chosen role rather than widening an existing one, and
+`write-tracked` is a post-hoc review gate, not a preventive control, so every write a
+spawned agent makes still lands through review and a PR whoever spawned it. It used to
+narrow — a child was seeded its template intersected with what its spawner could pass down,
+with the top the one exception that seeded the full template even for rights it did not
+hold. That exception is now the rule for every spawner; the only way `is_top` still changes
+the seed is the top's own fixed set (no `write-tracked`, §2.0). What the role name still
+decides on its own is the prompt, the model tier, and how far the agent may tune its own
+reminders. — confirmed 2026-09-08, spawn ∩-rule dropped (spawn-seeding only; `sb grant`
+still bounded by possession)
 
 **Every shipped role is seeded `spawn`, and that is an EXPERIMENT rather than a settled
 rule.** A change that lands is reviewed by a fresh agent that did not write it, and until
-now a leaf could not put that agent up: its template held no `spawn`, a spawn only ever
-narrows, and so the review got handed back to whoever spawned it — which spawned the
-reviewer into the PARENT's checkout, a tree with none of the work in it. So `worker`,
-`builder`, `reviewer`, `qa` and `researcher` now carry `spawn` in their templates and a
-leaf arranges the review of its own change. It is deliberately broad and we are trying it
-out: "we can tighten later", and what to watch is whether a leaf starts growing a tree
-instead of putting up one reviewer. Nothing else moved — a spawn still narrows, so what a
-leaf may hand down is still bounded by what it holds, and neither `qa` nor `researcher`
-gained `write-tracked`. — confirmed 2026-08-31, as an experiment
+now a leaf could not put that agent up: its template held no `spawn`, so the review got
+handed back to whoever spawned it — which spawned the reviewer into the PARENT's checkout,
+a tree with none of the work in it. So `worker`, `builder`, `reviewer`, `qa` and
+`researcher` now carry `spawn` in their templates and a leaf arranges the review of its own
+change. It is deliberately broad and we are trying it out: "we can tighten later", and what
+to watch is whether a leaf starts growing a tree instead of putting up one reviewer. Since
+the ∩-rule was dropped a leaf can also equip what it spawns — a `researcher` that specced a
+fix can spawn a `builder` that writes it — bounded by the role it names rather than by what
+the leaf itself holds; `qa` and `researcher` still hold no `write-tracked` of their own.
+— confirmed 2026-08-31 as an experiment; spawn-equips-fully updated 2026-09-08
 
 **The top dispatcher's capability set is fixed, and it holds no `write-tracked`.** It is
 the one bundle that is not data: not editable by a repo's role files, not derived from any

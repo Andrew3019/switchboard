@@ -453,9 +453,9 @@ CREATE TABLE capabilities (
                                       -- distinguishable from the seed by more than
                                       -- inference.
     granted_by    TEXT,                -- WHO decided this, for a grant. NULL on a seeded
-                                      -- row: nobody decided it, the role template and the
-                                      -- spawner's passable set did, and writing the
-                                      -- spawner's name here would make every spawn look
+                                      -- row: nobody decided it, the role template did (a
+                                      -- spawn seeds the full template, §2.1), and writing
+                                      -- the spawner's name here would make every spawn look
                                       -- like a grant in the audit.
     reason        TEXT                 -- the granter's `--reason`, verbatim and optional.
                                       -- Provenance is the whole audit story for a right
@@ -1434,9 +1434,10 @@ def reseed_capabilities(db: sqlite3.Connection, name: str, caps) -> int:
     seed is part of the command's report, not an implementation detail.
 
     Deliberately NOT a re-derivation from the role: the caps passed in are the STORED seed
-    (`agents.seed_capabilities`). Reseeding from the template would return a ∩-narrowed
-    lead as a full one, which is a silent widening past the exact ceiling ∩-seeding exists
-    to enforce, with no grant recorded and no granter in the log.
+    (`agents.seed_capabilities`). A spawn seeds the full template now (§2.1), so for a row
+    spawned since that change the stored seed and the template match; it still reads the
+    stored seed because a LEGACY row narrowed by the old ∩-rule holds less than its template,
+    and reseeding it from the template would silently widen it with no grant in the log.
     """
     caps = sorted(set(caps))
     dropped = len([r for r in
@@ -1498,11 +1499,12 @@ def held_capabilities(db: sqlite3.Connection, name: str) -> set:
 
 
 def passable_capabilities(db: sqlite3.Connection, name: str) -> set:
-    """What this agent may PASS DOWN — held ∪ delegable-only. The set ∩-seeding reads.
+    """What this agent may PASS DOWN with `sb grant` — held ∪ delegable-only.
 
     The second of the two read sites in the whole design, and there are exactly two: this
-    one at spawn, and `held_capabilities` at the gate. A third would be somebody deciding
-    that "may pass it on" is close enough to "may do it".
+    one bounds the GRANT path (`Broker.grant`), and `held_capabilities` bounds the gate. The
+    spawn no longer reads it — a spawn seeds the child its full role template (§2.1). A third
+    site would be somebody deciding that "may pass it on" is close enough to "may do it".
     """
     return {r["cap"] for r in
             db.execute("SELECT cap FROM capabilities WHERE agent=?", (name,))}

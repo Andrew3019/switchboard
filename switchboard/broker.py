@@ -1289,10 +1289,11 @@ class Broker:
         lenient — see `_capability_row`.
 
         It reads the HELD set and only the held set. A cap granted `--delegable` counts in
-        what this agent's children may be seeded with and NEVER in what it may do itself —
-        one of exactly two read sites in the design, the other being `passable_for` at the
-        spawn. That split is the whole of #163's motivating case: a read-only researcher
-        equips the workers below it without ever becoming a writer.
+        what this agent may PASS DOWN and NEVER in what it may do itself — the passable set
+        (`passable_for`) is read at `grant` to bound what a granter may hand on, not at the
+        spawn any more (a spawn seeds the child its full role template, §2.1). That split is
+        the whole of #163's motivating case: an agent can equip others without holding the
+        right itself, and a `--delegable`-only holder still cannot use the cap.
         """
         row = self._capability_row(agent)
         if row is None or cap in self._held_of(row):
@@ -1363,13 +1364,12 @@ class Broker:
         return store.passable_capabilities(self.db, row["name"])
 
     def passable_for(self, agent: str) -> Optional[set]:
-        """What this agent may hand DOWN to something it spawns. `None` means "no ceiling".
+        """What this agent may hand DOWN with `sb grant`. `None` means "no ceiling".
 
-        `None` is the rowless fail-open in the shape ∩-seeding needs it: the human, and a
-        caller this store has no row for, bound a child by nothing — intersecting with an
-        empty set instead would cripple every agent spawned against a cold store, which is
-        the same regression the gate's third value exists to avoid, arriving at the spawn
-        rather than at the check.
+        Read by the grant path (`grant` bounds a granter to its passable set), not by the
+        spawn any more — a spawn seeds the child its full role template (§2.1). `None` is the
+        rowless fail-open: the human, and a caller this store has no row for, are bounded by
+        nothing, so the human can grant anything and `sb start` survives a cold store.
         """
         row = self._capability_row(agent)
         return None if row is None else self._passable_of(row)
@@ -1379,61 +1379,44 @@ class Broker:
         row = self._capability_row(agent)
         return None if row is None else self._held_of(row)
 
-    def seed_for(self, role: str, is_top: bool, spawner: Optional[str] = None) -> list:
-        """The set an agent of this role gets at spawn: its role's DEFAULT BUNDLE.
+    def seed_for(self, role: str, is_top: bool) -> list:
+        """The set an agent of this role gets at spawn: its role's FULL TEMPLATE.
 
-        Read off the role (`roles.Role.capabilities`), never off the role's NAME, so a
-        repo's own orchestrating role is seeded correctly and a `roles.toml` that still
-        says `delegate = true` loads onto the bundle it always meant (`roles._bundle`).
+        Read off the role (`roles.Role.capabilities`) through `template_capabilities`, never
+        off the role's NAME, so a repo's own orchestrating role is seeded correctly and a
+        `roles.toml` that still says `delegate = true` loads onto the bundle it always meant
+        (`roles._bundle`). `status` renders divergence against the SAME call, so the seed and
+        the marker cannot come to disagree about what a role normally gets.
 
-        Two things the bundle does not decide, both `is_top`'s:
+        A SPAWN SEEDS THE FULL TEMPLATE regardless of the spawner's own set (§2.1). The
+        spawner chooses the child's ROLE, and the role's template decides what the child
+        holds: a read-only `researcher` (holding only `spawn`) can therefore spawn a
+        `builder` that writes, without holding `write-tracked` itself. This is the top's old
+        behaviour extended to every spawner — minting a fully-capable child while holding
+        none of its rights used to be the top's exclusive job and is now anyone's.
 
-        A STAMPED TOP takes the fixed set and nothing else (§2.0, `roles.TOP_CAPABILITIES`)
-        — no `write-tracked`, whatever its role template says. That is the top's whole
-        invariant, and it is not a template because a template has no vocabulary for the
-        stamp or for the placement `sb start` gives it.
+        The two gates are deliberately different. What a spawner may DO is bounded by its own
+        HELD set (`require_capability`); what it may SPAWN is bounded by the role templates
+        this repo defines, not by that set. The `sb grant` path is the one that stays bounded
+        by possession — an agent may grant, or `--delegable` pass down, only a capability it
+        holds — because a grant hands a right to an EXISTING agent, whereas a spawn equips a
+        NEW one of a chosen role. `write-tracked` is a post-hoc review gate, not a preventive
+        security control (`roles.side_effect_capabilities`), so a builder a researcher spawns
+        still lands every write through review and a PR, exactly as one a lead spawns does.
 
-        `fork` IS SEEDED LIKE ANY OTHER CAP NOW, to the roles whose template names it —
-        `lead`, of the shipped ones. It used to be subtracted from every non-top row, and
-        D2 removed both reasons at once: the request site that spends it exists
-        (`delegate(isolation="own")`), and holding it no longer turns a lead's every spawn
-        into a new workspace, because rule 2 reads the STAMP and rule 3 defaults to
-        `shared` (`mints_space`, `isolates`). A lead therefore arrives able to isolate a
-        child that asks for it, with its ordinary spawns unchanged — `sb grant fork` before
-        every fan-out was the bureaucracy this set exists to remove. The subtraction lived
-        in `roles.template_capabilities`, which says the same thing at more length.
+        A STAMPED TOP still takes its fixed set and nothing else (§2.0,
+        `roles.TOP_CAPABILITIES`) — no `write-tracked`, whatever its role template says. That
+        is now the only way `is_top` changes the answer, and `template_capabilities` already
+        applies it; the narrowing branch the top used to be the exception to is gone.
 
         There is no `start` in this function and there is none anywhere: `sb start` is a
         hardcoded human-only gate in the CLI, and a grantable version of it is how a top
         would come to mint another top.
-
-        THE ∩-RULE (§2.1). Given a `spawner`, the answer is `template ∩ passable(spawner)`:
-        a spawn NARROWS, never widens. Without it `spawn` is a second, unguarded
-        cap-minting path — a worker granted `spawn` runs `sb delegate --role lead`, the
-        child seeds the full lead bundle, and the worker drives it by `sb tell`, escalating
-        transitively past its own ceiling. Under the rule that "lead" comes out
-        `{spawn, write-tracked}`: crippled, and nothing escalated.
-
-        THE ONE EXCEPTION IS THE TOP. It seeds its children from the FULL template even for
-        caps it does not itself hold — commissioning fully-capable leads while holding no
-        `write-tracked` is precisely its job. Safe because the top is singular, non-grantable
-        as a target and placement-fixed (§2.0), and no non-top can reach it: the branch asks
-        the `is_top` stamp of the spawner, which nothing but `sb start` writes.
-
-        A spawner with NO ROW bounds nothing either (`passable_for` -> None) — the human,
-        and the cold-store bootstrap, for the gate's own fail-open reason. Intersecting
-        with an empty set there would cripple every agent spawned against a fresh store.
         """
-        # THE TEMPLATE, from the one function that defines it — `status` renders
-        # divergence against the same call, and a second copy of "what a lead normally
-        # gets" is how the seed and the marker would come to disagree.
-        bundle = roles_mod.template_capabilities(self.roles, role, is_top, self.repo)
-        if is_top:
-            return sorted(bundle)
-        if spawner is None or self.is_top(spawner):
-            return sorted(bundle)
-        passable = self.passable_for(spawner)
-        return sorted(bundle if passable is None else bundle & passable)
+        # THE TEMPLATE, from the one function that defines it — `status` renders divergence
+        # against the same call, and a second copy of "what a lead normally gets" is how the
+        # seed and the marker would come to disagree. `is_top` is handled inside it.
+        return sorted(roles_mod.template_capabilities(self.roles, role, is_top, self.repo))
 
     def _capability_refusal(self, role: str, cap: str) -> str:
         """What a refused caller is told. Word for word what the spawn gate said before
@@ -1559,7 +1542,7 @@ class Broker:
            whichever bits the caller holds. Without it a delegable-only holder grants
            itself the held form and the split lasts as long as it takes to type one line.
            No agent widens its own HELD set by any path: held caps come from exactly two
-           places, the ∩-seed at spawn and a grant from SOMEBODY ELSE. This does not
+           places, the seed at spawn and a grant from SOMEBODY ELSE. This does not
            conflict with promote being self-service (§2.3) — reorganizing yourself is
            position and takes rights over no third party; widening yourself takes one from
            the lead who authorized a routing hub and would silently get a writer.
@@ -1576,8 +1559,9 @@ class Broker:
            travels with the agent — the divergence marker in `sb status`'s ROLE column, the
            promote signal, and `sb who-holds` (all C3/F2).
         7. **THE GRANTER MUST ALREADY HOLD IT** — held or delegable, i.e. its PASSABLE set.
-           No escalation past your own ceiling. A delegable-only holder may grant, which is
-           the same one-hop-down semantics ∩-seeding gives it.
+           No escalation past your own ceiling on the GRANT path (the spawn is the other
+           story — §2.1 — and seeds a child its full role template regardless). A
+           delegable-only holder may grant, passing the cap one hop down without holding it.
         8. **THE TOP'S EXEMPTION**, and it is the only way past 7: the top may grant any
            capability in any role template it may spawn, even one it does not itself hold.
            Without it cross-subtree sharing has no mechanism at all when the common ancestor
@@ -1585,10 +1569,13 @@ class Broker:
            be minted capable and never repaired afterwards.
         9. **A GRANT THE GRANTER DOES NOT ITSELF HOLD MUST BE `--delegable`** — the bound on
            8. A delegable-only grant never widens what the target may DO: its held set, and
-           every `require_capability` answer about its own actions, is untouched; it widens
-           only what the target's CHILDREN are seeded with, which is the top's commissioning
-           power expressed one hop later. The top still never gains `write-tracked` and the
-           read-only agent it grants through still never holds it.
+           every `require_capability` answer about its own actions, is untouched. What it adds
+           is the target's own PASSABLE set — the right to grant the cap ON to a third agent
+           in its subtree, one hop further, still without ever doing it itself. (It does NOT
+           reach what the target SPAWNS: a spawn seeds the child its full role template
+           regardless, §2.1 — the delegable bit is a fact about the grant path alone now.)
+           The top still never gains `write-tracked` and the read-only agent it grants through
+           still never holds it.
 
            **Spec conflict, resolved and flagged.** §2.1 and objective 24 word this bound as
            *"a grant beyond the TARGET's own template must be `--delegable`"*. Taken
@@ -1717,8 +1704,8 @@ class Broker:
                 "agent": r["agent"],
                 "role": a["role"],
                 "state": a["state"],
-                # `held` is the bit `require_capability` reads; `delegable` is the bit
-                # ∩-seeding reads. Both, because they are independent (§2.1 obj 20).
+                # `held` is the bit `require_capability` reads; `delegable` is the bit the
+                # grant path reads (`passable`). Both, because they are independent (§2.1 obj 20).
                 "held": bool(r["held"]),
                 "delegable": bool(r["delegable"]),
                 "granted_by": _column(r, "granted_by") or None,
@@ -4796,11 +4783,10 @@ class Broker:
         """What the previewed spawn would be able to do, and where each half comes from.
 
         Read through `seed_for`, so this is THE SEED THE SPAWN WOULD ACTUALLY WRITE rather
-        than a second derivation of it. The ∩-rule (§2.1: a role's template narrowed by
-        what the spawner may pass down) is the whole of the difference between a bundle
-        and what a child of THIS parent gets, and a preview that showed the raw template
-        would be wrong for exactly the case anybody previews for — a `lead` spawned by a
-        `worker` comes out short, and the point of asking is to see that.
+        than a second derivation of it. A spawn seeds the child its FULL role template now
+        (§2.1) — the spawner's own set no longer narrows it — so the seed and the raw
+        template are the same set for a non-top preview, and who the parent is changes it
+        only through the `is_top` stamp (`sb start`'s `MAIN`-for-`HUMAN`).
 
         `top` is DERIVED, because a preview has no stamp to read: `sb start` is the only
         path that stamps one (`_top`) and it always spawns `MAIN` for `HUMAN`, so that
@@ -4816,8 +4802,7 @@ class Broker:
         """
         is_top = role == MAIN and parent == HUMAN
         template = roles_mod.template_capabilities(self.roles, role, is_top, self.repo)
-        seed = self.seed_for(role, is_top, spawner=parent)
-        passable = self.passable_for(parent)
+        seed = self.seed_for(role, is_top)
         # A STAMPED TOP'S SET IS NOT ITS ROLE FILE'S (§2.0, `roles.TOP_CAPABILITIES`): it is
         # fixed in python, unlayerable, and pointing a reader at `roles/dispatcher.md` for
         # it would send them to edit a file that cannot change the answer.
@@ -4829,12 +4814,9 @@ class Broker:
             "template": sorted(template),
             "template_source": role_source,
             "template_ownership": role_owner,
-            # `None` is "this spawner bounds nothing" — the human, or a caller with no row
-            # — and it is not the same statement as an empty list, which is a spawner that
-            # may pass nothing down. `seed_for` branches on exactly that difference.
+            # Who is spawning, kept for context. It no longer narrows the seed — a spawn
+            # seeds the full template (§2.1) — so there is no "withheld by spawner" set here.
             "spawner": parent,
-            "spawner_passes": None if passable is None else sorted(passable),
-            "withheld_by_spawner": sorted(set(template) - set(seed)),
             "seed": list(seed),
             "grants": [],
             "held": list(seed),
@@ -5594,11 +5576,12 @@ class Broker:
         # spawners share and it stays one statement; a spawn that dies in between leaves a
         # row whose seed is NULL, and that row reads exactly as every row written before
         # this existed does — derived from the same two facts, same answer.
-        # `me` is what turns the seed from a template read into the ∩-RULE: what this
-        # child gets is its role's bundle narrowed by what its spawner may pass down, and
-        # the result is PERSISTED on the row because `restore` reseeds from it and must
-        # never re-widen back to the raw template.
-        store.seed_capabilities(self.db, name, self.seed_for(role, is_top, spawner=me))
+        # A spawn seeds the child its full role template (§2.1) — the spawner's own set no
+        # longer narrows it — so the seed is a plain template read. The result is still
+        # PERSISTED on the row because `restore` reseeds from it: a NULL there would derive,
+        # and a legacy row narrowed before this change must come back as it was written, not
+        # re-widened to the current template.
+        store.seed_capabilities(self.db, name, self.seed_for(role, is_top))
 
         # A SHARED WRITE FAN-OUT IS A JIT GUIDANCE MOMENT. The child is claimed and seeded
         # before the provider is started, so the existing ledger fact can see the candidate
@@ -8467,11 +8450,12 @@ class Broker:
         expiry effectively permanent, and remove the blast-radius bound that makes grants
         cheap to give.
 
-        **The seed, never the raw role template.** A lead spawned by a ∩-narrowed lead
-        legitimately holds less than its template — `{spawn, write-tracked}`, no `dispatch`,
-        no `fork` — and reseeding from `roles` would return it as a full lead. That is a
-        silent widening past the exact ceiling ∩-seeding exists to enforce, reachable by any
-        operator, with no grant recorded and no granter in the log. `agents.seed_capabilities`
+        **The seed, never the raw role template.** A spawn seeds the full template now
+        (§2.1), so for a row spawned since that change the stored seed and the template are
+        the same set. It still reads the STORED seed rather than the template because a
+        LEGACY row — one narrowed by the old ∩-rule before this change — legitimately holds
+        less than its template, and reseeding it from `roles` would silently widen it past a
+        ceiling with no grant recorded and no granter in the log. `agents.seed_capabilities`
         is written once at spawn and never mutated precisely so this read is possible.
 
         **It is not a silent narrowing.** The count of dropped grants goes to the operator
