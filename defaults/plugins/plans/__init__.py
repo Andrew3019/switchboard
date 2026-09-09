@@ -669,7 +669,10 @@ def register(reg):
     reg.command(
         "guide", guide, audience="both",
         help="how plan-making is done — when a plan exists, who writes to it, what to "
-             "build it from, and how to edit one")
+             "build it from, and how to edit one",
+        args=[reg.arg("--short", flag=True,
+                      help="only the path-decision section — direct vs shaped vs neither; "
+                           "the cheap read for deciding which path a job is on")])
     reg.command(
         "planner", planner, audience="both",
         help="the plan writer's own instruction — read it on your first turn if you were "
@@ -1415,6 +1418,15 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
 """
 
 
+# The path-decision half of the guide alone — "WHICH PATH THIS WORK IS ON" and nothing
+# past it. It is what the turn-start nudge sends a lead to read to pick direct vs shaped,
+# before any of the plan-authoring mechanics that a builder or planner reads later matter.
+# DERIVED from GUIDE, never a second copy: it is exactly the prefix up to the first heading
+# after the decision, so the two cannot drift and every claim in it is Andrew's own prose,
+# uncut. `--short` returns this; the bare verb returns the whole thing, unchanged.
+GUIDE_PATH = GUIDE.split("\nWHEN A PLAN EXISTS", 1)[0].rstrip("\n")
+
+
 # -- the handlers --------------------------------------------------------------
 
 
@@ -1424,7 +1436,13 @@ def guide(ctx, args) -> Result:
     A verb rather than a preset because a preset survives the plugin being deleted, and
     this text is a list of commands that would then not dispatch. `data` carries the same
     string so a machine reader gets the instruction rather than a rendering of it.
+
+    `--short` returns only the path-decision section — the read the turn-start nudge is
+    aimed at, cheap enough to re-check. The bare verb is unchanged, for the builder,
+    planner and callers that want the whole reference.
     """
+    if getattr(args, "short", False):
+        return Result(human=GUIDE_PATH, data={"guide": GUIDE_PATH, "short": True})
     return Result(human=GUIDE.rstrip("\n"), data={"guide": GUIDE})
 
 

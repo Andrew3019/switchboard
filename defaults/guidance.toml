@@ -75,7 +75,7 @@ id = "lead-plans-at-turn-start"
 role = "lead"
 repeat = "once"
 category = "plans"
-text = "At task start, decide whether this work needs shaping before implementation; if so, consider `sb plugin plans create`. Clear bounded work stays direct; if it heads for review or a PR, use `sb plugin plans record` without a plan. `sb plugin plans guide` explains the path."
+text = "At task start, decide whether this work needs shaping before implementation; if so, consider `sb plugin plans create`. Clear bounded work stays direct; if it heads for review or a PR, use `sb plugin plans record` without a plan. `sb plugin plans guide --short` explains the path (the full `guide` has the plan-authoring detail)."
 
 
 # MOVED OUT OF `protocol.md` (2026-08-22, unit E1). This paragraph used to sit in the
