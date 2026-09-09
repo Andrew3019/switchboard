@@ -967,6 +967,10 @@ def _configure_text(r: dict) -> str:
 # answers about capabilities outright — so a footer there would be a second, shorter
 # answer to the question the command was asked.
 STATE_COMMANDS = frozenset({"delegate", "grant", "merge", "workspace"})
+# Report verbs use the same guidance delivery door after their body is durable, but do not
+# carry the caller-state readout above: `done` and `tell` are frequent report channels and
+# a capabilities footer there would add noise to the report it is meant to keep short.
+REPORT_COMMANDS = frozenset({"done", "tell"})
 
 
 def _state_key(args) -> Optional[str]:
@@ -984,9 +988,15 @@ def _state_key(args) -> Optional[str]:
     return cmd
 
 
-def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
-    """Print the caller's own state under a non-trivial command's output, and ask the
-    ledger whether any `command`-keyed rule fires (E2, spec §2.4).
+def _guidance_key(args) -> Optional[str]:
+    """Return the state-readout or report verb whose post-command guidance may fire."""
+    return _state_key(args) or (
+        getattr(args, "cmd", None) if getattr(args, "cmd", None) in REPORT_COMMANDS else None
+    )
+
+
+def _state_output(args, b: Broker, db, key: Optional[str], *, code: int = 0) -> None:
+    """Print caller state, or report guidance, under the command that just ran.
 
     TWO THINGS THROUGH ONE DOOR, and neither is a new mechanism. The readout is
     `guidance.state_note` — what this agent may do, where it is attached, what config it
@@ -994,7 +1004,8 @@ def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
     `guidance.deliver` with the command in hand, which is the call site E1 built the
     `command` key for and left with nobody to call it: until this line existed, a rule
     keyed on a command could never match, because the only resolver call passed None.
-    `delegate-to-a-lead` is that rule, and this is where it starts firing.
+    `delegate-to-a-lead` is that rule, and this is where it starts firing. Report guidance
+    uses the same `guidance.deliver` call after `done`/`tell`, once the body is durable.
 
     A COMPLEMENT TO THE TURN-START CHANNEL, NOT A REPLACEMENT (obj. 2). Both ship, and they
     answer different questions: the hook says "before your next action, remember X" at the
@@ -1021,6 +1032,15 @@ def _state_output(args, b: Broker, db, key: Optional[str]) -> None:
     try:
         me = b.whoami()
         if me == HUMAN:
+            return
+        if key in REPORT_COMMANDS:
+            # A refused report command did not write a new body. Do not resolve against an
+            # older report and turn a failed tell/done into an unrelated reminder.
+            if code != 0:
+                return
+            text = guidance.deliver(db, me, command=key, repo=b.repo)
+            if text:
+                print(text)
             return
         held, passable = b.held_for(me), b.passable_for(me)
         if held is None or passable is None:
@@ -1332,7 +1352,7 @@ def _main(argv: Optional[list[str]], capture: dict[str, Any]) -> int:
     # wants to see that it does not hold `fork` — and reading it afterwards is what makes
     # it true: a spawn that just moved this agent's child into a new workspace, or a grant
     # that just widened somebody, is already reflected.
-    _state_output(args, b, db, _state_key(args))
+    _state_output(args, b, db, _guidance_key(args), code=code)
     return code
 
 

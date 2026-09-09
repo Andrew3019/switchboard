@@ -136,10 +136,16 @@ class Facts:
     it instead (see `shared_write_tracked_children`).
     """
 
-    def __init__(self, db: sqlite3.Connection, row: sqlite3.Row):
+    def __init__(self, db: sqlite3.Connection, row: sqlite3.Row,
+                 command: Optional[str] = None):
         self.db = db
         self.row = row
         self.name = row["name"]
+        # A report's body lives in different existing records depending on the verb: a
+        # child `done` is a message, while a root `done` is only in the event log, and a
+        # `tell` is always a message. Keep the command context here so the fact can read
+        # the record this turn just wrote without adding another storage path.
+        self.command = command
         self._cache: dict[str, Any] = {}
 
     def get(self, fact: str) -> Any:
@@ -254,6 +260,62 @@ def _state(f: Facts) -> str:
     return f.row["state"]
 
 
+def _report_words(body: Any, *, kind: str) -> int:
+    """Count the words in a stored report body, excluding switchboard's done envelope."""
+    if body is None:
+        return 0
+    text = str(body)
+    if kind == "done" and text.startswith("[done]"):
+        # Child done messages carry the marker and, for promote, a generated second line;
+        # neither is the agent's summary and neither belongs in its word count.
+        text = text[len("[done]"):].lstrip().split("\n", 1)[0]
+    return len(text.split())
+
+
+def _last_report_words(f: Facts) -> int:
+    """The word count of this agent's most recently stored done/tell body.
+
+    `Broker.done` uses the event log as its repeat anchor, but child reports also retain
+    the full body in `messages` while event payloads are clipped for diagnostics. Read the
+    full existing message when one exists, and use the event summary for parentless done.
+    The command narrows the lookup after a report command so a same-second tell/done pair
+    cannot be mistaken for one another.
+    """
+    command = f.command
+    if command == "tell":
+        row = f.db.execute(
+            "SELECT body FROM messages WHERE from_agent=? AND kind='tell' "
+            "ORDER BY id DESC LIMIT 1", (f.name,)).fetchone()
+        return _report_words(row["body"], kind="tell") if row else 0
+
+    if command == "done":
+        row = f.db.execute(
+            "SELECT body FROM messages WHERE from_agent=? AND kind='done' "
+            "ORDER BY id DESC LIMIT 1", (f.name,)).fetchone()
+        if row:
+            return _report_words(row["body"], kind="done")
+        # A root has no parent mailbox, so its summary is recorded only here. This is the
+        # same event-log lookup used by Broker.done's replay guard.
+        row = f.db.execute(
+            "SELECT json_extract(payload,'$.summary') AS body FROM events "
+            "WHERE agent=? AND kind='done' ORDER BY id DESC LIMIT 1", (f.name,)
+        ).fetchone()
+        return _report_words(row["body"], kind="done") if row else 0
+
+    # Turn-start callers have no command context. A message is the only un-clipped record
+    # for a child report, while the event fallback keeps parentless done observable.
+    row = f.db.execute(
+        "SELECT body, kind FROM messages WHERE from_agent=? AND kind IN ('done','tell') "
+        "ORDER BY id DESC LIMIT 1", (f.name,)).fetchone()
+    if row:
+        return _report_words(row["body"], kind=row["kind"])
+    row = f.db.execute(
+        "SELECT json_extract(payload,'$.summary') AS body FROM events "
+        "WHERE agent=? AND kind='done' ORDER BY id DESC LIMIT 1", (f.name,)
+    ).fetchone()
+    return _report_words(row["body"], kind="done") if row else 0
+
+
 # The closed set. A `when` clause naming anything else is a ConfigError at load, not a rule
 # that silently never fires — a nudge nobody wrote wrong and nobody ever sees is the worst
 # of the three outcomes.
@@ -268,6 +330,7 @@ FACTS: dict[str, Callable[[Facts], Any]] = {
     "awaiting_task": _awaiting_task,
     "is_top": _is_top,
     "state": _state,
+    "last_report_words": _last_report_words,
 }
 
 
@@ -428,7 +491,7 @@ def resolve(db: sqlite3.Connection, name: str, *, command: Optional[str] = None,
     row = store.get_agent(db, name)
     if row is None:
         return []
-    facts = Facts(db, row)
+    facts = Facts(db, row, command=command)
     matched = [r for r in (ledger(repo) if rules is None else rules)
                if r.matches(facts, command)]
     return sorted(matched, key=lambda r: (-r.specificity, r.order))
@@ -459,7 +522,7 @@ def deliver(db: sqlite3.Connection, name: str, *, command: Optional[str] = None,
     row = store.get_agent(db, name)
     if row is None:
         return ""
-    facts = Facts(db, row)
+    facts = Facts(db, row, command=command)
     cursors = store.guidance_cursors(db, name)
     cfg = configuration(db, name, repo=repo)
     firing = []

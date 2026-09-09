@@ -27,9 +27,10 @@
 #           marked `[sb: guidance]` so it is never mistaken for the human typing.
 #   role    fires only for agents of that role.
 #   command fires only when the rule is resolved with that command in context — which is
-#           the moment the agent RUNS that `sb` verb, not turn start. The verbs that carry
-#           it are `cli.STATE_COMMANDS`; a rule keyed on anything else never fires, and a
-#           rule with no `command` is unaffected by any of this.
+#           the moment the agent RUNS that `sb` verb, not turn start. The state-readout
+#           verbs are `cli.STATE_COMMANDS`; report guidance also runs after `done` and
+#           `tell` through `cli.REPORT_COMMANDS`. A rule keyed on anything else never
+#           fires, and a rule with no `command` is unaffected by any of this.
 #   holds / lacks
 #           capability names, matched against the agent's LIVE capability set — what it
 #           holds NOW, grants included, never the role template. Anything else would nag a
@@ -76,6 +77,18 @@ role = "lead"
 repeat = "once"
 category = "plans"
 text = "At task start, decide whether this work needs shaping before implementation; if so, consider `sb plugin plans create`. Clear bounded work stays direct; if it heads for review or a PR, use `sb plugin plans record` without a plan. `sb plugin plans guide --short` explains the path (the full `guide` has the plan-authoring detail)."
+
+
+# REPORTS are a summary channel, not a transcript. The fact is evaluated after `done` or
+# `tell` has stored the body, and `once` keeps a legitimately verbose agent from paying the
+# same reminder on every report.
+[[rule]]
+id = "oversized-report"
+command = "done"
+when = [{fact = "last_report_words", op = ">", value = 200}]
+repeat = "once"
+category = "reports"
+text = "Your last report ran well over the ~200-word `sb done`/`sb tell` contract — that channel is a summary for your parent, not a transcript. Point at a file path or PR for detail instead of inlining it."
 
 
 # MOVED OUT OF `protocol.md` (2026-08-22, unit E1). This paragraph used to sit in the
