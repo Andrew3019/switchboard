@@ -11,21 +11,25 @@ capabilities = ["spawn", "write-tracked"]
 # prompt, which forbids widening scope or redesigning and turns any uncertainty about
 # whether a fix is minor into a major finding instead of an edit.
 #
-# WHAT THIS DOES NOT REACH: a spawn NARROWS (`Broker.seed_for`, template ∩ what the spawner
-# may pass down), so a reviewer put up by a planner — a `researcher`, which holds no
-# `write-tracked` — comes out without it. Plan and design review therefore come out seeded
-# read-only without a second role or a flag, which is the boundary `plan-review` asks for.
+# READ-ONLY REVIEW IS CARRIED BY THE PROMPT, NOT THE SEED. It used to be the seed too: a
+# spawn narrowed, so a reviewer put up by a planner — a `researcher`, holding no
+# `write-tracked` — came out without it, and plan/design review was read-only by seed as
+# well as by instruction. Since the ∩-rule was dropped (§2.1) a spawn seeds the full
+# reviewer template, `write-tracked` included, whoever put the reviewer up — so that seed no
+# longer agrees with the instruction, and the boundary `plan-review` asks for now rests on
+# the PROMPT alone (it forbids widening scope or editing) plus the post-hoc gates below.
 #
-# THAT IS THE SEED AND NOT A GATE, and nothing may be written as though it were. There is no
-# filesystem chokepoint in sb (`roles.side_effect_capabilities`): `write-tracked` is refused
-# at `sb merge` and flagged at `done`, both post-hoc, and the plan file is not a tracked file
-# at all. So the seeding makes the capability agree with the instruction; the instruction is
-# still what holds. `plan-review` and `planner.md` say so in the same words.
+# THAT WAS NEVER A GATE, and this is why nothing breaks. There is no filesystem chokepoint in
+# sb (`roles.side_effect_capabilities`): `write-tracked` is refused at `sb merge` and flagged
+# at `done`, both post-hoc, and the plan file is not a tracked file at all. So a plan reviewer
+# holding `write-tracked` still lands nothing a human did not see — the instruction is what
+# holds, exactly as `plan-review` and `planner.md` say.
 #
 # `spawn` (2026-08-31) is the same widening every writing leaf got, and for the same reason
 # — a review that needs one bounded helper, a second lens or an environment this agent has
-# not got, puts it up itself rather than handing the job back up. It narrows the same way
-# `write-tracked` does: a reviewer seeded by a spawner without `spawn` comes out without it.
+# not got, puts it up itself rather than handing the job back up. Since the ∩-rule was
+# dropped (§2.1) a spawn seeds the child its full role template regardless of the spawner,
+# so a reviewer arrives with `spawn` whoever put it up.
 +++
 
 <!--

@@ -103,8 +103,10 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
 
     def test_the_mark_is_signed_so_widened_and_narrowed_read_apart(self):
         """Objectives 7 and 8, in one assertion each way: a granted reviewer is MORE
-        powerful than its label and a ∩-seeded lead is crippled, and one undirected mark
-        would say the same thing about both."""
+        powerful than its label and a narrowed lead is crippled, and one undirected mark
+        would say the same thing about both. The `+` is the live case now that a spawn seeds
+        the full template (§2.1); the `−` reaches only a LEGACY row narrowed by the old
+        ∩-rule, built here explicitly since a spawn no longer produces one."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         reviewer = self.spawn(lead, "reviewer", "rv")
@@ -113,8 +115,10 @@ class DivergenceMarkerTest(Legibility, unittest.TestCase):
         self.b.grant(reviewer, CAP_DISPATCH, me=lead)
         self.assertEqual(self.cell(reviewer), "reviewer +dispatch")
 
-        worker = self.spawn(lead, "worker", "w")
-        crippled = self.spawn(worker, "lead", "sub")          # ∩-seeded: no dispatch
+        crippled = self.spawn(lead, "lead", "sub")            # full template at spawn now
+        self.db.execute("DELETE FROM capabilities WHERE agent=? AND cap IN (?,?)",
+                        (crippled, CAP_DISPATCH, CAP_FORK))   # narrow it, legacy-style
+        self.db.commit()
         self.assertNotIn(CAP_DISPATCH, store.held_capabilities(self.db, crippled))
         self.assertEqual(self.cell(crippled), "lead−")
         self.assertNotEqual(self.cell(crippled), self.cell(reviewer))

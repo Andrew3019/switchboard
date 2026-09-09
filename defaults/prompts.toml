@@ -252,13 +252,13 @@ granted = "[capabilities changed] {granter} granted you the capability `{cap}`.{
 
 # The `{use}` half of `granted`, for a grant the agent HOLDS: it may do the thing.
 #   {cap} the capability
-granted_held = "You may now do it yourself: every gate that asked for `{cap}` will let you through, and it is also passed down to what you spawn."
+granted_held = "You may now do it yourself: every gate that asked for `{cap}` will let you through, and you may grant it on to another agent in your subtree."
 
 # The `{use}` half of `granted`, for a `--delegable` grant. The distinction is the whole of
 # #163's motivating case and stating it plainly is the only thing that stops the recipient
 # trying the action itself and reading the refusal as a bug.
 #   {cap} the capability
-granted_delegable = "This one is PASS-THROUGH ONLY: you may NOT do it yourself — a gate asking for `{cap}` still refuses you — but the agents you spawn are seeded with it and they may."
+granted_delegable = "This one is PASS-THROUGH ONLY: you may NOT do it yourself — a gate asking for `{cap}` still refuses you — but you may grant it on to another agent in your subtree with `sb grant`, and that agent may."
 
 # A WORKSPACE RE-ATTACH, over the same in-transaction channel as `granted` above (C4).
 # The agent's PLACE has changed, which is the one fact it cannot discover by carrying on:

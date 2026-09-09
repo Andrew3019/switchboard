@@ -2,8 +2,9 @@
 model = "gpt-luna-max-effort"
 capabilities = ["spawn", "write-tracked"]
 # A leaf that writes, and the same bundle as `worker` for the same reason: `spawn` is here
-# so a builder can put up the review of its own change instead of handing that job back,
-# and what that spawn may seed is still bounded by this set.
+# so a builder can put up the review of its own change instead of handing that job back.
+# What that spawn seeds is the child's full role template now (§2.1), not an intersection
+# with this set.
 +++
 
 <!--

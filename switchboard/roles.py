@@ -191,9 +191,10 @@ class Role:
     # next question by holding another string. A repo file that still says `delegate` maps
     # onto a bundle on the way in (`_bundle`), so nothing on disk breaks.
     #
-    # It is a CEILING, not a guarantee: a child is seeded from its template narrowed by
-    # what its spawner may pass (the ∩-rule; the broker's `seed_for` is where it lands),
-    # so an agent never exceeds either its template or its spawner.
+    # It is the CHILD's ceiling: a child is seeded its role template in full at spawn
+    # (`seed_for`), regardless of the spawner's own set — the spawner picks the role, the
+    # role's template decides what the child holds. What stays bounded by possession is
+    # `sb grant`, not the spawn (§2.1).
 
     def __post_init__(self):
         # Defaulted here rather than in the signature, so that even a Role built by hand
@@ -340,8 +341,8 @@ def get_or_fallback(roles: dict[str, Role], name: str,
 
 def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
                           repo: Optional[Path] = None) -> frozenset:
-    """THE BASELINE a live capability set is read against — what an agent of this role
-    would be seeded with by a spawner that bounded it by nothing.
+    """THE BASELINE a live capability set is read against — what an agent of this role is
+    seeded with at spawn, now for every spawner (§2.1: a spawn no longer narrows).
 
     One function because two callers must not disagree about it: `Broker.seed_for` writes
     the seed from it, and `status.collect` renders divergence against it. If the renderer
@@ -365,9 +366,9 @@ def template_capabilities(roles: dict[str, Role], name: str, is_top: bool,
     (of the shipped roles, `lead`); the rest are unchanged because their bundles never
     named it.
 
-    What it deliberately does NOT include is the ∩ with the spawner's passable set. That
-    narrowing is exactly what the marker exists to show: a "lead" seeded by a worker comes
-    out short of this, and the row says so.
+    It is the WHOLE seed now: a spawn seeds this template in full regardless of who spawned
+    it, so a non-top row's held set diverges from this only through a later `sb grant` (the
+    marker still renders those), never through a spawner having narrowed it.
     """
     if is_top:
         return frozenset(TOP_CAPABILITIES)

@@ -627,8 +627,9 @@ class AgentStatus:
 
         THE MARK IS SIGNED. `reviewer+` and `lead−` are two different pieces of news —
         "more powerful than its label" and "crippled" — and one undirected mark would
-        collapse them into a bit nobody can act on. A row that is both (granted one cap,
-        ∩-narrowed out of another) carries both signs.
+        collapse them into a bit nobody can act on. The `+` is the live case now that a
+        spawn seeds the full template (§2.1); the `−` only reaches a LEGACY row narrowed by
+        the old ∩-rule. A row that is both carries both signs.
 
         A DELEGABLE-ONLY cap is drawn distinctly (`researcher →write-tracked`), because
         "may pass this to its children" must never read as "does this itself" — that
@@ -659,9 +660,10 @@ class AgentStatus:
             else:
                 signs += "+"
         if template - held:
-            # Narrowed rows are not named: what a `∩`-seeded lead is MISSING is the whole
-            # template minus what it got, which is longer than the news is worth. The sign
-            # says "read this row's caps"; `sb who-holds` and `sb inspect` say which.
+            # Narrowed rows are not named: what a legacy ∩-narrowed row (§2.1: new spawns
+            # seed the full template) is MISSING is the whole template minus what it got,
+            # which is longer than the news is worth. The sign says "read this row's caps";
+            # `sb who-holds` and `sb inspect` say which.
             signs += "\u2212"
         if deleg:
             mark = _named_mark("\u2192", deleg)

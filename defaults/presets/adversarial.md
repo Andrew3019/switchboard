@@ -84,8 +84,8 @@ decides what you do, and there are three cases:
   it the artifact, where it is, and "read `sb presets adversarial` and run it". It then owns
   the rounds, you report from what it reports, and you do not run rounds of your own beside
   it.
-- You genuinely cannot spawn — a role seeded without it, or a spawner that could not pass
-  it down. Then you cannot run this and should not try: `sb delegate` refuses you, and
+- You genuinely cannot spawn — a role whose template holds no `spawn`. Then you cannot run
+  this and should not try: `sb delegate` refuses you, and
   there is nothing left of the procedure once the spawns are removed. Say so where it will
   be read, naming the artifact and where it is, and get on with the rest of your task.
 

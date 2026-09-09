@@ -58,33 +58,44 @@ class Fixture:
 
 
 class IntersectionSeedingTest(Fixture, unittest.TestCase):
-    """§2.1: a child seeds `role-template ∩ passable(spawner)`. A spawn NARROWS."""
+    """§2.1: a spawn seeds the child its FULL role template, regardless of the spawner's own
+    set. A spawn no longer narrows — the ∩-rule was dropped (spawn-seeding only; `sb grant`
+    is still bounded by possession)."""
 
-    def test_the_escalation_this_closes(self):
-        """The exact hole from the spec: a worker granted `spawn` spawns `--role lead`, and
-        the child must NOT come out with the caps the worker never held. Without the rule,
-        `spawn` is a second, unguarded cap-minting path — the worker drives that child by
-        `sb tell` and has escalated transitively."""
+    def test_a_spawn_seeds_the_full_template_beyond_the_spawner(self):
+        """The case the old ∩-rule refused, now deliberately allowed: a worker holding only
+        {spawn, write-tracked} spawns `--role lead`, and the child comes out a FULL lead —
+        `dispatch` and `fork` included — though the worker never held them. The spawner picks
+        the role; the role's template decides what the child holds."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         worker = self.spawn(lead, "worker", "w")
-        self.b.grant(worker, CAP_SPAWN, me=lead)
         self.assertEqual(self.held(worker), {CAP_WRITE_TRACKED, CAP_SPAWN})
         child = self.spawn(worker, "lead", "sub")
-        self.assertEqual(self.held(child), {CAP_SPAWN, CAP_WRITE_TRACKED})
-        self.assertNotIn(CAP_DISPATCH, self.held(child))       # a crippled "lead"
-        self.assertNotIn(CAP_FORK, self.held(child))
+        self.assertEqual(self.held(child),
+                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
 
-    def test_the_computed_seed_is_persisted_on_the_row(self):
-        """Persisted because `restore` reseeds from it — a set recomputed later from the
-        role would not be the set this agent was actually given."""
+    def test_a_read_only_researcher_can_spawn_a_writable_child(self):
+        """The motivating case (Andrew, automode-block-stats): a `researcher` holds only
+        `spawn` and no `write-tracked`, yet a child it spawns of a role whose template holds
+        `write-tracked` — a `worker` here, a `builder` in practice, same mechanic — comes out
+        able to write, and the write gate agrees. The child gets its role template, not an
+        intersection with the researcher's set."""
+        top = self.top()
+        r = self.spawn(top, "researcher", "r")
+        self.assertNotIn(CAP_WRITE_TRACKED, self.held(r))
+        w = self.spawn(r, "worker", "w")
+        self.assertIn(CAP_WRITE_TRACKED, self.held(w))
+        self.b.require_capability(w, CAP_WRITE_TRACKED)          # no ValueError
+
+    def test_the_seed_is_persisted_on_the_row(self):
+        """Persisted because `restore` reseeds from it — and it is the full template now."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         worker = self.spawn(lead, "worker", "w")
-        self.b.grant(worker, CAP_SPAWN, me=lead)
         child = self.spawn(worker, "lead", "sub")
         self.assertEqual(store.get_agent(self.db, child)["seed_capabilities"],
-                         "spawn write-tracked")
+                         "dispatch fork spawn write-tracked")
         self.assertEqual(set(store.get_agent(self.db, child)["seed_capabilities"].split()),
                          self.held(child))
 
@@ -101,36 +112,29 @@ class IntersectionSeedingTest(Fixture, unittest.TestCase):
                 self.assertIsNone(row["granted_by"])   # a seed is nobody's decision
         self.b.require_capability(w, CAP_WRITE_TRACKED)               # and it can write
 
-    def test_only_the_top_seeds_from_the_full_template(self):
-        """THE ONE EXEMPTION. The top holds no `write-tracked` and must still commission a
-        lead that does. A NON-top dispatcher holding the same set cannot: its children are
-        ∩-narrowed like everyone else's."""
+    def test_only_the_tops_own_fixed_set_still_differs(self):
+        """Every spawner now seeds the full template; the ONE thing `is_top` still changes is
+        the top's OWN set (§2.0, fixed, no `write-tracked`). A NON-top dispatcher that holds
+        no `write-tracked` still seeds a lead one — the top's old exemption is everyone's."""
         top = self.top()
-        self.assertNotIn(CAP_WRITE_TRACKED, self.held(top))
-        lead = self.spawn(top, "lead", "l")
-        # `fork` is in the lead template and reaches the seed since D2 — the fork DECISION
-        # is still the stamp's, so this lead's ordinary spawns are unchanged; what it may
-        # now do is ask, with `delegate(isolation="own")`.
-        self.assertEqual(self.held(lead),
-                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
-
-        # The same shape one level down, and the exemption is out of reach.
-        inner = self.spawn(top, "dispatcher", "d")     # non-top dispatcher
+        self.assertNotIn(CAP_WRITE_TRACKED, self.held(top))     # the top's fixed set
+        inner = self.spawn(top, "dispatcher", "d")             # non-top dispatcher
         self.db.execute("DELETE FROM capabilities WHERE agent=? AND cap=?",
                         (inner, CAP_WRITE_TRACKED))
         self.db.execute("UPDATE agents SET seed_capabilities='dispatch spawn' WHERE name=?",
                         (inner,))
         self.db.commit()
-        self.assertNotIn(CAP_WRITE_TRACKED, self.passable(inner))
-        kid = self.spawn(inner, "lead", "k")
-        self.assertNotIn(CAP_WRITE_TRACKED, self.held(kid))
+        self.assertNotIn(CAP_WRITE_TRACKED, self.held(inner))
+        kid = self.spawn(inner, "lead", "k")                   # still a full lead
+        self.assertEqual(self.held(kid),
+                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
 
-    def test_a_rowless_spawner_bounds_nothing(self):
-        """The gate's fail-open, in the shape ∩-seeding needs: intersecting with an empty
-        set would cripple every agent spawned against a cold store."""
+    def test_seed_for_is_a_plain_template_read(self):
+        """No spawner argument, no narrowing: `seed_for` is the role template, and the one
+        place `is_top` still moves the answer is the top's own fixed set."""
         full = {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK}   # `fork`: D2
-        self.assertEqual(set(self.b.seed_for("lead", False, spawner=HUMAN)), full)
-        self.assertEqual(set(self.b.seed_for("lead", False, spawner="nobody")), full)
+        self.assertEqual(set(self.b.seed_for("lead", False)), full)
+        self.assertNotIn(CAP_WRITE_TRACKED, set(self.b.seed_for("dispatcher", True)))
 
 
 class GrantCommandTest(Fixture, unittest.TestCase):
@@ -309,21 +313,22 @@ class DelegableTest(Fixture, unittest.TestCase):
         self.assertIn(CAP_WRITE_TRACKED, self.held(r))
         self.assertIn(CAP_WRITE_TRACKED, self.passable(r))
 
-    def test_a_delegable_cap_arrives_HELD_and_the_bit_does_not_travel(self):
-        """"One hop down" is a fact about the BIT, not about reach: the child is seeded
-        with the capability HELD, and nothing it was seeded with is delegable-only. Passing
-        the pass-through *decision* on is a fresh `--delegable` grant from somebody who now
-        holds it."""
+    def test_a_spawn_seeds_held_rows_only_and_ignores_the_spawners_grants(self):
+        """A spawn produces HELD rows and never delegable-only ones, and a `--delegable`
+        grant to the SPAWNER neither seeds the child nor bounds it: the child gets its full
+        role template either way (§2.1). The delegable bit is now a fact about the GRANT
+        path, not about what a spawn hands down."""
         top = self.top()
         r = self.spawn(top, "researcher", "r")
-        self.b.grant(r, CAP_SPAWN, me=top)
-        self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=top)
+        self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=top)   # r may pass it on, not do it
         lead = self.spawn(r, "lead", "l")
-        self.assertEqual(self.held(lead), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        # Full lead template, all held, none delegable — the grant to r did not seed it and
+        # did not narrow it, and `dispatch` (which r may not pass) is present all the same.
+        self.assertEqual(self.held(lead),
+                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
         self.assertFalse([row for row in store.capability_rows(self.db, lead)
                           if row["delegable"]])
-        # `dispatch` is in the lead template and in nothing r may pass, so it is not there.
-        self.assertNotIn(CAP_DISPATCH, self.held(lead))
+        self.assertIn(CAP_DISPATCH, self.held(lead))
 
 
 class TopExemptionTest(Fixture, unittest.TestCase):
@@ -416,20 +421,27 @@ class RestoreTest(Fixture, unittest.TestCase):
         self.assertEqual(self.held(w), {CAP_WRITE_TRACKED, CAP_SPAWN})
         self.assertEqual(self.passable(w), {CAP_WRITE_TRACKED, CAP_SPAWN})
 
-    def test_reseeding_is_from_the_seed_not_the_template(self):
-        """The subtler bug: a ∩-narrowed lead must not come back as a full one. That would
-        be a silent widening past the ceiling ∩-seeding exists to enforce, with no grant
-        recorded and no granter in the log."""
+    def test_reseeding_is_from_the_stored_seed_not_the_template(self):
+        """A spawn seeds the full template now, so the ∩-narrowed row this protects is a
+        LEGACY one — written before that change. `restore` must bring it back on its STORED
+        seed, never re-widened to the current template. Set the legacy shape up explicitly."""
         top = self.top()
-        lead = self.spawn(top, "lead", "l")
-        w = self.spawn(lead, "worker", "w")
-        self.b.grant(w, CAP_SPAWN, me=lead)
-        narrow = self.spawn(w, "lead", "sub")               # {spawn, write-tracked}
-        self.assertEqual(self.held(narrow), {CAP_SPAWN, CAP_WRITE_TRACKED})
-        self._closed(narrow)
-        self.b.restore(narrow)
-        self.assertEqual(self.held(narrow), {CAP_SPAWN, CAP_WRITE_TRACKED})
-        self.assertNotIn(CAP_DISPATCH, self.held(narrow))   # the template's, not its own
+        legacy = self.spawn(top, "lead", "sub")
+        # A lead narrowed by the old ∩-rule: capability rows and stored seed short of the
+        # lead template.
+        self.db.execute("DELETE FROM capabilities WHERE agent=?", (legacy,))
+        for cap in (CAP_SPAWN, CAP_WRITE_TRACKED):
+            self.db.execute(
+                "INSERT INTO capabilities(agent, cap, delegable, held, granted_at) "
+                "VALUES (?,?,0,1,1)", (legacy, cap))
+        self.db.execute("UPDATE agents SET seed_capabilities='spawn write-tracked' WHERE name=?",
+                        (legacy,))
+        self.db.commit()
+        self.assertEqual(self.held(legacy), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        self._closed(legacy)
+        self.b.restore(legacy)
+        self.assertEqual(self.held(legacy), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        self.assertNotIn(CAP_DISPATCH, self.held(legacy))   # not re-widened to the template
 
     def test_the_narrowing_is_surfaced_to_both_parties(self):
         """Not silent: the operator is told, and so is the agent, so the one cheap line

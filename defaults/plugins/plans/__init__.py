@@ -1110,15 +1110,16 @@ SPAWNING A PLANNER, AND WHO RUNS THE PLAN AFTERWARDS
   helper is actually foreseen. NEVER `write-tracked`: a planner reads and does not write
   tracked files, and its own writes — the plan file (under the git common dir's
   `agentflow/`, via `sb`) and its briefs (under `.switchboard/`, gitignored) — are neither
-  of them tracked. A reviewer it spawns is seeded from that same set and so arrives without `write-tracked` too, which points the plan-review
-  boundary the right way — but it is not a wall, and nothing here should be relied on as one:
+  of them tracked. A reviewer it spawns is seeded that reviewer's FULL template now
+  (§2.1: a spawn no longer narrows to the spawner's set), so it arrives holding
+  `write-tracked` even though the planner does not — and that was never the wall anyway:
   the plan file is not a tracked file, no write is refused anywhere, and what actually keeps
   a plan reviewer off the plan is the instruction it is given.
 
-  SEEDING IS TWO VERBS, and neither is a flag on the other. `sb delegate --role <role>` sets
-  the child's ROLE TEMPLATE, which is the seed narrowed by the template/intersection rule;
-  `sb grant <agent> <cap>` adds anything beyond that template. There is no `delegate --grant`.
-  A capability you cannot supply is a precondition — resolve it before the spawn, not at it.
+  SEEDING SETS THE ROLE TEMPLATE. `sb delegate --role <role>` seeds the child that role's
+  full template, regardless of your own set (§2.1); `sb grant <agent> <cap>` adds anything
+  beyond that template, and stays bounded by what you may pass. There is no `delegate
+  --grant`: pick the role whose template already carries what the child needs.
 
   IT HANDS THE SHAPE BACK AND FINISHES. The planner clears the `planner` field, tells you
   what it wrote and what it challenged, and calls `sb done`. It does not stay open, it does

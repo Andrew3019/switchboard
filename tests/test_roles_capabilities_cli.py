@@ -139,7 +139,7 @@ class InstructionRendererTest(ListingSandbox):
         b = broker_mod.Broker(store.connect(), None, repo=self.repo)
         self.addCleanup(b.db.close)
         self.assertEqual(got["capabilities"]["seed"],
-                         b.seed_for("lead", False, spawner="human"))
+                         b.seed_for("lead", False))
         self.assertEqual(got["capabilities"]["template"],
                          sorted(roles_mod.template_capabilities(
                              roles_mod.load(self.repo), "lead", False, self.repo)))

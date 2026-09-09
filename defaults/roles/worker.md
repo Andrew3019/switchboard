@@ -5,9 +5,9 @@ capabilities = ["spawn", "write-tracked"]
 # change that lands is reviewed by a fresh agent that did not write it, and a worker that
 # cannot put one up has to hand its review back to whoever spawned it — which is how a
 # reviewer ends up spawned by an agent that has no shared worktree to lend it, in a tree
-# that is not the one the work is in (2026-08-31). What that spawn may seed is still
-# bounded by the worker's own set, so this widens what a worker can arrange, not what it
-# can hand out.
+# that is not the one the work is in (2026-08-31). What that spawn seeds is the child's full
+# role template now (§2.1), not an intersection with the worker's own set — a worker holds
+# `write-tracked` anyway, so nothing here changes for it in practice.
 +++
 
 <!--
