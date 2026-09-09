@@ -1569,10 +1569,13 @@ class Broker:
            be minted capable and never repaired afterwards.
         9. **A GRANT THE GRANTER DOES NOT ITSELF HOLD MUST BE `--delegable`** — the bound on
            8. A delegable-only grant never widens what the target may DO: its held set, and
-           every `require_capability` answer about its own actions, is untouched; it widens
-           only what the target's CHILDREN are seeded with, which is the top's commissioning
-           power expressed one hop later. The top still never gains `write-tracked` and the
-           read-only agent it grants through still never holds it.
+           every `require_capability` answer about its own actions, is untouched. What it adds
+           is the target's own PASSABLE set — the right to grant the cap ON to a third agent
+           in its subtree, one hop further, still without ever doing it itself. (It does NOT
+           reach what the target SPAWNS: a spawn seeds the child its full role template
+           regardless, §2.1 — the delegable bit is a fact about the grant path alone now.)
+           The top still never gains `write-tracked` and the read-only agent it grants through
+           still never holds it.
 
            **Spec conflict, resolved and flagged.** §2.1 and objective 24 word this bound as
            *"a grant beyond the TARGET's own template must be `--delegable`"*. Taken
