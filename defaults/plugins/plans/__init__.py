@@ -437,6 +437,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import textwrap
 import time
 from pathlib import Path
@@ -715,8 +716,12 @@ def register(reg):
               reg.arg("--note", repeat=True, help="a note on the record; repeat for more"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
-        "list", ls, audience="both", help="the plans on this worktree",
-        args=[reg.arg("--all", flag=True, help="every plan, on every workspace")])
+        "list", ls, audience="both",
+        help="the plans on this worktree; --all is a repo-wide human view, not an agent's "
+             "next-step list",
+        args=[reg.arg("--all", flag=True,
+                      help="every plan, on every workspace (human repo-wide view; agents "
+                           "should omit this)")])
     reg.command(
         "show", show, audience="both",
         help="one plan in full — steps, deps, changelog; or one STEP in full, with the "
@@ -2011,6 +2016,9 @@ def ls(ctx, args) -> Result:
     A plan with no `checkout` — one written by hand — is only ever shown by `--all`, which
     is the honest answer to "is this here?" when the record does not say.
     """
+    if args.all and ctx.agent and ctx.json:
+        print("sb: `plans list --all --json` is a repo-wide human view; "
+              "agents deciding what to do next should omit `--all`.", file=sys.stderr)
     doc, seal = _read(ctx.state_dir)
     plans, here = doc["plans"], _here(ctx)
     if not args.all:
