@@ -4,6 +4,8 @@ Switchboard is a visibility and control system for many concurrent coding agents
 
 It exists because running many Claude Code/Codex sessions otherwise means opening each one to find out what it is doing, whether it is working, blocked, waiting, done, or needs review.
 
+> **Note for implementation.** Treat the behavioural invariants in this document as requirements, and prefer the simplest implementation that satisfies them. The explanatory machinery here — state tables, object shapes, named timers — exists to make those invariants checkable, not to mandate additional abstractions where existing Switchboard behaviour already satisfies the same invariant.
+
 ---
 
 ## 1. Core abstractions
@@ -116,7 +118,7 @@ The user interacts through normal conversation. Agents translate that conversati
 | Store | Content | Written by |
 | --- | --- | --- |
 | Task document | title, objective, scope, constraints, success criteria, decisions, summary, notes/references | Agents |
-| Plan document | Plan summary, step *structure* (names and order only) | Agents |
+| Plan document | Plan summary; editable step *structure* — IDs, names, order, and the kind of a Step being created | Agents |
 | System-held Plan state | step *ownership*, step *completion*, step *kind*, the Plan's branch/worktree binding, PR/CI facts | Switchboard |
 | Derived state | PR status, Plan progress, active/idle state, pending question counts, liveness, worktree state, last activity, timestamps, Needs You state | Switchboard |
 | Event log | append-only history of all of the above | Switchboard |
@@ -249,11 +251,12 @@ A Step is in exactly one of:
 pending   preceding Steps not all complete; not yet eligible
 active    eligible (all preceding Steps complete), incomplete, not blocked or failed; has
           an owner or is unowned
-blocked   `Merge` awaiting a tracked merge precondition Switchboard follows — approval, CI
-          not `red`, or an unresolved `major` Finding — not idle, not an attention item on
-          its own. When the last precondition clears the Step returns to `active` for the
-          owner to merge; if a human merges directly, Switchboard observes it and the Step
-          goes straight to `complete`
+blocked   `Merge` awaiting the human authorization to merge — the one merge precondition
+          no agent can act on. Not idle, not an attention item on its own. When the
+          authorization lands the Step returns to `active` for the owner to merge; if a
+          human merges directly, Switchboard observes it and the Step goes straight to
+          `complete`. A red CI or an unresolved `major` Finding does *not* block the Step:
+          those are agent-actionable, so `Merge` stays `active` (Section 4)
 failed    a bundled operation half-succeeded or a local check failed (Section 4); or a
           terminal system Step whose remote fact was later observed false (its PR was
           closed); carries what failed and is retryable
@@ -322,7 +325,9 @@ PR successfully merged                 → Merge complete
 
 `Open PR` is a bundled Step, so it completes when the whole operation succeeds, not merely because a PR exists. Observing a PR on the remote attaches the PR reference; it does not by itself imply the local checks and PR-comment portions succeeded. The "required checks" it runs are the repo-configured list of **local** commands (Section 11), defaulting to the repo's test command; a repo may add lint, build or type checks. These run before completion; if one fails, or the PR opens but the summary comment does not post, the Step enters `failed`, carrying which sub-operation failed, and its owner retries with `sb plan step retry`. The operation is idempotent: retrying reuses the existing PR rather than opening a second one.
 
-**Remote CI is a Plan-level fact, not part of `Open PR`.** After the PR exists, the remote's checks are tracked on the Plan as `ci: pending | green | red`, updated by the derivation tick (Section 7). CI is therefore not something `Open PR` waits on and not a Step of its own; a red CI does not reopen the terminal `Open PR` Step. Instead, CI status is a **merge precondition**: `Merge` requires a live authorization *and* CI not `red` *and* no unresolved major review finding. A `red` CI on a Plan awaiting merge is surfaced (`Needs You`: PR checks failed) so the worker fixes it.
+**Remote CI is a Plan-level fact, not part of `Open PR`.** After the PR exists, the remote's checks are tracked on the Plan as `ci: pending | green | red`, updated by the derivation tick (Section 7). CI is therefore not something `Open PR` waits on and not a Step of its own; a red CI does not reopen the terminal `Open PR` Step. Instead, CI status is a **merge precondition**: `Merge` requires a live authorization *and* CI not `red` *and* no unresolved major review finding.
+
+The three preconditions are not alike, and Switchboard treats them differently. A missing authorization is external — no agent can supply it — so `Merge` is `blocked` and the wait surfaces as `Needs Human Review`. A red CI or an unresolved `major` Finding is **agent-actionable**: `Merge` stays `active`, the `merge` operation refuses while the condition stands, and Switchboard wakes the responsible owner to fix it. Its owner is therefore not excused from stall derivation, and the human is not paged for work an agent should be doing. Only if the condition is still unrecovered past `attention_timeout`, or the responsible agent explicitly asks, does it become a `Needs You` item.
 
 Everything judgment-based, review completion included, is declared by the accountable agent.
 
@@ -342,7 +347,7 @@ Once a PR is opened, Switchboard derives that the Plan is waiting on human revie
 Open PR ✓   Merge ○   → Needs Human Review   (→ awaiting merge if an authorization is already live)
 ```
 
-The worker that owns the change end-to-end owns the incomplete `Merge` Step while the PR waits. That Step is `blocked` (awaiting the human's approval, an external event Switchboard already tracks), so the worker is **not** derived as stalled: its derived state is `awaiting external`, which is excluded from stalled-agent attention because the `Needs Human Review` item on the Plan already represents the same wait. For the same reason `sb done` is not blocked by a `blocked` Step (Section 6) — the owner may stay live-and-idle, or `sb done` and be reactivated. When approval lands the `Merge` Step returns to `active`, and Switchboard delivers a message to its owner — the same reactivation mechanism `sb tell` uses, which wakes a `completed`-but-live owner and is held for a not-live one until restore — so an approved PR is actually driven to merge rather than sitting under a stopped owner. The owner performs the merge; if a human merges directly from the browser or GitHub instead, Switchboard observes the merge (Section 9, remote-fact observation) and completes the Step. Either way the wait for review surfaces only as `Needs Human Review` (plus a real CI item if checks are red) — never a phantom stall or a phantom unowned Step — and an approved-but-unmerged PR whose owner never resumes is surfaced by the stopped-owner backstop (Section 6).
+The worker that owns the change end-to-end owns the incomplete `Merge` Step while the PR waits. That Step is `blocked` (awaiting the human's approval, an external event Switchboard already tracks), so the worker is **not** derived as stalled: its derived state is `awaiting external`, which is excluded from stalled-agent attention because the `Needs Human Review` item on the Plan already represents the same wait. For the same reason `sb done` is not blocked by a `blocked` Step (Section 6) — the owner may stay live-and-idle, or `sb done` and be reactivated. When approval lands the `Merge` Step returns to `active`, and Switchboard delivers a message to its owner — the same reactivation mechanism `sb tell` uses, which wakes a `completed`-but-live owner and is held for a not-live one until restore — so an approved PR is actually driven to merge rather than sitting under a stopped owner. The owner performs the merge; if a human merges directly from the browser or GitHub instead, Switchboard observes the merge (Section 9, remote-fact observation) and completes the Step. Either way the wait for review surfaces only as `Needs Human Review` (a red CI raises its own item only if the owner fails to act on it) — never a phantom stall or a phantom unowned Step — and an approved-but-unmerged PR whose owner never resumes is surfaced by the stopped-owner backstop (Section 6).
 
 The existing PR comment format remains the primary summary presented for human review — what changed, Plan summary and history, verification performed, review result, remaining human checks or decisions, relevant metadata. The browser surfaces or links to it rather than inventing a competing summary format.
 
@@ -498,9 +503,9 @@ Worker assigned "own this change end-to-end"    → done only after the PR is me
 
 Assignment scope is not the same as Step ownership. A Worker assigned to own the change end-to-end is not done after Implement: it remains responsible for driving the work through independent Review, Open PR and Merge, even though the Review Step is owned by a Lead Reviewer. Step completion and agent completion are separate concepts.
 
-Switchboard gates `done` on more than Step ownership, because assignment scope — not Step ownership — is what `done` actually means, and the two differ (a Worker assigned end-to-end is not done at Implement). So assignment scope is made machine-visible via end-to-end Plan ownership. The agent that runs `sb plan create` is recorded as the Plan's end-to-end owner by default (the normal path, since the working agent creates the Plan when it commits to a change); `sb plan create --no-own` opts out when the creator is only scaffolding for someone else, and `sb spawn --own-plan <plan>` or a `--handoff` that transfers the Plan assigns it to another agent. While an agent holds end-to-end ownership of a Plan, `done` is blocked while that Plan still has any `active` or `failed` Step, or until ownership is handed off. A Plan whose only incomplete Step is `blocked` (its `Merge` awaiting approval/CI/major) does **not** block `done` — the owner stays reactivatable and is woken to merge when the block clears, exactly as the `blocked`-Step exemption on the Step gate allows. This still closes the two one-command false-completion exits: the spawn-a-child-and-`done` case leaves `Implement` `active` (end-to-end ownership unmet), and escaping work by releasing a Step leaves the Plan with an `active`/`failed` gap — both block `done`.
+Switchboard gates `done` on more than Step ownership, because assignment scope — not Step ownership — is what `done` actually means, and the two differ (a Worker assigned end-to-end is not done at Implement). So assignment scope is made machine-visible via end-to-end Plan ownership. The agent that runs `sb plan create` is recorded as the Plan's end-to-end owner by default (the normal path, since the working agent creates the Plan when it commits to a change); `sb plan create --no-own` opts out when the creator is only scaffolding for someone else, and `sb spawn --own-plan <plan>` or a `--handoff` that transfers the Plan assigns it to another agent. While an agent holds end-to-end ownership of a Plan, `done` is blocked while that Plan still has any `active` or `failed` Step, or until ownership is handed off. A Plan whose only incomplete Step is `blocked` (its `Merge` awaiting the human authorization) does **not** block `done` — the owner stays reactivatable and is woken to merge when the block clears, exactly as the `blocked`-Step exemption on the Step gate allows. This still closes the two one-command false-completion exits: the spawn-a-child-and-`done` case leaves `Implement` `active` (end-to-end ownership unmet), and escaping work by releasing a Step leaves the Plan with an `active`/`failed` gap — both block `done`.
 
-Switchboard also blocks `done` while the agent owns an **incomplete Step that is not `blocked`** — that is, an `active` or `failed` owned Step; only a `blocked` Step (awaiting a tracked external event, such as `Merge` awaiting approval) is exempt, because its owner stays reactivatable and the PR item already represents the wait. To clear such a Step the agent completes it, hands it off, or explicitly releases it as `unowned`. `release` requires a reason, and a `done` in the same assignment reports the released Steps to the delegator ("released: Implement — <reason>"), so dropping scope reaches the delegator and not only the human queue. A `blocked` Step cannot be released — releasing it would strand an approved PR with no owner to merge — so an end-to-end owner awaiting merge either stays live-and-idle or `sb done`s and is reactivated when approval lands.
+Switchboard also blocks `done` while the agent owns an **incomplete Step that is not `blocked`** — that is, an `active` or `failed` owned Step; only a `blocked` Step (`Merge` awaiting the human authorization) is exempt, because its owner stays reactivatable and the `Needs Human Review` item already represents the wait. To clear such a Step the agent completes it, hands it off, or explicitly releases it as `unowned`. `release` requires a reason, and a `done` in the same assignment reports the released Steps to the delegator ("released: Implement — <reason>"), so dropping scope reaches the delegator and not only the human queue. A `blocked` Step cannot be released — releasing it would strand an approved PR with no owner to merge — so an end-to-end owner awaiting merge either stays live-and-idle or `sb done`s and is reactivated when approval lands.
 
 Because the completion report is the sole evidence the delegator relies on to *not* redo the work, `sb done` requires a minimal shape, enforced by the command rather than by prose: **what was done**, **what was verified and by what command** (or explicitly "not verified"), and **what was not done** (or "nothing outstanding"). The third field is the one that matters — it makes a dropped or deferred piece of scope visible in the report itself rather than only in a queue the delegator does not watch, and it costs an honest agent one line. Everything else stays minimal: this is three short fields, not a narrative.
 
@@ -520,7 +525,7 @@ owns ≥1 blocked Step and no active Step                      → awaiting exte
 called sb done                                               → completed
 ```
 
-`pending` Steps (not yet eligible) are not work the agent can act on, so they do not defeat `awaiting external`. Only an `active` Step counts as actionable owned work. A `Merge` Step is `blocked` (not `active`) whenever *any* of its tracked merge preconditions is unmet — awaiting approval, CI `red`, or an unresolved `major` Finding — so its owner is `awaiting external`, never `stalled`, by the definition above with no special case: the corresponding attention item (needs review, PR checks failed, or the open major) already represents the block, and the owner is woken to merge when the last precondition clears. There is no can-fix-vs-cannot-fix judgment for Switchboard to make: a worker that decides to fix red CI reopens `Implement` (code fix) or its push simply resets things, and is `active` again either way.
+`pending` Steps (not yet eligible) are not work the agent can act on, so they do not defeat `awaiting external`. Only an `active` Step counts as actionable owned work. A `Merge` Step is `blocked` (not `active`) only while it awaits the human authorization to merge — the one precondition no agent can act on — so its owner is `awaiting external`, never `stalled`, and the `Needs Human Review` item already represents that wait. The other two merge preconditions are different in kind: a red CI or an unresolved `major` Finding is work an agent can act on, so `Merge` stays `active`, its owner is not excused from stall derivation, and Switchboard wakes it to act rather than paging the human (Section 4). A worker fixing red CI reopens `Implement` for a code fix, or its push simply resets things; either way it is working, not waiting.
 
 `waiting on child` is **structural but scoped**: it holds only for a child spawned as a delegated subtask of the agent's own current assignment and from which it has not yet received a report — not merely for having *any* live child, which would let one `sb spawn` of an unrelated long-running helper buy the parent indefinite stall immunity. It is also bounded, to stop a chain of parked agents mutually explaining itself all the way up: `waiting on child` breaks — the parent becomes `stalled` — only when the parent is idle past `stall_threshold` **and** the awaited child is itself `stalled` or itself `waiting on child`. A child that is idle for a *surfaced* reason (it is `waiting on human`, or `awaiting external`) does not break the parent's wait, because that reason is already in the queue; only an unproductive, unexplained-or-chained child does.
 
@@ -1019,7 +1024,7 @@ This list is illustrative of the item *types*; the authoritative set is the unio
 * unanswered human Questions
 * PRs ready for review (the Plan's `Needs Human Review` state; see Appendix A)
 * a merge authorized by an agent from your message, pending your confirm/flag (survives the merge — Section 4)
-* PRs whose checks (CI) failed
+* PRs whose checks (CI) failed, or an unresolved `major` review Finding, where the responsible agent has not acted within `attention_timeout`
 * stalled agents and Tasks
 * agents that are not restorable (their held Steps/Questions cannot resume themselves)
 * unowned `active` Steps on incomplete Plans
@@ -1110,7 +1115,7 @@ The explained-idle rows are derived from what the agent owns and awaits (a stand
 | --- | --- | --- | --- | --- |
 | `pending` | created with preceding Steps incomplete, or suspended by a `reopen` of an earlier Step | predecessors complete → `active` (or `blocked`); a `merge`-kind Step whose PR is observed merged → `complete` from any state | derived | no |
 | `active` | eligible (all preceding Steps complete), incomplete, not blocked or failed | completed; or an earlier Step is `reopen`ed → back to `pending` | derived | **yes** if `unowned`; or if its owner has stopped and is not restorable, or the wake was delivered but not acted on within `attention_timeout` |
-| `blocked` | eligible, awaiting a tracked merge precondition — approval, CI not `red`, or an unresolved `major` Finding | last precondition met → `active` (owner merges); merge observed → `complete`; earlier Step reopened → `pending` | derived | no |
+| `blocked` | eligible, awaiting the human authorization to merge — the one merge precondition no agent can act on | authorization lands → `active` (owner merges); merge observed → `complete`; earlier Step reopened → `pending` | derived | no |
 | `failed` | a bundled sub-operation or local check failed; or a system Step whose remote fact was later observed false (PR closed) | `step retry` succeeds → `complete`; retry fails → stays `failed` | Switchboard | **yes** if its owner has stopped and is not restorable, or the wake was delivered but not acted on within `attention_timeout`; else if unrecovered past `attention_timeout`; a `failed` owned Step also blocks the owner's `sb done` |
 | `complete` | system fact established, or owner declared it | terminal, except: a judgment Step may be `reopen`ed → `active`; a later `reopen` suspends it → `pending`; a system Step whose fact is observed false → `failed` | Switchboard (system Steps) / owner (judgment Steps) | no |
 
@@ -1124,18 +1129,28 @@ Ownership is orthogonal to state: an `active` Step is owned or explicitly `unown
 | --- | --- | --- | --- | --- |
 | in progress | created (always ≥1 Step) | → `Needs Human Review` when `Open PR` completes with no live authorization; → `awaiting merge` when `Open PR` is complete and an authorization is live; → `complete` (no-PR Plan, all Steps complete) | derived | no |
 | `Needs Human Review` | `Open PR` complete, `Merge` incomplete, no live merge authorization | authorization recorded → `awaiting merge`; PR merged → `complete`; earlier Step reopened, or `Open PR` fact observed false (PR closed) → back to `in progress` | derived | **yes** |
-| `awaiting merge` | `Open PR` complete, a live authorization, `Merge` incomplete | `Merge` complete → `complete`; authorization invalidated (push/revoke) → `Needs Human Review`; earlier Step reopened → `in progress` | derived | no (the owner drives it; a red-CI or open-major item covers any block) |
+| `awaiting merge` | `Open PR` complete, a live authorization, `Merge` incomplete | `Merge` complete → `complete`; authorization invalidated (push/revoke) → `Needs Human Review`; earlier Step reopened → `in progress` | derived | no (the owner drives it) |
 | `complete` | `Merge` complete, or a no-PR Plan with ≥1 Step all complete; a Plan with commits requires a completed `merge`-kind Step | terminal (a post-merge concern is a new Plan, not a reopen — Section 4) | Switchboard | no |
 
-Alongside its state, an open-PR Plan carries `ci: pending | green | red` (set by the derivation tick, Section 4) — a tracked fact rather than a Plan state: it gates `Merge` and a `red` raises a `Needs You` item, but it does not by itself move the Plan between the rows above. The three middle states span the whole PR-open-to-merged interval, so a Plan is never without a state. `Needs Human Review` is what the `Needs You` queue heads as "PRs ready for review". A browser approval moves the Plan to `awaiting merge` outright; an agent-relayed approval also moves it there but raises a separate `confirm or flag` item that survives the merge (Section 4), so it does not silently clear. A Plan is never `complete` with zero Steps — the vacuous case is `in progress` (Section 4).
+Alongside its state, an open-PR Plan carries `ci: pending | green | red` (set by the derivation tick, Section 4) — a tracked fact rather than a Plan state: it gates the `merge` operation, and a `red` wakes the owner to fix it — raising a `Needs You` item only if the owner does not act (Section 4) — but it does not by itself move the Plan between the rows above. The three middle states span the whole PR-open-to-merged interval, so a Plan is never without a state. `Needs Human Review` is what the `Needs You` queue heads as "PRs ready for review". A browser approval moves the Plan to `awaiting merge` outright; an agent-relayed approval also moves it there but raises a separate `confirm or flag` item that survives the merge (Section 4), so it does not silently clear. A Plan is never `complete` with zero Steps — the vacuous case is `in progress` (Section 4).
 
 ### Task
 
-| State | Entry | Exit | Set by | Needs You |
-| --- | --- | --- | --- | --- |
-| `open` | created (human action) | closed (human action) | human | no |
-| `Stalled` | unfinished work and no agent advancing it: a `stalled` agent, or every agent idle with no explanation, or no agent `live` and none `restorable` | the condition resolves | derived | **yes** |
-| `Ready to Close` | the single Section 4 predicate: work has happened (a completed Plan, or a Plan-less Task's initiating agent has `sb done`), every Plan complete, no open Step/Question, no agent working | more work starts, or closed | derived | no |
-| `closed` | human closes it | terminal | human | no |
+A Task has **two independent things**, not one state machine: a human-owned lifecycle, and a derived condition that only exists while it is `open`. A Task is routinely both `open` and `stalled`. An implementation that collapses these into one mutually exclusive field is wrong.
 
-`Stalled` and `Needs Human Review` can hold together (a stalled agent on a Task that also has a PR out); both surface as distinct `Needs You` items. `Ready to Close` never coexists with `Stalled` — the latter requires unfinished work, the former requires none.
+**Lifecycle** — set by the human, never derived:
+
+| Lifecycle | Entry | Exit |
+| --- | --- | --- |
+| `open` | created (human action) | closed (human action) |
+| `closed` | human closes it | terminal |
+
+**Derived condition**, evaluated only while `open`:
+
+| Condition | Holds when | Set by | Needs You |
+| --- | --- | --- | --- |
+| `working` | work remains and at least one agent is advancing it | derived | no |
+| `stalled` | unfinished work and no agent advancing it: a `stalled` agent, or every agent idle with no explanation, or no agent `live` and none `restorable` | derived | **yes** |
+| `ready_to_close` | the single Section 4 predicate: work has happened (a completed Plan, or a Plan-less Task's initiating agent has `sb done`), every Plan complete, no open Step/Question, no agent working | derived | no |
+
+These are the canonical names; the prose elsewhere in this document writes them `working`, `Stalled` and `Ready to Close`. Exactly one condition holds at a time. `ready_to_close` never coexists with `stalled` — the latter requires unfinished work, the former requires none. A Task's condition is independent of its Plans' states: `stalled` and a Plan's `Needs Human Review` can hold together (a stalled agent on a Task that also has a PR out), and both surface as distinct `Needs You` items.
