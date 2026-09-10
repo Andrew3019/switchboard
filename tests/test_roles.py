@@ -270,6 +270,28 @@ class RolesTest(unittest.TestCase):
         self.assertIn("Andrew's to run, not yours", prompt)
         self.assertIn("that tree is not below", prompt)
 
+    def test_a_dispatcher_is_not_told_to_pick_a_model_tier(self):
+        """A DECISION, pinned so that re-arming it is deliberate (Andrew, 2026-09-10).
+
+        Between 2026-09-01 and now this prompt told a dispatcher that judging an issue
+        plainly direct was its cue to spawn the worker on the cheap-provider maximum-effort
+        tier. The structural argument for it was real — the model is fixed at the spawn and
+        cannot be moved after, so the earliest actor is the only one who can choose it — and
+        it lost anyway: a dispatcher reading an issue has the LEAST context about the work,
+        and a tier picked there cannot be undone without unwinding the spawn.
+
+        The same nudge was deleted from the guidance ledger on the same day; `test_guidance`
+        pins that half over the whole ledger, and this is the half that lived in a prompt.
+        The TIER is untouched and still resolves — `test_models` and the tier tests below
+        pin that. What is pinned here is that a dispatcher chooses a role and leaves the
+        model alone.
+        """
+        prompt = roles.load(self.repo)["dispatcher"].prompt
+        for gone in ("cheap-provider", "maximum-effort", "gpt-luna-max-effort",
+                     "That read is also where a model tier gets chosen"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, prompt)
+
     def test_a_dispatcher_is_told_flatly_that_it_does_none_of_the_work(self):
         """The prompt is the only mechanism here, and it does not arrive alone: the
         protocol comes first ("do the task you were given"), this repo's house-rules
