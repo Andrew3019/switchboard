@@ -1900,6 +1900,28 @@ class Broker:
 
         Called before anything spawns into a worktree. Idempotent, and it never
         overwrites a real file that is already there.
+
+        A symlink we already own is REPOINTED when the pinned main moves, rather than
+        left alone. The guard used to read `dst.exists() or dst.is_symlink()`, which
+        treats any symlink as finished — including one whose target has gone. That is
+        exactly the state a relocated checkout leaves behind: every worktree keeps a
+        `.switchboard -> <old main>/.switchboard` that no longer resolves, and a dangling
+        symlink answers False to `exists()` and True to `is_symlink()`, so the old guard
+        took the skip branch forever. The worktree then read NO repo-local config at all —
+        no `settings.toml`, no local roles or presets — and said nothing about it, because
+        every one of those layers is optional by design. Silence is the whole cost here,
+        which is why the repair is unconditional rather than something a flag turns on.
+
+        Staleness is "does not point at the pinned main", not "is broken". Both halves of
+        a move are ordinary: the old tree may still be sitting there (a checkout copied
+        before the original was retired), in which case the link resolves perfectly and
+        still feeds the worktree a config tree nobody is writing to any more. Only
+        `store.main_checkout` says where config lives, so only agreement with it counts.
+
+        A real file or directory at `dst` is still never touched — that is a human's or an
+        orphan's, and adopting it would silently discard whatever it holds. See #263 for
+        the neighbouring case this deliberately does not fix: a main checkout that has no
+        `.switchboard` for the worktree to point AT.
         """
         wt = Path(worktree or self.repo).resolve()
         try:
@@ -1909,11 +1931,22 @@ class Broker:
         if wt == main:
             return []
 
-        linked = []
+        linked, repaired = [], []
         for name in LINKED_CONFIG:
             src, dst = main / name, wt / name
-            if not src.exists() or dst.exists() or dst.is_symlink():
+            if not src.exists():
                 continue
+            if dst.is_symlink():                          # ours, and possibly stale
+                if self._points_at(dst, src):
+                    continue
+                try:
+                    dst.unlink()
+                except OSError as e:
+                    store.log_event(self.db, kind="link_failed", error=f"{name}: {e}")
+                    continue
+                repaired.append(name)
+            elif dst.exists():
+                continue                                  # a real file: not ours to replace
             try:
                 dst.symlink_to(src)
                 linked.append(name)
@@ -1922,7 +1955,27 @@ class Broker:
         if linked:
             self._exclude(main, LINKED_CONFIG)
             store.log_event(self.db, kind="link_config", linked=linked, worktree=str(wt))
+        if repaired:
+            store.log_event(self.db, kind="link_repaired", relinked=repaired,
+                            worktree=str(wt), main=str(main))
         return linked
+
+    @staticmethod
+    def _points_at(link: Path, src: Path) -> bool:
+        """Does this symlink already name `src`, however it spells it?
+
+        `os.readlink` rather than `Path.resolve`: resolve() follows the target's own
+        symlinks too, so a main checkout reached through one would compare unequal to
+        itself and be "repaired" on every spawn. A relative link is resolved against the
+        link's own directory, which is what the kernel does with it.
+        """
+        try:
+            target = Path(os.readlink(link))
+        except OSError:
+            return False
+        if not target.is_absolute():
+            target = link.parent / target
+        return os.path.normpath(target) == os.path.normpath(src)
 
     @staticmethod
     def _exclude(main: Path, names: Sequence[str]) -> None:
