@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import cli as cli_mod, config  # noqa: E402
@@ -1502,6 +1504,50 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(d["counts"]["unread"], 1)
 
 
+_STATUS_JSON_SAMPLE = {                                  # a minimal legal argv per verb
+    "start": [], "delegate": ["do a thing"],
+    "tell": ["w1", "hi"], "inbox": [], "waiting": [],
+    "done": ["finished"], "block": ["why"],
+    # Summary optional — a bare `sb close` is the silent self-close.
+    "close": [],
+    "status": [], "presets": [], "models": [], "init": [], "doctor": [],
+    # `models`' two siblings. The role name is optional, so a bare listing is the
+    # minimal legal argv for both.
+    "roles": [], "capabilities": [], "instructions": [],
+    "cleanup": [], "workspace": ["list"], "restore": ["w1"],
+    "grant": ["w1", "spawn"],
+    "who-holds": ["spawn"],
+    # Both arguments optional: with none it prints what the caller is tuned to.
+    "configure": [],
+    "merge": ["w1"],
+    "inspect": ["w1"], "log": [], "usage": [],
+    "board": [], "flush": [], "reconcile": [], "sweep": [],
+    # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
+    # so it can print that instead of an argparse usage dump.
+    "plugins": [],
+    # A namespace, not a verb. Its own arguments are a REMAINDER handed to the
+    # subparser sb builds from the plugin's declaration, so `--json` typed AFTER a
+    # plugin name belongs to that parser rather than this one — `sb plugin todo
+    # list --json` still emits JSON, and `tests/test_plugins.py` is where that is
+    # checked. With no name typed there is no remainder yet, so the rule below
+    # holds here too.
+    "plugin": [],
+}
+
+
+@pytest.mark.parametrize("verb", tuple(_STATUS_JSON_SAMPLE))
+def test_every_subcommand_takes_json_on_either_side(verb):
+    """Keep each parser check independent so xdist can spread the slow cases."""
+    from switchboard.cli import build_parser
+    rest = _STATUS_JSON_SAMPLE[verb]
+    after = build_parser().parse_args([verb, *rest, "--json"])
+    before = build_parser().parse_args(["--json", verb, *rest])
+    plain = build_parser().parse_args([verb, *rest])
+    assert after.json
+    assert before.json     # the per-command flag must not undo this
+    assert not plain.json
+
+
 class StatusCliTest(unittest.TestCase):
     """The wiring: `sb status` must parse, and `--json` must work on either side."""
 
@@ -1523,53 +1569,16 @@ class StatusCliTest(unittest.TestCase):
         self.assertFalse(build_parser().parse_args(["status", "--all"]).live)
         self.assertFalse(build_parser().parse_args(["status", "--everything"]).live)
 
-    def test_every_subcommand_takes_json_on_either_side(self):
-        """cli.py has always documented `--json` as per-command. It was global-only, and
-        the first three spawn attempts of the QA run died on `sb delegate ... --json`.
+    def test_every_parser_subcommand_has_a_json_sample(self):
+        """Keep the parameterized cases aligned with the parser's own subcommand list.
 
-        Built from the parser's own subcommand list, so a verb added later is covered
-        without anyone remembering to add it here.
+        The samples are separate pytest cases so xdist can spread the parser work, while
+        this check still makes a newly added verb fail loudly until it has legal arguments.
         """
         from switchboard.cli import build_parser
-        sample = {                                  # a minimal legal argv per verb
-            "start": [], "delegate": ["do a thing"],
-            "tell": ["w1", "hi"], "inbox": [], "waiting": [],
-            "done": ["finished"], "block": ["why"],
-            # Summary optional — a bare `sb close` is the silent self-close.
-            "close": [],
-            "status": [], "presets": [], "models": [], "init": [], "doctor": [],
-            # `models`' two siblings. The role name is optional, so a bare listing is the
-            # minimal legal argv for both.
-            "roles": [], "capabilities": [], "instructions": [],
-            "cleanup": [], "workspace": ["list"], "restore": ["w1"],
-            "grant": ["w1", "spawn"],
-            "who-holds": ["spawn"],
-            # Both arguments optional: with none it prints what the caller is tuned to.
-            "configure": [],
-            "merge": ["w1"],
-            "inspect": ["w1"], "log": [], "usage": [],
-            "board": [], "flush": [], "reconcile": [], "sweep": [],
-            # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
-            # so it can print that instead of an argparse usage dump.
-            "plugins": [],
-            # A namespace, not a verb. Its own arguments are a REMAINDER handed to the
-            # subparser sb builds from the plugin's declaration, so `--json` typed AFTER a
-            # plugin name belongs to that parser rather than this one — `sb plugin todo
-            # list --json` still emits JSON, and `tests/test_plugins.py` is where that is
-            # checked. With no name typed there is no remainder yet, so the rule below
-            # holds here too.
-            "plugin": [],
-        }
         verbs = build_parser()._subparsers._group_actions[0].choices
-        self.assertEqual(set(verbs), set(sample), "a verb was added or removed")
-        for verb, rest in sample.items():
-            with self.subTest(verb=verb):
-                after = build_parser().parse_args([verb, *rest, "--json"])
-                before = build_parser().parse_args(["--json", verb, *rest])
-                plain = build_parser().parse_args([verb, *rest])
-                self.assertTrue(after.json)
-                self.assertTrue(before.json)     # the per-command flag must not undo this
-                self.assertFalse(plain.json)
+        self.assertEqual(set(verbs), set(_STATUS_JSON_SAMPLE),
+                         "a verb was added or removed")
 
     def test_naming_an_agent_is_spelled_the_same_way_everywhere(self):
         """One way to name an agent: `--name`, on both verbs that spawn. `--agent` was
