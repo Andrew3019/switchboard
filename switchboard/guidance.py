@@ -367,7 +367,10 @@ class Rule:
     text: str
     repeat: str = ONCE_UNTIL_CLEAR
     category: str = DEFAULT_CATEGORY
-    role: Optional[str] = None
+    # A tuple, not a str: one norm usually applies to several roles, and three near-copies
+    # of a row is how the copies drift. Authored as either `role = "worker"` or
+    # `role = ["worker", "builder", "lead"]`; `_rule` normalises both to a tuple.
+    role: tuple[str, ...] = ()
     command: Optional[str] = None
     when: tuple = ()
     holds: tuple = ()
@@ -392,7 +395,7 @@ class Rule:
 
     def matches(self, facts: Facts, command: Optional[str]) -> bool:
         """Does this rule apply to this agent right now? Every key ANDs."""
-        if self.role and facts.row["role"] != self.role:
+        if self.role and facts.row["role"] not in self.role:
             return False
         if self.command and self.command != command:
             return False
@@ -446,6 +449,12 @@ def _rule(raw: Any, order: int) -> Rule:
     if not isinstance(category, str) or not category or "." in category:
         raise config.ConfigError(
             f"guidance.toml: rule {rid!r}: `category` is one plain word, got {category!r}")
+    role = raw.get("role")
+    roles = (role,) if isinstance(role, str) else tuple(role or ())
+    if not all(isinstance(r, str) and r for r in roles):
+        raise config.ConfigError(
+            f"guidance.toml: rule {rid!r}: `role` is a role name or a list of them, "
+            f"got {role!r}")
     unknown = set(raw) - {"id", "text", "repeat", "category",
                           "role", "command", "when", "holds", "lacks"}
     if unknown:
@@ -459,7 +468,7 @@ def _rule(raw: Any, order: int) -> Rule:
         text=config.flatten(str(raw["text"])),
         repeat=repeat,
         category=category,
-        role=raw.get("role"),
+        role=roles,
         command=raw.get("command"),
         when=tuple(_clause(rid, c) for c in raw.get("when", [])),
         holds=tuple(raw.get("holds", [])),

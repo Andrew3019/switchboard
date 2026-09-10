@@ -67,13 +67,22 @@
 
 # ISSUE #285: the plans path needs to be visible before a lead starts decomposing work.
 # Andrew chose a turn-start reminder rather than spawn-time or passive documentation. It
-# applies to every lead once: there is no deterministic "needs shaping" fact, and
-# waiting for a second child would be after the decomposition this reminder is meant to
-# influence. The wording leaves the path decision with the lead, keeps direct work direct,
-# and distinguishes a direct change record from a shaped plan.
+# applies once per agent: there is no deterministic "needs shaping" fact, and waiting for
+# a second child would be after the decomposition this reminder is meant to influence. The
+# wording leaves the path decision with the agent, keeps direct work direct, and
+# distinguishes a direct change record from a shaped plan.
+#
+# EXTENDED BEYOND `lead`, 2026-09-10. The row was keyed on one role while the only other
+# plans trigger was `plugins/plans/agent.md`, a standing-prompt fragment — so a worker or
+# builder, the agents that actually land the change, were told about plans only in the
+# spawn payload. Observed result: they ignore it there, and comply when a human says it or
+# a lead relays it. Covered roles complied, which is what made the gap hard to see. The
+# roles here are the ones that land changes; a researcher, reviewer or qa agent that ends
+# up owning one is told by whoever hands it over. A dispatcher still gets nothing: it
+# delegates rather than lands, and `plans/agent.md` says so in as many words.
 [[rule]]
 id = "lead-plans-at-turn-start"
-role = "lead"
+role = ["lead", "worker", "builder"]
 repeat = "once"
 category = "plans"
 text = "At task start, decide whether this work needs shaping before implementation; if so, consider `sb plugin plans create`. Clear bounded work stays direct; if it heads for review or a PR, use `sb plugin plans record` without a plan. `sb plugin plans guide --short` explains the path (the full `guide` has the plan-authoring detail)."

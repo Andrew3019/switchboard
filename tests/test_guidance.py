@@ -272,8 +272,12 @@ class ChannelTest(Fixture, unittest.TestCase):
 
     def test_the_hook_says_nothing_when_no_rule_fires(self):
         """Obj. 3 — zero added context, zero regression. The turn edge is still written,
-        which is the other half of the same call."""
-        self.agent("w1", session_id="sess-1")
+        which is the other half of the same call.
+
+        A `reviewer`: the plans nudge is keyed to the roles that land changes, so the
+        fixture's default `worker` now hears something on turn one and would prove the
+        opposite of what this asserts."""
+        self.agent("w1", role="reviewer", session_id="sess-1")
         said = hooks.run_activity(self.payload(), db_path=self.repo / "state.db")
         self.assertEqual(said, "")
         self.assertEqual(store.get_agent(self.db, "w1")["turn"], store.TURN_WORKING)
@@ -291,8 +295,9 @@ class ChannelTest(Fixture, unittest.TestCase):
 
     def test_a_broken_ledger_costs_silence_not_the_turn_edge(self):
         """Fails open, like everything else in `hooks`. A ledger that will not parse must
-        not stop an agent's turns being recorded."""
-        self.agent("w1", session_id="sess-1")
+        not stop an agent's turns being recorded. A `reviewer` for the same reason as
+        the silence test above: no shipped rule is keyed to it."""
+        self.agent("w1", role="reviewer", session_id="sess-1")
         self.ledger_file("this is not toml [[[")
         said = hooks.run_activity(self.payload(), db_path=self.repo / "state.db")
         self.assertEqual(said, "")
@@ -442,22 +447,41 @@ class DiscoverabilityTest(Fixture, unittest.TestCase):
 class PlansNudgeTest(Fixture, unittest.TestCase):
     """Issue #285 — remind leads about plans before they decompose a task."""
 
-    def test_the_plans_nudge_is_turn_start_once_for_every_lead(self):
-        """The reminder arrives before any child exists, then stays quiet for that lead."""
-        self.agent("lead-x", role="lead", session_id="sess-1")
-        self.agent("worker-x", role="worker", session_id="sess-2")
+    def test_the_plans_nudge_reaches_every_role_that_lands_a_change(self):
+        """The reminder arrives before any child exists, then stays quiet for that agent.
 
-        ids = [r.id for r in guidance.resolve(self.db, "lead-x", repo=self.repo)]
-        self.assertIn("lead-plans-at-turn-start", ids)
-        first = guidance.deliver(self.db, "lead-x", repo=self.repo)
-        self.assertIn("sb plugin plans create", first)
-        self.assertIn("sb plugin plans record", first)
-        self.assertIn("without a plan", first)
-        # Points at the cheap path-decision read, not the full plan-authoring reference.
-        self.assertIn("sb plugin plans guide --short", first)
-        self.assertEqual(guidance.deliver(self.db, "lead-x", repo=self.repo), "")
+        Every role that lands a change, not just `lead`: a worker or builder told about
+        plans only in the spawn payload ignores it, which is the gap this row was widened
+        to close. A dispatcher delegates rather than lands, and still gets nothing."""
+        for i, (name, role) in enumerate(
+                [("lead-x", "lead"), ("worker-x", "worker"), ("builder-x", "builder")]):
+            self.agent(name, role=role, session_id=f"sess-{i}")
+            ids = [r.id for r in guidance.resolve(self.db, name, repo=self.repo)]
+            self.assertIn("lead-plans-at-turn-start", ids, f"{role} should hear it")
+            first = guidance.deliver(self.db, name, repo=self.repo)
+            self.assertIn("sb plugin plans create", first)
+            self.assertIn("sb plugin plans record", first)
+            self.assertIn("without a plan", first)
+            # Points at the cheap path-decision read, not the full plan-authoring
+            # reference: a trigger carries a pointer, never the procedure.
+            self.assertIn("sb plugin plans guide --short", first)
+            # Once per agent, not once per turn.
+            self.assertEqual(guidance.deliver(self.db, name, repo=self.repo), "")
+
+        self.agent("disp-x", role="dispatcher", session_id="sess-9")
         self.assertNotIn("lead-plans-at-turn-start", [r.id for r in guidance.resolve(
-            self.db, "worker-x", repo=self.repo)])
+            self.db, "disp-x", repo=self.repo)])
+
+    def test_a_rule_takes_one_role_or_a_list_of_them(self):
+        """One norm usually covers several roles, and three near-copies of a row drift."""
+        self.assertEqual(guidance._rule({"id": "r", "text": "t", "role": "worker"}, 0).role,
+                         ("worker",))
+        self.assertEqual(
+            guidance._rule({"id": "r", "text": "t", "role": ["worker", "lead"]}, 0).role,
+            ("worker", "lead"))
+        self.assertEqual(guidance._rule({"id": "r", "text": "t"}, 0).role, ())
+        with self.assertRaises(config.ConfigError):
+            guidance._rule({"id": "r", "text": "t", "role": [1]}, 0)
 
 
 class StatusPollNudgeTest(Fixture, unittest.TestCase):
