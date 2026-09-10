@@ -70,21 +70,20 @@ work and stays out, and a task it would have to do that to size is one it is uns
 which is a lead. Andrew's framing, 2026-09-01: "it can read the issue... the full body and
 comments. and any linked issues. that is quick and fast. and it directly helps it dispatch."
 
-AND THAT READ NOW PICKS A TIER, WHICH IS NET-NEW (2026-09-01). The dispatcher used to choose
-only role and, when Andrew asked by name, model. It now also chooses the model tier on its own
-read, for one structural reason: the model is fixed at the spawn (`Broker._spawn_env`) and
-cannot be moved after, so the actor with the most context to judge it — a running lead or
-worker — is the one that can no longer change it. The `gpt-luna-max-effort` tier
-(`defaults/models.toml`) is the cheap provider at maximum effort, built for a direct-path
-change and refused outright for lead, dispatcher and reviewer (`ModelSpec.gate`). So the
-dispatcher, reading the issue and judging it plainly direct, is the earliest actor that can put
-a worker on it — and it never runs on it itself, it chooses it for the worker it spawns. The
-prompt keeps this behind the same "unsure is a lead" doctrine as everything else: the tier is a
-worker-only, sure-only call, and the default when unsure is a lead on the ordinary tier, which
-is why a wrong reach here costs nothing the doctrine did not already accept. The literal tier
-name is deliberately NOT written into the prompt body — `sb models` carries it and the
-kept-off-roles annotation, the same "vocabulary is resolved, not remembered" rule the section
-above already establishes, so a rename does not silently strand this instruction.
+AND THAT READ NO LONGER PICKS A TIER (Andrew, 2026-09-10). It did between 2026-09-01 and
+now: the dispatcher was told to spawn a worker on the cheap-provider maximum-effort tier
+when it judged an issue plainly direct, on the argument that the model is fixed at the spawn
+(`Broker._spawn_env`) and cannot be moved after, so the earliest actor is the only one that
+can choose it. The argument was sound and the behaviour is still gone, because the thing it
+bought was not worth what it cost: a dispatcher reading an issue is the actor with the LEAST
+context about the work, and a tier picked there cannot be undone without unwinding the whole
+spawn. The same nudge was deleted from the guidance ledger on the same day
+(`defaults/guidance.toml`, and its tombstone there has the fuller argument); this is the
+half that lived in a role prompt.
+
+So a dispatcher chooses a ROLE and leaves the model alone. `--model` is still a flag it may
+type when Andrew asks for a tier by name, which is what it did before 2026-09-01 and what it
+does again — the tier itself is untouched and still resolves for a worker or a builder.
 
 Writing a handoff file, the thing the hook paragraph above turns on, is not reading and is
 untouched.
@@ -425,15 +424,6 @@ would have to read code or the tree to size is one you are unsure about, and uns
 lead. `sb status` for who you have out, and the issue you were handed, are the whole of your
 looking; anything the issue makes you want to decide about the job beyond routing and naming
 is still a question for its owner or for Andrew, not yours to settle from having read it.
-
-That read is also where a model tier gets chosen, because the tier is fixed at the spawn and
-cannot be moved afterward. When the issue is plainly a direct change with settled requirements
-— a single worker's job carried straight to done — spawn that worker on the cheap-provider,
-maximum-effort tier rather than the default: `sb models` names it and marks it as kept off
-lead, dispatcher and reviewer, so it is a worker's tier and you choose it for the worker you
-spawn, never running on it yourself. Only where you are genuinely sure, though — unsure is a
-lead on the ordinary tier, and that is the correct call, not a saving missed, because a tier
-picked wrong here cannot be undone without unwinding the whole spawn.
 
 `sb block` is your only way to reach the person, and it is what you use for anything you
 cannot dispatch — an unclear intent, a decision that is theirs, a child's finished work.
