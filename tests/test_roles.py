@@ -704,7 +704,7 @@ class RolesTest(unittest.TestCase):
 
         Every shipped role now, where this was four: `reviewer` has a tier of its own,
         `worker`'s `default` stopped being an unmade choice once every shipped Claude tier
-        pinned a concrete id, and `builder` arrived on a codex tier.
+        pinned a concrete id, and `builder` has a tier of its own too.
 
         `planner` is here as well and is the one entry that does not come from
         `defaults/roles/`: the plans plugin contributes it and ships enabled, so it is
@@ -714,11 +714,12 @@ class RolesTest(unittest.TestCase):
         a provider whose flags are not Claude's. The flags are still checked underneath, on
         the two tiers that differ in shape.
 
-        ONE SHIPPED ROLE IS ON CODEX: `builder`, on `gpt-luna-max-effort` since 2026-09-07.
-        It went `gpt-5.6-sol` -> `opus-5-medium` (2026-09-01) -> here, when the tier that
-        replaced its codex pin turned out to be what the role wants by default rather than
-        per spawn. It is also the one shipped role whose tier is GATED — `enabled_by` —
-        which is why the shipped flag defaults true.
+        NO SHIPPED ROLE IS ON CODEX, and none is on a GATED tier (`enabled_by`) either.
+        `builder` was the one that was: it went `gpt-5.6-sol` -> `opus-5-medium`
+        (2026-09-01) -> `gpt-luna-max-effort` (2026-09-07) -> back to `opus-5-medium`
+        (2026-09-10, Andrew), because a role file cannot know whether the next job handed
+        to a builder is direct-path. `gpt-luna-max-effort` is still reachable, by naming it
+        at a spawn on either implementation leaf — the test below is where that is pinned.
 
         Pinned as a DECISION, not as behaviour.
         """
@@ -730,7 +731,7 @@ class RolesTest(unittest.TestCase):
             "qa":         ("claude", "claude-sonnet-5", "high"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
             "worker":     ("claude", "claude-opus-5",   None),
-            "builder":    ("codex",  "gpt-5.6-luna",   "max"),
+            "builder":    ("claude", "claude-opus-5",   "medium"),
             "planner":    ("claude", "claude-opus-5",   "high"),
         }
         got = {}
@@ -752,7 +753,8 @@ class RolesTest(unittest.TestCase):
         takes it from every role at once. The ROLE list is the mechanical half of the
         direct-path rule: an agent that splits work, routes it or judges somebody else's
         change may not have this tier, whoever names it, while the two implementation
-        leaves may.
+        leaves may — which since 2026-09-10 is the ONLY way onto the tier, no shipped role
+        naming it as a default any more.
 
         The judgment half — whether a job actually IS direct-path — is deliberately not
         here and cannot be: it is a fact about content, written in the plan guide.

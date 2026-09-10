@@ -1,5 +1,5 @@
 +++
-model = "gpt-luna-max-effort"
+model = "opus-5-medium"
 capabilities = ["spawn", "write-tracked"]
 # A leaf that writes, and the same bundle as `worker` for the same reason: `spawn` is here
 # so a builder can put up the review of its own change instead of handing that job back.
@@ -20,33 +20,30 @@ what everything that never asked for one lands on. So it goes on a role you have
 for. `sb delegate --role builder` is how code work gets handed out; `worker` stays the
 generic writer, and stays what an undefined role falls back to.
 
-IT IS BACK ON CODEX (Andrew, 2026-09-07), and on `gpt-luna-max-effort`. The role went
-`gpt-5.6-sol` -> `opus-5-medium` (2026-09-01, when that pin was retired) -> here. What
-changed this time is that the tier the codex pin was replaced by turned out to be what
-this role wants by DEFAULT rather than per spawn: cheap good code at maximum effort is the
-builder's ordinary case, not its special one, and asking every caller to type
-`--model gpt-luna-max-effort` made the common path the one you had to remember.
+IT IS BACK ON A CLAUDE TIER (Andrew, 2026-09-10), and on `opus-5-medium` — where it was
+between 2026-09-01 and 2026-09-07. The role went `gpt-5.6-sol` -> `opus-5-medium` (when
+that codex pin was retired) -> `gpt-luna-max-effort` (2026-09-07, when cheap good code at
+maximum effort was judged this role's ordinary case rather than its special one) -> back
+here. What changed this time is the judgment and not the mechanism: a role file cannot know
+whether the next job handed to a builder is direct, so the cheap model stopped being what a
+builder lands on for having been asked for by name.
 
-SO THE TIER IS NOW BOTH: this role's default, and still nameable per spawn on a `worker`.
-`--model gpt-luna-max-effort` on a worker is not refused and is not meant to be — the two
+SO THE TIER IS NAMED PER SPAWN AGAIN, on this role and on `worker` alike.
+`--model gpt-luna-max-effort` is not refused on either and is not meant to be — the two
 implementation leaves may both have it, and `defaults/models.toml` carries the refusal for
 the other three as `forbidden_roles` (`lead`, `dispatcher`, `reviewer`). What is no longer
-true is that naming it is how a builder gets it.
+true is that a builder arrives on the tier without anyone having chosen it.
 
-THE JUDGMENT HALF DID NOT MOVE, and it is worth reading as a builder now that the tier
-arrives without anyone choosing it. The tier suits DIRECT-path work — requirements
-settled, going straight to implement/verify/review/land — and if your job turns out to
-need shaping, the job moves onto the shaped path even though your model does not follow it
-any more. That is a change in what the tier signals: it used to mean somebody had judged
-this work direct, and now it means nothing about your work at all. Read the plan guide and
-make that call yourself.
+THE JUDGMENT HALF IS THE ONE IT ALWAYS WAS, and naming the tier is how it gets made. The
+tier suits DIRECT-path work — requirements settled, going straight to implement/verify/
+review/land. Not work still being shaped, not an open design question, not investigation.
+If your job turns out to need shaping after all, it moves onto the shaped path and off this
+tier with it. Read the plan guide before typing the flag.
 
 `defaults/models.toml` has the rest at `[tiers.gpt-luna-max-effort]`, including the
-context budget. ONE CONSEQUENCE OF IT BEING A ROLE DEFAULT: the tier still resolves only
-while `[routing] gpt_luna_direct_enabled` is true, which now ships true — so a repo that
-sets it false takes away this role's own tier and every builder spawn there fails naming
-that key. That is the loud failure rather than a silent fallback, but it is worth knowing
-before turning the key off.
+context budget. The tier resolves only while `[routing] gpt_luna_direct_enabled` is true,
+which ships true — and no shipped role names it any more, so a repo setting that key false
+withdraws an option rather than taking a role's own default away.
 
 The prompt below is worker's, deliberately and almost word for word. What a leaf needs
 teaching is how it ENDS, not how to write code — that was worker.md's whole finding and it
