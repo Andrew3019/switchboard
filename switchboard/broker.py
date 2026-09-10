@@ -4957,11 +4957,11 @@ class Broker:
         repo_file = config.path_for("guidance_file", self.repo)
         out = []
         for rule in guidance.ledger(self.repo):
-            if rule.role and rule.role != role:
+            if rule.role and role not in rule.role:
                 continue
             keys = []
             if rule.role:
-                keys.append(f"role:{rule.role}")
+                keys.append(f"role:{'|'.join(rule.role)}")
             if rule.command:
                 keys.append(f"command:{rule.command}")
             keys += [f"holds {c}" for c in rule.holds]

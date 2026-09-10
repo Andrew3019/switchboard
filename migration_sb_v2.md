@@ -917,7 +917,13 @@ This resolves a tension the layered-context model would otherwise create: Sectio
 
 A conditional norm placed in the standing prompt under-fires badly, and the more indirect its payload the worse: a line that asks the agent to notice a condition, judge whether it applies, and then spend a call fetching the real instruction has four independent places to be dropped. The same words delivered at the moment the condition holds are acted on. This is why every hint above is keyed to a transition, and why a norm should not be added to the standing prompt as a substitute for having a trigger for it.
 
-The corollary for role prompts: a role prompt states what this agent *is for*. A reminder about what to do *when something becomes true* belongs on a trigger, not in the role prompt, and putting it in both pays for it twice and lets the two copies drift.
+Two rules follow, and both are load-bearing.
+
+**A trigger carries a pointer, not the instruction.** The hint says the condition and where the real instruction lives — one or two sentences and a command to run. It does not inline the procedure. This is what keeps the just-in-time channel cheap enough to use freely, and it is sufficient: a pointer delivered at the governing moment is complied with, where the same pointer in the standing prompt is not. The failure was never that the standing text was too short to act on; it was that it arrived before there was anything to act on, among everything else that arrived then.
+
+**A norm that gains a trigger is removed from the standing prompt, not duplicated.** A rule carried in both places is paid for twice on every spawn, and the two copies drift. Reminder-shaped guidance moves to the trigger; identity and orientation prose stays in the standing prompt, because it has no later moment to wait for and must be true from turn one. That division — *what this agent is for* stays, *what to do when something becomes true* moves — is also the rule for role prompts.
+
+**Triggers are keyed to every role the norm applies to.** A norm delivered to one role and not to the others that need it is the same failure as no trigger at all, and it is harder to see: the roles that were covered comply, so the norm looks like it works. When a trigger is added, the set of roles it fires for is part of the requirement.
 
 No speculative hints such as "seems like it might need review" or "has been coding for a while". Where the moment cannot be identified deterministically, rely on `sb context`, `sb help` and the Advisor.
 
