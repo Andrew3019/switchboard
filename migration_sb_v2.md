@@ -32,7 +32,7 @@ A Task may contain no Plans (a codebase question), one Plan (a change), or sever
 
 * One Task is isolated conceptually from another. Work in one Task must not accidentally cross into another.
 * A Plan has at most one primary PR. Work needing several independently landable PRs is several Plans.
-* Every active Step has exactly one accountable owner, or is explicitly `unowned` and surfaced.
+* Steps in a Plan are ordered. A Step is **active** when every preceding Step is complete and it is not itself complete; Switchboard derives activation on predecessor completion. Every active Step has exactly one accountable owner, or is explicitly `unowned` and surfaced. Assigning an owner to a not-yet-active Step is legal and pre-stages ownership; the unowned-Step attention item fires only for active Steps.
 * Agents are represented as a flat pool inside a Task. Parent/child relationships exist operationally and are useful internal metadata, not the product abstraction.
 * Agents do not create Tasks. Task creation is a human action, through the browser or Auto Task. Delegated work stays inside the current Task as a Plan, a Step, or another agent.
 * Pieces of a larger change are Plans or Steps, never nested Tasks. A new Task means a genuinely separate scope, not another implementation chunk.
@@ -43,11 +43,12 @@ A Task may contain no Plans (a codebase question), one Plan (a change), or sever
 | --- | --- |
 | Dispatcher | Task-level coordination (below) and the Switchboard Advisor (Section 10) |
 | `lead` role | `worker` as the general-purpose default; delegation available to every agent |
+| `builder`, `qa`, `py-qa` roles | folded into `worker`; a repo wanting them keeps them as custom roles (Section 5) |
 | First-class `Workflow` | The Plan is the execution and lifecycle structure |
 | `sb block` | Waiting derived from behaviour (Section 7) |
 | Universal Stop-hook enforcement | A passive turn-end signal (Section 7) |
 | Separate `Quick Task` / `Quick Agent` | The normal New Task flow is already the lightweight path |
-| `next turn` vs `when idle` delivery | `NORMAL` and `INTERRUPT` (Section 7) |
+| `next turn` vs `when idle` delivery | `NORMAL` (next turn boundary) and `INTERRUPT` (Section 7) |
 
 ### Task-level coordination
 
@@ -55,7 +56,9 @@ There is no mandatory permanent Task coordinator, and most Tasks never need one.
 
 When coordination across a Task is genuinely required — sequencing Plans, reconciling results from several Plans, keeping the Task document current — that responsibility is assigned explicitly at Task creation or moved later by handoff.
 
-If nobody holds it and coordination is required, the default coordinator is the oldest relevant agent in the Task that is not done.
+If nobody holds it and cross-Plan coordination is required, the default coordinator is computed mechanically: the agent with the earliest `created_at` whose status is not `done`, tie-broken by agent ID. `created_at` is the agent's original creation time and is preserved across restore, so the choice is stable. Switchboard recomputes it whenever a coordination-requiring event occurs (a Plan completes with other Plans still open or unsequenced, or a Task-level decision is needed) and injects a one-time `you now hold Task-level coordination` hint when the holder changes, so the chosen agent actually learns it holds the role. Because `done` is not permanent, the holder migrates as agents finish and are re-poked; it is always recomputed, never latched.
+
+If Plans are awaiting sequencing and no agent is available to hold coordination (all candidates `done`), Switchboard surfaces `Task: Plans awaiting sequencing — no coordinator` as an attention item so the human assigns one, rather than letting the work silently strand.
 
 This is a fallback so cross-Plan work always has a defined actor. It is not an ownership hierarchy and does not reintroduce a dispatcher.
 
@@ -78,7 +81,7 @@ Nothing is added beyond what a normal session would have. A Task that is only a 
 
 Auto mode has its own separate input. The user enters a desired outcome; the request goes to a fork of the Switchboard Advisor, which proposes the initial setup — prompt(s), initial agents, roles, models, presets, worktree configuration, other Switchboard parameters — starting from the normal Task template and overriding only what this request needs.
 
-The UI may start directly from the proposed configuration, or show it for review and editing first.
+By default the UI shows the proposed configuration for review and editing before anything is spawned, consistent with "the Advisor proposes; it does not own". A repo setting (`auto_task.skip_review`, Section 11) may start directly from the proposal instead.
 
 The Advisor proposes; it does not own. Once the Task is running, working agents own the Task and Plan documents and may reshape anything proposed, including any initial Plan shape.
 
@@ -115,13 +118,13 @@ The user interacts through normal conversation. Agents translate that conversati
 | Store | Content | Written by |
 | --- | --- | --- |
 | Task document | title, objective, scope, constraints, success criteria, decisions, summary, notes/references | Agents |
-| Plan document | Plan summary, steps, step owners, structure | Agents |
-| Derived state | PR status, Plan progress, active/idle state, pending question counts, liveness, worktree state, last activity, timestamps, Needs You state | Switchboard |
+| Plan document | Plan summary, step *structure* (names, order, owners) | Agents |
+| Derived state | PR status, Plan progress, step *completion*, active/idle state, pending question counts, liveness, worktree state, last activity, timestamps, Needs You state | Switchboard |
 | Event log | append-only history of all of the above | Switchboard |
 | Handoff | scoped instructions for one receiving agent (Section 6) | Agents, at spawn |
 | Question | one structured request and its lifecycle (Section 7) | Agents |
 
-Derived state lives **outside** the editable documents. An agent's write can never set or revert it, and agents must not maintain facts Switchboard can determine itself.
+Derived state lives **outside** the editable documents. An agent's write can never set or revert it, and agents must not maintain facts Switchboard can determine itself. In particular, a Step's *completion* is derived state held by Switchboard, not a field in the agent-submitted Plan document: a whole-document `sb plan edit` carries step structure only and can never revert `Open PR ✓` or `Merge ✓`. Judgment-based completion (a Review the Lead Reviewer declares finished) is recorded through a dedicated verb, not by writing a completion flag into the document (Section 4, Section 12).
 
 The document schema stays flexible enough to add durable fields where useful.
 
@@ -152,7 +155,7 @@ read compact document → reason about the desired shape → write it back once
 * Every edit goes through Switchboard and is serialized against other edits.
 * System-owned state lives outside agent-editable documents, so agent writes cannot revert system facts.
 * A submitted document contains only agent-writable fields.
-* Switchboard handles rare write contention internally wherever possible, rather than requiring agents to perform explicit version-management bookkeeping. No agent-facing optimistic-locking protocol unless implementation proves it necessary.
+* Serialization orders concurrent writes but does not by itself prevent a lost update: an agent that read the document before another agent's write would otherwise clobber it by writing back its whole stale copy. Switchboard prevents this with an implicit base version the agent never reasons about: `sb task show` / `sb plan show` return an opaque version token, `sb task edit` / `sb plan edit` carry it back automatically, and a write whose base is stale is rejected with the current document and a one-line "re-read and re-apply" instruction. This is one transparent retry, not an agent-facing optimistic-locking protocol — agents never construct or compare version tokens by hand. The collision surface is real, not rare: by design several agents (a researcher, a worker discovering a constraint, the agent holding Task-level responsibility) write the same Task document, and whole-document editing makes any two edits collide even when they touch different fields, so silently dropping `constraints` or `decisions` is exactly the failure this prevents.
 * An agent may edit the Task it belongs to; it does not create Tasks.
 
 ### When agents update state
@@ -233,6 +236,25 @@ Split a step only when the pieces have independently meaningful completion state
 
 Many agents working on one step is not a reason to split it. One `Implement` step may have several contributing agents and still be one coherent outcome.
 
+### Step states
+
+A Step is in exactly one of:
+
+```text
+pending   preceding Steps not all complete; not yet active
+active    all preceding Steps complete, not itself complete; has an owner or is unowned
+blocked   awaiting an external event Switchboard is already tracking (Merge awaiting the
+          human merge, Open PR awaiting CI) — not idle, not an attention item on its own
+failed    a bundled operation half-succeeded (Section 4, "What Switchboard completes
+          automatically"); carries which sub-operation failed and is retryable
+complete  finished
+```
+
+There is no `skipped` state: unnecessary Steps are never created rather than created and skipped. Completion is derived state (system-held), never a flag in the agent-submitted document. Two ways a Step reaches `complete`:
+
+* **System-completed** Steps (`Open PR`, `Merge`) — Switchboard sets `complete` when it establishes the fact itself. Agents cannot complete these, and cannot revert them.
+* **Judgment-completed** Steps (`Review`, `Implement`, `Research`, `Design`) — the accountable owner declares completion with `sb plan complete --step <Step>` (Section 12). Switchboard accepts it only from that owner and rejects it for system-completed Steps.
+
 ### Step ownership
 
 Every active step has exactly one accountable owner, responsible for completing it, delegating inside it, collecting results from contributors, keeping step information accurate, and deciding when it is done.
@@ -270,7 +292,7 @@ CI finished                            → recorded on the Plan
 PR successfully merged                 → Merge complete
 ```
 
-`Open PR` is a bundled Step, so it completes when the whole operation succeeds, not merely because a PR exists. Observing a PR on the remote attaches the PR reference; it does not by itself imply the checks and PR-comment portions succeeded.
+`Open PR` is a bundled Step, so it completes when the whole operation succeeds, not merely because a PR exists. Observing a PR on the remote attaches the PR reference; it does not by itself imply the checks and PR-comment portions succeeded. The "required checks" it runs are a repo-configured list of commands (Section 11), defaulting to the repo's test command; a repo may add lint, build or type checks. If a sub-operation fails — checks fail, or the PR opens but the summary comment does not post — the Step enters `failed`, carrying which sub-operation failed, and its owner retries with `sb plan step retry`. The operation is idempotent: retrying reuses the existing PR rather than opening a second one.
 
 Everything judgment-based, review completion included, is declared by the accountable agent.
 
@@ -290,15 +312,19 @@ Once a PR is opened, Switchboard derives that the Plan is waiting on human revie
 Open PR ✓   Merge ○   → Needs Human Review
 ```
 
+The worker that owns the change end-to-end owns the incomplete `Merge` Step while the PR waits. That Step is `blocked` (awaiting the human merge, an external event Switchboard already tracks), so the worker is **not** derived as stalled: its derived state is `awaiting merge`, which is excluded from stalled-agent attention because the `Needs Human Review` item on the Plan already represents the same wait. For the same reason `sb done` is not blocked by a `blocked` Step (Section 6) — the owner may stay live-and-idle awaiting merge, or `sb done` and be reactivated to perform the merge; it need not release `Merge` as `unowned`. A successful PR therefore produces exactly one attention item (`Needs Human Review`), never a phantom stall or a phantom unowned Step.
+
 The existing PR comment format remains the primary summary presented for human review — what changed, Plan summary and history, verification performed, review result, remaining human checks or decisions, relevant metadata. The browser surfaces or links to it rather than inventing a competing summary format.
 
 ### Changes requested, approval, and merge
 
 If the user requests changes, the Plan structure does not change. The same worker fixes, re-reviews, pushes the updated PR, and the Plan log and PR-facing information stay current.
 
-The browser may expose `Approve`, and optionally `Merge`, as a convenience for telling the responsible agent the current result is approved. The agent-driven path — "looks good, merge it" — remains equally valid; both enter the same underlying state.
+**Approval is a durable object**, like a Question or a Handoff, not a transient message. It records `{plan, pr_head_sha, scope, granted_by, granted_at, revoked}`. `Merge` requires an approval whose `pr_head_sha` matches the current PR head; an approval is invalidated by any push after it was granted, so a merge always reflects content a human actually approved. Its default `scope` is one Plan. There is no repo-wide standing approval that would authorize merging content the human has never seen.
 
-Approval stays flexible. After requested changes the user may want to review the updated result again, or may authorize merge once the fixes are made. An explicit pre-approval lets agents merge without another round.
+Both entry paths write this same object. The browser may expose `Approve`, and optionally `Merge`, as a convenience. The agent-driven path — the user tells the agent "looks good, merge it" — is equally valid: the agent records the approval with `sb plan approve` (Section 12), quoting the user's words into the event log, and the `PRs ready for review` attention item then resolves because the approval exists. Whether human review is needed at all is the human's call, expressed by granting (or pre-granting) an approval; absent one, an agent does not merge.
+
+Approval stays flexible. After requested changes the user may want to review the updated result again — the earlier approval is already invalidated by the fixes' push — or may grant a pre-approval so agents merge once the fixes are made without another round.
 
 ### Multiple Plans in a Task
 
@@ -310,13 +336,16 @@ Plans do not know about other Plans, and there is no built-in cross-Plan depende
 
 Task completion is a user decision. A Task with every Plan merged may stay open if the user wants to keep working in that scope; Switchboard never closes or finalizes a Task because its known work finished.
 
+A Task is `Ready to Close` when all of the following hold: it has at least one completed Plan or a completed initial assignment (so a fresh Task and a question Task still working are not vacuously ready), every Plan is complete, no Step is incomplete, no Question is unresolved, and no agent is working. This one rule covers Plan-less question Tasks and multi-Plan Tasks alike.
+
 ```text
-All current Plans complete → Ready to Close
+completed work present, every Plan complete, no open Step/Question, no agent working
+    → Ready to Close
 ```
 
 `Ready to Close` is a normal state, not an error and not an attention item. It is distinct from `Stalled` (Section 6).
 
-Closing a Task is a strong user action meaning *this is finished and I no longer need its live execution state*. Switchboard then cleans up everything safe to remove: live agents, temporary runtime sessions, Herdr resources, worktrees where appropriate, other Task-scoped runtime resources. Durable history remains. This applies equally to large multi-Plan Tasks, single-Plan changes and small question Tasks.
+Closing a Task is a strong user action meaning *this is finished and I no longer need its live execution state*. Switchboard then cleans up everything safe to remove: live agents, temporary runtime sessions, Herdr resources, worktrees whose removal predicate is satisfied (Section 8; one holding unpushed or uncommitted work is retained and surfaced, not destroyed), other Task-scoped runtime resources. Durable history remains. This applies equally to large multi-Plan Tasks, single-Plan changes and small question Tasks.
 
 An unfinished Task simply stays open. The user should never need to close Tasks merely to keep the interface manageable.
 
@@ -332,7 +361,7 @@ Agents remain fundamentally normal Claude Code/Codex sessions. A role describes 
 worker (general-purpose default)   researcher   reviewer   planner
 ```
 
-A worker completes work directly, investigates, delegates, spawns agents and coordinates what it spawned. Delegation is a normal agent capability, not the privilege of a special role. A researcher may investigate and clarify a problem with the user, then spawn a worker to implement the result.
+A worker completes work directly, investigates, delegates, spawns agents and coordinates what it spawned. Delegation is a normal agent capability, not the privilege of a special role. A researcher may investigate and clarify a problem with the user, then spawn a worker to implement the result. A reviewer critiques a change and reports findings. A planner shapes and sequences a larger body of work — breaking an objective into Plans and Steps and recommending how to stage them — without owning the implementation; it is the role reached for when a Task needs deliberate up-front structuring rather than a worker that plans as it goes. None of these are permission classes.
 
 Roles affect prompt guidance, what Switchboard-specific context is included at spawn, and expected focus. They do **not** impose hard capability restrictions: a researcher can still edit code, run commands, delegate and spawn. Where functionality is irrelevant to a role, omit it from that role's context rather than mechanically prohibiting it. The goal is to avoid permission systems that constrain more capable future agents.
 
@@ -421,22 +450,24 @@ Worker assigned "own this change end-to-end"    → done only after the PR is me
 
 Assignment scope is not the same as Step ownership. A Worker assigned to own the change end-to-end is not done after Implement: it remains responsible for driving the work through independent Review, Open PR and Merge, even though the Review Step is owned by a Lead Reviewer. Step completion and agent completion are separate concepts.
 
-Switchboard blocks `done` while the agent still owns an incomplete required Step. The agent must complete it, hand it off, or explicitly release it as `unowned`.
+Switchboard blocks `done` while the agent still owns an `active` incomplete Step. It does not block on a `blocked` Step (one awaiting an external event Switchboard already tracks, such as `Merge` awaiting the human merge): the owner of a change end-to-end may `sb done` after opening the PR and be reactivated to merge, without having to release `Merge` as `unowned`. To clear an `active` owned Step the agent completes it, hands it off, or explicitly releases it as `unowned`.
 
 `done` is not permanent. If the delegator needs more, it messages the agent, which becomes active again, completes the new assignment and reports done again. There is no separate acceptance ceremony; the completion report is enough unless the delegator decides more work is necessary.
 
 ### Derived idle and stalled state
 
-Switchboard distinguishes why an agent is idle from observable state:
+Switchboard distinguishes why an agent is idle from observable state. An agent is idle-with-a-reason when any of these holds, and none is an attention item:
 
 ```text
-has an active child whose result it awaits    → waiting on child
-has an unresolved human question and stopped  → waiting on human
-called sb done                                → completed
-none of the above, and not working            → suspicious / unexplained idle
+has an active child whose result it awaits          → waiting on child
+has an unresolved human question and stopped        → waiting on human
+owns only a blocked Step (Merge awaiting merge, …)  → awaiting external
+called sb done                                      → completed
 ```
 
-At Task level, unfinished work with unexplained inactivity is `Stalled` and is an attention item; all known work complete while the Task remains open is `Ready to Close` and is not. The goal is not to enforce a rigid ownership graph but to prevent work disappearing because every agent involved happened to stop.
+If none of those explains it and the agent has done nothing for longer than `stall_threshold` (a repo-configurable default, Section 11), it is `stalled` — the single derived state for unexplained inactivity. "Activity" that resets the clock is a turn end, any `sb` command, or any runtime tool call Herdr exposes; a session that died and one thinking for a few minutes are told apart by the threshold. There is one agent-level stalled state, not a graded "suspicious / potentially / confirmed" ladder.
+
+At Task level, unfinished work with any `stalled` agent, or with every agent idle and no idle-with-a-reason explanation, is `Stalled` and is an attention item; all known work complete while the Task remains open is `Ready to Close` and is not. The goal is not to enforce a rigid ownership graph but to prevent work disappearing because every agent involved happened to stop.
 
 ### Cleanup
 
@@ -461,11 +492,15 @@ The existing cleanup rules are not carried over blindly: they were written again
 Two delivery modes:
 
 ```text
-NORMAL     deliver once the target finishes its current active work
-INTERRUPT  stop current work and deliver immediately, for genuinely urgent course corrections
+NORMAL     queued and delivered at the target's next turn boundary, without interrupting
+           its current turn
+INTERRUPT  stop the current turn and deliver immediately, for genuinely urgent course
+           corrections
 ```
 
-If the target is done but still live, delivery reactivates it. If its runtime session is gone, the message is held and delivered when the session is restored, never dropped.
+`NORMAL` replaces both old delivery modes. The old `next turn` mode is exactly `NORMAL`. The old `when idle` mode (hold until the target finishes) is dropped deliberately: a message delivered at the next turn boundary costs the receiver nothing until it chooses to act on it, so there is no need for a separate hold-until-idle mode — the receiver decides when a queued message is worth acting on. "Turn boundary" means the target's next turn, not the end of its current Step or assignment.
+
+Both modes reactivate a `done`-but-live target: delivery makes it active again. If its runtime session is gone, the message is held and delivered when the session is restored, never dropped.
 
 Messaging stays point-to-point. There is no shared Task chat or channel by default, and normal behaviour favours direct relationships — parent↔child, delegator↔delegate, reviewer→worker — but nothing hard-prevents messaging another relevant agent in the same Task.
 
@@ -491,7 +526,9 @@ waiting   derived state, when the unresolved question actually prevents progress
 withdraw  the question is no longer needed
 ```
 
-`sb ask <target>` creates a durable Question associated with the asking agent and its Task, and surfaces it in the browser attention queue. Creating one does not by itself mean the agent is blocked.
+`sb ask <target>` creates a durable Question associated with the asking agent and its Task, and surfaces it in the browser attention queue. The target is one of `human`, `advisor`, `parent`, or an explicit `<agent-name>`. Creating one does not by itself mean the agent is blocked.
+
+Human- and agent-targeted asks always create a durable Question; `advisor` asks never do — they are synchronous, answered in the command result. The two shapes are one verb but do not overlap: the target determines which, so an agent knows from its own target whether to expect a Question ID or an inline answer.
 
 Agents ask whichever party is most likely to know the answer:
 
@@ -510,7 +547,14 @@ resolved   the agent processed the answer
 withdrawn  the answer was no longer needed
 ```
 
+`answered` is an optional intermediate state, set only when Switchboard itself delivered the answer (the browser path) and can therefore record that a response arrived. When the user answers in the terminal, the asking agent moves the Question straight from `pending` to `resolved` in its own turn — `pending → resolved` is a valid transition, and is the normal terminal path, not an edge case. An agent-targeted Question is answered by the target with `sb ask answer <qid>`, which sets `answered`; a bare `sb tell` does not resolve a Question.
+
 A Question stays associated with the Task, and visible in the Task view, until the requesting agent resolves or withdraws it. It leaves the attention queue once answered. An agent holding an unresolved Question is never cleaned up. The UI does not need to expose every internal state prominently.
+
+Two escapes keep the cross-Task queue from accreting stale items:
+
+* **Human resolve.** The browser lets the human authoritatively answer a Question, which resolves it. This is not "manual dismissal" of a derived item — it changes the underlying state by supplying the answer — so it is consistent with the `Needs You` no-dismissal rule.
+* **Dead asker.** A Question whose asking agent is neither live nor restorable (its Task was closed, or the agent was cleaned up) is auto-`withdrawn` after `stall_threshold`, with an event recorded, so a single crashed agent cannot permanently pollute the queue.
 
 Withdrawal matters: if another agent discovers the answer first, the asker withdraws it so stale items do not sit in the queue.
 
@@ -528,12 +572,13 @@ Switchboard derives this from actual behaviour rather than requiring agents to t
 Stop-hook *enforcement* is removed: ending a turn must never require an agent to prove why it stopped, produce a message, or spend another turn. The turn-end *signal* is kept wherever the runtime provides one — passive, updating derived state at no cost to the agent. On top of that signal Switchboard infers:
 
 ```text
-unanswered human question + agent stopped                              → waiting on human
-owns an incomplete Step, no dependency, no child awaited, no activity  → potentially stalled
-Task has unfinished work + every agent idle + no known dependency      → Task needs attention
+unanswered human question + agent stopped                                → waiting on human
+owns an active (non-blocked) Step, no child awaited, no activity past
+  stall_threshold                                                        → stalled
+Task has unfinished work + every agent idle + no idle-with-reason        → Task needs attention
 ```
 
-Targeted mechanical checks remain where they are high-confidence, such as blocking `done` while the agent owns an incomplete Step.
+Targeted mechanical checks remain where they are high-confidence, such as blocking `done` while the agent owns an `active` incomplete Step.
 
 ### Question format
 
@@ -590,7 +635,7 @@ Agents working on the same coherent Plan normally share one worktree, especially
 
 Worktrees are visible in Task and Plan detail, not a prominent global abstraction. The primary user-facing objects remain Tasks, Plans and Agents.
 
-Cleanup happens when the work associated with a worktree is complete and it holds no useful live state, commonly when a Plan's PR merges. A Task may stay open with other Plans and worktrees after one Plan's worktree is removed.
+A worktree is removable only when it holds no useful live state, checked explicitly: its branch has no uncommitted or untracked changes, no commits absent from its remote, and no live agent assigned to it. When any of those holds — commonly satisfied once a Plan's PR merges — the worktree is removed. Otherwise it is retained and surfaced as `Needs You: worktree retained — unpushed work in <path>`, never silently destroyed. Removal on Task close (Section 4) follows the same predicate rather than a blanket "where appropriate". A Task may stay open with other Plans and worktrees after one Plan's worktree is removed.
 
 ---
 
@@ -638,7 +683,7 @@ The current restore system is audited during migration rather than preserved by 
 
 ### Runtime errors
 
-Agent processes rarely crash outright, but the underlying session can hit runtime errors or become unexpectedly idle. Where the runtime exposes a clear error signal, record and surface it. Otherwise the derived-state model catches it as potentially stalled. Avoid fragile heuristics that parse arbitrary terminal text unless they prove reliable.
+Agent processes rarely crash outright, but the underlying session can hit runtime errors or become unexpectedly idle. Where the runtime exposes a clear error signal, record and surface it. Otherwise the derived-state model catches it as `stalled` once activity ceases past `stall_threshold`. Avoid fragile heuristics that parse arbitrary terminal text unless they prove reliable.
 
 During normal operation Switchboard surfaces problems rather than automatically restarting or poking agents. Automatic restoration is for explicit environment recovery after a crash or restart.
 
@@ -664,7 +709,7 @@ A warm pool of pre-forked sessions is unnecessary; fork on demand unless startup
 
 ### Refresh
 
-Advisor context goes stale when Switchboard itself, `.switchboard` configuration, roles/models/presets, or relevant repo conventions change. The browser exposes **Refresh Advisor**, which produces a new authoritative base session from current configuration. Switchboard detects when relevant inputs have changed and indicates staleness. If nothing relevant changed there is no reason to rebuild.
+Advisor context goes stale when its inputs change. Staleness is computed over a defined watched set — a hash of `.switchboard/**` (roles, presets, models, review and Plan defaults, repo Switchboard conventions) plus the Switchboard version string — so the check is deterministic rather than firing on any unrelated repo commit. The browser exposes **Refresh Advisor**, which produces a new authoritative base session from current configuration; Switchboard indicates staleness when the watched hash changes. Conventions living outside that set do not auto-trigger staleness and are picked up by a manual **Refresh Advisor**. If nothing in the watched set changed there is no reason to rebuild.
 
 ### Boundary
 
@@ -699,6 +744,8 @@ Switchboard defaults → repo-specific overrides → effective value
 ```
 
 Switchboard ships defaults for roles, presets, models, review behaviour, Task and Plan defaults, worktree behaviour and other common orchestration settings. A repo may override any of them. Changing a value in the UI creates or updates the repo override rather than modifying Switchboard's global defaults.
+
+Named tunables referenced elsewhere in this document resolve through the same two levels: `stall_threshold` (how long without activity before an unexplained-idle agent is `stalled`, Sections 6–7), the `Open PR` required-checks command list (Section 4), and `auto_task.skip_review` (whether Auto mode spawns from the proposal without review, Section 2). Each ships a Switchboard default and is repo-overridable.
 
 Most configuration is editable from the browser: toggles, model/role/preset selections, default review configuration, default Plan behaviour and other structured options. The UI distinguishes Switchboard default, repo override and effective value, and offers an easy reset to default. Raw prompt text may stay easier to edit directly as files.
 
@@ -754,7 +801,9 @@ Switchboard injects guidance only from clear authoritative state transitions:
 ```text
 Agent assigned a Plan Step             → inject Step-owner guidance once
 Agent takes ownership of a Review step → inject review-orchestration guidance once
-Agent attempts sb done while owning an incomplete required Step
+Agent becomes Task coordinator (fallback holder changes)
+                                       → inject "you now hold Task-level coordination" once
+Agent attempts sb done while owning an incomplete active Step
                                        → block until it completes, hands off, or releases the Step
 Agent receives human approval while responsible for Merge
                                        → expose the relevant landing action
@@ -785,20 +834,21 @@ sb spawn \
   --worktree same \
   --assignment "Review the current implementation" \
   --handoff "<what the receiving agent needs to know>" \
-  --take-step Review
+  --assign-step Review
 ```
 
-`--preset` is repeatable, and one call carries both the handoff content and any Step/assignment transfer. This may internally create relationships, associate Task/Plan state, configure the runtime session and attach the assignment. The caller must never need a sequence of spawn → set role → set model → attach preset → assign Plan → assign Step → configure worktree → send initial instructions.
+`--assign-step` names the Step the spawned agent takes (it is about the spawnee, not the caller). Any agent working in a Plan may assign an *unowned* Step; reassigning an already-owned Step requires the current owner to release it first, or an explicit `--steal` with an event recorded, so the "exactly one accountable owner" invariant holds. `--preset` is repeatable, and one call carries both the handoff content and any Step/assignment transfer. This may internally create relationships, associate Task/Plan state, configure the runtime session and attach the assignment. The caller must never need a sequence of spawn → set role → set model → attach preset → assign Plan → assign Step → configure worktree → send initial instructions.
 
 `sb plan` and `sb task` expose high-level operations rather than a collection of low-level mutations:
 
 ```text
-sb plan create | show | take | complete | edit
+sb plan create | show | take <step> | complete --step <step> | step retry <step>
+              | approve | edit
 sb task show | edit
-sb ask <target> | resolve | withdraw | escalate
+sb ask <target> | answer <qid> | resolve | withdraw | escalate
 ```
 
-A Plan's initial structure is provided in one operation (`--title "OAuth migration" --steps "Research,Design,Implement,Review,Open PR,Merge"`). Operations such as `reopen` may be added if they represent genuine recurring lifecycle actions. Underlying database operations may remain granular internally; agents interact with the higher-level transaction. Editing semantics — whole documents, agent-writable fields only, serialization handled by Switchboard — are defined in Section 3.
+`sb plan take <step>` takes a Step for the calling agent; `complete --step <step>` records judgment-based completion by that Step's owner (rejected for system-completed Steps); `step retry <step>` re-runs a `failed` bundled operation idempotently; `approve` records a human approval as the durable object of Section 4. `sb ask answer <qid>` is how an agent answers a Question targeted at it. A Plan's initial structure is provided in one operation (`--title "OAuth migration" --steps "Research,Design,Implement,Review,Open PR,Merge"`). Operations such as `reopen` may be added if they represent genuine recurring lifecycle actions. Underlying database operations may remain granular internally; agents interact with the higher-level transaction. Editing semantics — whole documents, agent-writable fields only, serialization handled by Switchboard — are defined in Section 3.
 
 `sb context` is the general-purpose inspection and reorientation command; avoid creating many overlapping top-level inspection commands. `sb plan show` remains for Plan-specific inspection.
 
@@ -807,7 +857,7 @@ Three primitives stay semantically distinct even though they share underlying in
 | Command | Why it stays separate |
 | --- | --- |
 | `sb done` | Switchboard must know the agent believes its assigned scope is complete; it is not an ordinary `tell` |
-| `sb ask` | Routes structured requests for information; human and agent asks may create durable Questions, while Advisor asks are synchronous |
+| `sb ask` | Routes structured requests for information; human and agent asks always create durable Questions, while Advisor asks are synchronous |
 | `sb tell` | Lightweight point-to-point delivery; must not acquire question or lifecycle semantics |
 
 ### Output
@@ -882,7 +932,7 @@ Browser actions and CLI/agent actions operate through the same underlying state 
 
 > Organize around Tasks and human attention, not a global wall of agents.
 
-The first browser implementation should focus on rendering real Tasks with their live agents and status, navigating into a Task, and jumping to the correct Herdr terminal. Beyond the states defined in this document, task status vocabulary and precedence, card layouts and queue organization are deliberately left open and should be iterated on once the core framework works.
+The first browser implementation should focus on rendering real Tasks with their live agents and status, navigating into a Task, and jumping to the correct Herdr terminal. The state vocabulary the CLI and browser share is fixed in Appendix A; beyond that fixed set, presentational status vocabulary and precedence, card layouts and queue organization are deliberately left open and should be iterated on once the core framework works.
 
 ---
 
@@ -908,3 +958,64 @@ No large fixed analytics system initially. Store enough raw structured informati
 Keep structured history locally and retain it indefinitely for now. Export, dashboards, aggregation and retention policies can be added later if they become useful.
 
 > Record rich operational data now; decide what to analyze later.
+
+---
+
+## Appendix A — State reference
+
+This is the single authoritative list of the states this document relies on: their entry and exit triggers, who sets each, and whether it raises a `Needs You` attention item. Where Section 13 leaves "task status vocabulary and precedence, card layouts and queue organization" open to iteration, this is the fixed set it iterates *beyond* — the derivation engine, `sb context`, and the browser must all agree on these.
+
+### Agent
+
+| State | Entry | Exit | Set by | Needs You |
+| --- | --- | --- | --- | --- |
+| `working` | actively taking turns / running tools | goes idle, or `done` | derived | no |
+| `waiting on child` | idle with an active child whose result it awaits | child reports, or is reassigned | derived | no |
+| `waiting on human` | idle with an unresolved human Question it asked | Question answered/resolved/withdrawn | derived | no |
+| `awaiting external` | idle owning only `blocked` Step(s) (e.g. `Merge` awaiting merge) | the external event fires | derived | no (the PR/CI item covers it) |
+| `completed` | called `sb done` | reactivated by a delivered message | derived | no |
+| `stalled` | none of the above and no activity for `stall_threshold` | any activity, or cleanup | derived | **yes** |
+
+Only one applies at a time; the rows are evaluated top-to-bottom, so an explained idle (`waiting on child`/`human`, `awaiting external`, `completed`) always beats `stalled`.
+
+### Question
+
+| State | Entry | Exit | Set by | Needs You |
+| --- | --- | --- | --- | --- |
+| `pending` | `sb ask <human/agent>` | answered, resolved, or withdrawn | asking agent | yes (human target) |
+| `answered` | Switchboard delivered a response (browser path, or `sb ask answer`) | asker resolves | Switchboard | no |
+| `resolved` | asker processed the answer (incl. direct `pending → resolved` on the terminal path) | terminal | asking agent, or human resolve | no |
+| `withdrawn` | answer no longer needed, or dead asker after `stall_threshold` | terminal | asking agent, or Switchboard | no |
+
+`advisor` asks create no Question (synchronous).
+
+### Step
+
+| State | Entry | Exit | Set by | Needs You |
+| --- | --- | --- | --- | --- |
+| `pending` | created with preceding Steps incomplete | a predecessor completes → `active` | derived | no |
+| `active` | all preceding Steps complete, not itself complete | completed, or predecessor reverts (cannot) | derived | **yes** if `unowned` |
+| `blocked` | active, awaiting a tracked external event | the event fires → `complete` | Switchboard | no |
+| `failed` | a bundled sub-operation failed | `step retry` succeeds → `complete` | Switchboard | **yes** |
+| `complete` | system fact established, or owner declared it | terminal | Switchboard (system Steps) / owner (judgment Steps) | no |
+
+Ownership is orthogonal to state: an `active` Step is owned or explicitly `unowned` (attention item); a not-yet-`active` Step may carry a pre-staged owner.
+
+### Plan
+
+| State | Entry | Exit | Set by | Needs You |
+| --- | --- | --- | --- | --- |
+| in progress | created | PR opened, or all Steps complete | derived | no |
+| `Needs Human Review` | `Open PR` complete, `Merge` incomplete | approved and merged | derived | **yes** |
+| `complete` | `Merge` complete | terminal | Switchboard | no |
+
+### Task
+
+| State | Entry | Exit | Set by | Needs You |
+| --- | --- | --- | --- | --- |
+| `open` | created (human action) | closed (human action) | human | no |
+| `Stalled` | unfinished work with a `stalled` agent, or all agents idle with no explanation | the condition resolves | derived | **yes** |
+| `Ready to Close` | completed work present, every Plan complete, no open Step/Question, no agent working | more work starts, or closed | derived | no |
+| `closed` | human closes it | terminal | human | no |
+
+`Stalled` and `Needs Human Review` can hold together (a stalled agent on a Task that also has a PR out); both surface as distinct `Needs You` items. `Ready to Close` never coexists with `Stalled` — the latter requires unfinished work, the former requires none.
