@@ -215,6 +215,8 @@ Any Task that results in a code change has a Plan. Creating one is extremely che
 
 The working agent creates the Plan at the point it commits to making a code change. Switchboard does not create Plans speculatively at Task creation, and no scaffolding appears before a change is actually being made.
 
+**The reminder to do this is delivered, not carried.** It is a turn-start hint (Section 12), not a line in the standing spawn prompt. This is an observed result in the current system, not a preference: the same instruction sitting in the spawn prompt is widely ignored, while the same instruction delivered at turn start, or relayed by another agent as a message, is complied with. Section 12 records why. A Plan-creation norm that lives only in the standing prompt should be assumed not to fire.
+
 A Plan always has at least one Step: `sb plan create` without `--steps` starts from the default Plan below, never from an empty one, and `sb plan edit` refuses an edit that would leave zero Steps. A Plan with no incomplete Steps is `complete` only if it has at least one Step; the vacuous "all zero Steps complete" is not a completion. This keeps a freshly created or mid-reshape Plan from flipping to `complete` (and its Task to `Ready to Close`) before any real Step exists.
 
 The default Plan is:
@@ -575,6 +577,14 @@ Messaging stays point-to-point. There is no shared Task chat or channel by defau
 
 > `sb tell` should be uncommon. Prefer completing a bounded unit of work and sending one concise result over continuously reporting progress.
 
+**`--no-reply`.** A sender that does not need an answer says so: `sb tell <agent> --no-reply "<message>"` appends a short line to the delivered message telling the receiver that no reply is expected and that it should not reply unless something is actually wrong or blocking.
+
+It is **prompt text, not a gate**. Switchboard does not refuse, drop or warn on a reply to a `--no-reply` message; a receiver that has something the sender genuinely needs still sends it. Enforcing it would turn a courtesy into a trap — the one case worth hearing about is exactly the case a gate would silence.
+
+It is also orthogonal to delivery mode: `NORMAL` and `INTERRUPT` say *when* a message arrives, `--no-reply` says what response it invites. Both combine freely.
+
+The reason it earns a flag rather than being left to the sender's phrasing is that the default is expensive. An unmarked message reads as an opening, and a courteous acknowledgement costs a turn on both sides plus the context it drags along; across a Task that is most of the message traffic the Plan never needed. Most `tell`s — a status hand-off, a "your Step is unblocked", a heads-up — want no answer, so marking them is the common case, not the exception.
+
 Messages carry only what changes what the receiver needs to know or do:
 
 ```text
@@ -883,6 +893,8 @@ Switchboard injects guidance only from clear authoritative state transitions:
 
 ```text
 Agent assigned a Plan Step             → inject Step-owner guidance once
+Agent in a working role takes its first turn in a Task that has no Plan
+                                       → inject the Plan-creation trigger once (Section 4)
 Agent takes ownership of a Review step → inject review-orchestration guidance once
 Agent recorded as end-to-end Plan owner (via plan-create default, --own-plan, or handoff)
                                        → inject done-semantics (done only when the Plan lands) once
@@ -897,6 +909,15 @@ Agent receives human approval while responsible for Merge
 ```
 
 This resolves a tension the layered-context model would otherwise create: Sections 3–6 state behavioural norms (done means the assigned scope landed; summaries stay minimal; narrowing scope is surfaced; review is independent), while the minimal universal context deliberately does *not* carry them. The reconciliation is a division of labour, not a hope that agents fetch the right page. **A norm the system can check is enforced or recorded, not merely taught** — the `done` gate and its required report shape, the merge preconditions, the review-independence record, the scope-narrowing event — so an uninformed agent cannot violate it silently. **A norm that must stay prose gets an explicit delivery trigger in the list above**, injected at the transition it governs, so it reaches the agent at the moment it applies rather than only if the agent thinks to look. The hint list is therefore derived from the norms of Sections 3–6, not an independent short list; a norm with neither enforcement nor a delivery trigger does not belong in the spec as an agent duty at all.
+
+**Delivery channel is not a presentation detail — it decides whether a norm fires at all.** Standing instructions and delivered messages are not interchangeable, and the difference is large enough to design around:
+
+* **Standing prompt** — orientation that must be true from turn one: identity, role, what the agent may do. It arrives before any work exists, competes with everything else in the payload, and its structure is lost when fragments are flattened for the provider.
+* **Delivered at the governing moment** — a turn-start hint, a command's own output, or a message from another agent. It arrives when the condition it describes is true, on the same channel a human instruction arrives on.
+
+A conditional norm placed in the standing prompt under-fires badly, and the more indirect its payload the worse: a line that asks the agent to notice a condition, judge whether it applies, and then spend a call fetching the real instruction has four independent places to be dropped. The same words delivered at the moment the condition holds are acted on. This is why every hint above is keyed to a transition, and why a norm should not be added to the standing prompt as a substitute for having a trigger for it.
+
+The corollary for role prompts: a role prompt states what this agent *is for*. A reminder about what to do *when something becomes true* belongs on a trigger, not in the role prompt, and putting it in both pays for it twice and lets the two copies drift.
 
 No speculative hints such as "seems like it might need review" or "has been coding for a while". Where the moment cannot be identified deterministically, rely on `sb context`, `sb help` and the Advisor.
 
@@ -966,7 +987,7 @@ Three primitives stay semantically distinct even though they share underlying in
 | --- | --- |
 | `sb done` | Switchboard must know the agent believes its assigned scope is complete; it is not an ordinary `tell` |
 | `sb ask` | Routes structured requests for information; human and agent asks always create durable Questions, while Advisor asks are synchronous |
-| `sb tell` | Lightweight point-to-point delivery; must not acquire question or lifecycle semantics |
+| `sb tell` | Lightweight point-to-point delivery; takes `--no-reply` (Section 7) and `--handoff`; must not acquire question or lifecycle semantics |
 
 ### Output
 
@@ -1064,7 +1085,7 @@ Switchboard         → structured orchestration history + references to those s
 
 Switchboard stores normal mutable current state plus an append-only event log. The product is not otherwise event-sourced unless that later becomes clearly useful.
 
-Logged events include: Task creation and close; Plan creation, change and completion; Step assignment, completion, release, reopen and steal; review Findings raised and resolved; merge authorizations granted, confirmed, invalidated and revoked; scope narrowings; agent spawn, done and cleanup; parent/child relationships; handoffs; `tell`, `ask` and `done` messages; question answers, escalations and withdrawals; review activity; worktree creation and cleanup; PR creation and merge; role/model/preset used; important status transitions; timestamps and durations.
+Logged events include: Task creation and close; Plan creation, change and completion; Step assignment, completion, release, reopen and steal; review Findings raised and resolved; merge authorizations granted, confirmed, invalidated and revoked; scope narrowings; agent spawn, done and cleanup; parent/child relationships; handoffs; `tell` (including whether it was `--no-reply`), `ask` and `done` messages; question answers, escalations and withdrawals; review activity; worktree creation and cleanup; PR creation and merge; role/model/preset used; important status transitions; timestamps and durations.
 
 Full Switchboard message text is retained. Storage efficiency is not an important constraint.
 
