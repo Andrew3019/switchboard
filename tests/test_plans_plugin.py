@@ -3889,15 +3889,28 @@ class LivenessTest(PlansSandbox):
         wedged = Path(self.tmp.name) / "bin"
         wedged.unlink()
         wedged.mkdir()
-        (wedged / "sb").write_text("#!/bin/sh\nsleep 60\n")
+        (wedged / "sb").write_text("#!/bin/sh\nexec sleep 60\n")
         (wedged / "sb").chmod(0o755)
 
-        started = time.monotonic()
-        shown = self.data("plugin", "plans", "show", "p-1")
-        self.assertLess(time.monotonic() - started, 15)
-        self.assertEqual(shown["condition"], "unknown")
-        self.assertIn("not the same as nobody working",
-                      self.ok("plugin", "plans", "show", "p-1"))
+        # Keep the real fork and timeout path, but inject a short deadline for this test's
+        # deliberately wedged helper. The production budget remains long enough for the
+        # measured `sb` calls; spending it here would make this one test the suite's floor.
+        real_run = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            if (argv and not isinstance(argv, (str, bytes))
+                    and Path(argv[0]).resolve() == (wedged / "sb").resolve()):
+                timeout = kwargs.get("timeout")
+                kwargs["timeout"] = min(timeout, 1) if timeout is not None else 1
+            return real_run(argv, *args, **kwargs)
+
+        with mock.patch("subprocess.run", run):
+            started = time.monotonic()
+            shown = self.data("plugin", "plans", "show", "p-1")
+            self.assertLess(time.monotonic() - started, 15)
+            self.assertEqual(shown["condition"], "unknown")
+            self.assertIn("not the same as nobody working",
+                          self.ok("plugin", "plans", "show", "p-1"))
 
     def test_a_crafted_name_cannot_forge_a_row(self):
         """A plan renders as rows and a row is a line, so a newline in a step name or an

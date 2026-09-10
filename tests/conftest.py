@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 
 import pytest
 
 from switchboard import usage
+
+
+# The test store is disposable, so durability across a machine crash is not part of what
+# these tests exercise. Keep SQLite's transaction and locking semantics, but avoid paying
+# an fsync for every schema statement in every fresh test database.
+_SQLITE_CONNECT = sqlite3.connect
+
+
+def _test_sqlite_connect(*args, **kwargs):
+    db = _SQLITE_CONNECT(*args, **kwargs)
+    db.execute("PRAGMA synchronous=OFF")
+    return db
+
+
+sqlite3.connect = _test_sqlite_connect
 
 
 @pytest.fixture(autouse=True)
