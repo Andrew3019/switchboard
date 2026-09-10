@@ -3899,7 +3899,7 @@ class LivenessTest(PlansSandbox):
 
         def run(argv, *args, **kwargs):
             if (argv and not isinstance(argv, (str, bytes))
-                    and Path(argv[0]).resolve() == wedged / "sb"):
+                    and Path(argv[0]).resolve() == (wedged / "sb").resolve()):
                 timeout = kwargs.get("timeout")
                 kwargs["timeout"] = min(timeout, 1) if timeout is not None else 1
             return real_run(argv, *args, **kwargs)
